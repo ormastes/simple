@@ -84,6 +84,8 @@ grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runn
 [ "$(grep -Fc "scripts/check/validate_stage4_hosted_dynload_provider_archive.spl" "${multiplatform}")" -eq 2 ] || fail "hosted Stage4 dynload validator triggers missing"
 [ "$(grep -c "scripts/check/native-smoke-matrix.shs" "${multiplatform}")" -eq 3 ] || fail "native smoke trigger or wiring missing"
 [ "$(grep -c "scripts/check/native-smoke-matrix.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD native smoke triggers missing"
+[ "$(grep -Fc "scripts/check/check-stage4-hosted-dynload-provider-archive.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Stage4 dynload checker triggers missing"
+[ "$(grep -Fc "scripts/check/validate_stage4_hosted_dynload_provider_archive.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Stage4 dynload validator triggers missing"
 [ "$(grep -Fc "scripts/check/check-native-seed-parity.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option parity trigger missing"
 [ "$(grep -Fc "test/fixtures/compiler/native_option_try_*_loud.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option fixture trigger missing"
 [ "$(grep -Fc "test/fixtures/native_crossmodule_result_u8/**" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Result try fixture trigger missing"
@@ -122,7 +124,8 @@ dynload_archive_check=scripts/check/check-stage4-hosted-dynload-provider-archive
 dynload_archive_validator=scripts/check/validate_stage4_hosted_dynload_provider_archive.spl
 grep -Fq 'Linux) archive_format=elf ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the Linux ELF mapping"
 grep -Fq 'Darwin) archive_format=macho ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the macOS Mach-O mapping"
-grep -Fq '*) die "requires Linux or macOS" ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not reject unsupported hosts"
+grep -Fq 'FreeBSD) archive_format=elf ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the FreeBSD ELF mapping"
+grep -Fq '*) die "requires Linux, macOS, or FreeBSD" ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not reject unsupported hosts"
 grep -Fq 'for lane in a b; do' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks independent builds"
 grep -Fq 'SOURCE=src/runtime/runtime_dynload.c' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong source owner"
 grep -Fq '"$AR" rcsD "$archive" "$object"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks deterministic archive mode"
@@ -132,7 +135,9 @@ grep -Fq 'sha256_file() {' "${dynload_archive_check}" || fail "Stage4 dynload ar
 grep -Fq 'command -v sha256sum' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks sha256sum support"
 grep -Fq 'command -v shasum' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the macOS hash fallback"
 grep -Fq 'checksum=$(shasum -a 256 "$1")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong shasum mode"
-grep -Fq 'die "requires sha256sum or shasum"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not fail without a SHA-256 tool"
+grep -Fq 'elif command -v sha256 >/dev/null 2>&1; then' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the FreeBSD hash fallback"
+grep -Fq 'checksum=$(sha256 -q "$1")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong FreeBSD sha256 mode"
+grep -Fq 'die "requires sha256sum, shasum, or sha256"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not fail without a SHA-256 tool"
 grep -Fq 'sha_a=$(sha256_file "$archive_a")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not hash archive A"
 grep -Fq 'sha_b=$(sha256_file "$archive_b")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not hash archive B"
 grep -Fq '[ "$sha_a" = "$sha_b" ] || die "independent archive SHA-256 values differ"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not compare independent SHA-256 values"
@@ -218,6 +223,25 @@ fi
 [ "$(grep -Fc "'scripts/check/check-native-option-try-target-fail.shs'" "${multiplatform}")" -eq 2 ] || fail "target Option compile helper workflow trigger missing"
 [ "$(grep -Fc "'test/fixtures/compiler/native_option_try_*_loud.spl'" "${multiplatform}")" -eq 2 ] || fail "target Option compile fixture workflow trigger missing"
 grep -Fq 'run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download' "${freebsd_workflow}" || fail "FreeBSD full execution wiring missing"
+grep -Fq 'STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
+freebsd_dynload_archive_body=$(awk '
+$0 == "    info \"Running FreeBSD Stage4 dynload provider archive proof...\"" { inside=1; print; next }
+inside && /^    info "/ { exit }
+inside { print }
+' scripts/check/check-freebsd-bootstrap-qemu.shs)
+for required in \
+  'AR=llvm-ar' \
+  'SIMPLE_NO_STUB_FALLBACK=1' \
+  'SIMPLE_BINARY=${STAGE_BIN}' \
+  'sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs 2>&1; echo EXIT:\$?' \
+  'DYNLOAD_ARCHIVE_EXIT=$(printf '\''%s'\'' "$DYNLOAD_ARCHIVE_OUT" | grep '\''^EXIT:'\'' | tail -1 | cut -d: -f2)' \
+  '[ "$DYNLOAD_ARCHIVE_EXIT" = "0" ]' \
+  'printf '\''%s\n'\'' "$DYNLOAD_ARCHIVE_OUT" | grep -qx '\''stage4_dynload_provider_archive=true'\'''; do
+  printf '%s\n' "${freebsd_dynload_archive_body}" | grep -Fq -- "${required}" || fail "FreeBSD Stage4 dynload archive proof missing: ${required}"
+done
+if printf '%s\n' "${freebsd_dynload_archive_body}" | grep -Eq '\|\|[[:space:]]*true|bin/release|src/compiler_rust/target|--backend'; then
+  fail "FreeBSD Stage4 dynload archive proof is optional, uses fallback tooling, or overrides the fresh staged compiler backend"
+fi
 grep -Eq '^[[:space:]]*SMOKE_OUT=.*native-build .*--backend cranelift .*--output \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe build missing"
 grep -Eq '^[[:space:]]*SMOKE_RESULT=.*test -x \$\{SMOKE_DIR\}/probe && \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe execution missing"
 grep -Fq 'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity backend selection missing"
