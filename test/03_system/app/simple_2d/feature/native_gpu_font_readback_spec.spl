@@ -13,9 +13,14 @@ textures cannot satisfy this spec.
 use std.spec.{describe, it, expect, step, fail_test}
 use std.io_runtime.{file_read, file_size, file_hash_sha256}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_cache_identity}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{mat4_translate, mat4_perspective}
+use std.gpu.engine3d.font_vulkan_spirv.{
+    font_hud_vulkan_vertex_spirv, font_world_vulkan_vertex_spirv,
+    font_vulkan_fragment_spirv
+}
 use test.system.qemu.os.common.qemu_os_harness.{file_exists}
 use test.helpers.shared_multilingual_gpu_fonts_perf_evidence.{
     expect_font_perf_budget, read_font_perf_evidence
@@ -367,8 +372,23 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     var evidence_alpha: [u8] = []
     for pixel in evidence_batch.atlas_pixels:
         evidence_alpha.push(((pixel >> 24u32) & 255u32).to_u8())
+    val material_identity = evidence_batch.atlas_owner_identity()
+    val device_features = "name=" + native.device.device_name + ";type=" + native.device.device_type +
+        ";driver=" + native.device.driver_identity
+    val artifact_identity = "hud-sha256=" + sha256_u8_hex(font_hud_vulkan_vertex_spirv()) +
+        ";world-sha256=" + sha256_u8_hex(font_world_vulkan_vertex_spirv()) +
+        ";fragment-sha256=" + sha256_u8_hex(font_vulkan_fragment_spirv()) +
+        ";hud=" + native.hud_pipeline_handle.to_string() +
+        ";world=" + native.world_pipeline_handle.to_string()
+    val dependency_identity = "device=" + native.device.device_handle.to_string() +
+        ";sampler=" + native.sampler_handle.to_string()
+    val expected_cache_identity = font_atlas_composite_cache_identity(
+        material_identity, "vulkan3d", device_features, artifact_identity, dependency_identity)
+    val material_component = "|material=" + material_identity.len().to_string() + ":" + material_identity
+    val material_identity_preserved = native.atlas_owner_identity.contains(material_component)
     val payload_matches = (evidence_batch.valid and
-        native.atlas_owner_identity == evidence_batch.atlas_owner_identity() and
+        material_identity == evidence_batch.atlas_owner_identity() and material_identity_preserved and
+        native.atlas_owner_identity == expected_cache_identity and
         native.atlas_generation == evidence_batch.atlas_generation and
         native.atlas_payload_sha256 == sha256_u8_hex(evidence_alpha))
     val device_pixels = engine.read_pixels()

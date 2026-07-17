@@ -275,6 +275,8 @@ ROCm keeps its atlas inside one backend lifetime and releases it with the HIP
 module at shutdown.
 Configuration identity now invalidates and keys canonical glyph material and
 is length-delimited into shaped-run keys and every configured batch/atlas owner.
+Shared multi-face batches carry the renderer's explicit atlas-owner generation;
+a caller-supplied `font-faces-v1` string cannot claim shared ownership.
 `FontRenderBatch.material_supported()` rejects unknown atlas-composite program
 versions and noncanonical transforms before Engine2D or Engine3D mutation.
 Remaining REQ-009 gaps are runtime compiled-artifact identity, resolved-run and
@@ -547,7 +549,10 @@ This source path is implemented but not promoted as native evidence until the
 conditional device test runs and reports device-origin readback.
 
 Vulkan has a canonical `FontRenderBatch` adapter beside the other Engine2D
-adapters. Session initialization examines the 10,772-byte embedded SPIR-V for
+adapters. The public Vulkan backend initializes and retains the existing
+`VulkanSession`; that one owner supplies the established primitive pipelines,
+font pipeline, selected device type, and driver identity. Session initialization
+examines the 10,772-byte embedded SPIR-V for
 the common GLSL `main` entry (SHA-256
 `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`), but its
 semantics revision 1 is stale and installation rejects it before native
@@ -692,6 +697,15 @@ and a host-side image hash are not guest rendering evidence.
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.
+On AArch64 the canonical desktop runner attaches that existing VirtIO-BLK FAT32
+image, resets stale VFS state, mounts it, and registers the validated Noto Sans
+bytes before Engine2D creation. A failed mount or post-mount executable probe
+clears VFS readiness. Host image acceptance requires `mtype` extraction plus
+an exact 1,708,408-byte SHA-256 check; missing tools fail closed. RV64 remains
+on its existing bitmap path because the initializer is ARM-only and the current
+64 KiB runtime heap cannot carry this vector-font bootstrap. Both canonical ARM
+scenario contracts require the exact successful registration marker; bitmap
+fallback cannot satisfy them.
 The x86_64 SimpleOS witness is now the existing 12 px `taskbar-clock` command in the
 real `SharedWmScene -> DrawIrComposition -> Engine2D` frame; the private
 post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper captures the

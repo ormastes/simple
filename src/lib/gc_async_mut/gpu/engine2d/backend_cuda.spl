@@ -11,7 +11,7 @@ use std.gpu.engine2d.backend_cuda_kernels.{cuda_2d_ptx_source}
 use std.gpu.engine2d.backend_cuda_launch_args.{CUDA_FONT_ARG_BYTES, _i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_font_atlas_composite_launch_args, _write_u32_pixels_to_host}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
-use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_subrect_pixels, font_destination_origin}
 use std.gpu.engine2d.helpers_text.{text_transparent_blit_buffer}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 
@@ -584,7 +584,17 @@ class CudaBackend:
         if pixel_count <= 0 or pixel_count > 2147483647 or batch.atlas_pixels.len() != pixel_count:
             return false
         val required_bytes = pixel_count * 4
-        val owner_identity = batch.atlas_owner_identity()
+        val device_features = if self.session.ctx > 0 and self.last_probe.device_name != "":
+            "device=" + self.session.device.to_string() + ";name=" + self.last_probe.device_name
+        else: ""
+        val dependency_identity = if self.session.ctx > 0 and self.session.generation > 0:
+            "context=" + self.session.ctx.to_string() + ";generation=" + self.session.generation.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            batch.atlas_owner_identity(), "cuda", device_features,
+            self.session.font_module_identity, dependency_identity)
+        if owner_identity == "":
+            return false
         if self.d_font_atlas == 0 or self.font_atlas_bytes != required_bytes:
             val new_atlas = self.session.alloc(required_bytes)
             if new_atlas == 0:

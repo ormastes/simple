@@ -41,7 +41,8 @@ use std.gpu.engine2d.backend_rocm_runtime_ops.{
     rocm_backend_launch_kernel
 }
 use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_program_version_valid, font_destination_origin}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_destination_origin}
+use std.common.crypto.sha256.{sha256_text}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 
 val ROCM_MAX_FRAMEBUFFER_PIXELS: i64 = 100000000
@@ -193,6 +194,7 @@ class RocmBackend:
     font_atlas_bytes: i64
     font_atlas_generation: i64
     font_atlas_owner_identity: text
+    font_artifact_sha256: text
 
     static fn create() -> RocmBackend:
         """Create an uninitialized ROCm backend. Call init() before drawing."""
@@ -231,7 +233,8 @@ class RocmBackend:
             d_font_atlas: 0,
             font_atlas_bytes: 0,
             font_atlas_generation: -1,
-            font_atlas_owner_identity: ""
+            font_atlas_owner_identity: "",
+            font_artifact_sha256: ""
         )
 
     me invalidate_font_atlas():
@@ -245,7 +248,27 @@ class RocmBackend:
         if pixel_count <= 0 or pixel_count > 2147483647 or batch.atlas_pixels.len() != pixel_count:
             return false
         val required_bytes = pixel_count * 4
-        val owner_identity = batch.atlas_owner_identity()
+        val device_features = if self.device_identity > 0:
+            "device=" + self.device_identity.to_string()
+        else: ""
+        if (self.font_artifact_sha256 == "" and self.hip_module > 0 and
+            self.fn_font_atlas_composite > 0):
+            val source_sha256 = sha256_text(_engine2d_hip_source())
+            if source_sha256.len() == 64:
+                self.font_artifact_sha256 = source_sha256
+        val artifact_identity = if (self.hip_module > 0 and self.fn_font_atlas_composite > 0 and
+            self.font_artifact_sha256.len() == 64):
+            "source-sha256=" + self.font_artifact_sha256 + ";module=" + self.hip_module.to_string() +
+                ";kernel=" + self.fn_font_atlas_composite.to_string()
+        else: ""
+        val dependency_identity = if self.d_framebuffer > 0:
+            "framebuffer=" + self.d_framebuffer.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            batch.atlas_owner_identity(), "rocm", device_features,
+            artifact_identity, dependency_identity)
+        if owner_identity == "":
+            return false
         if (self.d_font_atlas != 0 and self.font_atlas_bytes == required_bytes and
             self.font_atlas_owner_identity == owner_identity and self.font_atlas_generation == batch.atlas_generation):
             return true
@@ -428,6 +451,7 @@ impl RenderBackend for RocmBackend:
         if self.hip_module != 0:
             rocm_backend_unload_module(self.hip_module)
             self.hip_module = 0
+        self.font_artifact_sha256 = ""
         self.fn_clear = 0
         self.fn_rect_filled = 0
         self.fn_rect_outline = 0

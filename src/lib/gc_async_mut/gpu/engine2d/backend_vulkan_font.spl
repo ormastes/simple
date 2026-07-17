@@ -1,7 +1,7 @@
 # Vulkan font-atlas composite companion. Pipeline ownership stays in
 # VulkanSession; this module owns only atlas upload, dispatch, and evidence.
 
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_subrect_pixels, font_destination_origin}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind, vulkan_classify_error}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
@@ -304,6 +304,17 @@ impl VulkanBackend:
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-params", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             checked = checked + 1
 
+        val device_features = if pipeline.device_name != "" and pipeline.device_type != "" and pipeline.driver_identity != "":
+            "name=" + pipeline.device_name + ";type=" + pipeline.device_type + ";driver=" + pipeline.driver_identity
+        else: ""
+        val dependency_identity = if self.session.device > 0 and self.session.generation > 0:
+            "device=" + self.session.device.to_string() + ";generation=" + self.session.generation.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            batch.atlas_owner_identity(), "vulkan2d", device_features,
+            pipeline.artifact_identity, dependency_identity)
+        if owner_identity == "":
+            return _vulkan_font_evidence(pipeline, "rejected", "incomplete-font-cache-identity", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
         val atlas_bytes = atlas_count * 4
         val dimensions_changed = self.font_atlas_width != batch.atlas_width or self.font_atlas_height != batch.atlas_height
         if self.d_font_atlas == 0 or dimensions_changed:
@@ -325,7 +336,6 @@ impl VulkanBackend:
             val allocated_bytes = vulkan_font_gpu_resource_bytes(atlas_bytes, dst_count * 4, self.d_font_params != 0)
             if allocated_bytes > self.font_gpu_resource_high_water_bytes:
                 self.font_gpu_resource_high_water_bytes = allocated_bytes
-        val owner_identity = batch.atlas_owner_identity()
         if self.font_atlas_generation != batch.atlas_generation or self.font_atlas_owner_identity != owner_identity:
             val dirty_upload_started = time_now_nanos()
             val atlas_payload = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)

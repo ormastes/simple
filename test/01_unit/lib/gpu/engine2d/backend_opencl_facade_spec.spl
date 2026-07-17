@@ -8,8 +8,21 @@ use std.gpu.engine2d.backend_opencl.{OpenClBackend, opencl_2d_generated_source, 
 use std.gpu.engine2d.engine.{Engine2D}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
+use std.io_runtime.{file_read}
 
 describe "Engine2D OpenCL backend facade":
+
+    it "fences the atlas cache with OpenCL program and session identity":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_opencl.spl")
+        expect(source).to_contain("font_atlas_composite_cache_identity(")
+        expect(source).to_contain("batch.atlas_owner_identity(), \"opencl\", device_features")
+        expect(source).to_contain("if self.font_artifact_sha256 == \"\" and self.session.program > 0:")
+        expect(source.index_of("if self.font_artifact_sha256 == \"\"") < source.index_of("sha256_text(opencl_2d_generated_source())")).to_equal(true)
+        expect(source.split("sha256_text(opencl_2d_generated_source())").len()).to_equal(2)
+        expect(source).to_contain("\"source-sha256=\" + self.font_artifact_sha256")
+        expect(source).to_contain("artifact_identity, dependency_identity")
+        expect(source).to_contain("self.font_artifact_sha256 = \"\"")
+        expect(source.contains("val artifact_identity = if self.session.program > 0:\n            \"program=\"")).to_equal(false)
 
     it "ships generated OpenCL 2D source with the shared kernel entries":
         # @req REQ-013 NFR-011
@@ -171,6 +184,17 @@ describe "Engine2D OpenCL backend facade":
             expect(font_readback.pixels[5]).to_equal(0xff400000u32)
             expect(font_readback.pixels[6]).to_equal(0xff004000u32)
             expect(font_readback.pixels[7]).to_equal(0xff000080u32)
+            val cached_owner = backend.font_atlas_owner_identity
+            expect(cached_owner).to_contain("|backend=6:opencl")
+            expect(backend.draw_font_batch(0, 0, gap_batch)).to_equal(1)
+            expect(backend.font_atlas_owner_identity).to_equal(cached_owner)
+            backend.session.generation = backend.session.generation + 1
+            expect(backend.draw_font_batch(0, 0, gap_batch)).to_equal(1)
+            val dependency_owner = backend.font_atlas_owner_identity
+            expect(dependency_owner == cached_owner).to_equal(false)
+            backend.session.platform = backend.session.platform + 1
+            expect(backend.draw_font_batch(0, 0, gap_batch)).to_equal(1)
+            expect(backend.font_atlas_owner_identity == dependency_owner).to_equal(false)
         else:
             expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
             expect(backend.last_probe.has_graphics).to_equal(false)

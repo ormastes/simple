@@ -17,7 +17,9 @@
 #   use std.gpu.engine2d.vulkan_session.{VulkanSession}
 
 use std.gpu.engine2d.backend_vulkan_spirv.{
-    spirv_clear, spirv_rect_filled, spirv_noop_storage, spirv_blit
+    spirv_clear, spirv_rect_filled, spirv_noop_storage,
+    spirv_rect_outline, spirv_circle_filled, spirv_triangle_filled,
+    spirv_gradient_rect, spirv_blit
 }
 use std.gpu.engine2d.backend_vulkan_font_spirv.{
     FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256,
@@ -31,8 +33,8 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_init, vulkan_sffi_shutdown, vulkan_sffi_is_available,
     vulkan_sffi_device_count, vulkan_sffi_select_device,
     vulkan_sffi_begin_compute, vulkan_sffi_submit_and_wait,
-    vulkan_sffi_device_name, vulkan_sffi_selected_device_type,
-    vulkan_sffi_selected_device_driver_identity
+    vulkan_sffi_device_name, vulkan_sffi_device_type,
+    vulkan_sffi_device_driver_identity
 }
 use std.gc_async_mut.io.vulkan_sffi.{vulkan_get_device}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
@@ -185,28 +187,28 @@ class VulkanSession:
             return 4
         self.selected_device_index = 0
         self.device_name = vulkan_sffi_device_name(0)
-        # Older bootstrap/debug runtimes may not expose the selected-device
-        # metadata externs even when Vulkan compute/readback is available.
-        self.device_type = ""
-        self.driver_identity = ""
+        self.device_type = vulkan_sffi_device_type(0)
+        self.driver_identity = vulkan_sffi_device_driver_identity(0)
 
         # Retrieve the opaque device handle exposed by the runtime
         self.device = vulkan_get_device()
         if self.device <= 0:
             return 4
 
-        # Compile validated SPIR-V kernels. Unsupported kernels use a
-        # descriptor-compatible no-op module until their real kernels land.
+        # Compile validated SPIR-V kernels. circle_outline / line /
+        # rounded_rect keep descriptor-compatible no-op pipelines because their
+        # dedicated blobs use algorithm classes that diverge from the engine's
+        # Bresenham/midpoint contract; those draws compose real rect dispatches.
         val noop_spirv = spirv_noop_storage()
         self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())
         self.shader_rect_filled   = vulkan_sffi_compile_spirv(spirv_rect_filled())
-        self.shader_rect_outline  = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_circle_filled = vulkan_sffi_compile_spirv(noop_spirv)
+        self.shader_rect_outline  = vulkan_sffi_compile_spirv(spirv_rect_outline())
+        self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())
         self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)
         self.shader_line          = vulkan_sffi_compile_spirv(noop_spirv)
         self.shader_rounded_rect  = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_triangle      = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_gradient      = vulkan_sffi_compile_spirv(noop_spirv)
+        self.shader_triangle      = vulkan_sffi_compile_spirv(spirv_triangle_filled())
+        self.shader_gradient      = vulkan_sffi_compile_spirv(spirv_gradient_rect())
         self.shader_blit          = vulkan_sffi_compile_spirv(spirv_blit())
 
         if (self.shader_clear <= 0 or self.shader_rect_filled <= 0 or

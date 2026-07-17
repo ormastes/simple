@@ -3,7 +3,8 @@
 
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
-use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_composite_metal_source, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.crypto.sha256.{sha256_text}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_upload_ptr}
 use std.gc_async_mut.io.metal_sffi.{
@@ -40,9 +41,11 @@ class MetalFontBackendState:
     atlas_bytes: i64
     atlas_generation: i64
     atlas_owner_identity: text
+    font_artifact_sha256: text
 
     static fn create() -> MetalFontBackendState:
-        MetalFontBackendState(atlas_buffer: 0, atlas_bytes: 0, atlas_generation: -1, atlas_owner_identity: "")
+        MetalFontBackendState(atlas_buffer: 0, atlas_bytes: 0, atlas_generation: -1,
+            atlas_owner_identity: "", font_artifact_sha256: "")
 
     me release():
         if self.atlas_buffer != 0:
@@ -51,6 +54,7 @@ class MetalFontBackendState:
         self.atlas_bytes = 0
         self.atlas_generation = -1
         self.atlas_owner_identity = ""
+        self.font_artifact_sha256 = ""
 
     me invalidate():
         self.atlas_generation = -1
@@ -63,6 +67,25 @@ class MetalFontBackendState:
         if count <= 0 or count > 2147483647 or batch.atlas_pixels.len() != count:
             return false
         val bytes = count * 4
+        val device_features = if session.device > 0: "device=" + session.device.to_string() else: ""
+        if (self.font_artifact_sha256 == "" and session.font_shader_lib > 0 and
+            session.pipe_font_atlas_composite > 0):
+            val source_sha256 = sha256_text(font_atlas_composite_metal_source())
+            if source_sha256.len() == 64:
+                self.font_artifact_sha256 = source_sha256
+        val artifact_identity = if (session.font_shader_lib > 0 and session.pipe_font_atlas_composite > 0 and
+            self.font_artifact_sha256.len() == 64):
+            "source-sha256=" + self.font_artifact_sha256 + ";library=" + session.font_shader_lib.to_string() +
+                ";pipeline=" + session.pipe_font_atlas_composite.to_string()
+        else: ""
+        val dependency_identity = if session.command_queue > 0 and session.generation > 0:
+            "queue=" + session.command_queue.to_string() + ";generation=" + session.generation.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            batch.atlas_owner_identity(), "metal", device_features,
+            artifact_identity, dependency_identity)
+        if owner_identity == "":
+            return false
         if self.atlas_buffer == 0 or self.atlas_bytes != bytes:
             val fresh = metal_sffi_alloc_buffer(session.device, bytes)
             if fresh == 0:
@@ -73,7 +96,6 @@ class MetalFontBackendState:
             self.atlas_bytes = bytes
             self.atlas_generation = -1
             self.atlas_owner_identity = ""
-        val owner_identity = batch.atlas_owner_identity()
         if self.atlas_generation == batch.atlas_generation and self.atlas_owner_identity == owner_identity:
             return true
         val host = rt_alloc(bytes)
