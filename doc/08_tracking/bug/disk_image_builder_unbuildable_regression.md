@@ -54,3 +54,29 @@ native path):
 ## Triage note (2026-07-17)
 
 Likely fixed by commit `2138b3d9fca6` ("fix(disk-image): FAT32 builder — field default, truncate u64 unbox, 8.3 names, dynamic FAT sizing", 2026-07-11): commit's own E2E verification shows `nested_payloads` omitted, `ring-3 FSEXEC_OK rc=42` — a working disk-image build+boot. The interp-path `cannot iterate over this type` symptom is resolved. The native-build LLVM "multiple definition of local value 'l5'" half of the symptom is not explicitly re-confirmed in that commit message; pending runtime verification via native-build from source on current HEAD.
+
+## Runtime re-check (2026-07-17)
+
+Probe: `probe10_disk_image.spl` (minimal reproduction of `os.port.disk_image` usage).
+
+- **Interpreter path (`bin/simple run`):** The JIT-rejection message reproduces
+  verbatim (`HIR lowering error: Unsupported feature: cannot infer field type while
+  lowering _push_str8: struct 'String' field 'length'`), but this is only an
+  INFO-level JIT rejection; **the interpreter fallback succeeds** with output
+  `BUILD_OK` and produces a valid, verified FAT32 image (`file` output: "DOS/MBR boot
+  sector... OEM-ID SIMPLEOS... FAT (32 bit)... label SIMPLEOS"). This contradicts
+  the doc's earlier hard `error: semantic: cannot iterate over this type` claim on
+  the interp path — **the interpreter path is FIXED-AT-TIP**.
+
+- **Native-build path (`bin/simple native-build`):** Still fails, but with a
+  different error signature than documented. The doc's quoted `llc: error: multiple
+  definition of local value named 'l5'` is no longer seen; instead:
+  ```
+  MIR lowering error: unresolved method call: is_ok
+  MIR lowering error: unresolved method call: upper
+  ```
+  (repeated). The native path remains broken, but the specific blocking construct
+  and symptom have shifted since 2026-07-08.
+
+**Status correction:** Interp path is now fixed; native path still open with
+altered error signature. Status remains OPEN (native blocker unchanged).

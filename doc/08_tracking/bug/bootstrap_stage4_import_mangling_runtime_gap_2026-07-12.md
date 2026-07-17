@@ -28,3 +28,24 @@ ELF linker boundary (or fix call-target mangling at its canonical owner), then
 route remaining symbols through the exact Stage4 provider profile. Do not
 select raw `native_all`, generate symbol stubs, add feature-local `rt_*` aliases,
 or re-enable a hosted runtime bundle for ordinary applications.
+
+## Verification (2026-07-17)
+
+No single-file repro possible — this bug's scope is architecture-level full-CLI
+linking, not an isolated function. Cross-referenced verification against
+`doc/08_tracking/bug/native_build_stage4_pre_object_spin_2026-07-13.md`
+(2026-07-16 entries):
+
+- Sub-issue (a) — bare `run_check`/`run_arch_check` imported-call mangling:
+  **FIXED-AT-TIP**. The Stage-4 entry doc explicitly notes that a recent change
+  "removes an obsolete blanket exclusion" and "proves the owner fix for
+  run_check and run_arch_check."
+
+- Sub-issue (b) — capability-owned providers missing (`rt_array_concat`,
+  `spl_dlsym`, `spl_wffi_call_i64`): **REMAINS OPEN**. Same doc's final
+  2026-07-16 entries explicitly state "This boundary is intentionally not called
+  from the production `link_llvm_native` body" and "Provider composition, TODO
+  535" remains incomplete.
+
+**Status:** PARTIALLY-FIXED. Sub-issue (a) resolved; sub-issue (b) remains
+explicit open TODO per cross-referenced doc.

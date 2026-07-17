@@ -165,6 +165,18 @@ source regressions for the two dispatch paths. This fix is pending the same
 fresh Stage-2/Stage-3 rebuild required by the tuple-parser change; do not claim
 the runner is runnable until the rebuilt candidate executes a focused spec.
 
+## Verification (2026-07-17)
+
+Runtime repro at tip 9feac6ef6e5 confirms the fix is present and working:
+- Probe: `probe07_span_empty.spl` (class `Span` with static-style `fn empty() -> Span`
+  plus colliding bare module-level `fn empty(shape: i64) -> i64`)
+- Output: `ok x=0` — `Span.empty()` correctly dispatches to the class method
+  (returns `Span(x:0)`), not the bare `empty(shape)` fallback
+- No "function expects argument for parameter 'shape'" error
+- Guard now requires the receiver to be absent from both environment and class
+  registry before falling back to a bare function
+- Status: RESOLVED
+
 ## Patched compiler rebuild result (2026-07-16)
 
 The isolated `build/bootstrap-font-runner-fresh-20260716` lane refreshed the

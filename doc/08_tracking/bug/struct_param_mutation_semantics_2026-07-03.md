@@ -158,3 +158,24 @@ requires changes outside this task's scope (`src/compiler_rust/**` /
 compiler HIR lowering), which needs a stage4/seed rebuild + deploy cycle to
 verify end-to-end — explicitly out of scope for this pass per task
 instructions.
+
+## Verification (2026-07-17)
+
+Runtime repro at tip 9feac6ef6e5:
+
+- **Struct case** (`fn` param mutates field): JIT rejects with `[W1006]` as
+  documented, falls back to interpreter. Interpreter now prints `n=0` (mutation
+  NOT visible to caller), not the 2026-07-03-claimed `n=1`. **Struct/interpreter
+  half no longer reproduces as originally described** — value-type semantics now
+  enforced consistently even under interpreter fallback.
+
+- **Class case, interpreter** (`bin/simple run`): Mutation visible, `n=1`.
+  Matches documented reference semantics.
+
+- **Class case, compiled** (`bin/simple native-build` to binary): Mutation LOST,
+  output `n=0`. **Class/compiled-backend half STILL-REPRODUCES** exactly as filed.
+  Confirmed the class-mutation-loss defect remains the real open issue, matching
+  `browser_engine_free_fn_arg_mutation_lost_2026-06-30.md`.
+
+**Status:** STILL-REPRODUCES (class/compiled half). Struct/interpreter half no
+longer reproduces as written.

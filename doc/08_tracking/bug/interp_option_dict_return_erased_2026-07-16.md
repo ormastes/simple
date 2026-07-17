@@ -55,3 +55,25 @@ splitting the `-> i64?` accessor `cranelift_static_init_bits` into a
 -> i64` pair. Root fix belongs in the seed interpreter's Option-of-Dict
 return channel; audit other live-interpreted `-> Dict<...>?` returns in the
 backend layer when fixing.
+
+## Verification (2026-07-17)
+
+Runtime repro at tip 9feac6ef6e5: **IN-CONTEXT REPRO CONFIRMED**.
+
+Followed the doc's prescribed method: temporarily added the `_probe_opt_dict()`
+function to `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`
+(right after the `CL_TYPE_*` constants block), then ran
+`bin/simple native-build --entry probe04c_class_mut_simple.spl --backend cranelift`
+(any entry works — the probe fires at module-load time for the whole compiler graph).
+
+Output (`probe08_build.log`):
+```
+PROBE_OPT_DICT_CHECK=nil
+```
+
+Exact match to the doc's quoted `probe check=nil` symptom. The build itself
+later failed for an unrelated reason (`unknown extern function:
+rt_cranelift_new_aot_module_triple`), irrelevant to this probe which already
+captured its answer before that point.
+
+**Status:** STILL-REPRODUCES (exact match, in-context).

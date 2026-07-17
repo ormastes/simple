@@ -51,3 +51,18 @@ Renamed locals `kernel` -> `kernel_elf` in:
 
 These entrypoints were completely broken (release/image-builder CLI unusable)
 until the rename.
+
+## Verification (2026-07-17)
+
+Runtime repro at tip 9feac6ef6e5:
+
+Probe: `probe05_kernel_shadow.spl` (doc's exact minimal repro, from worktree
+context with module map in scope).
+
+Output matches byte-for-byte:
+```
+[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown variable: kernel while lowering run
+error: semantic: variable `kernel` not found
+```
+
+**Status:** STILL-REPRODUCES (exact match).
