@@ -162,9 +162,10 @@ the shared binary — deploys require explicit user go-ahead).
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
-  Array `map`/`filter`/`fold` retain their existing lifted i64 ABI. The strict
-  dual-backend typed-output/filter control is source-complete; executable proof
-  remains pending the staged pure-Simple gate.
+  Array `map`/`filter`/`fold` retain their existing lifted i64 ABI. Linux runs
+  the strict dual-backend typed-output/filter control in the full gate; macOS
+  arm64/x64, Windows x64, and FreeBSD x86_64 select it explicitly. First staged
+  platform-matrix execution is pending.
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see
