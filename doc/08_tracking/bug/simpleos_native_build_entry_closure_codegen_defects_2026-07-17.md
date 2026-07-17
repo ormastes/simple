@@ -39,3 +39,34 @@ building `gui_entry_desktop.spl`. Each verified by objdump disassembly of `build
 - Fault-recovery scheme (baremetal_stubs.c `_rich_fault_entry`) advances RIP by fixed 2 bytes with
   rax=3; any fault on an instruction of another length resumes mid-instruction -> garbage execution
   (source of the 32.5MB rt_string_concat allocations that exhausted the heap).
+
+## Second wave (2026-07-17, NVMe/vfs lane, same build config)
+
+## C5. Enum `==` comparison miscompiles (match works)
+- `lease.mode == NvmeNamespaceMode.System` false for a genuine System value while a match-based
+  helper in the SAME frame prints `mode=system`. Misrouted the boot lease to
+  `nvme-fs-user-namespace-uses-reserved-queue`.
+- Workaround landed: match-based predicate `nvme_namespace_mode_is_system()`
+  (src/os/drivers/nvme/nvme_storage_model.spl).
+
+## C6. Fused byte-combine drops the second term when inlined
+- `b0 | (b1 << 8)` (and `b0 + b1*256`, incl. named-intermediate forms) loses the high-byte term
+  when inlined into the FAT dirent scan: first-cluster 0x0f70 read as 0x70 -> exec probe read the
+  wrong cluster -> `exec probe failed` -> `mount_failed` -> bitmap font + 0 apps. HEISENBUG: adding
+  debug prints makes it compute correctly.
+- Workaround landed: single opaque loads `mmio_read16/32(addr+off) as u32`
+  (src/os/services/vfs/vfs_boot_init.spl `_vfs_boot_mem_u16_le`).
+
+## C7. Bare `.to_u32()` on u16 dispatches to the WRONG struct's method via alias bridge
+- Freestanding bare->qualified alias bridge resolved a scalar `.to_u32()` to `Color.to_u32`
+  (fb_driver) -> fault (cr2=0, bps=0x53535353). Avoid bare conversion-method calls on scalars in
+  kernel code; use `as u32` casts (no method dispatch).
+
+## C8. Trait-object dispatch performs an extra dereference (vtable slot treated as ptr-to-ptr)
+- `Fat32Core.read_boot_sector+0x18` calling `self._device_sector_size()` through a BlockDevice
+  trait object wild-jumps with rip=cr2=0x0001e0ec8148e589 — exactly the callee's first 8 CODE bytes
+  (`push rbp; mov rbp,rsp; sub rsp,0x1e0`) interpreted as an address: the dispatch loads function
+  ENTRY BYTES instead of calling the entry. 21k+ recovered-fault storm, boot hang pre-framebuffer.
+- Mitigation landed: hosted fat32 mount skipped behind marker
+  `[vfs-init] hosted fat32 mount skipped: blockdevice-dispatch-codegen-bug` (vfs_boot_init.spl).
+  THIS IS NOW THE ONLY REMAINING DISK BLOCKER (apps=0, bitmap font) — fix at seed level.

@@ -283,15 +283,6 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
         serial_println("[vfs-init] pure-nvme transfer failed")
         return false
     val transfer_evidence = transfer_evidence_result.unwrap()
-    # If the NVMe I/O path is not functional (doorbells not mapped or the I/O
-    # queue never came up), no DMA/sector read can succeed — attempting the
-    # FAT32 boot-sector read below issues a submission-queue doorbell write to a
-    # null/zero doorbell address and page-faults (cr2=0x0), hanging boot before
-    # the desktop can degrade to no-disk and render. Bail here so vfs_boot_init
-    # falls through to the degraded-no-disk path and the WM still renders.
-    if not transfer_evidence.doorbells_mapped or not transfer_evidence.io_queue_ready:
-        serial_println("[vfs-init] pure-nvme io not ready (doorbells/io-queue) — degrading to no-disk")
-        return false
     val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
         g_nvme.get_sector_size(),
         g_nvme.get_sector_count(),
@@ -358,6 +349,19 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val exec_probe = _vfs_boot_read_app_name11_raw(0x42u32, 0x52u32, 0x4Fu32, 0x57u32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
     if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
         serial_println("[vfs-init] exec probe failed")
+        return false
+    # BUG(codegen, freestanding entry-closure cranelift): BlockDevice
+    # trait-object dispatch performs an extra dereference — the indirect call
+    # in Fat32Core.read_boot_sector (+0x18, self._device_sector_size()) jumps
+    # to the callee's own first 8 code bytes read as an address
+    # (rip=cr2=0x0001e0ec8148e589 = "push rbp; mov rbp,rsp; sub rsp,0x1e0"),
+    # and the recovering fault handler then storms without progressing.
+    # Until that dispatch bug is fixed, skip the hosted SharedFat32Driver
+    # mount so the desktop keeps its degraded-but-rendering fallback. The
+    # scalar direct reader above has already validated geometry, version,
+    # and app-payload reads at their correct clusters.
+    if true:
+        serial_println("[vfs-init] hosted fat32 mount skipped: blockdevice-dispatch-codegen-bug")
         return false
     g_adapter = adapter
     g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)
@@ -541,28 +545,42 @@ fn _vfs_boot_byte(buf: [u8], off: i32) -> u32:
         return 0u32
     (rt_bytes_u8_at(buf, off.to_i64()) & 0xFF) as u32
 
+# Named intermediates with `+`/`*` (equivalent to the or/shift chain). The
+# mem_* variants below were miscompiled in the fused-combine form by the
+# freestanding cranelift aggressive build; these buf variants were not
+# observed broken, but use the same conservative shape.
 fn _vfs_boot_u16_le(buf: [u8], off: i32) -> u32:
-    _vfs_boot_byte(buf, off) | (_vfs_boot_byte(buf, off + 1) << 8)
+    val b0 = _vfs_boot_byte(buf, off)
+    val b1 = _vfs_boot_byte(buf, off + 1)
+    b0 + (b1 * 256u32)
 
 fn _vfs_boot_u32_le(buf: [u8], off: i32) -> u32:
-    _vfs_boot_byte(buf, off) |
-        (_vfs_boot_byte(buf, off + 1) << 8) |
-        (_vfs_boot_byte(buf, off + 2) << 16) |
-        (_vfs_boot_byte(buf, off + 3) << 24)
+    val b0 = _vfs_boot_byte(buf, off)
+    val b1 = _vfs_boot_byte(buf, off + 1)
+    val b2 = _vfs_boot_byte(buf, off + 2)
+    val b3 = _vfs_boot_byte(buf, off + 3)
+    b0 + (b1 * 256u32) + (b2 * 65536u32) + (b3 * 16777216u32)
 
 fn _vfs_boot_mem_byte(addr: u64, off: u64) -> u32:
     val aligned = addr + (off & 0xFFFFFFFFFFFFFFFCu64)
     val shift = ((off & 3u64) * 8u64).to_u32()
     (mmio_read32(aligned) >> shift) & 0xFFu32
 
+# NOTE: single hardware read, NOT a two-byte shift/or (or +/*) combine. The
+# freestanding cranelift aggressive build drops the high-byte term of the
+# combine when these helpers are inlined into the FAT dirent scan (first
+# cluster 0x0f70 parsed as 0x70), with or without named intermediates.
+# _vfs_boot_mem_byte alone is correct (name11 matching proves every shift
+# lane); only the multi-call combine miscompiles. x86 RAM scratch reads may
+# be unaligned, so a direct 16/32-bit load is safe here.
+# `as u32` cast, NOT `.to_u32()`: the freestanding bare->qualified alias
+# bridge resolves a bare `.to_u32()` on u16 to Color.to_u32 (fb_driver) in
+# this build, faulting on the integer-as-pointer receiver.
 fn _vfs_boot_mem_u16_le(addr: u64, off: u64) -> u32:
-    _vfs_boot_mem_byte(addr, off) | (_vfs_boot_mem_byte(addr, off + 1u64) << 8)
+    (mmio_read16(addr + off) as u32) & 0xFFFFu32
 
 fn _vfs_boot_mem_u32_le(addr: u64, off: u64) -> u32:
-    _vfs_boot_mem_byte(addr, off) |
-        (_vfs_boot_mem_byte(addr, off + 1u64) << 8) |
-        (_vfs_boot_mem_byte(addr, off + 2u64) << 16) |
-        (_vfs_boot_mem_byte(addr, off + 3u64) << 24)
+    mmio_read32(addr + off)
 
 fn _vfs_boot_fat32_bpb_bytes_look_valid(b: [u8]) -> bool:
     if b.len() < 512:
