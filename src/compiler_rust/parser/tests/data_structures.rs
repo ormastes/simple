@@ -1,4 +1,4 @@
-use simple_parser::ast::{Node, Type};
+use simple_parser::ast::{Mutability, Node, Type, Visibility};
 use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
@@ -59,6 +59,82 @@ fn parse_class_definition() {
 #[test]
 fn parse_class_with_methods() {
     parse_ok("class Point:\n    fn init(x, y):\n        self.x = x\n        self.y = y\n    fn distance():\n        return 0");
+}
+
+// Regression: `var`/`val`-prefixed class fields must parse to exactly ONE
+// `Field` each, named after the real field -- not two (a phantom field
+// literally named "var"/"val" ahead of the real one).
+//
+// Root cause: `parse_class_body`'s field-declaration fallback delegated
+// straight to `parse_field()` without first consuming a leading `var`/`val`
+// mutability keyword. `expect_identifier()` accepts `var`/`val` as a bare
+// identifier (needed for other contexts like `var.field`), so `parse_field()`
+// silently parsed the keyword ITSELF as a whole extra untyped field. Every
+// `var`/`val`-prefixed class field thus registered TWO declared fields
+// instead of one in the type registry, which the seed's MIR StructInit
+// lowering (deriving field_offsets/field_types 1:1 from that declared list)
+// then used to emit an extra unfilled 8-byte struct slot -- see bug
+// native_class_array_field_mutation_segfault_2026-07-17.md ("field_offsets:
+// [0, 8], field_types: [TypeId(14)/ANY, TypeId(17)]" for what should have
+// been a single-field class).
+#[test]
+fn parse_class_var_field_is_single_field() {
+    let items = parse("class Container:\n    var items: i64");
+    if let Node::Class(c) = &items[0] {
+        assert_eq!(c.name, "Container");
+        assert_eq!(c.fields.len(), 1, "expected exactly one field, got {:?}", c.fields);
+        assert_eq!(c.fields[0].name, "items");
+        assert_eq!(c.fields[0].mutability, Mutability::Mutable);
+        assert_eq!(c.fields[0].ty, Type::Simple("i64".to_string()));
+    } else {
+        panic!("expected class");
+    }
+}
+
+#[test]
+fn parse_class_val_field_is_single_field() {
+    let items = parse("class Container:\n    val items: i64");
+    if let Node::Class(c) = &items[0] {
+        assert_eq!(c.fields.len(), 1, "expected exactly one field, got {:?}", c.fields);
+        assert_eq!(c.fields[0].name, "items");
+        assert_eq!(c.fields[0].mutability, Mutability::Immutable);
+    } else {
+        panic!("expected class");
+    }
+}
+
+#[test]
+fn parse_class_pub_var_field_is_single_field() {
+    // `pub` visibility parses before the `var`/`val` mutability keyword
+    // (`parse_optional_visibility()` runs first in `parse_field()`), so this
+    // exercises that ordering explicitly rather than relying on the bare
+    // `var`/`val` case alone.
+    let items = parse("class Container:\n    pub var items: i64");
+    if let Node::Class(c) = &items[0] {
+        assert_eq!(c.fields.len(), 1, "expected exactly one field, got {:?}", c.fields);
+        assert_eq!(c.fields[0].name, "items");
+        assert_eq!(c.fields[0].mutability, Mutability::Mutable);
+        assert_eq!(c.fields[0].visibility, Visibility::Public);
+    } else {
+        panic!("expected class");
+    }
+}
+
+#[test]
+fn parse_class_multiple_var_fields_are_distinct() {
+    let items = parse("class Band:\n    var pages: i64\n    var valid: i64");
+    if let Node::Class(c) = &items[0] {
+        assert_eq!(
+            c.fields.len(),
+            2,
+            "expected exactly two fields (no phantom var/val entries), got {:?}",
+            c.fields
+        );
+        assert_eq!(c.fields[0].name, "pages");
+        assert_eq!(c.fields[1].name, "valid");
+    } else {
+        panic!("expected class");
+    }
 }
 
 // Enum definitions

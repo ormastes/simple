@@ -315,11 +315,38 @@ impl<'a> Parser<'a> {
 
         let visibility = self.parse_optional_visibility()?;
 
+        // Optional `var`/`val` mutability keyword prefix: class-field syntax
+        // (`var name: Type` / `val name: Type`, optionally after `pub`).
+        //
+        // ROOT FIX (StructInit header-slot defect, seed-only Cranelift JIT):
+        // this prefix keyword was never consumed here, and
+        // `expect_identifier()` (a few lines below) treats `var`/`val` as a
+        // valid bare identifier -- needed for other legitimate contexts like
+        // `var.field` -- so without consuming it here the whole keyword got
+        // silently parsed as a complete extra field named "var"/"val"
+        // (untyped, defaulting to `any`) immediately BEFORE the real field.
+        // Every `var`/`val`-prefixed class field thus registered TWO declared
+        // fields instead of one in the type registry, and the seed's MIR
+        // StructInit lowering (deriving field_offsets/field_types 1:1 from
+        // that declared list) emitted an extra unfilled 8-byte struct slot --
+        // see bug native_class_array_field_mutation_segfault_2026-07-17.md
+        // ("field_offsets: [0, 8], field_types: [TypeId(14)/ANY, TypeId(17)]"
+        // for what should have been a single-field class).
+        let var_val_mutability = if self.check(&TokenKind::Var) {
+            self.advance();
+            Some(Mutability::Mutable)
+        } else if self.check(&TokenKind::Val) {
+            self.advance();
+            Some(Mutability::Immutable)
+        } else {
+            None
+        };
+
         let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
             Mutability::Mutable
         } else {
-            Mutability::Immutable
+            var_val_mutability.unwrap_or(Mutability::Immutable)
         };
 
         let name = self.expect_identifier()?;
