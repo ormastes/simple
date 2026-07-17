@@ -487,3 +487,49 @@ zero-collateral-regression full-suite diff) is considered sufficient proof
 of the fix at the unit level. Closing the loop with a live native-build
 rebuild + repro is a reasonable follow-up for whoever next rebuilds the seed
 for unrelated reasons.
+
+## 2026-07-17 follow-up (REDEPLOY-GATE lane): Wall-2 fix re-confirmed on a from-scratch seed build; live native-build repro still blocked
+
+(Reconstructed by the coordinator from the lane's final report — the lane's
+original append of this section was clobbered from the working copy by a
+parallel session's reconcile after its final verification.)
+
+**From-scratch rebuild verification.** Both seed profiles rebuilt clean from
+current disk state: `cargo build --release` (2m28s, 0 errors, 9 pre-existing
+`#[link_name]` warnings for `rt_time_now_micros`/`rt_time_now_unix_micros`)
+and `cargo build --profile bootstrap -p simple-driver` (4m10s, 0 errors).
+`cargo test -p simple-compiler --lib interpreter_patterns::` on the fresh
+build: **10/10 passed** — the Wall-2 `receiver_is_enum` fix is re-confirmed
+at unit level on a from-scratch artifact, not just an incremental build.
+
+**The doc's end-to-end native-build repro remains NOT RUN.** Phase-1 source
+collection (`--source src/lib`) hits a standing, pre-existing defect:
+`certificate.spl` imports `std.cert.x509` / `std.cert.chain` /
+`std.cert.validation`, none of which resolve — only `pem.spl` and
+`x509_typed.spl` exist under `cert/`. Confirmed present on `origin/main`
+(via `git show`/`git ls-tree`), i.e. not working-copy noise. Additionally a
+second, path-distinct `certificate.spl` exists under
+`src/std/nogc_sync_mut/tls/`, a tree absent from `origin/main` entirely
+(flagged, not investigated).
+
+**New fresh-vs-deployed divergence (untested risk, not a cleared item):**
+the fresh seed (both profiles) deterministically fails
+`SdnValue.Int(...)` construction with "unknown static method Int on class
+SdnValue", while the deployed 2026-07-11 `bin/simple` succeeds. On the
+actual redeploy path (`SIMPLE_BOOTSTRAP=1`, no `--source`) old and new fail
+identically ("cannot iterate over this type") — that failure is shared and
+pre-existing, not a regression. Whether the SdnValue name-collision affects
+a real stage2 bootstrap compile is **unverified** because the cert wall
+blocks `--source src/lib` collection.
+
+**Redeploy-readiness verdict: UNVERIFIED** (neither READY nor flat
+NOT-READY). Artifact correctness is strong — clean builds, this week's
+fixes all present on disk (Wall-2, HIR+MIR disc-dispatch gates, mut-param
+writeback d9ffd9b, Option.map ptr↔i1 58b24c2), and `nm -D` shows the fresh
+seed exports **76 `rt_cranelift_*` symbols vs 0** in the deployed binary,
+corroborating that a redeploy resolves the mechanism behind the 17 parity
+xfails. But zero end-to-end native-build compiles succeeded via any
+bootstrap-representative invocation. Concrete prerequisite: fix
+`certificate.spl`'s `std.cert.*` imports, then run the authoritative
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap` gate as the
+real test (it also produces the deployable artifact).
