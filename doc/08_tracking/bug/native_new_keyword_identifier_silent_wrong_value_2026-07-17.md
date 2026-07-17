@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Severity:** High (silent wrong output with no diagnostic; escalates to SIGSEGV)
-**Status:** open
+**Status:** source fixed for unambiguous terminal references; dual-backend execution pending
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom
@@ -124,6 +124,19 @@ to pin down the mechanism to file this).
   including inside string-interpolation sub-parsing.
 
 ## Verification
+
+- `new_keyword_identifier` is a strict LLVM/Cranelift parity case covering
+  interpolation, a direct function argument, and a `.replace(..., new)`
+  operand. It is selected on macOS, Windows, and FreeBSD as well as the full
+  Linux gate.
+- The parser now treats `new` as an identifier when the following token is an
+  unambiguous expression terminator. It deliberately preserves the documented
+  generic `new expr` allocation grammar. Ambiguous postfix forms such as
+  `new[...]` versus `new [ ... ]` still require a separate grammar decision;
+  adopting the Rust parser's allocation-start allowlist here would silently
+  narrow `doc/05_design/runtime/explicit_allocation_design.md`.
+- Source/static gates may pass without executing Simple; native dual-backend
+  execution is required before marking this bug closed.
 
 - Reproduced on worktree `/home/ormastes/dev/wt_r_find_infer` at tip
   `ffc0c360ba4` (fetched 2026-07-17), using
