@@ -1,5 +1,14 @@
 # Backend-Isolation Plan — App → Facade → Engine2D → Backend → `rt_*`
 
+## Owner review update (2026-07-17)
+
+Nineteen newly detected `examples/09_embedded/simple_os/arch/**` entry and
+probe files are exact bare-metal implementation owners: they exercise hardware,
+QEMU exit, target runtime ABI, or target-only services from restricted entry
+closures. Their exact paths are ratchet-baselined with an annotated provenance
+block; no directory wildcard is used, so every future file still fails closed.
+Hosted app consumers remain violations and are not absorbed by this review.
+
 **Status:** GATE LIVE, GAPS OPEN (2026-07-07) · **Owner:** UI/rendering · **Scope:** enforce the
 three-facade rendering architecture across `src/app/**` and `examples/**`.
 
