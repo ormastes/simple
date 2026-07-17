@@ -224,7 +224,8 @@ pending. The pure-Simple strict path now stages its already-compiled dynload
 object under a canonical member name, creates and inventories the deterministic
 dedicated archive, validates the exact hosted ABI, cleans it, and remains
 fail-closed before selection; addressless weak undefined dependencies are
-rejected, and execution proof is pending. The same production
+rejected. All staged provider objects now require a boundary-safe final-component
+identity on Unix and Windows; execution proof is pending. The same production
 path now stages, inventories, and exact-ABI validates the dedicated font archive
 with vendored STB exports held translation-unit-local and the dedicated
 memtrack archive with its 15-global ABI. It also compiles and stages the

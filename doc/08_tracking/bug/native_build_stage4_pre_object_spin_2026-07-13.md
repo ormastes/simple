@@ -691,6 +691,16 @@ deletes it at the existing fail-closed barrier. POSIX objects may not import any
 imports remain a measured platform-link concern, so archive selection, hashing,
 cache admission, and executable ELF/Mach-O/COFF proof remain open.
 
+## 2026-07-17 provider object identity boundary
+
+The shared Stage4 archive builder now selects fresh runtime objects by their
+normalized final path component and requires an exact or underscore-delimited
+`runtime_<provider>.o`/`.obj` identity. The previous raw suffix check also
+accepted collisions such as `notruntime_font.o`. Windows matching normalizes
+separators and case; Unix remains case-sensitive. One focused pure regression
+covers Linux-style `.o`, MSVC `.obj`, MinGW `.o`, collision, extension, case,
+and directory-boundary shapes. Exact ABI scanning remains the content owner.
+
 Timestamp time-of-day extraction now shares one floor-day microsecond
 remainder. Negative sub-second values such as `-1` therefore produce
 `23:59:59.999999` for the preceding date instead of the inconsistent
