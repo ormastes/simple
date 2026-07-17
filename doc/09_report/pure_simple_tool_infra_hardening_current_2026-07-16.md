@@ -524,6 +524,15 @@ so executable qualification is still blocked.
   CLI `String.smf` inference failure, so the focused enum fix is not admitted.
   Strict runs exit normally with no timeout, OOM, crash, hang, orphan, or seed
   fallback.
+- The CLI `String.smf` inference failure was a second nested-string
+  interpolation parse wall, not a missing `String` field: the default SMF path
+  called `filename.replace(".spl", ".smf")` directly inside an interpolated
+  string. The replacement is now hoisted into an explicitly typed `text`
+  local, and a CLI source contract was added to reject that nested-call
+  spelling. The focused Rust-seed test-runner attempt did not reach the spec:
+  it emitted an unbounded diagnostic stream and stopped on an unrelated
+  `database.spl` parser failure. Executable admission therefore remains the
+  next bounded Stage 2 run.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
