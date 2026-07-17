@@ -7,25 +7,33 @@
 # RAW-RT-001: `extern fn rt_<name>` declared outside src/lib/ or src/runtime/   WARNING
 #
 # Privileged tiers may declare raw intrinsics directly. A source path is
-# privileged when it sits under `src/lib/` or `src/runtime/` (mirrors the Rust
-# seed lint `raw_rt_access` / `source_path_is_privileged`, which match the
-# adjacent `src`+`lib` or `src`+`runtime` path components).
+# privileged when it sits under `src/lib/` or `src/runtime/` — the facade
+# owners. `src/compiler/` is NOT privileged: a refactor (see
+# llvm_native_link.spl) routed ~65 raw rt_* call sites in the compiler
+# backend through the std.nogc_sync_mut.io_runtime facade because new
+# `extern fn rt_*` decls in CLI-closure modules brick the deployed binary
+# (unknown-extern rejection at module load kills ALL native-builds). This
+# lint stays at WARNING severity (not Deny) so the many pre-existing
+# `extern fn rt_*` declarations still in src/compiler/ (the compiler defines
+# and bridges most of the rt_* runtime interface) do not fail the build —
+# it flags them for review without gating on the existing count.
 #
 # This file uses text-heuristic analysis (no AST dependency) so it can run in
-# interpreter-mode specs and parity-match the Rust seed lint. It scans
-# `extern fn` lines the way concurrency_api_misuse's E-PAR-005 scan does and
-# extracts the declared name to test the `rt_` prefix.
+# interpreter-mode specs. It scans `extern fn` lines the way
+# concurrency_api_misuse's E-PAR-005 scan does and extracts the declared name
+# to test the `rt_` prefix.
 
 # ============================================================================
 # Finding Struct
 # ============================================================================
 
-struct RawRtAccessFinding:
+pub struct RawRtAccessFinding:
     code: text
     severity: text
     message: text
     name: text
     note: text
+    line_num: i64
 
     fn fmt() -> text:
         "[{self.code}] {self.severity}: {self.message} — {self.note}"
@@ -35,17 +43,18 @@ struct RawRtAccessFinding:
 # ============================================================================
 
 fn _rra_is_privileged_path(file_path: text) -> bool:
-    """Privileged tiers may declare raw intrinsics directly.
+    """Privileged (facade-owner) tiers may declare raw intrinsics directly:
+    any path under `src/lib/` or `src/runtime/`.
 
-    Mirrors the Rust seed `source_path_is_privileged`: any path under
-    `src/lib/`, `src/runtime/`, or `src/compiler/`. The compiler defines and
-    bridges the `rt_*` runtime interface, so it must declare those intrinsics
-    directly (routing through std wrappers would be circular)."""
+    `src/compiler/` is intentionally NOT privileged: it is CLI-closure code,
+    and a new `extern fn rt_*` declared there can brick the deployed binary
+    (unknown-extern rejection at module load). The compiler's many existing
+    `extern fn rt_*` declarations are still only WARNING-level findings (see
+    file header), so this does not fail the build — it surfaces them for
+    review and stops new ones from blending in silently."""
     if file_path.contains("src/lib/"):
         return true
     if file_path.contains("src/runtime/"):
-        return true
-    if file_path.contains("src/compiler/"):
         return true
     false
 
@@ -101,7 +110,7 @@ fn _rra_is_ident_char(ch: text) -> bool:
 # Main Entry Point
 # ============================================================================
 
-fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
+pub fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
     """Text-based heuristic for RAW-RT-001 detection.
 
     Emits a WARNING for each `extern fn rt_*` declaration in a non-privileged
@@ -115,7 +124,9 @@ fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
         return findings
 
     val lines = source.split("\n")
+    var line_num = 0
     for line in lines:
+        line_num = line_num + 1
         val t = line.trim()
         if not t.starts_with("extern fn "):
             continue
@@ -130,6 +141,7 @@ fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
             severity: "WARNING",
             message: msg,
             name: name,
-            note: "use the std wrapper (e.g. std.io_runtime.file_read / file_write) instead of extern fn rt_*"
+            note: "use the std wrapper (e.g. std.io_runtime.file_read / file_write) instead of extern fn rt_*",
+            line_num: line_num
         ))
     findings
