@@ -1894,3 +1894,69 @@ redeploy (fresh self-hosted rebuild) plus resolving iteration 22's (b) if the
 divergence persists post-redeploy. Repros: `scratchpad/cfg_arch_dispatch_repro_a.spl`,
 `_repro_b.spl`, `_repro_spaced.spl`, `cfg_when_dispatch_repro.spl`,
 `cfg_when_dispatch_repro_a.spl`.
+
+## Task #99 (2026-07-17) — iteration-21 four-gap sweep: 3 of 4 verified FIXED; @cfg same-name dispatch (#4) OPEN, stale-vs-miscompile UNDECIDABLE
+
+Verification pass over the four iteration-20/21 "interpreter completeness" gaps
+left for iteration 21 (struct construction, env SymbolId mis-key, Field access,
+@cfg same-name dispatch). Base: origin main tip `f6e7e2a18e5`. Deployed
+`bin/simple` build date 2026-07-11.
+
+### #1 struct construction, #3 field access — FIXED (verified)
+Landed by `42abf4a6d74` ("re-land it21 arms — try_construct_struct + Field
+disc-dispatch (#99)"), an ancestor of HEAD. Red→green proof: at its parent
+`499b9d155bc` `interpreter.spl` has **0** occurrences of `try_construct_struct`
+and **0** of the `Field` disc `21232742`; at HEAD both are present.
+Behavioral green on the deployed binary via the InterpreterBackendImpl path
+(`bin/simple -c`): `struct Pnt: x/y; val p = Pnt(x:7,y:9); print(p.x+p.y)` → `16`.
+Regression guard added: `test/03_system/compiler/compiler_interpret_pipeline_spec.spl`
+"struct construction and field access in fn main succeed" (uses `interpret_file`,
+`is_success()` flips because the baseline crashed/erred).
+
+### #2 env SymbolId mis-key — FIXED (verified)
+`env.spl` now keys scopes by variable NAME: `scopes: [Dict<text, Value>]` (the
+`Dict<SymbolId, Value>` struct-keyed form that mis-keyed define-vs-lookup is
+gone). Behavioral green via `-c`: `val a=3; val b=4; print(a+b)` → `7`. Already
+covered by the existing spec case "variable binding in fn main succeeds".
+
+### #4 @cfg same-name variant dispatch — OPEN (reproduces on deployed binary)
+Fresh reproducer on the deployed binary (`bin/simple -c`, x86_64 host):
+- `@cfg(x86_64) fn arch_tag()->i64:64` FIRST, `@cfg(arm64) ...:32` SECOND,
+  `fn main(): print(arch_tag())` → `64` (correct — by declaration order luck).
+- Swap the order (arm64 FIRST) → `32` (**WRONG**; should be 64 on x86_64).
+- Decisive: a LONE inactive `@cfg(arm64) fn dead_fn()->i64: <undefined symbol>`
+  with `fn main(): print(41)` errors `undefined identifier` — i.e. the inactive
+  variant is **not stripped**; it is compiled. Both same-name variants survive →
+  first-declared wins in dispatch.
+
+### Correction to Task #45's stale-binary theory — UNSUPPORTED as stated
+Task #45 (above) concluded the `@cfg` source is correct and the deployed binary
+merely "predates `cb8d9df703558`". That specific claim is **not supported**: the
+per-declaration `@cfg` decl-stripping code (`_pp_preprocess_conditionals` second
+pass, `skip_until_dedent` / "blank @cfg line + following declaration") landed
+`7c30ce49d04` on 2026-07-04, which is BEFORE the 2026-07-11 deployed binary — so
+the binary is not simply older than the fix.
+
+### What IS verified about the source (isolation)
+- `parse_full_frontend` (`frontend.spl:64`, the shared front door for BOTH JIT
+  and interpret) calls `preprocess_conditionals(source)` at line 65 before the
+  flat-AST parse — so the interpret path DOES reach the preprocessor. The
+  `_FlatAstBridge` does no `@cfg` handling of its own.
+- `_pp_eval_atom("arm64")` returns `cfg_detect_arch()=="aarch64"` → false on
+  x86_64; `_pp_eval_atom("x86_64")` → true. `_pp_extract_cfg_condition("@cfg(arm64)")`
+  → `"arm64"`. The second pass blanks the `@cfg` line + the inline single-line
+  decl and returns `final_lines.join("\n")`. Read in isolation the source is
+  correct.
+
+### Why this is undecidable here (no code change made)
+Whether the deployed binary is genuinely stale (built from older source via the
+known `#99 bin/release redeploy wall`, not merely predating the fix) OR
+miscompiles the correct preprocessor loop cannot be decided this session:
+redeploy/bootstrap are forbidden; the test-runner is dead (`unknown extern
+function: rt_cli_arg_count`); native-build is broken (`bug #185` Map.new dict
+initializers) AND resolves arch `@cfg` on the Rust side
+(`native_project/discovery.rs strip_inactive_cfg_arch_fns`), so a passing
+native-build would NOT exonerate the pure-Simple preprocessor. There is no
+verifiable fix to land here, so no `.spl` change was made for #4 (shipping an
+unverifiable source edit would be a cover-up). #4 stays OPEN pending a fresh
+self-hosted rebuild; re-test the arm64-first reproducer after redeploy.
