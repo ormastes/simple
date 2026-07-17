@@ -148,3 +148,132 @@ this bug.
    actual QEMU load address against the link-time base, and/or instrument the
    receiver pointer value itself at the `_device_sector_size` call site in a
    freestanding build, rather than re-deriving it from static analysis.
+
+### C8-RELOC lane (2026-07-17) — relocation hypothesis DISPROVEN, bug re-isolated to trait-field storage
+
+**Relocation/load-base hypothesis: DISPROVEN, flatly.** `readelf -l` on the
+freestanding kernel ELF (`examples/09_embedded/simple_os/arch/x86_64/linker.ld`,
+base `0x100000`) shows all `PT_LOAD` segments with `VirtAddr == PhysAddr`
+(`0x100000`, `0x1007000`, `0x100b000`), and the linker identity-maps the first
+1GB. QEMU's `-kernel` multiboot1 loader places `PT_LOAD` segments at their
+`p_paddr` verbatim — no relocation, no ASLR, no bootloader-side copy. Load
+base equals link base exactly. Every `movabs`-addressed global and every
+RIP-relative access resolve to the same linear address; there is no "wrong
+base" for either addressing mode to disagree on. **This also means C1
+("module-global `val/var X = call()` initializers never emitted") is NOT
+explained by a load-base mismatch** — mis-based `movabs` globals was a live
+theory for C1 too, but with load base confirmed correct, C1 remains a
+separate, still-unexplained defect (the global's init-store code is simply
+never emitted/executed, not mis-addressed).
+
+**Static verification of the originally-suspected call site — clean.**
+Disassembled `Fat32Core._device_sector_size` (`nogc_async_mut` variant, the
+one actually linked; NOT the `nogc_sync_mut` copy) in a fresh from-scratch
+build: `and rdi,~7; mov rdi,[rdi]` (load `self.device`) → `and rax,~7; mov
+rax,[rax]` (deref to vtable) → `mov rax,[rax+0x10]` (slot 2 = `sector_size`,
+matching trait declaration order) → `call rax`. Confirmed the vtable data
+blob (`__vtable__NvmeBlockAdapter__for__BlockDevice`) holds the exact correct
+3 function-pointer slots (`read_sector`, `write_sector`, `sector_size`,
+byte-for-byte matched against fresh `nm` addresses), and confirmed BOTH
+`NvmeBlockAdapter` constructors (`new` and `for_identified_namespace_unchecked`,
+the latter is what's actually called from `vfs_boot_init.spl`) correctly
+stamp `[new_object+0] = &__vtable__NvmeBlockAdapter__for__BlockDevice` via a
+RIP-relative `lea`. Construction-site and isolated-call-site statics are
+BOTH provably correct — matches the prior lane's finding, independently
+re-derived.
+
+**Runtime isolation (the new part): 3 staged serial probes, one rebuild each,
+`--entry-closure --backend cranelift --opt-level=aggressive
+--target x86_64-unknown-none`, booted under QEMU `-name c8reloc` with an NVMe
+drive attached (`build/os/_wk/fat32-font.img`) so the pure-NVMe path is
+actually reached (earlier probe attempts without `-drive`/`-device nvme`
+silently skipped straight to `no-nvme-or-bad-fs` and never exercised this
+code at all — note for the next investigator: `-drive
+file=...,if=none,id=nvm,format=raw,snapshot=on -device
+nvme,serial=deadbeef,drive=nvm` is REQUIRED to reach this path):**
+
+1. `val bd_probe: BlockDevice = adapter; bd_probe.sector_size()` — concrete
+   `NvmeBlockAdapter` local var coerced to `BlockDevice` and dispatched
+   immediately at construction, zero composition. **Printed `ss=64`, no
+   fault.** Coercion + dispatch on a freshly-constructed object: clean.
+2. Same coercion+dispatch through the **module-global** `g_adapter` (after
+   `g_adapter = adapter`). **Printed `ss=64`, no fault.** Rules out a
+   mis-stored/mis-reloaded module global for this specific value (consistent
+   with, and reinforces, the prior lane's "5 live movabs refs" finding for
+   `g_adapter`).
+3. `g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)` (this is actually
+   `SharedFat32Driver.new(g_adapter)` — `Fat32Core` is aliased via `use
+   os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}`
+   in `vfs_boot_init.spl`) — printed fine (assignment completes). Then:
+   `g_pure_nvme_root_fat32.inner.mounted` (a plain bool field, TWO levels of
+   struct field access: `SharedFat32Driver.inner: Fat32Core`, i.e. the REAL
+   `std.fs_driver.fat32_core.Fat32Core`) — read correctly (`0`, not a
+   nil-deref). Then immediately: `val inner_bd: BlockDevice =
+   g_pure_nvme_root_fat32.inner.device; inner_bd.sector_size()` —
+   **FAULTED with `rip=cr2=0x0001e0ec8148e589`, byte-identical to the
+   original C8 report and to the prior lane's full-boot repro.** This is the
+   decisive reproduction: same exact garbage address, isolated to a single
+   two-statement probe with no `read_boot_sector`/`mount()` call chain
+   involved at all.
+
+**Verdict — mechanism narrowed, NOT yet pinned to storage-vs-read, NOT yet an
+exact instruction.** The trait coercion-and-dispatch machinery itself is
+proven correct twice (steps 1–2, same underlying `NvmeBlockAdapter` object,
+same vtable, no composition). Step 3 proves the receiver chain up to and
+including `.inner` is valid (`.inner.mounted` reads `0`, not a nil-deref, so
+`self.inner` is a real, correctly-addressed `Fat32Core`) — the fault
+localizes specifically to `.inner.device` and the dispatch on it. **What
+this A/B does NOT yet distinguish, and the doc previously over-claimed it
+did:**
+
+- **Storage-corrupt-at-write vs. chained-read-corrupt-at-read.**
+  `g_pure_nvme_root_fat32.inner.device` is itself a two-hop field chain
+  (`SharedFat32Driver.inner` then `Fat32Core.device`), so this probe does
+  NOT rule out a chained-erased-receiver-read bug (the documented
+  `.claude/rules/language.md` landmine) — it only proves `.inner` alone
+  reads correctly, not that `.inner.device` read as a *chain* is equivalent
+  to a fresh read. The **untested discriminator**: split the two hops —
+  `val f = g_pure_nvme_root_fat32.inner; val bd: BlockDevice = f.device;
+  bd.sector_size()`. If this still faults with the same `cr2`, the value is
+  corrupt at rest (storage-side bug). If it does NOT fault, the bug is in
+  the chained/erased read itself, not storage.
+- **Nesting depth.** The probe went straight to the doubly-nested
+  construction (`SharedFat32Driver(inner: Fat32Core.new(g_adapter), ...)`,
+  a constructor call nested inside another struct literal's field
+  initializer). The **simpler, untested shape**: `val f =
+  Fat32Core.new(g_adapter); val bd: BlockDevice = f.device;
+  bd.sector_size()` — single-level `Fat32Core(device: device, ...)`
+  struct-literal field store, no outer nesting. If that alone faults, the
+  bug is just "trait-typed constructor argument stored into a struct field
+  via a struct literal" (a much more common, higher-priority shape to fix)
+  and the nesting is irrelevant.
+
+Fix target for the next lane, scoped honestly: something in how a
+trait-typed value gets **stored into a struct field via a
+constructor/struct-literal argument, and/or read back through a struct
+field**, corrupts the vtable-bearing pointer — construction-site statics
+(vtable stamp, vtable data) and direct local/global coercion+dispatch are
+both proven correct, so the defect is specifically in this
+store-then-later-read path. Likely code: seed `StructInit`/field-store and
+field-read lowering (`src/compiler_rust/compiler/src/mir/lower/`,
+`src/compiler_rust/compiler/src/codegen/`). Run the two discriminator probes
+above (cheap, one rebuild each) before touching codegen — they turn "a trait
+field stored via a struct literal is corrupt somewhere" into an exact
+trigger shape. Not yet narrowed to an exact file:line or single instruction
+either way — the enclosing function (`_vfs_boot_init_pure_nvme_fat32`)
+compiles to ~31KB of machine code with the actual dispatch as one of many
+indirect `call reg` sites and no vtable-address cross-reference visible via
+`objdump`/`nm` alone; isolating the exact instruction needs either a minimal
+standalone repro compiled outside this function, or seed-side
+instrumentation of the `StructInit`/field-store lowering itself.
+
+**Files touched during this investigation, all reverted before finishing:**
+temporary serial probes in `src/os/services/vfs/vfs_boot_init.spl` and
+`src/lib/nogc_async_mut/fs_driver/fat32_core.spl` (raw-pointer/`mmio_read64`
+probes in the latter were themselves a dead end — `unsafe_addr_of` on a
+receiver/trait value appears to box through `any` and return a
+non-physical-looking address under `-m 2G`, e.g. ~14GB; do not repeat that
+approach — use typed dispatch-and-print probes like steps 1-3 above
+instead). `vfs_boot_init.spl:374` is confirmed restored to `if true:`
+(hosted FAT32 mount stays skipped; C8 is still open, not fixed by this
+lane).
