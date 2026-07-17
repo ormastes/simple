@@ -1448,8 +1448,60 @@ impl MirLowering:
                     acc1 = self.collect_free_var_syms(call_args[i].value, param_syms, acc1)
                     i = i + 1
                 acc1
+            case Block(block):
+                # `bound` widens param_syms with every `Let` name introduced
+                # anywhere in the block (see hir_block_bound_syms), so a
+                # body-local name is never reported as a free/captured
+                # variable. Statement forms (Expr/Let/Assign/nested Block) are
+                # walked by hir_block_stmts_free_syms -- an Assign statement's
+                # TARGET is scanned exactly like its value, so a body that only
+                # ever REASSIGNS an outer variable (never reads it) still gets
+                # that variable registered for the bind-time capture snapshot.
+                val bound = self.hir_block_bound_syms(block.stmts, param_syms)
+                val acc1 = self.hir_block_stmts_free_syms(block.stmts, bound, acc)
+                if block.has:
+                    self.collect_free_var_syms(block.value, bound, acc1)
+                else:
+                    acc1
+            case Lambda(nested_params, nested_body, _):
+                var combined = param_syms
+                var nlpi = 0
+                while nlpi < nested_params.len():
+                    val nsid = mir_expr_symbol_id_value(nested_params[nlpi].symbol)
+                    if nsid >= 0 and not int_list_contains(combined, nsid):
+                        combined = combined.push(nsid)
+                    nlpi = nlpi + 1
+                self.collect_free_var_syms(nested_body, combined, acc)
             case _:
                 acc
+
+    me hir_block_stmts_free_syms(stmts: [HirStmt], bound: [i64], acc: [i64]) -> [i64]:
+        """Accumulate free-variable symbol ids referenced anywhere in a lambda
+        block body's statements (mirrors `collect_free_var_syms`'s coverage,
+        extended to statement forms). An `Assign` statement contributes BOTH
+        its target and its value -- a target-only reference (`count = count +
+        1` where `count` is a free outer variable) must still be captured, not
+        just a target that is also read."""
+        var acc1 = acc
+        var i = 0
+        while i < stmts.len():
+            match stmts[i].kind:
+                case Expr(e):
+                    acc1 = self.collect_free_var_syms(e, bound, acc1)
+                case Let(_, _, init):
+                    acc1 = self.collect_free_var_syms(init, bound, acc1)
+                case Assign(target, _, value):
+                    acc1 = self.collect_free_var_syms(target, bound, acc1)
+                    acc1 = self.collect_free_var_syms(value, bound, acc1)
+                case Block(inner):
+                    val inner_bound = self.hir_block_bound_syms(inner.stmts, bound)
+                    acc1 = self.hir_block_stmts_free_syms(inner.stmts, inner_bound, acc1)
+                    if inner.has:
+                        acc1 = self.collect_free_var_syms(inner.value, inner_bound, acc1)
+                case _:
+                    pass
+            i = i + 1
+        acc1
 
     me snapshot_lambda_capture(lam: HirExpr) -> Dict<i64, LocalId>:
         """Bind-time by-value capture snapshot for `val f = \\x: ...`.
@@ -1645,9 +1697,97 @@ impl MirLowering:
                     true
                 else:
                     self.call_args_capture(call_args, param_syms)
+            case Block(block):
+                # Block-bodied lambda (`\v:` + indented statements). Let-bound
+                # names introduced anywhere in the block are treated as bound
+                # for the WHOLE block (a real program never references a
+                # `val`/`var` before its own declaration, so this is a safe,
+                # conservative over-approximation -- it can only avoid a FALSE
+                # capture report for a body-local name, never hide a genuine
+                # outer capture).
+                val bound = self.hir_block_bound_syms(block.stmts, param_syms)
+                if self.hir_block_stmts_capture(block.stmts, bound):
+                    true
+                elif block.has:
+                    self.lambda_body_captures(block.value, bound)
+                else:
+                    false
+            case Lambda(nested_params, nested_body, _):
+                # A lambda literal nested inside another lambda's body (e.g. an
+                # inline lambda arg passed to a call made from within the outer
+                # lambda). The nested lambda's own parameters are bound within
+                # ITS body; anything else it references is a free variable of
+                # the OUTER lambda too, so union the two parameter sets rather
+                # than failing closed on the mere presence of a nested Lambda
+                # node (Call/MethodCall args already recurse here).
+                var combined = param_syms
+                var nlpi = 0
+                while nlpi < nested_params.len():
+                    val nsid = mir_expr_symbol_id_value(nested_params[nlpi].symbol)
+                    if nsid >= 0 and not int_list_contains(combined, nsid):
+                        combined = combined.push(nsid)
+                    nlpi = nlpi + 1
+                self.lambda_body_captures(nested_body, combined)
             case _:
                 # Unknown / unsupported body form -- fail closed.
                 true
+
+    me hir_block_bound_syms(stmts: [HirStmt], base: [i64]) -> [i64]:
+        """Collect every `Let`-introduced symbol id anywhere in a statement
+        list, added to `base`. Used to widen the lambda-capture "bound" set
+        for a block body so a body-local `val`/`var` is never mistaken for a
+        free (captured) outer variable."""
+        var bound = base
+        var i = 0
+        while i < stmts.len():
+            match stmts[i].kind:
+                case Let(symbol, _, _):
+                    val sid = mir_expr_symbol_id_value(symbol)
+                    if sid >= 0 and not int_list_contains(bound, sid):
+                        bound = bound.push(sid)
+                case Block(inner):
+                    bound = self.hir_block_bound_syms(inner.stmts, bound)
+                case _:
+                    pass
+            i = i + 1
+        bound
+
+    me hir_block_stmts_capture(stmts: [HirStmt], bound: [i64]) -> bool:
+        """Scan every statement in a lambda block body for a capture of a
+        variable outside `bound` (mirrors `lambda_body_captures`'s coverage,
+        extended to statement forms: `Expr`, `Let`, `Assign`, nested `Block`).
+        An assignment TARGET is scanned exactly like a read (via the same
+        `lambda_body_captures` dispatch, which already recognizes `Var`/
+        `NamedVar`/`Field`/`Index`/`TupleIndex` base forms) so a body that
+        REASSIGNS a captured outer variable is correctly flagged as capturing,
+        not just one that reads it."""
+        var i = 0
+        while i < stmts.len():
+            val stmt_captures = match stmts[i].kind:
+                case Expr(e):
+                    self.lambda_body_captures(e, bound)
+                case Let(_, _, init):
+                    self.lambda_body_captures(init, bound)
+                case Assign(target, _, value):
+                    if self.lambda_body_captures(target, bound):
+                        true
+                    else:
+                        self.lambda_body_captures(value, bound)
+                case Block(inner):
+                    val inner_bound = self.hir_block_bound_syms(inner.stmts, bound)
+                    if self.hir_block_stmts_capture(inner.stmts, inner_bound):
+                        true
+                    elif inner.has:
+                        self.lambda_body_captures(inner.value, inner_bound)
+                    else:
+                        false
+                case _:
+                    # AsmAssert or unknown statement form -- fail closed.
+                    true
+            if stmt_captures:
+                return true
+            i = i + 1
+        false
 
     me call_args_capture(call_args: [HirCallArg], param_syms: [i64]) -> bool:
         var i = 0
@@ -1674,7 +1814,30 @@ impl MirLowering:
                 self.lambda_capture_scan_supported(callee) and self.call_args_capture_scan_supported(call_args)
             case MethodCall(receiver, _, call_args, _):
                 self.lambda_capture_scan_supported(receiver) and self.call_args_capture_scan_supported(call_args)
+            case Block(block):
+                self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
+            case Lambda(_, nested_body, _):
+                self.lambda_capture_scan_supported(nested_body)
             case _: false
+
+    me hir_block_stmts_scan_supported(stmts: [HirStmt]) -> bool:
+        """Mirrors `lambda_capture_scan_supported`'s coverage for the
+        statement forms a lambda block body can contain."""
+        var i = 0
+        while i < stmts.len():
+            val ok = match stmts[i].kind:
+                case Expr(e): self.lambda_capture_scan_supported(e)
+                case Let(_, _, init): self.lambda_capture_scan_supported(init)
+                case Assign(target, _, value):
+                    self.lambda_capture_scan_supported(target) and self.lambda_capture_scan_supported(value)
+                case Block(inner):
+                    self.hir_block_stmts_scan_supported(inner.stmts) and (not inner.has or self.lambda_capture_scan_supported(inner.value))
+                case _:
+                    false
+            if not ok:
+                return false
+            i = i + 1
+        true
 
     me call_args_capture_scan_supported(call_args: [HirCallArg]) -> bool:
         var i = 0

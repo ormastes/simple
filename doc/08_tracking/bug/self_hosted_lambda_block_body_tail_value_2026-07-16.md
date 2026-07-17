@@ -120,3 +120,18 @@ materialization; (2) `.filter(<block lambda>)` reports "unresolved method
 call: filter" because the counted-loop filter lowering only matches
 expression-bodied lambdas. Plus the capture-mutation gap above. All three are
 follow-up work on the MIR lambda path.
+
+## Residual gaps RESOLVED (2026-07-17, second pass)
+
+All three residual loud gaps are fixed by one shared root cause: the
+capture-analysis trio (`lambda_body_captures`, `lambda_capture_scan_supported`,
+`collect_free_var_syms` in `50.mir/_MirLoweringExpr/switch_operators_calls.spl`)
+had no `HirExprKind::Block` case, so every block-bodied lambda hit the
+fail-closed default and `lower_lambda_value` bailed to nil. Added Block (+
+nested Lambda) cases with shared statement-walk helpers; existing codegen
+handled Block bodies once analysis stopped bailing. Orchestrator-verified:
+inline call-arg block lambda → 11, `.filter(<block lambda>)` → kept 3,
+standalone control → 22. Genuinely unsupported shapes (captured f64) still
+fail loud. Remaining known-loud: a lambda literal nested inside another
+lambda's body fails at link (`undefined symbol: __lambda_lift_1`) —
+pre-existing, reproduces with expression bodies too, tracked as follow-up.

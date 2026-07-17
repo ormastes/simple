@@ -2,7 +2,7 @@
 
 **Severity:** high (silent wrong value)
 **Found:** 2026-07-17 during review of the `text.split_lines()` fix lane
-**Status:** source fixed; strict dual-backend execution pending
+**Status:** RESOLVED — fixed by 4539b364955 (preserve split text element types); orchestrator runtime-verified at tip 985885cb314 (2026-07-17): fresh native probe prints `3`/`aa`/`cc` correctly, matching the oracle.
 **Backend:** pure-Simple `native-build --entry` MIR lowering / LLVM
 
 ## Symptom
