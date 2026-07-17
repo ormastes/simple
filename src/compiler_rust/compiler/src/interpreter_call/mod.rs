@@ -574,6 +574,17 @@ pub(crate) fn evaluate_call(
                 .get(module_name)
                 .cloned()
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()));
+            if std::env::var("SCRATCH_WALL2_TRACE").is_ok() {
+                eprintln!(
+                    "[SCRATCH] module_name={} field={} local_enums_has={} global_enums_has={} enum_def_found={} variants={:?}",
+                    module_name,
+                    field,
+                    enums.contains_key(module_name),
+                    GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(module_name)),
+                    enum_def_opt.is_some(),
+                    enum_def_opt.as_ref().map(|d| d.variants.iter().map(|v| v.name.clone()).collect::<Vec<_>>())
+                );
+            }
             if let Some(enum_def) = enum_def_opt {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
                     let payload = if args.is_empty() {

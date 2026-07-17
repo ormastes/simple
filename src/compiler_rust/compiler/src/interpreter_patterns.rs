@@ -654,6 +654,200 @@ main = result_
         );
     }
 
+    // --- WALL2-SEED scratch repro (temporary, will be replaced/removed) ---
+
+    #[test]
+    fn scratch_wall2_first_variant_payload_via_fn_param() {
+        let src = r#"
+enum StmtKind:
+    Expr(i64)
+    Other
+
+class Stmt:
+    kind: StmtKind
+
+fn extract(s: Stmt) -> i64:
+    val stmt_kind_value = s.kind
+    match stmt_kind_value:
+        case StmtKind.Expr(einner):
+            einner
+        case _:
+            -1
+
+var result_ = -1
+val s = Stmt(kind: StmtKind.Expr(42))
+result_ = extract(s)
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 42, "single-arm match must extract the real payload (42), not fall to wildcard (-1)");
+    }
+
+    #[test]
+    fn scratch_wall2_debug() {
+        let src = r#"
+extern fn rt_enum_discriminant(value: StmtKind) -> i64
+
+enum ExprKind:
+    NilLit
+    IntLit(i64)
+
+class Expr:
+    kind: ExprKind
+
+enum StmtKind:
+    Expr(Expr)
+    Val(text, Expr)
+    Assign(Expr, Expr)
+
+class Stmt:
+    kind: StmtKind
+
+class HirLowering:
+    symbols: [text]
+
+impl HirLowering:
+    me lower(s: Stmt) -> i64:
+        val stmt_kind_value: StmtKind = s.kind
+        val sk_disc: i64 = rt_enum_discriminant(stmt_kind_value)
+        val sk_dummy: Expr = Expr(kind: ExprKind.NilLit)
+        val d_val = rt_enum_discriminant(StmtKind.Val("", sk_dummy))
+        val d_assign = rt_enum_discriminant(StmtKind.Assign(sk_dummy, sk_dummy))
+        val d_expr = rt_enum_discriminant(StmtKind.Expr(sk_dummy))
+        print("sk_disc=" + sk_disc.to_text())
+        print("d_val=" + d_val.to_text())
+        print("d_assign=" + d_assign.to_text())
+        print("d_expr=" + d_expr.to_text())
+        0
+
+var result_ = -1
+val hl = HirLowering(symbols: [])
+val s = Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.IntLit(42))))
+result_ = hl.lower(s)
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn scratch_wall2_debug2_isolated() {
+        // Isolated: does `StmtKind.Expr(x)` construction fail on its own,
+        // outside a method, with NO other disc-dispatch calls preceding it?
+        let src = r#"
+extern fn rt_enum_discriminant(value: StmtKind) -> i64
+
+class Expr:
+    kind: i64
+
+enum StmtKind:
+    Expr(Expr)
+    Val(text, Expr)
+
+val e = Expr(kind: 7)
+val v = StmtKind.Expr(e)
+print("disc=" + rt_enum_discriminant(v).to_text())
+main = 0
+"#;
+        let code = run(src);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn scratch_wall2_debug3_plain_fn() {
+        // Same construction, but inside a plain `fn`, not an impl `me` method.
+        let src = r#"
+extern fn rt_enum_discriminant(value: StmtKind) -> i64
+
+class Expr:
+    kind: i64
+
+enum StmtKind:
+    Expr(Expr)
+    Val(text, Expr)
+
+fn make() -> i64:
+    val e = Expr(kind: 7)
+    val v = StmtKind.Expr(e)
+    rt_enum_discriminant(v)
+
+var result_ = -1
+result_ = make()
+print("disc=" + result_.to_text())
+main = 0
+"#;
+        let code = run(src);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn scratch_wall2_method_disc_dispatch_shared_dummy() {
+        // Mirrors the REAL production shape more closely: a `me` (mutable-self)
+        // METHOD (not a free fn) whose body does disc-dispatch pre-checks
+        // (rt_enum_discriminant against freshly-constructed exemplar enum
+        // values that all reuse the SAME `sk_dummy` local as a payload for
+        // multiple different constructor calls), then falls into a single-arm
+        // `match ...: case StmtKind.Expr(einner): einner  case _: sk_dummy`
+        // extraction -- exactly the idiom in
+        // src/compiler/20.hir/hir_lowering/statements.spl `lower_hir_stmt`.
+        let src = r#"
+extern fn rt_enum_discriminant(value: StmtKind) -> i64
+extern fn rt_enum_payload(value: StmtKind) -> Expr
+
+enum ExprKind:
+    NilLit
+    IntLit(i64)
+
+class Expr:
+    kind: ExprKind
+
+enum StmtKind:
+    Expr(Expr)
+    Val(text, Expr)
+    Assign(Expr, Expr)
+
+class Stmt:
+    kind: StmtKind
+
+class HirLowering:
+    symbols: [text]
+
+impl HirLowering:
+    me lower(s: Stmt) -> i64:
+        val stmt_kind_value: StmtKind = s.kind
+        val sk_disc: i64 = rt_enum_discriminant(stmt_kind_value)
+        val sk_dummy: Expr = Expr(kind: ExprKind.NilLit)
+        if sk_disc == rt_enum_discriminant(StmtKind.Val("", sk_dummy)):
+            return -1
+        if sk_disc == rt_enum_discriminant(StmtKind.Assign(sk_dummy, sk_dummy)):
+            return -2
+        if sk_disc == rt_enum_discriminant(StmtKind.Expr(sk_dummy)):
+            val expr_t: Expr = match stmt_kind_value:
+                case StmtKind.Expr(einner):
+                    einner
+                case _:
+                    sk_dummy
+            match expr_t.kind:
+                case ExprKind.IntLit(n):
+                    return n
+                case _:
+                    return -99
+        return -100
+
+var result_ = -1
+val hl = HirLowering(symbols: [])
+val s = Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.IntLit(42))))
+result_ = hl.lower(s)
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(
+            code, 42,
+            "method-form disc-dispatch + single-arm match must extract the real payload (42), \
+             not the wildcard/NilLit fallback (-99) or misroute (-100/-1/-2)"
+        );
+    }
+
     #[test]
     fn enum_positional_pattern_unaffected() {
         // Enum variant positional patterns must continue to work.
