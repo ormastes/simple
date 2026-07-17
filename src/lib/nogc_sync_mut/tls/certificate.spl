@@ -4,11 +4,10 @@
 # chain building, and private key parsing.
 
 use std.cert.pem.{base64_decode, PEM_CERT_BEGIN, PEM_CERT_END}
-use std.cert.x509.{parse_distinguished_name, parse_certificate_der}
-use std.cert.chain.{build_certificate_chain}
-use std.cert.validation.{check_expiry, is_expired}
+use std.cert.x509_typed.{x509_parse_pem, X509ParseResult, X509Cert, x509_cert_cn, x509_cert_issuer_cn}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_time_now() -> i64
 
 # =============================================================================
 # TLS Certificate
@@ -16,7 +15,7 @@ extern fn rt_file_read_text(path: text) -> text
 
 class TlsCertificate:
     raw_der: text
-    parsed: text
+    parsed: X509Cert
     subject_cn: text
     issuer_cn: text
 
@@ -24,20 +23,19 @@ class TlsCertificate:
         val der = decode_pem_block(pem_text, PEM_CERT_BEGIN, PEM_CERT_END)
         if der.len() == 0:
             return Err("failed to decode PEM certificate")
-        val parsed = parse_certificate_der(der)
-        if parsed == nil:
-            return Err("failed to parse X.509 certificate")
-        val subject = parse_distinguished_name(get_cert_subject_bytes(parsed))
-        val issuer = parse_distinguished_name(get_cert_issuer_bytes(parsed))
-        Ok(TlsCertificate(
-            raw_der: der,
-            parsed: parsed,
-            subject_cn: extract_cn(subject),
-            issuer_cn: extract_cn(issuer)
-        ))
+        val parse_result = x509_parse_pem(pem_text)
+        if val X509ParseResult.Ok(cert) = parse_result:
+            return Ok(TlsCertificate(
+                raw_der: der,
+                parsed: cert,
+                subject_cn: x509_cert_cn(cert),
+                issuer_cn: x509_cert_issuer_cn(cert)
+            ))
+        Err("failed to parse X.509 certificate")
 
     fn is_valid() -> bool:
-        check_expiry(self.parsed)
+        val now = rt_time_now()
+        now >= self.parsed.not_before_unix and now <= self.parsed.not_after_unix
 
     fn is_self_signed() -> bool:
         self.subject_cn == self.issuer_cn
@@ -120,6 +118,13 @@ class TlsPrivateKey:
 # =============================================================================
 # Helpers
 # =============================================================================
+#
+# extract_cn/get_cert_subject_bytes/get_cert_issuer_bytes are no longer used
+# by TlsCertificate.from_pem (superseded by std.cert.x509_typed's typed
+# X509Cert + x509_cert_cn/x509_cert_issuer_cn accessors), but are kept: they
+# are re-exported by name from gc_async_mut.tls.certificate and
+# nogc_async_mut.tls.certificate (compatibility facades over this module).
+# Deleting them breaks those facades' `export use ... {...}` lists.
 
 fn decode_pem_block(pem: text, begin_marker: text, end_marker: text) -> text:
     val start = pem.index_of(begin_marker)

@@ -533,3 +533,89 @@ bootstrap-representative invocation. Concrete prerequisite: fix
 `certificate.spl`'s `std.cert.*` imports, then run the authoritative
 `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap` gate as the
 real test (it also produces the deployable artifact).
+
+## 2026-07-17 follow-up (CERT-IMPORTS lane): cert import wall FIXED
+
+Fixed the concrete prerequisite noted above. Root cause: a single commit,
+`97a9358145f8` ("test-infra: scaffold database + doc generation wiring
+(debug required)", 2026-07-01), added both the real typed X.509 parser
+(`src/lib/common/cert/pem.spl`, `src/lib/common/cert/x509_typed.spl`) **and**
+`src/lib/nogc_sync_mut/tls/certificate.spl`/`validation.spl` in the same
+change, but the latter two were scaffolded against an earlier-planned,
+never-created API shape (`std.cert.x509`, `std.cert.chain`,
+`std.cert.validation`) instead of the sibling `x509_typed.spl` module it
+added alongside them — never reconciled. `cert/x509.spl`, `cert/chain.spl`,
+`cert/validation.spl` never existed at any point in this repo's history
+(confirmed via `git ls-tree` on the commit immediately before, at, and after
+the unrelated "torn working copy" mass-delete/revert pair `e3e22d19da4`/
+`369a3725bbe` that was initially suspected — ruled out, `cert/` only ever
+held `pem.spl`+`x509_typed.spl`). The second, path-distinct
+`src/std/nogc_sync_mut/tls/certificate.spl` flagged in the prior section is
+confirmed still absent from `origin/main`/git entirely (on-disk only);
+untouched, per instructions.
+
+**Fix:**
+- `certificate.spl`: repointed `std.cert.x509`'s
+  `parse_certificate_der`/`parse_distinguished_name` and
+  `std.cert.validation`'s `check_expiry` to the real `std.cert.x509_typed`
+  API (`x509_parse_pem`, `X509Cert`, `x509_cert_cn`, `x509_cert_issuer_cn`,
+  `X509Cert.not_before_unix`/`not_after_unix` + `rt_time_now()` for
+  `is_valid()`). `TlsCertificate.parsed` changed type from `text` to
+  `X509Cert`. Unused-but-still-cross-tier-re-exported helpers
+  (`extract_cn`, `get_cert_subject_bytes`, `get_cert_issuer_bytes`,
+  `decode_pem_block`) kept in place (documented why) since
+  `gc_async_mut`/`nogc_async_mut` tier facades re-export them by name.
+- `validation.spl`: same phantom-import defect
+  (`std.cert.chain`/`std.cert.validation`), plus `verify_signature` — which,
+  unlike the other three, has **no equivalent anywhere** in this codebase
+  (real RSA/ECDSA X.509 signature verification was never implemented). Its
+  only caller, `validate_chain`, had zero live callers and zero test
+  coverage (confirmed via repo-wide grep), so it was deleted rather than
+  stubbed, per the "implement or delete" rule. `gc_async_mut/tls/validation.spl`
+  and `nogc_async_mut/tls/validation.spl`'s named re-export lists had
+  `validate_chain` dropped in the same change (`gc_sync_mut`'s is a `.*`
+  facade, unaffected). Tracked as a distinct, deliberately-deferred gap:
+  `doc/08_tracking/bug/cert_chain_signature_verification_missing_2026-07-17.md`.
+
+**Verification.** The real `--source src/lib` whole-tree collection run is
+too slow to complete in-session (interpreted-seed entry-closure scan over
+7,120 files; a from-scratch attempt was still mid-`gc_async_mut` after 9
+minutes — see the pre-existing lexer/parse perf landmine in repo memory).
+Instead verified with a minimal mirror `--source` root containing only the
+five real files in the affected import closure (`base64.spl`, `pem.spl`,
+`x509_typed.spl`, the fixed `certificate.spl`, the fixed `validation.spl`),
+run through the same `native_build_worker.spl` phase-1 collector:
+- **Before fix** (original file content): phase 1 failed immediately with
+  exactly the three documented errors — `unresolved import 'std.cert.x509'`,
+  `'std.cert.chain'`, `'std.cert.validation'` (all naming
+  `certificate.spl` as the importer).
+- **After fix**: zero `unresolved import 'std.cert...'` errors; phase 1
+  passed and execution proceeded deep into real parsing/semantic analysis
+  (observed parsing `base64.spl`'s actual statements, then into the
+  self-hosting bootstrap's own `flat-bridge`/driver stage). It then hit
+  `error: semantic: variable 'Map' not found` — a bare, file-less error
+  message (matches the known "native-build eprint lost" landmine). Traced:
+  `Map<K,V>` is a real stdlib type at
+  `src/lib/nogc_sync_mut/src/map.spl`, deliberately excluded from the
+  minimal mirror along with the rest of stdlib — this is a test-harness
+  scope artifact (the compiler's own self-hosting driver code needs `Map`
+  from the full stdlib), not a new defect from this fix. Repo-wide
+  `grep -rn "std\.cert\.x509\b|std\.cert\.chain|std\.cert\.validation"` now
+  matches only the explanatory comment in the fixed `validation.spl`.
+- A full, unmodified `--source src/lib` run was started before the fix as a
+  baseline (to independently confirm the pre-fix wall on the real tree, not
+  just the mirror) but was killed once the mirror test gave equivalent
+  proof faster; it never reached the `tls/` files in its alphabetical scan
+  before being killed, so it contributes no additional evidence beyond the
+  mirror test and the static grep sweep.
+
+**Files changed:** `src/lib/nogc_sync_mut/tls/certificate.spl`,
+`src/lib/nogc_sync_mut/tls/validation.spl`,
+`src/lib/gc_async_mut/tls/validation.spl`,
+`src/lib/nogc_async_mut/tls/validation.spl`.
+
+**Next wall for the redeploy gate:** re-run the authoritative
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap` gate (or a
+full `--source src/lib` phase-1 collection to completion) now that the cert
+wall is gone — not done in this lane, given the multi-hour interpreted-seed
+runtime for a whole-tree pass observed above.
