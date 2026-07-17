@@ -990,7 +990,7 @@ pub(crate) fn exec_assignment(
                         }
                         Value::Dict(dict) => {
                             if let Some(map) = Arc::get_mut(dict) {
-                                map.insert(index_val.to_key_string(), value);
+                                map.insert(index_val.to_key_string(), Value::wrap_dict_entry(&index_val, value));
                                 return Ok(Control::Next);
                             }
                         }
@@ -1026,7 +1026,8 @@ pub(crate) fn exec_assignment(
                     }
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
-                        Arc::make_mut(&mut dict).insert(key, value);
+                        let stored = Value::wrap_dict_entry(&index_val, value);
+                        Arc::make_mut(&mut dict).insert(key, stored);
                         Value::Dict(dict)
                     }
                     Value::Tuple(mut tup) => {
@@ -1167,7 +1168,7 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(dict) => {
                                         if let Some(map) = Arc::get_mut(dict) {
-                                            map.insert(index_val.to_key_string(), value);
+                                            map.insert(index_val.to_key_string(), Value::wrap_dict_entry(&index_val, value));
                                             return Ok(Control::Next);
                                         }
                                     }
@@ -1198,7 +1199,8 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
-                                        Arc::make_mut(&mut dict).insert(key, value);
+                                        let stored = Value::wrap_dict_entry(&index_val, value);
+                                        Arc::make_mut(&mut dict).insert(key, stored);
                                         Value::Dict(dict)
                                     }
                                     Value::Tuple(mut tup) => {
@@ -1306,7 +1308,8 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
-                                        Arc::make_mut(&mut dict).insert(key, value);
+                                        let stored = Value::wrap_dict_entry(&index_val, value);
+                                        Arc::make_mut(&mut dict).insert(key, stored);
                                         Value::Dict(dict)
                                     }
                                     _ => {

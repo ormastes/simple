@@ -872,22 +872,30 @@ pub fn handle_dict_methods(
             Value::Bool(map.contains_key(&key))
         }
         "get" => {
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
-            map.get(&key).cloned().unwrap_or(Value::Nil)
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let key = key_val.to_key_string();
+            map.get(&key)
+                .cloned()
+                .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
+                .unwrap_or(Value::Nil)
         }
         "keys" => {
-            let keys: Vec<Value> = map.keys().map(|k| Value::text(k.clone())).collect();
+            let keys: Vec<Value> = map
+                .iter()
+                .map(|(k, v)| Value::dict_entry_key_for_iteration(v, k))
+                .collect();
             Value::array(keys)
         }
         "values" => {
-            let vals: Vec<Value> = map.values().cloned().collect();
+            let vals: Vec<Value> = map.values().map(Value::dict_entry_value_for_iteration).collect();
             Value::array(vals)
         }
         "set" | "insert" => {
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let key = key_val.to_key_string();
             let value = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
-            new_map.insert(key, value);
+            new_map.insert(key, Value::wrap_dict_entry(&key_val, value));
             Value::Dict(Arc::new(new_map))
         }
         "remove" | "delete" => {
@@ -927,14 +935,23 @@ pub fn handle_dict_methods(
             Value::Dict(Arc::new(map.clone()))
         }
         "get_or" => {
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let key = key_val.to_key_string();
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            map.get(&key).cloned().unwrap_or(default)
+            map.get(&key)
+                .cloned()
+                .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
+                .unwrap_or(default)
         }
         "entries" | "items" => {
             let entries: Vec<Value> = map
                 .iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+                .map(|(k, v)| {
+                    Value::Tuple(vec![
+                        Value::dict_entry_key_for_iteration(v, k),
+                        Value::dict_entry_value_for_iteration(v),
+                    ])
+                })
                 .collect();
             Value::array(entries)
         }
@@ -984,9 +1001,13 @@ pub fn handle_dict_methods(
         }
         "fetch" => {
             // Get value at key, or default if not present
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let key = key_val.to_key_string();
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            map.get(&key).cloned().unwrap_or(default)
+            map.get(&key)
+                .cloned()
+                .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
+                .unwrap_or(default)
         }
         "setdefault" => {
             // Get value if key exists, otherwise set and return default
@@ -1005,7 +1026,11 @@ pub fn handle_dict_methods(
             for arg in args {
                 let key = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
                 current = match &current {
-                    Value::Dict(m) => m.get(&key.to_key_string()).cloned().unwrap_or(Value::Nil),
+                    Value::Dict(m) => m
+                        .get(&key.to_key_string())
+                        .cloned()
+                        .map(|stored| Value::unwrap_dict_entry(&key, stored))
+                        .unwrap_or(Value::Nil),
                     Value::Array(a) => {
                         if let Ok(idx) = key.as_int() {
                             a.get(idx as usize).cloned().unwrap_or(Value::Nil)

@@ -385,13 +385,28 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         // Mirrors block_execution::get_iterator_values so module-scope and
         // function-body for-loops behave identically.
         Value::Generator(gen) => Ok(gen.collect_remaining()),
+        // Recover the original (key, value) pair for each entry. Scalar
+        // (self-describing) keys keep today's behavior exactly
+        // (`Value::text(k)`); composite keys (struct/enum/tuple/array) yield
+        // the real original key instead of the internal map string, fixing
+        // the type corruption in dict_struct_key_iteration_single_entry_2026-06-13.
         Value::Dict(map) => Ok(map
             .iter()
-            .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+            .map(|(k, v)| {
+                Value::Tuple(vec![
+                    Value::dict_entry_key_for_iteration(v, k),
+                    Value::dict_entry_value_for_iteration(v),
+                ])
+            })
             .collect()),
         Value::FrozenDict(map) => Ok(map
             .iter()
-            .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+            .map(|(k, v)| {
+                Value::Tuple(vec![
+                    Value::dict_entry_key_for_iteration(v, k),
+                    Value::dict_entry_value_for_iteration(v),
+                ])
+            })
             .collect()),
         Value::Object { class, fields } if class == BUILTIN_RANGE => {
             // Range object

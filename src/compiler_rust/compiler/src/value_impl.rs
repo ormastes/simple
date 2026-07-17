@@ -1,3 +1,15 @@
+/// Reserved marker tagging a `Dict` entry that bundles its original
+/// (non-scalar) key alongside its value -- see `Value::wrap_dict_entry`.
+/// Uses this codebase's existing double-underscore convention for reserved
+/// internal names (`__setitem__`, `__getitem__`).
+const DICT_ENTRY_MARKER: &str = "__dict_entry__";
+
+/// Whether a stored dict value is a `wrap_dict_entry` marker tuple:
+/// `Tuple([Symbol("__dict_entry__"), original_key, actual_value])`.
+fn is_dict_entry_marker(items: &[Value]) -> bool {
+    items.len() == 3 && matches!(&items[0], Value::Symbol(s) if s == DICT_ENTRY_MARKER)
+}
+
 impl Value {
     pub fn as_int(&self) -> Result<i64, CompileError> {
         match self {
@@ -99,7 +111,136 @@ impl Value {
             Value::BorrowMut(b) => b.inner().to_key_string(),
             Value::NativeFunction(native) => format!("<native:{}>", native.name),
             Value::Nil => "nil".to_string(),
+            // Composite keys: canonicalize instead of relying on the derived
+            // `Debug` catch-all below. `fields` on `Value::Object` is an
+            // `Arc<HashMap<String, Value>>`, and Rust's std `HashMap` seeds a
+            // fresh, randomized hasher per instance -- two structurally equal
+            // structs built as separate literals can iterate their fields in
+            // a different order, so `format!("{:?}", ...)` is NOT a stable
+            // function of value. That let two value-equal struct keys hash to
+            // DIFFERENT dict-map keys, breaking key equality (root cause of
+            // the over-count/duplicate-entry drift in
+            // dict_struct_key_iteration_single_entry_2026-06-13). Sort field
+            // names so the string is deterministic regardless of HashMap
+            // iteration order.
+            Value::Object { class, fields } => {
+                let mut names: Vec<&String> = fields.keys().collect();
+                names.sort();
+                let parts: Vec<String> = names
+                    .into_iter()
+                    .map(|name| format!("{}={}", name, fields.get(name).unwrap().to_key_string()))
+                    .collect();
+                format!("{}{{{}}}", class, parts.join(","))
+            }
+            Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } => match payload {
+                Some(p) => format!("{}::{}({})", enum_name, variant, p.to_key_string()),
+                None => format!("{}::{}", enum_name, variant),
+            },
+            Value::Tuple(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_key_string()).collect();
+                format!("({})", parts.join(","))
+            }
+            Value::LabeledTuple { labels, values } => {
+                let parts: Vec<String> = labels
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(l, v)| format!("{}={}", l, v.to_key_string()))
+                    .collect();
+                format!("({})", parts.join(","))
+            }
+            Value::Array(items) | Value::FrozenArray(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_key_string()).collect();
+                format!("[{}]", parts.join(","))
+            }
             other => format!("{other:?}"),
+        }
+    }
+
+    /// Whether `to_key_string()` on this value is a type-preserving round
+    /// trip, i.e. the interpreter's `Dict` (a `HashMap<String, Value>`
+    /// keyed by `to_key_string()`) never needs extra bookkeeping to hand
+    /// the original key back on iteration. True for the scalar-ish types
+    /// the interpreter's dict representation already handled correctly;
+    /// false for composite types (struct/enum/tuple/array) whose
+    /// `to_key_string()` is a canonical-but-lossy serialization.
+    ///
+    /// See `dict_struct_key_iteration_single_entry_2026-06-13`: iterating a
+    /// struct-keyed `Dict` used to yield the map's raw string key (or crash
+    /// on field access) instead of the original struct because the map
+    /// value slot only ever stored the associated *value*, never the key.
+    /// `wrap_dict_entry`/`unwrap_dict_entry`/`dict_entry_key_for_iteration`
+    /// close that gap for non-scalar keys only, so scalar-keyed dict
+    /// behavior (int/text/bool/float/nil) is completely unchanged.
+    pub fn dict_key_is_scalar(&self) -> bool {
+        match self {
+            Value::Int(_)
+            | Value::UInt { .. }
+            | Value::Float(_)
+            | Value::Float32(_)
+            | Value::Bool(_)
+            | Value::Str(_)
+            | Value::Symbol(_)
+            | Value::Nil => true,
+            Value::Unit { value, .. } => value.dict_key_is_scalar(),
+            Value::Unique(u) => u.inner().dict_key_is_scalar(),
+            Value::Shared(s) => s.inner().dict_key_is_scalar(),
+            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).dict_key_is_scalar(),
+            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).dict_key_is_scalar(),
+            Value::Borrow(b) => b.inner().dict_key_is_scalar(),
+            Value::BorrowMut(b) => b.inner().dict_key_is_scalar(),
+            _ => false,
+        }
+    }
+
+    /// Value stored in a `Dict`'s backing map for `key => value`. For
+    /// self-describing (scalar) keys this is just `value` (unchanged
+    /// behavior). For composite keys, the original `key` is bundled
+    /// alongside `value` behind a reserved marker so it can be recovered
+    /// later without a key argument on hand (dict iteration / `.keys()` /
+    /// `.entries()`). The marker is a `Value::Symbol` with a
+    /// double-underscore reserved name, mirroring this codebase's existing
+    /// `__setitem__`/`__getitem__` convention for internal dunder names.
+    pub fn wrap_dict_entry(key: &Value, value: Value) -> Value {
+        if key.dict_key_is_scalar() {
+            value
+        } else {
+            Value::Tuple(vec![Value::Symbol(DICT_ENTRY_MARKER.to_string()), key.clone(), value])
+        }
+    }
+
+    /// Inverse of `wrap_dict_entry` for call sites that already know the
+    /// key they looked up with (`get`, `contains`, `set`, ...).
+    pub fn unwrap_dict_entry(key: &Value, stored: Value) -> Value {
+        if key.dict_key_is_scalar() {
+            return stored;
+        }
+        match stored {
+            Value::Tuple(ref items) if is_dict_entry_marker(items) => items[2].clone(),
+            other => other,
+        }
+    }
+
+    /// Recover the original key from a stored dict entry when iterating
+    /// blind (no key argument on hand: `for k, v in dict`, `.keys()`,
+    /// `.entries()`). Falls back to the map's own string key -- today's
+    /// (pre-existing, unchanged) behavior for scalar-keyed dicts.
+    pub fn dict_entry_key_for_iteration(stored: &Value, string_key: &str) -> Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => items[1].clone(),
+            _ => Value::text(string_key.to_string()),
+        }
+    }
+
+    /// Recover the original value from a stored dict entry when iterating
+    /// blind.
+    pub fn dict_entry_value_for_iteration(stored: &Value) -> Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => items[2].clone(),
+            other => other.clone(),
         }
     }
 

@@ -278,7 +278,7 @@ pub(super) fn eval_collection_expr(
                 } else {
                     let key_val = evaluate_expr(k, env, functions, classes, enums, impl_methods)?;
                     let val = evaluate_expr(v, env, functions, classes, enums, impl_methods)?;
-                    map.insert(key_val.to_key_string(), val);
+                    map.insert(key_val.to_key_string(), Value::wrap_dict_entry(&key_val, val));
                 }
             }
             Ok(Some(Value::Dict(Arc::new(map))))
@@ -588,12 +588,20 @@ pub(super) fn eval_collection_expr(
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
-                    Ok(map.get(&key).cloned().unwrap_or(Value::Nil))
+                    Ok(map
+                        .get(&key)
+                        .cloned()
+                        .map(|stored| Value::unwrap_dict_entry(&idx_val, stored))
+                        .unwrap_or(Value::Nil))
                 }
                 Value::FrozenDict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
-                    Ok(map.get(&key).cloned().unwrap_or(Value::Nil))
+                    Ok(map
+                        .get(&key)
+                        .cloned()
+                        .map(|stored| Value::unwrap_dict_entry(&idx_val, stored))
+                        .unwrap_or(Value::Nil))
                 }
                 Value::Str(s) => {
                     let raw_idx = require_integer_index_value(&idx_val, "string")?;
@@ -744,7 +752,7 @@ pub(super) fn eval_collection_expr(
             for mut inner_env in envs {
                 let k = evaluate_expr(key, &mut inner_env, functions, classes, enums, impl_methods)?;
                 let v = evaluate_expr(value, &mut inner_env, functions, classes, enums, impl_methods)?;
-                result.insert(k.to_key_string(), v);
+                result.insert(k.to_key_string(), Value::wrap_dict_entry(&k, v));
             }
             Ok(Some(Value::Dict(Arc::new(result))))
         }
