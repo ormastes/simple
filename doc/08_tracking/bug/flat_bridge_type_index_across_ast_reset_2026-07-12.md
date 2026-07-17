@@ -1,11 +1,11 @@
 # Flat AST Bridge: type-expr index goes stale across an interleaved `ast_reset()`
 
-**Status:** FIXED 2026-07-12 — bounds-check added in `convert_flat_type` before the
-expr-arena fallback read; falls back to `TypeKind.Infer` when the index is out
-of range (restores pre-#146 behavior for the unrecoverable case).
-**Severity:** Blocking — stage-4 native build of the full compiler (`native_build_main.spl`,
-`--mode dynload`) dies with `error: semantic: array index out of bounds: index is 48
-but length is 13`.
+**Status:** FIX IMPLEMENTED; STAGE-4 ADMISSION PENDING 2026-07-17 — the original
+type bounds check remains, and native Stage-4 statement/expression stores now
+ignore stale bootstrap environment mirrors.
+**Severity:** Blocking — the authorized Stage-4 build of `src/app/cli/main.spl`
+(`--mode one-binary`, one thread) read statement indices 1706 through 1756
+against an arena of length 462 and failed to produce the CLI.
 **Affected file:** `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` (`convert_flat_type`, ~line 176)
 **Path:** `bug` track.
 
@@ -19,7 +19,37 @@ at line 8) raised, from the Rust seed's `collections.rs:479` bounds check:
 error: semantic: array index out of bounds: index is 48 but length is 13
 ```
 
-## Root Cause
+## 2026-07-17 correction: native arena and environment provenance
+
+A compiled, single-thread Stage-4 run disproved concurrency as a requirement
+for this failure class. It repeatedly read statement indices 1706 through
+1756 while the current statement arena contained 462 nodes. Sequential module
+parses reset the live arrays, but the reverted statement/expression code kept
+allocating from and reading persistent `SIMPLE_BOOTSTRAP_*` environment
+counters and fields even when `SIMPLE_NATIVE_ARENA_DECLS=1` selected native
+arena ownership. A stale index could therefore be out of bounds or, worse,
+silently resolve to an unrelated in-bounds node.
+
+The corrective implementation restores the proven `48921b1f924` ownership
+rule in `ast_stmt.spl` and `_AstExpr/{nodes,accessors}.spl`: native mode uses
+local count slots, skips per-node environment mirrors, ignores stale mirrored
+fields, and clears arrays in place. Declaration/module arrays and scalar slots
+are likewise reset in place, including newer trait and parameter-mutation
+parallel fields. Finally, `flat_decl_tag_text` now delegates exclusively to
+the arena-aware `decl_get_tag`; its unconditional direct environment read was
+misclassifying current trait/impl bodies as functions, turning method
+declaration IDs into the observed out-of-range statement IDs. The tag bounds
+guards remain defensive diagnostics; they are not the data-integrity fix. The regression
+`bootstrap_expr_stmt_arena_spec.spl` injects the observed stale counters and
+slot-zero fields, crosses two sequential parse/bridge calls, and verifies that
+a stale mirrored function tag cannot override a current trait tag.
+
+## Original 2026-07-12 hypothesis (superseded)
+
+This section records the initial diagnosis. The 2026-07-17 correction above
+is authoritative: the reproduced single-thread failure needs no sibling parse
+race because persistent environment mirrors can diverge from reset arrays
+across sequential module parses.
 
 `convert_flat_type(type_expr_idx)` handles the fixed `TYPE_*` tag constants
 (≈1-33) and anything `>= TYPE_UNION_BASE` as pre-resolved type tags. Any other

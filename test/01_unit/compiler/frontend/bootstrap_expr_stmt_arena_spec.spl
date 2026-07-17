@@ -1,0 +1,98 @@
+# Bootstrap expression/statement native-arena regression.
+#
+# @cover src/compiler/10.frontend/core/_AstExpr/nodes.spl
+# @cover src/compiler/10.frontend/core/_AstExpr/accessors.spl
+# @cover src/compiler/10.frontend/core/ast_stmt.spl
+
+use compiler.core.ast.{
+    ast_reset,
+    EXPR_INT_LIT, expr_count, expr_int_lit, expr_get_int, expr_get_tag,
+    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag
+}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "bootstrap expression and statement native arenas":
+    it "ignores stale environment counters and fields":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_expr_count = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? ""
+        val old_expr_tag = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? ""
+        val old_expr_int = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? ""
+        val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
+        val old_stmt_tag = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? ""
+        val old_stmt_expr = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_EXPR") ?? ""
+
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", "1706")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "1756")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", "999")).to_equal(true)
+
+        ast_reset()
+        val expression = expr_int_lit(42, 7)
+        val statement = stmt_expr_stmt(expression, 8)
+
+        expect(expression).to_equal(0)
+        expect(statement).to_equal(0)
+        expect(expr_count()).to_equal(1)
+        expect(stmt_count()).to_equal(1)
+        expect(expr_get_tag(expression)).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(expression)).to_equal(42)
+        expect(stmt_get_tag(statement)).to_equal(STMT_EXPR)
+        expect(stmt_get_expr(statement)).to_equal(expression)
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT")).to_equal("1706")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT")).to_equal("1756")
+
+        ast_reset()
+        expect(expr_int_lit(7, 0)).to_equal(0)
+        expect(stmt_expr_stmt(0, 0)).to_equal(0)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", old_expr_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", old_expr_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", old_expr_int)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", old_stmt_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", old_stmt_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", old_stmt_expr)).to_equal(true)
+
+describe "bootstrap declaration arena ownership", tag: ["only-compiled"]:
+    it "does not retain a prior module body across reset":
+        val large_source = "fn large_body():\n" +
+            "    1\n    2\n    3\n    4\n" +
+            "    5\n    6\n    7\n    8\n"
+        val large_module = parse_and_build_module(large_source, "large_body.spl")
+        val large_fn = large_module.functions["large_body"] ?? panic("missing large_body")
+        expect(large_fn.body.stmts.len()).to_equal(8)
+
+        val small_source = "fn small_body():\n    9\n"
+        val small_module = parse_and_build_module(small_source, "small_body.spl")
+        val small_fn = small_module.functions["small_body"] ?? panic("missing small_body")
+        expect(small_fn.body.stmts.len()).to_equal(1)
+
+    it "ignores a stale mirrored declaration tag in the bridge":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_0") ?? ""
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", "1")).to_equal(true)
+
+        val source = "trait CurrentTrait:\n" +
+            "    fn current_method() -> i64:\n" +
+            "        42\n"
+        val module = parse_and_build_module(source, "current_trait.spl")
+        expect(module.traits.contains("CurrentTrait")).to_equal(true)
+        expect(module.functions.contains("CurrentTrait")).to_equal(false)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", old_decl_tag)).to_equal(true)

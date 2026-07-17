@@ -185,22 +185,32 @@ result then entered the authorized compiled in-process Stage 4 path for
 `src/app/cli/main.spl`, with `--entry-closure`, one thread, a warm 53 MiB
 native cache, and the `core-c-bootstrap` runtime lane.
 
-The process remained continuously CPU-active and emitted no parse, type, or
-link diagnostic, but produced no output before the explicit 2400-second
-timeout. RSS grew gradually to about 10.5 GiB. A concurrent independent Stage
-4 run showed the same one-CPU profile beyond 46 minutes, which rules out a
-local cache/output collision and confirms the timeout remains reproducible on
-the newer compiled in-process path.
+The process remained continuously CPU-active and produced no output before
+the explicit 2400-second timeout. RSS grew gradually to about 10.5 GiB. After
+the timeout flushed the log, it contained repeated statement-arena diagnostics
+for even indices 1706 through 1756 against a live arena length of 462, followed
+by `[flat-bridge] missing stmt tag`. A concurrent independent Stage 4 run
+showed the same one-CPU profile beyond 46 minutes, ruling out a local
+cache/output collision.
 
 Evidence:
 
 - worktree: `/tmp/simple-font-publish-20260717`
-- log: `build/native_probe/full-cycle3.log` (empty because the compiled path
-  emits only on completion/error)
+- log: `build/native_probe/full-cycle3.log` (78 lines after timeout)
 - intended output: `build/native_probe/full-cycle3/simple` (not produced)
 - result: exit 124 after 2400 seconds
 
-This session stopped at its mandatory three-cycle cap. The next run should use
-the existing warm cache and a measured phase profiler with a timeout above the
-observed reference duration; repeating the same uninstrumented 40-minute gate
-does not add evidence.
+The diagnostics identified a provenance split: native Stage 4 enabled
+`SIMPLE_NATIVE_ARENA_DECLS=1`, but statement/expression counters and accessors
+still preferred persistent `SIMPLE_BOOTSTRAP_*` environment mirrors while the
+live arrays were reset per module. Commit `48921b1f924` had aligned these
+stores, but the logic was lost in the broad restore `10d50ad3e27`. The
+2026-07-17 repair restores local count slots, arena-preferred reads, disabled
+environment mirrors, and in-place arena reuse across expression, statement,
+declaration, arm, elif, and module storage. It also removes the Flat AST
+bridge's duplicate direct read of stale `SIMPLE_BOOTSTRAP_DECL_TAG_*` values;
+that read could misclassify a current trait/impl as a function and then treat
+its method declaration IDs as statement IDs. The regression
+`bootstrap_expr_stmt_arena_spec.spl` reproduces the stale 1706/1756 counters.
+A fresh Stage-4 admission run remains required before closing the performance
+incident.
