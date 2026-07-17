@@ -278,6 +278,95 @@ instead). `vfs_boot_init.spl:374` is confirmed restored to `if true:`
 (hosted FAT32 mount stays skipped; C8 is still open, not fixed by this
 lane).
 
+### C1 root-fix (2026-07-17, C1-GLOBALINIT lane) — LANDED (entry-file case); library-module case was already fixed
+
+Two independent mechanisms turned out to be involved, landed at different
+times on 2026-07-17. Neither was previously verified against this doc's
+original repro.
+
+1. **Library-module call-initialized globals (this doc's original
+   `_browser_default_font_lock` repro shape) were already fixed before this
+   lane started**, by `inject_freestanding_module_global_init`
+   (`src/compiler_rust/compiler/src/pipeline/native_project/module_global_init.rs`,
+   landed 2026-07-17 01:13 UTC, commit `4d3f37e3e9e`) together with the
+   linker's `generate_init_caller`
+   (`native_project/linker.rs::generate_init_caller`, aggregates every
+   `__module_init_*` symbol across all compiled objects into
+   `__simple_call_module_inits`) and the freestanding x86_64 boot stub
+   (`examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s:319-330`, which
+   calls `__simple_call_module_inits` before `spl_start`). Confirmed
+   empirically: a library module with `var g = make_thing()` compiles to a
+   real `V`-defined global plus a `T __module_init_<mod>_dynamic` function
+   containing the assignment, unaffected by anything below.
+
+2. **Entry-file call-initialized globals were a separate, still-open gap,
+   now fixed.** `wrap_entry_script_as_main`
+   (`native_project/compiler.rs`) runs on every `--entry` `.spl` file with no
+   function literally named `main` — the common shape for freestanding OS
+   entry points, which define their own boot entry (`fn spl_start():`, as
+   `gui_entry_desktop.spl` does) instead. Before this fix, any top-level
+   `val`/`var`/`const`/`static` whose initializer was not compile-time
+   constant (the restored-but-partial `is_liftable_global_decl`/
+   `is_const_global_initializer` check only rescued literal-valued
+   declarations) was moved into the body of a *synthetic* `main` function.
+   Under freestanding/entry-closure builds that synthetic `main` is dead code
+   (real entry is `spl_start`/`_start`, never `main`) — but the bug is worse
+   than a missed runtime side effect: `module_pass.rs`'s HIR registration
+   only scans *top-level* `module.items`, so a declaration buried inside
+   `main`'s body was never registered as a global AT ALL. Any other
+   top-level function in the same file referencing that name compiled to a
+   dangling `GlobalLoad`/`GlobalStore`.
+   - **Empirical repro** (seed native-build,
+     `--entry-closure --target x86_64-unknown-none --backend cranelift`):
+     entry file defining `spl_start()`, a top-level `var h = local_make()`
+     read from `spl_start`. Before fix: **link failure**,
+     `undefined symbol: entry_kernel__h_entry_thing` referenced from
+     `entry_kernel__spl_start`. After fix: links cleanly;
+     `nm` shows `h_entry_thing` as a real defined (`V`) global and
+     `spl_start` resolved.
+   - **Fix**: `wrap_entry_script_as_main` now takes an `is_freestanding: bool`
+     (computed from `effective_target().os` at the call site in
+     `compile_file_to_object`, before the wrap runs instead of after). Under
+     freestanding targets, *every* top-level `Node::Let`/`Const`/`Static` stays
+     lifted at module scope (not just const-foldable ones) — `module_pass.rs`
+     then registers a real global for it, and
+     `inject_freestanding_module_global_init` (which already ran after this
+     transform, previously starved of input for entry files) now sees it and
+     synthesizes the runtime-init assignment.
+   - **Tests**: new file
+     `src/compiler_rust/compiler/src/pipeline/native_project/entry_closure_global_init_tests.rs`
+     (4 tests, deterministic AST-level, no target/OnceLock global state
+     touched): confirms freestanding keeps both const- and call-initialized
+     entry-file globals at module scope; confirms hosted (non-freestanding)
+     script-entry behavior is unchanged (regression guard); confirms
+     `wrap_entry_script_as_main` + `inject_freestanding_module_global_init`
+     chained together actually produce a `__module_init_entry_kernel_dynamic`
+     function whose body assigns `h_entry_thing` (closes the "link succeeds
+     but nothing ever runs the initializer" gap — link success alone does not
+     prove the runtime-init function was generated). All 4 FAIL before this
+     fix / PASS after (verified via git-HEAD-content swap, not just code
+     reading). Deviated from originally-planned test location
+     (`codegen/entry_closure_global_init_tests.rs`) to keep the test beside
+     the code it exercises and avoid a merge conflict with a concurrent lane
+     appending to `codegen/local_execution_tests.rs`.
+   - **Scope note**: `wrap_entry_script_as_main`'s condition calls
+     `is_liftable_global_decl`, itself dependent on `is_const_global_initializer`
+     — both of these have been silently reverted by same-day `chore(wc):
+     session sync` commits at least twice already (see the `1386666fadf`
+     "worktree salvage" commit message and the C8 addenda above for the same
+     pattern). If reverted again, this fix will fail to compile (not
+     silently regress) since `wrap_entry_script_as_main`'s new 2-arg
+     signature and the `entry_closure_global_init_tests.rs` module both
+     depend on it existing.
+   - **Not yet migrated**: the ~75 FSK004 lazy-init workarounds in `src/os/**`
+     can in principle be migrated back to plain module-level initializers now
+     that both mechanisms are confirmed working, but that migration was
+     explicitly out of scope for this lane and was not attempted.
+   - **Unverified**: whether the actual `gui_entry_desktop.spl` build (full
+     SimpleOS kernel, not the minimal 2-file repro) now boots further/renders
+     correctly with this fix — not re-run under QEMU by this lane; the fix is
+     verified at the AST-transform and seed-CLI-link level only.
+
 ### C8-FIELD lane (2026-07-17) — six-way static elimination, dispatch codegen is CLEAN; reframed to runtime data corruption
 
 Picked up the two untested discriminators the C8-RELOC lane flagged (storage-

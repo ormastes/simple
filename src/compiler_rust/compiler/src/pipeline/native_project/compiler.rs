@@ -112,7 +112,10 @@ fn is_liftable_global_decl(node: &Node) -> bool {
     }
 }
 
-fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_parser::ast::Module {
+pub(crate) fn wrap_entry_script_as_main(
+    mut module: simple_parser::ast::Module,
+    is_freestanding: bool,
+) -> simple_parser::ast::Module {
     if has_explicit_main(&module.items) {
         return module;
     }
@@ -120,8 +123,22 @@ fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_p
     let mut lifted = Vec::new();
     let mut script_body = Vec::new();
     for item in module.items {
-        if is_liftable_global_decl(&item) {
-            // Keep const-initialized module-level declarations as real globals.
+        // Under freestanding targets ALL module-level declarations must stay
+        // lifted, not just const-foldable ones: the synthetic `main` below is
+        // dead code there (the real freestanding entry point is
+        // `spl_start`/`_start`, never `main`), so burying a declaration in it
+        // does not just skip its runtime init side effect -- it drops the
+        // global's registration entirely (module_pass only scans top-level
+        // `module.items`), turning any reference to it from another function
+        // in the same file into a dangling/undefined symbol (bug
+        // freestanding_entry_module_val_initializers_never_run, C1 class).
+        // `inject_freestanding_module_global_init`, which runs right after
+        // this transform, synthesizes the actual runtime-init call for the
+        // non-const ones once they are visible here.
+        let is_module_level_decl = matches!(item, Node::Let(_) | Node::Const(_) | Node::Static(_));
+        if is_liftable_global_decl(&item) || (is_freestanding && is_module_level_decl) {
+            // Keep const-initialized (always) and, under freestanding, all
+            // other module-level declarations as real globals.
             lifted.push(item);
         } else if is_script_statement(&item) {
             script_body.push(item);
@@ -338,12 +355,17 @@ pub(crate) fn compile_file_to_object(
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
     super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
-    let mut ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
     let target = effective_target();
-    if matches!(
+    let is_freestanding = matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
-    ) {
+    );
+    let mut ast = if is_entry {
+        wrap_entry_script_as_main(ast, is_freestanding)
+    } else {
+        ast
+    };
+    if is_freestanding {
         let module_prefix = module_prefix_from_path(file_path, source_root);
         inject_freestanding_module_global_init(&mut ast, &module_prefix);
     }

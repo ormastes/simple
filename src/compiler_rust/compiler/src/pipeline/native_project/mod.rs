@@ -20,6 +20,8 @@ mod stubs;
 mod tools;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod entry_closure_global_init_tests;
 
 pub use config::*;
 pub use compiler::*;
