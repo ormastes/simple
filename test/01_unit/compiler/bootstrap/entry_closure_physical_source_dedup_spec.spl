@@ -1,7 +1,10 @@
 extern fn rt_file_read_text(path: text) -> text
 
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.driver.driver_source_loading.{_driver_canonical_source_path, _driver_unique_physical_sources}
+use compiler.driver.driver_source_loading.{
+    _driver_canonical_source_path, _driver_unique_physical_sources,
+    _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add
+}
 
 describe "entry-closure physical source deduplication":
     it "normalizes aliases to one physical parse source":
@@ -14,6 +17,16 @@ describe "entry-closure physical source deduplication":
         expect(_driver_canonical_source_path(sources[0].path)).to_equal("src/lib/common/shared.spl")
         expect(_driver_unique_physical_sources(sources).len()).to_equal(1)
 
+    it "keeps colliding bucket keys exact and persistent":
+        var buckets = _driver_text_bucket_set_new(1)
+        buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
+        buckets = _driver_text_bucket_set_add(buckets, "std.alphabet")
+        buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
+
+        expect(_driver_text_bucket_set_has(buckets, "std.alpha")).to_be(true)
+        expect(_driver_text_bucket_set_has(buckets, "std.alphabet")).to_be(true)
+        expect(_driver_text_bucket_set_has(buckets, "std.alph")).to_be(false)
+
     it "registers every logical alias from one cached module result":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
 
@@ -22,3 +35,12 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("parsed_entry_modules = parsed_entry_modules.push(entry_module)")
         expect(driver).to_contain("self.ctx.modules[source.module_name] = parsed_entry_modules[parsed_idx]")
         expect(driver).to_contain(r"phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
+
+    it "uses bucket sets for every phase-one closure membership role":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+
+        expect(driver).to_contain("var seen_sources = _driver_text_bucket_set_new(8192)")
+        expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(8192)")
+        expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(8192)")
+        expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(8192)")
+        expect(driver).to_not_contain("var closure_seen_mods: [text]")

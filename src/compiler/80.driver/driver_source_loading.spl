@@ -17,6 +17,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_hash_text(value: text) -> i64
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -84,21 +85,50 @@ pub fn _driver_canonical_source_path(path: text) -> text:
     else:
         joined
 
+fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
+    val raw = rt_hash_text(key) % bucket_count
+    if raw < 0:
+        raw + bucket_count
+    else:
+        raw
+
+pub fn _driver_text_bucket_set_new(bucket_count: i64) -> [text]:
+    """Create a compiled-Simple-safe exact text set.
+    Closure keys are source paths/module names and therefore cannot contain
+    newlines; each hash bucket stores newline-delimited keys."""
+    val count = if bucket_count > 0: bucket_count else: 1
+    var buckets: [text] = []
+    while buckets.len() < count:
+        buckets = buckets.push("")
+    buckets
+
+pub fn _driver_text_bucket_set_has(buckets: [text], key: text) -> bool:
+    if buckets.len() == 0:
+        return false
+    val bucket = buckets[_driver_text_bucket_index(key, buckets.len())]
+    for existing in bucket.split("\n"):
+        if existing == key:
+            return true
+    false
+
+pub fn _driver_text_bucket_set_add(buckets: [text], key: text) -> [text]:
+    if buckets.len() == 0 or _driver_text_bucket_set_has(buckets, key):
+        return buckets
+    val index = _driver_text_bucket_index(key, buckets.len())
+    var updated = buckets
+    updated[index] = updated[index] + key + "\n"
+    updated
+
 pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
     """Keep the first logical source for each normalized physical path.
     Logical aliases remain in the caller's source list for module registration;
     this list is only the phase-2 parse plan."""
     var unique: [SourceFile] = []
-    var seen: [text] = []
+    var seen = _driver_text_bucket_set_new(8192)
     for source in sources:
         val key = _driver_canonical_source_path(source.path)
-        var already_seen = false
-        for seen_key in seen:
-            if seen_key == key:
-                already_seen = true
-                break
-        if not already_seen:
-            seen = seen.push(key)
+        if not _driver_text_bucket_set_has(seen, key):
+            seen = _driver_text_bucket_set_add(seen, key)
             unique = unique.push(source)
     unique
 

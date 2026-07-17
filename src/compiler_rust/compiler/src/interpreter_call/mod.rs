@@ -494,6 +494,13 @@ pub(crate) fn evaluate_call(
                     }
                 }
             }
+            // Map.new()/Dict.new() parse as FieldAccess rather than Path. Treat
+            // the public aliases like the existing HashMap/BTreeMap builtins so
+            // bootstrap code receives a genuinely empty dictionary instead of
+            // falling through to receiver lookup or a synthetic `__type__` row.
+            if field == "new" && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap") {
+                return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())));
+            }
             // Check for static method call on a type: Type.method()
             // This handles calls like Set.new() or Set.from_array()
             if field == "new" {
@@ -942,7 +949,7 @@ pub(crate) fn evaluate_call(
                 );
                 // Special builtin types
                 match type_name.as_str() {
-                    "HashMap" | "BTreeMap" => {
+                    "Map" | "Dict" | "HashMap" | "BTreeMap" => {
                         return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
                     }
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),

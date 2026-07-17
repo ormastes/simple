@@ -1518,6 +1518,15 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
+        if method == "new"
+            && matches!(
+                module_name.as_str(),
+                "Map" | "Dict" | "HashMap" | "BTreeMap"
+            )
+        {
+            let value = Value::Dict(Arc::new(HashMap::new()));
+            return Ok((value, None));
+        }
         if method == "new" && BITFIELDS.with(|cell| cell.borrow().contains_key(module_name)) {
             let value = super::interpreter_call::instantiate_bitfield_from_args(
                 module_name,

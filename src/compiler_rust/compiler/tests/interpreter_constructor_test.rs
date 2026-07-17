@@ -23,3 +23,14 @@ main = if sym.id == 7: 0 else: 1
 
     assert_eq!(parse_and_eval(source).unwrap(), 0);
 }
+
+#[test]
+fn map_and_dict_new_return_empty_builtin_dicts() {
+    let source = r#"
+val map_value: Dict<text, i64> = Map.new()
+val dict_value: Dict<text, i64> = Dict.new()
+main = if map_value.keys().len() == 0 and dict_value.keys().len() == 0: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}

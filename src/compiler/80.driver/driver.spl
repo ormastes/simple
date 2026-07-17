@@ -72,6 +72,7 @@ use compiler.driver.driver_source_loading.{
     _driver_entry_import_dirname, _driver_entry_import_module_paths,
     _driver_resolve_entry_import, _driver_collect_entry_import_source,
     _driver_canonical_source_path, _driver_unique_physical_sources,
+    _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
     _format_type_infer_error, _format_nll_error, _format_coherence_error, _format_trait_error
 }
 
@@ -414,7 +415,7 @@ pub class CompilerDriver:
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
-        var seen_sources: Dict<text, bool> = {}
+        var seen_sources = _driver_text_bucket_set_new(8192)
 
         # Start with user-provided roots
         var i = 0
@@ -456,8 +457,8 @@ pub class CompilerDriver:
             val loaded = _driver_collect_sources(input_path)
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
-                if not seen_sources.contains(source_key):
-                    seen_sources[source_key] = true
+                if not _driver_text_bucket_set_has(seen_sources, source_key):
+                    seen_sources = _driver_text_bucket_set_add(seen_sources, source_key)
                     all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
@@ -492,16 +493,15 @@ pub class CompilerDriver:
             # entry-only filter, which otherwise requires this block to flip
             # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE before anything but the exact
             # entry file is parsed.
-            var closure_loaded_mods: [text] = []
+            var closure_loaded_mods = _driver_text_bucket_set_new(8192)
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
                 val loaded_module_name = all_sources[closure_preidx].module_name
-                if not _driver_text_list_contains(closure_loaded_mods, loaded_module_name):
-                    closure_loaded_mods = closure_loaded_mods.push(loaded_module_name)
+                closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, loaded_module_name)
                 closure_preidx = closure_preidx + 1
             var closure_added = 0
-            var closure_seen_mods: [text] = []
-            var closure_scanned_paths: [text] = []
+            var closure_seen_mods = _driver_text_bucket_set_new(8192)
+            var closure_scanned_paths = _driver_text_bucket_set_new(8192)
             var closure_idx = 0
             while closure_idx < all_sources.len():
                 val closure_src = all_sources[closure_idx]
@@ -510,19 +510,19 @@ pub class CompilerDriver:
                 # alias grows the closure queue exponentially and can exhaust
                 # memory before parsing begins.
                 val closure_physical_key = _driver_canonical_source_path(closure_src.path)
-                if _driver_text_list_contains(closure_scanned_paths, closure_physical_key):
+                if _driver_text_bucket_set_has(closure_scanned_paths, closure_physical_key):
                     closure_idx = closure_idx + 1
                     continue
-                closure_scanned_paths = closure_scanned_paths.push(closure_physical_key)
+                closure_scanned_paths = _driver_text_bucket_set_add(closure_scanned_paths, closure_physical_key)
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
                 val closure_imports = _driver_entry_import_module_paths(closure_src.content)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
-                    if _driver_text_list_contains(closure_seen_mods, closure_mp):
+                    if _driver_text_bucket_set_has(closure_seen_mods, closure_mp):
                         continue
-                    closure_seen_mods = closure_seen_mods.push(closure_mp)
-                    if _driver_text_list_contains(closure_loaded_mods, closure_mp):
+                    closure_seen_mods = _driver_text_bucket_set_add(closure_seen_mods, closure_mp)
+                    if _driver_text_bucket_set_has(closure_loaded_mods, closure_mp):
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
                         continue
@@ -545,11 +545,10 @@ pub class CompilerDriver:
                         if cs.module_name == closure_mp:
                             closure_has_exact = true
                         val closure_key = cs.path + "::" + cs.module_name
-                        if not seen_sources.contains(closure_key):
-                            seen_sources[closure_key] = true
+                        if not _driver_text_bucket_set_has(seen_sources, closure_key):
+                            seen_sources = _driver_text_bucket_set_add(seen_sources, closure_key)
                             all_sources = all_sources.push(cs)
-                            if not _driver_text_list_contains(closure_loaded_mods, cs.module_name):
-                                closure_loaded_mods = closure_loaded_mods.push(cs.module_name)
+                            closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, cs.module_name)
                             closure_added = closure_added + 1
                     if not closure_has_exact:
                         # The path-derived module name differs from the import
@@ -557,11 +556,10 @@ pub class CompilerDriver:
                         # the file under the import path so
                         # resolve_import_symbols finds it by name.
                         val closure_alias_key = closure_file + "::" + closure_mp
-                        if not seen_sources.contains(closure_alias_key):
-                            seen_sources[closure_alias_key] = true
+                        if not _driver_text_bucket_set_has(seen_sources, closure_alias_key):
+                            seen_sources = _driver_text_bucket_set_add(seen_sources, closure_alias_key)
                             all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
-                            if not _driver_text_list_contains(closure_loaded_mods, closure_mp):
-                                closure_loaded_mods = closure_loaded_mods.push(closure_mp)
+                            closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, closure_mp)
                             closure_added = closure_added + 1
                 closure_idx = closure_idx + 1
             if self.ctx.errors.len() == 0 and (closure_added > 0 or input_len > 1):
@@ -582,16 +580,16 @@ pub class CompilerDriver:
             if bulk_loaded.len() > 0:
                 for s in bulk_loaded:
                     val source_key = s.path + "::" + s.module_name
-                    if not seen_sources.contains(source_key):
-                        seen_sources[source_key] = true
+                    if not _driver_text_bucket_set_has(seen_sources, source_key):
+                        seen_sources = _driver_text_bucket_set_add(seen_sources, source_key)
                         all_sources = all_sources.push(s)
             else:
                 for p in paths:
                     val loaded = _driver_collect_sources(p)
                     for s in loaded:
                         val source_key = s.path + "::" + s.module_name
-                        if not seen_sources.contains(source_key):
-                            seen_sources[source_key] = true
+                        if not _driver_text_bucket_set_has(seen_sources, source_key):
+                            seen_sources = _driver_text_bucket_set_add(seen_sources, source_key)
                             all_sources = all_sources.push(s)
 
         # Single assignment avoids chained push issue
