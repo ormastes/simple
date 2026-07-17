@@ -246,6 +246,37 @@ for invocation in \
   'build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu'; do
   grep -Fq "${invocation}" "${arch_gate}" || fail "native architecture invocation missing: ${invocation}"
 done
+grep -qx 'check_unsupported_riscv32_hosted' "${arch_gate}" || fail "hosted RV32 rejection invocation missing"
+rv32_hosted_body=$(sed -n '/^check_unsupported_riscv32_hosted() {$/,/^}$/p' "${arch_gate}")
+for required in \
+  'target=riscv32-unknown-linux-gnu' \
+  'SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build' \
+  '--mode one-binary' \
+  '[ "$status" -ne 0 ]' \
+  '[ ! -e "$out" ]' \
+  'grep -Fq "host C runtime/entry compilation unsupported: target '\''$target'\''" "$log"'; do
+  printf '%s\n' "${rv32_hosted_body}" | grep -Fq -- "${required}" || fail "hosted RV32 rejection gate missing: ${required}"
+done
+if printf '%s\n' "${rv32_hosted_body}" | grep -Eq -- '--backend|\|\|[[:space:]]*true'; then
+  fail "hosted RV32 rejection gate bypasses default LLVM or is optional"
+fi
+grep -Fq 'install_hint: "Hosted RISC-V32 is unsupported; use riscv32-unknown-none-elf"' \
+  src/compiler/70.backend/backend/llvm_cross_target.spl || fail "hosted RV32 bare-metal recovery hint missing"
+rv32_guard_spec=test/01_unit/compiler/backend/hosted_c_target_guard_spec.spl
+for required in \
+  'toolchain_for_target(CodegenTarget.Riscv32)' \
+  'expect(toolchain.linker).to_equal("")' \
+  'expect(toolchain.sysroot).to_equal("")' \
+  'expect(toolchain.crt_dir).to_equal("")' \
+  'hosted_c_compiler_plan("riscv32-unknown-linux-gnu", "linux", "x86_64")' \
+  'hosted_c_compiler_plan("rv32", "linux", "x86_64")' \
+  'expect(full.supported).to_be(false)' \
+  'expect(alias.supported).to_be(false)' \
+  'expect(hosted_cross_c_compiler_name("riscv32-unknown-linux-gnu", "linux", "x86_64")).to_equal("")'; do
+  grep -Fq -- "${required}" "${rv32_guard_spec}" || fail "hosted RV32 source guard missing: ${required}"
+done
+rv32_guard_path_count=$(grep -Fc "'${rv32_guard_spec}'" "${multiplatform}")
+[ "${rv32_guard_path_count}" -eq 2 ] || fail "hosted RV32 source guard must trigger push and pull-request architecture checks"
 grep -Fq 'sh scripts/check/check-native-option-try-target-fail.shs' "${arch_gate}" || fail "ARM32 Option compile helper missing"
 grep -Fq 'armv7-unknown-linux-gnueabihf llvm' "${arch_gate}" || fail "ARM32 Option compile target/backend missing"
 if grep -Fq 'check-native-option-try-target-fail.shs' scripts/check/check-cranelift-aot-aggregate-cross.shs; then

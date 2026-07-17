@@ -35,4 +35,7 @@ longer advertises the RV64 linker for RV32; platform defaults return no hosted
 RV32 CRT, dynamic-loader, or GCC triplet; and an explicit hosted target cannot
 be rerouted to SimpleOS merely because an output filename contains `rv32`.
 Focused source tests cover these fail-closed boundaries; executable proof
-remains pending the pure-Simple runner repair.
+is now scheduled in the existing Linux architecture gate. It requires the
+flagless default-LLVM full native build to fail, leave no executable, and name
+the rejected hosted target. The same gate statically pins the bare-metal
+recovery target; first staged CI execution remains pending.

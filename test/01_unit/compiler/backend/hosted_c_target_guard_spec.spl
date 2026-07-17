@@ -2,7 +2,8 @@ use std.spec.*
 use compiler.backend.backend.llvm_native_link.{hosted_c_target_matches_host}
 use compiler.backend.backend.runtime_compiler.{hosted_c_compiler_plan, hosted_cross_c_compiler_name}
 use compiler.backend.linker.linker_wrapper.{hosted_native_link_arch_supported, hosted_cross_cc_required}
-use compiler.backend.backend.llvm_cross_target.{toolchain_x86_64_native, toolchain_aarch64, toolchain_armv7, toolchain_riscv64}
+use compiler.backend.backend.llvm_cross_target.{toolchain_for_target, toolchain_x86_64_native, toolchain_aarch64, toolchain_armv7, toolchain_riscv64}
+use compiler.backend.backend.backend_types.{CodegenTarget}
 use std.io_runtime.{rt_file_read_text}
 
 describe "hosted C target guard":
@@ -133,6 +134,23 @@ describe "hosted C target guard":
         expect(macos.is_available()).to_be(false)
         expect(windows.is_available()).to_be(false)
         expect(freebsd.is_available()).to_be(false)
+
+    it "fails hosted RV32 closed without borrowing an RV64 toolchain":
+        val toolchain = toolchain_for_target(CodegenTarget.Riscv32)
+        expect(toolchain.triple).to_equal("riscv32-unknown-linux-gnu")
+        expect(toolchain.linker).to_equal("")
+        expect(toolchain.sysroot).to_equal("")
+        expect(toolchain.crt_dir).to_equal("")
+        expect(toolchain.default_flags.len()).to_equal(0)
+        expect(toolchain.is_available()).to_be(false)
+        expect(toolchain.diagnostic()).to_contain("No linker configured")
+        expect(toolchain.install_hint).to_contain("riscv32-unknown-none-elf")
+
+        val full = hosted_c_compiler_plan("riscv32-unknown-linux-gnu", "linux", "x86_64")
+        val alias = hosted_c_compiler_plan("rv32", "linux", "x86_64")
+        expect(full.supported).to_be(false)
+        expect(alias.supported).to_be(false)
+        expect(hosted_cross_c_compiler_name("riscv32-unknown-linux-gnu", "linux", "x86_64")).to_equal("")
 
     it "uses a cross C compiler only for a Linux architecture mismatch":
         expect(hosted_cross_cc_required("aarch64-apple-darwin", "macos", "aarch64")).to_be(false)

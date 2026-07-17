@@ -145,6 +145,12 @@ the shared binary — deploys require explicit user go-ahead).
     visibility of that array handle through an alias captured before mutation;
     execution is pending. Broader class-reference/struct-copy semantics remain
     separate.
+  - Hosted `riscv32-unknown-linux-gnu` remains intentionally unsupported until
+    a verified ILP32D linker/sysroot/CRT owner exists. The existing Linux
+    architecture gate now exercises the original hosted target boundary with a
+    flagless default-LLVM full build, requires loud failure and no output, and
+    pins `riscv32-unknown-none-elf` as the supported recovery path. First staged
+    execution is pending.
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
