@@ -35,10 +35,10 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | A fresh-seed bounded Stage 2 admits the imported-enum `Shared` and `String.smf` fixes, then exits normally on nine later LLVM undeclared-symbol imports; no fresh CLI exists | Repair the LLVM import/linkage frontier, rebuild, admit, and atomically deploy | P0 |
+| Production runtime | BLOCKED | A fresh-seed bounded Stage 2 admits the imported-enum `Shared` and `String.smf` fixes, then exits normally on a mixed LLVM import/linkage and bare-name-capture frontier; no fresh CLI exists | Preserve local/generic binding provenance, rebuild, admit, and atomically deploy | P0 |
 | Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The fresh-seed Stage 2 now reaches a later LLVM import/linkage frontier | Fix the remaining bootstrap frontier, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
-| Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending safe recursive discovery; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Repair native directory-walk parity, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
+| Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending an aggregate scanner owner; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Run the retained directory-walk spec, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
 | Bootstrap essential tools | SOURCE WIRED | The exact fresh Stage 4 CLI now gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd; raw-source duplicate dispatch is structurally forbidden | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
 | Native directory walk | OWNER TESTED | C/core-C, Rust SFFI, and Rust interpreter return non-directory entries without following symlink cycles; exact cycle fixtures pass and core-C now exports the formerly missing symbol | Run the retained Simple source spec after pure-runner admission | P0 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files and generic casts are safe; the corrupting indentation-repair prepass is deleted | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
@@ -53,7 +53,7 @@ so executable qualification is still blocked.
 | `gen-lean` | IMPLEMENTED | Main dispatch reaches the distinct deadline-bound worker; runtime proof blocked by seed | Run bounded invalid-subcommand/worker probe | P2 |
 | Lean proof checker | SOURCE FIXED | Configured timeout now reaches every Lake operation; executable fake-Lake timeout proof awaits admitted runtime | Run the focused shell-timeout spec and a fake-Lake check after admission | P1 |
 
-## Ranked work items
+## Ranked work items (historical IDs; current status is in the matrix above)
 
 1. **PSH-001 — Provenance-safe atomic deploy:** admission check, rollback, and
    `--version`/`-c`/source-check post-swap evidence.
@@ -93,7 +93,7 @@ so executable qualification is still blocked.
 
 1. A clean admitted full-CLI runtime is unavailable. The correctly selected
    fresh seed clears both imported-enum `Shared` and `String.smf`, then exits
-   normally at Stage 2 on nine LLVM undeclared-symbol imports (`cuda_available`,
+   normally at Stage 2 on the last pre-arity-run mixed nine-file frontier (`cuda_available`,
    `system.args`, four `char_to_ascii` sites, two `Tensor.T` sites, and
    `Iterator.count`). The earlier wrapper run was not admission evidence:
    `CARGO_TARGET_DIR` rebuilt a fresh shared seed, but the wrapper selected the
@@ -137,7 +137,7 @@ so executable qualification is still blocked.
   env/process/file/time facades; platform-owner exceptions need exact reviewed
   ownership, while the RISC-V desktop entry retains genuine direct display
   bypasses.
-- **CPU hot loops:** the 41 findings are not one mechanical baseline update.
+- **CPU hot loops:** an earlier 41-finding snapshot was not one mechanical baseline update.
   Browser pixel/span work, software blend/copy loops, and repeated compositor
   lookup are real owner-level debt; bounded parser/control/hardware polling
   loops need exact reason annotations only after the real hot paths move.
@@ -145,14 +145,15 @@ so executable qualification is still blocked.
   across the entire designated set, so `data[...]` in one file could inherit an
   unrelated byte declaration from another. Detection now pairs each name with
   its declaring file. Positive and cross-file-negative fixtures pass directly;
-  the real gate still reports 41 LOOP/SUBSTR findings and no BYTE false hit.
+  that earlier gate reported 41 LOOP/SUBSTR findings and no BYTE false hit;
+  the current matrix count is 30.
 - **Lint MCP performance:** the known inert `build lint --mcp-perf` subprocess
   is removed. `--mcp-perf` and `--all` now fail closed with an explicit owner-gap
   error instead of false-greening. MCP001-MCP004 now share one stable aggregate
   and canonical MCP/LSP path predicate with focused rule-order coverage. CLI
-  repository mode remains blocked on the documented `dir_walk_native`
-  cross-runtime entry-set and symlink-cycle defect; it must not adopt that
-  walker until its C, Rust, and interpreter owners agree.
+  directory-walk owners now agree and owner tests pass. Repository mode remains
+  blocked on the aggregate scanner owner and the retained pure-Simple spec after
+  runtime admission.
 - **UI facade duplication:** the unreferenced
   `src/lib/common/ui/host_winit_surface.spl` duplicate is deleted. An
   absence/canonical-owner regression retains all seven host-window operations

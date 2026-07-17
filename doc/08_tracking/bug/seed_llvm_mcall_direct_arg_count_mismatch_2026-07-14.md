@@ -1,5 +1,9 @@
 # Bootstrap-seed LLVM backend: `mcall_direct` emits wrong argument count → whole-compiler LLVM build fails verification
 
+Current status (2026-07-17): the `mcall_direct` arity defect is fixed. The
+remaining LLVM bootstrap blocker is local/generic binding provenance before
+MIR global resolution; later sections retain the historical investigation.
+
 Found by Lane INGUEST-RUN while attempting an LLVM-clean rebuild of the
 SimpleOS Simple toolchain (the redeploy path that would dodge the cranelift
 enum miscompile). This is the concrete reason the **LLVM** seed backend cannot

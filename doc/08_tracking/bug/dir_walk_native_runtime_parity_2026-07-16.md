@@ -1,7 +1,6 @@
- # Native directory walk runtime parity
- 
--Status: Open.
-+Status: Fixed and owner-tested; pure-Simple source spec pending an admitted runtime.
+# Native directory walk runtime parity
+
+Status: Fixed and owner-tested; pure-Simple source spec pending an admitted runtime.
  
  Date: 2026-07-16
  
@@ -33,12 +32,12 @@
  symlinks. The fix must therefore land in the C, Rust SFFI, and interpreter
  runtime owners (`lstat`/`DirEntry.file_type()`/Windows reparse metadata), with
  the wrapper remaining only the shared caller facade.
-+
-+## Resolution (2026-07-17)
-+
-+The POSIX C owners now classify with `lstat`, Windows rejects reparse points as
-+directories, and both Rust owners use `DirEntry.file_type()`. The core-C archive
-+also exports the same non-following walker; its missing symbol was found by the
-+native focus reproducer. Rust SFFI, Rust interpreter, and core-C native cycle
-+tests pass with the exact four-entry fixture. The Simple source parity spec is
-+retained for the next admitted pure-Simple test-runner pass.
+
+## Resolution (2026-07-17)
+
+The POSIX C owners now classify with `lstat`, Windows rejects reparse points as
+directories, and both Rust owners use `DirEntry.file_type()`. The core-C archive
+also exports the same non-following walker; its missing symbol was found by the
+native focus reproducer. Rust SFFI, Rust interpreter, and core-C native cycle
+tests pass with the exact four-entry fixture. The Simple source parity spec is
+retained for the next admitted pure-Simple test-runner pass.
