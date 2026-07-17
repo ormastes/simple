@@ -19,22 +19,19 @@ expression kind: DictLit`.
 `eval_expr` now routes `EXPR_DICT_LIT` once in its rare branch. The active
 `_EvalOps` owner evaluates every key and value, converts keys to the existing
 dynamic-field text representation, and returns the established `__dict`
-struct used by indexing, assignment, and dictionary methods. No new value
-representation or parallel dispatch was introduced.
+struct. The live index, statement-assignment, and method owners now consume
+that same representation; insert/update reuse one value-arena upsert helper.
+No new value representation or parallel dispatch was introduced.
 
 ## Regression
 
 `src/compiler/10.frontend/core/interpreter/test_interp.spl` now interprets a
 nonempty dictionary with computed keys and values plus two empty dictionaries.
-The harness inspects their established `__dict` representation and proves the
-two empty literals received distinct value IDs. The focused source spec pins
-the rare-branch ordering and the active `_EvalOps` export so the implementation
-cannot drift back into the unused split.
-
-Dictionary indexing, indexed assignment, and dictionary methods remain a
-separate known activation gap: their implementations still live only in the
-orphaned `eval_access.spl` and `eval_methods.spl` splits. This regression avoids
-claiming those consumers work while directly covering literal construction.
+The interpreted fixture exercises index read/update, insertion, `set`, `len`,
+`keys`, `values`, `contains`, `contains_key`, `get`, and `get_or`. The harness
+inspects the resulting `__dict` values and proves that mutating one empty
+literal leaves the other empty. The focused source spec pins every live owner
+so the implementation cannot drift back into the unused splits.
 
 Execution remains pending under the current no-runtime/no-compiler-command
 restriction. `.github/workflows/core-mcp-dev-pipeline.yml` executes

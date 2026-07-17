@@ -589,6 +589,45 @@ fn eval_method_call(eid: i64) -> i64:
     if kind == VAL_INT:
         return eval_int_method(receiver, method_name, arg_eids)
 
+    # Dictionary built-ins use the established dynamic-field struct.
+    if kind == VAL_STRUCT and val_get_struct_name(receiver) == "__dict":
+        if method_name == "len":
+            return val_make_int(val_get_struct_fields(receiver).len())
+        if method_name == "keys":
+            var key_values: [i64] = []
+            for key in val_get_struct_fields(receiver):
+                key_values.push(val_make_text(key))
+            return val_make_array(key_values)
+        if method_name == "values":
+            return val_make_array(val_get_struct_values(receiver))
+        if method_name == "contains" or method_name == "contains_key":
+            if arg_eids.len() == 0: return val_make_bool(false)
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_bool(val_struct_find_field_idx(receiver, val_to_text(key)) >= 0)
+        if method_name == "get":
+            if arg_eids.len() == 0: return val_make_nil()
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val field_value = val_struct_get_field(receiver, val_to_text(key))
+            if field_value >= 0: return field_value
+            return val_make_nil()
+        if method_name == "get_or":
+            if arg_eids.len() < 2: return val_make_nil()
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val field_value = val_struct_get_field(receiver, val_to_text(key))
+            if field_value >= 0: return field_value
+            return eval_expr(arg_eids[1])
+        if method_name == "set" or method_name == "insert":
+            if arg_eids.len() < 2: return receiver
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val new_value = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val_struct_upsert_field(receiver, val_to_text(key), new_value)
+            return receiver
+
     # Struct methods — look up Type__method in function table
     if kind == VAL_STRUCT:
         val type_name = val_get_struct_name(receiver)
