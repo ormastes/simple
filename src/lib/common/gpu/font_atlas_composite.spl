@@ -87,6 +87,48 @@ fn font_atlas_composite_opencl_source() -> text:
     "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
     "}\n"
 
+fn font_atlas_composite_hip_source() -> text:
+    "#include <hip/hip_runtime.h>\n" +
+    "extern \"C\" __global__ void simple_font_atlas_composite_v1_u32(\n" +
+    "    const unsigned int* atlas, unsigned int* dst,\n" +
+    "    long atlas_width, long atlas_height, long atlas_count,\n" +
+    "    long atlas_x, long atlas_y, long quad_width, long quad_height,\n" +
+    "    long dst_width, long dst_height, long dst_count,\n" +
+    "    long dst_x, long dst_y, long color) {\n" +
+    "    long i = blockIdx.x * blockDim.x + threadIdx.x;\n" +
+    "    if (i < 0 || atlas_width > 2147483647L || atlas_height > 2147483647L ||\n" +
+    "        quad_width > 2147483647L || quad_height > 2147483647L ||\n" +
+    "        dst_width > 2147483647L || dst_height > 2147483647L) { return; }\n" +
+    "    if (atlas_width <= 0 || atlas_height <= 0 || atlas_count <= 0 ||\n" +
+    "        quad_width <= 0 || quad_height <= 0 || dst_width <= 0 ||\n" +
+    "        dst_height <= 0 || dst_count <= 0 || atlas_x < 0 || atlas_y < 0) { return; }\n" +
+    "    if (atlas_count != atlas_width * atlas_height || dst_count != dst_width * dst_height) { return; }\n" +
+    "    if (dst_x < -quad_width || dst_y < -quad_height || dst_x >= dst_width || dst_y >= dst_height) { return; }\n" +
+    "    if (i >= quad_width * quad_height) { return; }\n" +
+    "    long sx = atlas_x + i % quad_width;\n" +
+    "    long sy = atlas_y + i / quad_width;\n" +
+    "    if (sx < 0 || sy < 0 || sx >= atlas_width || sy >= atlas_height) { return; }\n" +
+    "    long si = sy * atlas_width + sx;\n" +
+    "    if (si < 0 || si >= atlas_count) { return; }\n" +
+    "    long dx = i % quad_width + dst_x;\n" +
+    "    long dy = i / quad_width + dst_y;\n" +
+    "    if (dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height) { return; }\n" +
+    "    long di = dy * dst_width + dx;\n" +
+    "    if (di < 0 || di >= dst_count) { return; }\n" +
+    "    unsigned int color_u32 = (unsigned int)color;\n" +
+    "    unsigned int mask_a = atlas[si] >> 24u;\n" +
+    "    unsigned int sa = (mask_a * (color_u32 >> 24u) + 127u) / 255u;\n" +
+    "    if (sa == 0u) { return; }\n" +
+    "    unsigned int d = dst[di];\n" +
+    "    unsigned int da = d >> 24u;\n" +
+    "    unsigned int inv = 255u - sa;\n" +
+    "    unsigned int out_a = sa + (da * inv) / 255u;\n" +
+    "    unsigned int out_r = (((color_u32 >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * inv) / 255u;\n" +
+    "    unsigned int out_g = (((color_u32 >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * inv) / 255u;\n" +
+    "    unsigned int out_b = ((color_u32 & 255u) * sa + (d & 255u) * inv) / 255u;\n" +
+    "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
+    "}\n"
+
 fn font_atlas_composite_metal_source() -> text:
     "#include <metal_stdlib>\nusing namespace metal;\n\nstruct FontAtlasCompositeParams {\n    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n    int dst_x;\n    int dst_y;\n    uint color;\n};\n\nkernel void simple_font_atlas_composite_v1_u32(\n    device const uint* atlas [[buffer(0)]],\n    device uint* dst [[buffer(1)]],\n    constant FontAtlasCompositeParams& p [[buffer(2)]],\n    uint i [[thread_position_in_grid]]) {\n    if (i >= p.quad_width * p.quad_height) { return; }\n    uint sx = p.atlas_x + i % p.quad_width;\n    uint sy = p.atlas_y + i / p.quad_width;\n    if (sx >= p.atlas_width || sy >= p.atlas_height) { return; }\n    uint si = sy * p.atlas_width + sx;\n    if (si >= p.atlas_count) { return; }\n    int dx = int(i % p.quad_width) + p.dst_x;\n    int dy = int(i / p.quad_width) + p.dst_y;\n    if (dx < 0 || dy < 0 || dx >= int(p.dst_width) || dy >= int(p.dst_height)) { return; }\n    uint di = uint(dy) * p.dst_width + uint(dx);\n    if (di >= p.dst_count) { return; }\n    uint mask_a = atlas[si] >> 24u;\n    uint sa = (mask_a * (p.color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    uint d = dst[di];\n    uint da = d >> 24u;\n    uint inv = 255u - sa;\n    uint out_a = sa + (da * inv) / 255u;\n    uint out_r = (((p.color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * inv) / 255u;\n    uint out_g = (((p.color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * inv) / 255u;\n    uint out_b = ((p.color & 255u) * sa + (d & 255u) * inv) / 255u;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n"
 
@@ -143,4 +185,4 @@ fn font_atlas_composite_vulkan_glsl_source() -> text:
     "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
     "}\n"
 
-export FONT_ATLAS_COMPOSITE_ENTRY, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin, font_atlas_composite_opencl_source, font_atlas_composite_metal_source, font_atlas_composite_vulkan_glsl_source
+export FONT_ATLAS_COMPOSITE_ENTRY, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin, font_atlas_composite_opencl_source, font_atlas_composite_hip_source, font_atlas_composite_metal_source, font_atlas_composite_vulkan_glsl_source

@@ -149,6 +149,7 @@ class Engine2D:
     last_vulkan_font_evidence: VulkanFontCompositeEvidence? = nil
     metal_backend: MetalBackend? = nil
     opencl_backend: OpenClBackend? = nil
+    rocm_backend: RocmBackend? = nil
     w: i32
     h: i32
     pacing: FramePacingCounters
@@ -327,7 +328,7 @@ class Engine2D:
         # 0xf000d43df000d43d). Root cause is a compiler/codegen bug (defaulted
         # struct-literal fields not zero-initialized when omitted); this is
         # the workaround at the call site until that's fixed upstream.
-        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create one transparent child framebuffer on this engine's Vulkan session."""
@@ -427,7 +428,7 @@ class Engine2D:
         if requested_backend == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
+                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
 
         if requested_backend == "intel":
             var intel = IntelBackend.create()
@@ -829,7 +830,23 @@ class Engine2D:
             self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
 
     me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
-        self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+
+    me _draw_font_batch_cpu_suffix(x: i32, y: i32, batch: FontRenderBatch, submitted: i64) -> i64:
+        var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
+        while quad_index < batch.quads.len():
+            val quad = batch.quads[quad_index]
+            val pixels = engine2d_font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
+            if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
+                val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
+                val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
+                if dst_x != nil and dst_y != nil:
+                    self.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
+            quad_index = quad_index + 1
+        quad_index
 
     me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
         if not batch.material_supported() or plan.len() == 0:
@@ -904,20 +921,22 @@ class Engine2D:
                     if evidence.promotion_ready and evidence.dispatch_count == batch.quads.len():
                         quad_index = batch.quads.len()
                         winner = "vulkan"
+            elif target == "rocm":
+                val active = self.rocm_backend
+                if active == nil:
+                    attempts.push("rocm:unavailable")
+                else:
+                    val rocm = active
+                    quad_index = rocm.draw_font_batch(x, y, batch)
+                    self.rocm_backend = rocm
+                    if rocm.initialized:
+                        self.backend = rocm
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "rocm:success" else: "rocm:failed")
+                    if quad_index == batch.quads.len(): winner = "rocm"
             elif target == "cpu":
                 attempts.push("cpu:success")
-                while quad_index < batch.quads.len():
-                    val quad = batch.quads[quad_index]
-                    val pixels = engine2d_font_atlas_subrect_pixels(
-                        batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                        quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
-                    )
-                    if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
-                        val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
-                        val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
-                        if dst_x != nil and dst_y != nil:
-                            self.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
-                    quad_index = quad_index + 1
+                quad_index = self._draw_font_batch_cpu_suffix(x, y, batch, quad_index)
                 winner = "cpu"
             if winner != "":
                 break
@@ -951,7 +970,7 @@ class Engine2D:
             self.backend.draw_text(x, y, text_val, color, font_size)
 
     me draw_text_configured(x: i32, y: i32, text_val: text, color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
@@ -966,7 +985,7 @@ class Engine2D:
         )
 
     me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
@@ -981,7 +1000,7 @@ class Engine2D:
         )
 
     me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
@@ -1006,6 +1025,13 @@ class Engine2D:
             val metal = active_metal
             metal.invalidate_font_atlas()
             self.metal_backend = metal
+        val active_rocm = self.rocm_backend
+        if active_rocm != nil:
+            val rocm = active_rocm
+            rocm.invalidate_font_atlas()
+            self.rocm_backend = rocm
+            if rocm.initialized:
+                self.backend = rocm
         val fonts = self.fonts()
         val loaded = fonts.try_load_runtime_ttf(path)
         self.font_renderer = fonts
@@ -1062,6 +1088,13 @@ class Engine2D:
             val metal = active_metal
             metal.invalidate_font_atlas()
             self.metal_backend = metal
+        val active_rocm = self.rocm_backend
+        if active_rocm != nil:
+            val rocm = active_rocm
+            rocm.invalidate_font_atlas()
+            self.rocm_backend = rocm
+            if rocm.initialized:
+                self.backend = rocm
         val selected = self.font_renderer
         if selected != nil:
             val fonts = selected

@@ -228,7 +228,7 @@ Only `precompiled-spirv` may become promotion-ready; runtime GLSL remains a
 diagnostic API path. Conditional execution evidence remains environment-dependent.
 
 Engine2D and Engine3D reuse the same common atlas subrect/color material.
-Engine2D maps batch quads to the shared CUDA, native Metal, OpenCL, or Vulkan
+Engine2D maps batch quads to the shared CUDA, native Metal, OpenCL, Vulkan, or ROCm
 atlas-composite launch when that backend is active and ready. Each backend
 reuses its upload only when the batch atlas-owner identity and atlas generation both
 match, and invalidates on font replacement; an unsubmitted suffix uses the
@@ -242,7 +242,12 @@ companion is installed into a distinct session module keyed by its exact hash
 without replacing the optimization module. Missing, stale, or rejected
 companions fail before atlas mutation so Engine2D can replay from quad zero on
 CPU where policy permits. No handwritten font PTX is a runtime provider.
-Other backends retain image/alpha compatibility. Engine3D
+ROCm compiles the exact common HIP helper into its existing module, retains one
+backend-local atlas owner/generation and versioned function handle, rejects an
+unsupported program or unready session before mutation, and reports the first
+unsubmitted quad for CPU replay. Target `rocm` is canonical and `hip` is its
+configuration alias. This source contract does not promote AMD hardware
+execution. Other backends retain image/alpha compatibility. Engine3D
 retains CPU HUD/world compatibility and now has dedicated Vulkan font pipeline,
 sampler-descriptor, depth, fence, and device-readback ownership. Its atlas
 texture is warm only when both canonical batch owner identity and dependency
@@ -384,7 +389,7 @@ translation are initially valid; rotation, skew, nonuniform/subpixel transform,
 unsupported axes, and unsupported rendering modes reject before cache mutation.
 
 Policy is observable. Engine2D supplies its executable font-adapter order
-`cuda, metal, opencl, vulkan, cpu`; Engine3D supplies `vulkan, cpu`.
+`cuda, metal, opencl, vulkan, rocm, cpu`; Engine3D supplies `vulkan, cpu`.
 `Suggested(auto)` uses the supplied order, while `Suggested(named)` moves its
 named target first and retains each remaining target once. `Preferred(named)`
 tries the named target then CPU; `Required(named)` tries only the named target.

@@ -45,9 +45,10 @@ directly and never creates or executes a temporary SSpec emitter.
 All portable targets use entry `simple_font_atlas_composite_v1_u32`.
 Each emitted artifact exposes deterministic SHA-256 `source_hash()` and
 entry/format/source `version_hash()` values used by the scenario.
-Runtime batches stamp matching program version 1; CUDA/Metal/OpenCL reject a
-mismatch before mutation and Engine2D replays CPU from quad 0. CUDA/OpenCL have
-conditional reject-then-v1 recovery evidence, while Metal remains static-only
+Runtime batches stamp matching program version 1; CUDA/Metal/OpenCL/ROCm reject
+a mismatch before mutation and Engine2D replays CPU from quad 0. CUDA/OpenCL have
+conditional reject-then-v1 recovery evidence, ROCm has GPU-less rejection and
+CPU replay coverage, and Metal remains static-only
 without an injectable dispatch seam. This is not native execution or complete
 REQ-009 evidence.
 
@@ -81,6 +82,9 @@ source and entry/version hashes twice and requires exact equality.
 - CUDA/HIP/OpenCL source contains atlas, destination, coordinates, dimensions,
   explicit buffer element counts, guarded source/destination indices, and
   alpha-composition logic.
+- HIP emission must equal the exact shared `font_atlas_composite_hip_source()`
+  consumed by the ROCm runtime; equality is source evidence, not compilation or
+  AMD device execution.
 - Metal includes `metal_stdlib`, binds atlas/destination at buffers 0/1, and
   receives one `FontAtlasCompositeParams` constant block at buffer 2.
 - WGSL binds a read-only atlas at binding 0 and read-write destination at

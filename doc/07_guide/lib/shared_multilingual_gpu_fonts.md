@@ -237,7 +237,7 @@ glyph cache, atlas, and resolved-metrics cache; stats expose that identity, and
 generation-bound wrappers over the process-global face are revocable so stale
 operations fail closed. A batch derives an atlas-owner identity from its live
 font identity, face generation, numeric program version, and dimensions, then
-adds atlas generation for the backend cache identity. CUDA, OpenCL, Metal, and
+adds atlas generation for the backend cache identity. CUDA, OpenCL, Metal, ROCm, and
 Vulkan reuse an upload only when both backend-local owner and generation match.
 Focused unit specs cover these keys and bounded cache counters; the shared
 surface SSpec covers warm generation and dirty regions. Conditional real-dylib
@@ -250,6 +250,8 @@ components remain unsupported. Backend-device and runtime program-artifact
 identity do not share one cache concern: atlas buffers are destroyed before a
 device is destroyed, while an active CUDA, OpenCL, or Vulkan backend rejects
 session replacement and Metal releases font state before device recreation.
+ROCm keeps its atlas inside one backend lifetime and releases it with the HIP
+module at shutdown.
 Configuration identity now invalidates and keys canonical glyph material and
 is length-delimited into shaped-run keys and every configured batch/atlas owner.
 `FontRenderBatch.material_supported()` rejects unknown atlas-composite program
@@ -274,7 +276,7 @@ The default is normal style/weight, no hinting, grayscale coverage, the shared
 target first, then the remaining canonical GPU order, then CPU; `Preferred`
 tries its named target then CPU; `Required` tries only its named target and
 fails without another GPU or CPU attempt. `Suggested(auto)` uses Engine2D's
-executable `cuda, metal, opencl, vulkan, cpu` order or Engine3D's
+executable `cuda, metal, opencl, vulkan, rocm, cpu` order or Engine3D's
 `vulkan, cpu` order. Preferred/Required require a concrete supported target;
 concrete `cpu` is valid. Unknown targets and unsupported
 rendering modes or nonuniform/rotated/skewed/subpixel transforms must reject
@@ -370,7 +372,7 @@ using the independently pinned embedded SPIR-V installed by `VulkanSession`.
 CUDA compile plans use
 `nvcc --ptx -o <output> <source>`; the kernel
 symbol is verified from the artifact rather than passed through a nonexistent
-`--entry` option. CUDA, native Metal, OpenCL, and Vulkan are the implemented
+`--entry` option. CUDA, native Metal, OpenCL, Vulkan, and ROCm are the implemented
 Engine2D runtime adapters.
 CUDA font execution uses the separately source-tracked Simple-generated PTX
 companion in `backend_cuda_font_ptx.spl`. The default CUDA 2D module contains
@@ -420,9 +422,20 @@ long-scalar ABI, submits one versioned
 composite launch per quad, synchronizes, and falls back from the first
 unsubmitted quad.
 
+ROCm uses canonical execution target `rocm`; `hip` is an alias in
+`FontRenderConfig` identities and plans. Compiler emission and the Engine2D
+runtime both consume the exact
+`std.common.gpu.font_atlas_composite.font_atlas_composite_hip_source()` text.
+The backend compiles that source into its existing HIP module, caches the
+versioned entry and atlas by owner/generation, and returns the first
+unsubmitted quad for Engine2D CPU replay. Current regressions prove source
+identity, invalid/uninitialized rejection, configuration routing, and replay
+without AMD hardware. Native HIP submission and device-origin readback remain
+pending and no ROCm promotion is claimed.
+
 `atlas_generation` is a process-unique, positive, sequential dependency token,
 not a renderer-local edit count. Each renderer atlas change reserves a token
-with an atomic compare-exchange loop. CUDA, OpenCL, Metal, and Vulkan pair it
+with an atomic compare-exchange loop. CUDA, OpenCL, Metal, ROCm, and Vulkan pair it
 with the batch atlas-owner identity before reusing a backend-local upload.
 Concurrent mutation/use of the same renderer remains unsupported. A token gap is safe: OpenCL treats
 it as a full upload and uses dirty subrects only for the exact next token.
@@ -432,10 +445,11 @@ generation collision, but does not complete REQ-009 or promote native hardware
 coverage.
 
 Every `FontRenderBatch` now stamps program version `1`, tied to
-`simple_font_atlas_composite_v1_u32`. CUDA, native Metal, and OpenCL reject any
+`simple_font_atlas_composite_v1_u32`. CUDA, native Metal, OpenCL, and ROCm reject any
 other version before atlas/session mutation; Engine2D then replays the CPU
 fallback from quad 0. Conditional CUDA/OpenCL evidence covers mismatch
-rejection followed by version-1 recovery. Metal currently has static rejection
+rejection followed by version-1 recovery. ROCm has GPU-less rejection and CPU
+replay coverage; Metal currently has static rejection
 evidence only because its session has no injectable dispatch seam. None of
 this promotes native execution or completes REQ-009 program/backend cache
 identity.

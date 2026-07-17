@@ -16,6 +16,7 @@ use std.gpu.engine2d.bitmap_font_offload.{
 use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gpu.engine2d.backend_rocm.{RocmBackend}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
@@ -44,6 +45,21 @@ fn _one_pixel_batch(version: i64, color: u32) -> FontRenderBatch:
         dirty_rects: []
     )
 
+fn _two_pixel_batch() -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+        font_identity: "test-font", face_generation: 1, valid: true,
+        atlas_width: 2, atlas_height: 1,
+        atlas_pixels: [0xff000000u32, 0xff000000u32],
+        quads: [
+            FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xff112233u32),
+            FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 1, dst_y: 0,
+                width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0xff445566u32)
+        ],
+        atlas_generation: 1, dirty_rects: []
+    )
+
 describe "Engine2D font offload preference smoke":
 
     it "replays unsupported and current font programs from quad zero after GPU refusal":
@@ -57,6 +73,27 @@ describe "Engine2D font offload preference smoke":
         engine.clear(0xff000000u32)
         expect(engine._draw_font_batch(0, 0, _one_pixel_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, 0xffabcdefu32))).to_equal(true)
         expect(engine.read_pixels()[4]).to_equal(0xffabcdefu32)
+        engine.shutdown()
+
+    it "replays a failed ROCm font batch from quad zero on CPU":
+        var engine = Engine2D.create_with_backend(3, 2, "software")
+        engine.rocm_backend = RocmBackend.create()
+        engine.clear(0xff000000u32)
+
+        expect(engine._draw_font_batch_plan(0, 0, _one_pixel_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, 0xff2468acu32), ["rocm", "cpu"])).to_equal(true)
+        expect(engine.font_execution_attempts()).to_equal(["rocm:failed", "cpu:success"])
+        expect(engine.font_execution_target()).to_equal("cpu")
+        expect(engine.read_pixels()[4]).to_equal(0xff2468acu32)
+        engine.shutdown()
+
+    it "replays only the unsubmitted suffix from prefix one":
+        var engine = Engine2D.create_with_backend(2, 1, "software")
+        engine.clear(0xff000000u32)
+        val batch = _two_pixel_batch()
+        expect(engine._draw_font_batch_cpu_suffix(0, 0, batch, 1)).to_equal(2)
+        val pixels = engine.read_pixels()
+        expect(pixels[0]).to_equal(0xff000000u32)
+        expect(pixels[1]).to_equal(0xff445566u32)
         engine.shutdown()
 
     it "uses the shared font offload order for vector and bitmap evidence":

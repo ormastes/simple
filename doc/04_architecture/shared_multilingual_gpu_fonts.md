@@ -23,7 +23,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/app/release/install.spl` and `common/encoding/font_registry.spl` | Install the unchanged font/CLDR tree and notices below `share/simple`, then resolve selected registry-relative paths at the shared byte-load boundary through `SIMPLE_ASSET_ROOT`; hashes and exact installed-layout matching preserve one canonical candidate identity. |
 | `src/lib/common/encoding/font_cldr_rank.spl` | Targeted, exact-arithmetic CLDR ranking core with fixture evidence; validating XML input and pinned-source replay remain gates. |
 | `src/lib/common/encoding/sfnt.spl` | Neutral sfnt directory/fvar owner and typed default-`glyf` preflight shared by both production loaders; the old Skia parser modules are compatibility re-exports. |
-| `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact OpenCL, Metal, and Vulkan GLSL sources used by compiler emission and runtime adapters. |
+| `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact HIP, OpenCL, Metal, and Vulkan GLSL sources used by compiler emission and runtime adapters. |
 | `src/lib/nogc_sync_mut/text_layout/font_types.spl` | Canonical shared values; owns `FontGlyphRun`, `FontRenderQuad`, `FontRenderBatch`, `FontRenderConfig`, `FontExecutionPolicy`, and the pure execution-plan function. `FontGlyphRun` carries the exact revocable face handle/generation pair plus logical codepoint clusters; consumers validate liveness and never dereference the handle directly. |
 | `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` | Canonical renderer, glyph cache, CPU payload; gains `prepare_text`, the bound glyph-run adapter, and fail-closed sfnt preflight before native loading. |
 | `src/lib/common/ui/draw_ir.spl` and `draw_ir_sdn.spl` | Handle-free `DrawIrGlyphRunPayload` plus selected identity/ordered advances; shaped glyph IDs, positions, and logical clusters round-trip as semantic Draw IR while native faces, atlases, and caches remain executor-private. |
@@ -32,9 +32,9 @@ plugin interface, renderer factory, or new native dependency.
 | `src/app/portable_compute_emit/main.spl` | Stable pure-Simple CLI handoff to the existing portable/Vulkan emitters; emits source and identity markers only. |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_cuda_font_ptx.spl` | Source-tracked CUDA font companion and independently compiled trust tuple; no renderer, cache, or discovery logic. |
 | `src/compiler/70.backend/backend/gpu_generated_2d_contract.spl` | Version, symbol, compile-plan, and artifact evidence. |
-| `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter; routes one canonical batch through CUDA, Metal, OpenCL, Vulkan, then the CPU suffix fallback. |
+| `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter; routes one canonical batch through CUDA, Metal, OpenCL, Vulkan, ROCm, then the CPU suffix fallback. |
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, R8 atlas upload, depth, fence, and device readback without changing the shared batch. |
-| `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
+| `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan,rocm}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
 | `backend_vulkan_font_types.spl` plus `test/helpers/shared_multilingual_gpu_fonts_perf_evidence.spl` | Transient pipeline/composite stage observations stay with the Vulkan owner; ordered durable v5 serialization retains stage distributions and promotion facts without turning handles into reusable authority. |
 | Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. Host Web uses the HTML/WebIR Draw IR owner; `ui.browser` executes one `widget_tree_to_draw_ir` composition and leaves queue dispatch neutral unless that composition is submitted. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Canonical SimpleOS and hosted color-background frames select the Draw IR/Engine2D route. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
 
@@ -114,7 +114,7 @@ delegate. `FontRenderBatch` carries the length-delimited config identity,
 execution target, and execution policy; the config object and all transient
 material remain outside WebIR and Draw IR. Engine2D combines the existing
 semantic IR fields with runtime-owned config. Its executable adapter order is
-CUDA, Metal, OpenCL, Vulkan, then CPU; Engine3D's is Vulkan then CPU.
+CUDA, Metal, OpenCL, Vulkan, ROCm, then CPU; Engine3D's is Vulkan then CPU.
 `Suggested(auto)` uses that order. `Suggested(named)` tries the named target,
 remaining executable GPU adapters in that order, then CPU. `Preferred(named)`
 tries the named target then CPU; `Required(named)` tries only the named target
@@ -140,7 +140,7 @@ consumer sibling. Everything else is tree-private.
 | Font registry | Parent: exact language/category policy cell; next: accepted asset binding | — | — |
 | Renderer/shaper | — | Parent: `FontRenderConfig` + `FontRenderBatch`; next: Engine2D/Engine3D configured batch consumption | — |
 | Compiler emitter | — | — | Parent: paired optimization/font `PortableComputeArtifact` plans; next: toolchain/runtime adapters |
-| Engine2D | — | Parent: existing `draw_text`; next: CUDA/Metal/OpenCL atlas adapters | Parent: conditional device readback; next: required verifier |
+| Engine2D | — | Parent: existing `draw_text`; next: CUDA/Metal/OpenCL/Vulkan/ROCm atlas adapters | Parent: conditional device readback; next: required verifier |
 | Engine3D | — | Parent: `draw_text_hud`/`draw_text_world`; next: none | Parent: native texture/draw evidence; next: verifier |
 
 ## Target promotion flow
@@ -262,7 +262,7 @@ The existing `FontRenderer` cache is extended in place. Current keys fence glyph
 and resolved-metrics material with the live checksum/default-axis identity.
 `FontRenderBatch` derives an atlas-owner identity from font identity, face
 generation, numeric program version, the canonical rendering/transform
-configuration identities, and dimensions; CUDA, OpenCL, Metal, and
+configuration identities, and dimensions; CUDA, OpenCL, Metal, ROCm, and
 Vulkan combine that owner with dependency generation before reusing a
 backend-local upload. Glyph-cache stats report hits, misses, evictions, bytes,
 and generations; batches report dirty regions. Raster scale is the canonical
@@ -283,6 +283,13 @@ session module with an immutable PTX hash. The default CUDA 2D module contains
 no font entry. If the companion is absent or rejected, CUDA font dispatch is
 unavailable and Engine2D replays the batch from quad zero through its CPU
 fallback policy.
+
+ROCm compiles the exact shared `font_atlas_composite_hip_source` into its
+existing HIP module, caches the versioned entry and atlas only inside that
+backend, and returns the first unsubmitted quad so Engine2D can replay the
+suffix on CPU. `hip` is a configuration alias for canonical target `rocm`.
+This is source routing and fail-closed fallback coverage, not native AMD
+submission or device-readback evidence.
 
 Production deployment has a separate trust boundary from toolchain evidence.
 Ignored `build/portable_compute_toolchains` output may prove emission and device

@@ -40,6 +40,17 @@ use std.gpu.engine2d.backend_rocm_runtime_ops.{
     rocm_backend_launch_kernel
 }
 use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_program_version_valid, font_destination_origin}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+
+fn rocm_font_atlas_composite_args(atlas: i64, framebuffer: i64,
+                                  atlas_width: i64, atlas_height: i64, atlas_count: i64,
+                                  atlas_x: i64, atlas_y: i64, quad_width: i64, quad_height: i64,
+                                  dst_width: i64, dst_height: i64, dst_count: i64,
+                                  dst_x: i64, dst_y: i64, color: i64) -> [i64]:
+    [atlas, framebuffer, atlas_width, atlas_height, atlas_count,
+     atlas_x, atlas_y, quad_width, quad_height,
+     dst_width, dst_height, dst_count, dst_x, dst_y, color]
 
 # ============================================================================
 # ROCm/HIP Probe
@@ -159,6 +170,11 @@ class RocmBackend:
     fn_gradient_rect: i64
     fn_blit_image: i64
     fn_blit_image_nonzero: i64
+    fn_font_atlas_composite: i64
+    d_font_atlas: i64
+    font_atlas_bytes: i64
+    font_atlas_generation: i64
+    font_atlas_owner_identity: text
 
     static fn create() -> RocmBackend:
         """Create an uninitialized ROCm backend. Call init() before drawing."""
@@ -189,8 +205,92 @@ class RocmBackend:
             fn_triangle_filled: 0,
             fn_gradient_rect: 0,
             fn_blit_image: 0,
-            fn_blit_image_nonzero: 0
+            fn_blit_image_nonzero: 0,
+            fn_font_atlas_composite: 0,
+            d_font_atlas: 0,
+            font_atlas_bytes: 0,
+            font_atlas_generation: -1,
+            font_atlas_owner_identity: ""
         )
+
+    me invalidate_font_atlas():
+        self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
+
+    me _upload_font_atlas(batch: FontRenderBatch) -> bool:
+        if not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0:
+            return false
+        val pixel_count = _i64(batch.atlas_width) * _i64(batch.atlas_height)
+        if pixel_count <= 0 or pixel_count > 2147483647 or batch.atlas_pixels.len() != pixel_count:
+            return false
+        val required_bytes = pixel_count * 4
+        val owner_identity = batch.atlas_owner_identity()
+        if (self.d_font_atlas != 0 and self.font_atlas_bytes == required_bytes and
+            self.font_atlas_owner_identity == owner_identity and self.font_atlas_generation == batch.atlas_generation):
+            return true
+        var target = self.d_font_atlas
+        var allocated = false
+        if target == 0 or self.font_atlas_bytes != required_bytes:
+            target = rocm_backend_malloc(required_bytes)
+            if target == 0:
+                return false
+            allocated = true
+        if rocm_engine2d_upload_pixels(target, batch.atlas_pixels, pixel_count) != 0:
+            if allocated:
+                rocm_backend_free(target)
+            else:
+                self.invalidate_font_atlas()
+            return false
+        if allocated:
+            if self.d_font_atlas != 0:
+                rocm_backend_free(self.d_font_atlas)
+            self.d_font_atlas = target
+            self.font_atlas_bytes = required_bytes
+        self.font_atlas_generation = batch.atlas_generation
+        self.font_atlas_owner_identity = owner_identity
+        true
+
+    me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
+        if not font_atlas_composite_program_version_valid(batch.program_version):
+            return 0
+        if not batch.material_supported() or batch.quads.len() == 0 or not self.initialized:
+            return 0
+        if self.d_framebuffer == 0 or self.fn_font_atlas_composite == 0 or self.clip_enabled or self.mask_buf.len() != 0:
+            return 0
+        if not self._upload_font_atlas(batch):
+            return 0
+        val atlas_count = _i64(batch.atlas_width) * _i64(batch.atlas_height)
+        val dst_count = _i64(self.w) * _i64(self.h)
+        if atlas_count <= 0 or atlas_count > 2147483647 or dst_count <= 0 or dst_count > 2147483647:
+            return 0
+        var submitted: i64 = 0
+        while submitted < batch.quads.len():
+            val quad = batch.quads[submitted]
+            if (quad.width <= 0 or quad.height <= 0 or quad.atlas_x < 0 or quad.atlas_y < 0 or
+                quad.width > batch.atlas_width - quad.atlas_x or quad.height > batch.atlas_height - quad.atlas_y):
+                return submitted
+            val dst_x = font_destination_origin(origin_x, quad.dst_x, quad.width)
+            val dst_y = font_destination_origin(origin_y, quad.dst_y, quad.height)
+            if dst_x == nil or dst_y == nil:
+                return submitted
+            val total = _i64(quad.width) * _i64(quad.height)
+            if total <= 0 or total > 2147483647:
+                return submitted
+            val args = rocm_font_atlas_composite_args(
+                self.d_font_atlas, self.d_framebuffer,
+                _i64(batch.atlas_width), _i64(batch.atlas_height), atlas_count,
+                _i64(quad.atlas_x), _i64(quad.atlas_y), _i64(quad.width), _i64(quad.height),
+                _i64(self.w), _i64(self.h), dst_count,
+                _i64(dst_x.?), _i64(dst_y.?), _i64_from_u32(quad.color)
+            )
+            val grid_size = (total + 255) / 256
+            if not _launch_kernel_1d(self, self.fn_font_atlas_composite, grid_size, 256, args):
+                return submitted
+            if not rocm_backend_synchronize():
+                return submitted
+            self.dirty = true
+            submitted = submitted + 1
+        submitted
 
 impl RenderBackend for RocmBackend:
 
@@ -249,6 +349,15 @@ impl RenderBackend for RocmBackend:
         self.fn_gradient_rect = rocm_backend_get_function(self.hip_module, "kernel_draw_gradient_rect")
         self.fn_blit_image = rocm_backend_get_function(self.hip_module, "kernel_blit_image")
         self.fn_blit_image_nonzero = rocm_backend_get_function(self.hip_module, "kernel_blit_image_nonzero")
+        self.fn_font_atlas_composite = rocm_backend_get_function(self.hip_module, FONT_ATLAS_COMPOSITE_ENTRY)
+        if self.fn_font_atlas_composite == 0:
+            rocm_backend_unload_module(self.hip_module)
+            self.hip_module = 0
+            rocm_backend_free(self.d_framebuffer)
+            self.d_framebuffer = 0
+            self.last_probe = _rocm_probe_failed("rocm-font-kernel-gap", "ROCm font-atlas composite kernel lookup failed")
+            self.initialized = false
+            return false
 
         self.clip_x = 0
         self.clip_y = 0
@@ -260,6 +369,11 @@ impl RenderBackend for RocmBackend:
         true
 
     me shutdown():
+        if self.d_font_atlas != 0:
+            rocm_backend_free(self.d_font_atlas)
+            self.d_font_atlas = 0
+        self.font_atlas_bytes = 0
+        self.invalidate_font_atlas()
         if self.d_framebuffer != 0:
             rocm_backend_free(self.d_framebuffer)
             self.d_framebuffer = 0
@@ -277,6 +391,7 @@ impl RenderBackend for RocmBackend:
         self.fn_gradient_rect = 0
         self.fn_blit_image = 0
         self.fn_blit_image_nonzero = 0
+        self.fn_font_atlas_composite = 0
         self.host_buf = []
         self.w = 0
         self.h = 0
@@ -553,7 +668,7 @@ impl Engine2DExtended for RocmBackend:
 # Kernel Launch Helpers
 # ============================================================================
 
-fn _launch_kernel_1d(backend: RocmBackend, func: i64, grid_x: i64, block_x: i64, args: [i64]):
+fn _launch_kernel_1d(backend: RocmBackend, func: i64, grid_x: i64, block_x: i64, args: [i64]) -> bool:
     """Launch a 1D HIP kernel via ROCm."""
     rocm_backend_launch_kernel(
         func,
@@ -563,7 +678,7 @@ fn _launch_kernel_1d(backend: RocmBackend, func: i64, grid_x: i64, block_x: i64,
         args
     )
 
-fn _launch_kernel_2d(backend: RocmBackend, func: i64, grid_dim: RocmGridDim, block_dim: RocmBlockDim, args: [i64]):
+fn _launch_kernel_2d(backend: RocmBackend, func: i64, grid_dim: RocmGridDim, block_dim: RocmBlockDim, args: [i64]) -> bool:
     """Launch a 2D HIP kernel via ROCm."""
     rocm_backend_launch_kernel(
         func,

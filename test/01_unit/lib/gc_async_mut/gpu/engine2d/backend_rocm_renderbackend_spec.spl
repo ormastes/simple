@@ -7,8 +7,27 @@
 # fallback / error-classification paths that pass on a GPU-less host.
 # No skip(), no hollow expects, no boolean-wrapper asserts.
 
-use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm}
+use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm, rocm_font_atlas_composite_args}
+use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.io_runtime.{file_read}
+
+fn _rocm_font_batch(version: i64) -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: version, font_identity: "rocm-unit-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: []
+    )
+
+fn _has_invalid_hip_hash_comment(source: text) -> bool:
+    for line in source.split("\n"):
+        if line.trim().starts_with("# "):
+            return true
+    false
 
 describe "RocmBackend init guards":
 
@@ -49,6 +68,60 @@ describe "RocmBackend init guards":
         expect(b.last_probe.shader_format).to_equal("hsaco")
 
 describe "RocmBackend draw-method init guards (GPU-less)":
+
+    it "packs the frozen 15-slot font ABI in kernel order":
+        expect(rocm_font_atlas_composite_args(
+            0x12345678, 0x23456789, 1024, 512, 524288,
+            11, 12, 31, 32, 800, 600, 480000, -17, -19, 0xF1020304
+        )).to_equal([
+            0x12345678, 0x23456789, 1024, 512, 524288,
+            11, 12, 31, 32, 800, 600, 480000, -17, -19, 0xF1020304
+        ])
+
+    it "keeps ROCm font cache failure and shutdown ordering fail closed":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl")
+        val runtime = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl")
+        expect(source).to_contain("self.font_atlas_owner_identity == owner_identity and self.font_atlas_generation == batch.atlas_generation")
+        expect(source.index_of("if rocm_engine2d_upload_pixels(target") < source.index_of("rocm_backend_free(self.d_font_atlas)")).to_equal(true)
+        expect(source).to_contain("if not _launch_kernel_1d(self, self.fn_font_atlas_composite, grid_size, 256, args):\n                return submitted")
+        expect(source).to_contain("if not rocm_backend_synchronize():\n                return submitted")
+        expect(source.index_of("if not _launch_kernel_1d(self, self.fn_font_atlas_composite") < source.index_of("if not rocm_backend_synchronize()")).to_equal(true)
+        expect(source.index_of("if not rocm_backend_synchronize()") < source.index_of("self.dirty = true")).to_equal(true)
+        expect(source.index_of("self.dirty = true") < source.index_of("submitted = submitted + 1")).to_equal(true)
+        expect(source).to_contain("me shutdown():\n        if self.d_font_atlas != 0:\n            rocm_backend_free(self.d_font_atlas)\n            self.d_font_atlas = 0\n        self.font_atlas_bytes = 0\n        self.invalidate_font_atlas()")
+        expect(runtime).to_contain("pub fn rocm_backend_synchronize() -> bool:")
+        expect(runtime).to_contain("pub fn rocm_backend_launch_kernel(func: i64")
+        expect(runtime).to_contain("args: [i64]) -> bool:")
+
+    it "invalidates reusable ROCm atlas metadata without hardware":
+        var b = RocmBackend.create()
+        b.font_atlas_bytes = 64
+        b.font_atlas_generation = 7
+        b.font_atlas_owner_identity = "old-owner"
+        b.invalidate_font_atlas()
+        expect(b.font_atlas_bytes).to_equal(64)
+        expect(b.font_atlas_generation).to_equal(-1)
+        expect(b.font_atlas_owner_identity).to_equal("")
+        b.shutdown()
+        expect(b.d_font_atlas).to_equal(0)
+        expect(b.font_atlas_bytes).to_equal(0)
+        expect(b.font_atlas_generation).to_equal(-1)
+        expect(b.font_atlas_owner_identity).to_equal("")
+
+    it "emits C++ comments instead of invalid HIP preprocessor directives":
+        val source = _engine2d_hip_source()
+        expect(source).to_contain("#include <hip/hip_runtime.h>")
+        expect(source).to_contain("// kernel_clear:")
+        expect(_has_invalid_hip_hash_comment(source)).to_equal(false)
+
+    it "rejects unsupported and current font batches before an uninitialized backend mutates":
+        var b = RocmBackend.create()
+        expect(b.draw_font_batch(0, 0, _rocm_font_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1))).to_equal(0)
+        expect(b.draw_font_batch(0, 0, _rocm_font_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION))).to_equal(0)
+        expect(b.initialized).to_equal(false)
+        expect(b.hip_module).to_equal(0)
+        expect(b.host_buf.len()).to_equal(0)
+        expect(b.dirty).to_equal(false)
 
     it "clear() on uninitialized backend does not crash":
         var b = RocmBackend.create()

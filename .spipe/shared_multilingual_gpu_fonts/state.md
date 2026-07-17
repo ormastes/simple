@@ -140,7 +140,7 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
 - Existing Engine2D entrypoints remain compatibility adapters. Configured text,
   advances, and shaped entrypoints return `bool`; `FontRenderBatch` carries
   config identity, execution target, and policy. Engine2D supplies
-  `cuda, metal, opencl, vulkan, cpu`; Engine3D supplies `vulkan, cpu`.
+  `cuda, metal, opencl, vulkan, rocm, cpu`; Engine3D supplies `vulkan, cpu`.
   `Suggested(auto)` uses that order; Preferred/Required require a concrete
   supported target and unknown targets reject before mutation.
   Minimal Engine3D additions are
@@ -169,6 +169,12 @@ execution, canonical docgen, native Engine3D promotion, retained SimpleOS
 pixels, and performance evidence remain release-blocking.
 
 ## Log
+
+- rocm-font-source lane: Shared HIP emission/runtime source identity, canonical
+  `rocm` configuration with `hip` alias, GPU-less batch rejection, and
+  Engine2D quad-zero CPU replay regressions were added to existing specs.
+  Architecture/design/guide/plan/manual text records source coverage only;
+  native AMD submission and device-origin readback remain pending.
 
 - dev: Created state file with 14 acceptance criteria (type: feature); implementation is selection-blocked.
 - research: Three initial bounded sidecars plus three intensive Spark-style
