@@ -226,6 +226,45 @@ fn main() -> i64:
 EOF
 }
 
+# Regression guard for lane S35 task #182 ("value-position match always takes
+# the first arm"): `val r = match n: ...` on int-literal patterns must select
+# the arm matching the runtime scrutinee, not always the first one. Was
+# already fixed upstream (see 50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# emit_switch_dispatch/emit_if_chain_dispatch) but was never covered here.
+write_case_match_value() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val n: i64 = 2
+    val r = match n:
+        case 1: 5
+        case 2: 7
+        case _: 99
+    return r
+EOF
+}
+
+# Same task #182 class, but exercising the specific shape fixed by
+# f10db44f0f4 ("don't clobber return terminators in int-match arm dispatch"):
+# match arm bodies that themselves `return` out of the enclosing function
+# while the match result feeds a `val` binding. Before that fix this read an
+# uninitialized result register (silent wrong answer, rc=0).
+write_case_match_value_return() {
+    cat >"$1" <<'EOF'
+fn pick(n: i64) -> i64:
+    val r = match n:
+        case 1:
+            return 5
+        case 2:
+            return 7
+        case _:
+            return 99
+    return r + 1
+
+fn main() -> i64:
+    return pick(2)
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -317,6 +356,8 @@ closure_lambda|(12) closure/lambda|write_case_closure|7|no
 dict_index|(13) dict literal + index|write_case_dict|7|no
 option_nil_check|(14) Option/nil check (x.?)|write_case_option|7|no
 result_try_op|(15) Result + ? operator|write_case_result_try|7|no
+match_value_position|(16) value-position match (val r = match n)|write_case_match_value|7|no
+match_value_position_return|(17) value-position match, arm returns|write_case_match_value_return|7|no
 "
 
 # NOTE: read from a file (not a pipe) so the loop body runs in THIS shell,
