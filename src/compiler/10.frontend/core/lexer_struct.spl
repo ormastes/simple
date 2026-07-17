@@ -121,11 +121,16 @@ struct CoreLexer:
     cur_line: i64
     cur_col: i64
     cur_start: i64
+    # Stack of paren_depth values recorded by enable_forced_indentation(): a
+    # block-bodied construct (e.g. a `\x:` block lambda) that appears inside a
+    # call's parentheses needs real NEWLINE/INDENT/DEDENT tokens for its own
+    # body even though paren_depth > 0 there. See is_forced_indentation_active.
+    force_indent_bracket_depths: [i64]
 
 # ===== Constructor (free function) =====
 
 fn make_core_lexer(source: text) -> CoreLexer:
-    CoreLexer(source: source, source_chars: source.chars(), pos: 0, line: 1, col: 1, indent_stack: [0], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0, cur_start: 0)
+    CoreLexer(source: source, source_chars: source.chars(), pos: 0, line: 1, col: 1, indent_stack: [0], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0, cur_start: 0, force_indent_bracket_depths: [])
 
 # ===== CoreLexer Methods =====
 
@@ -830,7 +835,10 @@ impl CoreLexer:
 
         # Inside parentheses/brackets: suppress Indent/Dedent tokens entirely.
         # The indent stack is left unchanged so it remains valid after the closing bracket.
-        if self.paren_depth > 0:
+        # Exception: a block-bodied construct (e.g. `\x:` block lambda) that
+        # called enable_forced_indentation() needs real Indent/Dedent for its
+        # own body — see is_forced_indentation_active.
+        if self.paren_depth > 0 and not self.is_forced_indentation_active():
             self.scan_token()
             return
 
@@ -911,7 +919,7 @@ impl CoreLexer:
         if c == "\n":
             self.advance()
             self.at_line_start = true
-            if self.paren_depth > 0:
+            if self.paren_depth > 0 and not self.is_forced_indentation_active():
                 # Inside parens: suppress newline, scan next token
                 self.scan_token_rescan()
                 return
@@ -1195,6 +1203,42 @@ impl CoreLexer:
     me next_token_after_generic_close() -> i64:
         self.cur_kind = 0
         self.next_token()
+
+    # ----- Forced indentation (block bodies inside call parens) -----
+    #
+    # Normally paren_depth > 0 suppresses NEWLINE/INDENT/DEDENT entirely (see
+    # handle_indentation/scan_token above), because a parenthesized expression
+    # is one logical line. A block-bodied construct that itself appears inside
+    # a call's parens (e.g. `xs.filter(\x:\n    ...\n)`) still needs real
+    # structural tokens for its own body. enable_forced_indentation records
+    # the paren_depth at the point the block starts; indentation tracking
+    # resumes as long as paren_depth stays at or below that recorded depth (an
+    # inner `(...)` opened inside the block still suppresses normally, and
+    # popping back out of it restores forced tracking). Mirrors the Rust
+    # seed's Lexer::enable_forced_indentation / force_indent_bracket_depths.
+    me enable_forced_indentation():
+        self.force_indent_bracket_depths.push(self.paren_depth)
+
+    me disable_forced_indentation():
+        if self.force_indent_bracket_depths.len() > 0:
+            self.force_indent_bracket_depths.pop()
+
+    me is_forced_indentation_active() -> bool:
+        if self.force_indent_bracket_depths.len() == 0:
+            return false
+        var active = false
+        for depth in self.force_indent_bracket_depths:
+            if self.paren_depth <= depth:
+                active = true
+                break
+        active
+
+    # Keep indent_stack in sync when a forced-indentation block ends at a
+    # closing bracket/comma with no matching DEDENT token (e.g. the block's
+    # last statement is on the same line as the call's closing `)`).
+    me pop_indent():
+        if self.indent_stack.len() > 1:
+            self.indent_stack.pop()
 
 fn core_lexer_next_token(lexer: CoreLexer) -> (CoreLexer, i64):
     var next_lexer = lexer

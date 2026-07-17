@@ -746,8 +746,27 @@ fn convert_flat_expr(idx: i64) -> Expr:
         return Expr(kind: ExprKind.Return(ret_expr), span: span)
     elif tag == EXPR_LAMBDA:
         val lambda_body_exprs = expr_get_stmts(idx)
+        # A block-bodied lambda (`\x:` followed by an indented multi-statement
+        # body) is parsed by wrapping the WHOLE statement list in a single
+        # EXPR_BLOCK node (tag 18; see _ParserPrimary/primary_expr.spl's
+        # backslash-lambda case: `lam_stmts.push(expr_block(blk_stmts, -1, 0))`)
+        # -- lambda_body_exprs is always a 1-element list, holding either that
+        # EXPR_BLOCK node or a bare expression (single-expression body).
+        # convert_flat_expr has NO case for EXPR_BLOCK (only flat_if_branch_block,
+        # used by if/else expression branches, knows how to unwrap it), so
+        # calling convert_flat_expr directly on an EXPR_BLOCK silently fell
+        # through to the generic fallback (NilLit), discarding every statement
+        # AND the tail value -- every block-bodied lambda call returned the
+        # same garbage constant regardless of input. Reuse the same EXPR_BLOCK
+        # -> Block conversion the if-expression bridge already uses, then wrap
+        # it as ExprKind.Block so HIR/MIR thread the tail value through
+        # lower_hir_block / lower_block exactly like if/match arm bodies do.
         val body_expr = if lambda_body_exprs.len() > 0:
-            convert_flat_expr(lambda_body_exprs[0])
+            val lam_body0 = lambda_body_exprs[0]
+            if expr_get_tag(lam_body0) == EXPR_BLOCK:
+                Expr(kind: ExprKind.Block(flat_if_branch_block(lam_body0, span)), span: span)
+            else:
+                convert_flat_expr(lam_body0)
         else:
             Expr(kind: ExprKind.NilLit, span: span)
         var lambda_params: [LambdaParam] = []

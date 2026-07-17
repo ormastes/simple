@@ -46,6 +46,7 @@ use compiler.core.ast.{module_get_path}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
+use compiler.frontend.core.lexer.{lex_enable_forced_indentation, lex_disable_forced_indentation, lex_pop_indent}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
 use compiler.core.parser.{parser_guarded_int_text}
@@ -616,6 +617,14 @@ fn parse_primary_expr() -> i64:
                 val pn = par_text_get()
                 parser_advance()
                 lam_params.push(expr_ident(pn, 0))
+        # Enable forced indentation BEFORE consuming ':' so the lexer keeps
+        # emitting real NEWLINE/INDENT/DEDENT for this lambda's own body even
+        # though we may be inside a call's parens (paren_depth > 0), where
+        # those tokens are normally suppressed entirely (the whole
+        # parenthesized expression is otherwise one logical line). Must be
+        # disabled again on every exit path below. See
+        # CoreLexer.enable_forced_indentation (lexer_struct.spl).
+        lex_enable_forced_indentation()
         # Expect ':'
         parser_expect(161)
         # Block body or expression body. EXPR_LAMBDA's stmts list holds body
@@ -631,8 +640,10 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == 180 or par_kind_get() == 181:
             parser_skip_newlines()
             var blk_stmts: [i64] = []
+            var lam_saw_indent = false
             if par_kind_get() == 181:
                 parser_advance()
+                lam_saw_indent = true
             for blk_i in 0..100000:
                 parser_skip_newlines()
                 val bk = par_kind_get()
@@ -640,6 +651,11 @@ fn parse_primary_expr() -> i64:
                     parser_advance()
                     break
                 if bk == 141 or bk == 160 or bk == 190:
+                    # Block ended at the call's closing bracket/comma/eof with
+                    # no DEDENT seen (last statement shared its line with the
+                    # terminator) — resync the lexer's indent stack manually.
+                    if lam_saw_indent:
+                        lex_pop_indent()
                     break
                 val s = parse_statement()
                 blk_stmts.push(s)
@@ -647,10 +663,12 @@ fn parse_primary_expr() -> i64:
                     break
                 parser_skip_newlines()
             lam_stmts.push(expr_block(blk_stmts, -1, 0))
+            lex_disable_forced_indentation()
         else:
             # Expression body (single expression becomes sole body expr)
             val body_e = parse_expr()
             lam_stmts.push(body_e)
+            lex_disable_forced_indentation()
         return expr_lambda(lam_params, lam_stmts, 0)
 
     if par_kind_get() == 169:

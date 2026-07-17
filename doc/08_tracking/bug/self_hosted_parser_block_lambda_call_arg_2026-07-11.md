@@ -1,6 +1,6 @@
 # Self-hosted parser: block lambda as call argument with dedented closing paren fails
 
-**Date:** 2026-07-11 · **Status:** OPEN — divergence reproduced against current source.
+**Date:** 2026-07-11 · **Status:** RESOLVED (parser) 2026-07-17 — grammar divergence fixed; residual native-lowering gaps fail loud (see note below).
 **Found:** `simple check` delegation chain investigation. The check worker, when forced
 in-process (loop-guard env inherited), fails to parse
 `src/app/interpreter/async_runtime/mailbox.spl:525` with
@@ -90,3 +90,19 @@ filter/map with stateful bodies.
 ## Verification (2026-07-16)
 
 Still reproduces at origin tip 8932fcb3a148: `probe09_block_lambda_a.spl` (doc's exact minimal repro). Self-hosted parser via native-build: `[parser_error] line 8:13: expected ), got BoolLit 'false'` then cascading errors, exit 1, no binary produced. Matches documented divergence from seed grammar exactly.
+
+## Resolution (2026-07-17)
+
+Parser fixed: the self-hosted lexer now supports forced indentation inside
+brackets (ported the seed's `enable_forced_indentation` /
+`force_indent_bracket_depths` mechanism into `lexer_struct.spl`/`lexer.spl`),
+wired into the backslash-lambda path in `_ParserPrimary/primary_expr.spl`.
+Block lambdas as call arguments now parse on both the check-app route and
+native-build; single-expression lambdas unchanged. Landed together with the
+block-lambda tail-value fix (`self_hosted_lambda_block_body_tail_value_2026-07-16.md`).
+
+Residual (LOUD, not silent): inline block lambdas as call arguments still fail
+at MIR ("unsupported MIR expression: HirExprKind::Lambda(..Block..)" on the
+closure-materialization path; `.filter` with a block lambda reports
+"unresolved method call: filter") — tracked as residual gaps in the tail-value
+doc. Standalone-bound block lambdas compile and run correctly.
