@@ -2,18 +2,23 @@
 set -eu
 
 die() {
-    printf '%s\n' "stage4 linux dynload provider archive check: $*" >&2
+    printf '%s\n' "stage4 hosted dynload provider archive check: $*" >&2
     exit 1
 }
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 
-[ "$(uname -s 2>/dev/null || true)" = "Linux" ] || die "requires Linux"
+host_os=$(uname -s 2>/dev/null || true)
+case "$host_os" in
+    Linux) archive_format=elf ;;
+    Darwin) archive_format=macho ;;
+    *) die "requires Linux or macOS" ;;
+esac
 
 SIMPLE_BINARY=${SIMPLE_BINARY:-bin/simple}
-BUILD_DIR=${BUILD_DIR:-build/check/stage4-linux-dynload-provider}
-VALIDATOR=scripts/check/validate_stage4_linux_dynload_provider_archive.spl
+BUILD_DIR=${BUILD_DIR:-build/check/stage4-hosted-dynload-provider}
+VALIDATOR=scripts/check/validate_stage4_hosted_dynload_provider_archive.spl
 SOURCE=src/runtime/runtime_dynload.c
 
 [ -x "$SIMPLE_BINARY" ] || die "Simple binary is missing or not executable: $SIMPLE_BINARY"
@@ -42,8 +47,18 @@ else
     die "requires llvm-ar or ar"
 fi
 
-command -v sha256sum >/dev/null 2>&1 || die "requires sha256sum"
 command -v cmp >/dev/null 2>&1 || die "requires cmp"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        checksum=$(sha256sum "$1") || die "failed to hash $1"
+    elif command -v shasum >/dev/null 2>&1; then
+        checksum=$(shasum -a 256 "$1") || die "failed to hash $1"
+    else
+        die "requires sha256sum or shasum"
+    fi
+    printf '%s\n' "${checksum%% *}"
+}
 
 mkdir -p "$BUILD_DIR/a" "$BUILD_DIR/b"
 BUILD_DIR=$(CDPATH= cd -- "$BUILD_DIR" && pwd)
@@ -67,14 +82,13 @@ done
 
 archive_a="$BUILD_DIR/a/libsimple_stage4_dynload.a"
 archive_b="$BUILD_DIR/b/libsimple_stage4_dynload.a"
-sha_a=$(sha256sum "$archive_a")
-sha_b=$(sha256sum "$archive_b")
-sha_a=${sha_a%% *}
-sha_b=${sha_b%% *}
+sha_a=$(sha256_file "$archive_a")
+sha_b=$(sha256_file "$archive_b")
 [ "$sha_a" = "$sha_b" ] || die "independent archive SHA-256 values differ"
 cmp -s "$archive_a" "$archive_b" || die "independent archive bytes differ"
 
 validator_output=$(env \
+    SIMPLE_STAGE4_DYNLOAD_ARCHIVE_FORMAT="$archive_format" \
     SIMPLE_STAGE4_DYNLOAD_ARCHIVE_A="$archive_a" \
     SIMPLE_STAGE4_DYNLOAD_ARCHIVE_B="$archive_b" \
     "$SIMPLE_BINARY" run "$VALIDATOR" --mode=interpreter)
