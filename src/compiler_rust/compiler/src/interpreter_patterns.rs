@@ -955,4 +955,115 @@ main = result_
         let code = run(src);
         assert_eq!(code, 0, "enum positional pattern must be unaffected by the class fix");
     }
+
+    // --- SdnValue-style regression (hir_stmt_expr_payload_extraction_nil_2026-07-17.md,
+    //     "New fresh-vs-deployed divergence" follow-up) ---
+    //
+    // A DIFFERENT collision site than the Wall-2 fix above: `SdnValue.Int(42)`
+    // failed with "unknown static method Int on class SdnValue" whenever an
+    // unrelated `struct SdnValue`/`class SdnValue` (real collisions:
+    // src/compiler/70.backend/backend_types.spl and
+    // src/compiler/80.driver/init.spl, neither of which defines an `Int`
+    // method) is ALSO loaded into the interpreter's global `classes`/`enums`
+    // registries alongside the real `enum SdnValue:` (src/lib/common/sdn/
+    // value.spl). `Expr::Identifier` resolution (interpreter/expr/
+    // literals.rs) checks `classes` before `enums`, so the bare identifier
+    // `SdnValue` always resolves to `Value::Constructor`, routing the call to
+    // `handle_constructor_methods` (interpreter_method/special/objects.rs),
+    // which previously errored outright instead of falling back to
+    // enum-variant construction when the requested method name is a genuine
+    // variant on a same-named enum. Root-caused as a PRE-EXISTING defect
+    // (identical on the 2026-07-11 deployed seed binary and a from-scratch
+    // fresh build -- not a Wall-2 (b1a58671) regression: that fix's
+    // `use_bare_module_fallback` gate isn't even reached here, since
+    // `classes.contains_key("SdnValue")` is already true).
+    //
+    // Fix: `handle_constructor_methods` now falls back to enum-variant
+    // construction (mirroring `Value::EnumType`'s construction arm in
+    // `interpreter_method/mod.rs`) when, and only when, the class has no
+    // matching static method AND a same-named enum genuinely declares the
+    // requested method as a variant -- real static-method resolution is
+    // never shadowed.
+
+    #[test]
+    fn sdnvalue_style_enum_variant_survives_class_name_collision_on_constructor_call() {
+        // Minimal isolation of the production shape: a `struct SdnValue`
+        // with only an unrelated static method (`empty`, no `Int`) collides
+        // by name with `enum SdnValue: Int(i64)`. Constructing
+        // `SdnValue.Int(42)` must produce the real enum variant, not an
+        // "unknown static method" error and not a misrouted class instance.
+        //
+        // The construction happens INSIDE a plain `fn` body, matching the
+        // production shape and the Wall-2 tests above: at module top level,
+        // `evaluate_module_impl`'s first pass pre-registers a direct
+        // `Value::EnumType` binding for "SdnValue" straight into the
+        // module-level `env`, so a bare top-level `SdnValue.Int(42)` finds
+        // that binding via `env.get()` before `classes`/`enums` are ever
+        // consulted -- masking this bug entirely. Only a function-local
+        // `env` (which does not carry that module-level binding) reaches
+        // `Expr::Identifier`'s `classes`-before-`enums` fallback ordering
+        // and exercises the real defect + fix.
+        let src = r#"
+struct SdnValue:
+    data: i64
+
+impl SdnValue:
+    static fn empty() -> SdnValue:
+        SdnValue(data: 0)
+
+enum SdnValue:
+    Null
+    Int(i64)
+
+fn construct_and_extract() -> i64:
+    val v = SdnValue.Int(42)
+    match v:
+        case SdnValue.Int(n):
+            n
+        case _:
+            -1
+
+main = construct_and_extract()
+"#;
+        let code = run(src);
+        assert_eq!(
+            code, 42,
+            "SdnValue.Int(42) constructed inside a fn body must produce the real enum variant \
+             (payload 42) even though an unrelated same-named `struct SdnValue` with no `Int` \
+             method is also in scope"
+        );
+    }
+
+    #[test]
+    fn sdnvalue_style_real_static_method_still_wins_over_colliding_enum_variant_name() {
+        // Control case: when the class DOES have a real static method
+        // matching the call, that method must still win -- the enum-variant
+        // fallback must only activate on genuine "no matching static method"
+        // failures, never shadow a real constructor/static method. Also
+        // called from inside a `fn` body, for the same reason as above.
+        let src = r#"
+struct SdnValue:
+    data: i64
+
+impl SdnValue:
+    static fn empty() -> SdnValue:
+        SdnValue(data: 99)
+
+enum SdnValue:
+    Null
+    Int(i64)
+
+fn construct() -> i64:
+    val v = SdnValue.empty()
+    v.data
+
+main = construct()
+"#;
+        let code = run(src);
+        assert_eq!(
+            code, 99,
+            "a real static method on the class must still be called normally, not shadowed \
+             by the enum-variant fallback"
+        );
+    }
 }

@@ -534,6 +534,146 @@ bootstrap-representative invocation. Concrete prerequisite: fix
 `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap` gate as the
 real test (it also produces the deployable artifact).
 
+## 2026-07-17 follow-up (SDNVALUE lane): "fresh-vs-deployed divergence" NOT REPRODUCIBLE; a real, separate class/enum collision found and fixed anyway
+
+Picked up the "New fresh-vs-deployed divergence" item directly above. b1a58671
+("enum-variant ctor calls misrouted to colliding class via bare-module
+fallback", the Wall-2 fix) was the prime suspect. Verdict: **b1a58671 is
+innocent, and the reported divergence itself could not be reproduced.**
+
+### The divergence does not reproduce
+
+The task's own minimal repro — a tiny `.spl` doing
+`use std.sdn.value.SdnValue` then `SdnValue.Int(42)`, run via
+`src/compiler_rust/target/release/simple run` — prints `ok` (succeeds) on
+**both** a from-scratch fresh build (`cargo build --release` +
+`cargo build --profile bootstrap -p simple-driver`, current source) **and**
+the deployed 2026-07-11 `bin/release/x86_64-unknown-linux-gnu/simple`. No
+divergence exists for the faithful, task-specified repro.
+
+A second, more elaborate repro (`use compiler.backend.backend_types.*` +
+`use std.sdn.value.SdnValue`, calling `SdnValue.Int(42)` inside `fn main()`)
+DOES fail — with the exact reported error text
+(`unknown static method Int on class SdnValue; did you mean 'int'?`) — but it
+fails **identically on the 07-11 deployed binary and the fresh build**. Since
+this exact symptom already reproduces on a binary that predates b1a58671 by
+days, b1a58671 cannot be its cause, and there is no seed commit between
+07-11 and now to bisect for it (the failure isn't new). The bug doc's own
+prior entry already flagged this specific claim as "untested risk, not a
+cleared item" / "unverified" — that caution was warranted; the claim does not
+hold up empirically.
+
+### A real, pre-existing collision found via the elaborate repro (fixed anyway)
+
+The elaborate repro's failure is a genuine, previously-undocumented defect —
+a **different** collision site than Wall-2's `use_bare_module_fallback`
+fix, on the SAME "same name used for both a class and an enum" defect class:
+
+- Two `struct SdnValue:` declarations exist in `src/compiler`
+  (`src/compiler/70.backend/backend_types.spl:124`,
+  `src/compiler/80.driver/init.spl:280`), neither with an `Int` method, next
+  to the real `pub enum SdnValue:` (`src/lib/common/sdn/value.spl:28`,
+  variant `Int(i64)`). When both get loaded into the same interpreter run,
+  the interpreter's `classes`/`enums` registries are global/flat (the
+  already-documented "same struct name in 2 modules = runtime collision"
+  landmine), and `interpreter/expr/literals.rs`'s `Expr::Identifier`
+  handling checks `classes.contains_key(name)` **before** `enums`, so the
+  bare identifier `SdnValue` resolves to `Value::Constructor` (the class)
+  whenever both a class and an enum share the name — for ANY call made from
+  inside a function/method body (module top-level bypasses this: a
+  module-level `env` pre-registers a direct `Value::EnumType` binding, per
+  the same mechanism Wall-2 documented).
+- `SdnValue.Int(42)` then reaches `handle_constructor_methods`
+  (`interpreter_method/special/objects.rs`), which only searched the class's
+  own static methods and errored — it never considered that the method name
+  might be a genuine enum variant on a same-named enum.
+
+**Fix** (`src/compiler_rust/compiler/src/interpreter_method/special/objects.rs`):
+`handle_constructor_methods` now falls back to enum-variant construction
+(mirroring `interpreter_method/mod.rs`'s `Value::EnumType` construction arm)
+when, and only when, the class has no matching static method AND a
+same-named enum genuinely declares the requested method as a variant — real
+static-method resolution is never shadowed (verified by a dedicated control
+test).
+
+**Regression tests** (`src/compiler_rust/compiler/src/interpreter_patterns.rs`,
+`#[cfg(test)] mod tests`):
+- `sdnvalue_style_enum_variant_survives_class_name_collision_on_constructor_call`
+  — `struct SdnValue` (unrelated static method `empty`, no `Int`) + real
+  `enum SdnValue: Int(i64)`, both loaded, constructed **inside a `fn` body**
+  (required to reach the buggy path — see module-top-level note above).
+  Before the fix: `evaluate: SemanticWithContext(... "unknown static method
+  Int on class SdnValue" ...)`. After the fix: passes, payload extracted via
+  match is `42`.
+- `sdnvalue_style_real_static_method_still_wins_over_colliding_enum_variant_name`
+  — control case: a real static method (`empty`) on the class must still be
+  called normally, not shadowed by the new fallback. Passes both before and
+  after (proves the fix doesn't touch the normal-resolution path).
+- Both new tests were verified to actually exercise the fix (not
+  false-positives): temporarily disabling the fix (`if false { ... }` swap,
+  no `git stash` — this repo's concurrent-lane churn made `git stash`
+  unreliable mid-session) reproduces the exact real-world error message on
+  test 1 and leaves test 2 passing, confirming the tests have real
+  discriminating power.
+
+**Suite evidence:**
+`cargo test -p simple-compiler --lib interpreter_patterns::` — 12/12 passed
+(10 pre-existing incl. all 5 Wall-2 tests + 2 new), both before (10/10, new
+tests not yet added) and after this change. Targeted
+`interpreter_method::`/`interpreter_call::` runs: 8/8 and 4/4 passed
+(includes the pre-existing `objects.rs` static-method-overload tests
+immediately above the new fallback, confirming no interference). Full
+`cargo test -p simple-compiler --lib`: 3040 passed, 256 failed, 1 ignored —
+the 256-failure count matches this doc's own previously-recorded pre-existing
+baseline exactly (GPU SIMD, VHDL codegen, `native_project` runtime-bundle
+tests, etc., per the Wall-2 section above); no new failures attributable to
+this change.
+
+**Repro verification (final):** on a freshly rebuilt release binary
+(`cargo build --release`, current source, debug instrumentation stripped
+before this build) both `SdnValue.Int(42)` repros pass: the minimal one
+already passed before this fix (never broken); the elaborate
+`backend_types`-collision one, which failed identically on 07-11 and fresh
+before this fix, now succeeds — its `unknown static method Int on class
+SdnValue` symptom is resolved.
+
+### Flagged, not investigated: a THIRD, separate collision (stale duplicate `std.sdn.value`)
+
+While tracing the elaborate repro's remaining failure mode with temporary
+`eprintln` instrumentation (added, verified, then fully stripped — no
+instrumentation shipped), a **different**, still-open issue surfaced: even
+with the class/enum-collision fix above in place, that specific repro
+continued to fail — but for a wholly separate reason. Debug output showed
+`handle_constructor_methods`'s enum lookup DID find an enum named
+`"SdnValue"`, but with variants
+`["Null", "bool", "i32", "f32", "text", "Array", "Dict", "Table"]` — this is
+the shape of `src/compiler_rust/lib/std/src/sdn/value.spl` (a second,
+differently-shaped `enum SdnValue:` bundled inside the Rust seed's own
+`src/compiler_rust/lib/std/` tree), not the intended
+`src/lib/common/sdn/value.spl` one (`Bool/Int/Float/String/...`). Something
+in `compiler.backend.backend_types`'s transitive closure appears to pull in
+the seed's private embedded copy of `std.sdn.value` and it wins (overwrites)
+the global `enums` registry entry over the real one — an enum-vs-enum
+shadowing bug, independent of the class-vs-enum mechanism fixed above. This
+is almost certainly an artifact specific to that synthetic repro's plain
+`run` + wildcard `compiler.backend.backend_types.*` import (the real
+bootstrap path via `--source src/lib` would not pull in the seed's private
+`src/compiler_rust/lib/std` copy) rather than something hit by real
+bootstrap-representative invocations — **not chased further here**; flagged
+as a possible follow-up if a stale/duplicate embedded `std` copy is ever
+suspected of causing real (non-synthetic) failures.
+
+### Files changed
+
+- `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs` —
+  the fix (`handle_constructor_methods` enum-variant fallback).
+- `src/compiler_rust/compiler/src/interpreter_patterns.rs` — 2 new
+  regression tests appended to the existing `#[cfg(test)] mod tests`.
+
+Not touched: `interpreter_method/mod.rs`'s `use_bare_module_fallback` /
+`receiver_is_enum` (Wall-2, b1a58671) — confirmed innocent and left as-is;
+its 5 regression tests remain green and unmodified.
+
 ## 2026-07-17 follow-up (CERT-IMPORTS lane): cert import wall FIXED
 
 Fixed the concrete prerequisite noted above. Root cause: a single commit,

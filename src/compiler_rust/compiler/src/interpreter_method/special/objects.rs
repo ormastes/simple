@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::{evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods};
+use crate::interpreter::{
+    evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
+    GLOBAL_ENUMS,
+};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef, Type};
 use std::cell::RefCell;
@@ -222,6 +225,49 @@ pub fn handle_constructor_methods(
 
             return result;
         }
+
+        // No matching static method on the class. `class_name` may ALSO be a
+        // genuine enum whose name collides with an unrelated class/struct of
+        // the same name -- e.g. `struct SdnValue:` (src/compiler/70.backend/
+        // backend_types.spl, src/compiler/80.driver/init.spl) vs the real
+        // `enum SdnValue:` (src/lib/common/sdn/value.spl): both get loaded
+        // into the interpreter's global `classes`/`enums` registries, so
+        // `SdnValue.Int(42)` resolves its receiver to `Value::Constructor`
+        // (class wins identifier resolution, see `interpreter/expr/
+        // literals.rs`'s `Expr::Identifier` handling) even though `Int` is
+        // only a valid variant on the enum, never a static method on the
+        // colliding class. This mirrors the collision class already fixed
+        // for `use_bare_module_fallback` in `interpreter_method/mod.rs` (see
+        // bug doc hir_stmt_expr_payload_extraction_nil_2026-07-17.md, Wall
+        // 2) but for the constructor-call failure path instead: only taken
+        // when the class genuinely has no matching static method AND a
+        // same-named enum genuinely declares `method` as a variant, so real
+        // static-method resolution is never shadowed.
+        let enum_def = enums
+            .get(class_name)
+            .cloned()
+            .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()))
+            .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
+        if let Some(enum_def) = enum_def {
+            if let Some(variant) = enum_def.variants.iter().find(|v| v.name == method) {
+                let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                let payload = if !has_fields && positional_values.is_empty() {
+                    None
+                } else if positional_values.len() == 1 {
+                    Some(Box::new(positional_values[0].clone()))
+                } else if positional_values.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(Value::Tuple(positional_values.clone())))
+                };
+                return Ok(Some(Value::Enum {
+                    enum_name: class_name.to_string(),
+                    variant: method.to_string(),
+                    payload,
+                }));
+            }
+        }
+
         // Collect available static methods for suggestion
         let available: Vec<&str> = class_def
             .methods
