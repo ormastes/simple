@@ -913,6 +913,28 @@ impl Lowerer {
                 "concat" | "slice" | "replace" => Some(TypeId::STRING),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
+                // `.bytes()` returns UTF-8 bytes as an array of ints (see
+                // interpreter_method/string.rs `"bytes" => Vec<Value::Int>`,
+                // and the native runtime's `rt_string_bytes`, which pushes
+                // `RuntimeValue::from_int(b as i64)` per byte). This table
+                // forgetting `"bytes"` is the SAME class of gap as the
+                // `"length"` alias above: `.bytes()` fell through to generic
+                // dynamic dispatch typed `TypeId::ANY`, so `byte_arr[idx]`
+                // never got the `UnboxInt` MIR instruction that's gated on a
+                // known int element type
+                // (mir/lower/lowering_expr_struct.rs `needs_int_unbox`),
+                // leaving each element as a raw tagged `RuntimeValue`
+                // (`(v << 3) | TAG_INT`) that downstream relational ops
+                // (`<`, `<=`, `>`, `>=`) and arithmetic (`+`, `-`) compiled as
+                // raw native ops assuming an already-unboxed i64 — corrupting
+                // results (bug
+                // seed_interp_bytes_u8_relational_boxtag_shift_2026-07-17.md;
+                // marker: seed_bytes_u8_boxtag_2026-07-17).
+                "bytes" => Some(
+                    self.module
+                        .types
+                        .register(HirType::Array { element: TypeId::I64, size: None }),
+                ),
                 _ => None,
             };
 

@@ -109,6 +109,68 @@ fn flow_length(flag: bool) -> i64:
     assert_eq!(loop_length.ty, TypeId::I64);
 }
 
+// Regression for seed_bytes_u8_boxtag_2026-07-17:
+// `.bytes()` was missing from the string-methods return-type table in
+// `lower_builtin_method_call` (the same table `.length()` was missing an
+// alias from above), so `s.bytes()` inferred `TypeId::ANY` instead of an
+// `[i64]` array. That wrong static type meant `byte_arr[i]` never received
+// the `UnboxInt` MIR instruction gated on a known int element type
+// (mir/lower/lowering_expr_struct.rs `needs_int_unbox`), so each element
+// stayed a raw tagged `RuntimeValue` (`(v << 3) | TAG_INT`) that the
+// Cranelift JIT's relational ops (`<`, `<=`, `>`, `>=`) and arithmetic
+// (`+`, `-`) then treated as an already-unboxed i64 — corrupting results.
+// See doc/08_tracking/bug/seed_interp_bytes_u8_relational_boxtag_shift_2026-07-17.md.
+#[test]
+fn bytes_method_infers_i64_array_seed_bytes_u8_boxtag_2026_07_17() {
+    let module = parse_and_lower(
+        r#"fn first_byte() -> i64:
+    val s = "abc"
+    val byte_arr = s.bytes()
+    return byte_arr[0]
+"#,
+    )
+    .unwrap();
+
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.name == "first_byte")
+        .expect("first_byte");
+
+    // The `.bytes()` call itself must be typed as an array of i64, not ANY.
+    let bytes_call_ty = func
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let {
+                value: Some(value), ..
+            } if matches!(&value.kind, HirExprKind::MethodCall { method, .. } if method == "bytes") => {
+                Some(value.ty)
+            }
+            _ => None,
+        })
+        .expect("expected byte_arr = s.bytes() initializer");
+    match module.types.get(bytes_call_ty) {
+        Some(HirType::Array { element, .. }) => {
+            assert_eq!(*element, TypeId::I64, ".bytes() element type must be i64, not ANY");
+        }
+        other => panic!(".bytes() must infer an Array(i64) type, got {other:?}"),
+    }
+
+    // The indexed element `byte_arr[0]` must itself resolve to i64 so the
+    // MIR array-index lowering emits `UnboxInt` instead of leaving the
+    // element as a raw tagged RuntimeValue.
+    let index_ty = func
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr.ty),
+            _ => None,
+        })
+        .expect("expected return byte_arr[0]");
+    assert_eq!(index_ty, TypeId::I64, "byte_arr[0] must infer i64, not ANY");
+}
+
 #[test]
 fn text_rfind_uses_string_method_lowering() {
     let module = parse_and_lower(

@@ -80,11 +80,25 @@ codegen or runtime changes were needed.
 Regression test (Rust): `bytes_method_infers_i64_array_seed_bytes_u8_boxtag_2026_07_17`
 in `src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs`,
 asserting `s.bytes()` infers `Array{element: I64}` (not ANY) and
-`byte_arr[0]` infers `I64`. Confirmed fails without the fix (HIR type is
-`ANY`, `TypeId::Array` match arm panics) and passes with it.
+`byte_arr[0]` infers `I64`. Ran clean post-fix: `1 passed; 0 failed`. By
+construction this test fails without the fix (unfixed `lower_expr/mod.rs`
+has no `"bytes"` arm, so `bytes_call_ty` resolves to `TypeId::ANY`, and the
+test's `match module.types.get(bytes_call_ty) { Some(HirType::Array {..}) =>
+.., other => panic!(...) }` panics on that `ANY`) — this was reasoned from
+the unfixed source, not separately re-observed under a live cargo run (the
+shared working copy was repeatedly reverted mid-session by a concurrent jj
+sync from another worker, see fail→pass binary proof below for the
+directly-observed half of this).
 
-End-to-end verification (fresh seed rebuild, isolated `CARGO_TARGET_DIR`):
-the doc's minimal repro now prints `c=97` (was `776`) and `b <= 122 -> true`
+**Fail→pass proof (directly observed, two binaries, same repro, immune to
+the WC churn above):**
+- Untouched original seed (`src/compiler_rust/target/release/simple`,
+  pre-fix): `b <= 122 -> false`, `c=776`.
+- Freshly rebuilt seed from the fixed source (isolated
+  `CARGO_TARGET_DIR`, this task's binary): `b <= 122 -> true`, `c=97`.
+
+End-to-end verification (the freshly rebuilt binary above): the doc's
+minimal repro now prints `c=97` (was `776`) and `b <= 122 -> true`
 (was `false`) with NO `int(...)` wrapper needed. A broader operator audit
 (`==`,`!=`,`<`,`<=`,`>`,`>=`,`+`,`-`,`*`) all match the interpreter's
 reference values post-fix.
@@ -92,6 +106,57 @@ reference values post-fix.
 exits 0, including the specific tokenizer test
 "classifies control-flow and binding keywords as Keyword tokens" that
 exercises the exact `bytes[i]` classification pattern this bug corrupted.
+
+## Scope / collision check
+
+`lower_builtin_method_call`'s HIR return-type inference (this fix's
+location) is a different module and different mechanism from worker P's
+`mcp_stdio_smoke_seed_flat_registry_len_i64_2026-07-17.md` (function-registry
+/ module-import resolution) — no file or function overlap, no collision.
+
+`chars()` (the adjacent string-builtin method, right above `bytes()` in
+`method_registry/builtins.rs`) has the identical HIR return-type-inference
+gap (also missing from the `result_ty` match arm, also falls back to
+`ANY`). Not fixed here — out of scope for this task (assigned bug is
+`bytes()`-specific) and its element type is `STRING` not an int, so it
+doesn't reproduce this exact tag-shift symptom. Flagging as a follow-up so
+a future lane doesn't have to re-discover it.
+
+## Full `simple-compiler` `--lib` suite run (no NEW failures from this fix)
+
+Ran `cargo test --release -p simple-compiler --lib` (isolated
+`CARGO_TARGET_DIR`, current source at time of run) as a broader regression
+check beyond the assigned duplicate_check acceptance test: **3067 passed,
+257 failed, 1 ignored** (3325 total). This repo's shared working copy was
+being actively rewritten by other parallel-session jj syncs throughout this
+task (see anti-clobber notes above), so this run is against an ambient,
+not-isolated snapshot — it is not a clean before/after diff.
+
+Verified none of the 257 failures are attributable to this fix:
+- Every test with `bytes` in its name (19 total, across
+  `codegen_instr_tests`, `common_backend`, `interpreter_extern`, and this
+  fix's own new `hir::lower::tests::expression_tests::bytes_method_infers_i64_array_seed_bytes_u8_boxtag_2026_07_17`)
+  passed.
+- The failures span entirely disjoint subsystems with no possible causal
+  path from a string-match arm gated on the literal `"bytes"` (Cranelift
+  vector-op codegen, GPU error-arg codegen, native_project runtime-bundle
+  pipeline, lint suppression tests, `std.io` module-loader/path-resolution
+  tests) — this fix touches none of them.
+- Inspected the handful of failures inside the SAME file this fix's test
+  lives in (`hir/lower/tests/expression_tests.rs`):
+  `test_empty_array_append_refines_indexed_element_type` (empty-array
+  literal `[]` element-type refinement) and
+  `test_lower_local_function_value_call_uses_function_return_type`
+  (closure/function-value call typing) — both exercise code paths this fix
+  never touches (no `.bytes()` call in either test's source, and this fix's
+  new match arm only registers a type when the literal method name
+  `"bytes"` is matched).
+
+Conclusion: this is ambient pre-existing/in-flux failure noise from the
+actively multi-agent-edited repository at this snapshot, not a regression
+from this fix. The narrower, hard-required checks (targeted regression
+test, `duplicate_check_unit_spec.spl`) remain the authoritative evidence
+for this fix specifically.
 
 ## Symptom
 
