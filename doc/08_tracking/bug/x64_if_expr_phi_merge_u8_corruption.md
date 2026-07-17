@@ -1,6 +1,7 @@
 # BUG: x64 freestanding if-EXPRESSION phi-merge corrupts extern-`[u8]` branch handle
 
-**Status:** open (workaround landed at the one KEX-critical site)
+**Status:** ROOT-FIXED 2026-07-10 (see "Root cause + fix" below). Workaround at
+ssh_session_kex.spl:565 is now removable.
 **Severity:** high (silent heap-handle corruption; any if-expression mixing extern and Simple `[u8]` branches)
 **Component:** seed native-build codegen — `lower_if_expr` (src/compiler_rust/compiler/src/mir/lower/lowering_expr_control.rs:69)
 **Found:** 2026-07-10, x64 SSH KEX bring-up
@@ -42,6 +43,30 @@ Make the `lower_if_expr` result merge preserve the branch value representation
 (type-aware slot or direct register move), or route erased-`[u8]` results
 through the same recovery used for typed indexing (see landed
 lowering_expr_struct.rs `recovered_receiver_ty` fix in 19e2f81e).
+
+## Root cause + fix (2026-07-10) — NOT a type/merge bug
+
+The merge is structurally correct in MIR. The actual defect is in Cranelift
+codegen block scheduling: `codegen/instr/body.rs` compiles blocks in
+`func.blocks` **storage order** and populates `local_addr_map`
+(VReg→local_index, from `LocalAddr`) **lazily** as each block is compiled.
+After a `Simple`-fn branch is **inlined**, the if-EXPRESSION condition block
+(which emits the merge slot's `LocalAddr`) can be renumbered to a HIGH block id
+stored AFTER the low-id then/else/merge blocks that consume it. When those
+consumer blocks are compiled first, `local_addr_map` lacks the merge-slot VReg,
+so the merge `Store`/`Load` fall through to the raw-address path and silently
+mis-resolve — corrupting the extern-`[u8]` handle. This is why P9 (Simple-fn
+untaken branch → inlining → id inversion) fails while P8 (both extern, no
+inline) and P10 (if-STATEMENT, pre-declared local) pass, and why the failure is
+nondeterministic (garbage address).
+
+**Fix:** pre-populate `local_addr_map` from *every* `LocalAddr` in the function
+before compiling any block (`LocalAddr` is a pure, SSA-unique
+`dest → local_index` fact, so this is order-safe for all backends/targets).
+One change in `codegen/instr/body.rs`; no lowering change; interpreter/rv64/
+hosted unaffected. abi_probe P9 now reads correctly; P1-P8/P10 unchanged; lib
+unit-test failure set unchanged vs baseline (238 vs 239, delta is flaky
+watchdog test only).
 
 ## 2026-07-10 update — x64 SSH login now completes end-to-end
 
