@@ -20,20 +20,12 @@ use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
-use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
 
-# Raw mutex handles behind literal-0-initialized module vars. A module-level
-# `val x: Mutex = mutex_new(0)` (function-call initializer) does NOT run on the
-# freestanding/baremetal native-build — only literal initializers (0, [], nil)
-# execute at module-init — so the Mutex object stays a null receiver whose
-# .lock() derefs null (cr2=0x0) and kills the first WM compose. A `var: Any = 0`
-# literal DOES initialize; lazily create the raw handle on first use (heap is up
-# by then). Single-core baremetal makes the lock a no-op; hosted still gets real
-# mutual exclusion once created.
-extern fn rt_mutex_new(initial: Any) -> Any
-extern fn rt_mutex_lock(handle: Any) -> Any
-extern fn rt_mutex_unlock(handle: Any, new_value: Any) -> Any
+# Hosted module initialization eagerly creates these facade mutexes before
+# worker threads start. Freestanding native-builds leave function-call module
+# initializers nil, so the same optional slots initialize on first use after the
+# heap is ready; that path is single-core.
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
@@ -74,16 +66,25 @@ val RESOLVED_FONT_METRICS_CACHE_CONTENT_LIMIT: i64 = 4096
 var _resolved_font_metric_keys: [text] = []
 var _resolved_font_metric_values: [ResolvedFontMetrics] = []
 var _resolved_font_metric_cursor: i64 = 0
-var _resolved_font_metric_lock_handle: Any = 0
+var _resolved_font_metric_lock: Mutex? = mutex_new(0)
+
+fn _font_mutex_acquire(current: Mutex?) -> Mutex:
+    if val active = current:
+        active.lock()
+        return active
+    val created = mutex_new(0)
+    created.lock()
+    created
+
+fn _font_mutex_release(current: Mutex?):
+    if val active = current:
+        active.unlock(0)
 
 fn _resolved_font_metric_lock_acquire():
-    if _resolved_font_metric_lock_handle == 0:
-        _resolved_font_metric_lock_handle = rt_mutex_new(0)
-    rt_mutex_lock(_resolved_font_metric_lock_handle)
+    _resolved_font_metric_lock = _font_mutex_acquire(_resolved_font_metric_lock)
 
 fn _resolved_font_metric_lock_release():
-    if _resolved_font_metric_lock_handle != 0:
-        rt_mutex_unlock(_resolved_font_metric_lock_handle, 0)
+    _font_mutex_release(_resolved_font_metric_lock)
 
 fn _resolved_font_metric_key(family: text, content: text, font_size: i32, identity: text) -> text:
     _resolved_font_metric_language_key(family, content, font_size, identity, "und")
@@ -145,16 +146,13 @@ var _browser_default_font_renderers: [FontRenderer] = []
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
 var _registered_selected_fonts_only: bool = false
-var _browser_default_font_lock_handle: Any = 0
+var _browser_default_font_lock: Mutex? = mutex_new(0)
 
 fn _browser_default_font_lock_acquire():
-    if _browser_default_font_lock_handle == 0:
-        _browser_default_font_lock_handle = rt_mutex_new(0)
-    rt_mutex_lock(_browser_default_font_lock_handle)
+    _browser_default_font_lock = _font_mutex_acquire(_browser_default_font_lock)
 
 fn _browser_default_font_lock_release():
-    if _browser_default_font_lock_handle != 0:
-        rt_mutex_unlock(_browser_default_font_lock_handle, 0)
+    _font_mutex_release(_browser_default_font_lock)
 
 fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
     _browser_default_font_lock_acquire()
@@ -231,13 +229,11 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
 
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
-# Plain literal-initialized counter, NOT `val ...: AtomicI64 = atomic_i64_new(0)`.
-# A module-level function-call initializer (atomic_i64_new) does NOT run on the
-# freestanding/baremetal native-build (only literal 0/[]/nil inits execute), so
-# the AtomicI64 stayed a null receiver whose .load() derefs null (cr2=0x0) and
-# killed the first WM compose the moment any text command rendered. Single-core
-# baremetal needs no atomic; a literal `var: i64 = 0` initializes correctly.
+# The scalar stays literal-initialized for freestanding startup. Its dedicated
+# facade mutex is eager on hosted builds and lazy on the single-core baremetal
+# path, matching the cache locks above.
 var _font_atlas_dependency_generation_counter: i64 = 0
+var _font_atlas_dependency_generation_lock: Mutex? = mutex_new(0)
 
 fn _font_render_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> FontRenderBatch:
     FontRenderBatch(
@@ -293,11 +289,10 @@ fn _font_atlas_dependency_generation_after(current: i64) -> i64:
     current + 1
 
 fn _next_font_atlas_dependency_generation() -> i64:
-    # Single-core baremetal: plain increment, no atomic CAS. Return the freshly
-    # computed local so the result is correct even if the module-var write does
-    # not persist through the native-build's constant-folded global read path.
+    _font_atlas_dependency_generation_lock = _font_mutex_acquire(_font_atlas_dependency_generation_lock)
     val next = _font_atlas_dependency_generation_after(_font_atlas_dependency_generation_counter)
     _font_atlas_dependency_generation_counter = next
+    _font_mutex_release(_font_atlas_dependency_generation_lock)
     next
 
 class GlyphCache:
