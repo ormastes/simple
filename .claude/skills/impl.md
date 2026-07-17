@@ -84,7 +84,8 @@ review-team:    explore -> docs          (sequential)
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
 2. Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual font work”:
    preserve `FontRenderer`, transient `FontRenderBatch`, `WebIR`,
-   `DrawIrComposition`, and its five frozen SSpec step phrases.
+   `DrawIrComposition`, and the plan-defined frozen SSpec vocabulary; keep
+   secondary detail steps folded.
 3. **Stub Prevention Gate** (mandatory):
    - `bin/simple build lint` on touched files
    - `bin/simple query workspace-symbols --query pass_todo` to find stubs

@@ -501,13 +501,16 @@ font GPU emission, or GUI/Web/2D/3D text.
    validated registered bytes bind through the existing shaper with
    handle/generation `0`, then only a handle-free glyph payload may cross Draw
    IR to the existing selected-byte `FontRenderer`/`FontRenderBatch` path.
-8. Freeze these five SSpec phrases exactly:
+8. Freeze these five primary SSpec phrases exactly:
    `Load the pinned multilingual font manifest`;
    `Accept exact-face-bound simple-script shaping`;
    `Prepare one shared font batch for 2D and 3D`;
    `Emit the selected font composite program and plan compilation`;
    `Prove native submission and device readback`.
-   Mirrored manuals under `doc/06_spec` are `.md` only.
+   Resolved-host, completion, and folded secondary detail phrases are defined
+   by `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; do not introduce
+   vocabulary outside that plan. Mirrored manuals under `doc/06_spec` are `.md`
+   only.
 9. Lower-model sidecars may implement or audit bounded lanes and generated
    manuals, but the final done mark and manual-quality judgment require a
    higher-capability review.

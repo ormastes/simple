@@ -239,3 +239,11 @@ deadline and blocked. Both owners now share `-2` timeout semantics and focused
 spawn/wait/kill tests. Until redeploy, the seed's existing
 `SIMPLE_TEST_RUNNER_RUST=1` path is explicitly available only as bounded,
 redirected repair evidence; normal `simple test` remains pure-Simple.
+
+The next bounded bootstrap exposed Stage 4 parsing of unparenthesized custom
+literal dictionary iteration in `UnifiedRegistry`. Commit `0dcb8e7a397`
+replaced that tuple form with the compiled-safe `.keys()` plus indexed lookup
+already used by compiler dictionaries and added a focused source regression.
+An isolated Stage 2 native build parsed and linked the registry, but this is
+source-only repair evidence: it produced no admitted full CLI, runner
+calibration, or font acceptance PASS.

@@ -91,7 +91,7 @@ Skip if exist. See `design` skill for details.
   comments; return a typed diagnostic and add/refresh backend contract coverage.
 - Shared-font work follows `$sp_dev` “Shared multilingual font work”: preserve
   `FontRenderer`, transient `FontRenderBatch`, `WebIR`, `DrawIrComposition`, and
-  its five frozen SSpec step phrases.
+  the plan-defined frozen SSpec vocabulary; keep secondary detail steps folded.
 - Use short grammar deliberately:
   - Prefer expression-bodied functions for small pure helpers.
   - Prefer placeholder lambdas (`_`, `_1`, `_2`) and method references (`&:name`) only for single-expression transforms.

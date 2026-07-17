@@ -371,7 +371,8 @@ match the pinned
 and `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`
 identities exactly. A mismatch
 fails closed; the checker does not install its fresh artifact. Production keeps
-using the independently pinned embedded SPIR-V installed by `VulkanSession`.
+the independently pinned embedded SPIR-V, but `VulkanSession` currently rejects
+its stale semantics before resource creation.
 CUDA compile plans use
 `nvcc --ptx -o <output> <source>`; the kernel
 symbol is verified from the artifact rather than passed through a nonexistent
@@ -382,7 +383,8 @@ companion in `backend_cuda_font_ptx.spl`. The default CUDA 2D module contains
 no font entry. Canonical CUDA construction verifies the runtime PTX hash, entry,
 and program version, then attempts installation through
 `Engine2D.install_cuda_font_artifact`. The checker and focused SPipe compare the
-pinned source/emitter hashes exactly with the current Simple emitter. Once
+pinned source/emitter hashes against the current Simple emitter and currently
+fail closed on the recorded mismatch. Once
 installed, CUDA uploads the
 atlas on generation change, marshals the exact 15-slot pointer ABI,
 synchronizes each submitted quad, and mirrors only completed prefixes.
@@ -390,12 +392,14 @@ The installer rechecks payload consistency, then delegates to the existing
 bounded `install_cuda_font_ptx` entry-symbol/session gate without replacing the
 optimization module. The session pins the PTX hash, rejects replacement,
 launches font quads from it when present, and unloads it with the CUDA context.
-The focused `cuda_generated_font_handoff_spec.spl` authenticates the
-source-tracked tuple, proves tampered bytes reject, confirms canonical
-construction installed the pinned identity, dispatches one canonical
-`FontRenderBatch`, and compares device-origin readback with its CPU oracle. It
-is independent of the Vulkan Engine3D native evidence rows. A retained native
-PASS is still required for promotion. If the companion is missing, stale,
+The focused `cuda_generated_font_handoff_spec.spl` authenticates the retained
+source-tracked tuple and proves tampered bytes reject, but currently requires
+the recorded source/version mismatch and semantics revision 1. Canonical
+construction therefore rejects it before installation. After regeneration,
+the same scenario must install the pinned identity, dispatch one canonical
+`FontRenderBatch`, and compare device-origin readback with its CPU oracle. It is
+independent of the Vulkan Engine3D native evidence rows. A retained native PASS
+is still required for promotion. If the companion is missing, stale,
 rejected, or unsupported by the active driver's PTX ISA, CUDA font dispatch is
 unavailable and the existing CPU font fallback applies; primitive CUDA remains
 available. Normal Engine2D construction never loads ignored `build/` output.
@@ -491,12 +495,14 @@ an internal adapter. Font load/unload invalidates the cached atlas identity.
 This source path is implemented but not promoted as native evidence until the
 conditional device test runs and reports device-origin readback.
 
-Vulkan now has a canonical `FontRenderBatch` adapter beside the other Engine2D
-adapters. Session initialization auto-installs the 10,772-byte embedded SPIR-V
-for the common GLSL `main` entry (SHA-256
-`e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`), creates
-the zero-push-constant three-buffer pipeline, and composites validated quads
-into the real device framebuffer. The adapter validates the complete batch before
+Vulkan has a canonical `FontRenderBatch` adapter beside the other Engine2D
+adapters. Session initialization examines the 10,772-byte embedded SPIR-V for
+the common GLSL `main` entry (SHA-256
+`e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`), but its
+semantics revision 1 is stale and installation rejects it before native
+resource creation. After regeneration, the same path creates the
+zero-push-constant three-buffer pipeline and composites validated quads into
+the real device framebuffer. The adapter validates the complete batch before
 atlas/cache mutation, binds atlas/destination/52-byte params buffers, waits for
 each dispatch, reads the framebuffer directly, and compares it with an
 independent CPU oracle, requiring every packed-ARGB `u32` pixel to match. Ordinary unavailable/rejected states replay the CPU
@@ -696,10 +702,12 @@ quad zero through the replacement software surface; required GPU-only policy
 still fails closed. The v5 source gate retains post-loss CPU p95 and identity;
 native device-loss injection remains the NFR-007 execution gate.
 
-Keep the five manual-facing SSpec steps exact: `Load the pinned multilingual
+Keep the five primary SSpec steps exact: `Load the pinned multilingual
 font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
 shared font batch for 2D and 3D`; `Emit the selected font composite program and
-plan compilation`; `Prove native submission and device readback`.
+plan compilation`; `Prove native submission and device readback`. Resolved-host,
+completion, and folded secondary detail steps use the vocabulary recorded in
+the authoritative system-test plan below.
 
 The authoritative gate list and evidence boundaries are in
 [`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`](../../03_plan/sys_test/shared_multilingual_gpu_fonts.md).
