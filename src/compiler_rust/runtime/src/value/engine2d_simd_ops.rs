@@ -25,6 +25,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::{collections, RuntimeValue};
+
 /// Count of span kernels that took a real SIMD (NEON/SSE2) chunked path.
 /// Lets the evidence layer prove the SIMD path actually ran instead of the
 /// scalar fallback (guards against a scalar false-green on a NEON host).
@@ -45,6 +47,76 @@ pub fn engine2d_simd_row_hits() -> u64 {
 #[inline]
 pub fn engine2d_simd_row_reset() {
     SIMD_ROW_HITS.store(0, Ordering::Relaxed);
+}
+
+fn pixel_array(values: &[u32]) -> RuntimeValue {
+    let array = collections::rt_array_new_with_cap(values.len() as i64);
+    for &value in values {
+        if !collections::rt_typed_words_u32_push(array, i64::from(value)) {
+            return RuntimeValue::NIL;
+        }
+    }
+    array
+}
+
+fn pixel_vec(array: RuntimeValue) -> Vec<u32> {
+    let len = collections::rt_array_len_safe(array).max(0) as usize;
+    (0..len)
+        .map(|index| collections::rt_typed_words_u32_at(array, index as i64) as u32)
+        .collect()
+}
+
+/// Rust-hosted ABI for native `[u32]` row construction.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_fill_row_u32(count: i64, color: i64) -> RuntimeValue {
+    pixel_array(&fill_row_u32(count.max(0) as usize, color as u32))
+}
+
+/// Rust-hosted ABI for rectangular pixel-buffer construction.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_fill_rows_u32(
+    width: i64,
+    height: i64,
+    color: i64,
+    _worker_limit: i64,
+) -> RuntimeValue {
+    let Some(count) = width.max(0).checked_mul(height.max(0)) else {
+        return RuntimeValue::NIL;
+    };
+    rt_engine2d_simd_fill_row_u32(count, color)
+}
+
+/// Rust-hosted ABI for native `[u32]` row copies.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_copy_row_u32(src: RuntimeValue) -> RuntimeValue {
+    pixel_array(&copy_row_u32(&pixel_vec(src)))
+}
+
+#[inline]
+fn blend_pixel(src: u32, dst: u32) -> u32 {
+    let sa = src >> 24;
+    if sa == 255 {
+        return src;
+    }
+    if sa == 0 {
+        return dst;
+    }
+    let inv = 255 - sa;
+    let channel = |shift| ((((src >> shift) & 0xff_u32) * sa + ((dst >> shift) & 0xff_u32) * inv) / 255_u32) & 0xff_u32;
+    0xff00_0000_u32 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+/// Rust-hosted ABI for source-over native `[u32]` row blending.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_blend_row_u32(dst: RuntimeValue, src: RuntimeValue) -> RuntimeValue {
+    let dst = pixel_vec(dst);
+    let src = pixel_vec(src);
+    let values: Vec<u32> = dst
+        .iter()
+        .zip(src.iter())
+        .map(|(&dst, &src)| blend_pixel(src, dst))
+        .collect();
+    pixel_array(&values)
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +278,20 @@ mod tests {
             let simd = copy_row_u32(&src);
             assert_eq!(simd, src, "copy count={count}");
         }
+    }
+
+    #[test]
+    fn hosted_row_abi_preserves_pixels_and_blends_source_over() {
+        let filled = rt_engine2d_simd_fill_row_u32(3, 0x8010_2030);
+        assert_eq!(pixel_vec(filled), vec![0x8010_2030; 3]);
+
+        let copied = rt_engine2d_simd_copy_row_u32(filled);
+        assert_eq!(pixel_vec(copied), vec![0x8010_2030; 3]);
+
+        let dst = pixel_array(&[0xff10_2030, 0xff01_0203]);
+        let src = pixel_array(&[0x0000_0000, 0xffff_0000]);
+        let blended = rt_engine2d_simd_blend_row_u32(dst, src);
+        assert_eq!(pixel_vec(blended), vec![0xff10_2030, 0xffff_0000]);
     }
 
     #[cfg(target_arch = "aarch64")]

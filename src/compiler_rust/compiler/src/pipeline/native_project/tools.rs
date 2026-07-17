@@ -1169,6 +1169,43 @@ fn validate_stage4_system_library_ownership(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn validate_stage4_macos_system_ownership(
+    archives: &[PathBuf],
+    cc: &str,
+    build_dir: &Path,
+) -> Result<(), String> {
+    for (archive, spec) in archives.iter().zip(STAGE4_C_PROVIDER_SPECS) {
+        let probe = build_dir.join(format!("{}.system-owner.dylib", spec.source));
+        let mut command = std::process::Command::new(cc);
+        command
+            .arg("-dynamiclib")
+            .arg("-Wl,-undefined,error")
+            .arg(format!("-Wl,-force_load,{}", archive.display()));
+        if matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite) {
+            // These two ABI names are deliberately owned by the adjacent
+            // core-C capsule; every remaining undefined must resolve through
+            // the macOS SDK's SQLite/System libraries in this strict probe.
+            command
+                .arg("-Wl,-U,_rt_string_data")
+                .arg("-Wl,-U,_rt_string_new")
+                .arg("-lsqlite3");
+        }
+        let output = command.arg("-o").arg(&probe).output().map_err(|err| {
+            format!("failed to execute macOS Stage4 system-owner probe for {}: {err}", spec.source)
+        })?;
+        let _ = std::fs::remove_file(&probe);
+        if !output.status.success() {
+            return Err(format!(
+                "macOS Stage4 system-owner probe failed for {}: {}",
+                spec.source,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate only ABI disjointness for the staged Stage4 C components.
 ///
 /// This deliberately does not select the components or prove that their
@@ -1213,17 +1250,20 @@ pub(crate) fn validate_stage4_cli_c_provider_archive_disjointness(
     validate_archive_definition_disjointness(&archives)
 }
 
-/// Build the disabled native GNU/Linux Stage4 C provider components.
+/// Build the native host Stage4 C provider components.
 ///
 /// Callers must separately validate requested-owner completeness before these
 /// archives may be selected for a link.
 pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let target = effective_target();
-    if !cfg!(all(target_os = "linux", target_env = "gnu"))
-        || target.os != simple_common::target::TargetOS::Linux
-        || !target.is_host()
-    {
-        return Err("Stage4 C provider archives currently require the native GNU/Linux host target".to_string());
+    let native_linux = cfg!(all(target_os = "linux", target_env = "gnu"))
+        && target.os == simple_common::target::TargetOS::Linux
+        && target.is_host();
+    let native_macos = cfg!(target_os = "macos")
+        && target.os == simple_common::target::TargetOS::MacOS
+        && target.is_host();
+    if !native_linux && !native_macos {
+        return Err("Stage4 C provider archives currently require a native GNU/Linux or macOS host target".to_string());
     }
     let runtime_root = find_core_c_runtime_source_root()
         .ok_or_else(|| "cannot locate src/runtime for Stage4 C providers".to_string())?;
@@ -1317,12 +1357,18 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
         .collect();
     validate_archive_definition_disjointness(&labeled)?;
 
-    let (libc, libc_definitions) = resolve_stage4_system_library(&cc, &[("libc.so.6", true)])?;
-    let (sqlite, sqlite_definitions) =
-        resolve_stage4_system_library(&cc, &[("libsqlite3.so", true), ("libsqlite3.a", false)])?;
-    validate_stage4_system_library_ownership(&archives[0], &STAGE4_C_PROVIDER_SPECS[0], &libc, &libc_definitions)?;
-    validate_stage4_system_library_ownership(&archives[1], &STAGE4_C_PROVIDER_SPECS[1], &sqlite, &sqlite_definitions)?;
-    validate_stage4_system_library_ownership(&archives[2], &STAGE4_C_PROVIDER_SPECS[2], &libc, &libc_definitions)?;
+    if native_linux {
+        let (libc, libc_definitions) = resolve_stage4_system_library(&cc, &[("libc.so.6", true)])?;
+        let (sqlite, sqlite_definitions) =
+            resolve_stage4_system_library(&cc, &[("libsqlite3.so", true), ("libsqlite3.a", false)])?;
+        validate_stage4_system_library_ownership(&archives[0], &STAGE4_C_PROVIDER_SPECS[0], &libc, &libc_definitions)?;
+        validate_stage4_system_library_ownership(&archives[1], &STAGE4_C_PROVIDER_SPECS[1], &sqlite, &sqlite_definitions)?;
+        validate_stage4_system_library_ownership(&archives[2], &STAGE4_C_PROVIDER_SPECS[2], &libc, &libc_definitions)?;
+    }
+    #[cfg(target_os = "macos")]
+    if native_macos {
+        validate_stage4_macos_system_ownership(&archives, &cc, build_dir)?;
+    }
     Ok(archives)
 }
 
@@ -1390,8 +1436,8 @@ fn project_stage4_archive_closure(
     temp_dir: &Path,
     stem: &str,
 ) -> Result<PathBuf, String> {
-    if !cfg!(all(target_os = "linux", target_env = "gnu")) {
-        return Err("Stage4 archive projection currently requires native GNU/Linux binutils semantics".to_string());
+    if !cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")) {
+        return Err("Stage4 archive projection currently requires native GNU/Linux or macOS linker semantics".to_string());
     }
     let output = temp_dir.join(format!("libsimple_{stem}.a"));
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
@@ -1455,23 +1501,23 @@ fn project_stage4_archive_closure(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
-        closure_cmd
-            .arg("-nostdlib")
-            .arg("-no-pie")
-            .arg("-Wl,-r")
-            .arg("-Wl,--gc-sections");
+        closure_cmd.arg("-nostdlib").arg("-Wl,-r");
+        #[cfg(target_os = "linux")]
+        closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
         for symbol in &requested {
+            #[cfg(target_os = "macos")]
+            closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
+            #[cfg(not(target_os = "macos"))]
             closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
         }
+        #[cfg(target_os = "linux")]
         closure_cmd.arg("-Wl,--start-group");
         for archive in inputs {
             closure_cmd.arg(archive);
         }
-        let closure = closure_cmd
-            .arg("-Wl,--end-group")
-            .arg("-o")
-            .arg(&closure_object)
-            .output()
+        #[cfg(target_os = "linux")]
+        closure_cmd.arg("-Wl,--end-group");
+        let closure = closure_cmd.arg("-o").arg(&closure_object).output()
             .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {cc}: {err}"))?;
         if !closure.status.success() {
             return Err(format!(
@@ -1535,6 +1581,8 @@ fn project_stage4_archive_closure(
             .arg("--remove-section=.dtors.*")
             .arg("--remove-section=__mod_init_func")
             .arg("--remove-section=__mod_term_func")
+            .arg("--remove-section=__DATA,__mod_init_func")
+            .arg("--remove-section=__DATA,__mod_term_func")
             .arg(&closure_object)
             .arg(&localized_object)
             .output()
@@ -1638,8 +1686,8 @@ pub(crate) fn build_compiler_backfill_archive(
     provider_archives: &[PathBuf],
     temp_dir: &Path,
 ) -> Result<PathBuf, String> {
-    if !cfg!(target_os = "linux") {
-        return Err("compiler backfill closure currently requires GNU/Linux binutils semantics".to_string());
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Err("compiler backfill closure currently requires GNU/Linux or macOS linker semantics".to_string());
     }
 
     let output = temp_dir.join("libsimple_compiler_backfill.a");
@@ -1709,12 +1757,13 @@ pub(crate) fn build_compiler_backfill_archive(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
-        closure_cmd
-            .arg("-nostdlib")
-            .arg("-no-pie")
-            .arg("-Wl,-r")
-            .arg("-Wl,--gc-sections");
+        closure_cmd.arg("-nostdlib").arg("-Wl,-r");
+        #[cfg(target_os = "linux")]
+        closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
         for export in &manifest {
+            #[cfg(target_os = "macos")]
+            closure_cmd.arg(format!("-Wl,-u,_{export}"));
+            #[cfg(not(target_os = "macos"))]
             closure_cmd.arg(format!("-Wl,--undefined={export}"));
         }
         let closure_result = closure_cmd
@@ -1787,6 +1836,8 @@ pub(crate) fn build_compiler_backfill_archive(
             .arg("--remove-section=.dtors.*")
             .arg("--remove-section=__mod_init_func")
             .arg("--remove-section=__mod_term_func")
+            .arg("--remove-section=__DATA,__mod_init_func")
+            .arg("--remove-section=__DATA,__mod_term_func")
             .arg(&closure_object)
             .arg(&localized_object)
             .output()

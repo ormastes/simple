@@ -563,7 +563,7 @@ impl NativeProjectBuilder {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn quote_linker_response_path(path: &Path) -> String {
         let raw = path.to_string_lossy();
         debug_assert!(
@@ -575,7 +575,7 @@ impl NativeProjectBuilder {
         format!("\"{escaped}\"")
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn write_linker_object_response_file(temp_dir: &Path, object_paths: &[PathBuf]) -> Result<PathBuf, String> {
         let rsp_path = temp_dir.join("spl_objects.rsp");
         let mut quoted_paths = Vec::with_capacity(object_paths.len());
@@ -591,7 +591,7 @@ impl NativeProjectBuilder {
         Ok(rsp_path)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn stage4_live_runtime_requests(
         temp_dir: &Path,
         object_paths: &[PathBuf],
@@ -612,15 +612,17 @@ impl NativeProjectBuilder {
         let response = Self::write_linker_object_response_file(&projection_dir, &inputs)?;
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
-        let output = std::process::Command::new(&cc)
-            .args([
-                "-nostdlib",
-                "-no-pie",
-                "-Wl,-r",
-                "-Wl,--gc-sections",
-                "-Wl,-u,main",
-                "-Wl,-u,spl_main",
-            ])
+        let mut command = std::process::Command::new(&cc);
+        command.arg("-nostdlib").arg("-Wl,-r");
+        #[cfg(target_os = "linux")]
+        command
+            .arg("-no-pie")
+            .arg("-Wl,--gc-sections")
+            .arg("-Wl,-u,main")
+            .arg("-Wl,-u,spl_main");
+        #[cfg(target_os = "macos")]
+        command.arg("-Wl,-u,_main").arg("-Wl,-u,_spl_main");
+        let output = command
             .arg(format!("@{}", response.display()))
             .arg("-o")
             .arg(&live)
@@ -1009,13 +1011,13 @@ int main(int argc, char** argv) {
             }
             other => other,
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let stage4_c_providers = if self.is_authorized_stage4_compiler_entry() {
             build_stage4_cli_c_provider_archives(&temp_dir.join("stage4_c_providers"))?
         } else {
             Vec::new()
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let stage4_c_providers: Vec<PathBuf> = Vec::new();
         let exact_stage4 = !stage4_c_providers.is_empty();
         if exact_stage4 && std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() != Ok("1") {
@@ -1041,7 +1043,7 @@ int main(int argc, char** argv) {
         }
         let compiler_backfill =
             self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), &backfill_providers, temp_dir)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let stage4_profile = if exact_stage4 {
             let (core, is_native_all) = selected_runtime
                 .as_ref()
@@ -1116,7 +1118,7 @@ int main(int argc, char** argv) {
         } else {
             None
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let stage4_profile: Option<(PathBuf, PathBuf, PathBuf)> = None;
         let has_native_all = selected_runtime
             .as_ref()
@@ -1241,7 +1243,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         if exact_stage4 {
             let (stubs_o, rust_capsule, c_capsule) = stage4_profile.as_ref().expect("validated Stage4 profile");
             let backfill = compiler_backfill.as_ref().expect("validated Stage4 compiler backfill");
@@ -1256,9 +1258,17 @@ int main(int argc, char** argv) {
             )?);
             roots.sort();
             roots.dedup();
+            #[cfg(target_os = "macos")]
+            for root in &roots {
+                cmd.arg(format!("-Wl,-u,_{root}"));
+            }
+            #[cfg(not(target_os = "macos"))]
             Self::add_elf_undefined_roots(&mut cmd, &roots);
-            cmd.arg(stubs_o)
-                .arg("-Wl,--start-group")
+            cmd.arg(stubs_o);
+            #[cfg(target_os = "macos")]
+            cmd.arg(backfill).arg(rust_capsule).arg(c_capsule);
+            #[cfg(not(target_os = "macos"))]
+            cmd.arg("-Wl,--start-group")
                 .arg(backfill)
                 .arg(rust_capsule)
                 .arg(c_capsule)
@@ -1414,6 +1424,10 @@ int main(int argc, char** argv) {
                 }
                 cmd.arg(format!("-l{}", lib));
             }
+            #[cfg(target_os = "macos")]
+            if exact_stage4 {
+                cmd.arg("-lsqlite3");
+            }
             if require_openssl {
                 cmd.arg("-lssl").arg("-lcrypto");
             }
@@ -1426,7 +1440,7 @@ int main(int argc, char** argv) {
             }
         }
         #[cfg(target_os = "macos")]
-        if has_native_all || host_gpu_lane {
+        if has_native_all || host_gpu_lane || exact_stage4 {
             add_macos_native_all_host_support(&mut cmd);
         }
 

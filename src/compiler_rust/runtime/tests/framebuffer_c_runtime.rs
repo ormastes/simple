@@ -10,6 +10,9 @@ unsafe extern "C" {
         copy_w: u64,
         copy_h: u64,
     );
+    fn rt_engine2d_rocm_upload_pixels(dst: i64, pixels: i64, count: i64) -> i64;
+    fn rt_engine2d_rocm_download_pixels(src: i64, pixels: i64, byte_size: i64) -> i64;
+    fn rt_engine2d_rocm_upload_host_buf(dst: i64, host_buf: i64, byte_size: i64) -> i64;
 }
 
 #[test]
@@ -40,4 +43,13 @@ fn overlapping_downward_blit_preserves_later_source_rows() {
         rt_fb_blit32(destination, 2, source, 2, 2, 2);
     }
     assert_eq!(pixels, [1, 2, 1, 2, 3, 4]);
+}
+
+#[test]
+fn unavailable_hosted_rocm_pixel_transport_fails_closed() {
+    unsafe {
+        assert_eq!(rt_engine2d_rocm_upload_pixels(1, 2, 3), -3);
+        assert_eq!(rt_engine2d_rocm_download_pixels(1, 2, 3), -3);
+        assert_eq!(rt_engine2d_rocm_upload_host_buf(1, 2, 3), -3);
+    }
 }

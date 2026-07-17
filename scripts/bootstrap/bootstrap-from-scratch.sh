@@ -36,7 +36,7 @@ Options:
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
                      SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
   --full-cli         Relink the full CLI after the staged pure-Simple build
-                     (currently Linux-only while the capsule is ported).
+                     (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
@@ -183,9 +183,14 @@ target=$(normalize_target "${target}")
 
 host_os=$(uname -s 2>/dev/null || echo unknown)
 
-if [ "${full_cli}" -eq 1 ] && [ "${host_os}" != "Linux" ]; then
-  echo "error: Stage 4 full-CLI capsule preparation is currently Linux-only" >&2
-  exit 1
+if [ "${full_cli}" -eq 1 ]; then
+  case "${host_os}" in
+    Linux|Darwin) ;;
+    *)
+      echo "error: Stage 4 full-CLI capsule preparation requires native Linux or macOS" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # FreeBSD must build inside FreeBSD. Linux hosts use the QEMU verifier, which

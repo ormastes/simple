@@ -96,7 +96,7 @@ pub(crate) fn runtime_archive_has_bootstrap_cli_symbols(path: &Path) -> bool {
 
 impl NativeProjectBuilder {
     pub(crate) fn is_authorized_stage4_compiler_entry(&self) -> bool {
-        if !cfg!(target_os = "linux")
+        if !cfg!(any(target_os = "linux", target_os = "macos"))
             || std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1")
             || std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() != Ok("1")
         {

@@ -2309,7 +2309,7 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
     assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
@@ -2371,9 +2371,9 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
-fn test_stage4_compiler_entry_is_disabled_without_gnu_binutils_capsule_support() {
+fn test_stage4_compiler_entry_is_disabled_without_supported_capsule_linker() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
