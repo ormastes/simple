@@ -1,0 +1,219 @@
+# Freestanding/kernel-risk pattern lints (entry-closure codegen defects
+# C1/C4/C5/C7). Scoped to src/os/** and examples/09_embedded/** only — these
+# are heuristic, non-type-checked line patterns that avoid known miscompiles
+# in the freestanding cranelift backend until the compiler fixes land. See
+# doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md
+use compiler.tools.lint.main.*
+
+class OsFreestandingWarning:
+    code: String
+    line: Int
+    message: String
+    hint: String
+
+fn _fsk_doc_ref() -> String:
+    "see doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md"
+
+# True when `path` is inside a freestanding/kernel-risk build tree where the
+# entry-closure codegen defects apply. Kept narrow so these heuristic rules
+# never fire across the rest of the repo.
+fn os_freestanding_lint_in_scope(path: String) -> Bool:
+    path.contains("src/os/") or path.contains("examples/09_embedded/")
+
+fn _fsk_is_ident_char(ch: String) -> Bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+# Longest suffix of `s` made of identifier/dot characters (stops at "(", " ",
+# operators, etc). Used to pull the left-hand operand token off an ==/!= line.
+fn _fsk_trailing_ident_token(raw: String) -> String:
+    val s = raw.trim()
+    val end = s.len()
+    var start = end
+    while start > 0:
+        val ch = s.substring(start - 1, start)
+        if _fsk_is_ident_char(ch) or ch == ".":
+            start = start - 1
+        else:
+            break
+    s.substring(start, end)
+
+# Longest prefix of `s` (after trimming) made of identifier/dot characters.
+# Returns "" if the token is immediately followed by "(" — that is a call,
+# not a bare Type.Variant literal.
+fn _fsk_leading_ident_token(raw: String) -> String:
+    val s = raw.trim()
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if _fsk_is_ident_char(ch) or ch == ".":
+            i = i + 1
+        else:
+            break
+    if i < s.len() and s.substring(i, i + 1) == "(":
+        return ""
+    s.substring(0, i)
+
+# A token looks like a bare enum-variant literal ("Type.Variant") when it has
+# exactly one dot and the part before it starts with an uppercase letter.
+fn _fsk_looks_like_enum_literal(token: String) -> Bool:
+    if not token.contains("."):
+        return false
+    val parts = token.split(".")
+    if parts.len() != 2:
+        return false
+    val type_part = parts[0]
+    val variant_part = parts[1]
+    if type_part == "" or variant_part == "":
+        return false
+    val c0 = type_part.substring(0, 1)
+    c0 >= "A" and c0 <= "Z"
+
+# C5: enum `==`/`!=` comparison miscompiles under freestanding codegen (a
+# match-based predicate works). Heuristic: one side of the operator is a bare
+# `Type.Variant` token.
+fn _fsk_check_enum_eq(trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+    if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+        return nil
+    var op_idx = trimmed.find("==")
+    if op_idx < 0:
+        op_idx = trimmed.find("!=")
+    if op_idx < 0:
+        return nil
+    val left_token = _fsk_trailing_ident_token(trimmed.slice(0, op_idx))
+    val right_token = _fsk_leading_ident_token(trimmed.slice(op_idx + 2))
+    if not (_fsk_looks_like_enum_literal(left_token) or _fsk_looks_like_enum_literal(right_token)):
+        return nil
+    Some(OsFreestandingWarning(
+        code: "FSK001",
+        line: line_num,
+        message: "entry-closure defect C5: enum == miscompiles under freestanding codegen — use match; {_fsk_doc_ref()}",
+        hint: "Replace the ==/!= comparison with a match-based predicate (see nvme_namespace_mode_is_system in src/os/drivers/nvme/nvme_storage_model.spl); suppress a false positive with @allow(freestanding_enum_eq)"
+    ))
+
+# C4: anonymous tuple RETURN types have swapped positional reads under
+# freestanding codegen. Heuristic: `fn ... -> (A, B, ...)` with a top-level
+# comma inside the return-type parens.
+fn _fsk_check_anon_tuple_return(trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+    if not (trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")):
+        return nil
+    val arrow_idx = trimmed.find("->")
+    if arrow_idx < 0:
+        return nil
+    val after = trimmed.slice(arrow_idx + 2).trim()
+    if not after.starts_with("("):
+        return nil
+    var depth = 0
+    var i = 0
+    var comma_at_top = false
+    while i < after.len():
+        val ch = after.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                break
+        elif ch == "," and depth == 1:
+            comma_at_top = true
+        i = i + 1
+    if not comma_at_top:
+        return nil
+    Some(OsFreestandingWarning(
+        code: "FSK002",
+        line: line_num,
+        message: "entry-closure defect C4: anonymous tuple return positional members read swapped under freestanding codegen — use a named struct; {_fsk_doc_ref()}",
+        hint: "Replace the anonymous tuple return type with a named struct (see Engine2dDrawIrRenderOutcome in draw_ir_adv.spl for the pattern)"
+    ))
+
+fn _fsk_conversion_methods() -> [text]:
+    ["to_u8", "to_u16", "to_u32", "to_u64", "to_i8", "to_i16", "to_i32", "to_i64",
+     "to_usize", "to_isize", "to_f32", "to_f64"]
+
+# C7: bare `.to_u32()`/`.to_u16()`/... conversion calls on scalars can
+# dispatch to the wrong struct's method via the freestanding alias bridge.
+# Heuristic only: method name is in a small conversion allowlist and is
+# called with no arguments; no receiver type inference is attempted.
+fn _fsk_check_bare_conversion(trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+    if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+        return nil
+    for method in _fsk_conversion_methods():
+        val pattern = ".{method}()"
+        if trimmed.contains(pattern):
+            return Some(OsFreestandingWarning(
+                code: "FSK003",
+                line: line_num,
+                message: "entry-closure defect C7: bare .{method}() scalar conversion can dispatch to the wrong struct's method under the freestanding alias bridge — use an `as` cast; {_fsk_doc_ref()}",
+                hint: "Replace .{method}() with an `as` cast (e.g. `x as {method.slice(3)}`); suppress a false positive with @allow(freestanding_bare_conversion)"
+            ))
+    nil
+
+# C1: module-global `val`/`var X = <call-expr>` initializers are never
+# emitted under freestanding codegen (the global stays nil). Heuristic:
+# zero-indent val/var declaration (optionally `pub`/`export`-qualified) whose
+# right-hand side contains a call.
+fn _fsk_global_decl_body(trimmed: String) -> String:
+    var rest = trimmed
+    if rest.starts_with("pub "):
+        rest = rest.slice(4)
+    elif rest.starts_with("export "):
+        rest = rest.slice(7)
+    rest
+
+fn _fsk_check_global_call_init(line: String, trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+    if indent_width(line) != 0:
+        return nil
+    val decl = _fsk_global_decl_body(trimmed)
+    if not (decl.starts_with("val ") or decl.starts_with("var ")):
+        return nil
+    val eq_idx = decl.find("=")
+    if eq_idx < 0:
+        return nil
+    if eq_idx + 1 < decl.len() and decl.substring(eq_idx, eq_idx + 2) == "==":
+        return nil
+    var rhs = decl.slice(eq_idx + 1).trim()
+    # Strip a trailing "# comment" before checking for a call paren — a
+    # paren inside a trailing comment (e.g. "= 0x10   # bit (4)") is not a
+    # call expression.
+    val comment_idx = rhs.find("#")
+    if comment_idx >= 0:
+        rhs = rhs.slice(0, comment_idx).trim()
+    if not rhs.contains("("):
+        return nil
+    Some(OsFreestandingWarning(
+        code: "FSK004",
+        line: line_num,
+        message: "entry-closure defect C1: module-global val/var initialized from a call expression is never emitted under freestanding codegen and stays nil — move the call into an explicit ensure/init function invoked from entry; {_fsk_doc_ref()}",
+        hint: "Declare the global with a nil/default literal and add an `*_ensure_*()` init function called once from the kernel entry point (see font_renderer_ensure_runtime_locks in font_renderer.spl)"
+    ))
+
+fn lint_os_freestanding_patterns(path: String, content: String) -> [OsFreestandingWarning]:
+    var warnings: [OsFreestandingWarning] = []
+    if not os_freestanding_lint_in_scope(path):
+        return warnings
+    val lines = content.split("\n")
+    var line_num = 1
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            match _fsk_check_enum_eq(trimmed, line_num):
+                case Some(w):
+                    warnings.push(w)
+                case nil:
+                    val _ = 0
+            match _fsk_check_anon_tuple_return(trimmed, line_num):
+                case Some(w):
+                    warnings.push(w)
+                case nil:
+                    val _ = 0
+            match _fsk_check_bare_conversion(trimmed, line_num):
+                case Some(w):
+                    warnings.push(w)
+                case nil:
+                    val _ = 0
+            match _fsk_check_global_call_init(line, trimmed, line_num):
+                case Some(w):
+                    warnings.push(w)
+                case nil:
+                    val _ = 0
+        line_num = line_num + 1
+    warnings
