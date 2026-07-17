@@ -60,6 +60,12 @@ or disabled stub-fallback guard is not equivalent evidence. Treat this as
 post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates.
 
+If a stale deployed pure-Simple test runner crashes during repair, temporary
+Rust-runner evidence may use only the explicit `SIMPLE_TEST_RUNNER_RUST=1`
+seed opt-in. Bound it with the canonical resource cap, `timeout -k`, and
+redirected output. Never treat that opt-in as production fallback or release
+evidence; remove it after the rebuilt pure runner passes the same fixture.
+
 For release-bound SPipe lanes, the final test-runner evidence is
 `bin/simple test test --whole --mode=interpreter`. `--whole` must retain all
 spec/long-test discovery and execute both `.spl` comment doctests and configured

@@ -62,16 +62,9 @@ Documentation was generated from executable SPipe scenarios.
 - converts seconds to milliseconds
 - detects timeout by exit_code -1
 - normal exit code is not timeout
-- env var name is SIMPLE_TEST_RUNNER_RUST
-- guard value is 1
-- Rust runner detects guard and skips Simple dispatch
-- falls back for --watch flag
-- falls back for --parallel flag
-- falls back for --json flag
-- does not fall back for --doc flag
-- does not fall back for --list flag
-- does not fall back for --seed flag
-- does not fall back for --list-skip-features
+- Rust seed accepts only the explicit temporary runner opt-in
+- internal child owners set the same recursion guard
+- async owners inherit output so verbose children cannot fill unread pipes
 - interpreter mode runs file directly
 - SMF mode compiles then runs .smf
 - native mode compiles then runs binary

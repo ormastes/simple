@@ -818,6 +818,11 @@ duplicate-check outcomes plus the aggregate pass marker. Raw source, a deployed
 wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
+During repair of a crashing stale pure-Simple runner, the Rust bootstrap may
+run test evidence only through explicit `SIMPLE_TEST_RUNNER_RUST=1`, the
+canonical resource cap, `timeout -k`, and redirected output. This is temporary
+repair evidence, never a production fallback or release PASS; remove it once
+the rebuilt pure runner passes the same fixture.
 For bootstrap MCP acceptance, run the shared bounded checker once after both
 Stage 5 outputs exist and before deploy. Point it at the exact fresh MCP/LSP
 paths, disable fallback, send initialize/initialized/tools-list, and require

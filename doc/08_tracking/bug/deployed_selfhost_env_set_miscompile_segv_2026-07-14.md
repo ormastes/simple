@@ -224,3 +224,18 @@ remained CPU-bound for five minutes without a diagnostic or output binary, so
 the third bounded build cycle was stopped. No runner artifact or fail/empty
 calibration PASS is claimed; resume only with a newer admitted pure-Simple
 compiler/runtime.
+
+## 2026-07-17 test-runner crash and bounded recovery
+
+The retained release binary still exits 139 even for `test --help` because its
+linked `rt_env_set` is the stale two-argument implementation described above;
+no test-runner or daemon process remains afterward. Current source ABI remains
+correct, so the fix is rebuild/redeploy rather than a caller workaround.
+
+Two Rust process owners also violated the pure runner's polling contract: a
+live child must return `-2`, remain tracked, and be reaped after kill. Rust
+native returned `-1` at deadline, while the Rust interpreter ignored the
+deadline and blocked. Both owners now share `-2` timeout semantics and focused
+spawn/wait/kill tests. Until redeploy, the seed's existing
+`SIMPLE_TEST_RUNNER_RUST=1` path is explicitly available only as bounded,
+redirected repair evidence; normal `simple test` remains pure-Simple.

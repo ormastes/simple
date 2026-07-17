@@ -147,6 +147,15 @@ struct CommandEntry {
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     let pure_simple_tool = command_is_pure_simple_tool(entry.name);
 
+    // Explicit repair-only escape hatch. Normal `simple test` remains pure-Simple;
+    // this exact opt-in keeps test evidence available while a stale deployed
+    // self-hosted runner is rebuilt.
+    if entry.name == "test"
+        && temporary_rust_test_runner_override(std::env::var("SIMPLE_TEST_RUNNER_RUST").ok().as_deref())
+    {
+        return run_rust_handler(&entry.rust_handler, ctx);
+    }
+
     if entry.name == "native-build"
         && native_build_rust_override(std::env::var("SIMPLE_NATIVE_BUILD_RUST").ok().as_deref())
     {
@@ -259,6 +268,10 @@ fn native_build_wants_cross_target(args: &[String]) -> bool {
 }
 
 fn native_build_rust_override(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn temporary_rust_test_runner_override(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
@@ -503,7 +516,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
-    // Testing - pure-Simple runner only. Do not silently fall back to Rust.
+    // Testing stays pure-Simple unless the explicit repair-only override above is set.
     CommandEntry {
         name: "test",
         app_path: "src/app/test_runner_new/main.spl",
@@ -1012,13 +1025,6 @@ pub extern "C" fn spl_get_arg(index: i64) -> *const std::os::raw::c_char {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    // TEMPORARY debug hook for bug C8 (trait-object vtable dispatch
-    // out-of-bounds) investigation. Remove before landing the fix.
-    if std::env::var("SIMPLE_DEBUG_VTABLE_TEST").is_ok() {
-        simple_compiler::codegen::vtable_c8_debug::run();
-        return;
-    }
-
     // macOS GUI mode: run on main thread (Cocoa requires EventLoop on main thread).
     // Shared-WM browser mode also needs this even when SIMPLE_GUI is not set.
     if std::env::var("SIMPLE_GUI").is_ok() || browser_shared_wm_needs_main_thread() {
@@ -1737,6 +1743,15 @@ mod tests {
     }
 
     #[test]
+    fn temporary_rust_test_runner_override_requires_exact_one() {
+        assert!(temporary_rust_test_runner_override(Some("1")));
+        assert!(!temporary_rust_test_runner_override(Some("0")));
+        assert!(!temporary_rust_test_runner_override(Some("true")));
+        assert!(!temporary_rust_test_runner_override(Some("")));
+        assert!(!temporary_rust_test_runner_override(None));
+    }
+
+    #[test]
     fn file_execution_options_extract_target_and_strip_runtime_flags() {
         let args = vec![
             "script.spl".to_string(),
@@ -1799,6 +1814,9 @@ mod tests {
             "negative index must return null, not underflow the `as usize` cast"
         );
         let out_of_range = spl_arg_count() + 1000;
-        assert!(spl_get_arg(out_of_range).is_null(), "out-of-range index must return null, not read OOB");
+        assert!(
+            spl_get_arg(out_of_range).is_null(),
+            "out-of-range index must return null, not read OOB"
+        );
     }
 }

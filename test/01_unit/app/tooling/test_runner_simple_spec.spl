@@ -26,6 +26,8 @@
 # | Test DB | Writes run records to `doc/08_tracking/test/test_db.sdn` |
 # | Skip features | Lists unimplemented features from .skip files |
 
+extern fn rt_file_read_text(path: text) -> text
+
 fn strip_test_suffix(stem: text) -> text:
     if stem.ends_with("_spec"):
         return stem[0:stem.len() - 5]
@@ -335,63 +337,25 @@ describe "Simple Test Runner Recursion Guard":
     #
     # `SIMPLE_TEST_RUNNER_RUST=1` prevents infinite dispatch.
 
-    it "env var name is SIMPLE_TEST_RUNNER_RUST":
-        val guard_var = "SIMPLE_TEST_RUNNER_RUST"
-        expect(guard_var).to_equal("SIMPLE_TEST_RUNNER_RUST")
+    it "Rust seed accepts only the explicit temporary runner opt-in":
+        val driver = rt_file_read_text("src/compiler_rust/driver/src/main.rs")
+        expect(driver).to_contain("temporary_rust_test_runner_override")
+        expect(driver).to_contain("value == Some(\"1\")")
+        expect(driver).to_contain("return run_rust_handler(&entry.rust_handler, ctx)")
 
-    it "guard value is 1":
-        val guard_value = "1"
-        expect(guard_value).to_equal("1")
+    it "internal child owners set the same recursion guard":
+        val runtime = rt_file_read_text("src/compiler_rust/runtime/src/value/cli_sffi.rs")
+        val interpreter = rt_file_read_text("src/compiler_rust/compiler/src/interpreter_extern/cli.rs")
+        expect(runtime).to_contain("cmd.env(\"SIMPLE_TEST_RUNNER_RUST\", \"1\")")
+        expect(interpreter).to_contain("cmd.env(\"SIMPLE_TEST_RUNNER_RUST\", \"1\")")
 
-    it "Rust runner detects guard and skips Simple dispatch":
-        val guard_set = true
-        val uses_rust = guard_set
-        expect(uses_rust).to_equal(true)
-
-
-# ============================================================================
-# Test Group 6: Rust Fallback Detection
-# ============================================================================
-
-describe "Simple Test Runner Rust Fallback":
-    # ## Automatic Rust Fallback
-    #
-    # Advanced flags automatically route to the Rust runner.
-
-    it "falls back for --watch flag":
-        val flag = "--watch"
-        val needs_rust = flag == "--watch"
-        expect(needs_rust).to_equal(true)
-
-    it "falls back for --parallel flag":
-        val flag = "--parallel"
-        val needs_rust = flag == "--parallel"
-        expect(needs_rust).to_equal(true)
-
-    it "falls back for --json flag":
-        val flag = "--json"
-        val needs_rust = flag == "--json"
-        expect(needs_rust).to_equal(true)
-
-    it "does not fall back for --doc flag":
-        val flag = "--doc"
-        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-        expect(needs_rust).to_equal(false)
-
-    it "does not fall back for --list flag":
-        val flag = "--list"
-        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-        expect(needs_rust).to_equal(false)
-
-    it "does not fall back for --seed flag":
-        val flag = "--seed"
-        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-        expect(needs_rust).to_equal(false)
-
-    it "does not fall back for --list-skip-features":
-        val flag = "--list-skip-features"
-        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-        expect(needs_rust).to_equal(false)
+    it "async owners inherit output so verbose children cannot fill unread pipes":
+        val runtime_process = rt_file_read_text("src/compiler_rust/runtime/src/value/sffi/env_process.rs")
+        val interpreter_process = rt_file_read_text("src/compiler_rust/compiler/src/interpreter_extern/system.rs")
+        expect(runtime_process).to_contain("command.stdout(Stdio::inherit())")
+        expect(runtime_process).to_contain("command.stderr(Stdio::inherit())")
+        expect(interpreter_process).to_contain(".stdout(std::process::Stdio::inherit())")
+        expect(interpreter_process).to_contain(".stderr(std::process::Stdio::inherit())")
 
 
 # ============================================================================

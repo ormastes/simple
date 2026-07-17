@@ -633,8 +633,8 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
     match command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
     {
         Ok(child) => {
@@ -649,13 +649,13 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Wait for a spawned process to complete
 ///
-/// Callable from Simple as: `rt_process_wait(pid)`
+/// Callable from Simple as: `rt_process_wait(pid, timeout_ms)`
 ///
 /// # Arguments
-/// * `args` - Evaluated arguments [pid: Int]
+/// * `args` - Evaluated arguments [pid: Int, optional timeout_ms: Int]
 ///
 /// # Returns
-/// * Int - exit code, or -1 on failure
+/// * Int - exit code, -2 on timeout, or -1 on failure
 pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_process_wait requires 1 argument (pid)"));
@@ -665,6 +665,37 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(n) => *n,
         _ => return Err(CompileError::runtime("rt_process_wait: pid must be an integer")),
     };
+
+    let timeout_ms = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        Some(_) => return Err(CompileError::runtime("rt_process_wait: timeout must be an integer")),
+        None => 0,
+    };
+
+    if timeout_ms > 0 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+        loop {
+            let poll = {
+                let mut processes = SPAWNED_PROCESSES.lock().unwrap();
+                match processes.get_mut(&pid) {
+                    Some(child) => child.try_wait(),
+                    None => return Ok(Value::Int(-1)),
+                }
+            };
+            match poll {
+                Ok(Some(status)) => {
+                    SPAWNED_PROCESSES.lock().unwrap().remove(&pid);
+                    return Ok(Value::Int(status.code().unwrap_or(-1) as i64));
+                }
+                Ok(None) if std::time::Instant::now() >= deadline => return Ok(Value::Int(-2)),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => {
+                    SPAWNED_PROCESSES.lock().unwrap().remove(&pid);
+                    return Ok(Value::Int(-1));
+                }
+            }
+        }
+    }
 
     let mut processes = SPAWNED_PROCESSES.lock().unwrap();
     match processes.remove(&pid) {
@@ -717,12 +748,13 @@ pub fn rt_process_kill(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(n) => *n,
         _ => return Err(CompileError::runtime("rt_process_kill: pid must be an integer")),
     };
-    let mut processes = SPAWNED_PROCESSES.lock().unwrap();
-    match processes.get_mut(&pid) {
-        Some(child) => match child.kill() {
-            Ok(()) => Ok(Value::Bool(true)),
-            Err(_) => Ok(Value::Bool(false)),
-        },
+    let child = SPAWNED_PROCESSES.lock().unwrap().remove(&pid);
+    match child {
+        Some(mut child) => {
+            let killed = child.kill().is_ok();
+            let reaped = child.wait().is_ok();
+            Ok(Value::Bool(killed && reaped))
+        }
         None => Ok(Value::Bool(false)),
     }
 }
@@ -835,6 +867,29 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_wait_timeout_keeps_child_tracked_until_killed() {
+        let pid = rt_process_spawn_async(&[
+            Value::text("/bin/sh".to_string()),
+            Value::Array(Arc::new(vec![
+                Value::text("-c".to_string()),
+                Value::text("sleep 30".to_string()),
+            ])),
+        ])
+        .expect("spawn")
+        .as_int()
+        .expect("pid");
+        assert!(pid > 0);
+        assert_eq!(
+            rt_process_wait(&[Value::Int(pid), Value::Int(10)]).unwrap(),
+            Value::Int(-2)
+        );
+        assert_eq!(rt_process_is_running(&[Value::Int(pid)]).unwrap(), Value::Bool(true));
+        assert_eq!(rt_process_kill(&[Value::Int(pid)]).unwrap(), Value::Bool(true));
+        assert_eq!(rt_process_is_running(&[Value::Int(pid)]).unwrap(), Value::Bool(false));
+    }
 
     #[test]
     fn test_sys_get_args() {

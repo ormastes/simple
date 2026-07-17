@@ -679,165 +679,23 @@ expect(timed_out).to_equal(false)
 
 ### Simple Test Runner Recursion Guard
 
-#### env var name is SIMPLE_TEST_RUNNER_RUST
+#### Rust seed accepts only the explicit temporary runner opt-in
 
-<details>
-<summary>Executable SSpec</summary>
+The executable scenario reads the Rust driver and requires an exact
+`SIMPLE_TEST_RUNNER_RUST=1` dispatch into the existing Rust test handler.
+Unset, `0`, `true`, and empty values remain on the pure-Simple path.
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+#### Internal child owners set the same recursion guard
 
-```simple
-val guard_var = "SIMPLE_TEST_RUNNER_RUST"
-expect(guard_var).to_equal("SIMPLE_TEST_RUNNER_RUST")
-```
+The runtime and interpreter child-launch owners both set the exact guard value.
+This prevents recursive Simple-to-Rust test dispatch without enabling an
+automatic production fallback.
 
-</details>
+#### Async owners inherit output so verbose children cannot fill unread pipes
 
-#### guard value is 1
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val guard_value = "1"
-expect(guard_value).to_equal("1")
-```
-
-</details>
-
-#### Rust runner detects guard and skips Simple dispatch
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val guard_set = true
-val uses_rust = guard_set
-expect(uses_rust).to_equal(true)
-```
-
-</details>
-
-### Simple Test Runner Rust Fallback
-
-#### falls back for --watch flag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--watch"
-val needs_rust = flag == "--watch"
-expect(needs_rust).to_equal(true)
-```
-
-</details>
-
-#### falls back for --parallel flag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--parallel"
-val needs_rust = flag == "--parallel"
-expect(needs_rust).to_equal(true)
-```
-
-</details>
-
-#### falls back for --json flag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--json"
-val needs_rust = flag == "--json"
-expect(needs_rust).to_equal(true)
-```
-
-</details>
-
-#### does not fall back for --doc flag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--doc"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-#### does not fall back for --list flag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--list"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-#### does not fall back for --seed flag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--seed"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-#### does not fall back for --list-skip-features
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val flag = "--list-skip-features"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
+The native runtime and interpreter async spawn owners inherit stdout and stderr.
+Because their public contract exposes only a PID and no pipe reader, this avoids
+the full-pipe deadlock that previously made chatty children appear hung.
 
 ### Simple Test Runner Execution Modes
 

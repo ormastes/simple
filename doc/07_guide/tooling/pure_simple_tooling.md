@@ -93,6 +93,16 @@ source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
 The gate establishes command dispatch and minimal behavior only. Release still
 requires the full test, lint, and duplication evidence for its scope.
 
+### Temporary Rust test-runner recovery
+
+Normal `simple test` remains pure-Simple. While repairing a stale deployed
+self-hosted runner, the Rust bootstrap accepts only the explicit
+`SIMPLE_TEST_RUNNER_RUST=1` opt-in and never falls back automatically. Run that
+temporary evidence through `scripts/resource/run_capped.shs`, a
+`timeout -k 5s ...` wall, and redirected output; inspect only the bounded tail.
+Remove the opt-in once the rebuilt pure runner passes the same fixture. Rust
+runner output is repair evidence, not production or release qualification.
+
 ## Completion Gate
 
 Workflow/tooling changes are not complete until matching process documentation

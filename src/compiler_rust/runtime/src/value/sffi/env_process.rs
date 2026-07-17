@@ -552,8 +552,8 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
     }
 
     command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
 
     match command.spawn() {
         Ok(child) => {
@@ -650,7 +650,7 @@ pub extern "C" fn rt_process_exists(pid: i64) -> bool {
 /// Wait for a previously spawned async process to finish.
 /// If timeout_ms <= 0, waits indefinitely.
 /// If timeout_ms > 0, polls in a loop up to the timeout.
-/// Returns exit code, or -1 on error/timeout.
+/// Returns exit code, -2 on timeout, or -1 on error.
 /// Removes the child from the registry on success.
 #[no_mangle]
 pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
@@ -683,7 +683,7 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
                         Ok(None) => {
                             // Still running, check timeout
                             if std::time::Instant::now() >= deadline {
-                                return -1; // Timeout
+                                return -2; // Timeout; child remains tracked.
                             }
                         }
                         Err(_) => {
@@ -1259,6 +1259,21 @@ mod tests {
         let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
         assert_eq!(result, -1);
         assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_wait_timeout_keeps_child_tracked_until_killed() {
+        unsafe {
+            let cmd = "/bin/sh";
+            let args = runtime_args(&["-c", "sleep 30"]);
+            let pid = rt_process_spawn_async(cmd.as_ptr(), cmd.len() as u64, args);
+            assert!(pid > 0);
+            assert_eq!(rt_process_wait(pid, 10), -2);
+            assert!(rt_process_is_running(pid));
+            assert!(rt_process_kill(pid));
+            assert!(!rt_process_is_running(pid));
+        }
     }
 
     #[test]
