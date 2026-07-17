@@ -1,14 +1,18 @@
 # Pixel-Level Rendering Comparison Guide
 
-Compares real Chromium/WebView rendering against the Simple web renderer's 2D CPU/SIMD backend output at the pixel level.
+Compares real Chromium/WebView rendering against Simple WebIR lowered through
+`DrawIrComposition` and Engine2D at the pixel level.
 
 ## Architecture
 
-All three shell backends (Electron, Tauri, Pure Simple) share the same Simple web rendering API. The Pure Simple web renderer uses a 2D CPU/SIMD backend for rasterization. The comparison reference is real Chromium (via Electron `capturePage()`).
+All three shell backends (Electron, Tauri, Pure Simple) share the same Simple web
+rendering API. Production Simple Web lowers WebIR into `DrawIrComposition` and
+Engine2D; enabled vector text uses the shared selected-font/`FontRenderer` path.
+The comparison reference is real Chromium (via Electron `capturePage()`).
 
 ```
 Reference path:  HTML → Electron/Chromium → capturePage() → BGRA → ARGB pixels
-Test path:       HTML → Simple web renderer → 2D CPU backend → ARGB pixels
+Test path:       HTML → WebIR → DrawIrComposition → Engine2D → ARGB pixels
 Diff:            Per-pixel ARGB comparison + structural/fringe classification
 ```
 
@@ -42,7 +46,7 @@ SIMPLE_LIB=src PIXEL_HTML=test/fixtures/pixel_compare/simple_text.html \
 PIXEL_W=320 PIXEL_H=240 \
 PIXEL_OUT_JSON=build/pixel_compare/simple_out.json \
 PIXEL_OUT_PPM=build/pixel_compare/simple_out.ppm \
-src/compiler_rust/target/release/simple run tools/pixel_compare/render_and_save_simple.spl
+bin/simple run tools/pixel_compare/render_and_save_simple.spl
 ```
 
 ### 3. Compare
@@ -182,9 +186,11 @@ separate `*_tracked_count` / `*_tracked_mismatch_count` fields and still require
 `blur_or_tolerance=false`.
 
 Rule of thumb: layout/box/geometry must be bit-exact (`policy=exact`); per-pixel
-**text antialiasing cannot bit-match a browser font rasterizer** with a 5×7 bitmap
-software font, so text-dominant fixtures are `track-text-divergence`, never
-memorized. See the spipe skill's false-green section.
+**text antialiasing cannot bit-match a browser font rasterizer** when a
+compatibility fixture selects the 5×7 bitmap font, so those text-dominant rows
+are `track-text-divergence`, never memorized. Vector-font rows use the canonical
+WebIR/Draw IR/Engine2D route and their declared oracle. See the spipe skill's
+false-green section.
 
 Historical 2026-06-02 divergences below are retained as context for generic
 font/text work outside the current exact fixture gates.
@@ -200,14 +206,18 @@ font/text work outside the current exact fixture gates.
 
 ## Rendering Paths
 
-The Simple web renderer has two code paths:
+Production Simple Web uses the canonical WebIR → `DrawIrComposition` →
+Engine2D route, including shared vector-font material when enabled. Two older
+renderers remain for compatibility fixtures only:
 
-1. **Layout renderer** (`simple_web_html_layout_renderer.spl`) — Real HTML parser + CSS cascade + block layout + 5x7 bitmap font paint. Used for generic HTML.
-2. **Heuristic renderer** (`simple_web_engine2d_renderer.spl`) — Pattern-matching substring heuristic for known HTML structures (famous site corpus, WM scenes). Falls through to layout renderer for unrecognized HTML.
+1. **Layout compatibility renderer** (`simple_web_html_layout_renderer.spl`) — HTML/CSS layout plus 5×7 bitmap paint for legacy fixtures.
+2. **Heuristic compatibility renderer** (`simple_web_engine2d_renderer.spl`) — Pattern matching for retained corpus/WM fixtures, with compatibility-layout fallback.
 
 ## Known Limitations
 
-- **Bitmap font**: 5x7 glyph grid scaled by `glyph_scale(font_size)` cannot match Chrome's vector font rendering. Needs TTF rasterizer integration (stb_truetype available in `src/runtime/stb_truetype.h`).
+- **Compatibility bitmap font**: the retained 5×7 fixture path cannot match
+  Chrome vector antialiasing. Production vector text already uses the shared
+  selected free-font renderer through WebIR, Draw IR, and Engine2D.
 - **Font offload evidence**: `vector_font_offload.spl` is the typed evidence
   path for real GPU-returned vector glyph pixels. Use
   `vector_font_preferred_offload_evidence(...)` and
@@ -240,9 +250,12 @@ The Simple web renderer has two code paths:
   expected values). That readback wrapper is the production proof gate: it only marks
   bitmap glyph rasterization ready after generated-kernel submit and
   checksum-matched device readback.
-- **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.
+- **Compatibility bitmap antialiasing**: retained 5×7 fixtures use binary
+  coverage rather than Chrome's subpixel AA.
 - **Tauri real capture**: No real WebView capture path exists yet. Chromium-via-Electron is the primary reference.
-- **Interpreter binary (v0.4.0)**: Cannot load `gc_async_mut.gpu.*` modules due to `Gpu` keyword parse error. Use native binary `src/compiler_rust/target/release/simple` (v1.0.0-beta).
+- **Runtime**: use the pure-Simple self-hosted
+  `bin/release/<triple>/simple`, normally through the canonical `bin/simple`
+  wrapper. The Rust seed is bootstrap-only and is not rendering evidence.
 
 ## Test Fixtures
 

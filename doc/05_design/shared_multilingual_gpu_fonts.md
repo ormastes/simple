@@ -182,8 +182,10 @@ The renderer follows only declared fallback edges.
 This is the target algorithm. Current compatibility material preparation covers
 the atlas steps and both native loader owners now share the neutral default-glyf
 preflight. The bounded compound corpus path, exact default-instance request
-guard, and built-in monochrome bitmap fallback are implemented; broader legal
-compound component modes, complete shaping, and complete cache keys remain open.
+guard, and built-in monochrome bitmap fallback are implemented. Broader legal
+compound component modes and general shaping remain fail-closed. Cache-key
+source cases are complete; compiled-artifact identity, resolved-run/atlas
+telemetry, native execution, and concurrent multi-face evidence remain open.
 The freestanding WM boot-safety branch reuses that canonical legacy bitmap text
 command when selected metrics cannot initialize. It remains compatibility
 fallback rather than selected-font or QEMU pixel-oracle evidence.
