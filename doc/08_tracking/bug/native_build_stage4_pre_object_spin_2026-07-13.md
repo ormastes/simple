@@ -630,3 +630,22 @@ remainder. Negative sub-second values such as `-1` therefore produce
 `00:00:00.999999`; nonnegative timestamps retain the same result. The shared
 pure-Simple time utility and bootstrap SFFI template now use the same floor-day
 rule, so interpreter, hosted runtime, and generated bootstrap owners agree.
+
+## 2026-07-17 macOS physical-path closure guard
+
+The cached Apple Silicon Stage 3 rebuild now succeeds with the explicit
+bootstrap hosted bundle: 9 modules compiled, 706 cached, zero failures, a
+24 MiB executable, and version plus `rt_native_build`, Cranelift, `copy_mem`,
+and array-extension symbol sanity checks all pass.
+
+The following exact-entry Stage 4 run was terminated before object emission
+after roughly two minutes because source loading repeated identical physical
+files under their many module aliases, produced 19,236 trace lines, and reached
+about 7 GiB RSS. The wrapper correctly seeded only `src/app/cli/main.spl`; the
+remaining growth was inside the transitive closure walk.
+
+`load_sources_impl` now tracks `closure_scanned_paths` separately from module
+aliases and scans each physical file's imports once. Aliases remain in
+`all_sources` for name resolution, but cannot multiply closure discovery. A
+source regression pins the guard. Executable Stage 4 verification remains
+pending because the bounded three-cycle bootstrap cap was reached.
