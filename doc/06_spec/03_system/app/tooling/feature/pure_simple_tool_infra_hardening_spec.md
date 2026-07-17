@@ -30,6 +30,9 @@ deadline-bound; `gen-lean` never dispatches back into itself.
 Batch children use the same bounded process facade and translate deadline
 termination to exit 124. Daemon PID checks and startup use argv-safe process
 operations, and request writes fail closed if their atomic rename fails.
+Resource-limited children round positive millisecond deadlines up to seconds,
+send TERM at the requested deadline, and reserve five seconds only for the
+TERM-to-KILL grace period.
 Tracked parallel children install one idempotent POSIX signal owner and poll it
 in execution and governor waits. A pending SIGINT, SIGTERM, or SIGHUP cleans
 tracked children before the runner exits; synchronous sequential children and

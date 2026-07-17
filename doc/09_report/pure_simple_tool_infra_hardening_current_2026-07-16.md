@@ -36,7 +36,7 @@ so executable qualification is still blocked.
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
-| Test runner | PARTIAL | POSIX parallel children are tracked; timeouts and cooperatively dispatched SIGINT/TERM/HUP clean them before exit. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
+| Test runner | PARTIAL | POSIX parallel children are tracked; resource-limited children now honor the requested soft deadline with one five-second TERM-to-KILL grace. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; exact/cosine line gates share one tokenizer-derived signal prefix, preserve indentation, and exclude comment/string-only windows; runtime and performance qualification remain | Run the focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP performance now fails closed instead of invoking inert `build lint`; global gates still report 29 UI and 41 hot-loop violations | Add one repository-scanner owner for the four MCP rules, repair classified violations, then run focused fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files are accepted; generic cast brackets retain parser-required adjacency | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
@@ -194,6 +194,11 @@ so executable qualification is still blocked.
   cleanup state. Sequential/limited/fork/daemon/doctest/QEMU waits are still
   synchronous and untracked; fatal-crash cleanup additionally needs process-
   group or parent-death containment. Source comments no longer claim otherwise.
+- **Runner limited deadlines:** the canonical bounded process owner no longer
+  adds five seconds before also applying GNU timeout's five-second kill grace.
+  Positive millisecond deadlines use overflow-safe ceiling conversion, so
+  1001–1999 ms no longer expire at one second and a one-second request no
+  longer waits six seconds before TERM.
 - **Dependency closure:** the daemon and standalone runner now fingerprint the
   full cycle-safe import closure. The former magic depth-five ceiling silently
   omitted deeper dependencies and could return stale cache hits; the existing
