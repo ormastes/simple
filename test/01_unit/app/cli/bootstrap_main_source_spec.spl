@@ -75,3 +75,46 @@ describe "bootstrap main source":
         expect(parser).to_contain("lex_mark_current_token_as_generic_close()")
         expect(parser).to_contain("parser_expect(TOK_GT)")
         expect(lexer).to_contain("loaded.next_token_after_generic_close()")
+
+    it "never re-introduces Map.new()/Dict.new()/bare Map()/Dict() as a Dict initializer in the live frontend (bug #185)":
+        # bug #185 / f06e5829e1d: these three files are executed LIVE (via the
+        # Rust-seed interpreter fallback) as part of native-build's own
+        # bootstrap-safe frontend, not just lowered like ordinary user code.
+        # `Map.new()`/`Dict.new()` route through the interpreter's deprecated
+        # "ClassName.new()" dispatch (interpreter_call/mod.rs), whose builtin
+        # match arm only covers "HashMap"/"BTreeMap" -- "Map" and "Dict" fall
+        # through to the generic unknown-type fallback, which stuffs a
+        # `__type__` string entry into the freshly "constructed" dict. That
+        # phantom entry then corrupts iteration/keys()/indexing on the SAME
+        # dict (silently: no compile error), producing exactly the kind of
+        # downstream misinference this repo's rule forbids ("semantic:
+        # undefined field: unknown property or method 'body' on String" was
+        # the reported symptom -- a phantom `__type__` -> String entry read
+        # back as if it were a real element). Bare `Map()`/`Dict()` (the
+        # "non-deprecated" spelling the interpreter suggests) do not corrupt
+        # anything, but they are ALSO not resolvable at all today (loud
+        # "unresolved name"/"function not found" everywhere) -- so no
+        # spelling of Map/Dict construction is currently safe to use in place
+        # of the `{}` dict literal. Only `{}` correctly threads the declared
+        # Dict<K, V> element types through. Until native-build's HIR lowering
+        # gains a real `Map`/`Dict` builtin (adopting the declared type) AND
+        # the seed interpreter's `.new()` fallback stops treating "Map"/"Dict"
+        # as unknown types, these three files -- and any other module living
+        # on native-build's live-interpreted frontend path -- must keep using
+        # `{}` for every Dict-typed local/field initializer.
+        val assembly = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl") ?? ""
+        val empty_module = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl") ?? ""
+        val desugar = rt_file_read_text("src/compiler/10.frontend/desugar/desugar_async.spl") ?? ""
+
+        expect(assembly.contains("Map.new()")).to_equal(false)
+        expect(assembly.contains("Dict.new()")).to_equal(false)
+        expect(assembly.contains("= Map()")).to_equal(false)
+        expect(assembly.contains("= Dict()")).to_equal(false)
+        expect(empty_module.contains("Map.new()")).to_equal(false)
+        expect(empty_module.contains("Dict.new()")).to_equal(false)
+        expect(empty_module.contains("= Map()")).to_equal(false)
+        expect(empty_module.contains("= Dict()")).to_equal(false)
+        expect(desugar.contains("Map.new()")).to_equal(false)
+        expect(desugar.contains("Dict.new()")).to_equal(false)
+        expect(desugar.contains("= Map()")).to_equal(false)
+        expect(desugar.contains("= Dict()")).to_equal(false)
