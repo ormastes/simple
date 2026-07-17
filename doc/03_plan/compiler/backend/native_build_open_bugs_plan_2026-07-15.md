@@ -242,6 +242,13 @@ Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
 the public `--msvc`/`--mingw` selection. Static source coverage is present;
 native Windows artifact receipts remain pending.
 
+Strict Stage4 now bypasses raw `native_all`, reads the compiler-backfill
+candidate from the explicit runtime path before creating temporary objects, and
+fail-closes unless a Linux ELF or macOS Mach-O archive has the localized
+`rt_cranelift_*` symbol envelope. The external archive is not selected, linked,
+copied, cached, or deleted. Current Cargo output is still the raw staticlib, so
+localized one-member capsule production and executable proof remain pending.
+
 ---
 
 ## Wave 4 — App/lane-specific (scoped, lower priority)

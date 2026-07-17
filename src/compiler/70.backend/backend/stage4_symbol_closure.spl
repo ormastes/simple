@@ -62,6 +62,12 @@ fn stage4_hosted_provider_archive_file(provider: text, target_os_name: text, msv
         return Ok("libsimple_stage4_" + provider + ".a")
     Err("Stage4 provider has no archive policy for target OS '" + target_os_name + "'")
 
+pub fn stage4_compiler_backfill_archive_file(target_os_name: text) -> Result<text, text>:
+    """Return the dedicated compiler capsule name on supported producer hosts."""
+    if target_os_name == "linux" or target_os_name == "macos":
+        return Ok("libsimple_compiler_backfill.a")
+    Err("Stage4 compiler backfill has no capsule producer for target OS '" + target_os_name + "'")
+
 pub fn stage4_dynload_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the target/linker-specific archive name without building or selecting it."""
     stage4_hosted_provider_archive_file("dynload", target_os_name, msvc_linker)
@@ -117,6 +123,46 @@ fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool
     if target_os_name == "linux" or target_os_name == "freebsd":
         return Ok("elf")
     Err("Stage4 provider has no object-format policy for target OS '" + target_os_name + "'")
+
+pub fn stage4_compiler_backfill_object_format(target_os_name: text) -> Result<text, text>:
+    """Return the portable-nm contract for a supported compiler capsule."""
+    if target_os_name == "linux":
+        return Ok("elf")
+    if target_os_name == "macos":
+        return Ok("macho")
+    Err("Stage4 compiler backfill has no object-format policy for target OS '" + target_os_name + "'")
+
+pub fn stage4_validate_compiler_backfill_symbol_envelope(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the derived compiler-capsule symbol envelope without a manual manifest."""
+    if object_format != "elf" and object_format != "macho":
+        return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
+
+    var definitions: Dict<text, bool> = {}
+    var definition_count = 0
+    for line in nm_output.split("\n"):
+        val parts = line.split_whitespace()
+        if parts.len() < 2:
+            continue
+        val type_index = parts.len() - 2
+        val type_code = parts[type_index]
+        val symbol = stage4_provider_symbol(parts[parts.len() - 1], object_format)
+        val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
+        if is_undefined:
+            if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
+                return Err("Stage4 compiler backfill has forbidden runtime dependency '" + symbol + "'")
+        elif stage4_nm_has_address(parts, type_index):
+            if definitions.has(symbol):
+                return Err("Stage4 compiler backfill repeats global definition '" + symbol + "'")
+            if not symbol.starts_with("rt_cranelift_"):
+                return Err("Stage4 compiler backfill retains unexpected global definition '" + symbol + "'")
+            if symbol == "rt_cranelift_module_new" or symbol == "rt_cranelift_emit_object":
+                return Err("Stage4 compiler backfill retains excluded compatibility wrapper '" + symbol + "'")
+            definitions[symbol] = true
+            definition_count = definition_count + 1
+
+    if definition_count == 0:
+        return Err("Stage4 compiler backfill defines no rt_cranelift_* symbols")
+    Ok(())
 
 pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a hosted dynamic-loader provider."""

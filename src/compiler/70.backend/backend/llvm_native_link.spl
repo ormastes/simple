@@ -18,7 +18,7 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_validate_compiler_backfill_symbol_envelope, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
@@ -81,6 +81,23 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         scans = scans.push(nm_out)
         i = i + 1
     Ok(scans)
+
+fn llvm_stage4_inventory_compiler_backfill(runtime_path: text, target_os_name: text) -> Result<(), text>:
+    if runtime_path.trim() == "":
+        return Err("Stage4 compiler backfill capsule requires SIMPLE_RUNTIME_PATH")
+    val archive_file = match stage4_compiler_backfill_archive_file(target_os_name):
+        case Ok(file): file
+        case Err(err): return Err(err)
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = runtime_path + "/" + archive_file
+    val scans = match llvm_stage4_candidate_archive_inventory(["compiler_backfill"], [archive_path]):
+        case Ok(output): output
+        case Err(err): return Err(err)
+    match stage4_validate_compiler_backfill_symbol_envelope(scans[0], object_format):
+        case Ok(()): Ok(())
+        case Err(err): Err(err)
 
 fn llvm_stage4_build_single_object_provider_archive(runtime_objects: [text], object_stem: text, provider: text, archive_file: text, object_ext: text, windows_paths: bool, pid: i64) -> Result<text, text>:
     var provider_objects: [text] = []
@@ -511,18 +528,23 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             case Ok(msvc): stage4_msvc_objects = msvc
             case Err(err): return Err(err)
 
-    # Link the Rust native_all archive whenever SIMPLE_RUNTIME_PATH points at
-    # one — not only under SIMPLE_BOOTSTRAP=1. The normal path needs it too for
+    # Outside strict Stage4, link the Rust native_all archive whenever
+    # SIMPLE_RUNTIME_PATH points at one. The normal path needs it for
     # modules calling seed-owned externs (e.g. bootstrap_main's
     # rt_native_build), which the C runtime objects do not define; without it
     # the link dies with "undefined symbol: rt_native_build" (#146/#79).
     var bootstrap_native_all = ""
-    val native_all_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
-    if native_all_runtime_path != "" and not hosted_plan.requires_cross:
+    val runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    if not stage4_requested and runtime_path != "" and not hosted_plan.requires_cross:
         val native_all_name = if hosted_os == "windows": "simple_native_all.lib" else: "libsimple_native_all.a"
-        val native_all = native_all_runtime_path + "/" + native_all_name
+        val native_all = runtime_path + "/" + native_all_name
         if file_exists(native_all):
             bootstrap_native_all = native_all
+
+    if stage4_requested:
+        match llvm_stage4_inventory_compiler_backfill(runtime_path, hosted_os):
+            case Ok(()): ()
+            case Err(err): return Err("Stage4 compiler backfill inventory failed: " + err)
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld

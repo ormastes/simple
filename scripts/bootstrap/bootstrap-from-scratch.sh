@@ -471,7 +471,7 @@ bootstrap_native_build_main() {
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
-    SIMPLE_RUNTIME_PATH= \
+    SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
     SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \

@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_validate_compiler_backfill_symbol_envelope, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -29,6 +29,37 @@ describe "Stage4 aggregate final symbol closure":
         val source = rt_file_read_text("src/compiler/70.backend/backend/stage4_symbol_closure.spl") ?? ""
         expect(source).to_contain("fn stage4_sorted_text")
         expect(source.contains(".sort()")).to_be(false)
+
+    it "names compiler backfill capsules only on supported native hosts":
+        expect(stage4_compiler_backfill_archive_file("linux").unwrap()).to_equal("libsimple_compiler_backfill.a")
+        expect(stage4_compiler_backfill_archive_file("macos").unwrap()).to_equal("libsimple_compiler_backfill.a")
+        expect(stage4_compiler_backfill_object_format("linux").unwrap()).to_equal("elf")
+        expect(stage4_compiler_backfill_object_format("macos").unwrap()).to_equal("macho")
+        expect(stage4_compiler_backfill_archive_file("windows").is_err()).to_be(true)
+        expect(stage4_compiler_backfill_archive_file("freebsd").is_err()).to_be(true)
+        expect(stage4_compiler_backfill_archive_file("plan9").is_err()).to_be(true)
+        expect(stage4_compiler_backfill_object_format("windows").is_err()).to_be(true)
+        expect(stage4_compiler_backfill_object_format("freebsd").is_err()).to_be(true)
+        expect(stage4_compiler_backfill_object_format("plan9").is_err()).to_be(true)
+
+    it "accepts compiler backfill symbol envelopes for ELF and Mach-O":
+        val elf = "0000000000000000 T rt_cranelift_new_module\n0000000000000010 T rt_cranelift_emit_object_raw\n                 U malloc\n"
+        val macho = "0000000000000000 T _rt_cranelift_new_module\n0000000000000010 T _rt_cranelift_emit_object_raw\n                 U _malloc\n"
+        expect(stage4_validate_compiler_backfill_symbol_envelope(elf, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(macho, "macho").is_ok()).to_be(true)
+
+    it "rejects invalid compiler backfill symbol envelopes":
+        val exact = "0000000000000000 T rt_cranelift_new_module\n0000000000000010 T rt_cranelift_emit_object_raw\n"
+        expect(stage4_validate_compiler_backfill_symbol_envelope("", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "0000000000000020 T rt_cranelift_new_module\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "0000000000000020 T compiler_helper\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "0000000000000020 T rt_cranelift_module_new\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "0000000000000020 T rt_cranelift_emit_object\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 U spl_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 w rt_weak_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 v spl_weak_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact, "coff-msvc").is_err()).to_be(true)
 
     it "defines target-explicit dynamic-loader archive identities without building them":
         expect(stage4_dynload_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
@@ -668,6 +699,28 @@ not-an-address W rt_malformed
     it "discovers the canonical native-all archive name for each hosted OS":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         expect(source).to_contain("if hosted_os == \"windows\": \"simple_native_all.lib\" else: \"libsimple_native_all.a\"")
+
+    it "inventories compiler backfill before creating strict Stage4 temporaries":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val native_all_pos = source.find("if not stage4_requested and runtime_path != \"\" and not hosted_plan.requires_cross") ?? -1
+        val inventory_pos = source.last_index_of("llvm_stage4_inventory_compiler_backfill(runtime_path, hosted_os)") ?? -1
+        val runtime_compile_pos = source.find("# Step 1: Always compile the FRESH C runtime") ?? -1
+        val closure_pos = source.find("match llvm_stage4_final_requested_symbols(final_simple_objects)") ?? -1
+        val provider_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val barrier_pos = source.find("remaining provider inventory and unique-owner selection are wired") ?? -1
+        expect(native_all_pos).to_be_greater_than(-1)
+        expect(inventory_pos).to_be_greater_than(native_all_pos)
+        expect(runtime_compile_pos).to_be_greater_than(inventory_pos)
+        expect(closure_pos).to_be_greater_than(runtime_compile_pos)
+        expect(provider_pos).to_be_greater_than(closure_pos)
+        expect(barrier_pos).to_be_greater_than(provider_pos)
+        expect(source).to_contain("if stage4_requested:\n        match llvm_stage4_inventory_compiler_backfill(runtime_path, hosted_os):\n            case Ok(()): ()\n            case Err(err): return Err(\"Stage4 compiler backfill inventory failed: \" + err)")
+        expect(source).to_contain("stage4_compiler_backfill_archive_file(target_os_name)")
+        expect(source).to_contain("stage4_compiler_backfill_object_format(target_os_name)")
+        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"compiler_backfill\"], [archive_path])")
+        expect(source).to_contain("stage4_validate_compiler_backfill_symbol_envelope(scans[0], object_format)")
+        expect(source.contains("file_delete(compiler_backfill")).to_be(false)
+        expect(source.contains("all_objects = all_objects.push(compiler_backfill")).to_be(false)
 
     it "builds and validates the dedicated dynload archive before the strict fail-closed boundary":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
