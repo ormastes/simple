@@ -1358,3 +1358,166 @@ fix-verification ELF/logs at `build/os/_wkc8deep/`
 (`desktop.elf` skip-lifted, `desktop_skipon.elf`, `serial.log`,
 `serial_skipon.log`); backups + baseline failure set at
 `scratchpad/c8deep_backup/`.
+
+## ALIAS-GAP lane (2026-07-17) — pure-Simple audit of the C8 alias-resolution bug class
+
+Answers the "Follow-up (out of scope, flagged not fixed)" note above: does
+`src/compiler/35.semantics/resolve*.spl` (and the HIR/MIR lowering that
+actually performs static-call/constructor dispatch) have the same
+alias-vs-consumer inconsistency that was root-caused and fixed in the Rust
+seed at commit `3f0acf071cf`? **No — audited clean, and backed by a new
+passing preventing test; no source fix was needed.**
+
+**1. Why pure-Simple's architecture differs from the seed's.** The seed's bug
+existed because `lower_static_method_call` (simd.rs) rebuilt the callee's
+qualified name from the raw receiver token, independently of how
+type-annotation resolution (`resolve_type_alias`) worked — two separate
+resolution paths that could disagree. Pure-Simple resolves an import alias
+**once, eagerly, at import registration** instead: `register_imported_symbol`
+(`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:400-419`) always
+calls `self.symbols.rename_symbol(imported_type, imported_name)` for a
+Class/Struct/Enum import, so the LOCAL alias symbol's canonical `.name` field
+is unconditionally overwritten with the real target's own declared name.
+Every downstream consumer that later reads that symbol's `.name` — directly
+via `SymbolTable.get_symbol(id).name`, or via the `HirExprKind.NamedVar`
+payload baked at Ident-lowering time
+(`symbol_display_name`, `hir_lowering/expressions.spl:539`, itself documented
+as returning "the CURRENT stored `.name`... reflecting any `rename_symbol`
+call") — sees the SAME post-rename real name. There is structurally only one
+source of truth, not one-per-consumer.
+
+**2. Consumer paths audited (all converge on the renamed name):**
+- **Type annotations**: `HirTypeKind.Named(symbol_id, _)` carries the same
+  symbol id (`hir_lowering/expressions.spl` pattern lowering + `types.spl`).
+- **Static method calls** (`Alias.method()`): HIR-level `MethodResolver`
+  (`35.semantics/resolve_strategies.spl:288-343`, `is_static_method_call` /
+  `resolve_static_method`) only matches a bare `Var(symbol)` receiver; a
+  plain identifier like `Alias` always lowers to `NamedVar(symbol, name)`
+  instead (see `hir_lowering/expressions.spl:489-540`), so this path is
+  rarely hit for ordinary code and `resolution` stays `Unresolved`. The REAL
+  dispatch decision is `50.mir/_MirLoweringExpr/method_calls_literals.spl`
+  lines 2031-2046 (the `Unresolved` arm): for `NamedVar(sym, name)` it sets
+  `static_receiver_name = name`; for `Var(sym)` it sets
+  `static_receiver_name = static_def.name`. Both read the POST-RENAME name
+  (see point 1), so they agree.
+- **Constructor calls** (`Alias(args)`):
+  `50.mir/_MirLoweringExpr/switch_operators_calls.spl:2224-2337`
+  (`lower_call`)'s `direct_name` is likewise taken from the `NamedVar`
+  payload's baked (post-rename) name before the `struct_field_order.has(direct_name)`
+  construction dispatch.
+- **Enum variant reclassification** (`Alias.Variant(...)` parsed as a
+  MethodCall): `method_calls_literals.spl:827-845` reads
+  `recv_enum_name` from the same `NamedVar` payload before consulting
+  `enum_variant_index`.
+- **Match patterns** (`case Alias.Variant(...)`) and struct-positional
+  patterns: `hir_lowering/expressions.spl:895-941` resolves the pattern's
+  bare enum/struct name via `self.symbols.lookup_or_invalid(...)` — the same
+  scope lookup, returning the same renamed symbol id — traced by
+  construction, not independently re-verified empirically (time-boxed out).
+- **Trait-impl target names**: not independently traced this lane (same
+  `HirTypeKind.Named(symbol_id, _)` mechanism applies architecturally; flag
+  for a future pass if a trait-impl-specific alias bug is ever suspected).
+
+**3. Empirical confirmation (new test, passing).** Wrote
+`test/01_unit/compiler/hir/alias_static_call_resolution_spec.spl`,
+reproducing the exact C8 collision shape: `use {RealWidget as Widget}` in a
+consumer module while a genuinely different class **also literally named
+`Widget`** is imported (under a different local alias, `DecoyWidget`) from a
+separate module in the same compile unit — then asserts that both
+`Widget.make()` (static call) and `Widget(value: ...)` (constructor) resolve
+their `NamedVar` receiver/callee to `"RealWidget"` (both the baked display
+name and the symbol table's own `.name`), never to the raw alias text or the
+decoy. Verified via `bin/simple run test/01_unit/compiler/hir/
+alias_static_call_resolution_spec.spl` — **2 examples, 0 failures**.
+Sanity-checked the test can actually fail: temporarily changed the expected
+value to a wrong marker, confirmed 2/2 failures with the real resolved name
+(`RealWidget`) shown in the diff, then reverted — the assertions are live,
+not vacuous.
+
+**4. OS/services sweep for the same shadowing pattern (list only, not
+refactored, per lane scope).** `grep -rn "^\s*use .*\bas\b" src/os/ src/app/`
+(29 hits, excluding `test/` and one non-`.spl` `.rs.patch` file). Cross-checked
+each alias's bare local name against real class/function declarations
+elsewhere in the tree:
+- **Confirmed, already-known collision (the C8 one itself):**
+  `use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}`
+  in `src/os/services/vfs/vfs_write_ops.spl:18`, `vfs_boot_init.spl:20`, and
+  `vfs_init.spl:20`. A real, unrelated `class Fat32Core` genuinely exists in
+  both `src/lib/nogc_sync_mut/fs_driver/fat32_core.spl:74` and
+  `src/lib/nogc_async_mut/fs_driver/fat32_core.spl:71`. This is exactly the
+  shape that caused the seed's fault storm (now fixed at the seed level,
+  3f0acf071cf); per point 3 above, pure-Simple's own resolver already handles
+  this shape correctly, so no action needed there — noting it here only
+  because the lane's instructions asked for a sweep list, and it is the one
+  live instance of the exact pattern.
+- **Everything else swept uses a defensive, collision-avoiding rename** (the
+  alias target is a unique, prefixed name, not a bare name that shadows
+  something else) — e.g. `env_get as redis_env_get` / `as hook_env_get` / `as
+  app_env_get`, `home as env_home` / `as app_home`, `cwd as app_cwd`,
+  `ParseError as LibParseError`, `FileHandle as SharedFileHandle`, `DirEntry
+  as SharedDirEntry`, `PayloadEntry as InitramfsPayloadEntry`,
+  `progress_bar_html as shared_progress_bar_html`. No bare-name shadowing
+  found among these.
+- **One lower-confidence, different-shape note:** `use os.runtime.baremetal.
+  runtime_minimal.{main as baremetal_main}` appears in all 5 arch `cstart.spl`
+  files (`arm32`, `arm64`, `riscv32`, `riscv64`, `x86_64`, `x86_32`). Its bare
+  alias text `baremetal_main` also happens to name a real, unrelated function
+  `fn baremetal_main(args: [text])` in `src/app/cli/baremetal_cmd.spl:15`.
+  This is a **function** alias, not a type alias — a structurally different
+  consumer path from the one this lane's regression test covers, and
+  `register_imported_symbol`'s function branch
+  (`module_lowering.spl:446-449`, `qualify_imported_function_symbol`) only
+  renames the symbol under `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1` bootstrap
+  mode (and even then to a qualified, not bare, name) — unlike the
+  unconditional class/struct/enum `rename_symbol` in point 1. Practical
+  exploitability looks low (the CLI subcommand module is unlikely to link
+  into the same kernel/baremetal compile unit as `cstart.spl`), and this is
+  outside this lane's scoped bug class (type/constructor alias resolution),
+  so it is flagged here for awareness only — not reproduced, not fixed.
+
+**5. Verdict / deliverable.** No pure-Simple source changes were made — the
+audit came back clean, matching the "clean audit + passing preventing test is
+success" criterion. New file:
+`test/01_unit/compiler/hir/alias_static_call_resolution_spec.spl` (2 tests,
+both passing). Backups of the probe script and the final spec are kept at
+`scratchpad/aliasgap_backup/` for this session.
+
+## MOUNT-ERR lane (2026-07-17) — mount() Err root-caused + fixed: silent phys=0 DMA bounce buffer
+
+Follow-up to C8-DEEP's "mount returns graceful Err" handoff. Root cause was
+(d)-family: `NvmeBlockAdapter` allocated its DMA bounce buffer via the raw
+`SYS_ALLOC_DMA` syscall and **silently accepted a zero physical address**
+under the freestanding boot. Every sector DMA then targeted phys 0 and read
+back zeros, so `read_boot_sector` never saw `EB 58 90` / `0x55AA` and
+`mount()` returned Err — no fault, no diagnostic.
+
+**Fix** (`src/os/services/vfs/vfs_block_adapters.spl`, alloc path only):
+route through `NvmeDriver.alloc_dma` so the existing phys==0 fallback
+(`rt_dma_alloc`/`rt_dma_phys_of`) applies, and hard-fail with a descriptive
+Err if either address is still zero (the zero-address guard is the
+preventing measure — the silent-accept can't recur).
+
+**Boot evidence** (QEMU NVMe, C8-fixed seed; serial saved at
+`scratchpad/mounterr_backup/serial_mount_ok.log`): bounce `phys=0x157995008`
+(was 0x0); boot sector probe read `b0=235 b1=88 b2=144` (=`EB 58 90`) and
+`b510=85 b511=170` (=`0x55AA`); `shared FAT32 root mounted after direct
+bootstrap`; `VFS ready (pure-Simple NVMe + FAT32)`; C8 storm count 0.
+Probes were temporary (`# MOUNTERR-PROBE`) and are stripped from the landed
+file; `vfs_boot_init.spl:374` remains `if true:` — lifting the skip for real
+awaits a full green boot + render verification pass.
+
+**Verification caveat:** the lane was killed by an API spend limit right
+after the in-boot confirmation; the coordinator landed the clean backup
+(diffed against origin: single hunk, alloc path only) and restored the
+skip + stripped probes. A hosted unit test for this DMA path is not
+practical (syscall + firmware behavior); the boot harness plus the
+zero-address guard are the regression net.
+
+**Also recorded (pre-existing, hit during re-verification):** the Rust seed
+parser cannot parse an f-string used directly as a function argument in
+`src/compiler/10.frontend/core/parser_preprocessor.spl`
+(`expected Comma, found FString([Literal(")}"), Expr("value_tok")])`),
+which currently blocks `<seed> test/run` on anything importing the
+pure-Simple compiler tree. Known seed-grammar-gap family
+(see bootstrap parser-fix chain); filed here so it isn't silently
+worked around.

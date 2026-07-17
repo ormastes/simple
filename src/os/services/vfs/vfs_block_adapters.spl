@@ -168,14 +168,25 @@ impl NvmeBlockAdapter:
         self.direct_4k_relative_lba(offset)
 
     me init_bounce_buffer() -> Result<bool, text>:
-        """Allocate a DMA bounce buffer for sector transfers."""
-        var result_buf = DmaAddrs(virt: 0, phys: 0)
-        val result_ptr = unsafe_addr_of(result_buf)
-        val virt_result = syscall(SYS_ALLOC_DMA, DMA_PAGE_SIZE, result_ptr, 0, 0, 0)
-        if virt_result < 0:
-            return Result.Err("NvmeBlockAdapter: DMA bounce buffer alloc failed")
-        self.bounce_phys = mmio_read64(result_ptr)
-        self.bounce_virt = virt_result as u64
+        """Allocate a DMA bounce buffer for sector transfers.
+
+        Routes through NvmeDriver.alloc_dma so the phys==0 fallback
+        (rt_dma_alloc/rt_dma_phys_of) applies. The raw SYS_ALLOC_DMA syscall
+        can return a zero physical address under the freestanding boot; the
+        old code accepted it silently, so every sector DMA landed at physical
+        address 0 and read back zeros -- read_boot_sector then never saw the
+        0x55AA signature and mount() returned Err. alloc_dma recovers a real
+        physical address in that case (proven by the direct scalar boot path,
+        which uses it and reads the boot sector correctly on the same image).
+        """
+        val dma = self.nvme.alloc_dma(DMA_PAGE_SIZE)
+        if dma.is_err():
+            return Result.Err(dma.unwrap_err())
+        val addrs = dma.unwrap()
+        if addrs.phys == 0u64 or addrs.virt == 0u64:
+            return Result.Err("NvmeBlockAdapter: DMA bounce buffer returned zero address")
+        self.bounce_phys = addrs.phys
+        self.bounce_virt = addrs.virt
         self.ready = true
         log_raw_println("[nvme-adapter] Bounce buffer allocated: virt=0x{self.bounce_virt}, phys=0x{self.bounce_phys}")
         Result.Ok(true)
