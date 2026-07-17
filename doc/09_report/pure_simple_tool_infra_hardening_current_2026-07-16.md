@@ -534,6 +534,16 @@ so executable qualification is still blocked.
   it emitted an unbounded diagnostic stream and stopped on an unrelated
   `database.spl` parser failure. Executable admission therefore remains the
   next bounded Stage 2 run.
+- Explicit-entry source isolation had a zero-import hole: a successful closure
+  walk enabled closure mode only after adding an import or receiving multiple
+  inputs, so a self-contained test entry fell through to the whole-workspace
+  loader. Every successful explicit-entry walk now enables closure mode, and
+  both source collectors honor their `paths` argument instead of hardcoding
+  all project roots. Source-contract regressions pin both conditions, and an
+  omitted-sibling fixture directly pins root isolation. A fresh
+  Rust-seed runner probe remains unsuitable as executable proof because that
+  seed embeds the pre-fix driver and still reaches the unrelated
+  `database.spl` parser error; it emitted only three lines and exited normally.
 - Lowercase `shared` was independently found to bind as a lowercase pattern
   but parse as capitalized `Shared` when read, allowing lenient project
   lowering to turn an ordinary local into an undeclared enum-like global.

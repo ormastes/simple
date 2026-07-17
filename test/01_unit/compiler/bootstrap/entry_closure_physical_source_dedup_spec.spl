@@ -1,9 +1,12 @@
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.driver.driver_source_loading.{
     _driver_canonical_source_path, _driver_module_name_from_path, _driver_unique_physical_sources,
-    _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add
+    _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
+    _driver_collect_sources_via_find
 }
 
 describe "entry-closure physical source deduplication":
@@ -49,3 +52,34 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(8192)")
         expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(8192)")
         expect(driver).to_not_contain("var closure_seen_mods: [text]")
+
+    it "keeps a zero-import explicit entry out of whole-workspace loading":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+
+        expect(driver).to_contain("if self.ctx.errors.len() == 0:\n                # A successful explicit-entry walk is a closure")
+        expect(driver).to_contain("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")")
+        expect(driver).to_contain("if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:")
+        expect(driver).to_not_contain("closure_added")
+
+    it "collects only the source roots supplied by its caller":
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""
+
+        expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
+        expect(helpers).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
+        expect(loading).to_not_contain("find src/app src/lib src/compiler src/runtime")
+        expect(helpers).to_not_contain("find src/app src/lib src/compiler src/runtime")
+
+    it "does not scan a sibling root omitted by its caller":
+        val fixture = "/tmp/simple-entry-closure-source-roots"
+        val included = fixture + "/included"
+        val omitted = fixture + "/omitted"
+        expect(rt_dir_create(included, true)).to_be(true)
+        expect(rt_dir_create(omitted, true)).to_be(true)
+        expect(rt_file_write_text(included + "/main.spl", "fn main() -> i64: 0\n")).to_be(true)
+        expect(rt_file_write_text(omitted + "/database.spl", "fn unrelated() -> i64: 1\n")).to_be(true)
+
+        val sources = _driver_collect_sources_via_find([included])
+        expect(sources.len()).to_be_greater_than(0)
+        for source in sources:
+            expect(source.path).to_start_with(included)
