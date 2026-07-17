@@ -36,6 +36,13 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
+Focused exact-face unit gates (execution and manual generation pending):
+
+| Executable SSpec | Generated manual |
+|---|---|
+| `test/01_unit/lib/skia/selected_devanagari_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md` |
+| `test/01_unit/lib/skia/selected_arabic_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_arabic_spec.md` |
+
 Supporting conditional pair: `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`
 and `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
 
