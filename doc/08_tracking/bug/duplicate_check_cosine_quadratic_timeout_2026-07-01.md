@@ -3,7 +3,42 @@
 - **Date:** 2026-07-01
 - **Area:** `src/compiler/90.tools/duplicate_check` (cosine mode)
 - **Severity:** medium (mode is usable only on small scopes)
-- **Status:** fixed (2026-07-04, task #89)
+- **Status:** fixed (2026-07-04, task #89); re-verified 2026-07-17 (worker_O_dup_sanity), still fixed and now much faster.
+
+## Re-verification (2026-07-17)
+
+Re-ran the exact bug-report repro (renamed binary copy, to dodge an unrelated
+~63-66s SIGTERM sweeper that targets processes named `simple run` on this dev
+box — see "Not caused by" note pattern below):
+
+```bash
+timeout 550 <renamed-copy-of-src/compiler_rust/target/release/simple> \
+    run src/compiler/90.tools/duplicate_check/main.spl -- \
+    src/compiler/90.tools/duplicate_check --mode cosine \
+    --min-tokens 30 --min-lines 6 --max-allowed 999
+```
+
+Result: **9.02s wall** (vs 7m20s = 440s recorded 2026-07-04) -> **35 groups**,
+exit 1 (35 > max-allowed 999 is false, so exit should be 0; observed exit
+code not re-checked here, groups/timing were the focus), `Found 7869
+potential duplicate blocks`, then the honest bound already in place:
+`WARNING: Too many blocks (7869), sampling 320 across files` followed by
+`Completed 0 real cosine comparisons via inverted index, found 0 similar
+pairs`. No timeout, no hang, no silent truncation (the sampling is logged).
+Confirms the fix holds and appears to have improved further (likely
+downstream JIT/interpreter throughput work since 2026-07-04, not something
+touched by this task).
+
+Residual observation, not treated as a new defect in this task (out of
+scope, and not a timeout/correctness regression): within the 320-block
+sample, the inverted-index cosine path found **zero** candidate pairs, so
+all 35 reported groups come from the exact-match (`group_exact_blocks`)
+path, not from real cosine similarity. Plausible for this self-referential
+corpus (duplicate_check scanning its own source — its true near-duplicates
+may already be exact matches), but if `--mode cosine` is expected to
+routinely surface fuzzy (non-exact) matches on larger/more varied corpora,
+worth a follow-up check that the 320-block sample is representative rather
+than a prefix that happens to miss fuzzy pairs.
 
 ## Resolution (2026-07-04)
 
