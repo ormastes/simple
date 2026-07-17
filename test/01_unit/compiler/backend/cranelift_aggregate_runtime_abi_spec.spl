@@ -121,3 +121,60 @@ describe "Cranelift aggregate runtime ABI":
         expect(wrapper).to_contain("rt_cranelift_function_addr_in_func")
         expect(resolver).to_contain("\"rt_cranelift_function_addr_in_func\"")
         expect(interpreter).to_contain("\"rt_cranelift_function_addr_in_func\"")
+
+    it "separates ordinary local collisions from lowering-owned runtime calls":
+        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val calls = file_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
+        val backend = file_read("src/compiler_rust/compiler/src/codegen/common_backend.rs")
+        val call_start = adapter.index_of("fn cl_translate_call(") ?? -1
+        val call_body = adapter.substring(call_start, adapter.len())
+        val compile_start = adapter.index_of("fn compile_function(") ?? -1
+        val compile_body = adapter.substring(compile_start, call_start)
+        val reserved_guard = call_body.index_of("if cl_is_lowering_owned_runtime(name):") ?? -1
+        val local_lookup = call_body.index_of("if func_handles.has(name)") ?? -1
+        val extern_fallback = call_body.index_of("# External function - declare as import") ?? -1
+        expect(call_start).to_be_greater_than(-1)
+        expect(compile_start).to_be_greater_than(-1)
+        expect(compile_body).to_contain("val emit_name = cl_function_emit_name(func.name)")
+        expect(reserved_guard).to_be_greater_than(-1)
+        expect(local_lookup).to_be_greater_than(-1)
+        expect(local_lookup).to_be_greater_than(reserved_guard)
+        expect(extern_fallback).to_be_greater_than(local_lookup)
+        val rust_call_start = calls.index_of("pub fn compile_call<M: Module>(") ?? -1
+        val rust_call_body = calls.substring(rust_call_start, calls.len())
+        val local_guard = rust_call_body.index_of("if has_defined_local_function(ctx, func_name)") ?? -1
+        val first_runtime_shortcut = rust_call_body.index_of("if compile_simple_runtime_memory_intrinsic") ?? -1
+        val generic_runtime = rust_call_body.index_of("ctx.runtime_funcs.get(sffi_name)") ?? -1
+        expect(local_guard).to_be_greater_than(-1)
+        expect(first_runtime_shortcut).to_be_greater_than(-1)
+        expect(generic_runtime).to_be_greater_than(-1)
+        expect(local_guard).to_be_greater_than(first_runtime_shortcut)
+        expect(generic_runtime).to_be_greater_than(local_guard)
+        expect(backend).to_contain("self.func_ids.insert(func.name.clone(), func_id)")
+        expect(adapter).to_contain("if cl_is_lowering_owned_runtime(name):")
+        expect(adapter).to_contain("name == \"rt_array_len\" or name == \"rt_array_get\" or name == \"rt_array_get_text\" or name == \"rt_array_set\" or name == \"rt_array_set_text\"")
+        expect(adapter).to_contain("return \"__simple_local_{name}\"")
+        expect(adapter).to_contain("translate_runtime_import_call_i64(ctx, cl_module, \"rt_string_new\"")
+        expect(adapter).to_contain("translate_runtime_import_call_i64(ctx, cl_module, \"rt_string_to_int_lenient\"")
+        expect(adapter.contains("fn cl_call_runtime_i64")).to_equal(false)
+        val fixture = file_read("test/fixtures/compiler/native_runtime_local_name_collision.spl")
+        val non_generic_fixture = file_read("test/fixtures/compiler/native_runtime_local_name_collision_non_generic.spl")
+        val open_repro = file_read("test/fixtures/compiler/native_runtime_generic_call_origin_collision_repro.spl")
+        val portability = file_read("scripts/check/check-bootstrap-portability.shs")
+        val gate = file_read("scripts/check/check-cranelift-aot-aggregates.shs")
+        expect(fixture).to_contain("fn rt_array_len_safe<T>(array: [T]) -> i64:")
+        expect(fixture).to_contain("fn rt_array_len(value: i64) -> i64:")
+        expect(fixture).to_contain("fn rt_array_get(array: i64, index: i64) -> i64:")
+        expect(fixture).to_contain("fn rt_array_set(array: i64, index: i64, value: i64) -> i64:")
+        expect(non_generic_fixture).to_contain("fn rt_array_len_safe(array: [i64]) -> i64:")
+        expect(gate).to_contain("native_runtime_local_name_collision.spl")
+        expect(gate).to_contain("native_runtime_local_name_collision_non_generic.spl")
+        expect(gate).to_contain("printf '4\\n20\\n25\\n'")
+        expect(gate).to_contain("printf '3\\n'")
+        expect(open_repro).to_contain("fn rt_array_new(capacity: i64) -> i64:")
+        expect(open_repro).to_contain("fn rt_array_push(array: i64, value: i64) -> i64:")
+        expect(open_repro).to_contain("fn first() -> i64:")
+        expect(open_repro).to_contain("fn second() -> i64:")
+        expect(open_repro).to_contain("val items = [first, second]")
+        expect(open_repro).to_contain("print(rt_array_new(0))")
+        expect(portability).to_contain("owned code defines a guarded compiler-generated runtime helper before MIR call origin exists")

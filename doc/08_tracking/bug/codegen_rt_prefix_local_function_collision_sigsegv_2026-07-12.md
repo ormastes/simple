@@ -1,6 +1,6 @@
 ---
 id: codegen_rt_prefix_local_function_collision_sigsegv_2026-07-12
-status: OPEN
+status: SOURCE-FIXED-EXECUTION-PENDING
 severity: blocking
 discovered: 2026-07-12
 discovered_by: native-build redeploy verification (agent session), follow-up to
@@ -12,8 +12,38 @@ related: doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_
 
 # Codegen: locally-defined function whose name coincidentally matches a runtime SFFI symbol name compiles to a SIGSEGV, not a call to the local body
 
-**Status:** OPEN — root cause located precisely, fix not attempted (separate,
-higher-risk scope; see below).
+## Resolution (2026-07-17)
+
+The pure-Simple Cranelift adapter resolves ordinary user-authored named calls
+through its local function table before declaring an external import. Its
+compiler-synthesized string conversions use the unconditional runtime-import
+helper. Lowering-owned array length/get/set names are kept on that runtime path
+and same-named local bodies receive private object symbols.
+
+The Rust seed now mirrors that ownership rule. Current-module function bodies
+replace preloaded runtime raw-name entries, while empty extern declarations do
+not displace an existing body. Native call codegen keeps compiler-owned inline
+intrinsics authoritative, then resolves a non-import body before the generic
+runtime SFFI path. Genuine imports retain runtime tagging and argument
+expansion.
+
+Unit coverage pins import/defined linkage and reused-backend mapping. The
+existing Cranelift AOT gate builds and runs both generic and non-generic
+`rt_array_len_safe` collisions. The generic fixture also carries unused local
+`rt_array_len/get/set` bodies. Exact output `4`, `20`, and `25` proves the
+ordinary local call wins while generated length/index/mutation operations keep
+runtime ownership; the non-generic fixture independently requires `3`.
+Source/static verification is complete; first staged execution with the
+rebuilt seed remains pending.
+
+This fixes the reported `rt_array_len_safe` crash without pretending MIR has
+call origin. Generic compiler-generated helpers such as `rt_array_new` and
+`rt_array_push` still require the explicit-origin refactor tracked in
+`mir_runtime_call_origin_ambiguity_2026-07-17.md`; a portability lint prevents
+new owned-code definitions of selected allocation/container helper names until
+that work lands.
+
+**Status:** SOURCE FIXED — staged Cranelift execution pending.
 **Severity:** Blocking for the real self-hosted redeploy target. Does not
 block `native-build` from running/producing a binary in general (the sibling
 interpreter-level bug is fixed — see the related doc) — this is a *different*
@@ -21,8 +51,8 @@ mechanism that only affects `.spl` programs that both (a) define a top-level
 function whose bare name coincidentally matches a real Rust runtime export
 (any of `simple_runtime`'s exported `rt_*` symbols), and (b) call it from
 compiled (not interpreter-fallback) code. **The seed's own compiler source
-does exactly this**: `src/compiler/10.frontend/core/lexer.spl:34` (and
-`parser.spl`, `decl_nodes.spl`, `lexer_struct.spl`) define
+did exactly this at discovery**; the current surviving compiler collision is
+in `src/compiler/10.frontend/core/lexer_struct.spl`, which defines
 `fn rt_array_len_safe<T>(array: [T]) -> i64`, unrelated to the real runtime
 export `rt_array_len_safe(array: RuntimeValue) -> i64`
 (`runtime/src/value/collections.rs:432`). Once native-build's entry-closure

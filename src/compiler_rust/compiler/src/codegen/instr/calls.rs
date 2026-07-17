@@ -5,7 +5,7 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::Module;
+use cranelift_module::{Linkage, Module};
 
 use crate::codegen::runtime_sffi::RUNTIME_FUNCS;
 use crate::hir::TypeId;
@@ -50,6 +50,48 @@ fn reinterpret_float_bit_args<M: Module>(
 
 fn is_profiler_function(name: &str) -> bool {
     name.starts_with("rt_profiler_")
+}
+
+fn linkage_is_defined_local(linkage: Option<Linkage>) -> bool {
+    linkage.is_some_and(|linkage| linkage != Linkage::Import)
+}
+
+fn has_defined_local_function<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> bool {
+    let Some(&func_id) = ctx.func_ids.get(name) else {
+        return false;
+    };
+    linkage_is_defined_local(Some(ctx.module.declarations().get_function_decl(func_id).linkage))
+}
+
+fn compile_user_function_call<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    func_name: &str,
+    args: &[VReg],
+    callee_id: cranelift_module::FuncId,
+) -> InstrResult<()> {
+    if !is_profiler_function(func_name) {
+        emit_profiler_call(ctx, builder, func_name)?;
+    }
+    let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
+    let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+    let arg_vals = reinterpret_float_bit_args(ctx, builder, args, arg_vals);
+    let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
+    let arg_vals = adapt_args_to_signature_with_signedness(builder, callee_ref, arg_vals, Some(&arg_signed));
+    let call = adapted_call(builder, callee_ref, &arg_vals);
+    if !is_profiler_function(func_name) {
+        emit_profiler_return(ctx, builder)?;
+    }
+    if let Some(d) = dest {
+        let results = builder.inst_results(call);
+        if !results.is_empty() {
+            ctx.vreg_values.insert(*d, results[0]);
+        } else {
+            ctx.vreg_values.insert(*d, builder.ins().iconst(types::I64, 0));
+        }
+    }
+    Ok(())
 }
 
 fn is_cross_module_data_export<M: Module>(ctx: &InstrContext<'_, M>, raw_name: &str, resolved_name: &str) -> bool {
@@ -110,7 +152,9 @@ fn emit_profiler_call<M: Module>(
 
 #[cfg(test)]
 mod tests {
-    use super::sffi_alias_target;
+    use cranelift_module::Linkage;
+
+    use super::{linkage_is_defined_local, sffi_alias_target};
 
     #[test]
     fn conversion_aliases_resolve_to_runtime_symbols() {
@@ -121,7 +165,16 @@ mod tests {
         assert_eq!(sffi_alias_target("to_f64"), Some("rt_string_to_float"));
         assert_eq!(sffi_alias_target("to_string"), Some("rt_to_string"));
         assert_eq!(sffi_alias_target("to_text"), Some("rt_to_string"));
+        assert_eq!(sffi_alias_target("rt_file_delete"), Some("rt_file_remove"));
         assert_eq!(sffi_alias_target("dealloc"), Some("rt_free"));
+    }
+
+    #[test]
+    fn only_defined_local_functions_shadow_runtime_symbols() {
+        assert!(linkage_is_defined_local(Some(Linkage::Export)));
+        assert!(linkage_is_defined_local(Some(Linkage::Local)));
+        assert!(!linkage_is_defined_local(Some(Linkage::Import)));
+        assert!(!linkage_is_defined_local(None));
     }
 }
 
@@ -2985,11 +3038,15 @@ pub fn compile_call<M: Module>(
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, result);
         }
+    } else if has_defined_local_function(ctx, func_name) {
+        // Compiler-owned intrinsics above remain authoritative because MIR
+        // does not yet carry call origin. For the ordinary SFFI path, a
+        // source-defined body owns its name and ABI; empty extern declarations
+        // remain imports and continue through the runtime path below.
+        let callee_id = ctx.func_ids[func_name];
+        compile_user_function_call(ctx, builder, dest, func_name, args, callee_id)?;
     } else if let Some(&runtime_id) = ctx.runtime_funcs.get(sffi_name) {
-        // Runtime SFFI function — checked BEFORE func_ids because runtime functions
-        // are also registered in func_ids for name resolution. Checking here first
-        // ensures text expansion and SFFI-specific handling (tagging, return type
-        // extension) is always applied for known runtime functions.
+        // Runtime imports need SFFI-specific tagging and text expansion.
         if !is_profiler_function(sffi_name) {
             emit_profiler_call(ctx, builder, sffi_name)?;
         }
@@ -3076,27 +3133,7 @@ pub fn compile_call<M: Module>(
             emit_profiler_return(ctx, builder)?;
         }
     } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
-        // User-defined function (not a known runtime SFFI function)
-        if !is_profiler_function(func_name) {
-            emit_profiler_call(ctx, builder, func_name)?;
-        }
-        let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-        let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
-        let arg_vals = reinterpret_float_bit_args(ctx, builder, args, arg_vals);
-        let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
-        let arg_vals = adapt_args_to_signature_with_signedness(builder, callee_ref, arg_vals, Some(&arg_signed));
-        let call = adapted_call(builder, callee_ref, &arg_vals);
-        if !is_profiler_function(func_name) {
-            emit_profiler_return(ctx, builder)?;
-        }
-        if let Some(d) = dest {
-            let results = builder.inst_results(call);
-            if !results.is_empty() {
-                ctx.vreg_values.insert(*d, results[0]);
-            } else {
-                ctx.vreg_values.insert(*d, builder.ins().iconst(types::I64, 0));
-            }
-        }
+        compile_user_function_call(ctx, builder, dest, func_name, args, callee_id)?;
     } else {
         if let Some(variant_name) = known_enum_variant_name(ctx, func_name) {
             if compile_known_enum_constructor_call(ctx, builder, dest, variant_name, args) {

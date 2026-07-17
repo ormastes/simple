@@ -198,6 +198,32 @@ grep -Fq '[ "$PARITY_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.s
 grep -Fq 'total=2 pass=2 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity strict summary missing"
 [ "$(grep -c "test/fixtures/compiler/llvm_simd_row_native_probe.spl" "${multiplatform}")" -eq 2 ] || fail "native architecture probe trigger missing"
 [ "$(grep -c "test/fixtures/compiler/stage4_struct_enum_array_probe.spl" "${multiplatform}")" -eq 2 ] || fail "Cranelift aggregate probe trigger missing"
+core_pipeline=.github/workflows/core-mcp-dev-pipeline.yml
+collision_fixture=test/fixtures/compiler/native_runtime_local_name_collision.spl
+[ "$(grep -Fc "'${collision_fixture}'" "${core_pipeline}")" -eq 2 ] || fail "runtime/local collision fixture must trigger push and pull-request Cranelift checks"
+non_generic_collision_fixture=test/fixtures/compiler/native_runtime_local_name_collision_non_generic.spl
+[ "$(grep -Fc "'${non_generic_collision_fixture}'" "${core_pipeline}")" -eq 2 ] || fail "non-generic runtime/local collision fixture must trigger push and pull-request Cranelift checks"
+collision_gate=scripts/check/check-cranelift-aot-aggregates.shs
+for required in \
+  'src/compiler_rust/compiler/src/codegen/common_backend.rs' \
+  'src/compiler_rust/compiler/src/codegen/instr/calls.rs' \
+  'build_fixture "$FIXTURE_DIR/native_runtime_local_name_collision.spl" "$COLLISION_BIN"' \
+  'build_fixture "$FIXTURE_DIR/native_runtime_local_name_collision_non_generic.spl" "$NON_GENERIC_COLLISION_BIN"' \
+  'printf '\''4\n20\n25\n'\'' >"$BUILD_DIR/collision.expected"' \
+  'cmp "$BUILD_DIR/collision.expected" "$BUILD_DIR/collision.actual"' \
+  'test ! -s "$BUILD_DIR/collision.stderr"'; do
+  grep -Fq -- "${required}" "${collision_gate}" || fail "runtime/local collision gate missing: ${required}"
+done
+grep -Fq 'printf '\''3\n'\'' >"$BUILD_DIR/collision-non-generic.expected"' "${collision_gate}" || fail "non-generic runtime/local collision expected output missing"
+grep -Fq 'cmp "$BUILD_DIR/collision-non-generic.expected" "$BUILD_DIR/collision-non-generic.actual"' "${collision_gate}" || fail "non-generic runtime/local collision exact-output check missing"
+grep -Fq 'test ! -s "$BUILD_DIR/collision-non-generic.stderr"' "${collision_gate}" || fail "non-generic runtime/local collision stderr check missing"
+generic_origin_repro=test/fixtures/compiler/native_runtime_generic_call_origin_collision_repro.spl
+test -f "${generic_origin_repro}" || fail "generic runtime call-origin reproducer missing"
+[ "$(grep -Fc "'${generic_origin_repro}'" "${core_pipeline}")" -eq 2 ] || fail "generic runtime call-origin reproducer must trigger push and pull-request checks"
+grep -Fq 'print(rt_array_new(0))' "${generic_origin_repro}" || fail "generic runtime call-origin reproducer lost explicit source call"
+if grep -R -E --include='*.spl' '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+(rt_array_new|rt_array_new_with_cap|rt_array_new_with_cap_u64|rt_byte_array_new|rt_array_push|rt_dict_new|rt_dict_insert|rt_tuple_new|rt_tuple_set|rt_enum_new)[[:space:]<(]' src/compiler src/app src/lib >/dev/null; then
+  fail "owned code defines a guarded compiler-generated runtime helper before MIR call origin exists"
+fi
 grep -q 'bootstrap-from-scratch.sh' "${multiplatform}" || fail "multiplatform workflow bypasses canonical bootstrap"
 grep -q '^  native-architectures:' "${multiplatform}" || fail "pure-Simple native architecture job missing"
 grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native architecture job does not consume Linux LLVM pure stage"

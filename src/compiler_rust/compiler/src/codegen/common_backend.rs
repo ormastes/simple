@@ -976,11 +976,10 @@ impl<M: Module> CodegenBackend<M> {
         functions: &[MirFunction],
         referenced_names: &HashSet<String>,
     ) -> BackendResult<()> {
-        let mut func_ids = BTreeMap::new();
-
-        // First, add runtime function IDs for functions that are already declared
+        // Runtime IDs are fallback name-resolution entries. Never let a later
+        // compilation unit replace an existing local raw-name mapping.
         for (name, id) in &self.runtime_funcs {
-            func_ids.insert(name.to_string(), *id);
+            self.func_ids.entry((*name).to_string()).or_insert(*id);
         }
 
         let _total_mir_functions = functions.len();
@@ -1029,18 +1028,20 @@ impl<M: Module> CodegenBackend<M> {
                 .declare_function(&symbol_name, linkage, &sig)
                 .map_err(|e| BackendError::ModuleError(format!("Failed to declare '{}': {}", symbol_name, e)))?;
 
-            // Always register under the raw name so local calls resolve
-            func_ids.insert(func.name.clone(), func_id);
-            // Also register under the mangled name if different
-            if symbol_name != func.name {
-                func_ids.insert(symbol_name, func_id);
+            if has_body {
+                // A current-module body owns its raw name; this intentionally
+                // replaces a preloaded same-named runtime import.
+                self.func_ids.insert(func.name.clone(), func_id);
+                if symbol_name != func.name {
+                    self.func_ids.insert(symbol_name, func_id);
+                }
+            } else {
+                // Imports never displace an already-known local body.
+                self.func_ids.entry(func.name.clone()).or_insert(func_id);
+                if symbol_name != func.name {
+                    self.func_ids.entry(symbol_name).or_insert(func_id);
+                }
             }
-        }
-
-        // Merge into existing func_ids rather than replacing.
-        // Runtime funcs are pre-populated and must be preserved.
-        for (name, id) in func_ids {
-            self.func_ids.entry(name).or_insert(id);
         }
         Ok(())
     }
@@ -2358,6 +2359,53 @@ mod tests {
             .find(|function| function.name == "parser_init_with_path")
             .expect("deduped function");
         assert!(!selected.blocks.is_empty());
+    }
+
+    #[test]
+    fn local_body_named_like_runtime_replaces_runtime_import_mapping() {
+        let mut caller = MirFunction::new("runtime_caller".to_string(), TypeId::I64, Visibility::Public);
+        let arg = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: arg, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(result),
+            target: CallTarget::from_name("rt_array_len_safe"),
+            args: vec![arg],
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut first = MirModule::new();
+        first.functions.push(caller);
+        let mut backend = test_backend();
+        backend.compile_all_functions(&first).expect("runtime compile");
+        let runtime_id = backend.runtime_funcs["rt_array_len_safe"];
+        assert_eq!(backend.func_ids["rt_array_len_safe"], runtime_id);
+        assert_eq!(
+            backend.module.declarations().get_function_decl(runtime_id).linkage,
+            cranelift_module::Linkage::Import
+        );
+
+        backend.set_module_prefix("compiler__frontend__core__lexer".to_string());
+        let mut local = MirFunction::new("rt_array_len_safe".to_string(), TypeId::I64, Visibility::Public);
+        let ret = local.new_vreg();
+        local
+            .block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: ret, value: 4 });
+        local.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(ret));
+        let mut second = MirModule::new();
+        second.functions.push(local);
+        backend.compile_all_functions(&second).expect("local compile");
+        let local_id = backend.func_ids["rt_array_len_safe"];
+        let local_decl = backend.module.declarations().get_function_decl(local_id);
+        assert_ne!(local_id, runtime_id);
+        assert_ne!(local_decl.linkage, cranelift_module::Linkage::Import);
+        assert_eq!(
+            backend.module.declarations().get_function_decl(runtime_id).linkage,
+            cranelift_module::Linkage::Import
+        );
     }
 
     #[test]

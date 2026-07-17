@@ -93,7 +93,7 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
 
     var func_handles: Dict<text, i64> = {}
     for func in module.functions.values():
-        val emit_name = if func.name == "main": "__simple_main" else: func.name
+        val emit_name = cl_function_emit_name(func.name)
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
         val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
@@ -153,7 +153,8 @@ impl Codegen for CraneliftCodegenAdapter:
         var func_handles: Dict<text, i64> = {}
         for func in module.functions.values():
             val sig = build_signature(func.signature, func.name == "main")
-            val handle = cranelift_declare_function(cl_module, func.name, sig, CL_LINKAGE_EXPORT)
+            val emit_name = cl_function_emit_name(func.name)
+            val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
             func_handles[func.name] = handle
 
         # Second pass: compile each function
@@ -271,7 +272,7 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>:
 # ============================================================================
 
 fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, i64>) -> bool:
-    val emit_name = if func.name == "main": "__simple_main" else: func.name
+    val emit_name = cl_function_emit_name(func.name)
     val sig = build_signature(func.signature, func.name == "main")
     val ctx = cranelift_begin_function(cl_module, emit_name, sig)
     if ctx == 0:
@@ -549,7 +550,7 @@ fn cl_translate_instruction(
 
         case Cast(dest, operand, target):
             val src_val = cl_translate_operand(ctx, cl_module, operand, value_map, slot_map, func)
-            val result = cl_translate_cast(ctx, cl_module, func_handles, src_val, operand, target, func)
+            val result = cl_translate_cast(ctx, cl_module, src_val, operand, target, func)
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -943,23 +944,7 @@ fn cl_translate_unaryop(ctx: i64, op: MirUnaryOp, a: i64, operand: MirOperand, f
 # Cast Translation
 # ============================================================================
 
-fn cl_call_runtime_i64(ctx: i64, cl_module: i64, func_handles: Dict<text, i64>, name: text, args: [i64]) -> i64:
-    """Call a runtime C function by NAME with i64 args/return, declaring it
-    as an external import if it isn't already a known function handle.
-    Mirrors the external-function branch of cl_translate_call."""
-    if func_handles.has(name):
-        val handle = func_handles[name]
-        val func_ref = cranelift_import_function(ctx, handle)
-        return cranelift_call(ctx, func_ref, args)
-    val sig = cranelift_new_signature(CL_CC_SYSTEM_V)
-    for a in args:
-        cranelift_sig_add_param(sig, CL_TYPE_I64)
-    cranelift_sig_set_return(sig, CL_TYPE_I64)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
-    val func_ref = cranelift_import_function(ctx, handle)
-    cranelift_call(ctx, func_ref, args)
-
-fn cl_translate_cast(ctx: i64, cl_module: i64, func_handles: Dict<text, i64>, src_val: i64, operand: MirOperand, target: MirType, func: MirFunction) -> i64:
+fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand, target: MirType, func: MirFunction) -> i64:
     val to_cl = mir_type_to_cl(target)
     val src_type = operand_type(operand, func)
     val is_src_float = operand_is_float(operand, func)
@@ -998,8 +983,8 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, func_handles: Dict<text, i64>, sr
         # "int(text) Semantics" after rebuilding.
         val ptr_val = cranelift_load(ctx, CL_TYPE_I64, src_val, 0)
         val len_val = cranelift_load(ctx, CL_TYPE_I64, src_val, 8)
-        val boxed = cl_call_runtime_i64(ctx, cl_module, func_handles, "rt_string_new", [ptr_val, len_val])
-        val parsed = cl_call_runtime_i64(ctx, cl_module, func_handles, "rt_string_to_int_lenient", [boxed])
+        val boxed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new", [ptr_val, len_val])
+        val parsed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_to_int_lenient", [boxed])
         # Bool-aware width: Bool targets are i64 in this backend (mir_type_to_cl),
         # so an ireduce to the same-width i64 would fail verification.
         val dst_size = match target.kind:
@@ -1072,6 +1057,12 @@ fn cl_translate_call(
                     val method = method_leaf_name(name)
                     if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:
                         return arg_vals[0]
+                    # MIR currently represents compiler-generated collection
+                    # helpers and source calls with the same string operand.
+                    # Keep the lowering-owned primitives on the runtime ABI so
+                    # a coincidentally named local body cannot capture them.
+                    if cl_is_lowering_owned_runtime(name):
+                        return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     # Named function call
                     if func_handles.has(name):
                         val handle = func_handles[name]
@@ -1106,6 +1097,16 @@ fn cl_translate_call(
                 cranelift_sig_add_param(sig, CL_TYPE_I64)
             cranelift_sig_set_return(sig, CL_TYPE_I64)
             cranelift_call_indirect(ctx, sig, addr, arg_vals)
+
+fn cl_is_lowering_owned_runtime(name: text) -> bool:
+    name == "rt_array_len" or name == "rt_array_get" or name == "rt_array_get_text" or name == "rt_array_set" or name == "rt_array_set_text"
+
+fn cl_function_emit_name(name: text) -> text:
+    if name == "main":
+        return "__simple_main"
+    if cl_is_lowering_owned_runtime(name):
+        return "__simple_local_{name}"
+    name
 
 # ============================================================================
 # Helper Functions

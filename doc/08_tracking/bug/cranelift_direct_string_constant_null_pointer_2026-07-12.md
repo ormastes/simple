@@ -11,6 +11,15 @@ related: src/lib/nogc_sync_mut/ffi/codegen.spl
 
 # `native-build --backend cranelift`: string constants always compile to a null pointer (SIGSEGV / silent no-op)
 
+## 2026-07-17 blocker update
+
+The later `rt_array_len_safe` interpreter-resolution fix was already landed,
+and the separate native codegen local/runtime-name collision is now source
+fixed with unit and Cranelift AOT regression coverage. Those historical walls
+no longer call for another interpreter extern shim or a lexer rename.
+End-to-end proof of this string-data fix still depends on the rebuilt staged
+seed running the existing Cranelift executable gates.
+
 ## 2026-07-12 update: fix implemented, mechanism verified by Rust unit test, e2e blocked by an unrelated pre-existing wall
 
 **BOTTOM LINE — read before assuming this unblocks redeploy:** the
