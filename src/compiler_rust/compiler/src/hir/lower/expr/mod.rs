@@ -896,7 +896,19 @@ impl Lowerer {
         // String methods
         if is_string {
             let result_ty = match method {
-                "len" => Some(TypeId::I64),
+                // "length" is a documented synonym of "len" (see codegen's
+                // "len" | "length" => "rt_len" tables in
+                // codegen/instr/{methods,calls,closures_structs}.rs and the
+                // interpreter's method_dispatch.rs / string.rs). This table
+                // is the ONLY place that recognizes "len" but forgot
+                // "length" — so `.length()` fell through to generic dynamic
+                // dispatch typed TypeId::ANY, which skips the int-boxing
+                // step at the print()/call-arg lowering site (see
+                // lowering_expr_builtin.rs `needs_int_boxing`), yielding a
+                // raw untagged i64 fed straight into rt_println_value —
+                // silently misdecoded as 0.0 (bug
+                // jit_string_length_var_control_flow_wrong_value_2026-07-17.md).
+                "len" | "length" => Some(TypeId::I64),
                 "starts_with" | "ends_with" | "contains" => Some(TypeId::BOOL),
                 "concat" | "slice" | "replace" => Some(TypeId::STRING),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
@@ -920,7 +932,8 @@ impl Lowerer {
         // Array methods
         if is_array {
             let result_ty = match method {
-                "len" => Some(TypeId::I64),
+                // "length" synonym — see the string-methods comment above.
+                "len" | "length" => Some(TypeId::I64),
                 "push" => Some(receiver.ty), // Returns the new array (same type)
                 "clear" => Some(TypeId::VOID),
                 "pop" => {
@@ -982,7 +995,8 @@ impl Lowerer {
                 "get" | "remove" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
-                "len" | "size" => Some(TypeId::I64),
+                // "length" synonym — see the string-methods comment above.
+                "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {
                     Some((k, _)) => self.module.types.register(HirType::Array { element: k, size: None }),
                     None => TypeId::ANY,
