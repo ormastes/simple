@@ -66,3 +66,14 @@ cross-module resolution defect worth tracking.
 3. Fix at the compiler level (out of scope for OS/UI lanes) so
    `_global_cleanup_handler`-style call sites always dereference the current
    stored pointer rather than being treated as a direct/data reference.
+
+## Additional reproduction — pure-Simple test runner entry
+
+The Cycle 11 pure-Simple bootstrap candidate reproduced this defect while
+building the smaller `src/app/test_runner_new/main.spl` entry closure with
+unsafe stub fallback disabled. Compilation rejected `on_sigint`, `on_sigterm`,
+`on_sighup`, and `on_normal_exit` because `_global_cleanup_handler` resolved to
+the DATA export
+`nogc_sync_mut__io__signal_handlers___global_cleanup_handler` where codegen
+required a function. This confirms the defect also blocks an admitted native
+test runner, independently of the monolithic CLI graph-load timeout.

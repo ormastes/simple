@@ -33,7 +33,7 @@ use compiler.core.tokens.{TOK_BACKSLASH}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
-use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
+use compiler.core.ast.{expr_ident, expr_call, expr_method_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
@@ -603,12 +603,63 @@ fn parse_statement() -> i64:
 
 # ===== Val/Var Declaration Statements =====
 
+fn try_parse_some_destructure_binding(is_mutable: bool) -> i64:
+    if par_kind_get() != TOK_IDENT or par_text_get() != "Some":
+        return -1
+    val (some_snap_nums, some_snap_txts) = lex_snapshot_save()
+    val (some_tok_nums, some_tok_text) = parser_tok_save()
+    parser_advance()
+    val has_payload = par_kind_get() == TOK_LPAREN
+    lex_snapshot_restore(some_snap_nums, some_snap_txts)
+    parser_tok_restore(some_tok_nums, some_tok_text)
+    if not has_payload:
+        return -1
+
+    # Parse this intentionally small grammar directly.  Building a temporary
+    # call expression here would leave dead arena nodes and make statement
+    # parsing depend on expression-arena getters during bootstrap.
+    parser_advance()
+    parser_expect(TOK_LPAREN)
+    var name = ""
+    var valid = true
+    if par_kind_get() == TOK_IDENT:
+        name = par_text_get()
+        parser_advance()
+    else:
+        parser_error("expected a single identifier in Some(...) binding")
+        valid = false
+
+    if par_kind_get() != TOK_RPAREN:
+        if valid:
+            parser_error("expected a single identifier in Some(...) binding")
+        valid = false
+        while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_ASSIGN and par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+            parser_advance()
+    if par_kind_get() == TOK_RPAREN:
+        parser_advance()
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+    if not valid:
+        # The Some(...) grammar was recognized, so consume its initializer and
+        # return a harmless statement instead of falling through into the
+        # ordinary identifier-binding parser at the trailing `=` token.
+        return stmt_expr_stmt(expr_pass(0), 0)
+    var unwrap_args: [i64] = []
+    val unwrapped = expr_method_call(init, "unwrap", unwrap_args, 0)
+    if is_mutable:
+        return stmt_var_decl(name, 0, unwrapped, 0)
+    stmt_val_decl(name, infer_expr_type_from_parse(unwrapped), unwrapped, 0)
+
 fn parse_val_decl_stmt() -> i64:
     parser_advance()
 
     # Tuple destructuring: val (a, b, c) = expr
     if par_kind_get() == 140:
         return parse_tuple_destructure_val()
+
+    val some_binding = try_parse_some_destructure_binding(false)
+    if some_binding >= 0:
+        return some_binding
 
     # G23: discard binding `val _ = expr` (`_` is kind 169, not Ident)
     # G26: accept keyword tokens as binding names (e.g. val after = ...)
@@ -675,6 +726,10 @@ fn parse_var_decl_stmt() -> i64:
     # Tuple destructuring: var (a, b, c) = expr
     if par_kind_get() == 140:
         return parse_tuple_destructure_var()
+
+    val some_binding = try_parse_some_destructure_binding(true)
+    if some_binding >= 0:
+        return some_binding
 
     # G23: discard binding `var _ = expr` (`_` is kind 169, not Ident)
     # G26: accept keyword tokens as binding names (e.g. var after = ...)

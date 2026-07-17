@@ -6,8 +6,8 @@
 
 use compiler.core.ast.{
     ast_reset,
-    EXPR_INT_LIT, EXPR_STRING_LIT, expr_count, expr_int_lit, expr_get_args, expr_get_int, expr_get_tag,
-    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag,
+    EXPR_IDENT, EXPR_INT_LIT, EXPR_METHOD_CALL, EXPR_PASS, EXPR_STRING_LIT, expr_count, expr_int_lit, expr_get_args, expr_get_int, expr_get_left, expr_get_str, expr_get_tag,
+    STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_name, stmt_get_tag,
     DECL_IMPL, arm_get_body, decl_get_body, decl_get_param_muts, decl_get_param_names,
     decl_get_tag, module_get_decls
 }
@@ -176,4 +176,66 @@ describe "bootstrap mutable method spellings":
         parse_module_body()
 
         expect(parser_has_errors()).to_equal(false)
+        ast_reset()
+
+describe "bootstrap Some destructuring bindings":
+    it "desugars an irrefutable Some payload to unwrap":
+        val source = "fn unwrap_present(maybe: i64?) -> i64:\n" +
+            "    if not maybe.?:\n" +
+            "        return 0\n" +
+            "    val Some(value) = maybe\n" +
+            "    value\n"
+        parser_init_with_path(source, "some_destructure_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val declarations = module_get_decls()
+        val body = decl_get_body(declarations[0])
+        expect(stmt_get_tag(body[1])).to_equal(STMT_VAL_DECL)
+        expect(stmt_get_name(body[1])).to_equal("value")
+        val unwrapped = stmt_get_expr(body[1])
+        expect(expr_get_tag(unwrapped)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_get_str(unwrapped)).to_equal("unwrap")
+        expect(expr_get_tag(expr_get_left(unwrapped))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(expr_get_left(unwrapped))).to_equal("maybe")
+        ast_reset()
+
+    it "preserves mutable Some payload bindings":
+        val source = "fn unwrap_mutable(maybe: i64?) -> i64:\n" +
+            "    var Some(value) = maybe\n" +
+            "    value\n"
+        parser_init_with_path(source, "some_mutable_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val body = decl_get_body(module_get_decls()[0])
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAR_DECL)
+        expect(stmt_get_name(body[0])).to_equal("value")
+        ast_reset()
+
+    it "recovers malformed Some bindings without reparsing the initializer":
+        val source = "fn invalid_some(maybe: i64?) -> i64:\n" +
+            "    val Some() = maybe\n" +
+            "    42\n"
+        parser_init_with_path(source, "invalid_some_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(true)
+        val body = decl_get_body(module_get_decls()[0])
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_EXPR)
+        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_PASS)
+        ast_reset()
+
+    it "keeps Some as an ordinary binding name without parentheses":
+        val source = "fn bind_some_name(maybe: i64?) -> i64?:\n" +
+            "    val Some = maybe\n" +
+            "    Some\n"
+        parser_init_with_path(source, "some_name_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val body = decl_get_body(module_get_decls()[0])
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAL_DECL)
+        expect(stmt_get_name(body[0])).to_equal("Some")
         ast_reset()

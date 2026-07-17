@@ -253,3 +253,35 @@ The full CLI and its test runner were not produced, so executable spec evidence,
 font/pixel/performance evidence, production verification, and publication remain
 open. Per the three-cycle cap, the `val Some(...)` parser gap is recorded here
 for the next scoped session rather than repaired or retried in this one.
+
+## Cycles 10–11 evidence — `Some(...)` binding repaired, graph timeout remains
+
+The next scoped session added direct pure-parser support for the production
+`val Some(name) = expression` and `var Some(name) = expression` forms. The
+binding evaluates the initializer once and lowers its payload to
+`expression.unwrap()`. Plain `val Some = expression` remains an ordinary name.
+Malformed constructor bindings consume their initializer and return a recovery
+statement instead of falling through at `=` and cascading diagnostics.
+
+Cycle 11 rebuilt the reviewed final source with the retained cache and the
+Cycle 10 pure-Simple bootstrap candidate: all 715 units compiled, zero failed,
+and `build/native_probe/simple-cycle11` linked in 401.5 seconds. A higher-model
+review reported PASS for the token progress, recovery, AST lowering, and the
+positive, mutable, malformed, and fallback parser regressions.
+
+The one bounded Cycle 11 Stage-4 admission run used that exact candidate and
+continued at full CPU with no parser/lowering diagnostic, including no
+recurrence of the earlier `variables.spl` error. It reached the 900-second
+timeout before linking `build/native_probe/full-cycle11/simple`. Therefore the
+grammar blocker is repaired, but full-graph admission performance remains open.
+No Rust-seed fallback was used, and the missing admitted full CLI still blocks
+execution of the focused specs, font/pixel evidence, verification, and push.
+
+A subsequent smaller pure-Simple build targeted
+`src/app/test_runner_new/main.spl` so focused specs could run without the full
+CLI. It reached code generation, then correctly failed closed on the existing
+function-pointer DATA-export defect in
+`src/lib/nogc_sync_mut/io/signal_handlers.spl`; see
+`signal_handlers_global_cleanup_fnptr_data_export_2026-07-17.md`. Unsafe stub
+fallback remained disabled. That independent blocker also prevents runner
+admission in this session.
