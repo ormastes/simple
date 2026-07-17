@@ -28,11 +28,28 @@ describe "hosted C target guard":
         expect(hosted_c_target_matches_host("riscv64gc-unknown-linux-gnu", "linux", "riscv64")).to_be(true)
 
     it "allows matching macOS Windows and FreeBSD targets":
+        expect(hosted_c_target_matches_host("x86_64-apple-darwin", "macos", "x86_64")).to_be(true)
         expect(hosted_c_target_matches_host("aarch64-apple-darwin", "macos", "aarch64")).to_be(true)
         expect(hosted_c_target_matches_host("arm64-apple-darwin", "macos", "aarch64")).to_be(true)
         expect(hosted_c_target_matches_host("x86_64-pc-windows-msvc", "windows", "x86_64")).to_be(true)
         expect(hosted_c_target_matches_host("x64-pc-windows-msvc", "windows", "x86_64")).to_be(true)
         expect(hosted_c_target_matches_host("x86_64-unknown-freebsd", "freebsd", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("aarch64-unknown-freebsd", "freebsd", "aarch64")).to_be(true)
+
+    it "keeps every supported native compiler plan out of the cross-capsule guard":
+        val plans = [
+            hosted_c_compiler_plan("x86_64-unknown-linux-gnu", "linux", "x86_64"),
+            hosted_c_compiler_plan("aarch64-unknown-linux-gnu", "linux", "aarch64"),
+            hosted_c_compiler_plan("riscv64-unknown-linux-gnu", "linux", "riscv64"),
+            hosted_c_compiler_plan("x86_64-apple-darwin", "macos", "x86_64"),
+            hosted_c_compiler_plan("aarch64-apple-darwin", "macos", "aarch64"),
+            hosted_c_compiler_plan("x86_64-pc-windows-msvc", "windows", "x86_64"),
+            hosted_c_compiler_plan("x86_64-unknown-freebsd", "freebsd", "x86_64"),
+            hosted_c_compiler_plan("aarch64-unknown-freebsd", "freebsd", "aarch64")
+        ]
+        for plan in plans:
+            expect(plan.supported).to_be(true)
+            expect(plan.requires_cross).to_be(false)
 
     it "admits only hosted architectures with implemented linker and CRT ownership":
         expect(hosted_native_link_arch_supported("linux", "x86_64")).to_be(true)
@@ -204,14 +221,19 @@ describe "hosted C target guard":
         val hosted_plan = source.index_of("val hosted_plan = hosted_c_compiler_plan") ?? -1
         val hosted_guard = source.index_of("if not hosted_plan.supported") ?? -1
         val arch_guard = source.index_of("if not hosted_native_link_arch_supported") ?? -1
+        val stage4_cross_guard = source.index_of("if stage4_requested and hosted_plan.requires_cross:") ?? -1
+        val compiler_discovery = source.index_of("val hosted_cc = find_c_compiler()") ?? -1
         val runtime_compile = source.index_of("val rt_result = compile_runtime_objects") ?? -1
         val entry_compile = source.index_of("val c_result = compile_entry_point_c") ?? -1
         expect(simpleos_guard).to_be_greater_than(-1)
         expect(hosted_plan).to_be_greater_than(simpleos_guard)
         expect(hosted_guard).to_be_greater_than(hosted_plan)
         expect(arch_guard).to_be_greater_than(hosted_guard)
-        expect(runtime_compile).to_be_greater_than(arch_guard)
+        expect(stage4_cross_guard).to_be_greater_than(arch_guard)
+        expect(compiler_discovery).to_be_greater_than(stage4_cross_guard)
+        expect(runtime_compile).to_be_greater_than(compiler_discovery)
         expect(entry_compile).to_be_greater_than(runtime_compile)
+        expect(source).to_contain("Stage4 strict profile requires a native host target; cross-target compiler capsules are unavailable")
 
     it "preserves explicit bare-metal mode in both direct LLVM paths":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_codegen_adapter.spl") ?? ""
