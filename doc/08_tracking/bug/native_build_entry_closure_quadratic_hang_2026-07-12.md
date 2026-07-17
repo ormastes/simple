@@ -128,6 +128,28 @@ error is a **separate, out-of-scope** blocker; not investigated further here.
   `pure_simple_text_split_lines_missing_2026-07-13.md`.
 - `_nb_module_path_from_use`'s delimiter scan now uses
   `rest.index_of(delim)` per candidate delimiter (5 native O(n) scans)
+
+## 2026-07-17 compiled-Dict hardening
+
+The full CLI helper had regressed to local `Dict<text, bool>` and
+`Dict<text, text>` values for its discovered set and resolution cache. Compiled
+local Dict mutation is not a reliable bootstrap primitive and is also the wrong
+hot-path ownership for a hundreds-of-modules closure walk.
+
+The discovered set now reuses the compiler driver's proven 8,192-bucket exact
+text set. The resolution cache uses the same array-backed bucket representation
+with tab-delimited key/value entries, including a presence bit so cached empty
+resolution results remain distinguishable from misses. Every mutation is
+explicitly reassigned.
+
+A current pure-Simple compiler drove the modified module through parsing,
+lowering, and into parallel object emission. The isolated compile then exhausted
+the host's remaining disk space while writing unrelated compiler objects; no
+source diagnostic was emitted, and no retry was made. The source contract now
+rejects reintroducing either local Dict declaration. This hardens the future
+full-CLI `native-build --entry-closure` path; the exact Stage4 bootstrap entry
+uses the separate compiler-driver closure and is not claimed fixed by this
+change.
   instead of a char-by-char loop.
 - `test/01_unit/app/cli_native_build_main_contract_spec.spl` updated to
   assert the new implementation (and the absence of the old O(n²) patterns)

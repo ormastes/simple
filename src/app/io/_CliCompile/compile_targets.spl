@@ -12,6 +12,10 @@ use app.io.dir_ops (dir_create)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
+use compiler.driver.driver_source_loading.{
+    _driver_text_bucket_set_new, _driver_text_bucket_set_has,
+    _driver_text_bucket_set_add
+}
 use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
 use lazy app.compile.native (compile_native)
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
@@ -21,6 +25,7 @@ use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metada
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_hash_text(value: text) -> i64
 
 fn _cli_eprint(message: text):
     eprint(message)
@@ -388,6 +393,34 @@ fn _nb_join_segments(segs: [text]) -> text:
         i = i + 1
     result
 
+fn _nb_text_bucket_index(key: text, bucket_count: i64) -> i64:
+    val raw = rt_hash_text(key) % bucket_count
+    if raw < 0:
+        raw + bucket_count
+    else:
+        raw
+
+fn _nb_text_cache_get(buckets: [text], key: text) -> (bool, text):
+    if buckets.len() == 0:
+        return (false, "")
+    val prefix = key + "\t"
+    val bucket = buckets[_nb_text_bucket_index(key, buckets.len())]
+    for entry in bucket.split("\n"):
+        if entry.starts_with(prefix):
+            return (true, entry.substring(prefix.len()))
+    (false, "")
+
+fn _nb_text_cache_add(buckets: [text], key: text, value: text) -> [text]:
+    if buckets.len() == 0:
+        return buckets
+    val (present, _) = _nb_text_cache_get(buckets, key)
+    if present:
+        return buckets
+    val index = _nb_text_bucket_index(key, buckets.len())
+    var updated = buckets
+    updated[index] = updated[index] + key + "\t" + value + "\n"
+    updated
+
 fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
@@ -395,10 +428,10 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # errors in the compile phase.
     val trace_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     var queue: [text] = [entry]
-    var discovered: Dict<text, bool> = {}
-    discovered[entry] = true
+    var discovered = _driver_text_bucket_set_new(8192)
+    discovered = _driver_text_bucket_set_add(discovered, entry)
     var result: [text] = []
-    var resolve_cache: Dict<text, text> = {}
+    var resolve_cache = _driver_text_bucket_set_new(8192)
     val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
     var qi = 0
     while qi < queue.len():
@@ -430,16 +463,17 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             val segs = mp.split(".")
             val seg_key = _nb_join_segments(segs)
             var rp = ""
-            if resolve_cache.has(seg_key):
-                rp = resolve_cache.get(seg_key) ?? ""
+            val (cached, cached_value) = _nb_text_cache_get(resolve_cache, seg_key)
+            if cached:
+                rp = cached_value
             else:
                 rp = _nb_resolve_segs(segs, closure_source_dirs)
-                resolve_cache[seg_key] = rp
+                resolve_cache = _nb_text_cache_add(resolve_cache, seg_key, rp)
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not discovered.has(rp):
+            if rp != "" and not _driver_text_bucket_set_has(discovered, rp):
                 queue = queue.push(rp)
-                discovered[rp] = true
+                discovered = _driver_text_bucket_set_add(discovered, rp)
             if rp == "" and segs.len() > 1 and not raw.contains("{"):
                 var drop: [text] = []
                 var di = 0
@@ -448,14 +482,15 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                     di = di + 1
                 val drop_key = _nb_join_segments(drop)
                 var drop_rp = ""
-                if resolve_cache.has(drop_key):
-                    drop_rp = resolve_cache.get(drop_key) ?? ""
+                val (drop_cached, drop_cached_value) = _nb_text_cache_get(resolve_cache, drop_key)
+                if drop_cached:
+                    drop_rp = drop_cached_value
                 else:
                     drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
-                    resolve_cache[drop_key] = drop_rp
-                if drop_rp != "" and not discovered.has(drop_rp):
+                    resolve_cache = _nb_text_cache_add(resolve_cache, drop_key, drop_rp)
+                if drop_rp != "" and not _driver_text_bucket_set_has(discovered, drop_rp):
                     queue = queue.push(drop_rp)
-                    discovered[drop_rp] = true
+                    discovered = _driver_text_bucket_set_add(discovered, drop_rp)
     result
 
 fn cli_native_build(args: [text]) -> i64:
