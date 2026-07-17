@@ -28,7 +28,7 @@ use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.core.ast.{expr_int_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
-use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block}
+use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait}
 use compiler.core.ast.{decl_set_param_defaults}
 
 # ===== Use/Export Declarations =====
@@ -449,9 +449,14 @@ fn parse_impl_decl() -> i64:
     parser_advance()
     var target_name = par_text_get()
     parser_expect(6)
+    var trait_name = ""
     if par_kind_get() == 45:
         # `impl Trait for Type:` — methods attach to the concrete type;
-        # trait conformance is not checked at this stage.
+        # trait conformance is not checked at this stage. The leading name
+        # was the trait; capture it (#157) so module_assembly can restore the
+        # impl->trait link and un-overridden trait default methods resolve on
+        # the native build path instead of failing "unresolved method call".
+        trait_name = target_name
         parser_advance()
         target_name = par_text_get()
         parser_expect(6)
@@ -490,7 +495,10 @@ fn parse_impl_decl() -> i64:
             # Skip unknown tokens in impl body gracefully
             parser_advance()
 
-    decl_impl_block(target_name, method_ids, 0)
+    val impl_idx = decl_impl_block(target_name, method_ids, 0)
+    if trait_name != "":
+        decl_set_impl_trait(impl_idx, trait_name)
+    impl_idx
 
 fn parse_ce_decl() -> i64:
     # Already consumed 'ce' keyword

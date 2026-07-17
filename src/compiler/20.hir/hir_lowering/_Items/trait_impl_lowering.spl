@@ -202,7 +202,7 @@ impl HirLowering:
         # Without this, HirImpl.methods only contains textually-present methods,
         # so positional dispatch against the trait's full method list aliases the
         # wrong body (or SIGSEGVs). See task #55.
-        if impl_.trait_.?:
+        if impl_.has_trait_:
             match impl_.trait_.kind:
                 case Named(trait_name, _):
                     if self.lowered_traits.contains_key(trait_name):
@@ -241,6 +241,28 @@ impl HirLowering:
                                     false,
                                     self.module_filename
                                 )
+                                # #157 body half: the default body was lowered in
+                                # the trait scope where `self` is the trait's Self
+                                # type, so MIR's function_lowering would not
+                                # register the self local as the concrete struct
+                                # (`self.name()` inside the body then fails
+                                # "unresolved method call"). Retype the self param
+                                # to the concrete impl type so struct_value_syms
+                                # picks up the receiver's real name and inner
+                                # required/default calls resolve. HirFunction and
+                                # HirParam are value structs, so rebuilding params
+                                # here does not alias the shared trait default
+                                # (safe for two impls of one trait).
+                                if not default_fn.is_static and concrete_default.params.len() > 0:
+                                    var retyped_params: [HirParam] = []
+                                    var retyped_i = 0
+                                    while retyped_i < concrete_default.params.len():
+                                        var retyped_param = concrete_default.params[retyped_i]
+                                        if retyped_i == 0:
+                                            retyped_param.type_ = type_
+                                        retyped_params.push(retyped_param)
+                                        retyped_i = retyped_i + 1
+                                    concrete_default.params = retyped_params
                                 concrete_default.symbol = concrete_symbol
                                 methods[default_fn.name] = concrete_symbol
                                 self.lowered_impl_functions[concrete_symbol] = concrete_default

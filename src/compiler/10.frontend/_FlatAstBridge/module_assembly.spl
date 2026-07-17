@@ -134,6 +134,7 @@ fn flat_ast_to_module(path: text) -> Module:
     # `interp_struct_is_value_type`).
     var classes: Dict<text, Class> = {}
     var enums: Dict<text, Enum> = {}
+    var traits: Dict<text, Trait> = {}
     var constants: Dict<text, Const> = {}
     var imports: [Import] = []
     var exports: [Export] = []
@@ -175,6 +176,30 @@ fn flat_ast_to_module(path: text) -> Module:
             flat_module_trace_function("after", stored_fn)
         elif tag_text == "3":
             val s_name = decl_get_name(idx)
+            # #157: a `trait` decl arrives here (parsed via the struct-body path)
+            # marked by decl_set_trait. Rebuild it into module.traits with its
+            # method list (abstract + default bodies) so lower_impl can inject
+            # un-overridden defaults; skip struct/class emission to avoid a
+            # phantom zero-field `s_name` struct shadowing the trait.
+            if decl_get_is_trait(idx) != 0:
+                var t_methods: [Function] = []
+                for t_method_id in decl_get_body(idx):
+                    t_methods.push(convert_decl_method_fn(t_method_id, s_name))
+                traits[s_name] = Trait(
+                    name: s_name,
+                    type_params: [],
+                    super_traits: [],
+                    where_clause: [],
+                    methods: t_methods,
+                    assoc_types: [],
+                    visibility: convert_decl_visibility(idx),
+                    is_public: decl_get_visibility_text(idx) == "public",
+                    has_doc_comment: false,
+                    doc_comment: "",
+                    span: span
+                )
+                di = di + 1
+                continue
             val f_names = decl_get_fields(idx)
             val f_types = decl_get_field_types(idx)
             val f_bits = decl_get_field_bits(idx)
@@ -368,10 +393,20 @@ fn flat_ast_to_module(path: text) -> Module:
                     span: span
                 ))
                 i_tpi = i_tpi + 1
+            # #157: restore the trait link that parse_impl_decl records via
+            # decl_set_impl_trait. Empty => inherent `impl Type:` (trait_ Infer);
+            # non-empty => `impl Trait for Type:`, needed so lower_impl injects
+            # un-overridden trait default methods for the concrete type.
+            val impl_trait_name = decl_get_impl_trait(idx)
+            val impl_has_trait = impl_trait_name != ""
+            val impl_trait_type = if impl_has_trait:
+                Type(kind: TypeKind.Named(impl_trait_name, []), span: span)
+            else:
+                Type(kind: TypeKind.Infer, span: span)
             impls.push(Impl(
                 type_: Type(kind: TypeKind.Named(target_name, []), span: span),
-                has_trait_: false,
-                trait_: Type(kind: TypeKind.Infer, span: span),
+                has_trait_: impl_has_trait,
+                trait_: impl_trait_type,
                 type_params: i_type_params,
                 where_clause: [],
                 methods: methods,
@@ -556,7 +591,7 @@ fn flat_ast_to_module(path: text) -> Module:
         structs: structs,
         enums: enums,
         bitfields: bitfields,
-        traits: {},
+        traits: traits,
         impls: impls,
         type_aliases: {},
         constants: constants,

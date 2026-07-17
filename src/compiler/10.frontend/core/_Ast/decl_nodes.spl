@@ -132,7 +132,7 @@ fn ast_decl_i64_get(idx: i64, field: text) -> i64:
     ast_parse_i64(rt_env_get(ast_decl_key(idx, field)) ?? "")
 
 fn ast_decl_text_set(idx: i64, field: text, value: text):
-    if (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1" and (field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or ast_decl_env_mirror_enabled()):
+    if (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1" and (field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or field == "IMPL_TRAIT" or ast_decl_env_mirror_enabled()):
         rt_env_set(ast_decl_key(idx, field), value)
 
 fn ast_decl_text_get(idx: i64, field: text) -> text:
@@ -204,6 +204,18 @@ var decl_is_gpu_kernel: [i64] = []   # 1 if @gpu_kernel decorated, 0 otherwise
 var decl_is_simd: [i64] = []         # 1 if @simd decorated, 0 otherwise
 var decl_is_packed: [i64] = []       # 1 if @packed decorated, 0 otherwise
 var decl_derives: [[text]] = []      # @derive(Eq, Hash, Debug) trait list
+# Trait NAME implemented by an `impl Trait for Type:` block (#157). Empty for
+# inherent impls. Grown alongside the other pools (placeholder here, assigned
+# later via decl_set_impl_trait) so module_assembly can recover the trait link
+# that parse_impl_decl otherwise drops -- without it, un-overridden trait
+# default methods never resolve on the native build path.
+var decl_impl_trait: [text] = []
+# 1 if this struct-shaped decl is actually a `trait` declaration (#157). A trait
+# is parsed via the struct-body path (parse_struct_or_trait_decl) and stored as a
+# DECL_STRUCT node; this marker lets module_assembly route it into module.traits
+# (with its default-method bodies carried in the decl body) instead of emitting a
+# phantom zero-field struct.
+var decl_is_trait: [i64] = []
 var decl_is_hardware: [i64] = []     # 1 if @hardware decorated, 0 otherwise
 var decl_clocked_args: [[text]] = [] # @clocked(clk, reset_n) signal names
 var decl_is_value_type: [i64] = []   # 1 = struct (value semantics, copy on bind), 0 = class/actor (reference semantics)
@@ -247,6 +259,8 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_is_simd.push(0)
     decl_is_packed.push(0)
     decl_derives.push([])
+    decl_impl_trait.push("")
+    decl_is_trait.push(0)
     decl_is_hardware.push(0)
     decl_clocked_args.push([])
     decl_is_value_type.push(1)
@@ -279,6 +293,8 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_is_simd[idx] = 0
     decl_is_packed[idx] = 0
     decl_derives[idx] = []
+    decl_impl_trait[idx] = ""
+    decl_is_trait[idx] = 0
     decl_is_hardware[idx] = 0
     decl_clocked_args[idx] = []
     decl_is_value_type[idx] = 1
@@ -478,6 +494,46 @@ fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i
     decl_name[idx] = target_name
     decl_body_stmts[idx] = method_decl_ids
     idx
+
+# Record the trait NAME for an `impl Trait for Type:` block (#157). Called in a
+# separate step after decl_impl_block (never a push in the same call as the
+# index-assign -- see the decl_param_mut_text pool note) so the value persists.
+fn decl_set_impl_trait(idx: i64, trait_name: text):
+    if idx >= 0 and idx < decl_impl_trait.len():
+        decl_impl_trait[idx] = trait_name
+    ast_decl_text_set(idx, "IMPL_TRAIT", trait_name)
+
+fn decl_get_impl_trait(idx: i64) -> text:
+    if ast_decl_prefer_arena() and idx >= 0 and idx < decl_impl_trait.len():
+        return decl_impl_trait[idx]
+    val env_value = ast_decl_text_get(idx, "IMPL_TRAIT")
+    if env_value != "":
+        return env_value
+    if idx >= decl_impl_trait.len():
+        return ""
+    decl_impl_trait[idx]
+
+# Mark a struct-shaped decl as a `trait` (#157) and carry its method decl ids in
+# the shared BODY slot so module_assembly can rebuild the trait's method list
+# (including un-overridden default-method bodies) into module.traits.
+fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
+    if idx >= 0 and idx < decl_is_trait.len():
+        decl_is_trait[idx] = 1
+    ast_decl_i64_set(idx, "IS_TRAIT", 1)
+    ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
+    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
+    if idx >= 0 and idx < decl_body_stmts.len():
+        decl_body_stmts[idx] = method_decl_ids
+
+fn decl_get_is_trait(idx: i64) -> i64:
+    if ast_decl_prefer_arena() and idx >= 0 and idx < decl_is_trait.len():
+        return decl_is_trait[idx]
+    val env_value = ast_decl_i64_get(idx, "IS_TRAIT")
+    if env_value != 0:
+        return env_value
+    if idx >= decl_is_trait.len():
+        return 0
+    decl_is_trait[idx]
 
 fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], body_stmts: [i64], imports: [text], span_id: i64) -> i64:
     # cli Name: block — name = struct name for parsed args,
