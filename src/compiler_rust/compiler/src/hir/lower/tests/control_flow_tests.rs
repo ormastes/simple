@@ -378,3 +378,74 @@ fn test_implicit_self_inside_if_let_cast_binds_local() {
     let mir_repr = format!("{mir:?}");
     assert!(!mir_repr.contains("global_name: \"self\""), "{mir_repr}");
 }
+
+#[test]
+fn test_expression_match_bare_enum_variants_check_discriminants() {
+    let source = "enum BorrowKind:\n    Shared\n    Mutable\n\nfn render(kind: BorrowKind) -> text:\n    val rendered = match kind:\n        case Shared: \"shared\"\n        case Mutable: \"mutable\"\n    return rendered\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("render")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert_eq!(hir_repr.matches("rt_enum_check_discriminant").count(), 2, "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"Shared\")"), "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"Mutable\")"), "{hir_repr}");
+    assert!(!function
+        .locals
+        .iter()
+        .any(|local| local.name == "Shared" || local.name == "Mutable"));
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(!mir_repr.contains("global_name: \"Shared\""), "{mir_repr}");
+    assert!(!mir_repr.contains("global_name: \"Mutable\""), "{mir_repr}");
+}
+
+#[test]
+fn test_expression_match_identifier_binding_is_initialized() {
+    let source = "enum BorrowKind:\n    Shared\n    Mutable\n\nfn identity(kind: BorrowKind) -> BorrowKind:\n    val copied = match kind:\n        case bound: bound\n    return copied\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("identity")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(function.locals.iter().any(|local| local.name == "bound"), "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"bound\")"), "{hir_repr}");
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(!mir_repr.contains("global_name: \"bound\""), "{mir_repr}");
+}
+
+#[test]
+fn test_expression_match_guard_initializes_and_restores_shadowed_binding() {
+    let source = "enum BorrowKind:\n    Shared\n    Mutable\n\nfn guarded(kind: BorrowKind) -> BorrowKind:\n    val bound = kind\n    val copied = match kind:\n        case bound if bound == kind: bound\n    return bound\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("guarded")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert_eq!(
+        function.locals.iter().filter(|local| local.name == "bound").count(),
+        2,
+        "{hir_repr}"
+    );
+    assert!(!hir_repr.contains("Global(\"bound\")"), "{hir_repr}");
+    assert!(
+        hir_repr.contains("then_branch: HirExpr { kind: Block([Let"),
+        "{hir_repr}"
+    );
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(!mir_repr.contains("global_name: \"bound\""), "{mir_repr}");
+}
+
+#[test]
+fn test_expression_match_mutable_binding_preserves_mutability() {
+    let source = "enum BorrowKind:\n    Shared\n    Mutable\n\nfn identity(kind: BorrowKind) -> BorrowKind:\n    val copied = match kind:\n        case mut bound: bound\n    return copied\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("identity")).unwrap();
+
+    assert!(function
+        .locals
+        .iter()
+        .any(|local| local.name == "bound" && local.mutability == simple_parser::ast::Mutability::Mutable));
+}

@@ -881,6 +881,22 @@ impl Lowerer {
             other => other,
         };
         let mut binding_stmts = Vec::new();
+        if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = binding_pattern {
+            if bindings.iter().any(|(binding, _)| binding == name) {
+                let Some(&local_index) = ctx.local_map.get(name) else {
+                    return binding_stmts;
+                };
+                binding_stmts.push(HirStmt::Let {
+                    local_index,
+                    ty: subject_ty,
+                    value: Some(HirExpr {
+                        kind: HirExprKind::Local(subject_idx),
+                        ty: subject_ty,
+                    }),
+                });
+            }
+            return binding_stmts;
+        }
         if let Pattern::Enum {
             payload: Some(payload_patterns),
             variant: enum_variant,
@@ -1142,6 +1158,49 @@ impl Lowerer {
         binding_stmts
     }
 
+    pub(crate) fn lower_match_guard(
+        &mut self,
+        condition: HirExpr,
+        guard: Option<&Expr>,
+        mut binding_stmts: Vec<HirStmt>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<(HirExpr, Vec<HirStmt>)> {
+        let Some(guard) = guard else {
+            return Ok((condition, binding_stmts));
+        };
+        let guard_hir = self.lower_expr(guard, ctx)?;
+        if binding_stmts.is_empty() {
+            return Ok((
+                HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(condition),
+                        right: Box::new(guard_hir),
+                    },
+                    ty: TypeId::BOOL,
+                },
+                binding_stmts,
+            ));
+        }
+
+        binding_stmts.push(HirStmt::Expr(guard_hir));
+        let guarded_condition = HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(condition),
+                then_branch: Box::new(HirExpr {
+                    kind: HirExprKind::Block(binding_stmts),
+                    ty: TypeId::BOOL,
+                }),
+                else_branch: Some(Box::new(HirExpr {
+                    kind: HirExprKind::Bool(false),
+                    ty: TypeId::BOOL,
+                })),
+            },
+            ty: TypeId::BOOL,
+        };
+        Ok((guarded_condition, Vec::new()))
+    }
+
     /// Lower match arms to a chain of If-Else statements
     fn lower_match_arms_stmt(
         &mut self,
@@ -1158,27 +1217,8 @@ impl Lowerer {
         let remaining_arms = &arms[1..];
 
         // Check if this is a wildcard pattern (always matches)
-        // But: if subject is an enum and the identifier matches a variant name,
-        // treat it as an enum pattern, not a binding.
         if matches!(&arm.pattern, Pattern::Wildcard) {
             return self.lower_block(&arm.body, ctx);
-        }
-        if let Pattern::Identifier(name) = &arm.pattern {
-            let is_enum_variant = if let Some(HirType::Enum {
-                variants,
-                name: enum_name,
-                ..
-            }) = self.module.types.get(subject_ty)
-            {
-                variants.iter().any(|(vn, _)| vn == name)
-            } else {
-                false
-            };
-            if !is_enum_variant {
-                // Plain binding pattern - always matches
-                return self.lower_block(&arm.body, ctx);
-            }
-            // Otherwise fall through to treat as enum pattern
         }
 
         // Generate the condition for this pattern
@@ -1187,28 +1227,14 @@ impl Lowerer {
         // Extract pattern bindings and add them to context
         // This needs to happen after pattern condition but before guard/body
         let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        for (name, ty) in &bindings {
-            ctx.add_local(name.clone(), *ty, Mutability::Immutable);
-        }
-
-        // Handle guard expression if present (bindings are now in scope)
-        let final_condition = if let Some(guard) = &arm.guard {
-            let guard_hir = self.lower_expr(guard, ctx)?;
-            HirExpr {
-                kind: HirExprKind::Binary {
-                    op: BinOp::And,
-                    left: Box::new(condition),
-                    right: Box::new(guard_hir),
-                },
-                ty: TypeId::BOOL,
-            }
-        } else {
-            condition
-        };
+        let previous_bindings = self.register_match_bindings(&arm.pattern, &bindings, ctx);
 
         // Generate payload extraction statements for enum bindings (shared with
         // expression-position match arm lowering in expr/control.rs).
         let binding_stmts = self.build_pattern_binding_stmts(&arm.pattern, subject_idx, subject_ty, &bindings, ctx);
+
+        let (final_condition, binding_stmts) =
+            self.lower_match_guard(condition, arm.guard.as_ref(), binding_stmts, ctx)?;
 
         // Lower the arm body with bindings in scope
         let mut then_block = Vec::new();
@@ -1218,9 +1244,7 @@ impl Lowerer {
         // Restore context (remove pattern bindings from name scope only)
         // Keep locals in ctx.locals so they get proper indices in the final function.
         // Truncating would cause local_index references in HIR stmts to be out of bounds.
-        for (name, _) in &bindings {
-            ctx.local_map.remove(name);
-        }
+        self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
         let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, ctx)?;
@@ -1273,7 +1297,7 @@ impl Lowerer {
     }
 
     /// Generate a condition expression for pattern matching
-    fn lower_pattern_condition_stmt(
+    pub(crate) fn lower_pattern_condition_stmt(
         &mut self,
         subject_idx: usize,
         subject_ty: TypeId,
@@ -1294,23 +1318,7 @@ impl Lowerer {
                 })
             }
             Pattern::Identifier(name) => {
-                // Check if this identifier is an enum variant of the subject type
-                let enum_info = if let Some(HirType::Enum {
-                    variants,
-                    name: enum_name,
-                    ..
-                }) = self.module.types.get(subject_ty)
-                {
-                    if variants.iter().any(|(vn, _)| vn == name) {
-                        Some(enum_name.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(_enum_name) = enum_info {
+                if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as enum variant pattern using rt_enum_check_discriminant
                     let expected_disc: i64 = {
                         use std::collections::hash_map::DefaultHasher;

@@ -181,6 +181,17 @@ bounded bootstrap removed both `N` diagnostics, reducing undeclared globals
 from 12 to 10. The run exited 2 normally without timeout, OOM, crash, hang, or
 orphan.
 
+Seed HIR match lowering now distinguishes subject-owned unit variants from
+real identifier bindings, initializes guarded bindings before guard evaluation,
+restores shadowed locals, and preserves mutable patterns. Four focused HIR/MIR
+regressions pass. Two bounded bootstrap cycles found no new crash or hang; the
+first exposed and separately fixed a concurrent `SliceIter` syntax regression,
+while the second proved this correctness fix does not remove the imported-enum
+`Shared` diagnostics. After concurrent `C`/`Array` source repairs, Stage 2 now
+stops on six diagnostics: four unqualified imported `Shared` variants and two
+`CompareExchange` uses. Those require explicit imported-enum qualification or
+import-aware subject typing, not external symbol declarations.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs

@@ -294,8 +294,7 @@ impl Lowerer {
         let remaining_arms = &arms[1..];
 
         // Check if this is a wildcard pattern (always matches)
-        if matches!(&arm.pattern, Pattern::Wildcard | Pattern::Identifier(_)) {
-            // Wildcard or binding pattern - just execute the body
+        if matches!(&arm.pattern, Pattern::Wildcard) {
             return self.lower_match_arm_body(&arm.body, ctx);
         }
 
@@ -305,30 +304,14 @@ impl Lowerer {
         // Extract pattern bindings and add them to context
         // This needs to happen after pattern condition but before guard/body
         let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        for (name, ty) in &bindings {
-            ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
-        }
-
-        // Handle guard expression if present (bindings are now in scope)
-        let final_condition = if let Some(guard) = &arm.guard {
-            let guard_hir = self.lower_expr(guard, ctx)?;
-            HirExpr {
-                kind: HirExprKind::Binary {
-                    op: BinOp::And,
-                    left: Box::new(condition),
-                    right: Box::new(guard_hir),
-                },
-                ty: TypeId::BOOL,
-            }
-        } else {
-            condition
-        };
+        let previous_bindings = self.register_match_bindings(&arm.pattern, &bindings, ctx);
 
         // Generate payload extraction statements so enum payload bindings are
-        // actually initialized. Expression-position matches previously emitted
-        // no extraction at all — `case Copy(local): local.id` compiled with
-        // `local` left nil (shared helper with statement-position lowering).
+        // initialized before a guard or arm body reads them.
         let binding_stmts = self.build_pattern_binding_stmts(&arm.pattern, subject_idx, subject_ty, &bindings, ctx);
+
+        let (final_condition, binding_stmts) =
+            self.lower_match_guard(condition, arm.guard.as_ref(), binding_stmts, ctx)?;
 
         // Lower the arm body with bindings in scope
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
@@ -349,9 +332,7 @@ impl Lowerer {
         // Restore context (remove pattern bindings from name scope only)
         // Keep locals in ctx.locals so they get proper indices in the final function.
         // Truncating would cause local_index references in HIR stmts to be out of bounds.
-        for (name, _) in &bindings {
-            ctx.local_map.remove(name);
-        }
+        self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
         let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
@@ -380,13 +361,14 @@ impl Lowerer {
         };
 
         match pattern {
-            Pattern::Wildcard | Pattern::Identifier(_) => {
+            Pattern::Wildcard => {
                 // Always matches
                 Ok(HirExpr {
                     kind: HirExprKind::Bool(true),
                     ty: TypeId::BOOL,
                 })
             }
+            Pattern::Identifier(_) => self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx),
             Pattern::Literal(lit_expr) => {
                 // Compare subject == literal
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
@@ -631,12 +613,74 @@ impl Lowerer {
         bindings
     }
 
+    pub(crate) fn subject_enum_has_variant(&self, subject_ty: TypeId, name: &str) -> bool {
+        matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Enum { variants, .. }) if variants.iter().any(|(variant, _)| variant == name)
+        )
+    }
+
+    fn pattern_binding_is_mutable(pattern: &Pattern, name: &str) -> bool {
+        match pattern {
+            Pattern::MutIdentifier(binding) => binding == name,
+            Pattern::Tuple(patterns) | Pattern::Array(patterns) | Pattern::Or(patterns) => patterns
+                .iter()
+                .any(|pattern| Self::pattern_binding_is_mutable(pattern, name)),
+            Pattern::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, pattern)| Self::pattern_binding_is_mutable(pattern, name)),
+            Pattern::Enum { payload, .. } => payload.as_ref().is_some_and(|patterns| {
+                patterns
+                    .iter()
+                    .any(|pattern| Self::pattern_binding_is_mutable(pattern, name))
+            }),
+            Pattern::Typed { pattern, .. } => Self::pattern_binding_is_mutable(pattern, name),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn register_match_bindings(
+        &self,
+        pattern: &Pattern,
+        bindings: &[(String, TypeId)],
+        ctx: &mut FunctionContext,
+    ) -> Vec<(String, Option<usize>)> {
+        bindings
+            .iter()
+            .map(|(name, ty)| {
+                let previous = ctx.local_map.get(name).copied();
+                let mutability = if Self::pattern_binding_is_mutable(pattern, name) {
+                    Mutability::Mutable
+                } else {
+                    Mutability::Immutable
+                };
+                ctx.add_local(name.clone(), *ty, mutability);
+                (name.clone(), previous)
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_match_bindings(
+        &self,
+        previous_bindings: Vec<(String, Option<usize>)>,
+        ctx: &mut FunctionContext,
+    ) {
+        for (name, previous) in previous_bindings {
+            if let Some(local_index) = previous {
+                ctx.local_map.insert(name, local_index);
+            } else {
+                ctx.local_map.remove(&name);
+            }
+        }
+    }
+
     /// Recursively collect bindings from a pattern
     fn collect_pattern_bindings(&self, pattern: &Pattern, expected_ty: TypeId, bindings: &mut Vec<(String, TypeId)>) {
         match pattern {
             Pattern::Identifier(name) => {
-                // Variable binding - use expected type
-                bindings.push((name.clone(), expected_ty));
+                if !self.subject_enum_has_variant(expected_ty, name) {
+                    bindings.push((name.clone(), expected_ty));
+                }
             }
             Pattern::MutIdentifier(name) => {
                 bindings.push((name.clone(), expected_ty));
