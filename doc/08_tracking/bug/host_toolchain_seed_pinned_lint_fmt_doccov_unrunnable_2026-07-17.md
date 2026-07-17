@@ -123,6 +123,103 @@ the strategic dynSMF work:
 Tooling-surface smoke matrix (check / sdoctest / md / doc / test / compile /
 run) during the 2026-07-17 test-runner hardening campaign.
 
+## Runnable pure-Simple fmt/doc-coverage path 2026-07-17
+
+Confirmed (fmt/doc-coverage lane, separate from the lint lane above):
+`<seed> fmt ...` fails closed the same way as lint
+(`rt_cli_run_fmt is not supported in interpreter mode`), and
+`<seed> doc-coverage ...` is swallowed by the seed's front-end treating an
+unknown subcommand as a script path (usage dump, exit 1) -- the pure-Simple
+dispatch handler (`run_doc_coverage` in `main_and_help.spl`) is never
+reached, exactly as described above for the whole `.spl`-only subcommand
+family.
+
+Both tools already have a standalone pure-Simple entry point with its own
+`fn main()` that can be run directly, bypassing the seed's broken top-level
+subcommand routing entirely -- no source changes were needed to make these
+runnable, only invoking them a different way:
+
+```bash
+SIMPLE=src/compiler_rust/target/release/simple
+
+# fmt (module compiler.tools.formatter) -- NOTE: no `--` separator; the seed's
+# `run <file> -- <args>` form makes `--` itself args[1], breaking the
+# formatter's own `args[1]` = file-path parsing.
+timeout 240 "$SIMPLE" run src/compiler/90.tools/formatter/main.spl test/fixtures/fmt/unformatted.spl --check
+timeout 240 "$SIMPLE" run src/compiler/90.tools/formatter/main.spl <file.spl> --write
+timeout 240 "$SIMPLE" run src/compiler/90.tools/formatter/main.spl <file.spl> --diff
+
+# doc-coverage (module app.stats.doc_coverage_dynamic)
+timeout 240 "$SIMPLE" run src/app/stats/doc_coverage_dynamic.spl <path> --missing
+timeout 240 "$SIMPLE" run src/app/stats/doc_coverage_dynamic.spl <path> --format=json
+```
+
+Both entry points have a small import footprint (no whole-compiler
+transitive closure): doc-coverage's shell-based scanner runs in well under a
+second; the formatter (which imports the real lexer) takes ~15-20s per
+invocation, dominated by the seed's own startup-time "common mistake
+detected" diagnostic scan of its transitive closure (harmless noise, all on
+stderr -- stdout carries only the tool's real output, so redirecting stderr
+gives a clean result for scripting).
+
+Fixed in pure Simple while establishing this path (both root-caused, not
+worked around):
+
+- `src/compiler/90.tools/formatter/main.spl`: `format_line` ran
+  `add_expression_spacing`/`break_long_line` on full-line comments the same
+  as code, rewriting operator-like characters inside ordinary prose (e.g. a
+  hyphenated word `pure-Simple` became `pure - Simple`). This silently
+  changed comment content and tripped the formatter's own
+  `formatter_require_lexical_equivalence` guard, which then refused an
+  otherwise-valid `--write`/`--check` with "formatter refused a
+  semantics-changing rewrite" on any file whose comments contain
+  `+`/`-`/`*`/`/`/`%`. Fixed by short-circuiting full-line comments (lines
+  whose trimmed content starts with `#`) to re-indent-only, no spacing
+  transform. (Inline trailing comments after code on the same line are not
+  covered by this fix.)
+- `src/app/stats/doc_coverage_dynamic.spl`: `print_missing` (the
+  `--missing` handler) printed every `grep '^pub fn '` match unconditionally
+  -- it never actually filtered by documentation status, so it listed
+  already-documented functions as "missing" too. Fixed to cross-reference
+  against a second grep pass (comment line immediately followed by a
+  `pub fn` line, same definition `count_documented_fns` already uses) and
+  only print genuinely undocumented matches. The fix deliberately avoids
+  `.to_int()`/`??` on the grep-derived line-number strings -- see
+  `doc/08_tracking/bug/interp_to_int_split_result_nil_coalesce_garbage_2026-07-17.md`
+  for a confirmed, separate interpreter defect that corrupts exactly that
+  pattern; the fix stays string-only (line numbers compared as text, never
+  parsed to int) to route around it.
+
+New fixtures: `test/fixtures/fmt/unformatted.spl` (real comma/arrow/operator
+spacing violations, verified empirically: `--check` exit 1, `--write` exit 0,
+re-`--check` exit 0, second `--write` byte-identical to the first --
+idempotent) and `test/fixtures/doc_coverage/pub_fn_missing_sample.spl` (one
+documented + one undocumented `pub fn`, used as the regression fixture for
+the `print_missing` fix above).
+
+New specs: `test/01_unit/compiler/tools/formatter_core_spec.spl` (5 examples,
+direct in-process `Formatter.format_source` calls) and
+`test/03_system/app/fmt_doccov_contract_spec.spl` (4 examples, subprocess
+contract test via `app.io.cli_ops._cli_process_run` against both entry
+points and fixtures above). Both genuinely pass all examples under `run` and
+`test` ("N examples, 0 failures" / "Passed: N"), but -- like
+`test/01_unit/app/io/process_limits_enforcement_spec.spl` and this doc's
+lint precedent above -- the file-level result is still reported FAIL /
+nonzero under the seed: `test/01_unit/.../formatter_core_spec.spl` reports
+"Passed: 5, Failed: 1" and `test/03_system/app/fmt_doccov_contract_spec.spl`
+reports "Passed: 4, Failed: 1" despite every individual example passing.
+This is the same environmental exit-code-taint class as the rest of this
+doc, not a defect in fmt/doc-coverage; notably the unit spec exhibits it too
+even though it never calls `process_run` itself, so the taint is not
+strictly a `process_run`-only artifact -- it also reproduces from a plain
+cross-module `use compiler.tools.formatter.main.{...}` import under `run`.
+One suspect (not confirmed): `compiler.tools.formatter.main` and
+`compiler.tools.lint.main` are both literally named `main.spl`, and this doc
+already records one confirmed cross-module name collision between them
+(`read_file`); a second colliding name (`main`/`print_usage`) would explain
+the stray "Usage: simple_lint ..." text both new specs print just before
+exiting nonzero.
+
 ## Runnable pure-Simple lint path 2026-07-17
 
 Worker M mapped the lint architecture and confirmed `simple lint` (both the

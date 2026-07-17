@@ -225,16 +225,51 @@ fn print_md_report(path: text):
         app_pct = (app_doc * 100) / app_total
     print "| app/ | {app_total} | {app_doc} | {app_pct}% |"
 
-# Show undocumented functions using awk
+# Show undocumented public functions: a pub fn is "documented" iff the
+# immediately preceding source line is a `#` comment -- the same definition
+# count_documented_fns uses. Previously this printed EVERY `pub fn` match
+# unconditionally (bug: doc-coverage --missing listed already-documented
+# functions as "missing"; see
+# doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md).
+#
+# NOTE: deliberately avoids `.to_int()` / `??` on grep-derived line-number
+# strings -- both are corrupted by a confirmed interpreter defect (returns
+# garbage instead of the parsed value or the `??` fallback; repros even on a
+# flat, non-nested `"42".to_int() ?? 0`). Comparison below stays string-only.
 fn print_missing(path: text):
     print "Undocumented public functions in {path}:"
     print ""
-    val cmd = "grep -rn '^pub fn ' {path} --include='*.spl' 2>/dev/null | head -20"
-    val output = dc_run_cmd(cmd)
-    if output == "0" or output == "":
+    val all_cmd = "grep -rnH '^pub fn ' {path} --include='*.spl' 2>/dev/null | head -20"
+    val all_output = dc_run_cmd(all_cmd)
+    if all_output == "0" or all_output == "":
         print "(none found or all documented)"
-    else:
-        print output
+        return
+
+    # Documented pub fns, captured as "path-N-pub fn ..." (via -A1 on the
+    # comment line) -- the SAME line-number format `all_output` uses, so
+    # membership can be checked with a plain substring `contains`.
+    val doc_cmd = "grep -rnH -A1 '^#' {path} --include='*.spl' 2>/dev/null | grep -E -- '-[0-9]+-pub fn '"
+    val doc_output = dc_run_cmd(doc_cmd)
+
+    var missing_count = 0
+    for line in all_output.split("\n"):
+        if line.trim() == "":
+            continue
+        val parts = line.split(":")
+        if parts.len() < 2:
+            print line
+            missing_count = missing_count + 1
+            continue
+        val file = parts[0]
+        val line_no = parts[1]
+        val key = "{file}-{line_no}-pub fn "
+        if doc_output.contains(key):
+            continue
+        print line
+        missing_count = missing_count + 1
+
+    if missing_count == 0:
+        print "(none found or all documented)"
 
 # Main entry point for doc-coverage command
 fn run_doc_coverage(args: [text]) -> i64:
