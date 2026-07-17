@@ -89,6 +89,14 @@ fn native_build_cache_dir() -> text:
     else:
         dir
 
+fn _driver_text_list_contains(items: [text], item: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == item:
+            return true
+        i = i + 1
+    false
+
 # Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
 fn dtrace(msg: text) -> ():
@@ -475,14 +483,16 @@ pub class CompilerDriver:
             # entry-only filter, which otherwise requires this block to flip
             # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE before anything but the exact
             # entry file is parsed.
-            var closure_loaded_mods: Dict<text, bool> = {}
+            var closure_loaded_mods: [text] = []
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
-                closure_loaded_mods[all_sources[closure_preidx].module_name] = true
+                val loaded_module_name = all_sources[closure_preidx].module_name
+                if not _driver_text_list_contains(closure_loaded_mods, loaded_module_name):
+                    closure_loaded_mods = closure_loaded_mods.push(loaded_module_name)
                 closure_preidx = closure_preidx + 1
             var closure_added = 0
-            var closure_seen_mods: Dict<text, bool> = {}
-            var closure_scanned_paths: Dict<text, bool> = {}
+            var closure_seen_mods: [text] = []
+            var closure_scanned_paths: [text] = []
             var closure_idx = 0
             while closure_idx < all_sources.len():
                 val closure_src = all_sources[closure_idx]
@@ -490,19 +500,19 @@ pub class CompilerDriver:
                 # Its imports are identical for every alias, so scanning each
                 # alias grows the closure queue exponentially and can exhaust
                 # memory before parsing begins.
-                if closure_scanned_paths.contains(closure_src.path):
+                if _driver_text_list_contains(closure_scanned_paths, closure_src.path):
                     closure_idx = closure_idx + 1
                     continue
-                closure_scanned_paths[closure_src.path] = true
+                closure_scanned_paths = closure_scanned_paths.push(closure_src.path)
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
                 val closure_imports = _driver_entry_import_module_paths(closure_src.content)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
-                    if closure_seen_mods.contains(closure_mp):
+                    if _driver_text_list_contains(closure_seen_mods, closure_mp):
                         continue
-                    closure_seen_mods[closure_mp] = true
-                    if closure_loaded_mods.contains(closure_mp):
+                    closure_seen_mods = closure_seen_mods.push(closure_mp)
+                    if _driver_text_list_contains(closure_loaded_mods, closure_mp):
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
                         continue
@@ -528,7 +538,8 @@ pub class CompilerDriver:
                         if not seen_sources.contains(closure_key):
                             seen_sources[closure_key] = true
                             all_sources = all_sources.push(cs)
-                            closure_loaded_mods[cs.module_name] = true
+                            if not _driver_text_list_contains(closure_loaded_mods, cs.module_name):
+                                closure_loaded_mods = closure_loaded_mods.push(cs.module_name)
                             closure_added = closure_added + 1
                     if not closure_has_exact:
                         # The path-derived module name differs from the import
@@ -539,7 +550,8 @@ pub class CompilerDriver:
                         if not seen_sources.contains(closure_alias_key):
                             seen_sources[closure_alias_key] = true
                             all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
-                            closure_loaded_mods[closure_mp] = true
+                            if not _driver_text_list_contains(closure_loaded_mods, closure_mp):
+                                closure_loaded_mods = closure_loaded_mods.push(closure_mp)
                             closure_added = closure_added + 1
                 closure_idx = closure_idx + 1
             if self.ctx.errors.len() == 0 and (closure_added > 0 or input_len > 1):

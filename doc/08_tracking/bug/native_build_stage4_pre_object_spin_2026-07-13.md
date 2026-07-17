@@ -649,3 +649,18 @@ aliases and scans each physical file's imports once. Aliases remain in
 `all_sources` for name resolution, but cannot multiply closure discovery. A
 source regression pins the guard. Executable Stage 4 verification remains
 pending because the bounded three-cycle bootstrap cap was reached.
+
+The first guard-bearing retry proved that local compiled
+`Dict<text, bool>` mutation/lookup is not reliable in this path: 320 unique
+paths still emitted 5,014 scan events and RSS reached about 5.2 GiB. The three
+closure sets now use explicitly reassigned `[text]` arrays and a scalar equality
+helper. This retains bounded semantics without depending on the broken local
+dictionary state.
+
+The array-backed Stage 3 then completed with 4 compiled, 711 cached, zero
+failures, 24 MiB output, 54.49 seconds wall time, and about 276 MiB maximum RSS.
+Its exact-entry Stage 4 reached the source-loading boundary and exited in 8.45
+seconds at about 1.26 GiB maximum RSS instead of repeating scans. It now fails
+boundedly on unresolved import aliases, terminal member imports, and relative
+imports. Those resolver gaps are the next blocker; they are separate from this
+closed pre-object spin root cause and must be fixed in a fresh capped session.
