@@ -50,6 +50,64 @@ main = danger_tail() + danger_continue()"#;
     assert_eq!(run_interpreter(code).unwrap(), 50);
 }
 
+// Bug #172: stacked block-form `defer:` bodies must unwind in LIFO order
+// (last registered, first executed) — same contract as stacked statement-form
+// `defer expr`. Both forms share the tail-injection mechanism in
+// `macro::state::{queue_tail_injection, exit_block_scope}`; a module-global
+// mutated by each defer body, order-sensitive via `G = G * 10 + N`, detects
+// both a wrong-order (FIFO) regression and a double-execution regression in
+// one assertion: LIFO -> 21, FIFO -> 12, double-exec (any order) -> 3+ digits.
+//
+// `G` is read back through a function (`read_g()`), not directly at module
+// top level: top-level `Node::Let` syncs `var`/`val` into the interpreter's
+// `MODULE_GLOBALS` side-table (for function-body access) only once, at
+// declaration time — a *direct* top-level read after a function mutates `G`
+// would observe the stale pre-call value from the module's own `Env`, not
+// `MODULE_GLOBALS`. Routing the read through a function avoids that unrelated
+// staleness quirk and keeps this test focused on defer ordering.
+//
+// No explicit `main()` call is used — `evaluate_module` drives `helper()`
+// exactly once via the top-level statement below, avoiding an unrelated
+// driver-level auto-invoke-main artifact that would double the WHOLE
+// program (not defer-specific) if `main()` were also called explicitly.
+#[test]
+fn test_interpreter_stacked_block_form_defer_runs_lifo() {
+    let code = r#"var G: i32 = 0
+
+fn helper():
+    defer:
+        G = G * 10 + 1
+    defer:
+        G = G * 10 + 2
+
+fn read_g() -> i32:
+    return G
+
+helper()
+main = read_g()"#;
+
+    assert_eq!(run_interpreter(code).unwrap(), 21);
+}
+
+// Control comparison: statement-form `defer expr` shares the same
+// tail-injection mechanism, so it must show the identical LIFO contract.
+#[test]
+fn test_interpreter_stacked_statement_form_defer_runs_lifo() {
+    let code = r#"var G: i32 = 0
+
+fn helper():
+    defer G = G * 10 + 1
+    defer G = G * 10 + 2
+
+fn read_g() -> i32:
+    return G
+
+helper()
+main = read_g()"#;
+
+    assert_eq!(run_interpreter(code).unwrap(), 21);
+}
+
 #[test]
 fn test_interpreter_method_call_preserves_bitfield_static_new() {
     let code = r#"bitfield Flags(u32):

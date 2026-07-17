@@ -64,11 +64,27 @@ fn eval_stmt(sid: i64) -> i64:
     # Rare (tags 14+): DEFER, ERRDEFER, LABELED_LOOP, STATIC_FOR, COMPTIME, RECEIVE, BIND, LAZY_VAL
     if tag == STMT_DEFER:
         val defer_eid = stmt_get(sid).expr_idx
+        # Block-form `defer:` (bug #172) is parsed (stmt_defer_block_stmt sets
+        # EXPR to the -1 "no expr" sentinel and stores the body statements
+        # instead), but this tree-walking interpreter's replay queue
+        # (eval_defer_eids/eval_defer_depths in eval.spl) only stores a single
+        # expr id per registration and has no slot for a multi-statement
+        # body. Silently pushing -1 would let eval_expr(-1) run later with an
+        # invalid id (or collide with the queue's own -1 "already executed"
+        # tombstone) -- a silent-wrong-answer risk. Refuse loudly instead;
+        # the native-build path (_FlatAstBridge/convert_nodes.spl) is the
+        # supported route for block-form defer.
+        if defer_eid == -1:
+            eval_set_error("block-form 'defer:' is not supported by the interpreter (bin/simple run) -- use native-build, or the single-line 'defer expr' form")
+            return val_make_nil()
         eval_defer_eids.push(defer_eid)
         eval_defer_depths.push(eval_defer_depth)
         return val_make_nil()
     if tag == STMT_ERRDEFER:
         val errdefer_eid = stmt_get(sid).expr_idx
+        if errdefer_eid == -1:
+            eval_set_error("block-form 'errdefer:' is not supported by the interpreter (bin/simple run) -- use the single-line 'errdefer expr' form")
+            return val_make_nil()
         eval_errdefer_eids.push(errdefer_eid)
         eval_errdefer_depths.push(eval_defer_depth)
         return val_make_nil()

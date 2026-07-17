@@ -1136,6 +1136,19 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
 # prefix in `_mir_error_is_fatal`, 80.driver/driver_pipeline.spl). No new
 # classification entry is needed, so the build stops with a non-zero exit and
 # no binary is produced.
+#
+# Block-form `defer:` (bug #172 follow-up, 2026-07-17): the pure-Simple
+# parser (parser_stmts.spl) previously had no grammar for `defer:` /
+# `errdefer:` followed by an indented body at all -- every such program
+# failed to PARSE, before this bridge ever ran. `stmt_defer_block_stmt` /
+# `stmt_errdefer_block_stmt` (ast_stmt.spl) now parse it, storing the body
+# via `stmt_body` (EXPR left at the -1 "no expr" sentinel). This bridge
+# extends the SAME top-level-only scope to the block form: a top-level
+# `defer:` registers its whole body as one group in `g_pending_defers`
+# (see the type's doc comment below) so it still replays as a single LIFO
+# unit relative to other defers. Nested placement and `errdefer:` (block or
+# single-line) remain refused exactly as before -- this only widens WHERE a
+# `defer`'s own body can come from, not WHERE a `defer` may be written.
 fn defer_unsupported_marker(span: Span) -> Stmt:
     Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Ident("__defer_unsupported_placement__"), span: span)), span: span)
 
@@ -1143,7 +1156,14 @@ fn defer_unsupported_marker(span: Span) -> Stmt:
 # encounter (registration) order. Reset/saved-and-restored around each
 # `convert_decl_fn` call so nested function-like conversions (if any reuse
 # this bridge) can't cross-contaminate an enclosing function's defer list.
-var g_pending_defers: [Stmt] = []
+#
+# Each entry is a GROUP: the 1+ statements that make up ONE `defer`
+# registration's replay body. A single-line `defer expr` group always has
+# exactly one statement; a block-form `defer:` group (bug #172 follow-up) can
+# have several. LIFO ordering applies BETWEEN groups (last-registered defer
+# replays first); a group's OWN statements always replay in their original
+# top-to-bottom order, since only one defer body is unwinding at a time.
+var g_pending_defers: [[Stmt]] = []
 
 # Convert one raw statement for inclusion in a statement LIST (function body,
 # if/while/for/match body, ...). Unlike `convert_flat_stmt` (one raw stmt ->
@@ -1156,8 +1176,24 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
     if tag == STMT_DEFER:
         if is_top_level:
             val d_span = make_span()
-            val d_expr = convert_flat_expr(stmt_get_expr(idx))
-            g_pending_defers.push(Stmt(kind: StmtKind.Expr(d_expr), span: d_span))
+            val d_body = stmt_get_body(idx)
+            if d_body.len() > 0:
+                # Block-form `defer:` -- convert each body statement (in its
+                # own written order) and register the whole group as one
+                # pending-defer entry.
+                var d_group: [Stmt] = []
+                var dbi = 0
+                while dbi < d_body.len():
+                    val d_expanded = convert_flat_stmt_in_list(d_body[dbi], false)
+                    var dbk = 0
+                    while dbk < d_expanded.len():
+                        d_group.push(d_expanded[dbk])
+                        dbk = dbk + 1
+                    dbi = dbi + 1
+                g_pending_defers.push(d_group)
+            else:
+                val d_expr = convert_flat_expr(stmt_get_expr(idx))
+                g_pending_defers.push([Stmt(kind: StmtKind.Expr(d_expr), span: d_span)])
             return []
         else:
             return [defer_unsupported_marker(make_span())]
@@ -1169,7 +1205,11 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
         var out: [Stmt] = []
         var di = g_pending_defers.len() - 1
         while di >= 0:
-            out.push(g_pending_defers[di])
+            val d_replay_group = g_pending_defers[di]
+            var dgi = 0
+            while dgi < d_replay_group.len():
+                out.push(d_replay_group[dgi])
+                dgi = dgi + 1
             di = di - 1
         out.push(convert_flat_stmt(idx))
         return out
@@ -1398,7 +1438,7 @@ fn convert_decl_fn(idx: i64) -> Function:
     # Save/restore the pending-defer stack around this function's own body so
     # a re-entrant conversion (if any future caller nests one) can't leak
     # defers across function boundaries. See convert_flat_stmt_in_list above.
-    val saved_pending_defers: [Stmt] = g_pending_defers
+    val saved_pending_defers: [[Stmt]] = g_pending_defers
     g_pending_defers = []
     var si = 0
     val body_len = body.len()
@@ -1447,7 +1487,11 @@ fn convert_decl_fn(idx: i64) -> Function:
         if last_raw_tag == STMT_DEFER:
             var dj = g_pending_defers.len() - 1
             while dj >= 0:
-                stmts.push(g_pending_defers[dj])
+                val dj_group = g_pending_defers[dj]
+                var dji = 0
+                while dji < dj_group.len():
+                    stmts.push(dj_group[dji])
+                    dji = dji + 1
                 dj = dj - 1
         elif last_raw_tag != STMT_RETURN:
             if has_ret:
@@ -1455,7 +1499,11 @@ fn convert_decl_fn(idx: i64) -> Function:
             else:
                 var ej = g_pending_defers.len() - 1
                 while ej >= 0:
-                    stmts.push(g_pending_defers[ej])
+                    val ej_group = g_pending_defers[ej]
+                    var eji = 0
+                    while eji < ej_group.len():
+                        stmts.push(ej_group[eji])
+                        eji = eji + 1
                     ej = ej - 1
     g_pending_defers = saved_pending_defers
 

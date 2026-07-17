@@ -117,7 +117,13 @@ pub(crate) fn enter_block_scope() -> usize {
     })
 }
 
-/// Exit a block scope and return any pending tail injections for this depth
+/// Exit a block scope and return any pending tail injections for this depth.
+///
+/// Injections queued at the same depth must run in LIFO order (last queued,
+/// first executed) — this is the documented `defer` semantics (bug #172):
+/// stacked `defer` blocks unwind most-recently-registered first. The
+/// collection loop below walks `pending` in registration (FIFO) order, so
+/// the collected `result` is reversed before returning to restore LIFO.
 pub(crate) fn exit_block_scope() -> Vec<Block> {
     let current_depth = BLOCK_DEPTH.with(|cell| {
         let d = cell.get();
@@ -133,7 +139,7 @@ pub(crate) fn exit_block_scope() -> Vec<Block> {
     }
 
     // Collect and remove all pending injections at this depth
-    let result = PENDING_TAIL_INJECTIONS.with(|cell| {
+    let mut result = PENDING_TAIL_INJECTIONS.with(|cell| {
         let mut pending = cell.borrow_mut();
         let mut result = Vec::new();
         pending.retain(|(depth, block)| {
@@ -147,6 +153,8 @@ pub(crate) fn exit_block_scope() -> Vec<Block> {
         PENDING_INJECTION_COUNT.fetch_sub(result.len(), Ordering::Relaxed);
         result
     });
+    // Restore LIFO order: last queued at this depth runs first.
+    result.reverse();
 
     if is_macro_trace_enabled() && !result.is_empty() {
         macro_trace(&format!(
