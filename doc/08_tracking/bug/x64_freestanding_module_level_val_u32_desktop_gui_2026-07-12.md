@@ -53,3 +53,35 @@ Reverted to the original plain `u32` literals local to `spl_start()`; resolution
 ## Suspected relation
 
 Possibly the same class of freestanding layout/init-order sensitivity as `doc/08_tracking/bug/x64_freestanding_layout_sensitive_dup_displaced_stores.md` and `doc/08_tracking/bug/x64_freestanding_mmio_read_u8_address_dependent_zero.md` -- module-level global initializers on this freestanding target have a history of being layout- or init-order-sensitive. Not confirmed; no root cause identified yet, only the reproduction above.
+
+## Update 2026-07-17 — likely a DIFFERENT root cause than the sibling module-init bugs; not fixed by this pass
+
+This bug doc was grouped with
+`doc/08_tracking/bug/freestanding_entry_module_val_initializers_never_run_2026-07-06.md`
+and `doc/08_tracking/bug/baremetal_entry_closure_class_instantiation_fault_2026-07-06.md`
+under the hypothesis that all three share the "no `__module_init_*`
+emission/aggregation" root cause. Host-side testing this pass shows that
+hypothesis does NOT hold for this specific bug:
+
+- `DESKTOP_FB_WIDTH_4K: u32 = 3840` is a bare integer literal --
+  const-foldable by `lower_const_expr`
+  (`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3026`).
+- Reproduced the equivalent shape on the plain HOST hosted target
+  (`val MARKER: i64 = 42; fn main() -> i64: return MARKER`, native-build, no
+  `--entry-closure`, no freestanding target) and it returns the correct value
+  (`42`) every time -- the const-fold path works correctly when it applies.
+- By contrast, the module_init aggregator work landed this pass (see the
+  other two docs' 2026-07-17 updates) is about NON-foldable initializers
+  (calls, binops, cross-module reads), which this bug's literal is not.
+
+So this bug's corruption (`width=16000 height=1048` instead of `3840x2160`)
+most likely comes from something freestanding-target-specific -- section
+placement, relocation handling, or an init-order/layout sensitivity as the
+original "Suspected relation" section already guessed -- rather than the
+"initializer never runs" gap. **Not fixed, not further root-caused, and not
+verified this pass**: reproducing/diagnosing it requires an actual
+freestanding x86_64-unknown-none build + boot (or at minimum an objdump/relocation
+inspection of a real freestanding artifact with this shape), which is out of
+scope here (no rebuild, no QEMU/board boot per this pass's constraints).
+Left open; do not close this doc from the module-init link-stage fix landed
+in the other two docs.

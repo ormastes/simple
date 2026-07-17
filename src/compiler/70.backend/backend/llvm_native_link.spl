@@ -604,6 +604,59 @@ fn simpleos_spl_start_symbol(user_objects: [text]) -> text:
                 return symbol.name
     ""
 
+fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
+    """Collect defined `__module_init` / `__module_init_<prefix>` symbols
+    across the user's compiled objects, sorted + deduped by name.
+
+    Mirrors the naming convention `module_init_symbol()` computes on the Rust
+    seed (src/compiler_rust/compiler/src/codegen/common_backend.rs, restored
+    by commit 4aab3c435b7) and the discovery step of the seed linker's
+    `generate_init_caller` (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:786-812),
+    which sorts+dedups by symbol name rather than tracking a real dependency
+    graph -- there is no cross-module init ORDER guarantee beyond that, on
+    either backend. `extract_symbols_nm` already filters out undefined (U/u)
+    and weak (W/w/V/v) symbols, so only concretely DEFINED init functions are
+    collected here.
+
+    As of this writing the pure-Simple MIR-lowering path
+    (`src/compiler/50.mir/_MirLowering/module_lowering.spl`'s `lower_const`/
+    `lower_static`) never emits a `__module_init_*` function body for a
+    non-literal module-level `val`/`var` initializer, so this will return an
+    empty list for every native-build today. See
+    doc/08_tracking/bug/baremetal_entry_closure_class_instantiation_fault_2026-07-06.md."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            if symbol.name == "__module_init" or symbol.name.starts_with("__module_init_"):
+                if not seen.has(symbol.name):
+                    seen[symbol.name] = true
+                    names.push(symbol.name)
+    names.sort()
+    names
+
+fn simpleos_module_init_caller_source(init_names: [text]) -> text:
+    """Generate the freestanding C source defining `__simple_call_module_inits`,
+    which calls every discovered `__module_init_*` function.
+
+    Always emits a concrete (non-weak) definition, even with zero names, so
+    the `.weak __simple_call_module_inits` reference in
+    examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s and the
+    `extern void __simple_call_module_inits(void) __attribute__((weak));`
+    guard in baremetal_stubs.c resolve to a real function instead of staying
+    permanently unresolved-weak (today both always skip the call). Each
+    callee is itself declared `weak` inside this generated translation unit
+    so a partial object set still links. Mirrors the non-clang-cl branch of
+    generate_init_caller (linker.rs:844-855)."""
+    var code = "// Auto-generated: calls all __module_init_* functions\n"
+    for name in init_names:
+        code = code + "extern void __attribute__((weak)) {name}(void);\n"
+    code = code + "void __simple_call_module_inits(void) {\n"
+    for name in init_names:
+        code = code + "    if ({name}) {name}();\n"
+    code = code + "}\n"
+    code
+
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
@@ -687,6 +740,8 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     val stubs_o = "build/os/simpleos_x86_64_baremetal_stubs_{pid}.o"
     val type_o = "build/os/simpleos_x86_64_type_stubs_{pid}.o"
     val auto_o = "build/os/simpleos_x86_64_auto_stubs_{pid}.o"
+    val init_c = "build/os/simpleos_x86_64_module_init_{pid}.c"
+    val init_o = "build/os/simpleos_x86_64_module_init_{pid}.o"
 
     match compile_simpleos_x86_64_asm("examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s", crt_o):
         case Err(e): return Err(e)
@@ -701,6 +756,23 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         case Err(e): return Err(e)
         case Ok(_): pass
 
+    # crt0.s (`.weak __simple_call_module_inits`) and baremetal_stubs.c
+    # (`extern void __simple_call_module_inits(void) __attribute__((weak));`)
+    # both only ever reference this symbol as unresolved-weak, so it is
+    # always skipped. Emit a concrete definition that aggregates every
+    # discovered `__module_init_*` from the user's objects (see
+    # simpleos_module_init_symbols / simpleos_module_init_caller_source
+    # above) so the aggregation mechanism exists on the pure-Simple path the
+    # same way it does on the Rust seed's generate_init_caller.
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    file_write(init_c, simpleos_module_init_caller_source(module_init_names))
+    match compile_simpleos_x86_64_c(init_c, init_o, opt_level):
+        case Err(e):
+            file_delete(init_c)
+            return Err(e)
+        case Ok(_): pass
+    file_delete(init_c)
+
     val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if linker_script_env != "":
         linker_script_env
@@ -710,7 +782,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     var args: [text] = [
         "-T", linker_script,
         "-nostdlib", "--gc-sections", "-o", output,
-        crt_o, stubs_o, type_o, auto_o
+        crt_o, stubs_o, type_o, auto_o, init_o
     ]
     for obj in user_objects:
         args.push(obj)
@@ -719,6 +791,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     file_delete(stubs_o)
     file_delete(type_o)
     file_delete(auto_o)
+    file_delete(init_o)
     if link_code != 0:
         return Err("SimpleOS x86_64 freestanding link failed: {link_err}")
     if verbose:
@@ -742,6 +815,8 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     val entry_o = "build/os/simpleos_riscv64_entry.o"
     val stub_c = "build/os/simpleos_riscv64_link_stubs.c"
     val stub_o = "build/os/simpleos_riscv64_link_stubs.o"
+    val init_c = "build/os/simpleos_riscv64_module_init.c"
+    val init_o = "build/os/simpleos_riscv64_module_init.o"
     val entry_symbol = if is_smoke_entry: "spl_start" else: "boot_main"
     var entry_src = ".section .text.entry,\"ax\",@progbits\n"
     entry_src = entry_src + ".globl __simple_riscv_entry\n"
@@ -781,7 +856,16 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_start(void){return 0x80400000ULL;}\n"
     stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_size(void){return 16ULL*1024ULL*1024ULL;}\n"
     stub_src = stub_src + "int rt_riscv_noalloc_pmm_init(uint64_t a,uint64_t b,uint64_t c,uint64_t d){(void)a;(void)b;(void)c;(void)d;return 1;}\n"
-    stub_src = stub_src + "void __simple_call_module_inits(void){}\n"
+    # `__simple_call_module_inits` used to be defined here as an always-empty
+    # `{}` body. `src/os/kernel/arch/riscv64/boot.spl` declares it
+    # `extern fn __simple_call_module_inits()` and CALLS it unconditionally
+    # (not weakly) -- so the symbol must resolve for every riscv64 link, in
+    # both the `stub_o` and `uses_freestanding_runtime` branches below. It is
+    # now emitted unconditionally as its own object (init_c/init_o, see
+    # simpleos_module_init_symbols / simpleos_module_init_caller_source
+    # above) so both branches keep linking AND the aggregator actually
+    # collects any `__module_init_*` the user's objects define, instead of
+    # hard-coding an empty body regardless of what those objects contain.
     stub_src = stub_src + "void serial_println(uint64_t msg){const char*s=(const char*)(uintptr_t)msg;if(!s)return;while(*s)rt_riscv_uart_put((uint64_t)*s++);rt_riscv_uart_put(13);rt_riscv_uart_put(10);}\n"
     stub_src = stub_src + "void log_raw_println(uint64_t msg){serial_println(msg);}\n"
     stub_src = stub_src + "void rt_riscv_wfi_forever(void){for(;;){__asm__ volatile(\"wfi\");}}\n"
@@ -811,6 +895,24 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
         ])
         if runtime_code != 0:
             return Err("SimpleOS RISC-V runtime compilation failed: {runtime_out}{runtime_err}")
+
+    # Always compiled (both stub_o and freestanding_runtime branches link
+    # this in) because boot.spl's `__simple_call_module_inits()` call is an
+    # unconditional (non-weak) extern reference. `-mcmodel=medany` matches
+    # the Rust seed's generate_init_caller (linker.rs:882-891): the
+    # `if (__module_init_x) __module_init_x();` null-check pattern
+    # materializes each callee's ADDRESS as a value (not just a PC-relative
+    # call), which overflows medlow's +-2GB-from-zero window once this
+    # freestanding kernel is linked high (0x80200000+, see linker_script).
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    file_write(init_c, simpleos_module_init_caller_source(module_init_names))
+    val (init_out, init_err, init_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
+        "-o", init_o, init_c
+    ])
+    file_delete(init_c)
+    if init_code != 0:
+        return Err("SimpleOS RISC-V module-init caller compilation failed: {init_out}{init_err}")
 
     val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if configured_script != "": configured_script else: "src/os/kernel/arch/riscv64/linker.ld"
@@ -845,6 +947,7 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
         args = args.push(runtime_o)
     else:
         args = args.push(stub_o)
+    args = args.push(init_o)
     args = args.push("-o")
     args = args.push(output)
 

@@ -87,3 +87,59 @@ the evidence-script flow) with llvm-nm:
 
 - Probe build in progress (full + minimal source-set variants).
 - Fix at root cause in pure-Simple compiler; then re-verify CLASSOK marker.
+
+## Update 2026-07-17 — finding-1 (module inits) link-stage fix landed; finding-1 codegen gap + findings 2-4 still open
+
+This pass targeted finding 1 ("Module initializers never run in x86_64
+baremetal kernels", the empty `__simple_call_module_inits(void){}` riscv64
+stub at what was `llvm_native_link.spl:352`). Findings 2-4 (weak-NIL-stub
+cross-module method binding, dual method-symbol mangling, per-module MIR
+lowering field-map ordering) are **untouched by this pass** — still open,
+still candidates for the S2-S4 fault window described above.
+
+**Landed:** `src/compiler/70.backend/backend/llvm_native_link.spl` now has a
+real aggregator (`simpleos_module_init_symbols` scans user objects for
+defined `__module_init`/`__module_init_*` via the existing `extract_symbols_nm`
+helper, sorted+deduped; `simpleos_module_init_caller_source` mirrors
+`generate_init_caller`'s non-clang-cl codegen from
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:786-855`,
+restored dependency `module_init_symbol()` from commit `4aab3c435b7`). Wired
+into both `link_simpleos_riscv64` (replacing the always-empty stub; compiled
+unconditionally with `-mcmodel=medany` since `src/os/kernel/arch/riscv64/boot.spl`
+calls `__simple_call_module_inits()` as a strong, non-weak extern in BOTH the
+`stub_o` and `uses_freestanding_runtime` link branches) and
+`link_simpleos_x86_64`'s legacy kernel path (crt0.s/baremetal_stubs.c
+reference it `.weak`/`__attribute__((weak))` — now resolves to a real
+definition instead of staying permanently unresolved).
+
+**Verified without a rebuild** (bootstrap/`bin/simple build` is out of scope
+for this pass) by hand-reproducing the exact toolchain calls the new .spl
+code issues, in `scratchpad/s13_probes/verify_link_stage.sh`: two synthetic
+objects define `__module_init_b`/`__module_init_c` (C simulating module
+`val`s, with C's initializer reading B's), the generated aggregator's `nm`/
+`objdump` output shows a real, non-empty, defined `T __simple_call_module_inits`
+containing two `call`/`jalr` instructions (not an empty `ret`), and running
+the linked hosted binary prints `marker_b=42 marker_c=43` — confirming both
+the discovery/codegen logic AND alphabetical-sort-by-name ordering are
+correct for this dependency shape. Also reproduced with the exact
+freestanding compile flags (`-ffreestanding -nostdlib -fno-pic -mno-red-zone`
+for x86_64; `-march=rv64gc -mabi=lp64d -mcmodel=medany` for riscv64) and
+confirmed the zero-init-names case (today's reality) still resolves the
+previously-permanently-unresolved weak symbol.
+
+**Still does NOT close finding 1 end-to-end**, and this is the important
+caveat: `simpleos_module_init_symbols` will return an **empty list** for
+every real native-build today, because nothing below the link stage ever
+emits a `__module_init_*` symbol. Root-caused this pass (see
+`doc/08_tracking/bug/freestanding_entry_module_val_initializers_never_run_2026-07-06.md`'s
+2026-07-17 update for detail): `src/compiler/50.mir/_MirLowering/module_lowering.spl`'s
+`lower_const`/`lower_static` only const-fold literal expressions
+(`method_calls_literals.spl:3026` `lower_const_expr`) and silently drop/zero
+anything else — there is no MIR/codegen concept of a per-module runtime init
+function to emit calls FOR yet. This link-stage change makes the aggregation
+mechanism correct and ready (parity with the Rust seed), but a MIR-lowering +
+backend-codegen implementation pass is required before finding 1's symptom
+(module globals silently zero/garbage under `--entry-closure`) actually
+disappears. Freestanding/board verification of the link-stage change itself
+remains pending per the board-runnable rule (no QEMU/board boot attempted
+this pass).
