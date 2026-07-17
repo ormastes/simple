@@ -443,6 +443,65 @@ describe "Mir Lowering New":
         expect(legacy_cranelift).to_contain("if left_unsigned: cranelift_ushr(self.current_ctx, left, right) else: cranelift_sshr(self.current_ctx, left, right)")
         expect(parity).to_contain("run_strict_dual_backend_case unsigned_div_rem_shift write_case_unsigned_div_rem_shift \"111111\"")
 
+    it "keeps unsigned casts and ordered comparisons aligned across native backends":
+        val textual_llvm = read_mir_source("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        val llvm_module = read_mir_source("src/compiler/70.backend/backend/llvm_lib_translate.spl")
+        val llvm_api = read_mir_source("src/compiler/70.backend/backend/llvm_lib_translate_expr.spl")
+        val cranelift = read_mir_source("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val legacy_cranelift = read_mir_source("src/compiler/70.backend/codegen.spl")
+        val parity = read_mir_source("scripts/check/check-native-seed-parity.shs")
+
+        expect(textual_llvm).to_contain("if src_unsigned and cast_inst == \"sitofp\":")
+        expect(textual_llvm).to_contain("cast_inst = \"uitofp\"")
+        expect(llvm_module).to_contain("var local_unsigned: {i64: bool} = {}")
+        expect(llvm_module).to_contain("local_types, local_unsigned, block_map, func_map")
+        expect(llvm_api).to_contain("val source_unsigned = get_operand_unsigned(operand, local_unsigned)")
+        expect(llvm_api).to_contain("coerce_llvm_cast_value(builder, op_val, target_ty, source_unsigned)")
+        expect(llvm_api).to_contain("val is_unsigned = left_is_unsigned or get_operand_unsigned(right, local_unsigned)")
+        expect(llvm_api).to_contain("llvm_build_ui_to_fp(builder, value, target_ty, \"coerce\")")
+        expect(llvm_api).to_contain("llvm_build_icmp(builder, LLVM_INT_ULT, lhs, rhs, \"lt\")")
+        expect(llvm_api).to_contain("llvm_build_icmp(builder, LLVM_INT_ULE, lhs, rhs, \"le\")")
+        expect(llvm_api).to_contain("llvm_build_icmp(builder, LLVM_INT_UGT, lhs, rhs, \"gt\")")
+        expect(llvm_api).to_contain("llvm_build_icmp(builder, LLVM_INT_UGE, lhs, rhs, \"ge\")")
+        expect(cranelift).to_contain("case U8 | U16 | U32 | U64: cranelift_fcvt_from_uint(ctx, to_cl, src_val)")
+        expect(cranelift).to_contain("elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULT, a, b)")
+        expect(cranelift).to_contain("elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULE, a, b)")
+        expect(cranelift).to_contain("elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGT, a, b)")
+        expect(cranelift).to_contain("elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGE, a, b)")
+        expect(legacy_cranelift).to_contain("if unsigned: CL_CMP_ULT else: CL_CMP_SLT")
+        expect(legacy_cranelift).to_contain("if unsigned: CL_CMP_ULE else: CL_CMP_SLE")
+        expect(legacy_cranelift).to_contain("if unsigned: CL_CMP_UGT else: CL_CMP_SGT")
+        expect(legacy_cranelift).to_contain("if unsigned: CL_CMP_UGE else: CL_CMP_SGE")
+        expect(parity).to_contain("run_strict_dual_backend_case mixed_numeric_comparison write_case_mixed_numeric_comparison")
+        expect(parity).to_contain("run_strict_dual_backend_case mixed_unsigned_float_comparison write_case_mixed_unsigned_float_comparison")
+        expect(parity).to_contain("run_strict_dual_backend_case mixed_signed_unsigned_ordering write_case_mixed_signed_unsigned_ordering")
+
+        val llvm_wrapper_paths: [text] = [
+            "src/lib/nogc_sync_mut/sffi/llvm_codegen.spl",
+            "src/lib/nogc_async_mut/sffi/llvm_codegen.spl",
+            "src/lib/nogc_sync_mut/ffi/llvm_codegen.spl",
+        ]
+        for path in llvm_wrapper_paths:
+            val wrapper = read_mir_source(path)
+            expect(wrapper).to_contain("fn llvm_build_ui_to_fp(b: i64, value: i64, dest_ty: i64, name: text) -> i64:")
+            expect(wrapper).to_contain("_lc4(\"LLVMBuildUIToFP\", b, value, dest_ty, name.ptr())")
+
+        val llvm_facade_paths: [text] = [
+            "src/lib/nogc_sync_mut/sffi/llvm.spl",
+            "src/lib/nogc_async_mut/sffi/llvm.spl",
+            "src/lib/nogc_sync_mut/ffi/llvm.spl",
+        ]
+        for path in llvm_facade_paths:
+            expect(read_mir_source(path)).to_contain("llvm_build_si_to_fp, llvm_build_ui_to_fp, llvm_build_fp_to_si")
+
+        val llvm_export_paths: [text] = [
+            "src/lib/nogc_sync_mut/sffi/__init__.spl",
+            "src/lib/nogc_async_mut/sffi/__init__.spl",
+            "src/lib/nogc_sync_mut/ffi/__init__.spl",
+        ]
+        for path in llvm_export_paths:
+            expect(read_mir_source(path)).to_contain("export llvm_build_si_to_fp, llvm_build_ui_to_fp, llvm_build_fp_to_si")
+
 # # # MIR Lowering Initialization Specification
 # #
 # # **Feature IDs:** #TBD
