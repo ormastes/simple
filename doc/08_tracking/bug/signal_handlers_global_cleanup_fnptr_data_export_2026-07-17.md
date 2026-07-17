@@ -77,3 +77,20 @@ the DATA export
 `nogc_sync_mut__io__signal_handlers___global_cleanup_handler` where codegen
 required a function. This confirms the defect also blocks an admitted native
 test runner, independently of the monolithic CLI graph-load timeout.
+
+## Bootstrap artifact diagnosis — 2026-07-17
+
+Current Rust bootstrap source already records function-valued module globals,
+preserves their initial function symbol, lowers the read through `GlobalLoad`,
+and emits `IndirectCall`. A focused compiler regression now proves all four
+properties for `var handler: fn() = cleanup`; it passes with 1 test and 3,348
+filtered tests. This is consistent with the failing Cycle 11 binary embedding
+stale native compiler code, but the fresh Stage 2 runner rebuild must confirm
+that diagnosis before it is accepted.
+
+The canonical bootstrap-only driver, native runtime, and compiler-backfill
+artifacts were rebuilt separately from current source. Using that fresh seed
+once with a new cache produced `build/native_probe/simple-stage2-fresh`: 715
+units compiled, zero failed, linked in 397.6 seconds. Per the bounded-cycle
+guard, the standalone runner rebuild remains the next acceptance step; the bug
+stays open until that pure-Simple Stage 2 builds and executes the runner.

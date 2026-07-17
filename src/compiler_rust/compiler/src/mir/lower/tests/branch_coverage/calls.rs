@@ -281,6 +281,24 @@ fn closure_captures() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
 }
 
+#[test]
+fn module_global_function_pointer_call_loads_current_value() {
+    let mir = compile_to_mir(
+        "fn cleanup():\n    ()\n\nvar handler: fn() = cleanup\n\nfn invoke():\n    handler()\n",
+    )
+    .unwrap();
+    assert_eq!(mir.global_init_functions.get("handler").map(String::as_str), Some("cleanup"));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::GlobalLoad { global_name, .. } if global_name == "handler"
+    )));
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target.name() == "handler"
+    )));
+}
+
 // =============================================================================
 // Struct with type registry (lowering_expr.rs lines 817-818)
 // =============================================================================
