@@ -18,7 +18,7 @@ use std.gpu.engine2d.color.{color_a, blend}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
-use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, simd_fill_row, rt_engine2d_simd_fill_span_u32, engine2d_simd_copy_row_u32, engine2d_simd_blend_row_u32}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -678,24 +678,16 @@ impl SoftwareBackend:
             ly = ly + 1
 
     me sw_fill_raw_span(offset: i32, count: i32, color: u32):
-        record_simd_fill_hit()
         if self.native_simd_spans and native_pixel_rows_enabled():
+            record_simd_fill_hit()
             self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
             return
-        simd_fill_row(self.buf, offset as i64, count as i64, color)
+        _scalar_fill_row(self.buf, offset as i64, count as i64, color)
 
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
-        record_simd_copy_hit()
-        if native_pixel_rows_enabled():
-            val src_row: [u32] = src[src_offset:src_offset + count]
-            val row = engine2d_simd_copy_row_u32(src_row)
-            var j = 0
-            while j < count and j < row.len():
-                self.buf[dst_offset + j] = row[j]
-                j = j + 1
-            while j < count:
-                self.buf[dst_offset + j] = src[src_offset + j]
-                j = j + 1
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            record_simd_copy_hit()
+            self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, count as i64)
             return
         var i = 0
         while i < count:
@@ -703,12 +695,16 @@ impl SoftwareBackend:
             i = i + 1
 
     me sw_blend_const_raw_span(offset: i32, count: i32, color: u32):
-        record_simd_alpha_hit()
-        if native_pixel_rows_enabled():
-            val dst_row: [u32] = self.buf[offset:offset + count]
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            record_simd_alpha_hit()
+            var dst_row: [u32] = [0; count]
             var src_row: [u32] = [color; count]
             var j = 0
+            while j < count:
+                dst_row[j] = self.buf[offset + j]
+                j = j + 1
             val row = engine2d_simd_blend_row_u32(dst_row, src_row)
+            j = 0
             while j < count and j < row.len():
                 self.buf[offset + j] = row[j]
                 j = j + 1

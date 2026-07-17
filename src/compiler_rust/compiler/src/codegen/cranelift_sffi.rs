@@ -670,7 +670,31 @@ pub unsafe extern "C" fn rt_cranelift_data_addr_in_func(ctx: i64, data_handle: i
 /// Returns function context handle, or 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64, name_len: i64, sig: i64) -> i64 {
-    let name = string_from_ptr(name_ptr, name_len);
+    let name = if name_len == 0 {
+        let func_id = {
+            let declared = DECLARED_FUNCS.lock().unwrap();
+            match declared.get(&name_ptr) {
+                Some(&id) => id,
+                None => return 0,
+            }
+        };
+        let jit_name = JIT_MODULES.lock().unwrap().get(&module).and_then(|ctx| {
+            ctx.func_ids.iter().find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
+        });
+        match jit_name {
+            Some(name) => name,
+            None => {
+                let aot = AOT_MODULES.lock().unwrap();
+                let Some(ctx) = aot.get(&module) else { return 0 };
+                match ctx.func_ids.iter().find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None }) {
+                    Some(name) => name,
+                    None => return 0,
+                }
+            }
+        }
+    } else {
+        string_from_ptr(name_ptr, name_len)
+    };
     if name.is_empty() {
         return 0;
     }
@@ -1496,14 +1520,10 @@ fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
 
 /// Define a function in an AOT module.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, name_ptr: i64, name_len: i64, ctx: i64) -> bool {
-    let name = string_from_ptr(name_ptr, name_len);
-    if name.is_empty() {
-        return false;
-    }
-
+pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, _name_ptr: i64, _name_len: i64, ctx: i64) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
+    let name = finished.name;
 
     let mut modules = AOT_MODULES.lock().unwrap();
     let Some(mod_ctx) = modules.get_mut(&module) else {

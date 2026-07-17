@@ -36,6 +36,8 @@ dimensions to a tiny fixture while preserving the same code path.
 - REQ-CPU-SIMD-SCALE-009: The wrapper can require the canonical Engine2D SIMD
   arch matrix and expose x86_64, AArch64, and RISC-V target-binary pass fields
   without rerunning render benchmarks.
+- REQ-CPU-SIMD-SCALE-010: CPU-SIMD rows require positive provider/native hits,
+  while scalar software rows require zero SIMD hits.
 
 ## Plan
 
@@ -49,8 +51,9 @@ dimensions to a tiny fixture while preserving the same code path.
 
 **Design:** doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md
 
-The wrapper uses the same `backend_measurement_software_export.spl` path for
-CPU-SIMD and scalar software rows, then compares checksum and timing metadata.
+The wrapper uses the same `backend_measurement_software_export.spl` harness for
+CPU-SIMD and scalar rows. The harness passes the configured backend through the
+canonical Simple Web renderer before comparing checksum and timing metadata.
 
 ## Research
 
@@ -65,8 +68,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contra
 
 # @tag: system, engine2d, simd, perf
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{env_get, file_read, process_run}
 use std.spec.*
+
+fn _test_simple_bin() -> text:
+    env_get("CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN") ?? "bin/simple"
 
 describe "CPU SIMD render scale contract":
 
@@ -94,13 +100,19 @@ describe "CPU SIMD render scale contract":
         expect(script).to_contain("unsupported_run_order_$RUN_ORDER")
         expect(script).to_contain("CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY")
         expect(script).to_contain("binary_has_engine2d_simd_externs")
+        expect(script).to_contain("nm -P -g")
+        expect(script).to_contain("grep -q 'weak external'")
         expect(script).to_contain("rt_engine2d_simd_fill_row_u32")
+        expect(script).to_contain("rt_engine2d_simd_fill_rows_u32")
+        expect(script).to_contain("rt_engine2d_simd_fill_span_u32")
         expect(script).to_contain("rt_engine2d_simd_copy_row_u32")
+        expect(script).to_contain("rt_engine2d_simd_copy_span_u32")
         expect(script).to_contain("rt_engine2d_simd_blend_row_u32")
         expect(script).to_contain("cpu_simd_render_scale_engine2d_binary_link_status=$ENGINE2D_BINARY_LINK_STATUS")
         expect(script).to_contain("engine2d_simd_externs_not_linked_in_simple_bin")
         expect(script).to_contain("CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH")
         expect(script).to_contain("runtime_source_fresh_status")
+        expect(script).to_contain("src/runtime/runtime_simd_dispatch.c")
         expect(script).to_contain("runtime_sources_newer_than_simple_bin")
         expect(script).to_contain("cpu_simd_render_scale_runtime_source_fresh_status=$RUNTIME_SOURCE_FRESH_STATUS")
         expect(script).to_contain("CPU_SIMD_RENDER_SCALE_4K_WIDTH:-3840")
@@ -111,9 +123,17 @@ describe "CPU SIMD render scale contract":
         expect(script).to_contain("cpu_simd_render_scale_4k_software_checksum_parity=true")
         expect(script).to_contain("cpu_simd_render_scale_8k_software_checksum_parity=true")
         expect(script).to_contain("CPU_SIMD_RENDER_SCALE_4K_EXPECTED_CHECKSUM")
-        expect(script).to_contain("sum32:32105444634193792")
+        expect(script).to_contain("sum32:35624123900197965")
         expect(script).to_contain("CPU_SIMD_RENDER_SCALE_8K_EXPECTED_CHECKSUM")
-        expect(script).to_contain("sum32:135445232233405312")
+        expect(script).to_contain("sum32:142496654044810320")
+        expect(script).to_contain("require_value \"${label}_native_simd_executed\" \"true\"")
+        expect(script).to_contain("require_positive \"${label}_simd_provider_hits\"")
+        expect(script).to_contain("require_positive \"${label}_native_simd_hits\"")
+        expect(script).to_contain("require_value \"${label}_software_simd_provider_hits\" \"0\"")
+        expect(script).to_contain("require_value \"${label}_software_native_simd_executed\" \"false\"")
+        expect(script).to_contain("/usr/bin/time -f 'max_rss_kb=%M'")
+        expect(script).to_contain("measured_rss")
+        expect(script).to_contain("[ \"$run_rc\" -eq 0 ] || return \"$run_rc\"")
 
     it "external cpu drawing baseline comparison records benchmark scope":
         val script = file_read("tools/gui_perf_bench/run_all_benchmarks.shs")
@@ -132,17 +152,88 @@ describe "CPU SIMD render scale contract":
         expect(script).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
         expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
 
-    it "software exporter excludes the generic renderer backend closure":
+    it "software exporter routes the configured backend through the canonical renderer":
         val exporter = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
+        expect(exporter).to_contain("use std.nogc_sync_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}")
+        expect(exporter).to_contain("use std.nogc_sync_mut.io_runtime.{get_args}")
         expect(exporter.contains("web_render_backend")).to_equal(false)
-        expect(exporter).to_contain("fn _render_software_pixels(html: text, width: i32, height: i32) -> [u32]")
-        expect(exporter).to_contain("simple_web_layout_render_html_software_pixels(html, width, height)")
+        expect(exporter).to_contain("fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]")
+        expect(exporter).to_contain("raw.parse_int() ?? fallback")
+        expect(exporter).to_contain("raw.parse_int() ?? fallback.to_i64()")
+        expect(exporter).to_contain("simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html, width, height, backend)")
+        expect(exporter.contains("simple_web_render_html_to_pixels_with_engine2d_backend")).to_equal(false)
+        expect(exporter).to_contain("_render_software_pixels(html, width, height, backend)")
+        val renderer = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_cpu.spl")
+        expect(renderer).to_contain("pub fn simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html: text, width: i32, height: i32, backend_name: text) -> [u32]:")
+        expect(renderer).to_contain("simple_web_layout_render_html_draw_ir_cpu_bitmap(html, width, height)")
+        expect(renderer).to_contain("CpuBackend.create_simd()")
+        expect(renderer).to_contain("CpuBackend.create()")
+        expect(renderer.contains("use std.gc_async_mut.gpu.engine2d.engine")).to_equal(false)
+        val semantic_renderer = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl")
+        expect(semantic_renderer).to_contain("compute_styles(nodes, rules, child_index, false, vector_fonts)")
+        expect(semantic_renderer).to_contain("if vector_fonts and nd.tag == \"#text\"")
+        expect(semantic_renderer).to_contain("val canvas_color = _web_canvas_background(nodes, styles, argb(255, 255, 255))")
+        expect(semantic_renderer).to_contain("commands = [_html_draw_ir_canvas_command(width, height, canvas_color)] + commands")
+        expect(semantic_renderer).to_contain("if styles[i].visibility_hidden:")
         expect(exporter).to_contain("simd_provider_hits:")
         expect(exporter).to_contain("native_simd_hits:")
         expect(exporter).to_contain("gui_perf_benchmark_simd_provider_hits=")
         expect(exporter).to_contain("gui_perf_benchmark_native_simd_hits=")
         expect(exporter).to_contain("gui_perf_benchmark_native_simd_executed=")
         expect(exporter).to_contain("_native_simd_executed_text(native_simd_hits)")
+        val driver = file_read("src/compiler/80.driver/driver.spl")
+        expect(driver).to_contain("HIR lowering error in {name}{err.location}: {err.message}")
+        expect(driver.contains("err.span")).to_equal(false)
+        val hir_types = file_read("src/compiler/20.hir/hir_lowering/types.spl")
+        expect(hir_types).to_contain("location: text\n    span: Span")
+        expect(hir_types).to_contain("location: \"\",\n            span: span")
+        expect(hir_types.contains("span.file")).to_equal(false)
+        val simd_provider = file_read("src/lib/nogc_sync_mut/gpu/engine2d/simd_provider.spl")
+        expect(simd_provider).to_contain("pub fn reset_simd_hits() -> ():")
+        expect(simd_provider).to_contain("_simd_vectorize_changes = 0\n    return ()")
+        val vulkan_session = file_read("src/lib/nogc_sync_mut/gpu/engine2d/vulkan_session.spl")
+        expect(vulkan_session).to_contain("me init_device() -> text:")
+        expect(vulkan_session).to_contain("me create_command_pool() -> text:")
+        expect(vulkan_session).to_contain("me create_pipeline_cache() -> text:")
+        expect(vulkan_session).to_contain("me load_shader(name: text) -> i64:")
+        expect(vulkan_session).to_contain("me release() -> text:")
+        val directx_backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl")
+        expect(directx_backend).to_contain("me _native_execute_once():")
+        val arabic = file_read("src/lib/skia/feature/shaper/selected_arabic.spl")
+        expect(arabic).to_contain("fn _arabic_coverage_index")
+        expect(arabic).to_contain("fn _arabic_single")
+        expect(arabic).to_contain("while index < working.len():")
+        val devanagari = file_read("src/lib/skia/feature/shaper/selected_devanagari.spl")
+        expect(devanagari).to_contain("fn _devanagari_coverage_index")
+        expect(devanagari).to_contain("fn _devanagari_single")
+        val layout = file_read("src/lib/skia/feature/glyph/ot_parser_layout.spl")
+        expect(layout).to_contain("fn _layout_coverage_index")
+        val font_renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
+        expect(font_renderer).to_contain("val found = _resolved_font_metric_values[index]")
+        expect(font_renderer).to_contain("_resolved_font_metric_lock.unlock(0)\n            return found")
+        expect(font_renderer).to_contain("return found")
+        expect(font_renderer.contains("var found: ResolvedFontMetrics?")).to_equal(false)
+        val emu_adv = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl")
+        expect(emu_adv).to_contain("fn emu_draw_image_blend(mut core: RenderBackend")
+        expect(emu_adv).to_contain("emu_draw_image_blend(core, dst_x")
+        expect(emu_adv.contains("core.draw_image_blend(")).to_equal(false)
+        val emu = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl")
+        expect(emu.contains("fn emu_draw_image_blend(mut core: RenderBackend")).to_equal(false)
+        val vulkan_backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(vulkan_backend).to_contain("me mark_completion_unknown():")
+        val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        expect(engine).to_contain("vulkan.mark_completion_unknown()")
+        expect(engine.contains("vulkan.completion_unknown = true")).to_equal(false)
+        expect(engine).to_contain("evidence.clear_fallback_pixels()")
+        expect(engine.contains("evidence.fallback_pixels = []")).to_equal(false)
+        expect(engine).to_contain("software_backend: SoftwareBackend? = nil")
+        expect(engine).to_contain("cpu_backend: CpuBackend? = nil")
+        expect(engine).to_contain("directx_backend: DirectXBackend? = nil")
+        expect(engine).to_contain("emu_draw_image_blend(self.backend, x, y, w, h, pixels)")
+        expect(engine.contains("self.backend.draw_image_blend(")).to_equal(false)
+        expect(engine).to_contain("val active_vulkan = self.vulkan_backend")
+        val vulkan_font_types = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_types.spl")
+        expect(vulkan_font_types).to_contain("me clear_fallback_pixels():")
 
     it "typed software exporter reports true nearest rank percentiles":
         val exporter = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
@@ -205,7 +296,7 @@ describe "CPU SIMD render scale contract":
         val root = "build/test-cpu-simd-render-scale-contract"
         val command =
             "rm -rf " + root + " && mkdir -p " + root +
-            " && SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple" +
+            " && SIMPLE_BIN='" + _test_simple_bin() + "'" +
             " CPU_SIMD_RENDER_SCALE_4K_WIDTH=16 CPU_SIMD_RENDER_SCALE_4K_HEIGHT=16" +
             " CPU_SIMD_RENDER_SCALE_8K_WIDTH=32 CPU_SIMD_RENDER_SCALE_8K_HEIGHT=32" +
             " CPU_SIMD_RENDER_SCALE_RUN_ORDER=software_first CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=" + root + "/out" +
@@ -245,7 +336,7 @@ describe "CPU SIMD render scale contract":
         val root = "build/test-cpu-simd-render-scale-contract-dpi-override"
         val command =
             "rm -rf " + root + " && mkdir -p " + root +
-            " && SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple" +
+            " && SIMPLE_BIN='" + _test_simple_bin() + "'" +
             " CPU_SIMD_RENDER_SCALE_4K_WIDTH=8 CPU_SIMD_RENDER_SCALE_4K_HEIGHT=8" +
             " CPU_SIMD_RENDER_SCALE_8K_WIDTH=16 CPU_SIMD_RENDER_SCALE_8K_HEIGHT=16" +
             " CPU_SIMD_RENDER_SCALE_DPI=220 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=" + root + "/out" +

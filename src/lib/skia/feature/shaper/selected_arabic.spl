@@ -23,7 +23,7 @@ class _ArabicGlyph:
     x_offset_units: i64
     y_offset_units: i64
 
-fn _coverage_index(blob: [u8], coverage: i64, limit: i64, glyph: u32) -> i64:
+fn _arabic_coverage_index(blob: [u8], coverage: i64, limit: i64, glyph: u32) -> i64:
     if coverage < 0 or coverage + 4 > limit: return -2
     val format = read_u16_be(blob, coverage)
     val count = read_u16_be(blob, coverage + 2) as i64
@@ -134,7 +134,7 @@ fn _multiple(font: OtFont, lookup: GsubLookup, glyph: _ArabicGlyph) -> Option<[_
     for offset in lookup.subtable_offsets:
         val subtable = offset as i64
         if subtable + 6 > limit or read_u16_be(font.blob, subtable) != 1u32: return None
-        val covered = _coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, glyph.glyph_id)
+        val covered = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, glyph.glyph_id)
         if covered == -2: return None
         if covered < 0: continue
         val count = read_u16_be(font.blob, subtable + 4) as i64
@@ -164,14 +164,14 @@ fn _apply_multiple(font: OtFont, lookup: GsubLookup, glyphs: [_ArabicGlyph], for
             for item in replacement: result.push(item)
     Some(result)
 
-fn _single(font: OtFont, lookup: GsubLookup, glyph: u32) -> Option<u32>:
+fn _arabic_single(font: OtFont, lookup: GsubLookup, glyph: u32) -> Option<u32>:
     if lookup.lookup_type != 1u32: return None
     val limit = lookup.table_end as i64
     for offset in lookup.subtable_offsets:
         val subtable = offset as i64
         if subtable + 6 > limit: return None
         val format = read_u16_be(font.blob, subtable)
-        val covered = _coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, glyph)
+        val covered = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, glyph)
         if covered == -2: return None
         if covered < 0: continue
         if format == 1u32: return Some(((glyph as i64 + read_i16_be(font.blob, subtable + 4) as i64) & 65535) as u32)
@@ -209,11 +209,11 @@ fn _apply_chain_single(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup], 
         if sequence_index != 0u32 or nested_index < 0 or nested_index >= catalog.len(): return None
         var index: i64 = 0
         while index + 1 < result.len():
-            val current = _coverage_index(font.blob, input_coverage, limit, result[index].glyph_id)
-            val next = _coverage_index(font.blob, lookahead_coverage, limit, result[index + 1].glyph_id)
+            val current = _arabic_coverage_index(font.blob, input_coverage, limit, result[index].glyph_id)
+            val next = _arabic_coverage_index(font.blob, lookahead_coverage, limit, result[index + 1].glyph_id)
             if current == -2 or next == -2: return None
             if current >= 0 and next >= 0:
-                val replacement = match _single(font, catalog[nested_index], result[index].glyph_id):
+                val replacement = match _arabic_single(font, catalog[nested_index], result[index].glyph_id):
                     Some(value): value
                     None: return None
                 result[index].glyph_id = replacement
@@ -267,7 +267,7 @@ fn _pair_position(font: OtFont, lookup: GposLookup, glyphs: [_ArabicGlyph]) -> O
         if subtable + 16 + count_1 * count_2 * record_size > limit: return None
         var index: i64 = 0
         while index + 1 < result.len():
-            val covered = _coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, result[index].glyph_id)
+            val covered = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, result[index].glyph_id)
             val first = _class(font.blob, subtable + read_u16_be(font.blob, subtable + 8) as i64, limit, result[index].glyph_id)
             val second = _class(font.blob, subtable + read_u16_be(font.blob, subtable + 10) as i64, limit, result[index + 1].glyph_id)
             if covered == -2 or first < 0 or second < 0: return None
@@ -308,14 +308,14 @@ fn _mark_base_position(font: OtFont, lookup: GposLookup, glyphs: [_ArabicGlyph])
         if classes <= 0 or mark_array + 2 > limit or base_array + 2 > limit: return None
         var mark_index: i64 = 1
         while mark_index < result.len():
-            val mark_coverage = _coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, result[mark_index].glyph_id)
+            val mark_coverage = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, result[mark_index].glyph_id)
             if mark_coverage == -2: return None
             if mark_coverage >= 0:
                 var base_index = mark_index - 1
                 while base_index >= 0 and result[base_index].x_advance_units == 0:
                     base_index = base_index - 1
                 if base_index < 0: return None
-                val base_coverage = _coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 4) as i64, limit, result[base_index].glyph_id)
+                val base_coverage = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 4) as i64, limit, result[base_index].glyph_id)
                 if base_coverage == -2: return None
                 if base_coverage >= 0:
                     val mark_count = read_u16_be(font.blob, mark_array) as i64
@@ -405,8 +405,10 @@ fn selected_arabic_glyphs(codepoints: [u32], start: i64, end_idx: i64,
         working = match _apply_chain_single(parsed, gsub[28], gsub, working):
             Some(value): value
             None: return []
-    for glyph in working:
-        glyph.x_advance_units = (selected_glyph_advance(Some(parsed), glyph.glyph_id, 1000.0)) as i64
+    index = 0
+    while index < working.len():
+        working[index].x_advance_units = (selected_glyph_advance(Some(parsed), working[index].glyph_id, 1000.0)) as i64
+        index = index + 1
     if naskh_profile:
         working = match _mark_base_position(parsed, gpos[5], working):
             Some(value): value

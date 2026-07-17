@@ -264,16 +264,17 @@ impl HirLowering:
                 match call_callee_t.kind:
                     case ExprKind.Ident(callee_ident):
                         val callee_ident_t: text = callee_ident
-                        if call_args_t.len() == 1 and not call_args_t[0].has_name:
-                            val prim_kind = primitive_cast_type_kind(callee_ident_t)
-                            if prim_kind.?:
-                                val cast_arg_t: CallArg = call_args_t[0]
-                                val cast_target = HirType(kind: prim_kind.unwrap(), span: e.span)
-                                return HirExpr(
-                                    kind: HirExprKind.Cast(self.lower_hir_expr(cast_arg_t.value), cast_target),
-                                    type_: cast_target,
-                                    span: e.span
-                                )
+                        if call_args_t.len() == 1:
+                            val cast_arg_t: CallArg = call_args_t[0]
+                            if not cast_arg_t.has_name:
+                                val prim_kind = primitive_cast_type_kind(callee_ident_t)
+                                if prim_kind.?:
+                                    val cast_target = HirType(kind: prim_kind.unwrap(), span: e.span)
+                                    return HirExpr(
+                                        kind: HirExprKind.Cast(self.lower_hir_expr(cast_arg_t.value), cast_target),
+                                        type_: cast_target,
+                                        span: e.span
+                                    )
                     case _:
                         pass
                 var hir_args: [HirCallArg] = []
@@ -343,7 +344,8 @@ impl HirLowering:
                             case HirExprKind.NamedVar(fld_tb_sym2, _):
                                 fld_tuple_base_sym = Some(fld_tb_sym2)
                             case _: ()
-                        if val fld_tb_sym3 = fld_tuple_base_sym:
+                        if fld_tuple_base_sym.?:
+                            val fld_tb_sym3 = fld_tuple_base_sym.unwrap()
                             if self.local_tuple_types.has(fld_tb_sym3.id):
                                 val fld_tuple_elem_types = self.local_tuple_types[fld_tb_sym3.id]
                                 if fld_tuple_idx >= 0 and fld_tuple_idx < fld_tuple_elem_types.len():
@@ -372,7 +374,8 @@ impl HirLowering:
                         case HirExprKind.NamedVar(fld_base_sym2, _):
                             fld_base_sym_opt = Some(fld_base_sym2)
                         case _: ()
-                    if val fld_base_sym = fld_base_sym_opt:
+                    if fld_base_sym_opt.?:
+                        val fld_base_sym = fld_base_sym_opt.unwrap()
                         if self.local_struct_types.has(fld_base_sym.id):
                             val fld_struct_name = self.local_struct_types[fld_base_sym.id]
                             if self.struct_field_types_by_name.has(fld_struct_name):
@@ -490,54 +493,11 @@ impl HirLowering:
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                val symbol = self.symbols.lookup(ident_name_t)
-                if val found_symbol = symbol:
-                    # NOTE: `if val found_symbol = symbol:` is not sufficient
-                    # here -- same class of bug fixed in 413d121a011 for MIR
-                    # `if val ... .type_:` sites: the seed interpreter's
-                    # `if val` presence check can still enter this true
-                    # branch with `found_symbol` bound to nil when the
-                    # lookup actually failed. Downstream consumers of
-                    # HirExprKind.NamedVar (e.g. MIR lowering's `symbol.id`
-                    # access) assume `symbol` is never nil, so a redundant
-                    # explicit nil re-check here avoids constructing a
-                    # NamedVar with a nil symbol and crashing later with
-                    # "undefined field 'id': cannot access field on value
-                    # of type 'nil'".
-                    if found_symbol == nil:
-                        self.lower_unresolved_ident(ident_name_t, e.span)
-                    else:
-                        # Under a --entry-closure bootstrap build, a
-                        # cross-module imported (or same-module,
-                        # non-entry-module) function's stored symbol name may
-                        # have been rewritten to a qualified `module.function`
-                        # form (qualify_imported_function_symbol /
-                        # bootstrap_decl_idx's rename_symbol call, both in
-                        # this file's `impl HirLowering` block) so it stays
-                        # distinct from a same-named function in a DIFFERENT
-                        # module -- the flat MIR accumulator
-                        # (bootstrap_lower_extra_hir_module_to_mir,
-                        # bootstrap_globals.spl) keys/emits every closure
-                        # helper module's functions the same qualified way.
-                        # Bake the CURRENT stored name into this NamedVar's
-                        # payload text HERE (same HIR-lowering pass as the
-                        # rename, so the mutation is still visible) rather
-                        # than deferring to a fresh `self.symbols` lookup at
-                        # MIR-lowering time: a symbol-table rename applied
-                        # during HIR lowering does not survive the trip
-                        # through the bootstrap entry-HIR-module global into
-                        # that later, separate pass (the interpreter's known
-                        # "mutating a class held inside a value-type struct
-                        # across a pass boundary" landmine) even though it IS
-                        # visible to a same-pass lookup like this one (bug
-                        # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe
-                        # B). A name that was never rewritten (the common
-                        # case: normal compiles, single-entry bootstrap
-                        # builds, and the entry closure module's own
-                        # same-module calls) round-trips to `ident_name_t`
-                        # unchanged, so this is a no-op there.
-                        val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
-                        HirExprKind.NamedVar(found_symbol, display_name)
+                val found_symbol = self.symbols.lookup_or_invalid(ident_name_t)
+                if found_symbol.is_valid():
+                    # Preserve any same-pass qualified import name for closure MIR.
+                    val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                    HirExprKind.NamedVar(found_symbol, display_name)
                 else:
                     self.lower_unresolved_ident(ident_name_t, e.span)
 

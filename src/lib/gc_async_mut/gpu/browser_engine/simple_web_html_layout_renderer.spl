@@ -5847,7 +5847,7 @@ fn presentational_attr_decls(node: HNode) -> text:
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
-fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false) -> [Style]:
+fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
     val rule_buckets = build_rule_buckets(rules, trace_stages)
     if trace_stages:
         print "[layout-trace] style_stage=rule-buckets-ready"
@@ -5934,7 +5934,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
             print "[layout-trace] style_stage=inline-ready index={i}"
         if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
             st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
-        if nd.tag == "#text":
+        if vector_fonts and nd.tag == "#text":
             val metric_text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
             if trace_stages:
                 print "[layout-trace] style_stage=metric-text-ready index={i} len={metric_text.len()}"
@@ -9348,7 +9348,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("widows", "{st.widows}")
     ]
 
-fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, width: i32, height: i32) -> DrawIrCommand:
+fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, width: i32, height: i32, vector_fonts: bool) -> DrawIrCommand:
     val node = nodes[i]
     val st = styles[i]
     val x = boxes.bx[i]
@@ -9370,6 +9370,15 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     # real text command instead so the executor rasterizes glyphs (on Metal fast
     # mode this routes to the GPU glyph blit) in the node's foreground color.
     if node.tag == "#text" and node.text_trimmed != "":
+        if not vector_fonts:
+            return draw_ir_text_styled(
+                _html_draw_ir_component_id(node, i),
+                content_x,
+                content_y,
+                node.text_trimmed,
+                st.fg,
+                computed_style
+            )
         val metrics = resolve_font_metrics_with_language(st.font_family, node.text_trimmed, st.font_size, _html_text_language(nodes, i, st))
         if metrics.shaping_required:
             var shaped = draw_ir_text_shaped_font(
@@ -9420,6 +9429,8 @@ fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     val box_h = boxes.bh[i]
     if display == "none":
         return false
+    if styles[i].visibility_hidden:
+        return false
     val ancestor_hidden = content_hidden_by_ancestor(nodes, styles, i)
     if ancestor_hidden:
         return false
@@ -9429,7 +9440,7 @@ fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         return false
     true
 
-fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32) -> [DrawIrCommand]:
+fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32, vector_fonts: bool) -> [DrawIrCommand]:
     var command_count: i32 = 0
     var i: i32 = 0
     var first_visible: i32 = -1
@@ -9442,16 +9453,20 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
         i = i + 1
     if command_count <= 0:
         return []
-    val first_command = _html_draw_ir_command(nodes, styles, boxes, first_visible, width, height)
+    val first_command = _html_draw_ir_command(nodes, styles, boxes, first_visible, width, height, vector_fonts)
     var commands: [DrawIrCommand] = [first_command; command_count]
     var out_i = 1
     i = first_visible + 1
     while i < node_count:
         if _html_draw_ir_visible(nodes, styles, boxes, i):
-            commands[out_i] = _html_draw_ir_command(nodes, styles, boxes, i, width, height)
+            commands[out_i] = _html_draw_ir_command(nodes, styles, boxes, i, width, height, vector_fonts)
             out_i = out_i + 1
         i = i + 1
     commands
+
+fn _html_draw_ir_canvas_command(width: i32, height: i32, color: u32) -> DrawIrCommand:
+    val rect = draw_ir_rect_bounds(0, 0, width, height)
+    draw_ir_box_with_style("html-canvas", 0, 0, width, height, color, rect, rect, rect, rect, [])
 
 # CSS canvas background propagation: the viewport (canvas) background comes from
 # the root <html> element's computed background-color, or from <body> if the root
@@ -9581,7 +9596,7 @@ fn _web_paint_iframes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw:
         i = i + 1
     out
 
-pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
+fn _simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32, vector_fonts: bool) -> DrawIrComposition:
     val render_start_us = rt_time_now_unix_micros()
     val env_override = _web_render_budget_ms_env_override()
     val area_floor_ms = (width as i64) * (height as i64) / 16
@@ -9593,7 +9608,7 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
-    val styles = compute_styles(nodes, rules, child_index)
+    val styles = compute_styles(nodes, rules, child_index, false, vector_fonts)
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
@@ -9617,11 +9632,19 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     )
     val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
     val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
-    val commands = _html_draw_ir_commands(nodes, styles, boxes, width, height)
+    var commands = _html_draw_ir_commands(nodes, styles, boxes, width, height, vector_fonts)
+    val canvas_color = _web_canvas_background(nodes, styles, argb(255, 255, 255))
+    commands = [_html_draw_ir_canvas_command(width, height, canvas_color)] + commands
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
     val batches = [batch]
     val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
     composition
+
+pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
+    _simple_web_layout_render_html_draw_ir(html, width, height, true)
+
+pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap(html: text, width: i32, height: i32) -> DrawIrComposition:
+    _simple_web_layout_render_html_draw_ir(html, width, height, false)
 
 # Stage-timed variant of the software render entry: prints per-stage wall
 # times so render-cost regressions can be localized without a debugger.

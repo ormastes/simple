@@ -107,24 +107,6 @@ impl MirLowering:
             print "[mir-lower] lower_function:begin-function-done {fn_.name}"
         self.builder = bldr
 
-        # Map parameters to locals
-        var arg_locals: Dict<i64, LocalId> = {}
-        if trace_enabled:
-            print "[mir-lower] lower_function:locals-start {fn_.name} count={self.builder.locals.len()}"
-        var lmi = 0
-        while lmi < self.builder.locals.len():
-            val local = self.builder.locals[lmi]
-            if trace_enabled:
-                print "[mir-lower] lower_function:local {fn_.name} idx={lmi}"
-            match local.kind:
-                case Arg(index):
-                    arg_locals[index] = local.id
-                case _:
-                    ()
-            lmi = lmi + 1
-        if trace_enabled:
-            print "[mir-lower] lower_function:locals-done {fn_.name}"
-
         var pli = 0
         # Before body lowering, locals contain only the optional return local
         # plus signature parameters. Derive the argument-ID offset from that
@@ -133,21 +115,12 @@ impl MirLowering:
         if trace_enabled:
             print "[mir-lower] lower_function:param-map-start {fn_.name} count={fn_.params.len()}"
         while pli < fn_.params.len():
-            val param = fn_.params[pli]
-            val local = if arg_locals.has(pli):
-                arg_locals[pli]
-            else:
-                # The seed interpreter can miss the Arg-pattern scan above.
-                # Fall back to the actual builder layout, not a hardcoded +1.
-                LocalId(id: pli + parameter_local_offset)
-            # `if val` can still bind nil in this interpreter; re-check before `.id`.
-            if val found_symbol = param.symbol:
-                if found_symbol == nil:
-                    self.error("function parameter has no resolved symbol", Some(param.span))
-                else:
-                    self.local_map[found_symbol.id] = local
-            else:
-                self.error("function parameter has no resolved symbol", Some(param.span))
+            val param: HirParam = fn_.params[pli]
+            val local = LocalId(id: pli + parameter_local_offset)
+            val found_symbol: SymbolId = param.symbol
+            self.local_map[found_symbol.id] = pli + parameter_local_offset
+            if (rt_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+                eprint "[mir-local-map] write name={param.name} symbol={found_symbol.id} local={pli + parameter_local_offset}"
             # Thread the real HIR parameter name onto the (nameless) MIR arg
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder
@@ -287,7 +260,7 @@ impl MirLowering:
                         self.struct_value_syms[copy_local.id] = parameter_type.name
                         if val copy_symbol = param.symbol:
                             if copy_symbol != nil:
-                                self.local_map[copy_symbol.id] = copy_local
+                                self.local_map[copy_symbol.id] = copy_local.id
                 case _:
                     ()
             pli = pli + 1

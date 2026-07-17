@@ -9,7 +9,7 @@ detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
 
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{file_read}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, simd_blend_row, simd_blit_row, _scalar_blend_row}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, simd_blend_row, simd_blit_row, _scalar_blend_row}
 
 # ============================================================================
 # SimdLevel detection
@@ -113,15 +113,24 @@ describe "simd_fill_row":
         val llvm_source = file_read("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
         val mir_source = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
         expect(source).to_contain("rt_engine2d_simd_fill_span_u32")
+        expect(source).to_contain("rt_engine2d_simd_copy_span_u32")
         expect(backend_source).to_contain("self.buf = rt_engine2d_simd_fill_span_u32")
+        expect(backend_source).to_contain("self.buf = rt_engine2d_simd_copy_span_u32")
         expect(backend_source).to_contain("self.native_simd_spans and native_pixel_rows_enabled()")
+        expect(backend_source).to_contain("_scalar_fill_row(self.buf, offset as i64, count as i64, color)")
+        expect(backend_source.contains("simd_fill_row(self.buf, offset as i64, count as i64, color)")).to_equal(false)
+        expect(backend_source).to_contain("record_simd_alpha_hit()")
         expect(engine_source).to_contain("var cpu_simd = CpuBackend.create_simd()")
         expect(interp_source).to_contain("pub fn rt_engine2d_simd_fill_span_u32")
+        expect(interp_source).to_contain("pub fn rt_engine2d_simd_copy_span_u32")
         expect(interp_source).to_contain("copy_from_slice(&filled)")
         expect(interp_dispatch).to_contain("insert_simple!(\"rt_engine2d_simd_fill_span_u32\"")
+        expect(interp_dispatch).to_contain("insert_simple!(\"rt_engine2d_simd_copy_span_u32\"")
         expect(interp_dispatch.contains("rt_engine2d_simd_fill_u32")).to_equal(false)
         expect(llvm_source).to_contain("declare ptr @rt_engine2d_simd_fill_span_u32(ptr, i64, i64, i64)")
+        expect(llvm_source).to_contain("declare ptr @rt_engine2d_simd_copy_span_u32(ptr, i64, ptr, i64, i64)")
         expect(mir_source).to_contain("name == \"rt_engine2d_simd_fill_span_u32\"")
+        expect(mir_source).to_contain("name == \"rt_engine2d_simd_copy_span_u32\"")
 
     it "fills a bounded span without changing adjacent pixels":
         var buf: [u32] = [0 as u32; 8]
@@ -194,6 +203,20 @@ describe "simd_blit_row":
         expect(dst[2]).to_equal(0xFFDDEEFF)
         expect(dst[5]).to_equal(0xFFDDEEFF)
         expect(dst[6]).to_equal(0)
+
+    it "copies a bounded native span without changing adjacent pixels":
+        var dst: [u32] = [0u32; 8]
+        val src: [u32] = [10u32, 11u32, 12u32, 13u32, 14u32, 15u32, 16u32, 17u32]
+        dst = rt_engine2d_simd_copy_span_u32(dst, 2, src, 3, 4)
+        expect(dst[1]).to_equal(0u32)
+        expect(dst[2]).to_equal(13u32)
+        expect(dst[5]).to_equal(16u32)
+        expect(dst[6]).to_equal(0u32)
+        dst = rt_engine2d_simd_copy_span_u32(dst, 6, src, 6, 8)
+        expect(dst[6]).to_equal(16u32)
+        expect(dst[7]).to_equal(17u32)
+        dst = rt_engine2d_simd_copy_span_u32(dst, -1, src, 0, 2)
+        expect(dst[0]).to_equal(0u32)
 
 # ============================================================================
 # Platform-universal guarantee (AC-6)

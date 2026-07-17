@@ -1500,6 +1500,33 @@ pub fn rt_engine2d_simd_fill_span_u32(args: &[Value]) -> Result<Value, CompileEr
     Ok(pack_u32_array(dst))
 }
 
+/// Interpreter bridge for the native in-place copy ABI. Interpreter arrays
+/// are immutable Arc values, so return the updated destination array.
+pub fn rt_engine2d_simd_copy_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_copy_span_u32 expects 5 arguments (dst, dst_offset, src, src_offset, count)".to_string(),
+        ));
+    }
+    let mut dst = unpack_u32_array("rt_engine2d_simd_copy_span_u32(dst)", &args[0])?;
+    let dst_offset_raw = require_u64_value("rt_engine2d_simd_copy_span_u32(dst_offset)", &args[1])? as i64;
+    let src = unpack_u32_array("rt_engine2d_simd_copy_span_u32(src)", &args[2])?;
+    let src_offset_raw = require_u64_value("rt_engine2d_simd_copy_span_u32(src_offset)", &args[3])? as i64;
+    let requested_raw = require_u64_value("rt_engine2d_simd_copy_span_u32(count)", &args[4])? as i64;
+    if dst_offset_raw >= 0 && src_offset_raw >= 0 && requested_raw > 0 {
+        let dst_offset = dst_offset_raw as usize;
+        let src_offset = src_offset_raw as usize;
+        let requested = requested_raw as usize;
+        if dst_offset >= dst.len() || src_offset >= src.len() {
+            return Ok(pack_u32_array(dst));
+        }
+        let count = requested.min(dst.len() - dst_offset).min(src.len() - src_offset);
+        let copied = sffi_copy_row_u32(&src[src_offset..src_offset + count]);
+        dst[dst_offset..dst_offset + count].copy_from_slice(&copied);
+    }
+    Ok(pack_u32_array(dst))
+}
+
 /// rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
 pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
@@ -2099,4 +2126,54 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = expect_index_i64("rt_rank_select_free", &args[0])?;
     remove_width_index(handle);
     Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod engine2d_span_tests {
+    use super::{pack_u32_array, rt_engine2d_simd_copy_span_u32, unpack_u32_array};
+    use crate::value::Value;
+
+    #[test]
+    fn copy_span_preserves_adjacent_pixels_and_rejects_negative_bounds() {
+        let dst = pack_u32_array(vec![0; 8]);
+        let src = pack_u32_array(vec![10, 11, 12, 13, 14, 15, 16, 17]);
+        let copied = rt_engine2d_simd_copy_span_u32(&[
+            dst,
+            Value::Int(2),
+            src,
+            Value::Int(3),
+            Value::Int(4),
+        ])
+        .unwrap();
+        assert_eq!(
+            unpack_u32_array("copied", &copied).unwrap(),
+            vec![0, 0, 13, 14, 15, 16, 0, 0]
+        );
+
+        let truncated = rt_engine2d_simd_copy_span_u32(&[
+            copied.clone(),
+            Value::Int(6),
+            pack_u32_array(vec![10, 11, 12, 13, 14, 15, 16, 17]),
+            Value::Int(6),
+            Value::Int(8),
+        ])
+        .unwrap();
+        assert_eq!(
+            unpack_u32_array("truncated", &truncated).unwrap(),
+            vec![0, 0, 13, 14, 15, 16, 16, 17]
+        );
+
+        let unchanged = rt_engine2d_simd_copy_span_u32(&[
+            truncated.clone(),
+            Value::Int(-1),
+            truncated,
+            Value::Int(0),
+            Value::Int(2),
+        ])
+        .unwrap();
+        assert_eq!(
+            unpack_u32_array("unchanged", &unchanged).unwrap(),
+            vec![0, 0, 13, 14, 15, 16, 16, 17]
+        );
+    }
 }

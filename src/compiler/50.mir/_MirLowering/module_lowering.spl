@@ -24,8 +24,10 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 fn mir_lower_env_get(key: text) -> text:
     rt_env_get(key)
@@ -905,9 +907,22 @@ impl MirLowering:
             self.prescan_expr_for_struct_types(block.value)
 
     me prescan_stmt_for_struct_types(stmt: HirStmt):
-        match stmt.kind:
-            case Expr(expr):
-                self.prescan_expr_for_struct_types(expr)
+        val stmt_kind = stmt.kind
+        val nil_span = Span.empty()
+        val nil_type = HirType(kind: HirTypeKind.Unit, span: nil_span)
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: nil_type, span: nil_span)
+        val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(nil_expr))
+        if rt_enum_discriminant(stmt_kind) == expr_stmt_disc:
+            if mir_lower_trace_enabled():
+                eprint("[mir-prescan] HirStmtKind.Expr")
+            match stmt_kind:
+                case HirStmtKind.Expr(expr):
+                    val expr_t: HirExpr = expr
+                    self.prescan_expr_for_struct_types(expr_t)
+                    return
+                case _:
+                    return
+        match stmt_kind:
             case Let(_, _, init):
                 self.prescan_expr_for_struct_types(init)
             case Assign(_, _, value):
@@ -923,7 +938,20 @@ impl MirLowering:
         Named struct), or "" when unknown. Recurses into Call args, Return,
         Block, and If so a `return Q(inner: make(3), tag: 99)`-shaped function
         body (the exact case this pre-pass exists for) is fully covered."""
-        match expr.kind:
+        val expr_kind = expr.kind
+        val nil_span = Span.empty()
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: nil_span), span: nil_span)
+        val block_disc = rt_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
+        if rt_enum_discriminant(expr_kind) == block_disc:
+            if mir_lower_trace_enabled():
+                eprint("[mir-prescan] HirExprKind.Block")
+            match expr_kind:
+                case HirExprKind.Block(inner_block):
+                    self.prescan_block_for_struct_types(inner_block)
+                    return ""
+                case _:
+                    return ""
+        match expr_kind:
             case Call(callee, args, _):
                 var name = ""
                 match callee.kind:
@@ -1013,9 +1041,6 @@ impl MirLowering:
                     self.prescan_expr_for_struct_types(value.unwrap())
                 else:
                     ""
-            case Block(inner_block):
-                self.prescan_block_for_struct_types(inner_block)
-                ""
             case If(cond, then_, else_):
                 self.prescan_expr_for_struct_types(cond)
                 self.prescan_block_for_struct_types(then_)

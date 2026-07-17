@@ -61,12 +61,15 @@ static int64_t ref_blend_pixel(int64_t s, int64_t d) {
     if (sa == 255u) return (int64_t)(uint64_t)sp;          /* full src pixel */
     if (sa == 0u)   return (int64_t)(uint64_t)dp;          /* full dst pixel */
     uint32_t inv = 255u - sa;
+    uint32_t da = (dp >> 24) & 0xFFu;
+    uint32_t dst_weight = (da * inv) / 255u;
+    uint32_t out_a = sa + dst_weight;
     uint32_t sr = (sp >> 16) & 0xFFu, sg = (sp >> 8) & 0xFFu, sb = sp & 0xFFu;
     uint32_t dr = (dp >> 16) & 0xFFu, dg = (dp >> 8) & 0xFFu, db = dp & 0xFFu;
-    uint32_t r = (sr * sa + dr * inv) / 255u;
-    uint32_t g = (sg * sa + dg * inv) / 255u;
-    uint32_t b = (sb * sa + db * inv) / 255u;
-    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b; /* alpha forced 255 */
+    uint32_t r = (sr * sa + dr * dst_weight) / out_a;
+    uint32_t g = (sg * sa + dg * dst_weight) / out_a;
+    uint32_t b = (sb * sa + db * dst_weight) / out_a;
+    uint32_t out = (out_a << 24) | (r << 16) | (g << 8) | b;
     return (int64_t)(uint64_t)out;
 }
 
@@ -139,12 +142,12 @@ static void test_blend_into(void) {
         int64_t* out = (int64_t*)calloc((size_t)(n > 0 ? n : 1), sizeof(int64_t));
         for (int64_t i = 0; i < n; i++) {
             /* vary alpha across pixels including 0 and 255 boundary cases;
-               dst alpha kept nonzero so sa==0 (full dst pixel) is meaningful */
+               destination alpha includes transparent and translucent pixels */
             uint32_t sa = (uint32_t)((i * 37) & 0xFF);
             uint32_t sr = (uint32_t)((i * 11) & 0xFF);
             uint32_t sg = (uint32_t)((i * 23) & 0xFF);
             uint32_t sb = (uint32_t)((i * 47) & 0xFF);
-            uint32_t da = 0x80u | (uint32_t)((i * 3) & 0x7F);  /* always nonzero */
+            uint32_t da = (uint32_t)((i * 3) & 0xFF);
             uint32_t dr = (uint32_t)((i * 17) & 0xFF);
             uint32_t dg = (uint32_t)((i * 29) & 0xFF);
             uint32_t db = (uint32_t)((i * 53) & 0xFF);

@@ -21,6 +21,8 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: Any) -> Any
+extern fn rt_value_as_int(value: i64) -> i64
 
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
@@ -600,15 +602,9 @@ impl MirLowering:
 
     me emit_bounds_check_for_index(base_type: HirType?, base_local: LocalId, index_local: LocalId):
         """Emit an explicit bounds_check intrinsic before MIR indexed access."""
-        # NOTE: avoid Option.unwrap() here -- the seed interpreter mishandles
-        # .unwrap() on a "present" struct optional (a present optional is
-        # stored as the bare payload; see mir_lowering_stmts.spl lower_stmt
-        # and method_calls_literals.spl lower_method_call for the same
-        # documented workaround). Use the explicit `if val` bind instead,
-        # which correctly yields the bare HirType.
         var len_symbol = ""
-        if val found_base_type = base_type:
-            len_symbol = self.len_runtime_symbol_for_hir_type(found_base_type)
+        if base_type != nil:
+            len_symbol = self.len_runtime_symbol_for_hir_type(base_type)
         if len_symbol == "":
             if self.local_is_runtime_array(base_local):
                 len_symbol = "rt_array_len"
@@ -620,7 +616,8 @@ impl MirLowering:
         ))
         var b = self.builder
         val len_result = b.emit_call(func_operand, [mir_operand_copy(base_local)], MirType.i64())
-        if val len_local = len_result:
+        if len_result.?:
+            val len_local = len_result.unwrap()
             b.emit(MirInst(
                 kind: MirInstKind.Intrinsic(nil, "bounds_check", [
                     mir_operand_copy(index_local),
@@ -690,6 +687,10 @@ impl MirLowering:
             expr_value = expr
 
         val expr_disc = rt_enum_discriminant(expr_value.kind)
+        if (mir_expr_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+            val trace_var_disc = rt_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
+            val trace_namedvar_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+            eprint "[mir-expr-disc] actual={expr_disc} var={trace_var_disc} namedvar={trace_namedvar_disc}"
         val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
         if expr_disc == field_disc:
             match expr_value.kind:
@@ -868,35 +869,62 @@ impl MirLowering:
                 case HirExprKind.Var(pre_symbol):
                     val pre_symbol_id = mir_expr_symbol_id_value(pre_symbol)
                     if pre_symbol_id >= 0 and self.local_map.has(pre_symbol_id):
-                        return self.local_map[pre_symbol_id]
+                        val mapped_local_id: i64 = self.local_map[pre_symbol_id]
+                        if (mir_expr_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+                            eprint "[mir-local-map] var-read symbol={pre_symbol_id} local={mapped_local_id}"
+                        val mapped_local: MirLocal = self.builder.locals[mapped_local_id]
+                        return mapped_local.id
                 case _:
                     pass
         val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
-            match expr_value.kind:
-                case HirExprKind.NamedVar(pre_symbol, pre_name):
-                    if pre_name != "OUTPUT_LIMIT" and pre_name != "DEFAULT_TIMEOUT_MS":
-                        # Prefer the symbol id resolved onto the NamedVar node:
-                        # self.symbols.lookup(name) returns nil here (scope
-                        # state is not active during MIR lowering on this
-                        # path), which is why the name-based NamedVar arm
-                        # below never resolves locals. mir_expr_symbol_id_value
-                        # nil-guards the seed's `if val`-binds-nil hazard.
-                        val pre_sym_id = mir_expr_symbol_id_value(pre_symbol)
-                        if pre_sym_id >= 0 and self.local_map.has(pre_sym_id):
-                            return self.local_map[pre_sym_id]
-                        val pre_resolved = self.symbols.lookup(pre_name)
-                        if pre_resolved != nil:
-                            val pre_nv_id = pre_resolved.id
-                            if pre_nv_id >= 0 and self.local_map.has(pre_nv_id):
-                                return self.local_map[pre_nv_id]
-                        # Built-in nullary Option `None` used as a value (not a
-                        # call): construct Option.None (disc 1) via rt_enum_new.
-                        # A local of the same name shadows it (handled above).
-                        if pre_name == "None" and self.enum_variant_index.has("Option") and not (pre_sym_id >= 0 and self.local_map.has(pre_sym_id)):
-                            return self.lower_enum_construct_named("Option", "None", [])
-                case _:
-                    pass
+            val namedvar_payload: [Any] = rt_enum_payload(expr_value.kind)
+            val symbol_t: SymbolId = namedvar_payload[0]
+            val name_t: text = namedvar_payload[1]
+            if name_t == "OUTPUT_LIMIT":
+                var b_const = self.builder
+                val const_tmp = b_const.emit_const_int(12000)
+                self.builder = b_const
+                return const_tmp
+            if name_t == "DEFAULT_TIMEOUT_MS":
+                var b_timeout = self.builder
+                val timeout_tmp = b_timeout.emit_const_int(7200000)
+                self.builder = b_timeout
+                return timeout_tmp
+
+            val pre_sym_id = rt_value_as_int(symbol_t.id)
+            if (mir_expr_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+                eprint "[mir-local-map] payload name={name_t} symbol={pre_sym_id} has={self.local_map.has(pre_sym_id)}"
+            if pre_sym_id >= 0 and self.local_map.has(pre_sym_id):
+                val mapped_local_id: i64 = self.local_map[pre_sym_id]
+                if (mir_expr_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+                    eprint "[mir-local-map] read name={name_t} symbol={pre_sym_id} local={mapped_local_id}"
+                val mapped_local: MirLocal = self.builder.locals[mapped_local_id]
+                return mapped_local.id
+
+            val pre_resolved = self.symbols.lookup(name_t)
+            var resolved_id = -1
+            if pre_resolved != nil:
+                resolved_id = pre_resolved.id
+                if resolved_id >= 0 and self.local_map.has(resolved_id):
+                    val mapped_local_id: i64 = self.local_map[resolved_id]
+                    val mapped_local: MirLocal = self.builder.locals[mapped_local_id]
+                    return mapped_local.id
+
+            if name_t == "None" and self.enum_variant_index.has("Option"):
+                return self.lower_enum_construct_named("Option", "None", [])
+
+            val global_id = if pre_sym_id >= 0: pre_sym_id else: resolved_id
+            if global_id >= 0:
+                val global_local = self.try_lower_global_read(global_id)
+                if global_local.?:
+                    return global_local.unwrap()
+
+            self.error("undefined variable: {name_t}", Some(expr_value.span))
+            var b_namedvar_err = self.builder
+            val namedvar_err = b_namedvar_err.new_temp(MirType.i64())
+            self.builder = b_namedvar_err
+            return namedvar_err
 
         match expr_value.kind:
             case IntLit(value, _):
@@ -1014,7 +1042,11 @@ impl MirLowering:
                     self.builder = b_nil
                     nil_tmp
                 elif self.local_map.has(symbol_id):
-                    self.local_map[symbol_id]
+                    val mapped_local_id: i64 = self.local_map[symbol_id]
+                    if (mir_expr_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+                        eprint "[mir-local-map] broad-var-read symbol={symbol_id} local={mapped_local_id}"
+                    val mapped_local: MirLocal = self.builder.locals[mapped_local_id]
+                    mapped_local.id
                 elif val global_local = self.try_lower_global_read(symbol_id):
                     global_local
                 else:
@@ -1025,6 +1057,8 @@ impl MirLowering:
                     err_tmp
 
             case NamedVar(symbol, name):
+                val symbol_t: SymbolId = symbol
+                val name_t: text = name
                 # Same lookup as Var -- HirLowering's `case Ident(name):` (in
                 # hir_lowering/expressions.spl) produces NamedVar(symbol, name)
                 # for every resolved identifier reference, but this dispatch
@@ -1046,33 +1080,34 @@ impl MirLowering:
                 # with "undefined field 'id': cannot access field on value
                 # of type 'nil'" instead of surfacing a real diagnostic. A
                 # redundant explicit nil re-check guards against this.
-                if name == "OUTPUT_LIMIT":
+                if name_t == "OUTPUT_LIMIT":
                     var b_const = self.builder
                     val const_tmp = b_const.emit_const_int(12000)
                     self.builder = b_const
                     const_tmp
-                elif name == "DEFAULT_TIMEOUT_MS":
+                elif name_t == "DEFAULT_TIMEOUT_MS":
                     var b_timeout = self.builder
                     val timeout_tmp = b_timeout.emit_const_int(7200000)
                     self.builder = b_timeout
                     timeout_tmp
                 else:
-                    var symbol_id = -1
-                    val resolved_symbol = self.symbols.lookup(name)
-                    if resolved_symbol != nil:
-                        symbol_id = resolved_symbol.id
+                    val symbol_id = symbol_t.id
                     if symbol_id < 0:
-                        self.error("undefined variable: {name}", Some(expr_value.span))
+                        self.error("undefined variable: {name_t}", Some(expr_value.span))
                         var b_err3 = self.builder
                         val err_tmp3 = b_err3.new_temp(MirType.i64())
                         self.builder = b_err3
                         err_tmp3
                     elif self.local_map.has(symbol_id):
-                        self.local_map[symbol_id]
+                        val mapped_local_id: i64 = self.local_map[symbol_id]
+                        if (mir_expr_env_get("SIMPLE_MIR_LOCAL_MAP_TRACE") ?? "") == "1":
+                            eprint "[mir-local-map] broad-read name={name_t} symbol={symbol_id} local={mapped_local_id}"
+                        val mapped_local: MirLocal = self.builder.locals[mapped_local_id]
+                        mapped_local.id
                     elif val global_local2 = self.try_lower_global_read(symbol_id):
                         global_local2
                     else:
-                        self.error("undefined variable: {name}", Some(expr_value.span))
+                        self.error("undefined variable: {name_t}", Some(expr_value.span))
                         var b_err2 = self.builder
                         val err_tmp2 = b_err2.new_temp(MirType.i64())
                         self.builder = b_err2
@@ -1184,12 +1219,16 @@ impl MirLowering:
                         # a same-numbered plain int/float local from another
                         # function can never be misread as a struct operand.
                         var binop_left_is_struct = false
-                        if val binop_left_ty = self.local_mir_type_of(left_local):
+                        val binop_left_ty_opt = self.local_mir_type_of(left_local)
+                        if binop_left_ty_opt.?:
+                            val binop_left_ty = binop_left_ty_opt.unwrap()
                             match binop_left_ty.kind:
                                 case MirTypeKind.Struct(_): binop_left_is_struct = true
                                 case _: ()
                         var binop_right_is_struct = false
-                        if val binop_right_ty = self.local_mir_type_of(right_local):
+                        val binop_right_ty_opt = self.local_mir_type_of(right_local)
+                        if binop_right_ty_opt.?:
+                            val binop_right_ty = binop_right_ty_opt.unwrap()
                             match binop_right_ty.kind:
                                 case MirTypeKind.Struct(_): binop_right_is_struct = true
                                 case _: ()
@@ -1351,14 +1390,18 @@ impl MirLowering:
                             # (lower_array_lit's own default).
                             var array_result_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
                             var array_result_type_known = false
-                            if val left_arr_ty = self.local_mir_type_of(left_local):
+                            val left_arr_ty_opt = self.local_mir_type_of(left_local)
+                            if left_arr_ty_opt.?:
+                                val left_arr_ty = left_arr_ty_opt.unwrap()
                                 match left_arr_ty.kind:
                                     case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                                         array_result_type = left_arr_ty
                                         array_result_type_known = true
                                     case _: ()
                             if not array_result_type_known:
-                                if val right_arr_ty = self.local_mir_type_of(right_local):
+                                val right_arr_ty_opt = self.local_mir_type_of(right_local)
+                                if right_arr_ty_opt.?:
+                                    val right_arr_ty = right_arr_ty_opt.unwrap()
                                     match right_arr_ty.kind:
                                         case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                                             array_result_type = right_arr_ty
@@ -1524,7 +1567,9 @@ impl MirLowering:
                         var right_narrow_int = false
                         var left_binop_type = MirType.i64()
                         var right_binop_type = MirType.i64()
-                        if val left_type = self.local_mir_type_of(left_local):
+                        val left_type_opt = self.local_mir_type_of(left_local)
+                        if left_type_opt.?:
+                            val left_type = left_type_opt.unwrap()
                             left_binop_type = left_type
                             match left_type.kind:
                                 case MirTypeKind.F32: left_f32 = true
@@ -1532,7 +1577,9 @@ impl MirLowering:
                                 case MirTypeKind.I64 | MirTypeKind.U64: left_i64 = true
                                 case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: left_narrow_int = true
                                 case _: ()
-                        if val right_type = self.local_mir_type_of(right_local):
+                        val right_type_opt = self.local_mir_type_of(right_local)
+                        if right_type_opt.?:
+                            val right_type = right_type_opt.unwrap()
                             right_binop_type = right_type
                             match right_type.kind:
                                 case MirTypeKind.F32: right_f32 = true
@@ -1794,8 +1841,28 @@ impl MirLowering:
                 b_left.switch_to_block(then_block)
                 self.builder = b_left
                 var left_value = left_local
-                if self.runtime_value_locals.has(left_local.id):
-                    left_value = self.decode_runtime_value(left_local, result_type)
+                val unwrap_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_unwrap_or_self"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false
+                    )))
+                ))
+                var b_unwrap = self.builder
+                val unwrap_res = b_unwrap.emit_call(unwrap_func, [mir_operand_copy(left_local)], MirType.i64())
+                self.builder = b_unwrap
+                if val unwrapped = unwrap_res:
+                    left_value = unwrapped
+                    if self.mir_type_is_str(result_type):
+                        left_value = self.decode_runtime_value(unwrapped, result_type)
+                    else:
+                        match result_type.kind:
+                            case Struct(_) | Enum(_) | Array(_, _) | Dict(_, _) | Slice(_) | Tuple(_):
+                                var b_typed = self.builder
+                                val typed = b_typed.new_temp(result_type)
+                                b_typed.emit_copy(typed, unwrapped)
+                                self.builder = b_typed
+                                left_value = typed
+                            case _: ()
                 b_left = self.builder
                 b_left.emit_copy(result_local, left_value)
                 b_left.terminate_goto(merge_block)

@@ -592,9 +592,9 @@ int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const char* path);
 int         rt_dir_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
-int         rt_file_write_text(const char* path, const char* content);
+int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_append(const char* path, const char* content);
-int         rt_file_append_text(const char* path, const char* content);
+int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
@@ -875,11 +875,18 @@ void     panic(int64_t msg);
 /* ===== SIMD Text Dispatch ===== */
 
 void     simd_text_init(void);
+bool     rt_simd_has_sse(void);
+bool     rt_simd_has_avx(void);
+bool     rt_simd_has_avx2(void);
+bool     rt_simd_has_neon(void);
+bool     rt_simd_has_rvv(void);
 
 /* ===== Engine2D CPU SIMD Span Kernels ===== */
 
 int64_t  rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, int64_t color);
 int64_t  rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src, int64_t src_off, int64_t count);
+SplArray* rt_engine2d_simd_fill_span_u32(SplArray* dst, int64_t offset, int64_t count, int64_t color);
+SplArray* rt_engine2d_simd_copy_span_u32(SplArray* dst, int64_t dst_off, SplArray* src, int64_t src_off, int64_t count);
 
 /* RETURN-style row kernels: build and return a NEW SplArray of packed i64 pixels. */
 SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color);

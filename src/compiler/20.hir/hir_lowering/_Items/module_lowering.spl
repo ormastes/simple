@@ -155,6 +155,7 @@ impl HirLowering:
     # module sees the promoted return type too, not just the callee's own
     # generated `ret` instruction.
     me infer_untyped_return_type(fn_decl: Function) -> HirType:
+        hir_module_phase_probe("return-scan:function:" + fn_decl.name)
         val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
@@ -255,9 +256,17 @@ impl HirLowering:
         acc
 
     me scan_ast_stmt_for_returns(s: Stmt, params: [Param]) -> ReturnScan:
-        match s.kind:
-            case StmtKind.Expr(expr):
-                self.scan_ast_expr_for_returns(expr, params)
+        val stmt_kind = s.kind
+        val expr_disc = rt_enum_discriminant(StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: s.span)))
+        if rt_enum_discriminant(stmt_kind) == expr_disc:
+            hir_module_phase_probe("return-scan:StmtKind.Expr")
+            match stmt_kind:
+                case StmtKind.Expr(expr):
+                    val expr_t: Expr = expr
+                    return self.scan_ast_expr_for_returns(expr_t, params)
+                case _:
+                    return return_scan_empty()
+        match stmt_kind:
             case StmtKind.Val(_, _, init):
                 self.scan_ast_expr_for_returns(init, params)
             case StmtKind.Var(_, _, init):
@@ -294,7 +303,25 @@ impl HirLowering:
     # pre-existing Unit-return default is unchanged), so it cannot regress a
     # working case.
     me scan_ast_expr_for_returns(e: Expr, params: [Param]) -> ReturnScan:
-        match e.kind:
+        val expr_kind = e.kind
+        # `Block` is also a struct name. The bootstrap compiler otherwise
+        # lowers this variant pattern as an always-true struct pattern and
+        # extracts a nil enum payload from every later expression variant.
+        if rt_enum_discriminant(expr_kind) == 1138084884:  # hash("Block")
+            hir_module_phase_probe("return-scan:ExprKind.Block")
+            match expr_kind:
+                case ExprKind.Block(block):
+                    return self.scan_ast_block_for_returns(block, params)
+                case _:
+                    return return_scan_empty()
+        if rt_enum_discriminant(expr_kind) == 21232742:  # hash("Field")
+            hir_module_phase_probe("return-scan:ExprKind.Field")
+            match expr_kind:
+                case ExprKind.Field(base, _):
+                    return self.scan_ast_expr_for_returns(base, params)
+                case _:
+                    return return_scan_empty()
+        match expr_kind:
             case ExprKind.Return(value):
                 if value.?:
                     val v = value.unwrap()
@@ -302,9 +329,13 @@ impl HirLowering:
                 else:
                     return_scan_empty()
             case ExprKind.If(cond, then_, else_):
-                var acc = merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(then_, params))
-                if else_.?:
-                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_.unwrap(), params))
+                hir_module_phase_probe("return-scan:ExprKind.If")
+                val cond_t: Expr = cond
+                val then_t: Block = then_
+                val else_t: Block? = else_
+                var acc = merge_return_scan(self.scan_ast_expr_for_returns(cond_t, params), self.scan_ast_block_for_returns(then_t, params))
+                if else_t.?:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_t.unwrap(), params))
                 acc
             case ExprKind.MatchCase(scrutinee, arms):
                 var acc = self.scan_ast_expr_for_returns(scrutinee, params)
@@ -320,8 +351,6 @@ impl HirLowering:
                 if finally_.?:
                     acc = merge_return_scan(acc, self.scan_ast_block_for_returns(finally_.unwrap(), params))
                 acc
-            case ExprKind.Block(block):
-                self.scan_ast_block_for_returns(block, params)
             case ExprKind.LossBlock(body):
                 self.scan_ast_block_for_returns(body, params)
             case ExprKind.NogradBlock(body):
@@ -348,8 +377,6 @@ impl HirLowering:
                 self.scan_ast_expr_for_returns(expr, params)
             case ExprKind.Index(base, index):
                 merge_return_scan(self.scan_ast_expr_for_returns(base, params), self.scan_ast_expr_for_returns(index, params))
-            case ExprKind.Field(base, _):
-                self.scan_ast_expr_for_returns(base, params)
             case ExprKind.OptionalChain(base, _):
                 self.scan_ast_expr_for_returns(base, params)
             case ExprKind.NullCoalesce(left, right):
@@ -1278,8 +1305,8 @@ impl HirLowering:
             val name = expr_get_str(expr_idx)
             var sym = bootstrap_hir_symbol_for_name(name)
             val found = self.symbols.lookup(name)
-            if val found_symbol = found:
-                sym = found_symbol
+            if found.?:
+                sym = found.unwrap()
             return HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_BINARY:
             return HirExpr(kind: HirExprKind.Binary(self.bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_right(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
@@ -1309,8 +1336,8 @@ impl HirLowering:
         EXPR_IDENT case (bootstrap symbol, overridden by a scope lookup hit)."""
         var sym = bootstrap_hir_symbol_for_name(name)
         val found = self.symbols.lookup(name)
-        if val found_symbol = found:
-            sym = found_symbol
+        if found.?:
+            sym = found.unwrap()
         HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
 
     me bootstrap_interp_expr_from_source(inner: text, span: Span) -> HirExpr:

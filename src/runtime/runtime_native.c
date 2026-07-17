@@ -32,9 +32,11 @@
 #if defined(_WIN32)
 #include <io.h>
 #include <malloc.h>
+#include <windows.h>
 #endif
 #if !defined(_WIN32)
 #include <netdb.h>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -99,6 +101,7 @@ bool rt_dir_create(const char* path, bool recursive) {
 #define RT_VALUE_HEAP_CLOSURE 0x03U
 #define RT_VALUE_HEAP_ENUM 0x04U
 #define RT_VALUE_HEAP_DICT 0x06U
+#define RT_VALUE_HEAP_MUTEX 0x09U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
@@ -486,6 +489,13 @@ typedef struct RtCoreArray {
     void* data;
 } RtCoreArray;
 
+typedef struct RtCoreMutex {
+    uint8_t kind;
+    uint8_t reserved[7];
+    atomic_flag lock;
+    int64_t value;
+} RtCoreMutex;
+
 typedef struct RtCoreEnum {
     uint8_t kind;
     uint8_t reserved[3];
@@ -540,6 +550,10 @@ static size_t rt_core_array_registry_cap = 0;
 static RtCoreEnum** rt_core_enum_registry = NULL;
 static size_t rt_core_enum_registry_len = 0;
 static size_t rt_core_enum_registry_cap = 0;
+static RtCoreMutex** rt_core_mutex_registry = NULL;
+static size_t rt_core_mutex_registry_len = 0;
+static size_t rt_core_mutex_registry_cap = 0;
+static atomic_flag rt_core_mutex_registry_lock = ATOMIC_FLAG_INIT;
 
 static void rt_core_register_string(RtCoreString* s) {
     if (!s) return;
@@ -578,6 +592,36 @@ static int rt_core_is_registered_array(RtCoreArray* array) {
         if (rt_core_array_registry[i] == array) return 1;
     }
     return 0;
+}
+
+static void rt_core_register_mutex(RtCoreMutex* mutex) {
+    if (!mutex) return;
+    while (atomic_flag_test_and_set_explicit(&rt_core_mutex_registry_lock, memory_order_acquire)) { }
+    if (rt_core_mutex_registry_len == rt_core_mutex_registry_cap) {
+        size_t next_cap = rt_core_mutex_registry_cap == 0 ? 16 : rt_core_mutex_registry_cap * 2;
+        RtCoreMutex** next = (RtCoreMutex**)realloc(rt_core_mutex_registry, next_cap * sizeof(RtCoreMutex*));
+        if (!next) {
+            atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
+            return;
+        }
+        rt_core_mutex_registry = next;
+        rt_core_mutex_registry_cap = next_cap;
+    }
+    rt_core_mutex_registry[rt_core_mutex_registry_len++] = mutex;
+    atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
+}
+
+static int rt_core_is_registered_mutex(RtCoreMutex* mutex) {
+    int found = 0;
+    while (atomic_flag_test_and_set_explicit(&rt_core_mutex_registry_lock, memory_order_acquire)) { }
+    for (size_t i = 0; i < rt_core_mutex_registry_len; i++) {
+        if (rt_core_mutex_registry[i] == mutex) {
+            found = 1;
+            break;
+        }
+    }
+    atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
+    return found;
 }
 
 /* Bug (native_rt_is_none_heap_tag_collision_segv): a flat (unboxed) i64?/bool?
@@ -752,6 +796,13 @@ static inline RtCoreArray* rt_core_as_registered_array(int64_t value) {
     }
     RtCoreArray* array = (RtCoreArray*)raw;
     return rt_core_is_registered_array(array) ? rt_core_as_array(value) : NULL;
+}
+
+static inline RtCoreMutex* rt_core_as_mutex(int64_t value) {
+    if (!rt_core_is_heap(value)) return NULL;
+    RtCoreMutex* mutex = (RtCoreMutex*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!rt_core_is_registered_mutex(mutex)) return NULL;
+    return mutex->kind == RT_VALUE_HEAP_MUTEX ? mutex : NULL;
 }
 
 static inline RtCoreEnum* rt_core_as_enum(int64_t value) {
@@ -1638,6 +1689,39 @@ int64_t rt_string_rfind(int64_t value, int64_t needle) {
     return -1;
 }
 
+int64_t rt_mutex_new(int64_t initial) {
+    RtCoreMutex* mutex = (RtCoreMutex*)calloc(1, sizeof(RtCoreMutex));
+    if (!mutex) return rt_core_nil();
+    mutex->kind = RT_VALUE_HEAP_MUTEX;
+    atomic_flag_clear(&mutex->lock);
+    mutex->value = initial;
+    rt_core_register_mutex(mutex);
+    return (int64_t)(((uintptr_t)mutex) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_mutex_lock(int64_t handle) {
+    RtCoreMutex* mutex = rt_core_as_mutex(handle);
+    if (!mutex) return rt_core_nil();
+    while (atomic_flag_test_and_set_explicit(&mutex->lock, memory_order_acquire)) { }
+    return mutex->value;
+}
+
+int64_t rt_mutex_try_lock(int64_t handle) {
+    RtCoreMutex* mutex = rt_core_as_mutex(handle);
+    if (!mutex || atomic_flag_test_and_set_explicit(&mutex->lock, memory_order_acquire)) {
+        return rt_core_nil();
+    }
+    return mutex->value;
+}
+
+int64_t rt_mutex_unlock(int64_t handle, int64_t new_value) {
+    RtCoreMutex* mutex = rt_core_as_mutex(handle);
+    if (!mutex) return 0;
+    mutex->value = new_value;
+    atomic_flag_clear_explicit(&mutex->lock, memory_order_release);
+    return 1;
+}
+
 /* Task #178 (text3 lane): `.contains()` had a frontend extern declaration
  * (types.spl) and a backend LLVM decl (llvm_lib_translate.spl) but NO C
  * implementation anywhere in src/runtime/ -- a genuine missing symbol, not
@@ -1779,6 +1863,7 @@ int8_t rt_contains(int64_t collection, int64_t value) {
 }
 
 int64_t rt_unwrap_or_self(int64_t value) {
+    if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);
     return value;
 }
 
@@ -2599,6 +2684,78 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
 
 int64_t rt_array_data_ptr_u8(SplArray* a) {
     return rt_array_data_ptr(a);
+}
+
+static char* rt_core_string_to_cstring(int64_t value) {
+    RtCoreString* string = rt_core_as_string(value);
+    if (!string || string->len > SIZE_MAX - 1) return NULL;
+    char* out = (char*)malloc((size_t)string->len + 1);
+    if (!out) return NULL;
+    memcpy(out, string->data, (size_t)string->len);
+    out[string->len] = '\0';
+    return out;
+}
+
+int64_t spl_dlopen(int64_t path_value) {
+    char* path = rt_core_string_to_cstring(path_value);
+    if (!path) return 0;
+#if defined(_WIN32)
+    void* handle = (void*)LoadLibraryA(path);
+#else
+    void* handle = dlopen(path, RTLD_NOW);
+#endif
+    free(path);
+    return (int64_t)(uintptr_t)handle;
+}
+
+int64_t spl_dlsym(int64_t handle_value, int64_t name_value) {
+    char* name = rt_core_string_to_cstring(name_value);
+    if (!name) return 0;
+#if defined(_WIN32)
+    void* symbol = handle_value == 0 ? NULL : (void*)GetProcAddress((HMODULE)(uintptr_t)handle_value, name);
+#else
+    void* symbol = dlsym((void*)(uintptr_t)handle_value, name);
+#endif
+    free(name);
+    return (int64_t)(uintptr_t)symbol;
+}
+
+int64_t spl_dlclose(int64_t handle_value) {
+    if (handle_value == 0) return 0;
+#if defined(_WIN32)
+    return FreeLibrary((HMODULE)(uintptr_t)handle_value) ? 0 : 1;
+#else
+    return (int64_t)dlclose((void*)(uintptr_t)handle_value);
+#endif
+}
+
+int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
+    typedef int64_t (*Fn0)(void);
+    typedef int64_t (*Fn1)(int64_t);
+    typedef int64_t (*Fn2)(int64_t, int64_t);
+    typedef int64_t (*Fn3)(int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn5)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn6)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0 || nargs < 0 || nargs > 8) return 0;
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (nargs > 0 && (!args || args->flags & RT_CORE_ARRAY_FLAG_BYTES || !args->data || nargs > args->len)) return 0;
+    int64_t raw[8] = {0};
+    for (int64_t i = 0; i < nargs; i++) raw[i] = ((int64_t*)args->data)[i];
+    switch (nargs) {
+        case 0: return ((Fn0)(uintptr_t)fptr)();
+        case 1: return ((Fn1)(uintptr_t)fptr)(raw[0]);
+        case 2: return ((Fn2)(uintptr_t)fptr)(raw[0], raw[1]);
+        case 3: return ((Fn3)(uintptr_t)fptr)(raw[0], raw[1], raw[2]);
+        case 4: return ((Fn4)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3]);
+        case 5: return ((Fn5)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4]);
+        case 6: return ((Fn6)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+        case 7: return ((Fn7)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]);
+        case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
+        default: return 0;
+    }
 }
 
 int64_t rt_array_header_ptr(SplArray* a) {
@@ -4417,12 +4574,30 @@ const char* rt_platform_name(void) {
 #endif
 }
 
-int rt_file_write_text(const char* path, const char* content) {
-    return rt_file_write(path, content);
+static int rt_core_file_write_data(
+    const uint8_t* path_ptr,
+    uint64_t path_len,
+    const uint8_t* data,
+    uint64_t data_len,
+    const char* mode
+) {
+    if (!path_ptr || (!data && data_len != 0) || path_len > SIZE_MAX - 1) return 0;
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return 0;
+    FILE* f = fopen(path, mode);
+    free(path);
+    if (!f) return 0;
+    size_t written = fwrite(data, 1, (size_t)data_len, f);
+    fclose(f);
+    return written == (size_t)data_len ? 1 : 0;
 }
 
-int rt_file_append_text(const char* path, const char* content) {
-    return rt_file_append(path, content);
+int rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len) {
+    return rt_core_file_write_data(path, path_len, content, content_len, "wb");
+}
+
+int rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len) {
+    return rt_core_file_write_data(path, path_len, content, content_len, "ab");
 }
 
 static int rt_core_mkdir_one(const char* path) {
@@ -4675,17 +4850,7 @@ int64_t rt_file_read_all_text(int64_t path_tagged) {
 
 
 int rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len, const uint8_t* data, uint64_t len) {
-    if (!path_ptr || (!data && len != 0) || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
-    if (!path) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[path_len] = '\0';
-    FILE* f = fopen(path, "wb");
-    free(path);
-    if (!f) return 0;
-    size_t written = fwrite(data, 1, (size_t)len, f);
-    fclose(f);
-    return written == (size_t)len ? 1 : 0;
+    return rt_core_file_write_data(path_ptr, path_len, data, len, "wb");
 }
 
 /* IF-13 wave-4d: truncate (or zero-extend) `path` to exactly `size` bytes.

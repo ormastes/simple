@@ -146,11 +146,6 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "sffi_regex_replace" | "sffi_regex_replace_all" => Some(&[0, 1, 2]),
         "sffi_regex_split_n" => Some(&[0, 1]),
 
-        // Cranelift self-hosting
-        "rt_cranelift_new_module" | "rt_cranelift_new_aot_module" => Some(&[0]),
-        "rt_cranelift_begin_function" => Some(&[1]),
-        "rt_cranelift_get_function_ptr" => Some(&[1]),
-
         // File stat (path is text, rest are output pointers)
         "rt_file_stat" => Some(&[0]),
 
