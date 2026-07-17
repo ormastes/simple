@@ -40,7 +40,9 @@ checks that the child PID recorded by the fixture no longer exists.
 Lint uses the compiler's scoped annotation parser. Lint, format, and fix share a
 single behavior owner and production entrypoints do not execute raw source
 workers. Repository-wide UI and hot-loop gates run only for explicit `--all`;
-focused lint remains scoped. `check` truthfully promises parse/validation only
+focused lint remains scoped. MCP performance lint fails closed until its
+per-source rules have a production repository-scanner owner; it no longer
+delegates to the inert `build lint` compatibility route. `check` truthfully promises parse/validation only
 until full type inference has an enforcing implementation.
 
 ## Reject unsafe paths and stale fallbacks

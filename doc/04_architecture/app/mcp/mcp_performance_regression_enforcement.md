@@ -1,5 +1,8 @@
 # MCP Performance Regression Enforcement
 
+Status: **planned, not implemented**. The production CLI fails closed for
+`--mcp-perf`; the repository scanner described below does not yet exist.
+
 ## Startup Path
 
 Production MCP and LSP launchers are treated as wrapper-bound interfaces. The enforcement system checks both `.mcp.json` and launcher scripts so user-facing servers must launch cached compiled artifacts instead of raw `.spl` entrypoints.

@@ -1,5 +1,9 @@
 # MCP Performance Regression Enforcement Design
 
+Status: **planned, not implemented**. `scripts/mcp_performance_guard.py` does
+not exist; `simple lint --mcp-perf` fails closed until a pure-Simple repository
+scanner owns the four existing per-source rules.
+
 ## Startup Path
 
 The implementation uses one repo-owned executable, `scripts/mcp_performance_guard.py`, with subcommands for static audit, perf smoke, and verify. The build and CLI entrypoints call that executable directly through `python3`, so enforcement behavior stays in one place.
