@@ -131,6 +131,20 @@ impl<'a> Parser<'a> {
     /// If followed by `(`, parse as an enum variant pattern with payload.
     /// If followed by `.` or `::`, parse as qualified enum variant.
     /// Otherwise return a simple identifier pattern.
+    ///
+    /// `name` is the PascalCase spelling used ONLY for the enum-variant
+    /// interpretations below (payload / qualified-path patterns conventionally
+    /// name variants in PascalCase, e.g. matching `Some(x)` or `Target.Kernel`).
+    /// The plain-identifier fallback (bug local_var_kernel_shadowed_by_module_2026-07-06)
+    /// must NOT use that PascalCase spelling: these tokens are only lexed as
+    /// keywords from lowercase source text (see the sibling comment in
+    /// `expressions/primary/identifiers.rs` about the analogous `Unit` bug), so
+    /// `var kernel = ...` / `val kernel = ...` binds the pattern as lowercase
+    /// `kernel`, matching how `Expr::Identifier("kernel")` reads it back
+    /// (parser_impl side already lowercases via `parse_keyword_identifier`).
+    /// Reconstructing the actual lowercase spelling from `name` is safe here:
+    /// every caller's PascalCase spelling differs from the real keyword only in
+    /// the first letter's case (single-word keywords, no internal capitals).
     fn parse_keyword_as_pattern(&mut self, name: &str) -> Result<Pattern, ParseError> {
         self.advance(); // consume the keyword token
 
@@ -165,7 +179,10 @@ impl<'a> Parser<'a> {
             });
         }
 
-        Ok(Pattern::Identifier(name.to_string()))
+        // Plain identifier binding (no enum-pattern syntax follows): use the
+        // real lowercase keyword spelling, not the PascalCase enum-variant
+        // spelling — see the doc comment on this function.
+        Ok(Pattern::Identifier(name.to_lowercase()))
     }
 
     /// Skip newlines and indents for pattern continuation.
