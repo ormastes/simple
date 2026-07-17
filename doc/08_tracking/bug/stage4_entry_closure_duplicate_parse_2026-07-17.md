@@ -110,3 +110,29 @@ No fourth Stage4 run was started because the mandatory three-cycle cap was
 reached. Full executable acceptance remains open; the next bounded
 continuation should rebuild Stage3 with the comma-list parser fix and resume
 the exact Stage4 command without deleting caches.
+
+## 2026-07-17 macOS generic-and-web continuation
+
+Three bounded Stage4 cycles retained the 2,020 collected / 1,246 unique source
+plan and the roughly 10.3 GiB RSS plateau. The first reached
+`src/lib/common/sdn/value.spl` at 196.622 seconds and exposed that generic type
+branches returned before consuming an optional `?` suffix. `Option`, `Result`,
+`Dict`, named-generic, and unknown-generic returns now all pass through
+`parser_absorb_optional_suffix`; a focused `Dict<text, i64>?` native probe
+completed successfully.
+
+The second cycle passed `SdnValue` and reached
+`src/app/ui.render/html_widgets.spl` at 187.263 seconds. The Stage4 parser
+accepted `=>` only for same-line expressions, while the established web/UI
+source uses `=>` followed by an indented statement block. Fat-arrow arms now
+route a following newline through `parse_block`; the exact multiline match
+form compiled and ran as a focused native probe (`ok`, exit 0).
+
+The third and final permitted cycle passed both earlier failures, including
+the HTML renderer, and reached
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` at 213.094 seconds. It
+rejected an uninitialized `Engine2D` local, as required by the declared-type
+initialization gate. The offscreen selection now uses an explicitly initialized
+`Engine2D?`, assigns `Some(created)` on every backend path, and unwraps only
+after selection. No fourth full closure run was started. Full executable
+acceptance remains open at this later Engine2D boundary.
