@@ -66,6 +66,20 @@ Completion steps:
 - `step("Capture SimpleOS pinned-font pixels")`
 - `step("Measure warm font rendering and resource bounds")`
 
+Secondary detail steps remain folded beneath those manual-facing flows:
+
+- `step("Regenerate the top eleven twice from the exact pinned XML bytes")`
+- `step("Reject a stale global-face wrapper after loading a second selected face")`
+- `step("Check every candidate against its exact CORPUS codepoints and accepted-simple policy")`
+- `step("Replay exact CORPUS mappings through the bounded Pure Simple glyf parser")`
+- `step("Inspect the strict public Engine2D harness and its fail-closed evidence wrapper")`
+- `step("Invoke the stable pure-Simple GPU source emitter without a generated test file")`
+- `step("Emit two buffer bindings plus the contiguous 13-field Vulkan parameter block")`
+- `step("Plan optimization and font sources as separate companion artifacts")`
+- `step("Compare the retained artifact identity with the corrected common compositor")`
+- `step("Check the production Simple Browser uses the same DrawIR route")`
+- `step("Render Engine2D text on the promoted backend")`
+
 Shared checkers are `expect_resolved_font_metrics`,
 `expect_draw_ir_font_identity`, and `expect_simpleos_font_asset`; temporary
 implementations must call `fail(...)` rather than pass silently.
