@@ -2482,6 +2482,20 @@ mod tests {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_run_tests_process_args"));
     }
 
+    /// Guard for #159: a deployed seed binary built before commit
+    /// 7714fcb27838 ("fix(runtime): expose scalar CLI argument access")
+    /// does not register these externs, and any .spl module calling them
+    /// dies with "unknown extern function: rt_cli_arg_count", breaking
+    /// `bin/simple test` repo-wide on that binary. This guards the
+    /// registration so a future stale-WC sync/revert (see
+    /// doc/08_tracking/bug/regression_fn_type_registry_reverted_by_wc_sync_e6fa51c872e_2026-07-17.md
+    /// for a precedent of exactly this failure mode) is caught immediately.
+    #[test]
+    fn dispatch_registers_rt_cli_arg_count_and_at() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_cli_arg_count"));
+        assert!(EXTERN_DISPATCH.contains_key("rt_cli_arg_at"));
+    }
+
     #[test]
     fn dispatch_registers_rt_get_args_alias_of_sys_get_args() {
         // task #152: standalone `simple run script.spl` scripts declare
