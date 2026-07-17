@@ -1,5 +1,7 @@
 # Cert stress f01: deep-nesting parser stack overflow — already fixed by an earlier unrelated commit
 
+**Status:** RESOLVED (triage-confirmed 2026-07-17: NO LONGER REPRODUCES as of commit 4274c4f3f20b)
+
 - **Date documented:** 2026-07-17 (cert stress-suite salvage)
 - **Date re-verified:** 2026-07-17 (STRESS lane)
 - **Status:** NO LONGER REPRODUCES as of commit `4274c4f3f20b`

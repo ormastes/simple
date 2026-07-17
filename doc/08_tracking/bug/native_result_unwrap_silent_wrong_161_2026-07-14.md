@@ -1,5 +1,7 @@
 # native-build: `.unwrap()`/`.unwrap_or()` on `Result` silently returns 161
 
+**Status:** RESOLVED 2026-07-15
+
 **Severity:** high (silent-wrong — violates the never-loud→silent discipline)
 **Found:** 2026-07-14, errhandling lane
 **Resolved:** 2026-07-15
