@@ -9,14 +9,9 @@ use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
-use std.nogc_sync_mut.io.process_ops.{eprint}
 
-extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
-
-fn hir_stmt_env_get(key: text) -> text:
-    rt_env_get(key)
 
 fn hir_stmt_kind_disc(k: StmtKind) -> i64:
     rt_enum_discriminant(k)
@@ -336,13 +331,9 @@ impl HirLowering:
         HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
 
     me lower_hir_stmt(s: Stmt) -> HirStmt:
-        if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] lower_stmt:start")
         # DIRECT typed field read, NOT `match s: case Stmt(k, _): k` — the
         # struct-pattern destructure hazard (bug doc iteration 17).
         val stmt_kind_value: StmtKind = s.kind
-        if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] lower_stmt:kind")
 
         # DISC-DISPATCH for value-carrying non-Expr statements (bug doc iteration
         # 20 #86): the multi-arm `match stmt_kind_value` MIS-ROUTES on stage4 — a
@@ -434,33 +425,42 @@ impl HirLowering:
                     sk_dummy
             val as_hir_op = self.lower_hir_assign_op_opt(as_op)
             return HirStmt(kind: HirStmtKind.Assign(self.lower_hir_expr(as_target), as_hir_op, self.lower_hir_expr(as_value)), span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Expr(sk_dummy)):
+            # ROOT FIX (stage2 gate: StmtKind.Expr misroute): the multi-arm
+            # `match stmt_kind_value` below mis-routes on stage4/native-build
+            # worker execution exactly like Val/Var/Return/Assign did (bug
+            # doc iteration 20 #86) — a genuine StmtKind.Expr matched NONE
+            # of the qualified arms and fell through to the `case _`
+            # catch-all -> "unsupported statement kind", failing HIR
+            # lowering for every bare-expression-statement body (confirmed
+            # via disc-dispatch trace on a minimal native-build repro).
+            # Pre-dispatch by discriminant + single-arm pattern-extraction,
+            # same idiom Val/Var/Assign above already use successfully for
+            # their own Expr-typed fields (rt_enum_payload -- Return's
+            # idiom -- comes back nil for Expr's payload specifically; see
+            # bug doc hir_stmt_expr_payload_extraction_nil_2026-07-17.md).
+            val expr_t: Expr = match stmt_kind_value:
+                case StmtKind.Expr(einner):
+                    einner
+                case _:
+                    sk_dummy
+            # The flat parser emits `target = value` as an EXPRESSION
+            # statement (expr_assign), never StmtKind.Assign. Route it
+            # into HirStmtKind.Assign so MIR's assignment lowering
+            # (including bitfield field-write synthesis) sees it.
+            match expr_t.kind:
+                case ExprKind.Assign(assign_target, assign_op, assign_value):
+                    val hir_assign_op = self.lower_hir_assign_op_opt(assign_op)
+                    return HirStmt(kind: HirStmtKind.Assign(
+                        self.lower_hir_expr(assign_target),
+                        hir_assign_op,
+                        self.lower_hir_expr(assign_value)
+                    ), span: s.span)
+                case _:
+                    return HirStmt(kind: HirStmtKind.Expr(self.lower_hir_expr(expr_t)), span: s.span)
 
         val kind: HirStmtKind = match stmt_kind_value:
-            case StmtKind.Expr(_):
-                if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_stmt:expr")
-                # Pattern-extracted payload is GARBAGE on stage4 (iteration 17,
-                # disc=823890719). Extract via rt_enum_payload directly and
-                # compare (UNGATED probes, Trap D).
-                val expr_t: Expr = rt_enum_payload(stmt_kind_value)
-                # The flat parser emits `target = value` as an EXPRESSION
-                # statement (expr_assign), never StmtKind.Assign. Route it
-                # into HirStmtKind.Assign so MIR's assignment lowering
-                # (including bitfield field-write synthesis) sees it.
-                match expr_t.kind:
-                    case ExprKind.Assign(assign_target, assign_op, assign_value):
-                        val hir_assign_op = self.lower_hir_assign_op_opt(assign_op)
-                        HirStmtKind.Assign(
-                            self.lower_hir_expr(assign_target),
-                            hir_assign_op,
-                            self.lower_hir_expr(assign_value)
-                        )
-                    case _:
-                        HirStmtKind.Expr(self.lower_hir_expr(expr_t))
-
             case StmtKind.Val(name, type_, init):
-                if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_stmt:val {name}")
                 val hir_type = if type_.?:
                     Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
                 else:
@@ -470,22 +470,14 @@ impl HirLowering:
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
-                if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_stmt:var {name}")
                 val hir_type = if type_.?:
                     Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
                 else:
                     nil
-                if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_stmt:var:type {name}")
                 val hir_init = if init.?:
-                    if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                        eprint("[hir-lower] lower_stmt:var:init {name}")
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-                if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_stmt:var:init-done {name}")
                 val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
