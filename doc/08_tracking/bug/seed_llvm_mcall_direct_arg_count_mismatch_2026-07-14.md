@@ -151,6 +151,15 @@ reducing the total from 32 to 22. Unknown locals, generics, enum cases, and
 static receivers remain fail-closed. The run exited 2 normally without
 timeout, OOM, crash, hang, or orphan.
 
+Import discovery now records exact arities for concrete class, struct, enum,
+trait, impl, extend, and extern-class methods, including implicit receivers,
+while excluding abstract/pass-only trait methods. Focused discovery coverage
+passes. The single bounded bootstrap removed `Tensor.T` and `Iterator.count`,
+reducing undeclared globals from 22 to 18. A newly exposed `slice` method-value
+failure is the next import-discovery lane; unknown enum/generic/static/local
+symbols remain fail-closed. The run exited 2 normally without timeout, OOM,
+crash, hang, or orphan.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs

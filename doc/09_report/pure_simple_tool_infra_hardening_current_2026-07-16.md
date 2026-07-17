@@ -482,6 +482,10 @@ so executable qualification is still blocked.
   bounded bootstrap removed all `char_to_ascii` and `cuda_available` failures,
   reducing undeclared globals from 32 to 22 while preserving fail-closed
   unknown identifiers.
+- Exact import arities now include concrete methods and implicit receivers,
+  with abstract/pass-only exclusions. Focused discovery coverage PASS; one
+  bounded bootstrap removed `Tensor.T` and `Iterator.count`, reducing
+  undeclared globals from 22 to 18 and exposing `slice` as the next method lane.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

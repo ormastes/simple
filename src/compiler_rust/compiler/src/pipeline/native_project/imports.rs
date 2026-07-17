@@ -70,6 +70,10 @@ fn has_concrete_body(body: &simple_parser::ast::Block) -> bool {
     !body.statements.is_empty() && !matches!(body.statements.as_slice(), [simple_parser::ast::Node::Pass(_)])
 }
 
+fn method_arity(method: &simple_parser::ast::FunctionDef) -> usize {
+    method.params.len() + usize::from(!method.is_static && !method.params.iter().any(|param| param.name == "self"))
+}
+
 /// Try alternate name forms to resolve a call target through use_map/import_map.
 pub(crate) fn resolve_name_variants(
     name: &str,
@@ -301,6 +305,7 @@ pub(crate) fn build_import_map(
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", c.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name));
+                                fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
@@ -314,6 +319,9 @@ pub(crate) fn build_import_map(
                         for m in &ec.methods {
                             let raw = format!("{}.{}", ec.name, m.name);
                             let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ec.name, m.name));
+                            let arity = m.params.len()
+                                + usize::from(!matches!(m.kind, simple_parser::ast::ExternMethodKind::Static));
+                            fn_arities.insert(mangled.clone(), arity);
                             raw_to_mangled.entry(raw.clone()).or_default().push(mangled.clone());
                             raw_to_mangled.entry(m.name.clone()).or_default().push(mangled);
                         }
@@ -356,6 +364,7 @@ pub(crate) fn build_import_map(
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", s.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name));
+                                fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
@@ -392,6 +401,7 @@ pub(crate) fn build_import_map(
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", e.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, m.name));
+                                fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
@@ -413,6 +423,7 @@ pub(crate) fn build_import_map(
                             if has_concrete_body(&m.body) {
                                 let raw = format!("{}.{}", t.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name));
+                                fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
@@ -435,6 +446,7 @@ pub(crate) fn build_import_map(
                                 if !m.body.statements.is_empty() {
                                     let raw = format!("{}.{}", type_name, m.name);
                                     let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
+                                    fn_arities.insert(mangled.clone(), method_arity(m));
                                     raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                     raw_to_mangled.entry(raw).or_default().push(mangled);
                                 }
@@ -446,6 +458,7 @@ pub(crate) fn build_import_map(
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", ext.target_type, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name));
+                                fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }

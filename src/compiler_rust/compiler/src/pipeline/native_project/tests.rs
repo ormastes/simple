@@ -3240,6 +3240,33 @@ fn test_build_import_map_skips_pass_only_trait_methods() {
 }
 
 #[test]
+fn test_build_import_map_records_concrete_method_arities() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let path = lib_root.join("core/methods.spl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "trait Iterator:\n    fn missing():\n        pass\n    fn count() -> i64:\n        return 0\n\nstruct Tensor:\n    fn T(self) -> i64:\n        return 1\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(path.clone(), std::fs::read_to_string(&path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let prefix = module_prefix_from_path(&path, &lib_root);
+
+    assert_eq!(
+        result.fn_arities.get(&format!("{}__Iterator_dot_count", prefix)),
+        Some(&1)
+    );
+    assert_eq!(result.fn_arities.get(&format!("{}__Tensor_dot_T", prefix)), Some(&1));
+    assert!(!result
+        .fn_arities
+        .contains_key(&format!("{}__Iterator_dot_missing", prefix)));
+}
+
+#[test]
 fn test_build_import_map_records_cross_module_trait_implementations() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");
