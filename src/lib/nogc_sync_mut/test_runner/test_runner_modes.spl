@@ -6,6 +6,7 @@
 
 use std.io.{env_set, env_get}
 use std.io.{time_now_unix_micros}
+use std.io.{file_exists}
 
 use std.test_runner.test_runner_types.{TestOptions, TestRunResult}
 use std.test_runner.test_config.{TestConfig}
@@ -40,8 +41,30 @@ use std.test_runner.doctest_runner.{run_spl_doctests_same_file, discover_spl_doc
 # =========================================================================
 
 fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRunResult:
-    val files = discover_spl_doctest_files(["src/lib/", "src/compiler/", "src/app/"])
+    # Scoped launch: an explicit CLI target (--spl-doctest <file.spl|dir>)
+    # narrows discovery to just that path, mirroring run_sdoctest_mode's
+    # cli_path pattern for the markdown lane. No target (the bare "test/" /
+    # "test" default) keeps the full repo-wide sweep.
+    val cli_path = if options.path != "test/" and options.path != "test": options.path else: ""
+    val explicit_target = cli_path != ""
+    var files: [text] = []
+    if explicit_target:
+        if cli_path.ends_with(".spl"):
+            if file_exists(cli_path):
+                files = [cli_path]
+        else:
+            files = discover_spl_doctest_files([cli_path])
+    else:
+        files = discover_spl_doctest_files(["src/lib/", "src/compiler/", "src/app/"])
+
     if files.len() == 0:
+        if explicit_target:
+            # An explicitly named target with nothing to run is fail-closed —
+            # mirrors the sdoctest md lane and the single-file spec arbiter's
+            # "no examples executed" contract. Config-driven sweeps (no
+            # target) keep their existing zero-is-ok semantics.
+            print "error: test-runner: no doctest blocks found"
+            return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
         print "No SPL files with doctests found."
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
@@ -74,6 +97,15 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
         if options.fail_fast and (file_result.failed > 0 or file_result.errors > 0):
             break
 
+    val duration_ms = (time_now_unix_micros() - run_start) / 1000
+
+    if explicit_target and total == 0:
+        # The explicit target resolved to a real file, but it contained no
+        # extractable doctest (e.g. no ///-or-## fenced block). Fail-closed,
+        # same rationale as the zero-files-found case above.
+        print "error: test-runner: no doctest blocks found"
+        return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors_count, accepted: 0, duration_ms: duration_ms)
+
     SdoctestRunResult(
         files: file_results,
         total: total,
@@ -82,7 +114,7 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
         skipped: skipped,
         errors: errors_count,
         accepted: 0,
-        duration_ms: (time_now_unix_micros() - run_start) / 1000
+        duration_ms: duration_ms
     )
 
 # =========================================================================

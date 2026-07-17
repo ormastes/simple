@@ -5,7 +5,7 @@
 
 use std.io.{file_read, file_exists, file_atomic_write, file_remove}
 use std.io.{process_run}
-use std.io.{env_set}
+use std.io.{env_set, env_get}
 use std.io.{time_now_unix_micros}
 use std.sffi.cli.{cli_get_args}
 use nogc_sync_mut.platform.{get_host_os, get_host_arch}
@@ -28,6 +28,14 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     if files.len() == 0:
+        if cli_path != "":
+            # Explicit target (a single .md file or directory the caller named
+            # directly) that produced zero matching files is a fail-closed
+            # error, not a silent no-op — mirrors the single-file spec
+            # arbiter's "no examples executed" contract. Config-driven sweeps
+            # (cli_path == "") keep their existing zero-is-ok semantics.
+            print "error: test-runner: no doctest blocks found"
+            return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
         print "No sdoctest files found."
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
@@ -62,6 +70,15 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
 
     val run_end = time_now_unix_micros()
     val duration_ms = (run_end - run_start) / 1000
+
+    if cli_path != "" and total == 0:
+        # The explicit target resolved to a real file (or files), but none of
+        # them contained an extractable sdoctest block (e.g. markdown with no
+        # fences/markers). Fail-closed, matching the zero-files-found case
+        # above — an explicitly named target with nothing to run is an error,
+        # not a silent pass.
+        print "error: test-runner: no doctest blocks found"
+        return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors, accepted: accepted, duration_ms: duration_ms)
 
     SdoctestRunResult(
         files: file_results,
@@ -181,12 +198,27 @@ fn build_file_preambles(blocks: [SdoctestBlock]) -> [text]:
 # =========================================================================
 
 fn find_sdoctest_binary() -> text:
+    # Explicit override (used by the "test" dispatcher when it interprets a
+    # .spl entry file in-process instead of spawning a real compiled binary —
+    # see the argv[0] guard note below).
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != "" and configured != nil and file_exists(configured):
+        return configured
+
     # Prefer the currently running executable — subprocess sdoctests should use
     # the same binary that invoked the test runner (self-hosted consistency).
+    # Guard: when "test" is dispatched by interpreting a .spl entry file
+    # in-process (e.g. src/app/test_runner_new/main.spl via the seed), argv[0]
+    # is that source file's own path. It exists on disk but is not executable,
+    # so trusting it verbatim makes process_run fail to spawn immediately —
+    # which reads back as exit_code -1 and gets mislabeled "TIMEOUT" below.
+    # Only trust argv[0] when it looks like the compiled binary, mirroring
+    # test_runner_single.spl's find_simple_binary() / test_runner_client.spl's
+    # simple_binary() guards.
     val args = cli_get_args()
     if args.len() > 0:
         val self_exe = args[0]
-        if self_exe != "" and file_exists(self_exe):
+        if self_exe != "" and (self_exe.ends_with("/simple") or self_exe.ends_with("simple.exe")) and file_exists(self_exe):
             return self_exe
 
     # Fallback: try known locations, preferring bin/simple and platform-specific

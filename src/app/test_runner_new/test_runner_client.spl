@@ -2,6 +2,9 @@
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_timeout}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_config.{load_test_config}
+use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -144,8 +147,37 @@ fn print_response(content: text) -> i64:
         print body
     code
 
+fn has_spl_doctest_flag(args: [text]) -> bool:
+    for a in args:
+        if a == "--spl-doctest":
+            return true
+    false
+
+fn run_scoped_spl_doctest(args: [text]) -> i64:
+    """Handle `simple test --spl-doctest <target>` directly, in-process.
+
+    This flag is dropped by the light-daemon request protocol below (it only
+    forwards a bare file path — see parse_client_run/atomic_write_text), so a
+    file target ending in .spl always matches
+    test_should_use_light_daemon_client's routing and would otherwise run as
+    a normal spec via the daemon, silently discarding --spl-doctest. Handle it
+    here before any daemon/path-only forwarding happens."""
+    val options = parse_test_args(args)
+    val config = load_test_config()
+    print "=== Running SPL Doctests ==="
+    print ""
+    val result = run_spl_doctest_mode(options, config)
+    print "SPL Doctest: {result.passed} passed, {result.failed} failed, {result.skipped} skipped"
+    print ""
+    if result.is_ok():
+        return 0
+    1
+
 fn main() -> i64:
-    val run = parse_client_run(clean_args())
+    val cleaned = clean_args()
+    if has_spl_doctest_flag(cleaned):
+        return run_scoped_spl_doctest(cleaned)
+    val run = parse_client_run(cleaned)
     if not run.valid:
         print "Simple Test Runner client"
         print "error: {run.error}: {run.path}"
