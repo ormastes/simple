@@ -221,9 +221,11 @@ metallib files and rejects aggregate target readiness when either symbol set is
 missing. It also compiles the canonical Vulkan GLSL into a separately validated
 SPIR-V companion. Runtime promotion still requires loading the verified font
 companion.
-A bounded, embedded font-specific Vulkan SPIR-V contract is auto-installed by
-the retained session. Its 10,772 bytes and SHA-256
+A bounded, embedded font-specific Vulkan SPIR-V contract is attempted by the
+retained session. Its 10,772 bytes and SHA-256
 `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a` are pinned.
+Its retained semantics revision 1 is currently rejected before resource
+creation because the common compositor requires revision 2.
 Only `precompiled-spirv` may become promotion-ready; runtime GLSL remains a
 diagnostic API path. Conditional execution evidence remains environment-dependent.
 

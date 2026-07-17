@@ -315,7 +315,8 @@ execution, but Engine2D never discovers it. The source-tracked
 expected PTX SHA-256, entry, and common program version. Canonical CUDA
 construction verifies the runtime PTX hash, entry, and program version before
 attempting `install_cuda_font_artifact`. The checker and SPipe compare the
-source/emitter hashes exactly with a fresh Simple emission. A rejected companion
+source/emitter hashes against a fresh Simple emission and fail closed on the
+current recorded mismatch. A rejected companion
 leaves primitive CUDA available while font dispatch follows the existing CPU
 fallback policy. The current package verifier remains inadmissible because it
 skips checksum validation and its builder emits a placeholder checksum.
