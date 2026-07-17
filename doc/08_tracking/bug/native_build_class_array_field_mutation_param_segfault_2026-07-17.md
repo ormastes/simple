@@ -81,3 +81,16 @@ sh scripts/check/check-native-seed-parity.shs
 It is intentionally excluded from the default green parity gate while this
 issue is OPEN; it is a strict repro, not an expected-failure waiver. Remove
 the opt-in guard only after both backend legs print exactly `1` and exit 0.
+
+## Current-source audit (2026-07-17)
+
+Current MIR lowering already marks typed array parameters as runtime arrays and
+records the named element type in `array_element_struct_syms`. Indexed runtime
+array reads transfer that name to `struct_value_syms` on the decoded element,
+which is the shared provenance path required by the subsequent field write.
+`mir_lowering_new_spec.spl` now pins that path, the critical mutation shape,
+and its strict harness registration.
+
+This is source hardening, not runtime closure. The strict dual-backend fixture
+remains opt-in until LLVM and Cranelift both print `1` and exit zero; only then
+should it join the Linux, macOS, Windows, and FreeBSD selected green gates.
