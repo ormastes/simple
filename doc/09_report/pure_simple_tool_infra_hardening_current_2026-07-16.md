@@ -514,8 +514,9 @@ so executable qualification is still blocked.
   `parser_preprocessor.spl:207` nested-empty-string interpolation is fixed and
   pinned for spaced `=`/`==`; bounded Stage 2 now advances to the next same-
   class nested-string parse blocker at `trait_solver.spl:72:47`. Its raw-string
-  spelling and focused lexer regression advance Stage 2 to the next same-class
-  use at `lean_backend.spl:166`. The `Shared` admission remains
+  spelling and focused lexer regression advance Stage 2. The newline-preserving
+  `lean_backend.spl:166` hoist and exact builder regression advance again to
+  `vulkan/spirv_builder.spl:234`. The `Shared` admission remains
   provisional; strict runs exit normally with no timeout, OOM, crash, hang,
   orphan, or seed fallback.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system

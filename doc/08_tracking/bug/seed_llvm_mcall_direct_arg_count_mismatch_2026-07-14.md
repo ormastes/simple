@@ -215,8 +215,10 @@ architecture. The next bounded Stage 2 run no longer mentioned
 error in
 `trait_solver.spl:72:47` (`expected expression`, found `Comma`). Using the
 language's single-quoted raw separator inside that interpolation is pinned by a
-focused Rust lexer regression (1 pass) and advances Stage 2 again, now to the
-same-class `lean_backend.spl:166` use of `self.lines.join("\n")`. Therefore the
+focused Rust lexer regression (1 pass) and advances Stage 2 again. Hoisting the
+newline-preserving `lean_backend.spl:166` join is covered by an exact
+`LeanBuilder.build()` regression and advances discovery to the same-class
+`vulkan/spirv_builder.spl:234` nested `member_ids.map("{_}")`. Therefore the
 imported-`Shared` Stage 2 delta remains provisional. All bounded runs exited 1
 normally with no timeout, OOM, crash, hang, orphan, or seed fallback.
 
