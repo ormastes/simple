@@ -826,6 +826,27 @@ impl DesktopShell:
             if fullscreen_sequence > 0:
                 input_compositor.pending_fullscreen_sequence = 0
                 serial_println("[wm-input-irq] input_seq={fullscreen_sequence} scancode=87")
+                # Focus fallback: focused_idx can be -1 at F11 time (scene
+                # creation minimizes some windows, clearing focus), which
+                # silently skipped maximize — f11-step=committed printed
+                # `action= window=0` and correlation failed (2026-07-18).
+                # Prefer the topmost visible non-taskbar surface.
+                if input_compositor.focused_idx < 0 or input_compositor.focused_idx >= input_compositor.surfaces.len():
+                    var focus_scan = input_compositor.surfaces.len() - 1
+                    var focus_found = false
+                    while focus_scan >= 0 and not focus_found:
+                        val scan_surface = input_compositor.surfaces[focus_scan]
+                        if scan_surface.visible and scan_surface.id as u64 != self.taskbar_id:
+                            input_compositor.focused_idx = focus_scan
+                            focus_found = true
+                        focus_scan = focus_scan - 1
+                    if not focus_found:
+                        focus_scan = input_compositor.surfaces.len() - 1
+                        while focus_scan >= 0 and not focus_found:
+                            if input_compositor.surfaces[focus_scan].visible:
+                                input_compositor.focused_idx = focus_scan
+                                focus_found = true
+                            focus_scan = focus_scan - 1
                 if input_compositor.focused_idx >= 0 and input_compositor.focused_idx < input_compositor.surfaces.len():
                     fullscreen_window_id = input_compositor.surfaces[input_compositor.focused_idx].id
                     if input_compositor.surfaces[input_compositor.focused_idx].maximized:
