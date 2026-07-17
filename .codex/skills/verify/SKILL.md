@@ -45,13 +45,18 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   path mirrored from the executable `test/...` spec
 - For changed specs, `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
   reports complete documentation with `0 stubs`; a generated manual marked as a
-  stub is a FAIL even when the `.md` file exists.
+  stub is a FAIL even when the `.md` file exists. Run docgen only through the
+  pure-Simple `simple-core` or `core-c-bootstrap` lanes. Unresolved runtime
+  symbols, nonzero/signal exits, or missing output are FAIL and cannot be
+  replaced by a hand-edited manual or Rust-seed output.
 - Scenario-oriented generated docs read as manuals: primary scenario steps are
   visible first, `@inline`/`@prev` setup expands without redundant metadata,
   executable SPipe is folded by default, and advanced/edge/matrix/stress
   scenarios are folded or skipped according to policy.
 - Shared interface names and manual-facing setup/checker helper names match the
   accepted architecture/design/spec/manual references.
+- Every named setup/checker helper used by a displayed scenario is visible as
+  a manual step or included in complete folded executable source.
 - CUDA font production trust must satisfy the canonical artifact rule in
   `.codex/skills/system_test/SKILL.md` before PASS.
 - Shared-font interpreter calibration must satisfy `$system_test`: fail and

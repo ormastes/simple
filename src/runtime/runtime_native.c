@@ -23,6 +23,7 @@
 #include <string.h>
 #include <errno.h>
 #include <math.h>
+#include <signal.h>
 #include <time.h>
 #include <stdatomic.h>
 #include <fcntl.h>
@@ -254,6 +255,85 @@ SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_present(int64_t handle) {
 }
 
 #undef SPL_HOSTED_UNAVAILABLE_WEAK
+
+/* Core-C fallbacks. Full hosted builds provide stronger implementations. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SPL_CORE_C_WEAK __attribute__((weak))
+#else
+#define SPL_CORE_C_WEAK
+#endif
+
+typedef struct RtCoreAtomicInt {
+    atomic_int_fast64_t value;
+} RtCoreAtomicInt;
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_new(int64_t initial) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)malloc(sizeof(RtCoreAtomicInt));
+    if (!value) return 0;
+    atomic_init(&value->value, initial);
+    return (int64_t)(intptr_t)value;
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_load(int64_t handle) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    return value ? atomic_load_explicit(&value->value, memory_order_seq_cst) : 0;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_int_compare_exchange(int64_t handle, int64_t current, int64_t new_value) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    return value && atomic_compare_exchange_strong_explicit(
+        &value->value, &current, new_value, memory_order_seq_cst, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK void rt_thread_sleep(int64_t millis) {
+    rt_sleep_ms(millis);
+}
+
+static volatile sig_atomic_t rt_core_signal_flags[32];
+static volatile sig_atomic_t rt_core_atexit_flag;
+
+static void rt_core_signal_handler(int signal_num) {
+    if (signal_num >= 0 && signal_num < 32) rt_core_signal_flags[signal_num] = 1;
+}
+
+static void rt_core_atexit_handler(void) {
+    rt_core_atexit_flag = 1;
+}
+
+SPL_CORE_C_WEAK int64_t rt_signal_install(int64_t signal_num) {
+    if (signal_num < 0 || signal_num >= 32) return 0;
+#if defined(_WIN32)
+    return signal((int)signal_num, rt_core_signal_handler) == SIG_ERR ? 0 : 1;
+#else
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = rt_core_signal_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    return sigaction((int)signal_num, &action, NULL) == 0 ? 1 : 0;
+#endif
+}
+
+SPL_CORE_C_WEAK int64_t rt_signal_check(int64_t signal_num) {
+    if (signal_num < 0 || signal_num >= 32 || !rt_core_signal_flags[signal_num]) return 0;
+    rt_core_signal_flags[signal_num] = 0;
+    return 1;
+}
+
+SPL_CORE_C_WEAK int64_t rt_atexit_install(void) {
+    static int installed;
+    if (!installed && atexit(rt_core_atexit_handler) != 0) return 0;
+    installed = 1;
+    return 1;
+}
+
+SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
+    if (!rt_core_atexit_flag) return 0;
+    rt_core_atexit_flag = 0;
+    return 1;
+}
+
+#undef SPL_CORE_C_WEAK
 
 static int64_t rt_host_gpu_queue_now_us(void) {
     struct timespec ts;
@@ -1942,6 +2022,17 @@ int64_t rt_string_trim(int64_t value) {
         end--;
     }
     return rt_string_new((const uint8_t*)s->data + begin, end - begin);
+}
+
+int64_t rt_string_trim_end(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    uint64_t end = s->len;
+    while (end > 0 && (s->data[end - 1] == ' ' || s->data[end - 1] == '\t' ||
+                       s->data[end - 1] == '\n' || s->data[end - 1] == '\r')) {
+        end--;
+    }
+    return rt_string_new((const uint8_t*)s->data, end);
 }
 
 int64_t rt_string_to_int(int64_t value) {

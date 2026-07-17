@@ -433,3 +433,8 @@ After writing or changing a scenario:
 5. If it reads like code or test plumbing, improve `@step`, helper names,
    visibility, capture kind, or checker/capture output.
 6. Repeat until the manual is useful without opening the source test.
+
+Every named setup or checker helper used by a displayed scenario must be
+understandable from the manual itself: show it as a visible step or include its
+complete implementation in folded executable source. A missing or empty helper
+flow is incomplete documentation even when scenario and stub counts are zero.

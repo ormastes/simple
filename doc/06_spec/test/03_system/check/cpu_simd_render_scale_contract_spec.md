@@ -2,29 +2,6 @@
 
 > The scale wrapper is the focused evidence gate for CPU-SIMD rendering at 4K and 8K. This spec keeps the wrapper honest without running full 8K inside the test: the source check guards the report fields, and the executable check overrides dimensions to a tiny fixture while preserving the same code path.
 
-<!-- sdn-diagram:id=cpu_simd_render_scale_contract_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cpu_simd_render_scale_contract_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cpu_simd_render_scale_contract_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cpu_simd_render_scale_contract_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 13 | 13 | 0 | 0 |
@@ -116,6 +93,27 @@ canonical Simple Web renderer before comparing checksum and timing metadata.
 SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean
 ```
 
+The strict architecture rejection scenarios share this executable helper:
+
+```simple
+fn _arch_matrix_result(name: text, x86: text, aarch64: text, riscv64: text) -> (text, i64):
+    val root = "build/test-cpu-simd-render-scale-arch-matrix-" + name
+    val env_path = root + "/evidence.env"
+    val command =
+        "rm -rf " + root + " && mkdir -p " + root +
+        " && printf '%s\\n' " +
+        "'cpu_simd_engine2d_arch_matrix_status=pass' " +
+        "'cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=" + x86 + "' " +
+        "'cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=" + aarch64 + "' " +
+        "'cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=" + riscv64 + "' > " + env_path +
+        " && CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY=1" +
+        " CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX=1" +
+        " CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV=" + env_path +
+        " sh scripts/check/check-cpu-simd-render-scale-contract.shs > " + root + "/stdout.txt"
+    val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+    (file_read(root + "/stdout.txt"), code)
+```
+
 ## Scenarios
 
 ### CPU SIMD render scale contract
@@ -125,7 +123,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contra
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 57 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -223,11 +221,13 @@ expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 83 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val exporter = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
+expect(exporter).to_contain("use std.nogc_sync_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}")
+expect(exporter).to_contain("use std.nogc_sync_mut.io_runtime.{get_args}")
 expect(exporter.contains("web_render_backend")).to_equal(false)
 expect(exporter).to_contain("fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]")
 expect(exporter).to_contain("raw.parse_int() ?? fallback")
@@ -255,6 +255,13 @@ expect(exporter).to_contain("gui_perf_benchmark_simd_provider_hits=")
 expect(exporter).to_contain("gui_perf_benchmark_native_simd_hits=")
 expect(exporter).to_contain("gui_perf_benchmark_native_simd_executed=")
 expect(exporter).to_contain("_native_simd_executed_text(native_simd_hits)")
+val driver = file_read("src/compiler/80.driver/driver.spl")
+expect(driver).to_contain("HIR lowering error in {name}{err.location}: {err.message}")
+expect(driver.contains("err.span")).to_equal(false)
+val hir_types = file_read("src/compiler/20.hir/hir_lowering/types.spl")
+expect(hir_types).to_contain("location: text\n    span: Span")
+expect(hir_types).to_contain("location: \"\",\n            span: span")
+expect(hir_types.contains("span.file")).to_equal(false)
 val simd_provider = file_read("src/lib/nogc_sync_mut/gpu/engine2d/simd_provider.spl")
 expect(simd_provider).to_contain("pub fn reset_simd_hits() -> ():")
 expect(simd_provider).to_contain("_simd_vectorize_changes = 0\n    return ()")
@@ -330,7 +337,7 @@ expect(percentile_body.contains("sorted[sorted.len() - 1]")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,6 +351,13 @@ expect(repeat_body).to_contain("array->len = n")
 expect(repeat_body).to_contain("data[0] = value")
 expect(repeat_body).to_contain("memcpy(data + filled, data")
 expect(repeat_body.contains("rt_array_push")).to_equal(false)
+val simd_source = file_read("src/runtime/runtime_simd_dispatch.c")
+val simd_alloc_start = simd_source.find("static SplArray* engine2d_new_pixel_array")
+val simd_alloc_body = simd_source.slice(simd_alloc_start, simd_alloc_start + 260)
+expect(source).to_contain("SplArray* rt_array_new_uninit(int64_t cap)")
+expect(source).to_contain("return rt_core_array_new_fill(cap, 0, 0)")
+expect(simd_alloc_body).to_contain("rt_array_new_uninit(n)")
+expect(simd_alloc_body.contains("rt_array_new(n)")).to_equal(false)
 val core_source = file_read("src/runtime/simple_core/core_array_ops.spl")
 val core_repeat_start = core_source.find("pub fn rt_array_repeat")
 val core_repeat_body = core_source.slice(core_repeat_start, core_repeat_start + 500)
@@ -366,28 +380,41 @@ expect(rust_repeat_body.contains("rt_array_push")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl")
 expect(source).to_contain("fn browser_layout_framebuffer_filled")
-expect(source).to_contain("replace internals here if native fill grows a safer ABI")
-expect(source).to_contain("[base; width * height]")
+expect(source).to_contain("use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32}")
+expect(source).to_contain("if pixels >= 1048576: 8 else: 1")
+expect(source).to_contain("engine2d_simd_fill_rows_u32(width.to_i64(), height.to_i64(), base, workers)")
+expect(source).to_contain("browser_layout_framebuffer_filled_serial(base, width, height)")
 expect(source).to_contain("var fb = browser_layout_framebuffer_filled(base, width, height)")
 expect(source.contains("rt_engine2d_simd_fill_u32")).to_equal(false)
 expect(source.contains("engine2d_simd_fill_row_u32")).to_equal(false)
 expect(source.contains("rt_u32_alloc_filled")).to_equal(false)
+val app = file_read("src/app/ui.browser/app.spl")
+expect(app).to_contain("val BROWSER_WINDOW_SCALE: i32 = 1")
+expect(app).to_contain("val width: i32 = 672")
+expect(app).to_contain("val height: i32 = 448")
 ```
 
 </details>
 
 #### runs small dimensions and keeps comparison fields
 
+- Render canonical HTML through the CPU SIMD Draw IR route
+- " && SIMPLE BIN='" +  test simple bin
+   - Expected: code equals `0`
+- Render the same fixture through the scalar route
+- Compare pixels and SIMD counters
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -437,6 +464,10 @@ expect(out).to_contain("cpu_simd_render_scale_8k_software_checksum_parity=true")
 </details>
 
 #### runs small dimensions with an explicit dpi override
+
+- " && SIMPLE BIN='" +  test simple bin
+   - Expected: code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -506,28 +537,20 @@ expect(out).to_contain("cpu_simd_render_scale_arch_matrix_only=1")
 
 </details>
 
-Scenario helper used by the strict architecture rejection examples:
 
-```simple
-fn _arch_matrix_result(name: text, x86: text, aarch64: text, riscv64: text) -> (text, i64):
-    val root = "build/test-cpu-simd-render-scale-arch-matrix-" + name
-    val env_path = root + "/evidence.env"
-    val command =
-        "rm -rf " + root + " && mkdir -p " + root +
-        " && printf '%s\\n' " +
-        "'cpu_simd_engine2d_arch_matrix_status=pass' " +
-        "'cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=" + x86 + "' " +
-        "'cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=" + aarch64 + "' " +
-        "'cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=" + riscv64 + "' > " + env_path +
-        " && CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY=1" +
-        " CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX=1" +
-        " CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV=" + env_path +
-        " sh scripts/check/check-cpu-simd-render-scale-contract.shs > " + root + "/stdout.txt"
-    val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-    (file_read(root + "/stdout.txt"), code)
-```
+</details>
 
 #### rejects a missing x86_64 target result
+
+- Validate strict architecture evidence
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Validate strict architecture evidence")
@@ -536,7 +559,19 @@ expect(code).to_equal(1)
 expect(out).to_contain("arch_matrix_x86_64_target_binary_expected_pass_got_missing")
 ```
 
+</details>
+
 #### rejects a missing AArch64 target result
+
+- Validate strict architecture evidence
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Validate strict architecture evidence")
@@ -545,7 +580,19 @@ expect(code).to_equal(1)
 expect(out).to_contain("arch_matrix_aarch64_target_binary_expected_pass_got_missing")
 ```
 
+</details>
+
 #### rejects a missing RISC-V target result
+
+- Validate strict architecture evidence
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Validate strict architecture evidence")
@@ -554,7 +601,19 @@ expect(code).to_equal(1)
 expect(out).to_contain("arch_matrix_riscv64_target_binary_expected_pass_got_missing")
 ```
 
+</details>
+
 #### rejects a required native probe that is absent
+
+- Validate strict native probe evidence
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Validate strict native probe evidence")
@@ -571,7 +630,6 @@ expect(code).to_equal(1)
 expect(file_read(root + "/stdout.txt")).to_contain("native_probe_missing")
 ```
 
-
 </details>
 
 ## Scenario Summary
@@ -587,9 +645,10 @@ expect(file_read(root + "/stdout.txt")).to_contain("native_probe_missing")
 
 ## Related Documentation
 
-- **Plan:** [doc/07_guide/platform/gui_perf_benchmark_comparison.md](doc/07_guide/platform/gui_perf_benchmark_comparison.md)
-- **Design:** [doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md](doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md)
-- **Research:** [doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md](doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md)
+- **Requirements:** `REQ-CPU-SIMD-SCALE-001 through REQ-CPU-SIMD-SCALE-013`
+- **Plan:** `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
+- **Design:** `doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md`
+- **Research:** `doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md`
 
 
 </details>

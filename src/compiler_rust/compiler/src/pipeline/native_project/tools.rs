@@ -287,6 +287,9 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
         "runtime_mcp_core.c",
+        "runtime_fork.c",
+        "runtime_memtrack.c",
+        "runtime_process.c",
         "runtime_font.c",
         "runtime_pool.c",
         "runtime_simd_utf8.c",
@@ -311,7 +314,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         runtime_inputs.push("runtime_https_openssl_core.c");
     }
     if include_stage4_hosted {
-        runtime_inputs.extend(["runtime_font.c", "runtime_memtrack.c", "runtime_sqlite.c"]);
+        runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
     }
 
     let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
@@ -744,7 +747,6 @@ fn forbidden_archive_sections(path: &Path) -> Result<Vec<&'static str>, String> 
 enum Stage4CliCUndefinedPolicy {
     Time,
     Sqlite,
-    Memtrack,
 }
 
 struct Stage4CliCProviderSpec {
@@ -829,26 +831,6 @@ const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
     "sqlite3_step",
 ];
 
-const STAGE4_C_MEMTRACK_UNDEFINED: &[&str] = &["calloc", "fclose", "fopen", "fprintf", "free"];
-
-const STAGE4_C_MEMTRACK_DEFINITIONS: &[&str] = &[
-    "g_memtrack_enabled",
-    "spl_memtrack_bytes_since",
-    "spl_memtrack_clear_listener",
-    "spl_memtrack_count_since",
-    "spl_memtrack_disable",
-    "spl_memtrack_dump_since",
-    "spl_memtrack_enable",
-    "spl_memtrack_is_enabled",
-    "spl_memtrack_live_bytes",
-    "spl_memtrack_live_count",
-    "spl_memtrack_record",
-    "spl_memtrack_reset",
-    "spl_memtrack_set_listener",
-    "spl_memtrack_snapshot",
-    "spl_memtrack_unrecord",
-];
-
 const STAGE4_C_PROVIDER_SPECS: &[Stage4CliCProviderSpec] = &[
     Stage4CliCProviderSpec {
         source: "runtime_timestamp.c",
@@ -862,19 +844,12 @@ const STAGE4_C_PROVIDER_SPECS: &[Stage4CliCProviderSpec] = &[
         definitions: STAGE4_C_SQLITE_DEFINITIONS,
         undefined: Stage4CliCUndefinedPolicy::Sqlite,
     },
-    Stage4CliCProviderSpec {
-        source: "runtime_memtrack.c",
-        archive: "libsimple_stage4_memtrack.a",
-        definitions: STAGE4_C_MEMTRACK_DEFINITIONS,
-        undefined: Stage4CliCUndefinedPolicy::Memtrack,
-    },
 ];
 
 fn stage4_cli_c_expected_undefined(policy: Stage4CliCUndefinedPolicy) -> &'static [&'static str] {
     match policy {
         Stage4CliCUndefinedPolicy::Time => STAGE4_C_TIME_UNDEFINED,
         Stage4CliCUndefinedPolicy::Sqlite => STAGE4_C_SQLITE_UNDEFINED,
-        Stage4CliCUndefinedPolicy::Memtrack => STAGE4_C_MEMTRACK_UNDEFINED,
     }
 }
 
@@ -1360,7 +1335,6 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
             resolve_stage4_system_library(&cc, &[("libsqlite3.so", true), ("libsqlite3.a", false)])?;
         validate_stage4_system_library_ownership(&archives[0], &STAGE4_C_PROVIDER_SPECS[0], &libc, &libc_definitions)?;
         validate_stage4_system_library_ownership(&archives[1], &STAGE4_C_PROVIDER_SPECS[1], &sqlite, &sqlite_definitions)?;
-        validate_stage4_system_library_ownership(&archives[2], &STAGE4_C_PROVIDER_SPECS[2], &libc, &libc_definitions)?;
     }
     #[cfg(target_os = "macos")]
     if native_macos {

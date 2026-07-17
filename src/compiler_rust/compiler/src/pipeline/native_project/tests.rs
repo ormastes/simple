@@ -1334,6 +1334,22 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     );
     assert!(core_c_symbols.contains("rt_directx_execute_readback_checked"));
     assert!(core_c_symbols.contains("rt_directx_hardware_adapter_identity"));
+    let process_object = format!("runtime_process.{}", test_host_object_extension());
+    assert!(
+        core_c_members.contains(&process_object),
+        "core-c runtime archive must include the process timeout provider"
+    );
+    assert!(core_c_symbols.contains("rt_process_run_timeout"));
+    for provider in ["runtime_fork", "runtime_memtrack"] {
+        let object = format!("{provider}.{}", test_host_object_extension());
+        assert!(
+            core_c_members.contains(&object),
+            "core-c runtime archive must include {provider}"
+        );
+    }
+    for symbol in ["rt_fork_child_setup", "rt_fork_parent_wait", "rt_fork_parent_stdout"] {
+        assert!(core_c_symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
     let https_object = format!("runtime_https_openssl_core.{}", test_host_object_extension());
     assert!(
         !core_c_members.contains(&https_object),
@@ -1807,11 +1823,6 @@ fn test_stage4_cli_c_provider_archives_have_exact_members_and_contracts() {
     let expected = [
         ("libsimple_stage4_time.a", "runtime_timestamp.o", "runtime_timestamp.c"),
         ("libsimple_stage4_sqlite.a", "runtime_sqlite.o", "runtime_sqlite.c"),
-        (
-            "libsimple_stage4_memtrack.a",
-            "runtime_memtrack.o",
-            "runtime_memtrack.c",
-        ),
     ];
     assert_eq!(archives.len(), expected.len());
     for (archive, (archive_name, member_name, source_name)) in archives.iter().zip(expected) {
@@ -1979,9 +1990,9 @@ int main(void) {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
-fn test_stage4_memtrack_provider_real_behavior() {
+fn test_core_c_memtrack_provider_real_behavior() {
     let temp = tempfile::tempdir().unwrap();
-    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
     let dump = temp.path().join("memtrack.dump");
     run_stage4_c_probe(
         temp.path(),
@@ -2015,7 +2026,7 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#,
-        &[providers[2].as_path()],
+        &[core.as_path()],
         &[],
         &[dump.as_path()],
     );
@@ -2164,7 +2175,7 @@ double rt_time_now_seconds_f64(void) { return 0.0; }
 fn test_stage4_cli_c_provider_disjointness_requires_exact_component_set() {
     let missing = Path::new("missing");
     let error = validate_stage4_cli_c_provider_archive_disjointness(missing, missing, &[]).unwrap_err();
-    assert!(error.contains("requires exactly 3 providers (found 0)"));
+    assert!(error.contains("requires exactly 2 providers (found 0)"));
 }
 
 #[test]

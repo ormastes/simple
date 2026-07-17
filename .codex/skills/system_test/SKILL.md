@@ -95,10 +95,15 @@ describe "<Feature Name>":
   `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`. The generator
   must report the affected spec as complete with `0 stubs`; if it reports an
   auto/manual spec as a stub, fix the spec or docgen validation before handoff.
+  Use only the pure-Simple `simple-core` or `core-c-bootstrap` runtime lanes.
+  An unresolved runtime symbol, nonzero exit, signal exit, or missing output is
+  a FAIL; do not substitute a hand-edited manual or the Rust seed.
 - Scenario-oriented specs must produce manual-quality generated docs:
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
   by policy, and executable SSpec folded below the manual flow.
+  Every named setup/checker helper used by a displayed scenario must appear as
+  a visible manual step or in complete folded executable source.
 - If a scenario claims formal verification coverage, include the formal
   evidence path and exact proof command in the test plan or generated/manual
   doc. Lean evidence must point at a checked proof lane with no `sorry` or

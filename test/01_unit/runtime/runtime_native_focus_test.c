@@ -103,6 +103,9 @@ int main(void) {
     int64_t built = rt_string_builder_finish(builder);
     assert(rt_string_len(built) == 11);
     assert(memcmp(rt_string_data(built), "hello world", 11) == 0);
+    int64_t trim_end = rt_string_trim_end(text("  value \t\r\n"));
+    assert(rt_string_len(trim_end) == 7);
+    assert(memcmp(rt_string_data(trim_end), "  value", 7) == 0);
     assert(rt_string_builder_len(0) == -1);
     assert(rt_string_builder_push(0, built) == 0);
     rt_string_builder_free(0);
@@ -246,6 +249,19 @@ int main(void) {
     assert(rt_array_get((SplArray*)(uintptr_t)glyph, 0) == 0);
     assert(rt_array_get((SplArray*)(uintptr_t)glyph, 1) != 0);
     rt_sleep_secs(0);
+    rt_thread_sleep(0);
+    int64_t atomic = rt_atomic_int_new(7);
+    assert(atomic != 0);
+    assert(rt_atomic_int_load(atomic) == 7);
+    assert(rt_atomic_int_compare_exchange(atomic, 7, 9));
+    assert(!rt_atomic_int_compare_exchange(atomic, 7, 11));
+    assert(rt_atomic_int_load(atomic) == 9);
+    assert(rt_signal_install(SIGUSR1) == 1);
+    assert(raise(SIGUSR1) == 0);
+    assert(rt_signal_check(SIGUSR1) == 1);
+    assert(rt_signal_check(SIGUSR1) == 0);
+    assert(rt_atexit_install() == 1);
+    assert(rt_atexit_check() == 0);
     int64_t monotonic_before = rt_time_now_monotonic_ms();
     assert(monotonic_before > 0);
     assert(rt_time_now_monotonic_ms() >= monotonic_before);
@@ -303,7 +319,7 @@ int main(void) {
     assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 2)), "") == 0);
     assert(waitpid(child, NULL, 0) == child);
 
-    child = start_server(&port, "request");
+    child = start_server(&port, "request", 0);
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
     response = rt_http_request(text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
     assert(rt_value_as_int(rt_tuple_get(response, 0)) == 200);

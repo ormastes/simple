@@ -449,6 +449,7 @@ int64_t  rt_dict_get_i64_raw(int64_t dict, int64_t key);
 int8_t   rt_dict_set_i64_raw(int64_t dict, int64_t key, int64_t value);
 int64_t  rt_string_replace(int64_t value, int64_t old_value, int64_t new_value);
 int64_t  rt_string_trim(int64_t value);
+int64_t  rt_string_trim_end(int64_t value);
 int64_t  rt_string_to_int(int64_t value);
 int64_t  rt_string_to_int_lenient(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
@@ -532,7 +533,13 @@ void     rt_sleep_ms_native(int64_t ms);
 int64_t  rt_getpid(void);
 char*    rt_hostname(void);
 int64_t  rt_thread_available_parallelism(void);
+void     rt_thread_sleep(int64_t millis);
 int64_t  rt_time_now_unix_micros(void);
+
+int64_t  rt_signal_install(int64_t signal_num);
+int64_t  rt_signal_check(int64_t signal_num);
+int64_t  rt_atexit_install(void);
+int64_t  rt_atexit_check(void);
 
 /* ===== Memory ===== */
 

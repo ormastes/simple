@@ -19,6 +19,12 @@ When a migrated tool is slow, flaky, or resource-heavy, fix the pure Simple
 implementation in `src/compiler`, `src/lib`, or `src/app`, or record a concrete
 bug. Do not re-enable a Rust escape hatch.
 
+`spipe-docgen` must run through a pure-Simple `simple-core` or
+`core-c-bootstrap` runtime. Treat unresolved runtime symbols, nonzero or signal
+exits, and missing generated output as runtime defects. Fix the owning runtime
+provider and rerun docgen; do not accept a hand-edited manual or Rust-seed
+output as generated evidence.
+
 ## Bootstrap Build Modes
 
 `scripts/bootstrap/bootstrap-from-scratch.sh` is pure-Simple-only by default and
