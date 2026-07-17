@@ -45,6 +45,11 @@ fn parse_block_then_inline_elif_and_else_if_chain() {
     parse_ok("if a:\n    reason = \"a\"\nelif b: reason = \"b\"\nelse if c: reason = \"c\"\nelse: reason = \"d\"");
 }
 
+#[test]
+fn parse_renderdoc_inspector_real_source() {
+    parse_ok(include_str!("../../../app/test/renderdoc_replay_inspect.spl"));
+}
+
 // While loop
 #[test]
 fn parse_while_loop() {
