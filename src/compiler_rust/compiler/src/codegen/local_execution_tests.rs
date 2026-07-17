@@ -247,15 +247,32 @@ fn test_cranelift_jit_vtable_dispatch_partial_impl_compaction() {
 // next-probe recommendation (runtime pointer comparison under QEMU).
 // =============================================================================
 
+// CORRECTED 2026-07-17 (C8-FIX lane): the trait below was originally
+// single-method (`size_x` at slot 0) — at slot 0, a correct 2-deref
+// dispatch (`[vtable+0]`) and a hypothetical extra-deref bug reading the
+// same offset produce BYTE-IDENTICAL code, so none of the four tests below
+// could ever have caught the extra-deref hypothesis regardless of field
+// count (see the C8-PROBE lane addendum, "Confirmed" gap). Widened to the
+// exact 3-method/slot-`0x10` BlockDevice shape (`read_x`/`write_x`/
+// `size_x`, dispatched method at slot 2 = byte offset 0x10) with distinct
+// per-slot return constants so a wrong-slot dispatch is also detectable
+// (not just a crash). `size_x` returns 64 to mirror the real kernel's
+// `BlockDevice.sector_size()` value.
 const C8_FIELD_FIXTURE_PREFIX: &str = "trait Dev:\n\
+     \x20   fn read_x() -> i64\n\
+     \x20   fn write_x(v: i64) -> bool\n\
      \x20   fn size_x() -> i64\n\
      \n\
      struct DevC:\n\
      \x20   x: i64\n\
      \n\
      impl Dev for DevC:\n\
+     \x20   fn read_x() -> i64:\n\
+     \x20       return 11\n\
+     \x20   fn write_x(v: i64) -> bool:\n\
+     \x20       return true\n\
      \x20   fn size_x() -> i64:\n\
-     \x20       return 99\n\
+     \x20       return 64\n\
      \n\
      struct Middle:\n\
      \x20   device: Dev\n\
@@ -285,8 +302,8 @@ fn test_cranelift_jit_vtable_dispatch_two_level_single_local_chain() {
     em.compile_module(&mir).expect("compile");
     let result = em.execute("run_two_hop_combined", &[]).expect("execute");
     assert_eq!(
-        result, 99,
-        "two-hop combined-chain dispatch (outer.inner.device) expected size_x()==99, got {result}"
+        result, 64,
+        "two-hop combined-chain dispatch (outer.inner.device) expected size_x()==64, got {result}"
     );
 }
 
@@ -314,8 +331,8 @@ fn test_cranelift_jit_vtable_dispatch_two_level_split_hops() {
     em.compile_module(&mir).expect("compile");
     let result = em.execute("run_two_hop_split", &[]).expect("execute");
     assert_eq!(
-        result, 99,
-        "split-hop dispatch (mid = o.inner; bd = mid.device) expected size_x()==99, got {result}"
+        result, 64,
+        "split-hop dispatch (mid = o.inner; bd = mid.device) expected size_x()==64, got {result}"
     );
 }
 
@@ -341,8 +358,8 @@ fn test_cranelift_jit_vtable_dispatch_single_level_no_outer_nest() {
     em.compile_module(&mir).expect("compile");
     let result = em.execute("run_single_level", &[]).expect("execute");
     assert_eq!(
-        result, 99,
-        "single-level field-store+read dispatch expected size_x()==99, got {result}"
+        result, 64,
+        "single-level field-store+read dispatch expected size_x()==64, got {result}"
     );
 }
 
@@ -367,8 +384,120 @@ fn test_cranelift_jit_vtable_dispatch_two_level_chained_expr() {
     em.compile_module(&mir).expect("compile");
     let result = em.execute("run_chained_expr", &[]).expect("execute");
     assert_eq!(
-        result, 99,
-        "chained-expression dispatch (o.inner.device.size_x()) expected size_x()==99, got {result}"
+        result, 64,
+        "chained-expression dispatch (o.inner.device.size_x()) expected size_x()==64, got {result}"
+    );
+}
+
+// =============================================================================
+// C8-FIX lane (2026-07-17): factory-return-by-value discriminator.
+//
+// Untested by every prior lane: the four tests above all build the
+// trait-bearing struct via an INLINE struct literal in the SAME function
+// that dispatches on it (`val m = Middle(device: d)`). The real kernel path
+// goes through `static fn new(...)` factories that construct the struct and
+// RETURN IT BY VALUE across a call boundary — `Fat32Core.new(device)` /
+// `SharedFat32Driver.new(device)` (see std.fs_driver.fat32_core.Fat32Core
+// and os.services.fat32.shared_fat32_driver.SharedFat32Driver) — before the
+// caller ever reads `.device` off the returned struct. A struct-by-value
+// return (sret ABI or equivalent) is a different code path from a local
+// struct literal and has never been exercised by this bug's test matrix at
+// any tier. See doc/08_tracking/bug/
+// simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md, C8-FIX
+// lane addendum.
+// =============================================================================
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_factory_single_level() {
+    // Minimal delta from `single_level_no_outer_nest`: construct `Middle`
+    // inside a helper function and return it BY VALUE, instead of a struct
+    // literal inline in the caller.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn make_middle(d: Dev) -> Middle:\n\
+         \x20   return Middle(device: d)\n\
+         \n\
+         fn run_factory_single_level() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   val m = make_middle(d)\n\
+         \x20   val bd: Dev = m.device\n\
+         \x20   return bd.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_factory_single_level", &[]).expect("execute");
+    assert_eq!(
+        result, 64,
+        "factory-returned struct (make_middle(d) -> Middle) expected size_x()==64, got {result}"
+    );
+}
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_factory_two_level() {
+    // Exact shape of `SharedFat32Driver.new(device)` calling
+    // `Fat32Core.new(device)`: a two-level chain of factory functions, each
+    // constructing and returning a struct by value, the outer one nesting
+    // the inner one's return value into its own struct literal.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn make_middle(d: Dev) -> Middle:\n\
+         \x20   return Middle(device: d)\n\
+         \n\
+         fn make_outer(d: Dev) -> Outer:\n\
+         \x20   val m = make_middle(d)\n\
+         \x20   return Outer(inner: m)\n\
+         \n\
+         fn run_factory_two_level() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   val o = make_outer(d)\n\
+         \x20   val bd: Dev = o.inner.device\n\
+         \x20   return bd.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_factory_two_level", &[]).expect("execute");
+    assert_eq!(
+        result, 64,
+        "two-level factory chain (make_outer -> make_middle) expected size_x()==64, got {result}"
+    );
+}
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_factory_module_global() {
+    // Mirrors the ACTUAL faulting statement from the C8-RELOC/C8-PROBE
+    // repro: `g_pure_nvme_root_fat32 = SharedFat32Driver.new(g_adapter)`
+    // (a module-global reassigned from a two-level factory call chain),
+    // then a later split-hop read+dispatch on that global.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn make_middle(d: Dev) -> Middle:\n\
+         \x20   return Middle(device: d)\n\
+         \n\
+         fn make_outer(d: Dev) -> Outer:\n\
+         \x20   val m = make_middle(d)\n\
+         \x20   return Outer(inner: m)\n\
+         \n\
+         var g_outer_factory: Outer = Outer(inner: Middle(device: DevC(x: 0)))\n\
+         \n\
+         fn run_factory_module_global() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   g_outer_factory = make_outer(d)\n\
+         \x20   val mid = g_outer_factory.inner\n\
+         \x20   val bd: Dev = mid.device\n\
+         \x20   return bd.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_factory_module_global", &[]).expect("execute");
+    assert_eq!(
+        result, 64,
+        "module-global reassigned from factory chain, split-hop read expected size_x()==64, got {result}"
     );
 }
 

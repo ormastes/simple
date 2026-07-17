@@ -798,3 +798,207 @@ empty `git diff` on the file). No files outside `src/os/services/vfs/
 vfs_boot_init.spl` were edited by this lane. Scratch kernel builds, cache
 dirs, and serial logs live under `build/os/_wk/` (gitignored); serial logs
 gzipped, kernel ELF and native-build cache dir removed after use.
+
+### C8-FIX lane (2026-07-17) — harness fixed, root cause FOUND and CONFIRMED
+### at the real fault site; deployed seed is 6 days stale; full kernel
+### re-verification blocked by an unrelated build-plumbing gap
+**1. Harness defect fixed (task step 1).** `C8_FIELD_FIXTURE_PREFIX`
+(`src/compiler_rust/compiler/src/codegen/local_execution_tests.rs`) was
+widened from the flawed 1-method/slot-0 trait (`size_x` only — provably
+unable to discriminate the extra-deref hypothesis, per the C8-PROBE lane's
+"Confirmed" gap) to the exact 3-method/slot-`0x10` `BlockDevice` shape
+(`read_x`/`write_x`/`size_x`, `size_x` returns 64 mirroring the real
+kernel's `sector_size()` value). All 4 existing tests updated
+(`result==99` → `result==64`) and re-verified green. **New, genuinely
+untested axis added and executed:** three factory-return-by-value tests
+(`test_cranelift_jit_vtable_dispatch_factory_single_level`,
+`..._factory_two_level`, `..._factory_module_global`) — every prior
+*executed* test in this bug's history built the trait-bearing struct via an
+inline struct literal in the same function that dispatches on it; the real
+kernel path goes through `static fn new(...)` factories
+(`Fat32Core.new(device)` / `SharedFat32Driver.new(device)`) that construct
+and return the struct BY VALUE across a call boundary, including into a
+module-global. **Full corrected matrix (7 tests) is GREEN under the hosted
+Cranelift JIT** (`cargo test -p simple-compiler --lib
+codegen::local_execution_tests -- vtable_dispatch`, 18/18 including the 4
+control tests) — hosted JIT is_pic=true stays clean for every shape tried,
+consistent with every prior lane's finding at this tier. Kept as permanent
+regression coverage.
+**2. Executed (not just disassembled) AOT-freestanding reproduction.**
+Built minimal standalone probe kernels via the REAL `native-build` pipeline
+(`--entry-closure --backend cranelift --cpu x86-64-v1
+--opt-level=aggressive --target x86_64-unknown-none`, i.e. is_pic=false,
+matching the faulting kernel's exact flags) under
+`examples/09_embedded/simple_os/arch/x86_64/` (disposable scratch,
+deleted after use), booted under QEMU with `-kernel` (no NVMe drive
+needed — self-contained, never touched vfs code or `vfs_boot_init.spl`):
+- **Single-file, enriched fixture** (3-method trait, factory-return at TWO
+  levels, module-global reassignment, split-hop read, ~20-field
+  `Middle`/`Outer` structs mirroring `Fat32Core`'s field-count/type-mix,
+  simulated DMA/bounce-buffer traffic before dispatch) — **booted clean,
+  `ss_split_hop=64`, no fault.** First-ever *executed* (not disassembled)
+  result at the exact matched AOT/freestanding tier with a corrected+
+  enriched fixture; extends the negative-result frontier past every prior
+  lane's static-only AOT check.
+- **Two-file cross-module variant** (`Dev` trait + `DevC` impl in one
+  module, dispatch in another, importing via `use lib_module.{Dev, DevC}`)
+  — **FAULTED**, byte-identical signature to the original C8 report:
+  `FAULT @ 0x0000000008057e05`, incrementing storm, decoded as the
+  fixed-2-byte-RIP-advance recovery loop. Reproduced with BOTH a
+  cross-module `static fn new()` factory call and a bare cross-module
+  struct literal — factory indirection is not required, plain cross-module
+  trait dispatch alone reproduces it. Cleanest, smallest repro this bug
+  has had: 2 files, ~40 lines total, no kernel, no disk, no vfs code.
+**3. Root cause, pinned via disassembly + a pre-existing debug hook.**
+Disassembling the fault site showed NOT a vtable load but a call to
+`rt_eprintln_str` printing the literal string
+`"...backend_method_dispatch_sigsegv_2026-07-1x..."` immediately followed
+by a `ud2` trap and `int3` padding. Grepping the seed for that string found
+it hardcoded in `compile_method_call_virtual`
+(`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1373`):
+when the MIR's `vtable_slot` equals the sentinel
+`DUCK_DISPATCH_UNSUPPORTED_SLOT` (`u32::MAX`,
+`src/compiler_rust/compiler/src/mir/mod.rs:45`), codegen deliberately
+emits a diagnostic print + trap instead of a real dispatch — a **known,
+intentional** guard from an unrelated 2026-07-02 bug
+(`jit_game2d_backend_method_dispatch_sigsegv_2026-07-02`, comment at
+`lowering_core.rs:944`), meant only for genuinely duck-typed traits with no
+`impl` anywhere. The sentinel is produced in exactly one place:
+`find_trait_for_method_on_receiver`
+(`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:946-1008`),
+whose `slot_for` closure calls `trait_is_implemented(trait_name)` →
+`self.dependency_graph.get_implementations(trait_name)`. Using the
+**pre-existing** `SIMPLE_DEBUG_METHOD_DISPATCH=1` env hook (already wired
+in `lowering_expr_method.rs`, no code change needed to observe it) on the
+minimal 2-file repro: `'size_x' lowered as virtual trait call at slot
+4294967295` — i.e. `DevC` genuinely implements `Dev` but the compiler's own
+dependency graph reports no implementation, misfiring the duck-typed
+sentinel guard for a real, present, cross-module impl.
+The `ud2` trap then gets treated as just another recoverable event by the
+freestanding fault-recovery handler (both `_rich_fault_entry` and crt0's
+default handler do a blind "RIP += 2, iretq" on ANY of the 256 IDT
+vectors — see the C8-RELOC/C8-PROBE addenda above), so execution resumes 2
+bytes into the `ud2`+`int3` padding and free-runs into whatever adjacent
+code/rodata follows — exactly why every original C8 report and every prior
+lane's repro decoded as "a wild jump reading a callee's own prologue bytes
+as an address": that is just where the RIP+=2 walk happened to land in
+each specific binary layout, not a property of the trap itself.
+**Flagged, not fixed this lane** (separate, real latent defect): the
+fault-recovery handler treating an intentional, compiler-emitted `#UD`
+trap identically to a page fault is itself wrong, and is *why* every one
+of the four C8 investigation lanes chased vtable/pointer-corruption
+theories instead of the actual cause — a `ud2` should terminate/park, not
+"recover." Worth its own bug entry; out of scope to fix here.
+**4. Identity to C8's real fault site — CONFIRMED, not inferred.** The
+storm signature alone is non-discriminating (ANY unrecovered trap produces
+an identical-looking RIP+=2 walk), and two prior lanes (C8-FIELD item 4,
+C8-RELOC) disassembled clean `[rax];[rax+0x10];call` sequences at
+cross-module and at the real `_device_sector_size` site respectively — the
+opposite of a `ud2`. To resolve this directly rather than relying on
+signature similarity: ran the REAL entry point
+(`gui_entry_desktop.spl`, full 666-file kernel, same
+`--entry-closure --backend cranelift --cpu x86-64-v1
+--opt-level=aggressive --target x86_64-unknown-none` flags) through
+`native-build` with `SIMPLE_DEBUG_METHOD_DISPATCH=1` (no QEMU needed — the
+trace is emitted at MIR-lowering time, before codegen/link) and grepped
+the build log for `sector_size`:
+- **Stale deployed seed** (`bin/simple`, dated 2026-07-11): `[MIR-METHOD-
+  DISPATCH] 'sector_size' lowered as virtual trait call at slot
+  4294967295` — the REAL `Fat32Core._device_sector_size` call site
+  (confirmed by the adjacent `[CODEGEN-METHOD-STATIC] in
+  'Fat32Core.read_boot_sector' func_name='Fat32Core._device_sector_size'`
+  trace line — this is literally the call site named in the original C8
+  report, "`Fat32Core.read_boot_sector+0x18` calling
+  `self._device_sector_size()`") **hits the exact same sentinel as the
+  synthetic repro.** Identity confirmed directly, not by signature
+  resemblance.
+- **Fresh HEAD** (`src/compiler_rust/target/bootstrap/simple`, built this
+  lane via `cargo build --profile bootstrap`): the identical trace line
+  now reads `'sector_size' lowered as virtual trait call at slot 2` — a
+  real, correct vtable slot.
+This reconciles the apparent conflict with C8-FIELD/C8-RELOC's clean
+disassembly: those lanes' "clean 2-deref dispatch" observations are
+real and correct — for whatever binary/commit they happened to build
+with at the time (both dated within the window where the underlying
+`ca1e18c1744`/`b843353b50e` dependency-graph mechanism was already
+fixed or not yet broken) — while the actual production kernel's
+`desktop.elf` was built with the stale seed, which sentinels. C8 was
+never one single consistently-reproducing shape; it depends on which
+`simple` binary compiled the kernel, which is exactly the kind of
+non-obvious variable none of the four lanes controlled for.
+**5. The dispatch-resolution defect is ALREADY FIXED in current HEAD —
+the deployed seed is 6 days stale, this is confirmed at both the
+synthetic-repro AND the real-kernel-entry-point level (§4).**
+`bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`, the binary
+every prior C8 lane and this lane's early probes ran) is dated
+**2026-07-11 08:52**, six days behind HEAD. Nearest relevant landed
+history: `b843353b50e` ("fix(seed): scope trait-impl virtualization to
+local impls", 2026-07-16, ancestor of HEAD) reworked
+`find_trait_for_method_on_receiver` following a bisect on an unrelated
+fb-init regression from `ca1e18c1744`, which is where the project-wide
+`dependency_graph`/`imports.trait_impls` cross-module mechanism this bug
+depends on was introduced in the first place. **Not pinned to a single
+commit** — `b843353b50e`'s own diff targets the "concrete receiver, no
+local impl" branch (lines 987-1006), not the "receiver typed as the trait
+itself / unknown receiver" branches (964-978) that this specific repro's
+trace actually takes, so the exact fixing change may be `ca1e18c1744`
+itself (adding the mechanism) rather than `b843353b50e` (narrowing it) —
+`git bisect` the stale-seed-vs-HEAD slot value directly if the exact
+commit matters (cheap: `SIMPLE_DEBUG_METHOD_DISPATCH=1`, no QEMU, no
+rebuild needed since the two binaries already exist in this repo).
+**6. Full kernel re-verification (task step 4: lift `vfs_boot_init.spl:
+374`, boot with NVMe, confirm the fault storm is gone) NOT completed this
+lane — blocked by an unrelated build-plumbing gap, not by C8 itself.**
+Every ad-hoc `cargo build` of the driver from current HEAD (both
+`--release` and `--profile bootstrap`, with and without
+`SIMPLE_RUNTIME_PATH` set) linked freestanding kernels with the ~4000
+`auto_stubs.c`/`primitives.c` runtime stub symbols (including
+`rt_eprintln_str` itself) silently absent — confirmed via `nm` symbol-
+count comparison (236 symbols / 45 KB vs the properly-deployed seed's
+4148 symbols / 563 KB for an equivalent tiny probe) BEFORE booting it, so
+no fault result from that binary was trusted or reported as a dispatch
+result. This is a link/build-plumbing artifact, not a second dispatch
+bug; root-causing it was out of scope for this lane. It does NOT affect
+finding §4 above, which used the MIR-lowering debug trace (emitted before
+codegen/link) rather than a booted binary. **`vfs_boot_init.spl:374` was
+never touched this lane** — `git diff` on that file empty throughout,
+re-verified multiple times including after a mid-task resume.
+**Handoff for the next lane:** redeploy `bin/simple` from current HEAD via
+the repo's real bootstrap/deploy recipe
+(`scripts/bootstrap/bootstrap-from-scratch.sh` or the documented stage-2/
+redeploy recipe — NOT ad-hoc `cargo build`), confirm the deployed binary's
+`sector_size` trace now reads a real slot (same one-line
+`SIMPLE_DEBUG_METHOD_DISPATCH=1` + grep check used in §4, ~90s, no QEMU),
+then proceed to task step 4: lift the vfs skip, boot with NVMe attached,
+confirm the real kernel's fault storm is gone, restore the skip.
+**Suite counts (this lane, current HEAD, hosted `cargo test`):**
+`codegen::` (`cargo test -p simple-compiler --lib codegen::`): 772 passed,
+142 failed, 2382 filtered — all 142 failures are in GPU/SIMD/actor/
+coverage-probe/VHDL codegen tests, zero overlap with `vtable_dispatch` or
+any test this lane touched; appear pre-existing and unrelated (not
+investigated further, out of scope). `seed_regression` (`cargo test -p
+simple-compiler --lib seed_regression`): **18 passed, 0 failed.**
+`codegen::local_execution_tests -- vtable_dispatch`: **18 passed, 0
+failed** (4 corrected + 3 new factory-return + existing controls).
+**Files touched, final state confirmed:**
+`src/compiler_rust/compiler/src/codegen/local_execution_tests.rs` — kept
+(fixture fix + 3 new factory-return tests, permanent regression coverage).
+`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs` and
+`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs` — temporary
+debug `eprintln!`s added and removed via `git checkout --`; `git diff`
+re-verified empty of any `C8FIX-DEBUG` marker (the latter file separately
+gained an unrelated `mod entry_closure_global_init_tests;` line from a
+concurrent lane's sync during this lane's work — not this lane's change,
+left alone). Four scratch files under `examples/09_embedded/simple_os/
+arch/x86_64/` (`c8fix_probe_entry.spl`, `c8fix_probe_lib.spl`,
+`c8fix_probe_caller.spl`, plus intermediate variants overwritten in
+place) — all deleted after use, confirmed absent. `src/os/services/vfs/
+vfs_boot_init.spl` — not edited by this lane at all; `git diff` empty,
+`sed -n '374p'` shows `if true:`. Scratch kernel builds, cache dirs
+(`build/os/_wk/c8fix-cache*`, `build/os/_wk/c8fix-realcheck*`), and serial/
+build logs under `build/os/_wk/` (gitignored) — left in place for the next
+lane's convenience; not committed, gitignored. **Note for the coordinator:**
+this addendum was clobbered once mid-session by a concurrent working-copy
+sync (the file reverted to its pre-lane 713-line state while this lane's
+other edits survived) and was re-applied; commit this file promptly to
+avoid a second loss.
