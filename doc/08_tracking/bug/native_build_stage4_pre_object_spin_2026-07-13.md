@@ -597,6 +597,14 @@ before the provider can enter the inventory. Apple/BSD archiver behavior and
 MSVC/MinGW archive formats are therefore still pending, as are the remaining
 providers and production hash/digest/cache/link wiring.
 
+A Linux-only compile/archive/scan checker and Linux LLVM CI hook are now
+source-added, with first execution pending. The checker independently compiles
+and deterministically archives `runtime_dynload.c` twice, requires the exact
+single member, compares archive hashes and bytes, and sends both measured ELF
+archives through the existing pure-Simple forbidden-section and exact-symbol
+validators. This is not macOS, FreeBSD, MSVC, or MinGW archive proof and makes
+no production inventory, hashing/cache, selection, or link-correctness claim.
+
 The Stage4 closure now uses one pure-Simple insertion sorter for requested
 symbols, archive definitions, owner rows, and fingerprint rows. This replaces
 `[text].sort()`, which is a no-op under the deployed seed, so canonical order
