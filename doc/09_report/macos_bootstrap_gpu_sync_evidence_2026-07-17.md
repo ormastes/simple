@@ -48,3 +48,40 @@ The verified Stage 3 compiler was used for the exact Stage 4 `main.spl` entry wi
   the launcher's AppleScript nudge to block before its own deadline; the wrapper
   now disables that redundant nudge so bounded window discovery owns the
   timeout. No live-window PASS is claimed.
+
+## Current-source MCP/LSP evidence after `54ad67393a16`
+
+- A preserved-cache bootstrap rebuild produced a current 24 MiB pure-Simple
+  compiler with 7 compiled and 701 cached objects.
+- The exact full CLI remained pre-object and was terminated at 8m24s after RSS
+  reached 9.0 GiB with zero log, cache objects, or output. No repeat was made.
+- That compiler built fresh current-source MCP (2.2 MiB, 53 units) and LSP MCP
+  (1.1 MiB, 9 units) native artifacts directly.
+- Framed initialize, tools/list, and tools/call passed for both artifacts with
+  zero stderr, protocol errors, or tool errors. The LSP call returned a
+  correlated id and zero `Missing tool name` occurrences.
+- The canonical combined wrapper remains gated by the absent full CLI `run`
+  command; direct fresh-artifact protocol evidence is retained without claiming
+  the wrapper/deployment gate.
+
+## Focused current-source Metal clip probe
+
+- The current pure-Simple bootstrap compiler compiled the CPU/Metal parity
+  harness, including a GPU-only clip scene, into a 3.5 MiB archive: 1 unit was
+  compiled and 105 were reused from cache.
+- Executable evidence is blocked at runtime packaging rather than Simple source
+  compilation. `rust-hosted` has been removed, no installed `simple-core`
+  archive exists, `core-c-bootstrap` omits the Metal host symbols, and the
+  legacy Rust archive alone omits fresh C-runtime symbols.
+- Three bounded link variants were attempted and then stopped at the mandatory
+  iteration cap. `clip_gpu_only: MATCH` is therefore not claimed; installing a
+  canonical macOS `simple-core` runtime archive is the next acceptance step.
+
+## MCP ownership cleanup
+
+- The obsolete `src/app/mcp/bootstrap/` prototypes were removed. Repository
+  history already marks that lane superseded by `src/app/mcp/main.spl`, and its
+  optimized variant could not link against current module ownership.
+- `src/app/mcp/bugdb_resource.spl` is now a compatibility facade over the
+  canonical `std.nogc_async_mut.mcp.bugdb_resource` implementation, eliminating
+  the second mutable BugDB implementation and its stale fake-success behavior.

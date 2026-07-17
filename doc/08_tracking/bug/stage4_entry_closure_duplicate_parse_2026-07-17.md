@@ -161,3 +161,32 @@ three `.keys()` snapshots without reintroducing the interpreter-corrupting
 fresh Stage3 rebuilt incrementally (8 compiled, 700 cached, zero failed), then
 compiled and ran a new native module (`ready`). No fourth full Stage4 cycle was
 started; executable acceptance remains open for the next bounded continuation.
+
+## 2026-07-17 post-sync current-source continuation
+
+After rebasing and pushing `54ad67393a16`, the Rust bootstrap seed rebuilt the
+pure-Simple bootstrap compiler with the preserved cache: 7 objects compiled,
+701 reused, 0 failed, producing the 24 MiB `simple-current` artifact.
+
+One exact Stage4 `src/app/cli/main.spl` cycle used that compiler, the canonical
+four source roots, `core-c-bootstrap`, Cranelift, entry closure, low-memory, and
+the isolated Stage4 cache. It passed the prior immediate `Map.keys` SIGBUS but
+remained pre-object: after 8m24s it was still at 100% CPU, RSS had climbed to
+9.0 GiB, and the log, cache, and output remained empty. The process was stopped
+at the host-protection boundary. Repeating the identical full build would be a
+runaway-guard violation; the next compiler work must expose bounded phase
+progress or reduce the pre-object resident set before another full cycle.
+
+The same current bootstrap compiler successfully built the canonical MCP and
+LSP entries in isolated shards (53 and 9 compiled units respectively). Direct
+native framed initialize, tools/list, and tools/call requests all preserved IDs
+with zero stderr/protocol/tool errors; the correlated `lsp_symbols` response no
+longer contains `Missing tool name`. This proves the MCP/LSP source corrections
+independently of the still-missing monolithic CLI.
+
+A focused Metal parity archive also compiled from current source (1 compiled,
+105 cached), showing that the added GPU-only clip path closes at Simple compile
+time. Native execution is separately blocked by the missing canonical macOS
+`simple-core` runtime archive: the supported core-C lane lacks Metal symbols,
+while the removed legacy hosted lane is no longer selectable. This runtime
+packaging issue does not justify another monolithic Stage4 attempt.
