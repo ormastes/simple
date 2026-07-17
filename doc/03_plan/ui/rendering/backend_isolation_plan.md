@@ -9,6 +9,14 @@ closures. Their exact paths are ratchet-baselined with an annotated provenance
 block; no directory wildcard is used, so every future file still fails closed.
 Hosted app consumers remain violations and are not absorbed by this review.
 
+Three additional exact owners remain ratcheted pending dedicated prerequisites:
+the contract-pinned minimal freestanding argv facade, the SimpleOS guest target
+pipeline, and the WM Draw IR scalar-buffer workaround for documented Stage3
+aggregate corruption and QEMU FFI cost. Their existing contract tests pin the
+restricted closures; the hosted image patcher and CLI test entry remain
+unclassified consumer violations, and the SimpleOS tool main remains a facade
+migration item.
+
 **Status:** GATE LIVE, GAPS OPEN (2026-07-07) · **Owner:** UI/rendering · **Scope:** enforce the
 three-facade rendering architecture across `src/app/**` and `examples/**`.
 
