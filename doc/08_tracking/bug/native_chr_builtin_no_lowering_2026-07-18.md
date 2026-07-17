@@ -65,6 +65,22 @@ decoded `…|NotoSansMono-Regular|…`. Worked around in font_registry with
 primitive char-extraction stripping; the builtin needs an all-occurrences
 native lowering (rt_string_replace appears to be single-shot).
 
+## Sibling defect (ROOT of the render-fault chain): Option None-discrimination broken on baremetal
+A function that legitimately returns `None` can surface in the caller's
+`match` as the **Some arm with a nil binding**; the next field access hits the
+compiler's "field access on nil receiver" guard (rt_eprintln + ud2). Proven by
+disasm twice: (1) `rasterize_sfnt_glyf` returned None → caller's
+`match ... Some(bitmap)` bound nil → panic at `bitmap.width`; (2)
+`_outline_bounds` returned None for a whitespace glyph (empty outline) →
+`bounds.right` panic INTRA-module. Cross-module `opt.?`+field,
+`Option == nil/None` compares, and `.unwrap()` are all sinks of the same
+marshalling family. Matches only ever "work" when the value is Some.
+**Consequence: on the baremetal lane, any routinely-None Option path is a
+crash risk.** Workarounds landed: flat `(arrays..., bool)` cross-module APIs
+(sfnt_glyf parts API), path-based helpers computing struct fields inside
+font_registry, match unwraps only on always-Some paths, and making
+whitespace glyphs a valid Some(0x0 bitmap) instead of None.
+
 ## Sibling defect: text char-extraction loop faults on baremetal
 First workaround attempt for the `.replace` defect (a `str_char_at(family, i)`
 loop stripping spaces, running during font candidate construction) produced a
