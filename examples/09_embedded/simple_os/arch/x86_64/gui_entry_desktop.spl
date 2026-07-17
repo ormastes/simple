@@ -49,7 +49,9 @@ use os.kernel.arch.x86_64.host_gpu_ivshmem_vmm.{map_qemu_host_gpu_ivshmem_bar2_a
 use common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
-use std.common.encoding.font_registry.{validate_selected_font_asset}
+use std.common.encoding.font_registry.{validate_selected_font_asset, font_registry_debug_expected_names}
+use std.common.encoding.sfnt.{sfnt_debug_selected_names}
+use std.common.string_core.{char_from_code}
 
 @export("C", name: "rt_file_exists")
 fn rt_file_exists(path: text) -> bool:
@@ -364,6 +366,30 @@ fn spl_start():
         serial_println("[desktop-gui] font read alias bytes={font_blob.len()}")
         font_loaded = engine.load_font_bytes(font_path, font_blob)
         serial_println("[desktop-gui] font validator accepted={font_loaded}")
+        if not font_loaded:
+            # Affordable now: sha256 is allocation-light and sfnt parsing
+            # indexes the blob directly, so one diagnostic re-validate fits.
+            val diag = validate_selected_font_asset(font_path, font_blob)
+            val v_selected = diag.selected
+            val v_valid = diag.valid
+            val v_reason: text = diag.reason
+            serial_println("[desktop-gui] font validate selected={v_selected} valid={v_valid} reason={v_reason}")
+            val names_diag: text = sfnt_debug_selected_names(font_blob)
+            serial_println("[desktop-gui] font names decoded={names_diag}")
+            serial_println("[desktop-gui] font names expected=|Noto Sans Mono|Regular|Noto Sans Mono Regular|NotoSansMono-Regular|Version 2.014")
+            val expected_rt: text = font_registry_debug_expected_names(font_path)
+            serial_println("[desktop-gui] font names expected-runtime={expected_rt}")
+            # Micro-probe of the exact ops _sfnt_utf16be_text uses per char.
+            # Probes BOTH the `.chr()` builtin (no native-lane lowering — known
+            # empty on baremetal) and the pure-Simple char_from_code workaround
+            # the decode path now uses.
+            val cp_a: i64 = 65
+            val chr_a: text = cp_a.chr()
+            val cfc_a: text = char_from_code(cp_a)
+            var cat_t: text = ""
+            cat_t = cat_t + cfc_a
+            val cat_len = cat_t.len()
+            serial_println("[desktop-gui] chr-probe chr='{chr_a}' cfc='{cfc_a}' cat='{cat_t}' len={cat_len}")
     if font_loaded:
         font_loaded = font_renderer_register_selected_bytes(font_path, font_blob)
         serial_println("[desktop-gui] font register accepted={font_loaded}")

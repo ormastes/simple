@@ -1481,6 +1481,26 @@ impl MirLowering:
             return sw_receiver
 
         # Bug #138 (follow-up): same untyped-receiver gap as starts_with above,
+        # `.chr()` / `.to_char()` on an integer receiver: the native lane had NO
+        # lowering for this builtin (the LLVM lane routes it to char_from_code),
+        # so compiled code silently produced an empty/NIL result — SimpleOS font
+        # name-table decode yielded "" for every entry (validator reason=names),
+        # and _vfs_bytes_to_text produced empty manifests. Route to the runtime
+        # rt_char_from_code(code) -> tagged single-char string (strong impl in
+        # rt_extras.c on baremetal, runtime_native.c hosted).
+        if (method == "chr" or method == "to_char") and args.len() == 0 and resolution_is_unresolved:
+            val chr_receiver = self.lower_expr(receiver)
+            val chr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_char_from_code"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_chr = self.builder
+            val chr_res = b_chr.emit_call(chr_op, [mir_operand_copy(chr_receiver)], MirType.i64())
+            self.builder = b_chr
+            if val chr_local = chr_res:
+                return chr_local
+            return chr_receiver
+
         # for `x.ends_with(suffix)`. Mirrors the starts_with fix exactly:
         # rt_string_ends_with(i64 value, i64 suffix) needs both operands
         # tagged, so tag a raw string-literal suffix via rt_string_new first.

@@ -14,6 +14,7 @@
 
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{str_char_at}
 use std.io_runtime.{env_get}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -151,7 +152,21 @@ fn _font_candidate_embedded_full_name(family: text) -> text:
     family + " " + _font_candidate_embedded_style(family)
 
 fn _font_candidate_embedded_postscript_name(family: text) -> text:
-    family.replace(" ", "") + "-" + _font_candidate_embedded_style(family)
+    # NOT `family.replace(" ", "")`: the native-lane `.replace` builtin
+    # replaces only the FIRST occurrence ("Noto Sans Mono" -> "NotoSans Mono"),
+    # so the expected PostScript name was wrong in-guest and the name matcher
+    # correctly failed with reason=names (serial proof: `font names
+    # expected-runtime=` vs the decoded line). Strip spaces with primitive
+    # char extraction + concat, both kernel-proven.
+    var compact: text = ""
+    var i: i64 = 0
+    val n: i64 = family.len()
+    while i < n:
+        val ch: text = str_char_at(family, i)
+        if ch != " ":
+            compact = compact + ch
+        i = i + 1
+    compact + "-" + _font_candidate_embedded_style(family)
 
 fn _font_candidate_embedded_version(family: text) -> text:
     if family == "Roboto Slab": return "Version 2.002"
@@ -457,6 +472,23 @@ fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeVali
 fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
     """Validate the exact supplied bytes for a selected asset identity."""
     _validate_selected_font_asset(path, blob)
+
+fn font_registry_debug_expected_names(path: text) -> text:
+    """Diagnostic: the expected '|'-joined embedded-name line for the candidate
+    matching path, computed in the RUNNING lane (so builtin mis-lowerings in
+    the expected-value construction surface in serial evidence rather than
+    silently failing the name matcher). '<no-candidate>' when unmatched."""
+    val root = env_get("SIMPLE_ASSET_ROOT")
+    val candidates = selected_font_asset_candidates()
+    val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
+    if candidate_index < 0: return "<no-candidate>"
+    val candidate = candidates[candidate_index]
+    val family: text = candidate.family
+    val style: text = candidate.embedded_style
+    val full_name: text = candidate.embedded_full_name
+    val postscript: text = candidate.embedded_postscript_name
+    val version: text = candidate.embedded_version
+    "|" + family + "|" + style + "|" + full_name + "|" + postscript + "|" + version
 
 fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
     """Read and validate the exact bytes returned to the caller.

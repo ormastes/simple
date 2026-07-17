@@ -49,7 +49,7 @@ use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
-use common.string_core.{str_char_at}
+use common.string_core.{str_char_at, char_from_code}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{
@@ -97,7 +97,10 @@ fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
     var result: text = ""
     var i: i64 = 0
     while i < count and i < buf.len():
-        result = result + buf[i as i32].chr()
+        # `.chr()` has no native-lane lowering (empty on baremetal);
+        # char_from_code is pure Simple and kernel-proven.
+        val b: i64 = buf[i as i32] as i64
+        result = result + char_from_code(b)
         i = i + 1
     result
 
@@ -306,7 +309,8 @@ fn g_vfs_root_read_file_text(driver: Fat32Core, path: text) -> text:
     var result: text = ""
     var i: i32 = 0
     while i < data.len():
-        result = result + data[i].chr()
+        val b: i64 = data[i] as i64
+        result = result + char_from_code(b)
         i = i + 1
     result
 
@@ -513,14 +517,17 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     # (virtio-blk, disk-less harness, etc). This is what unblocks reading
     # /SYS/FONTS/<short-name> for the pinned taskbar-clock font when the
     # hosted mount is degraded but the disk and direct reader are healthy.
+    # NO _clone_bytes on these: the direct reader returns a freshly-built,
+    # unaliased array, and on the SimpleOS bump heap (no free) cloning a
+    # 1.7MB font blob would permanently burn another ~2-3.5MB per read.
     val direct_scalar_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(name)
     if direct_scalar_bytes.len() > 0:
-        return _clone_bytes(direct_scalar_bytes)
+        return direct_scalar_bytes
     val root_name_direct = g_vfs_root_path(name)
     if root_name_direct != name:
         val direct_scalar_root_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(root_name_direct)
         if direct_scalar_root_bytes.len() > 0:
-            return _clone_bytes(direct_scalar_root_bytes)
+            return direct_scalar_root_bytes
     # No root filesystem mounted (e.g. the disk-less WM harness where the NVMe
     # exec probe failed): the trait-device FAT32 read machinery below dispatches
     # through g_root_fat32.unwrap().stat(), and native-build miscompiles the

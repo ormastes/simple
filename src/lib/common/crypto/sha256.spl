@@ -150,62 +150,146 @@ fn sha256_text(data: text) -> text:
     use std.common.crypto.types.{text_to_bytes, bytes_to_hex}
     bytes_to_hex(sha256_bytes(text_to_bytes(data)))
 
+# Virtual byte j of the SHA-256 padded message for `data` (padding computed,
+# never materialized): data bytes, then 0x80, zeros, and the 8-byte big-endian
+# bit length occupying [total_len-8, total_len).
+fn _sha256_padded_byte(data: [u8], data_len: i64, total_len: i64, j: i64) -> i64:
+    if j < data_len:
+        return data[j] as i64
+    if j == data_len:
+        return 128
+    if j >= total_len - 8:
+        # Big-endian 64-bit bit length; byte_from_lsb 0 is the last byte.
+        val byte_from_lsb = total_len - 1 - j
+        # bit length = data_len * 8 = data_len << 3; shift the needed byte
+        # down first so the <<3 cannot overflow for any real input size.
+        if byte_from_lsb == 0:
+            return (data_len << 3) & 255
+        return (data_len >> (byte_from_lsb * 8 - 3)) & 255
+    0
+
 # SHA-256 of native bytes without copying the payload into an i64 list.
+#
+# ALLOCATION-LIGHT REWRITE (SimpleOS baremetal bump heap, no GC): the previous
+# version allocated a fresh 64-entry block list per 64-byte block, and
+# sha256_process_block allocated a fresh dynamic `w` schedule list, a fresh
+# 64-entry K constants list, and a fresh h list PER BLOCK -- for a 1.7MB font
+# that is 26,694 blocks and burned the remaining ~50MB of the 192MiB
+# bump heap in one hash (live: `[PANIC] heap exhausted heap_off=0xbffff80`).
+# Now: ONE reused [i64] w[64] schedule (index-assigned in place), ONE K list,
+# hash state in 8 scalar locals, words assembled by direct indexing into the
+# input, and padding synthesized virtually for the final block(s) only.
+# Total allocations per call: 2 small arrays + the 64-char hex build,
+# independent of input size.
 fn sha256_u8_hex(data: [u8]) -> text:
-    var h = sha256_initial_hash()
+    val mask32 = 4294967295  # 0xFFFFFFFF
+    val k = _sha256_k()
+    var w: [i64] = []
+    var zi = 0
+    while zi < 64:
+        w.push(0)
+        zi = zi + 1
+
+    var h0 = 1779033703
+    var h1 = 3144134277
+    var h2 = 1013904242
+    var h3 = 2773480762
+    var h4 = 1359893119
+    var h5 = 2600822924
+    var h6 =  528734635
+    var h7 = 1541459225
+
     val data_len = data.len()
-    var offset = 0
+    # Padded length: data + 0x80 + zero pad + 8 length bytes, multiple of 64.
+    val total_len = ((data_len + 8) / 64 + 1) * 64
+    var block_offset = 0
+    while block_offset < total_len:
+        var wi = 0
+        if block_offset + 64 <= data_len:
+            # Fast path: whole block inside data. Named intermediates with
+            # `+`/`*` combine (NOT a fused shift/or chain): the freestanding
+            # cranelift aggressive build has dropped high-byte terms of fused
+            # multi-byte combines before (see vfs_boot_init.spl helpers);
+            # `as` casts, not bare .to_i64(), per the C7 erased-receiver
+            # conversion defect.
+            while wi < 16:
+                val base = block_offset + wi * 4
+                val b0 = data[base] as i64
+                val b1 = data[base + 1] as i64
+                val b2 = data[base + 2] as i64
+                val b3 = data[base + 3] as i64
+                w[wi] = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+                wi = wi + 1
+        else:
+            # Tail block(s): read through the virtual padded message.
+            while wi < 16:
+                val base = block_offset + wi * 4
+                val b0 = _sha256_padded_byte(data, data_len, total_len, base)
+                val b1 = _sha256_padded_byte(data, data_len, total_len, base + 1)
+                val b2 = _sha256_padded_byte(data, data_len, total_len, base + 2)
+                val b3 = _sha256_padded_byte(data, data_len, total_len, base + 3)
+                w[wi] = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+                wi = wi + 1
 
-    while data_len >= 64 and offset <= data_len - 64:
-        var block: [i64] = []
-        var i = 0
-        while i < 64:
-            block.push(data[offset + i].to_i64())
-            i = i + 1
-        h = sha256_process_block(h, block)
-        offset = offset + 64
+        wi = 16
+        while wi < 64:
+            val w15 = w[wi - 15]
+            val w2  = w[wi - 2]
+            val s0 = (rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3)) & mask32
+            val s1 = (rotr32(w2, 17) ^ rotr32(w2,  19) ^ (w2  >> 10)) & mask32
+            w[wi] = (w[wi - 16] + s0 + w[wi - 7] + s1) & mask32
+            wi = wi + 1
 
-    val remaining = data_len - offset
-    var tail: [i64] = []
-    var i = 0
-    while i < 64:
-        tail.push(0)
-        i = i + 1
-    i = 0
-    while i < remaining:
-        tail[i] = data[offset + i].to_i64()
-        i = i + 1
-    tail[remaining] = 128
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        var f = h5
+        var g = h6
+        var hh = h7
 
-    if remaining >= 56:
-        h = sha256_process_block(h, tail)
-        i = 0
-        while i < 64:
-            tail[i] = 0
-            i = i + 1
+        var ri = 0
+        while ri < 64:
+            val big_s1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) & mask32
+            val ch     = ((e & f) ^ ((e ^ mask32) & g)) & mask32
+            val temp1  = (hh + big_s1 + ch + k[ri] + w[ri]) & mask32
+            val big_s0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) & mask32
+            val maj    = ((a & b) ^ (a & c) ^ (b & c)) & mask32
+            val temp2  = (big_s0 + maj) & mask32
 
-    # Encode data_len * 8 modulo 2^64 without an overflowing multiplication.
-    tail[56] = (data_len >> 53) & 255
-    tail[57] = (data_len >> 45) & 255
-    tail[58] = (data_len >> 37) & 255
-    tail[59] = (data_len >> 29) & 255
-    tail[60] = (data_len >> 21) & 255
-    tail[61] = (data_len >> 13) & 255
-    tail[62] = (data_len >> 5) & 255
-    tail[63] = (data_len << 3) & 255
-    h = sha256_process_block(h, tail)
+            hh = g
+            g  = f
+            f  = e
+            e  = (d + temp1) & mask32
+            d  = c
+            c  = b
+            b  = a
+            a  = (temp1 + temp2) & mask32
+            ri = ri + 1
+
+        h0 = (h0 + a) & mask32
+        h1 = (h1 + b) & mask32
+        h2 = (h2 + c) & mask32
+        h3 = (h3 + d) & mask32
+        h4 = (h4 + e) & mask32
+        h5 = (h5 + f) & mask32
+        h6 = (h6 + g) & mask32
+        h7 = (h7 + hh) & mask32
+        block_offset = block_offset + 64
 
     val digits = "0123456789abcdef"
     var result = ""
-    var wi = 0
-    while wi < 8:
-        val word = h.get(wi)
+    val words = [h0, h1, h2, h3, h4, h5, h6, h7]
+    var out_i = 0
+    while out_i < 8:
+        val word = words[out_i]
         var shift = 28
         while shift >= 0:
             val nibble = (word >> shift) & 15
             result = result + digits[nibble:nibble + 1]
             shift = shift - 4
-        wi = wi + 1
+        out_i = out_i + 1
     result
 
 # ============================================================================

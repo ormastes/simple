@@ -218,9 +218,15 @@ fn _sfnt_utf16be_text(blob: [u8], start: i64, length: i64) -> Option<text>:
         elif code_unit >= 0xDC00 and code_unit <= 0xDFFF:
             return None
         val decoded = utf16_decode_one(units, index)
-        if decoded[1] <= 0: return None
-        result = result + decoded[0].chr()
-        index = index + decoded[1]
+        # `.chr()` has no working native-lane lowering (empty on baremetal);
+        # char_from_code is pure Simple and already proven in-kernel by the
+        # sfnt tag-name path. ASCII coverage suffices for name matching.
+        val decoded_cp: i64 = decoded[0]
+        val decoded_len: i64 = decoded[1]
+        if decoded_len <= 0: return None
+        val piece: text = char_from_code(decoded_cp)
+        result = result + piece
+        index = index + decoded_len
     Some(result)
 
 fn _sfnt_selected_name(values: [SfntNameValue], primary: i64, fallback: i64) -> Option<text>:
@@ -234,23 +240,24 @@ fn _sfnt_selected_name(values: [SfntNameValue], primary: i64, fallback: i64) -> 
             return Some(value.value)
     None
 
-fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: text,
-                             postscript_name: text, version: text) -> bool:
+fn _sfnt_collect_names(blob: [u8]) -> Option<[SfntNameValue]>:
+    """Collect the Windows-platform English name-table entries used by the
+    manifest matcher. None = structurally invalid name table."""
     val maybe_font = parse_offset_table(blob)
     val font = match maybe_font:
         Some(value): value
-        None: return false
+        None: return None
     val maybe_table = find_table(font, 1851878757)
     val table = match maybe_table:
         Some(value): value
-        None: return false
+        None: return None
     val base = table.offset as i64
     val limit = base + table.length as i64
-    if table.length < 6 or read_u16_be(blob, base) != 0: return false
+    if table.length < 6 or read_u16_be(blob, base) != 0: return None
     val count = read_u16_be(blob, base + 2) as i64
     val records_end = base + 6 + count * 12
     val strings = base + read_u16_be(blob, base + 4) as i64
-    if records_end > limit or strings < records_end or strings > limit: return false
+    if records_end > limit or strings < records_end or strings > limit: return None
     var values: [SfntNameValue] = []
     for name_id in [1, 2, 4, 5, 6, 16, 17]:
         values.push(SfntNameValue(name_id: name_id, value: "", seen: false, valid: true))
@@ -259,26 +266,69 @@ fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: t
         val record = base + 6 + index * 12
         val length = read_u16_be(blob, record + 8) as i64
         val start = strings + read_u16_be(blob, record + 10) as i64
-        if start > limit or length > limit - start: return false
+        if start > limit or length > limit - start: return None
         val platform = read_u16_be(blob, record)
         val encoding = read_u16_be(blob, record + 2)
         val language = read_u16_be(blob, record + 4)
         val name_id = read_u16_be(blob, record + 6) as i64
         if platform == 3 and (encoding == 1 or encoding == 10) and language == 0x0409:
-            for value in values:
-                if value.name_id == name_id:
+            # Index-assign rebuild instead of `value.add(...)` on the loop
+            # variable: under the freestanding native-build, struct iteration
+            # yields VALUE COPIES, so the loop-var field mutation never
+            # persisted into `values` — every entry stayed seen=false and the
+            # name match failed with reason=names (same value-copy class as
+            # the fb_driver back-buffer defect). `values[vi] = ...` in-place
+            # assignment is the proven-persistent form.
+            var vi: i64 = 0
+            while vi < values.len():
+                val existing = values[vi]
+                val existing_name_id: i64 = existing.name_id
+                if existing_name_id == name_id:
                     val decoded = _sfnt_utf16be_text(blob, start, length)
                     match decoded:
-                        Some(candidate): value.add(candidate)
-                        None: return false
+                        Some(candidate):
+                            val was_seen = existing.seen
+                            val prior_value: text = existing.value
+                            val stays_valid = existing.valid
+                            if was_seen and prior_value != candidate:
+                                values[vi] = SfntNameValue(name_id: existing_name_id, value: prior_value, seen: was_seen, valid: false)
+                            else:
+                                values[vi] = SfntNameValue(name_id: existing_name_id, value: candidate, seen: true, valid: stays_valid)
+                        None: return None
+                vi = vi + 1
         index = index + 1
-    val selected_family = _sfnt_selected_name(values, 16, 1)
-    val selected_style = _sfnt_selected_name(values, 17, 2)
-    val selected_full = _sfnt_selected_name(values, 4, -1)
-    val selected_postscript = _sfnt_selected_name(values, 6, -1)
-    val selected_version = _sfnt_selected_name(values, 5, -1)
-    if (selected_family == None or selected_style == None or selected_full == None or
-        selected_postscript == None or selected_version == None): return false
-    selected_family.unwrap() == family and selected_style.unwrap() == style and
-        selected_full.unwrap() == full_name and selected_postscript.unwrap() == postscript_name and
-        selected_version.unwrap() == version
+    Some(values)
+
+fn sfnt_debug_selected_names(blob: [u8]) -> text:
+    """Diagnostic: the five manifest-matched name selections as one line.
+    '<collect-fail>' = structurally invalid table; '<none>' = entry missing."""
+    val collected = _sfnt_collect_names(blob)
+    val values = match collected:
+        Some(v): v
+        None: return "<collect-fail>"
+    var out = ""
+    for pair in [(16, 1), (17, 2), (4, -1), (6, -1), (5, -1)]:
+        val primary: i64 = pair.0
+        val fallback: i64 = pair.1
+        val sel = _sfnt_selected_name(values, primary, fallback)
+        val piece: text = match sel:
+            Some(v): v
+            None: "<none>"
+        out = out + "|" + piece
+    out
+
+fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: text,
+                             postscript_name: text, version: text) -> bool:
+    # Compare via the same joined-line path as sfnt_debug_selected_names: the
+    # previous per-field form (`selected_x == None` then `.unwrap() == arg`)
+    # returned false on the freestanding native lane even when every field
+    # decoded byte-exact (in-guest proof: `font names decoded=` printed the
+    # exact expected line while this matcher said no). Option-vs-None `==` and
+    # unwrap-then-compare are the known-unhealed marshalling sinks; a single
+    # text == text on identically-constructed (concat-built) lines avoids both.
+    # Missing/invalid entries surface as "<none>"/"<collect-fail>", which can
+    # never equal an expected line, preserving the reject semantics.
+    val decoded_line: text = sfnt_debug_selected_names(blob)
+    val expected_line: text = "|" + family + "|" + style + "|" + full_name + "|" +
+        postscript_name + "|" + version
+    decoded_line == expected_line
