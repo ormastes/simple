@@ -393,6 +393,7 @@ int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
 int64_t  rt_string_ends_with(int64_t value, int64_t suffix);
 int64_t  rt_string_find(int64_t value, int64_t needle);
+int64_t  rt_text_find(int64_t value, int64_t needle, int64_t start);
 int64_t  rt_string_rfind(int64_t value, int64_t needle);
 int64_t  rt_string_to_lower(int64_t value);
 int64_t  rt_string_to_upper(int64_t value);
@@ -652,6 +653,13 @@ int64_t     rt_epoll_create(void);
 int64_t     rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events);
 SplArray*   rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms);
 bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
+
+/* ===== Raw 32-bit framebuffer operations ===== */
+
+void        rt_fb_fill32(uint64_t dst_addr, uint64_t pixel_count, uint64_t color);
+void        rt_fb_blit32(uint64_t dst_addr, uint64_t dst_stride_pixels,
+                         uint64_t src_addr, uint64_t src_stride_pixels,
+                         uint64_t copy_w, uint64_t copy_h);
 
 /* ===== Audio (miniaudio backend) ===== */
 

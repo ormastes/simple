@@ -19,6 +19,7 @@ fn empty_cstr() -> *const c_char {
 
 #[cfg(target_os = "macos")]
 mod metal_impl {
+    use crate::value::{rt_interp_cstr, RuntimeValue};
     use std::collections::HashMap;
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
@@ -412,7 +413,9 @@ mod metal_impl {
         let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
         match dev {
             Some(dev) => {
-                let src_str = unsafe { CStr::from_ptr(source as *const c_char) }.to_string_lossy();
+                let source_value = RuntimeValue::from_raw(source as u64);
+                let source_ptr = rt_interp_cstr(source_value) as *const c_char;
+                let src_str = unsafe { CStr::from_ptr(source_ptr) }.to_string_lossy();
                 let ns_src = NSString::from_str(src_str.as_ref());
                 match dev.newLibraryWithSource_options_error(&ns_src, None) {
                     Ok(lib) => {
@@ -447,7 +450,9 @@ mod metal_impl {
         let lib = with_libraries(|m| m.get(&library_handle).map(|w| w.0.clone()));
         match (dev, lib) {
             (Some(dev), Some(lib)) => {
-                let entry_str = unsafe { CStr::from_ptr(entry as *const c_char) }.to_string_lossy();
+                let entry_value = RuntimeValue::from_raw(entry as u64);
+                let entry_ptr = rt_interp_cstr(entry_value) as *const c_char;
+                let entry_str = unsafe { CStr::from_ptr(entry_ptr) }.to_string_lossy();
                 let ns_entry = NSString::from_str(entry_str.as_ref());
                 let func: Option<Retained<ProtocolObject<dyn MTLFunction>>> =
                     unsafe { lib.newFunctionWithName(&ns_entry) };

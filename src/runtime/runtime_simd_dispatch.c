@@ -5,6 +5,7 @@
  */
 #include "runtime_simd_dispatch.h"
 #include "runtime.h"
+#include "runtime_value.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -561,7 +562,7 @@ static void engine2d_copy_u32_rvv(int64_t* dst, const int64_t* src, int64_t coun
  * -------------------------------------------------------------------- */
 
 static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
-    int64_t color_word = color & 0xffffffffLL;
+    int64_t color_word = (int64_t)rv_from_int(color & 0xffffffffLL);
     int64_t i = 0;
 #if defined(__aarch64__) || defined(_M_ARM64)
     uint64x2_t v = vdupq_n_u64((uint64_t)color_word);
@@ -634,10 +635,10 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
            The /255 is done scalar to stay bit-exact with C truncating
            division, and the sa==0 / sa==255 special lanes are patched
            afterward (sa==0 must return dst's FULL pixel incl. its alpha). */
-        uint32_t s0 = (uint32_t)(uint64_t)src[i];
-        uint32_t d0 = (uint32_t)(uint64_t)dst[i];
-        uint32_t s1 = (uint32_t)(uint64_t)src[i + 1];
-        uint32_t d1 = (uint32_t)(uint64_t)dst[i + 1];
+        uint32_t s0 = (uint32_t)(uint64_t)rv_to_int((RuntimeValue)src[i]);
+        uint32_t d0 = (uint32_t)(uint64_t)rv_to_int((RuntimeValue)dst[i]);
+        uint32_t s1 = (uint32_t)(uint64_t)rv_to_int((RuntimeValue)src[i + 1]);
+        uint32_t d1 = (uint32_t)(uint64_t)rv_to_int((RuntimeValue)dst[i + 1]);
         uint32_t sa0 = (s0 >> 24) & 0xFFu;
         uint32_t sa1 = (s1 >> 24) & 0xFFu;
 
@@ -666,15 +667,17 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
         uint32_t o1 = (255u << 24) | (r1 << 16) | (g1 << 8) | b1;
         if (sa0 == 255u) o0 = s0; else if (sa0 == 0u) o0 = d0;
         if (sa1 == 255u) o1 = s1; else if (sa1 == 0u) o1 = d1;
-        out[i] = (int64_t)(uint64_t)o0;
-        out[i + 1] = (int64_t)(uint64_t)o1;
+        out[i] = (int64_t)rv_from_int((int64_t)(uint64_t)o0);
+        out[i + 1] = (int64_t)rv_from_int((int64_t)(uint64_t)o1);
     }
     for (; i < n; i++) {
-        out[i] = engine2d_blend_pixel(src[i], dst[i]);
+        out[i] = (int64_t)rv_from_int(engine2d_blend_pixel(
+            rv_to_int((RuntimeValue)src[i]), rv_to_int((RuntimeValue)dst[i])));
     }
 #else
     for (int64_t i = 0; i < n; i++) {
-        out[i] = engine2d_blend_pixel(src[i], dst[i]);
+        out[i] = (int64_t)rv_from_int(engine2d_blend_pixel(
+            rv_to_int((RuntimeValue)src[i]), rv_to_int((RuntimeValue)dst[i])));
     }
 #endif
 }

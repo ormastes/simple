@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
-    archive_create_command, build_compiler_backfill_archive, build_stage4_c_runtime_library,
-    build_stage4_cli_c_provider_archives, build_stage4_runtime_capsule_archive,
+    archive_create_command, build_compiler_backfill_archive, build_core_c_runtime_library,
+    build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives, build_stage4_runtime_capsule_archive,
     build_stage4_rust_runtime_projection_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins,
-    find_cxx_compiler, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler,
-    target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
+    find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool, is_system_symbol, nm_command,
+    strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    validate_stage4_cli_c_provider_archive_disjointness,
 };
 
 #[cfg(target_os = "macos")]
@@ -970,6 +971,30 @@ int main(int argc, char** argv) {
         let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
+        let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
+        let host_gpu_core_runtime = if host_gpu_lane {
+            Some(
+                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
+                    .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
+            )
+        } else {
+            None
+        };
+        let host_gpu_hosted_runtime = if host_gpu_lane {
+            let runtime_path = self
+                .config
+                .runtime_path
+                .as_deref()
+                .ok_or_else(|| "host-gpu requires an explicit runtime path".to_string())?;
+            Some(find_hosted_runtime_rlib(runtime_path).ok_or_else(|| {
+                format!(
+                    "host-gpu canonical hosted runtime rlib is missing under `{}`",
+                    runtime_path.display()
+                )
+            })?)
+        } else {
+            None
+        };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let selected_runtime = match selected_runtime {
             Some((runtime_lib, true)) => {
@@ -1097,7 +1122,7 @@ int main(int argc, char** argv) {
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);
 
-        let cc = if has_native_all {
+        let cc = if has_native_all || host_gpu_lane {
             target_cxx_compiler(cross_target)
         } else {
             target_c_compiler(cross_target)
@@ -1309,6 +1334,12 @@ int main(int argc, char** argv) {
                     cmd.arg(runtime_lib);
                 }
             }
+            if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
+                cmd.arg(hosted_runtime);
+            }
+            if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
+                cmd.arg(core_runtime);
+            }
         }
 
         #[cfg(target_os = "windows")]
@@ -1395,7 +1426,7 @@ int main(int argc, char** argv) {
             }
         }
         #[cfg(target_os = "macos")]
-        if has_native_all {
+        if has_native_all || host_gpu_lane {
             add_macos_native_all_host_support(&mut cmd);
         }
 
@@ -1408,6 +1439,12 @@ int main(int argc, char** argv) {
                 }
                 if let Some((runtime, _)) = selected_runtime.as_ref() {
                     provider_paths.push(runtime.as_path());
+                }
+                if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
+                    provider_paths.push(hosted_runtime.as_path());
+                }
+                if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
+                    provider_paths.push(core_runtime.as_path());
                 }
                 let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
                 cmd.arg(&stubs_o);

@@ -10,6 +10,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_gpu_stubs.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
@@ -116,6 +119,9 @@ fn compile_c_runtime_sources() {
         "runtime_timestamp.c",
         "runtime_db.c",
         "runtime_pool.c",
+        "runtime_framebuffer.c",
+        "runtime_directx_core.c",
+        "runtime_hosted_gpu_stubs.c",
     ];
 
     let mut build = cc::Build::new();
@@ -179,6 +185,9 @@ fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
         "runtime_timestamp.c",
         "runtime_db.c",
         "runtime_pool.c",
+        "runtime_framebuffer.c",
+        "runtime_directx_core.c",
+        "runtime_hosted_gpu_stubs.c",
     ];
     for source in LINKED_C_SOURCES {
         let path = root.join(source);

@@ -256,7 +256,9 @@ impl NativeProjectBuilder {
                 .as_ref()
                 .and_then(|path| {
                     [
+                        path.join("bootstrap").join("deps").join("libsimple_runtime.a"),
                         path.join("bootstrap").join("libsimple_runtime.a"),
+                        path.join("deps").join("libsimple_runtime.a"),
                         path.join("libsimple_runtime.a"),
                     ]
                     .into_iter()

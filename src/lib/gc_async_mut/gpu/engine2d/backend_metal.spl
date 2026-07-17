@@ -332,12 +332,17 @@ class MetalBackend:
     font: MetalFontBackendState
 
     static fn create() -> MetalBackend:
-        make_metal_backend()
+        val backend = make_metal_backend()
+        backend
 
-fn make_metal_backend():
-    MetalBackend(
-        mirror: SoftwareBackend.create(),
-        session: MetalSession.create("legacy_no_session"),
+fn make_metal_backend() -> MetalBackend:
+    val mirror = SoftwareBackend.create()
+    val session = MetalSession.create("legacy_no_session")
+    val probe = BackendProbeResult.unavailable("metal", "not probed")
+    val font = MetalFontBackendState.create()
+    val backend = MetalBackend(
+        mirror: mirror,
+        session: session,
         command_queue: 0,
         d_framebuffer: 0,
         w: 0,
@@ -348,14 +353,15 @@ fn make_metal_backend():
         pending_composite_command: 0,
         pending_composite_encoder: 0,
         pending_composite_source: 0,
-        last_probe: BackendProbeResult.unavailable("metal", "not probed"),
+        last_probe: probe,
         last_error: "",
         lut_buffer: 0,
         lut_version: -1,
         lut_count: 0,
         glyph_lut_buffer: 0,
-        font: MetalFontBackendState.create()
+        font: font
     )
+    backend
 
 impl RenderBackend for MetalBackend:
     fn name() -> text:
@@ -372,7 +378,8 @@ impl RenderBackend for MetalBackend:
             self.last_error = "deferred Metal submission cleanup is still pending"
             return false
         self.font.release()
-        if not self.session.init():
+        val session_initialized = self.session.init()
+        if not session_initialized:
             val status = self.session.error_code()
             val msg = _metal_status_message(status)
             self.last_probe = BackendProbeResult.failed("metal", msg)
@@ -673,8 +680,13 @@ impl RenderBackend for MetalBackend:
         if self.gpu_frame_complete:
             val gpu_pixels = self.read_pixels_gpu_only()
             if gpu_pixels.len() == (self.w * self.h):
-                return engine2d_readback_with_handle(gpu_pixels, readback_source_label(ReadbackSource.DeviceReadback), self.d_framebuffer)
-        engine2d_readback(self.mirror.read_pixels(), readback_source_label(ReadbackSource.CpuMirror))
+                val source = readback_source_label(ReadbackSource.DeviceReadback)
+                val readback = engine2d_readback_with_handle(gpu_pixels, source, self.d_framebuffer)
+                return readback
+        val mirror_pixels = self.mirror.read_pixels()
+        val source = readback_source_label(ReadbackSource.CpuMirror)
+        val readback = engine2d_readback(mirror_pixels, source)
+        readback
     fn width() -> i32:
         if self.w > 0:
             return self.w
@@ -685,6 +697,11 @@ impl RenderBackend for MetalBackend:
         self.mirror.height()
 
 impl MetalBackend:
+    fn device_framebuffer_handle() -> i64:
+        if self.initialized and self.d_framebuffer != 0:
+            return self.d_framebuffer
+        0
+
     me draw_image_blend_checked(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
         val right = x.to_i64() + w.to_i64()
         val bottom = y.to_i64() + h.to_i64()
@@ -927,7 +944,8 @@ impl MetalBackend:
         # SIMPLE_ONE_CALL_READBACK=1 (set by gates/apps that pin a modern
         # driver). Flip to default-on once the self-hosted bin/simple is
         # redeployed (blocked on the stage-2 bootstrap bug).
-        if _metal_env_flag("SIMPLE_ONE_CALL_READBACK"):
+        val one_call = _metal_env_flag("SIMPLE_ONE_CALL_READBACK")
+        if one_call:
             val fast_pixels = metal_u32s_from_ptr(host, total_pixels)
             metal_host_free(host)
             if fast_pixels.len() != total_i32:
@@ -1635,7 +1653,7 @@ impl MetalBackend:
         self.pending_composite_encoder = 0
         true
 
-impl Engine2DExtended for MetalBackend:
+impl MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
         self.gpu_frame_complete = false

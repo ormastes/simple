@@ -15,6 +15,7 @@ pub(crate) mod inline_asm_emit;
 mod linker;
 mod imports;
 mod mangle;
+mod module_global_init;
 mod stubs;
 mod tools;
 #[cfg(test)]

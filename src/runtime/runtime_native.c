@@ -188,6 +188,14 @@ int64_t rt_engine2d_rocm_upload_pixels(int64_t dst, int64_t pixels, int64_t coun
     (void)dst; (void)pixels; (void)count;
     return -3;
 }
+int64_t rt_engine2d_rocm_download_pixels(int64_t src, int64_t pixels, int64_t byte_size) {
+    (void)src; (void)pixels; (void)byte_size;
+    return -3;
+}
+int64_t rt_engine2d_rocm_upload_host_buf(int64_t dst, int64_t host_buf, int64_t byte_size) {
+    (void)dst; (void)host_buf; (void)byte_size;
+    return -3;
+}
 
 /* oneAPI */
 bool rt_oneapi_init(void) { return false; }
@@ -1639,6 +1647,18 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
     if (n->len == 0) return 0;
     if (n->len > s->len) return -1;
     for (uint64_t i = 0; i + n->len <= s->len; i++) {
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+    }
+    return -1;
+}
+
+int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* n = rt_core_as_string(needle);
+    if (!s || !n || start < 0) return -1;
+    if (n->len == 0) return start <= (int64_t)s->len ? start : (int64_t)s->len;
+    if (start >= (int64_t)s->len || n->len > s->len) return -1;
+    for (uint64_t i = (uint64_t)start; i + n->len <= s->len; i++) {
         if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
     }
     return -1;

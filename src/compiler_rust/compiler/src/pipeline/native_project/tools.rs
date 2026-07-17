@@ -283,6 +283,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
         "runtime_mcp_core.c",
@@ -378,6 +379,21 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     build_c_runtime_library(build_dir, true)
+}
+
+pub(crate) fn find_hosted_runtime_rlib(runtime_path: &Path) -> Option<PathBuf> {
+    [runtime_path.to_path_buf(), runtime_path.join("deps")]
+        .into_iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libspl_hosted_runtime-") && name.ends_with(".rlib"))
+        })
+        .max_by_key(|path| std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok())
 }
 
 /// Find the pure-Simple core runtime library.

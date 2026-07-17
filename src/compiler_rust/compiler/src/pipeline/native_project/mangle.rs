@@ -657,6 +657,7 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
     extern_fns.contains(name)
         || name.starts_with("rt_")
         || name.starts_with("__simple_")
+        || name.starts_with("__module_init_")
         || name.starts_with("spl_")
         || name.starts_with("__get_global_")
         || name.starts_with("__set_global_")

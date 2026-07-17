@@ -849,6 +849,11 @@ impl<M: Module> CodegenBackend<M> {
     ///   prefix mangling (e.g. `module_prefix__main`).
     /// - All other names follow the existing prefix logic.
     pub fn mangle_name(&self, name: &str) -> String {
+        // Compiler-synthesized freestanding startup functions must retain this
+        // prefix so the linker's module-init symbol scan can discover them.
+        if name.starts_with("__module_init_") {
+            return self.sanitize_symbol(name);
+        }
         if name == "main" && self.is_entry_module {
             return "spl_main".to_string();
         }

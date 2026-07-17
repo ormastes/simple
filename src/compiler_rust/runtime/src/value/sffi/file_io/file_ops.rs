@@ -1010,15 +1010,14 @@ pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
 /// resolution, while this fills the array Rust-side in one call.
 #[no_mangle]
 pub unsafe extern "C" fn rt_u32s_from_raw(ptr: i64, count: i64) -> RuntimeValue {
-    use crate::value::collections::rt_array_set;
     if ptr == 0 || count <= 0 {
         return rt_array_new(0);
     }
     let src = ptr as usize as *const u32;
     let slice = std::slice::from_raw_parts(src, count as usize);
     let array = rt_array_new(count as u64);
-    for (i, v) in slice.iter().enumerate() {
-        rt_array_set(array, i as i64, RuntimeValue::from_int(*v as i64));
+    for value in slice {
+        rt_array_push(array, RuntimeValue::from_int(*value as i64));
     }
     array
 }
@@ -1656,6 +1655,18 @@ sandbox_lowering:
 
         assert_eq!(written, 3);
         assert_eq!(output, [0, 0x7fff_ffff, 0xffff_ffff]);
+    }
+
+    #[test]
+    fn test_u32s_from_raw_is_bit_exact() {
+        let input = [0u32, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
+
+        let values = unsafe { rt_u32s_from_raw(input.as_ptr() as i64, input.len() as i64) };
+
+        assert_eq!(crate::value::collections::rt_array_len(values), input.len() as i64);
+        for (index, expected) in input.iter().enumerate() {
+            assert_eq!(rt_array_get(values, index as i64).as_int() as u32, *expected);
+        }
     }
 
     #[test]

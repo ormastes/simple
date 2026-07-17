@@ -267,16 +267,27 @@ class FontAssetRuntimeValidation:
     family: text
     reason: text
 
-fn _selected_font_asset_candidate_for_path_with_root(path: text, root: text) -> FontAssetCandidate?:
+fn _selected_font_asset_candidate_index_for_path_with_root(path: text, root: text) -> i64:
     val clean = root.trim()
     val base = if clean.ends_with("/"): clean.slice(0, clean.len() - 1) else: clean
-    for candidate in selected_font_asset_candidates():
+    val candidates = selected_font_asset_candidates()
+    var index: i64 = 0
+    while index < candidates.len():
+        val candidate = candidates[index]
         if candidate.local_path == path:
-            return candidate
+            return index
         if ((base == "share/simple" or base.ends_with("/share/simple")) and
             path == base + "/" + candidate.local_path):
-            return candidate
-    nil
+            return index
+        index = index + 1
+    -1
+
+fn _selected_font_asset_candidate_for_path_with_root(path: text, root: text) -> FontAssetCandidate?:
+    val candidates = selected_font_asset_candidates()
+    val index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
+    if index < 0:
+        return nil
+    candidates[index]
 
 fn selected_font_asset_candidate_for_path(path: text) -> FontAssetCandidate?:
     _selected_font_asset_candidate_for_path_with_root(path, env_get("SIMPLE_ASSET_ROOT"))
@@ -347,10 +358,12 @@ fn _font_asset_validation(selected: bool, valid: bool, family: text, reason: tex
     FontAssetRuntimeValidation(selected: selected, valid: valid, family: family, reason: reason)
 
 fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
-    val maybe_candidate = selected_font_asset_candidate_for_path(path)
-    val candidate = match maybe_candidate:
-        Some(value): value
-        None: return _font_asset_validation(false, true, "", "unmanaged")
+    val root = env_get("SIMPLE_ASSET_ROOT")
+    val candidates = selected_font_asset_candidates()
+    val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
+    if candidate_index < 0:
+        return _font_asset_validation(false, true, "", "unmanaged")
+    val candidate = candidates[candidate_index]
     if blob.len() != candidate.byte_len:
         return _font_asset_validation(true, false, candidate.family, "byte-length")
     val actual_sha256 = sha256_u8_hex(blob)
@@ -382,10 +395,13 @@ fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
     not take down the first desktop compose (proven live 2026-07-16:
     first-frame render halted in [TRAP] rt_file_read_bytes)."""
     val physical_path = selected_font_asset_physical_path(path)
-    if not rt_file_exists(physical_path):
-        return ([], _validate_selected_font_asset(path, []))
+    val exists = rt_file_exists(physical_path)
+    if not exists:
+        val missing_validation = _validate_selected_font_asset(path, [])
+        return ([], missing_validation)
     val blob = rt_file_read_bytes(physical_path)
-    (blob, _validate_selected_font_asset(path, blob))
+    val validation = _validate_selected_font_asset(path, blob)
+    (blob, validation)
 
 class FontCoverageCell:
     language: text

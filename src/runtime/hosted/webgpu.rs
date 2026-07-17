@@ -11,6 +11,8 @@
 //! extern fn rt_webgpu_destroy_surface(handle: i64) -> bool
 //! extern fn rt_webgpu_upload_pixels(handle: i64, pixels: [u32], w: i32, h: i32) -> bool
 //! extern fn rt_webgpu_present(handle: i64) -> bool
+//! extern fn rt_webgpu_compute_draw(handle: i64, op_kind: i32, x: i32, y: i32,
+//!                                  w: i32, h: i32, color: u32) -> bool
 //! ```
 //!
 //! Two build modes, mirroring `cocoa.rs` / `win32.rs`:
@@ -100,6 +102,18 @@ mod imp {
     }
 
     pub fn present(_handle: i64) -> bool {
+        false
+    }
+
+    pub fn compute_draw(
+        _handle: i64,
+        _op_kind: i32,
+        _x: i32,
+        _y: i32,
+        _w: i32,
+        _h: i32,
+        _color: u32,
+    ) -> bool {
         false
     }
 }
@@ -388,6 +402,21 @@ mod imp {
         // in backend_webgpu.spl.
         true
     }
+
+    pub fn compute_draw(
+        _handle: i64,
+        _op_kind: i32,
+        _x: i32,
+        _y: i32,
+        _w: i32,
+        _h: i32,
+        _color: u32,
+    ) -> bool {
+        // No WebGPU compute/graphics pipeline is owned by this surface yet.
+        // Returning false makes the Simple backend retain its CPU mirror;
+        // claiming success here would lose the draw.
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +470,19 @@ pub extern "C" fn rt_webgpu_present(handle: i64) -> bool {
     imp::present(handle)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_webgpu_compute_draw(
+    handle: i64,
+    op_kind: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) -> bool {
+    imp::compute_draw(handle, op_kind, x, y, w, h, color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +498,7 @@ mod tests {
             assert_eq!(rt_webgpu_create_surface(640, 480), WEBGPU_INVALID_HANDLE);
             assert!(!rt_webgpu_destroy_surface(1));
             assert!(!rt_webgpu_present(1));
+            assert!(!rt_webgpu_compute_draw(1, 0, 0, 0, 1, 1, 0xFFFF_FFFF));
             // shutdown is idempotent-ok even in stub mode.
             assert!(rt_webgpu_shutdown());
         }

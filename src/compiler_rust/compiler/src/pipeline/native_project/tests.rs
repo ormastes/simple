@@ -2225,13 +2225,8 @@ fn test_stage4_linux_exact_core_projects_fail_closed_platform_abi() {
     let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
     let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
     let requested: Vec<String> = REQUESTED.iter().map(|symbol| (*symbol).to_string()).collect();
-    let capsule = build_stage4_runtime_capsule_archive(
-        &core,
-        &providers,
-        &requested,
-        &temp.path().join("capsule"),
-    )
-    .unwrap();
+    let capsule =
+        build_stage4_runtime_capsule_archive(&core, &providers, &requested, &temp.path().join("capsule")).unwrap();
 
     let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
     assert_eq!(
@@ -2725,6 +2720,27 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     let error = builder.selected_runtime_library(temp.path()).unwrap_err();
     assert!(error.contains("missing Engine2D queue symbols"));
     assert!(error.contains("rt_host_gpu_queue_emit_payload"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let deps = temp.path().join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    build_compiler_backfill_test_archive(&deps, "simple_runtime", &["void rt_host_gpu_queue_reset(void) {}\n"]);
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("missing Engine2D queue symbols"));
+    assert!(!error.contains("feature-built libsimple_runtime.a is missing"));
 }
 
 #[test]
@@ -3988,7 +4004,10 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
         .arg(&linked_probe)
         .status()
         .unwrap();
-    assert!(link_status.success(), "optional main-stub hooks must link without providers");
+    assert!(
+        link_status.success(),
+        "optional main-stub hooks must link without providers"
+    );
 }
 
 #[cfg(not(target_os = "windows"))]

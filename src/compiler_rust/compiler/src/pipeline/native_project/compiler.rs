@@ -16,6 +16,7 @@ use crate::monomorphize::monomorphize_module;
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
 use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::mangle_mir;
+use super::module_global_init::inject_freestanding_module_global_init;
 
 fn is_script_statement(node: &Node) -> bool {
     matches!(
@@ -276,7 +277,15 @@ pub(crate) fn compile_file_to_object(
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
     super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
-    let ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
+    let mut ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
+    let target = effective_target();
+    if matches!(
+        target.os,
+        simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
+    ) {
+        let module_prefix = module_prefix_from_path(file_path, source_root);
+        inject_freestanding_module_global_init(&mut ast, &module_prefix);
+    }
 
     // Build per-module use_map from AST `use` statements.
     let use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);

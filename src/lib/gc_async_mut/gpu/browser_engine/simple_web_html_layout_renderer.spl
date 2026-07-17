@@ -9,7 +9,7 @@
 # so Draw IR and software layout stay free of the GPU backend closure.
 #
 # Two interpreter bugs are worked around here (both worth a seed fix):
-#   * text.index_of(needle, pos) IGNORES pos -> use find_from() (substring+find).
+#   * text.index_of(needle, pos) IGNORES pos -> scan from the requested offset.
 #   * obj.field.push() on an array element does not persist -> use a flat arena
 #     of nodes keyed by integer parent index; only ever append to the top array.
 #
@@ -240,11 +240,12 @@ fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
     true
 
 fn find_from(s: text, needle: text, pos: i32) -> i32:
-    # O(n) per call via the native byte-search (`index_of`) instead of an
-    # interpreted char_at loop (which is O(n^2): each char_at is O(index)).
-    # The whole renderer is byte==char (it uses `.len()` byte counts as char-loop
-    # bounds), so byte-index native search is semantics-preserving for the ASCII
-    # HTML/CSS these paths handle.
+    # O(n*m) portable positional search. Do not emulate this through
+    # substring(start).index_of(): native substring can be represented as an
+    # untagged slice, while index_of expects tagged text and silently returns a
+    # bogus near-zero offset for non-zero starts. Keeping this in Simple also
+    # lets older deployed interpreters run current web-renderer source without
+    # requiring a newly added runtime extern.
     val start = if pos < 0: 0 else: pos
     val nlen = needle.len() as i32
     if nlen == 0:
@@ -252,13 +253,13 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     val slen = s.len() as i32
     if start >= slen or slen < nlen:
         return -1
-    if start <= 0:
-        return s.index_of(needle) as i32
-    val tail = s.substring(start, slen)
-    val idx = tail.index_of(needle) as i32
-    if idx < 0:
-        return -1
-    start + idx
+    val limit = slen - nlen
+    var i = start
+    while i <= limit:
+        if text_matches_at(s, needle, i):
+            return i
+        i = i + 1
+    -1
 
 fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     if key_len == 0:
@@ -465,6 +466,31 @@ fn class_flags_from_attr(class_attr: text) -> ClassFlags:
         i = i + 1
     flags
 
+fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
+    # Construct array-bearing node fields in one typed value. Mutating an
+    # initially-empty [text] field and then copying the class into [HNode]
+    # loses earlier siblings' array handles in native code.
+    val class_attr: text = attr_value_by_key(inner, "class=")
+    val class_words: [text] = if class_attr.len() > 0: split_class_words_trimmed(class_attr) else: []
+    val flags: ClassFlags = class_flags_from_attr(class_attr)
+    HNode(
+        tag: tag,
+        text_data: "",
+        text_trimmed: "",
+        style_attr: attr_value_by_key(inner, "style="),
+        class_attr: class_attr,
+        class_words: class_words,
+        has_widget_class: flags.has_widget_class,
+        has_icon_image_class: flags.has_icon_image_class,
+        has_widget_panel_class: flags.has_widget_panel_class,
+        has_widget_button_class: flags.has_widget_button_class,
+        has_widget_image_class: flags.has_widget_image_class,
+        has_focused_class: flags.has_focused_class,
+        id_attr: attr_value_by_key(inner, "id="),
+        attrs_raw: inner,
+        parent: parent
+    )
+
 fn html_text_range_has_non_ws(html: text, start: i32, end: i32) -> bool:
     var i = start
     while i < end:
@@ -521,19 +547,18 @@ fn _html_scan_events(html: text) -> [[text]]:
         out = out + 1
     var k = 1
     while k < np:
-        var seg = parts[k]
-        val seg_txt: text = "{seg}"
-        if seg_txt.starts_with("!--"):
+        var seg: text = parts[k]
+        if seg.starts_with("!--"):
             # Comment: content may contain "<" (spanning later parts), but
             # "-->" contains no "<" so it always lies within a single part.
-            var cidx = seg.index_of("-->") as i32
+            var cidx = (seg.index_of("-->") ?? -1) as i32
             var terminated = cidx >= 0
             while not terminated:
                 k = k + 1
                 if k >= np:
                     break
                 seg = parts[k]
-                cidx = seg.index_of("-->") as i32
+                cidx = (seg.index_of("-->") ?? -1) as i32
                 terminated = cidx >= 0
             if not terminated:
                 # Unterminated comment: old scanner broke out, discarding the rest.
@@ -547,14 +572,14 @@ fn _html_scan_events(html: text) -> [[text]]:
             continue
         # Normal tag: the old scanner searched ">" from the "<" across any
         # embedded "<", so accumulate parts until the segment holds a ">".
-        var gt = seg.index_of(">") as i32
+        var gt = (seg.index_of(">") ?? -1) as i32
         while gt < 0:
             k = k + 1
             if k >= np:
                 # No ">" until EOF: old scanner broke out, discarding the rest.
                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
             seg = seg + "<" + parts[k]
-            gt = seg.index_of(">") as i32
+            gt = (seg.index_of(">") ?? -1) as i32
         val inner = seg.substring(0, gt)
         var rest = seg.substring(gt + 1, seg.len())
         if out < cap:
@@ -578,8 +603,8 @@ fn _html_scan_events(html: text) -> [[text]]:
                         j = j + 1
                     if found >= 0:
                         # First ">" from the closer on (may cross a "<").
-                        var seg2 = parts[found]
-                        var gt2 = seg2.index_of(">") as i32
+                        var seg2: text = parts[found]
+                        var gt2 = (seg2.index_of(">") ?? -1) as i32
                         while gt2 < 0:
                             found = found + 1
                             if found >= np:
@@ -587,7 +612,7 @@ fn _html_scan_events(html: text) -> [[text]]:
                                 # "</name", found no ">", and broke out.
                                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
                             seg2 = seg2 + "<" + parts[found]
-                            gt2 = seg2.index_of(">") as i32
+                            gt2 = (seg2.index_of(">") ?? -1) as i32
                         rest = seg2.substring(gt2 + 1, seg2.len())
                         k = found
                     # Closer missing entirely: old scanner left pos after the
@@ -790,20 +815,7 @@ fn parse_html(html: text) -> [HNode]:
             continue
         if name == "head" or name == "meta" or name == "link" or name == "base":
             continue
-        var node = mk_node(name, pstack[stack_len - 1])
-        node.class_attr = attr_value_by_key(inner, "class=")
-        if node.class_attr.len() > 0:
-            node.class_words = split_class_words_trimmed(node.class_attr)
-            val class_flags = class_flags_from_attr(node.class_attr)
-            node.has_widget_class = class_flags.has_widget_class
-            node.has_icon_image_class = class_flags.has_icon_image_class
-            node.has_widget_panel_class = class_flags.has_widget_panel_class
-            node.has_widget_button_class = class_flags.has_widget_button_class
-            node.has_widget_image_class = class_flags.has_widget_image_class
-            node.has_focused_class = class_flags.has_focused_class
-        node.id_attr = attr_value_by_key(inner, "id=")
-        node.style_attr = attr_value_by_key(inner, "style=")
-        node.attrs_raw = inner
+        val node = mk_element_node(name, pstack[stack_len - 1], inner)
         val current_index = node_i
         nodes[current_index] = node
         node_i = node_i + 1
@@ -1833,6 +1845,71 @@ class Style:
     object_position: text
     bold: bool
 
+    me inherit_from(p: Style):
+        self.display = if p.display == "none": "none" else: "block"
+        self.fg = p.fg
+        self.font_size = p.font_size
+        self.font_family = p.font_family
+        self.line_height_px = p.line_height_px
+        self.scrollbar_thumb_color = p.scrollbar_thumb_color
+        self.scrollbar_track_color = p.scrollbar_track_color
+        self.text_overflow_ellipsis = p.text_overflow_ellipsis
+        self.visibility_hidden = p.visibility_hidden
+        self.text_align = p.text_align
+        self.text_align_last = p.text_align_last
+        self.text_justify = p.text_justify
+        self.text_transform = p.text_transform
+        self.text_indent_px = p.text_indent_px
+        self.letter_spacing_px = p.letter_spacing_px
+        self.word_spacing_px = p.word_spacing_px
+        self.font_size_adjust = p.font_size_adjust
+        self.font_palette = p.font_palette
+        self.font_feature_settings = p.font_feature_settings
+        self.font_language_override = p.font_language_override
+        self.font_variation_settings = p.font_variation_settings
+        self.font_variant = p.font_variant
+        self.font_variant_alternates = p.font_variant_alternates
+        self.font_variant_caps = p.font_variant_caps
+        self.font_variant_east_asian = p.font_variant_east_asian
+        self.font_variant_emoji = p.font_variant_emoji
+        self.font_variant_ligatures = p.font_variant_ligatures
+        self.font_variant_numeric = p.font_variant_numeric
+        self.font_variant_position = p.font_variant_position
+        self.font_style_italic = p.font_style_italic
+        self.font_kerning = p.font_kerning
+        self.font_optical_sizing = p.font_optical_sizing
+        self.font_stretch = p.font_stretch
+        self.font_width = p.font_width
+        self.font_synthesis = p.font_synthesis
+        self.font_synthesis_small_caps = p.font_synthesis_small_caps
+        self.font_synthesis_position = p.font_synthesis_position
+        self.font_synthesis_style = p.font_synthesis_style
+        self.font_synthesis_weight = p.font_synthesis_weight
+        self.direction_rtl = p.direction_rtl
+        self.writing_mode = p.writing_mode
+        self.text_orientation = p.text_orientation
+        self.text_combine_upright = p.text_combine_upright
+        self.text_shadow_x_px = p.text_shadow_x_px
+        self.text_shadow_y_px = p.text_shadow_y_px
+        self.text_shadow_color = p.text_shadow_color
+        self.text_decoration_color = p.text_decoration_color
+        self.text_decoration_underline = p.text_decoration_underline
+        self.text_decoration_style = p.text_decoration_style
+        self.text_decoration_thickness_px = p.text_decoration_thickness_px
+        self.text_underline_offset_px = p.text_underline_offset_px
+        self.text_underline_position = p.text_underline_position
+        self.white_space_nowrap = p.white_space_nowrap
+        self.overflow_wrap = p.overflow_wrap
+        self.line_break = p.line_break
+        self.hyphens = p.hyphens
+        self.word_break = p.word_break
+        self.cursor = p.cursor
+        self.caret_color = p.caret_color
+        self.tab_size = p.tab_size
+        self.object_fit = p.object_fit
+        self.object_position = p.object_position
+        self.bold = p.bold
+
 fn _html_text_language(nodes: [HNode], node_index: i32, st: Style) -> text:
     val override = st.font_language_override.trim()
     if override != "" and override.lower() != "normal":
@@ -1851,9 +1928,14 @@ fn _html_text_language(nodes: [HNode], node_index: i32, st: Style) -> text:
 fn renderer_default_style() -> Style:
     Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: argb(0, 0, 0), font_size: 16, font_family: "sans-serif", resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, box_shadow_blur_px: 0, box_shadow_alpha: 255, box_shadow_raw: "", bg_layers_raw: "", border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: "block", overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: 0u32, scrollbar_track_color: 0u32, text_overflow_ellipsis: false, visibility_hidden: false, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", text_align_last: "auto", text_justify: "auto", text_transform: "none", text_indent_px: 0, letter_spacing_px: 0, word_spacing_px: 0, font_size_adjust: "none", font_palette: "normal", font_feature_settings: "normal", font_language_override: "normal", font_variation_settings: "normal", font_variant: "normal", font_variant_alternates: "normal", font_variant_caps: "normal", font_variant_east_asian: "normal", font_variant_emoji: "normal", font_variant_ligatures: "normal", font_variant_numeric: "normal", font_variant_position: "normal", font_style_italic: false, font_kerning: "auto", font_optical_sizing: "auto", font_stretch: "normal", font_width: "normal", font_synthesis: "weight style", font_synthesis_small_caps: "auto", font_synthesis_position: "auto", font_synthesis_style: "auto", font_synthesis_weight: "auto", direction_rtl: false, writing_mode: "horizontal-tb", text_orientation: "mixed", text_combine_upright: "none", text_shadow_x_px: 0, text_shadow_y_px: 0, text_shadow_color: 0u32, text_decoration_color: 0u32, text_decoration_underline: false, text_decoration_style: "solid", text_decoration_thickness_px: 1, text_underline_offset_px: 0, text_underline_position: "auto", white_space_nowrap: false, overflow_wrap: "normal", line_break: "auto", hyphens: "manual", word_break: "normal", cursor: "auto", resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: 0u32, tab_size: 8, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: "fill", object_position: "50% 50%", bold: false)
 
-fn inherit_style(p: Style) -> Style:
+fn inherit_style_legacy(p: Style) -> Style:
     val display = if p.display == "none": "none" else: "block"
     Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: p.fg, font_size: p.font_size, font_family: p.font_family, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, box_shadow_blur_px: 0, box_shadow_alpha: 255, box_shadow_raw: "", bg_layers_raw: "", border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: display, overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: p.scrollbar_thumb_color, scrollbar_track_color: p.scrollbar_track_color, text_overflow_ellipsis: p.text_overflow_ellipsis, visibility_hidden: p.visibility_hidden, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, text_align_last: p.text_align_last, text_justify: p.text_justify, text_transform: p.text_transform, text_indent_px: p.text_indent_px, letter_spacing_px: p.letter_spacing_px, word_spacing_px: p.word_spacing_px, font_size_adjust: p.font_size_adjust, font_palette: p.font_palette, font_feature_settings: p.font_feature_settings, font_language_override: p.font_language_override, font_variation_settings: p.font_variation_settings, font_variant: p.font_variant, font_variant_alternates: p.font_variant_alternates, font_variant_caps: p.font_variant_caps, font_variant_east_asian: p.font_variant_east_asian, font_variant_emoji: p.font_variant_emoji, font_variant_ligatures: p.font_variant_ligatures, font_variant_numeric: p.font_variant_numeric, font_variant_position: p.font_variant_position, font_style_italic: p.font_style_italic, font_kerning: p.font_kerning, font_optical_sizing: p.font_optical_sizing, font_stretch: p.font_stretch, font_width: p.font_width, font_synthesis: p.font_synthesis, font_synthesis_small_caps: p.font_synthesis_small_caps, font_synthesis_position: p.font_synthesis_position, font_synthesis_style: p.font_synthesis_style, font_synthesis_weight: p.font_synthesis_weight, direction_rtl: p.direction_rtl, writing_mode: p.writing_mode, text_orientation: p.text_orientation, text_combine_upright: p.text_combine_upright, text_shadow_x_px: p.text_shadow_x_px, text_shadow_y_px: p.text_shadow_y_px, text_shadow_color: p.text_shadow_color, text_decoration_color: p.text_decoration_color, text_decoration_underline: p.text_decoration_underline, text_decoration_style: p.text_decoration_style, text_decoration_thickness_px: p.text_decoration_thickness_px, text_underline_offset_px: p.text_underline_offset_px, text_underline_position: p.text_underline_position, white_space_nowrap: p.white_space_nowrap, overflow_wrap: p.overflow_wrap, line_break: p.line_break, hyphens: p.hyphens, word_break: p.word_break, cursor: p.cursor, resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: p.caret_color, tab_size: p.tab_size, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: p.object_fit, object_position: p.object_position, bold: p.bold)
+
+fn inherit_style(p: Style) -> Style:
+    var st = renderer_default_style()
+    st.inherit_from(p)
+    st
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -4054,6 +4136,13 @@ class Rules:
     group_parts: [[[text]]]
     decls: [text]
 
+# Named transport for the three parallel rule-scan arrays. Returning these as
+# an anonymous [[text]] loses the inner RuntimeArray identity in native code.
+class CssRuleScan:
+    selectors: [text]
+    declarations: [text]
+    wrappers: [text]
+
 class RuleBuckets:
     id_keys: [text]
     id_rules: [[i32]]
@@ -4341,7 +4430,7 @@ fn extract_css(html: text) -> Rules:
 # @-wrappers so depth-1 rules carry their wrapper prelude, matching the
 # depth-0-rule / depth-1-child-of-@-wrapper emission the layout cascade
 # expects.
-fn _css_scan_rules_simple(css: text) -> [[text]]:
+fn _css_scan_rules_simple(css: text) -> CssRuleScan:
     val cap = 6000
     var sels: [text] = [""; cap]
     var decls: [text] = [""; cap]
@@ -4353,8 +4442,8 @@ fn _css_scan_rules_simple(css: text) -> [[text]]:
     val parts = css.split("{")
     val np = parts.len()
     if np == 0:
-        return [text_list_prefix(sels, 0), text_list_prefix(decls, 0), text_list_prefix(wraps, 0)]
-    var sel_pending = parts[0]
+        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
+    var sel_pending: text = parts[0]
     var k = 1
     while k < np:
         val opener = sel_pending.trim()
@@ -4362,8 +4451,8 @@ fn _css_scan_rules_simple(css: text) -> [[text]]:
         if depth < stack.len():
             stack[depth] = opener
         depth = depth + 1
-        val seg = parts[k]
-        val subs = seg.split("}")
+        val seg: text = parts[k]
+        val subs: [text] = seg.split("}")
         val nsubs = subs.len()
         # `subs[0]` is the just-opened block's body up to its first "}". If the
         # block is a leaf rule (opener not an @-wrapper) with a non-empty
@@ -4373,7 +4462,7 @@ fn _css_scan_rules_simple(css: text) -> [[text]]:
         if (not is_wrapper) and opener.len() > 0 and out < cap:
             var wrapper = ""
             if depth >= 2 and (depth - 2) < stack.len():
-                val parent = stack[depth - 2]
+                val parent: text = stack[depth - 2]
                 if parent.starts_with("@"):
                     wrapper = parent
             sels[out] = opener
@@ -4388,9 +4477,13 @@ fn _css_scan_rules_simple(css: text) -> [[text]]:
         # The trailing piece after the last "}" is the next block's selector.
         sel_pending = if nsubs > 0: subs[nsubs - 1] else: ""
         k = k + 1
-    [text_list_prefix(sels, out), text_list_prefix(decls, out), text_list_prefix(wraps, out)]
+    CssRuleScan(
+        selectors: text_list_prefix(sels, out),
+        declarations: text_list_prefix(decls, out),
+        wrappers: text_list_prefix(wraps, out)
+    )
 
-fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
+fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Rules:
     # First pass: collect CSS custom properties from all :root blocks
     var custom_prop_parts: [text] = [""; 100]
     var custom_prop_count = 0
@@ -4436,11 +4529,17 @@ fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
         # cost seconds-to-minutes on a realistic theme sheet). See
         # `_css_scan_rules_simple`. Selector-group splitting, @media condition
         # evaluation, and CSS-variable substitution stay in Simple below.
-        val bounds = _css_scan_rules_simple(css)
-        val b_sel_text = bounds[0]
-        val b_decl_text = bounds[1]
-        val b_wrapper = bounds[2]
+        val bounds: CssRuleScan = _css_scan_rules_simple(css)
+        val b_sel_text: [text] = bounds.selectors
+        val b_decl_text: [text] = bounds.declarations
+        val b_wrapper: [text] = bounds.wrappers
         val candidate_count = b_sel_text.len()
+        if trace_stages:
+            print "[layout-trace] css_scan candidates={candidate_count} declarations={b_decl_text.len()} wrappers={b_wrapper.len()}"
+            var trace_rule_i = 0
+            while trace_rule_i < candidate_count:
+                print "[layout-trace] css_scan rule={trace_rule_i} selector={b_sel_text[trace_rule_i]} decl_len={b_decl_text[trace_rule_i].len()}"
+                trace_rule_i = trace_rule_i + 1
         var block_group_parts: [[[text]]] = [[[]]; candidate_count]
         var block_decls: [text] = [""; candidate_count]
         var out_i = 0
@@ -4465,7 +4564,10 @@ fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
         group_parts = group_parts + group_parts_list_prefix(block_group_parts, out_i)
         decls = decls + text_list_prefix(block_decls, out_i)
         pos = close + 1
-    Rules(group_parts: group_parts, decls: decls)
+    val result = Rules(group_parts: group_parts, decls: decls)
+    if trace_stages:
+        print "[layout-trace] css_result rules={result.group_parts.len()} decls={result.decls.len()}"
+    result
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -5258,13 +5360,17 @@ fn dict_key_index_count(d: Dict<text, i32>, keys: [text], key: text, count: i32)
     # ponytail: linear fallback keeps Simple-core correct until its Dict ABI is available; hosted runtimes stay O(1).
     text_key_index_count(keys, key, count)
 
-fn build_rule_buckets(rules: Rules) -> RuleBuckets:
+fn build_rule_buckets(rules: Rules, trace_stages: bool = false) -> RuleBuckets:
     var bucket_capacity = 0
     var cr = 0
     val rule_count = rules.group_parts.len()
+    if trace_stages:
+        print "[layout-trace] bucket_stage=count-start rules={rule_count}"
     while cr < rule_count:
         bucket_capacity = bucket_capacity + rules.group_parts[cr].len()
         cr = cr + 1
+    if trace_stages:
+        print "[layout-trace] bucket_stage=count-ready capacity={bucket_capacity}"
     var id_keys_raw: [text] = [""; bucket_capacity]
     var id_counts_raw: [i32] = [0; bucket_capacity]
     var id_key_count = 0
@@ -5282,11 +5388,15 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
     var id_key_dict: Dict<text, i32> = {}
     var class_key_dict: Dict<text, i32> = {}
     var tag_key_dict: Dict<text, i32> = {}
+    if trace_stages:
+        print "[layout-trace] bucket_stage=storage-ready"
     var r = 0
     while r < rule_count:
         val groups = rules.group_parts[r]
         var g = 0
         val group_count = groups.len()
+        if trace_stages:
+            print "[layout-trace] bucket_stage=rule-start rule={r} groups={group_count}"
         while g < group_count:
             val right = selector_rightmost_part(groups[g])
             val base = selector_bucket_base(right)
@@ -5744,12 +5854,20 @@ fn presentational_attr_decls(node: HNode) -> text:
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
-fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> [Style]:
-    val rule_buckets = build_rule_buckets(rules)
+fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false) -> [Style]:
+    val rule_buckets = build_rule_buckets(rules, trace_stages)
+    if trace_stages:
+        print "[layout-trace] style_stage=rule-buckets-ready"
     val selector_ctx = build_selector_context(nodes, child_index)
+    if trace_stages:
+        print "[layout-trace] style_stage=selector-context-ready"
     val rule_specificities = build_rule_specificities(rules)
+    if trace_stages:
+        print "[layout-trace] style_stage=rule-specificities-ready"
     val node_count = nodes.len()
     var styles: [Style] = [renderer_default_style(); node_count]
+    if trace_stages:
+        print "[layout-trace] style_stage=defaults-ready nodes={node_count}"
     var i = 0
     while i < node_count:
         # Budget guard (outer): stop resolving further nodes on expiry; nodes not
@@ -5757,17 +5875,41 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
         if _web_budget_expired():
             break
         val nd = nodes[i]
-        var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: renderer_default_style()
+        if trace_stages:
+            print "[layout-trace] style_stage=node-start index={i} parent={nd.parent} tag={nd.tag}"
+        var st = renderer_default_style()
+        if nd.parent >= 0:
+            val parent_style = styles[nd.parent]
+            if trace_stages:
+                print "[layout-trace] style_stage=parent-loaded index={i}"
+                print "[layout-trace] style_stage=parent-display index={i} display={parent_style.display}"
+                print "[layout-trace] style_stage=parent-font index={i} size={parent_style.font_size} family={parent_style.font_family}"
+            st.inherit_from(parent_style)
+            if trace_stages:
+                print "[layout-trace] style_stage=inherit-returned index={i} display={st.display} font={st.font_family}"
         # em/% font-size resolve against the inherited (parent) font-size, not the
         # UA-default set by tag_defaults (so h1{font-size:1.5em} == 1.5 x parent).
         val em_base = if nd.parent >= 0: styles[nd.parent].font_size else: 16
+        if trace_stages:
+            print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
         st = tag_defaults(st, nd.tag)
+        if trace_stages:
+            print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
+            print "[layout-trace] style_stage=attrs-ready index={i} attrs_len={nd.attrs_raw.len()}"
         val pres_decls = presentational_attr_decls(nd)
+        if trace_stages:
+            print "[layout-trace] style_stage=presentational-ready index={i} decls_len={pres_decls.len()}"
         if pres_decls.len() > 0:
             st = apply_decls(st, pres_decls, em_base)
         var empty_cells_hide = false
+        if trace_stages:
+            print "[layout-trace] style_stage=selector-inputs index={i} class_attr={nd.class_attr} classes={nd.class_words.len()} id_len={nd.id_attr.len()}"
         val candidates_raw = style_rule_candidates(nd, rule_buckets)
+        if trace_stages:
+            print "[layout-trace] style_stage=candidates-ready index={i} count={candidates_raw.len()}"
         val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)
+        if trace_stages:
+            print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
         var candidate_i = 0
         val candidate_count = candidates.len()
         while candidate_i < candidate_count:
@@ -5788,22 +5930,35 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
                     empty_cells_hide = true
                 st = apply_decls(st, rules.decls[r], em_base)
             candidate_i = candidate_i + 1
+        if trace_stages:
+            print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
         if nd.style_attr.len() > 0:
             val inline_empty_cells_decl = decl_get(nd.style_attr, "empty-cells")
             if inline_empty_cells_decl.trim().lower() == "hide":
                 empty_cells_hide = true
             st = apply_decls(st, nd.style_attr, em_base)
+        if trace_stages:
+            print "[layout-trace] style_stage=inline-ready index={i}"
         if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
             st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
         if nd.tag == "#text":
             val metric_text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
-            val metrics = resolve_font_metrics_with_language(st.font_family, metric_text, st.font_size, _html_text_language(nodes, i, st))
+            if trace_stages:
+                print "[layout-trace] style_stage=metric-text-ready index={i} len={metric_text.len()}"
+            val language = _html_text_language(nodes, i, st)
+            if trace_stages:
+                print "[layout-trace] style_stage=metric-language-ready index={i} language={language}"
+            val metrics = resolve_font_metrics_with_language(st.font_family, metric_text, st.font_size, language)
+            if trace_stages:
+                print "[layout-trace] style_stage=metrics-ready index={i} valid={metrics.valid}"
             if metrics.valid:
                 st.resolved_font_identity = metrics.identity
                 st.resolved_font_advances = metrics.advances
                 st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
         styles[i] = st
+        if trace_stages:
+            print "[layout-trace] style_stage=node-complete index={i}"
         i = i + 1
     styles
 
@@ -9240,7 +9395,7 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
                     merged.push(prop)
                 shaped.computed_style = merged
             return shaped
-        return draw_ir_text_styled(
+        val command = draw_ir_text_styled(
             _html_draw_ir_component_id(node, i),
             content_x,
             content_y,
@@ -9248,7 +9403,8 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
             st.fg,
             computed_style
         )
-    draw_ir_box_with_style(
+        return command
+    val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
         x,
         y,
@@ -9261,14 +9417,29 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         clip_rect,
         computed_style
     )
+    command
 
 fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32) -> bool:
-    i > 0 and styles[i].display != "none" and not content_hidden_by_ancestor(nodes, styles, i) and boxes.bw[i] > 0 and boxes.bh[i] > 0
+    if i <= 0:
+        return false
+    val display = styles[i].display
+    val box_w = boxes.bw[i]
+    val box_h = boxes.bh[i]
+    if display == "none":
+        return false
+    val ancestor_hidden = content_hidden_by_ancestor(nodes, styles, i)
+    if ancestor_hidden:
+        return false
+    if box_w <= 0:
+        return false
+    if box_h <= 0:
+        return false
+    true
 
 fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32) -> [DrawIrCommand]:
-    var command_count = 0
-    var i = 0
-    var first_visible = -1
+    var command_count: i32 = 0
+    var i: i32 = 0
+    var first_visible: i32 = -1
     val node_count = nodes.len()
     while i < node_count:
         if _html_draw_ir_visible(nodes, styles, boxes, i):
@@ -9421,11 +9592,19 @@ fn _web_paint_iframes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw:
     out
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
-    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val render_start_us = rt_time_now_unix_micros()
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
+    val resolved_budget_ms = if env_override > 0: env_override else: default_budget_ms
+    _web_budget_begin(resolved_budget_ms)
+    val budget_us = resolved_budget_ms * 1000
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
+    _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     val styles = compute_styles(nodes, rules, child_index)
+    _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
@@ -9448,8 +9627,11 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     )
     val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
     val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
-    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
-    draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
+    val commands = _html_draw_ir_commands(nodes, styles, boxes, width, height)
+    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
+    val batches = [batch]
+    val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
+    composition
 
 # Stage-timed variant of the software render entry: prints per-stage wall
 # times so render-cost regressions can be localized without a debugger.
@@ -9459,13 +9641,15 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
     val nodes = parse_html(html)
     val t1 = rt_time_now_unix_micros()
     print "[layout-trace] parse_html_ms={(t1 - t0) / 1000} nodes={nodes.len()}"
-    val rules = extract_css_vw(html, width)
+    val rules = extract_css_vw(html, width, true)
     val t2 = rt_time_now_unix_micros()
     print "[layout-trace] extract_css_ms={(t2 - t1) / 1000}"
     val child_index = build_child_index(nodes)
-    val styles = compute_styles(nodes, rules, child_index)
+    val t_child_index = rt_time_now_unix_micros()
+    print "[layout-trace] build_child_index_ms={(t_child_index - t2) / 1000}"
+    val styles = compute_styles(nodes, rules, child_index, true)
     val t3 = rt_time_now_unix_micros()
-    print "[layout-trace] compute_styles_ms={(t3 - t2) / 1000}"
+    print "[layout-trace] compute_styles_ms={(t3 - t_child_index) / 1000}"
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
