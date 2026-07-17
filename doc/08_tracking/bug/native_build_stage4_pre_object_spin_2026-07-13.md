@@ -658,6 +658,19 @@ Ordinary LLVM-default and explicit-Cranelift object emission remain unchanged;
 only the Stage4 one-binary profile is rejected. A focused source regression
 pins both the fail-fast ordering and the later ordinary emit-object path.
 
+## 2026-07-17 production memtrack provider inventory
+
+The strict pure-Simple link path now stages the already-compiled
+`runtime_memtrack.o`/`.obj` as a deterministic one-member archive after the
+dynload and font providers. Its shared hosted validator accepts only the 14
+`spl_memtrack_*` functions plus `g_memtrack_enabled`, rejects duplicate or
+extra globals and undefined `rt_*`/`spl_*` dependencies, and normalizes ELF,
+Mach-O, COFF-MSVC, and COFF-MinGW spellings. The archive is deleted on the
+existing fail-closed path and is not selected or linked. Production selection
+must first exclude the same object from core-C so the unique-owner validator
+does not correctly reject that overlap; hashing, cache admission, link ordering,
+and executable proof remain open.
+
 Timestamp time-of-day extraction now shares one floor-day microsecond
 remainder. Negative sub-second values such as `-1` therefore produce
 `23:59:59.999999` for the preceding date instead of the inconsistent

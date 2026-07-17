@@ -57,6 +57,10 @@ pub fn stage4_font_provider_archive_file(target_os_name: text, msvc_linker: bool
     """Return the target/linker-specific font archive name without selecting it."""
     stage4_hosted_provider_archive_file("font", target_os_name, msvc_linker)
 
+pub fn stage4_memtrack_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the target/linker-specific memtrack archive name without selecting it."""
+    stage4_hosted_provider_archive_file("memtrack", target_os_name, msvc_linker)
+
 fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     if target_os_name == "windows":
         return Ok(if msvc_objects: "coff-msvc" else: "coff-mingw")
@@ -74,6 +78,10 @@ pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects:
 
 pub fn stage4_font_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a hosted font provider."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_memtrack_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for a hosted memtrack provider."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
 pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
@@ -111,19 +119,9 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
     Ok(())
 
-pub fn stage4_validate_font_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
-    """Validate the exact public font ABI and forbid hidden runtime dependencies."""
+fn stage4_validate_runtime_only_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text]) -> Result<(), text>:
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
-        return Err("Unsupported Stage4 font object format '" + object_format + "'")
-
-    val expected = [
-        "rt_font_load_bytes", "rt_font_load", "rt_font_free",
-        "rt_font_glyph_bitmap", "rt_font_glyph_index", "rt_font_glyph_bitmap_index",
-        "rt_font_bitmap_width", "rt_font_bitmap_height", "rt_font_bitmap_xoff",
-        "rt_font_bitmap_yoff", "rt_font_bitmap_get_pixel", "rt_font_bitmap_free",
-        "rt_font_glyph_advance", "rt_font_glyph_advance_index", "rt_font_line_height",
-        "rt_font_ascent", "rt_font_descent", "rt_font_line_gap"
-    ]
+        return Err("Unsupported Stage4 " + provider + " object format '" + object_format + "'")
     var definitions: Dict<text, bool> = {}
     for line in nm_output.split("\n"):
         val parts = line.split_whitespace()
@@ -135,20 +133,42 @@ pub fn stage4_validate_font_provider_symbol_contract(nm_output: text, object_for
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
-        if type_code == "U":
+        val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
+        if is_undefined:
             if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
-                return Err("Stage4 font provider has runtime dependency '" + symbol + "'")
+                return Err("Stage4 " + provider + " provider has runtime dependency '" + symbol + "'")
         elif stage4_nm_has_address(parts, type_index):
             if definitions.has(symbol):
-                return Err("Stage4 font provider repeats global definition '" + symbol + "'")
+                return Err("Stage4 " + provider + " provider repeats global definition '" + symbol + "'")
             definitions[symbol] = true
 
     if definitions.len() != expected.len():
-        return Err("Stage4 font provider definitions differ from the exact ABI: " + definitions.keys().join(", "))
+        return Err("Stage4 " + provider + " provider definitions differ from the exact ABI: " + definitions.keys().join(", "))
     for symbol in expected:
         if not definitions.has(symbol):
-            return Err("Stage4 font provider is missing exact ABI symbol '" + symbol + "'")
+            return Err("Stage4 " + provider + " provider is missing exact ABI symbol '" + symbol + "'")
     Ok(())
+
+pub fn stage4_validate_font_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the exact public font ABI and forbid hidden runtime dependencies."""
+    stage4_validate_runtime_only_provider_symbol_contract(nm_output, object_format, "font", [
+        "rt_font_load_bytes", "rt_font_load", "rt_font_free",
+        "rt_font_glyph_bitmap", "rt_font_glyph_index", "rt_font_glyph_bitmap_index",
+        "rt_font_bitmap_width", "rt_font_bitmap_height", "rt_font_bitmap_xoff",
+        "rt_font_bitmap_yoff", "rt_font_bitmap_get_pixel", "rt_font_bitmap_free",
+        "rt_font_glyph_advance", "rt_font_glyph_advance_index", "rt_font_line_height",
+        "rt_font_ascent", "rt_font_descent", "rt_font_line_gap"
+    ])
+
+pub fn stage4_validate_memtrack_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the exact public memtrack ABI and forbid hidden runtime dependencies."""
+    stage4_validate_runtime_only_provider_symbol_contract(nm_output, object_format, "memtrack", [
+        "g_memtrack_enabled", "spl_memtrack_enable", "spl_memtrack_disable",
+        "spl_memtrack_is_enabled", "spl_memtrack_record", "spl_memtrack_unrecord",
+        "spl_memtrack_snapshot", "spl_memtrack_dump_since", "spl_memtrack_live_count",
+        "spl_memtrack_live_bytes", "spl_memtrack_reset", "spl_memtrack_count_since",
+        "spl_memtrack_bytes_since", "spl_memtrack_set_listener", "spl_memtrack_clear_listener"
+    ])
 
 fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
     if type_index <= 0:

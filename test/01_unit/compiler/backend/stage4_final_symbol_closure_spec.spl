@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -118,6 +118,36 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_font_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
         expect(stage4_validate_font_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
 
+    it "accepts only the exact hosted memtrack provider ABI":
+        val exact = "00000000 B g_memtrack_enabled\n00000010 T spl_memtrack_enable\n00000020 T spl_memtrack_disable\n00000030 T spl_memtrack_is_enabled\n00000040 T spl_memtrack_record\n00000050 T spl_memtrack_unrecord\n00000060 T spl_memtrack_snapshot\n00000070 T spl_memtrack_dump_since\n00000080 T spl_memtrack_live_count\n00000090 T spl_memtrack_live_bytes\n000000a0 T spl_memtrack_reset\n000000b0 T spl_memtrack_count_since\n000000c0 T spl_memtrack_bytes_since\n000000d0 T spl_memtrack_set_listener\n000000e0 T spl_memtrack_clear_listener\n         U calloc\n"
+        val prefixed = exact.replace(" B g_", " B _g_").replace(" T spl_", " T _spl_")
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(prefixed, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "00000000 A @feat.00\n", "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(prefixed, "coff-mingw").is_ok()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact.replace("000000e0 T spl_memtrack_clear_listener\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "000000f0 T spl_memtrack_extra\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "000000f0 T spl_memtrack_enable\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "         w spl_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_memtrack_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+
+    it "stages validates and cleans the memtrack provider before the fail-closed barrier":
+        expect(stage4_memtrack_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_memtrack.a")
+        expect(stage4_memtrack_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_memtrack.lib")
+        expect(stage4_memtrack_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_memtrack_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val font_pos = source.last_index_of("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
+        expect(memtrack_pos).to_be_greater_than(font_pos)
+        expect(barrier_pos).to_be_greater_than(memtrack_pos)
+        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_memtrack\"")
+        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_memtrack\"], [archive_path])")
+        expect(source).to_contain("stage4_validate_memtrack_provider_symbol_contract(scans[0], object_format)")
+        expect(source).to_contain("file_delete(memtrack_provider_archive)")
+
     it "builds inventories validates and cleans the font provider before the fail-closed barrier":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         val build_pos = source.find("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid)")
@@ -139,6 +169,7 @@ describe "Stage4 aggregate final symbol closure":
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(err)")
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 dynamic-loader provider failed")
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 font provider failed")
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 memtrack provider failed")
 
     it "rejects hosted constructor and destructor section families":
         val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
@@ -219,7 +250,7 @@ not-an-address W rt_malformed
         val combine_pos = source.find("# Step 3: Combine all objects and link")
         expect(barrier_pos).to_be_greater_than(closure_pos)
         expect(combine_pos).to_be_greater_than(barrier_pos)
-        expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        file_delete(entry_obj_path)\n        file_delete(dynload_provider_archive)\n        file_delete(font_provider_archive)\n        if bootstrap_support_obj != \"\":\n            file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
+        expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        file_delete(entry_obj_path)\n        file_delete(dynload_provider_archive)\n        file_delete(font_provider_archive)\n        file_delete(memtrack_provider_archive)\n        if bootstrap_support_obj != \"\":\n            file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
 
     it "selects uniquely owning archives in declared order":
         val result = stage4_select_requested_archive_indices(
