@@ -410,13 +410,22 @@ not copy them into a package, pass their adjacent self-reported hash as trust,
 or configure a production process to load them directly. A future external
 package route must authenticate its own manifest and bytes before calling the
 same installer.
-On the current NVIDIA promotion host, a fresh-session generation attempt is
-bounded to one invocation:
-`CUDA_ARCH=compute_75 SIMPLE_BIN=bin/simple sh scripts/check/check-portable-compute-toolchains.shs`.
-First verify that `bin/simple` resolves to the current pure-Simple self-hosted
-runtime. Promote only a `cuda_font_status=compiled_artifact_verified` record
-whose Simple/emitter/source/artifact provenance matches the source-tracked
-tuple.
+On the current promotion host, a fresh semantics-revision-2 CUDA/Vulkan
+candidate generation attempt is bounded to one invocation:
+
+```sh
+CUDA_ARCH=compute_75 \
+  SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
+  VULKAN_GLSLC_TOOL="$PINNED_GLSLC" \
+  BUILD_DIR=build/portable_compute_toolchains-semantics2 \
+  REPORT_PATH=build/portable_compute_toolchains-semantics2/report.md \
+  sh scripts/check/check-portable-compute-toolchains.shs
+```
+
+Both variable paths must name current, admitted binaries. The authoritative
+result is `build/portable_compute_toolchains-semantics2/evidence.env`, not the
+checker exit alone; accept only rows whose Simple, compiler, emitter, source,
+and artifact provenance matches the independently reviewed candidate tuple.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
