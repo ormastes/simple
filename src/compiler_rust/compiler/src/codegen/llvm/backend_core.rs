@@ -1123,6 +1123,7 @@ impl LlvmBackend {
 #[cfg(all(test, feature = "llvm"))]
 mod tests {
     use super::LlvmBackend;
+    use crate::codegen::backend_trait::NativeBackend;
     use crate::hir::TypeId;
     use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
@@ -1140,6 +1141,76 @@ mod tests {
         assert!(ir.contains("target triple"));
         assert!(ir.contains("x86_64"));
         assert!(ir.contains("target datalayout"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn llvm_aot_function_sections_allow_strict_dead_reference_gc() {
+        use crate::mir::CallTarget;
+        use object::{Object, ObjectSection};
+
+        let mut live = MirFunction::new("live".to_string(), TypeId::I64, Visibility::Public);
+        live.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 7,
+        });
+        live.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut dead = MirFunction::new("dead".to_string(), TypeId::I64, Visibility::Public);
+        dead.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(0)),
+            target: CallTarget::Pure("missing_dead_symbol".to_string()),
+            args: vec![],
+        });
+        dead.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut mir = MirModule::new();
+        mir.functions = vec![live, dead];
+        let mut backend = LlvmBackend::new(Target::new(TargetArch::host(), TargetOS::Linux)).unwrap();
+        let object_bytes = backend.compile(&mir).unwrap();
+
+        let object = object::File::parse(object_bytes.as_slice()).unwrap();
+        let function_sections = object
+            .sections()
+            .filter_map(|section| section.name().ok())
+            .filter(|name| name.starts_with(".text.simple."))
+            .collect::<Vec<_>>();
+        assert!(
+            function_sections.len() >= 2,
+            "expected distinct LLVM function sections, got {function_sections:?}"
+        );
+
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        if std::process::Command::new(&cc).arg("--version").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let llvm_object = temp.path().join("functions.o");
+        std::fs::write(&llvm_object, object_bytes).unwrap();
+
+        for (entry, should_link) in [("live", true), ("dead", false)] {
+            let main_source = temp.path().join(format!("main_{entry}.c"));
+            let output = temp.path().join(format!("probe_{entry}"));
+            std::fs::write(
+                &main_source,
+                format!("extern long {entry}(void); int main(void) {{ return (int){entry}(); }}\n"),
+            )
+            .unwrap();
+            let link = std::process::Command::new(&cc)
+                .arg(&main_source)
+                .arg(&llvm_object)
+                .arg("-Wl,--gc-sections")
+                .arg("-o")
+                .arg(&output)
+                .output()
+                .unwrap();
+            assert_eq!(
+                link.status.success(),
+                should_link,
+                "{entry} link status mismatch: {}",
+                String::from_utf8_lossy(&link.stderr)
+            );
+        }
     }
 
     #[test]
@@ -1339,15 +1410,29 @@ impl NativeBackend for LlvmBackend {
         {
             let m = self.module.borrow();
             if let Some(m) = m.as_ref() {
+                let emit_elf_function_sections = matches!(
+                    self.target.os,
+                    TargetOS::Linux | TargetOS::FreeBSD | TargetOS::SimpleOS | TargetOS::None
+                );
+                let mut body_section_index = 0usize;
                 let mut func_opt = m.get_first_function();
                 while let Some(f) = func_opt {
                     if f.count_basic_blocks() == 0 {
                         // No body — must be External
                         f.set_linkage(inkwell::module::Linkage::External);
-                    } else if f.get_name().to_str() == Ok("spl_main") {
-                        // Entry point must be a strong (Global) symbol so the linker
-                        // prefers it over the weak spl_main in the C main stub.
-                        f.set_linkage(inkwell::module::Linkage::External);
+                    } else {
+                        // ELF section GC works at section granularity. Keep every
+                        // body in its own section so an unreachable generic/helper
+                        // body cannot retain its unresolved imports at final link.
+                        if emit_elf_function_sections {
+                            f.set_section(Some(&format!(".text.simple.{body_section_index}")));
+                            body_section_index += 1;
+                        }
+                        if f.get_name().to_str() == Ok("spl_main") {
+                            // Entry point must be a strong (Global) symbol so the linker
+                            // prefers it over the weak spl_main in the C main stub.
+                            f.set_linkage(inkwell::module::Linkage::External);
+                        }
                     }
                     func_opt = f.get_next_function();
                 }
