@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Severity:** High (silent wrong output, no diagnostic)
-**Status:** open
+**Status:** source fixed; execution pending
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom
@@ -45,8 +45,8 @@ Additional probe with equal strings (`a = "abc"`, `c = "abc"`):
 tagged-string-aware handling. Since a `text` value is represented as a tagged
 heap-string handle (not a raw byte buffer inline), a raw `MirBinOp.Lt`/`Gt` on
 two string operands compares the **handle/pointer bit patterns** — arbitrary
-relative to allocation order, not the string's lexicographic content. No
-`rt_string_compare`-style runtime function exists to call.
+relative to allocation order, not the string's lexicographic content. The
+existing `rt_text_cmp_any` runtime helper was not wired into MIR.
 
 ## Expected
 
@@ -57,13 +57,10 @@ strings after task #148's fix.
 
 ## Suggested direction
 
-- Add a runtime string-compare function (e.g. `rt_string_compare(a, b) ->
-  i64` returning `-1`/`0`/`1`, à la C `strcmp`/Rust `Ordering`) if one does
-  not already exist under a different name.
-- In `switch_operators_calls.spl`'s `lower_binop`/binop-lowering call site,
+- In `expr_dispatch.spl`'s binop-lowering call site,
   detect a string-typed operand (mirroring the existing `ensure_tagged_str`
   / `local_is_str` detection used throughout `method_calls_literals.spl`) and
-  route `Lt`/`Le`/`Gt`/`Ge` through `rt_string_compare` + a threshold check,
+  route `Lt`/`Le`/`Gt`/`Ge` through `rt_text_cmp_any` + a threshold check,
   instead of the generic numeric/pointer `MirBinOp`.
 - Verify against the oracle's own `<=`/`>=` behavior on equal strings before
   assuming strict `strcmp`-style semantics — the oracle's `X5` result above
@@ -80,3 +77,14 @@ strings after task #148's fix.
   (native).
 - Confirmed via direct source read that no string-aware comparison path
   exists anywhere in the MIR binop lowering for relational operators.
+
+## Source fix (2026-07-17)
+
+MIR now routes text `<`, `<=`, `>`, and `>=` through the existing
+`rt_text_cmp_any` tagged-or-raw comparator and compares its signed result with
+zero. The textual LLVM backend declares both text comparison helpers with their
+real two-word ABI, including 32-bit pointer-to-word coercion. A strict
+LLVM/Cranelift case covers raw/raw, tagged/raw, raw/tagged, tagged/tagged, and
+equal-content strict and inclusive boundaries. Linux runs it in the full board; macOS arm64/x64,
+Windows x64, and FreeBSD select it explicitly. First staged execution remains
+pending under the current no-runtime-command restriction.

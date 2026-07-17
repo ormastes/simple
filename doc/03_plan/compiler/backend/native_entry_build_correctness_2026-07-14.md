@@ -14,9 +14,9 @@ failure is **never** silently converted to a wrong answer.
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **86 logical cases / 113 recorded checks** because strict-dual cases
+  defines **87 logical cases / 115 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **89 logical cases / 118 recorded checks**; execution is opt-in because
+  to **90 logical cases / 120 recorded checks**; execution is opt-in because
   those three reproductions remain known-red. Execution of the expanded matrix
   is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL

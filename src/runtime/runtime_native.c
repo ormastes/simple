@@ -1558,12 +1558,11 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
     return !rt_native_eq(left, right);
 }
 
-/* Task #178 (text3 lane): backs native `<`/`<=`/`>`/`>=` on text operands
- * (core_codegen.spl translate_binop's Lt/Le/Gt/Ge cases). Those previously
- * had NO string-aware routing at all (unlike Eq/NotEq's rt_text_eq_any
- * above, added for bug #148) -- the frontend never special-cased ordering
- * ops for strings, so a `ptr`-typed operand fell straight through to a raw
- * `icmp slt/sle/sgt/sge ptr, ptr`, comparing the two strings' memory
+/* Task #178 (text3 lane): backs native `<`/`<=`/`>`/`>=` on text operands.
+ * MIR lowering routes text ordering here (like Eq/NotEq's rt_text_eq_any
+ * above, added for bug #148). Previously the frontend did not special-case
+ * ordering ops for strings, so a `ptr`-typed operand fell straight through
+ * to a raw `icmp slt/sle/sgt/sge ptr, ptr`, comparing the strings' memory
  * ADDRESSES instead of their lexicographic content (observed:
  * `"foo" < "bar"` native said true, oracle interpreter said false --
  * whichever literal happened to be malloc'd/placed at the lower address

@@ -1497,6 +1497,27 @@ impl MirLowering:
                                 self.builder = b_narrow
                                 return bool_local
 
+                        var bin_is_str_order = false
+                        match op:
+                            case Lt | LtEq | Gt | GtEq:
+                                if self.local_is_str(left_local) or self.local_is_str(right_local):
+                                    bin_is_str_order = true
+                            case _:
+                                ()
+                        if bin_is_str_order:
+                            val cmp_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_text_cmp_any"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var b_cmp = self.builder
+                            val cmp_res = b_cmp.emit_call(cmp_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
+                            self.builder = b_cmp
+                            if val cmp_local = cmp_res:
+                                var b_order = self.builder
+                                val ordered = b_order.emit_binop(self.lower_binop(op), mir_operand_copy(cmp_local), mir_operand_const_int(0), MirType.bool())
+                                self.builder = b_order
+                                return ordered
+
                         val mir_op = self.lower_binop(op)
                         # Float arithmetic must carry an F64 dest: infer_binop_type
                         # defaults arithmetic to i64, which makes translate_binop
