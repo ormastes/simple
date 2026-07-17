@@ -188,9 +188,16 @@ regressions pass. Two bounded bootstrap cycles found no new crash or hang; the
 first exposed and separately fixed a concurrent `SliceIter` syntax regression,
 while the second proved this correctness fix does not remove the imported-enum
 `Shared` diagnostics. After concurrent `C`/`Array` source repairs, Stage 2 now
-stops on six diagnostics: four unqualified imported `Shared` variants and two
-`CompareExchange` uses. Those require explicit imported-enum qualification or
-import-aware subject typing, not external symbol declarations.
+stopped on six diagnostics: four unqualified imported `Shared` variants and two
+`CompareExchange` uses. Owner-qualifying the CUDA/OpenCL `CompareExchange`
+expression and match arms removed both diagnostics and the CUDA failing root.
+Two bounded follow-ups did not advance past `Shared`; both wrapper logs record
+normal Stage 2 exit 1 and strict fallback refusal, and the retained final Stage
+2 log names only the HIP/OpenCL dependency closures. Qualified `Shared` match
+arms and comparisons were therefore rejected as ineffective workarounds. The
+remaining fix is
+import-aware enum-owner registration/lowering, not an external declaration or
+another call-site spelling change.
 
 ## Context: in-guest RUN is otherwise REACHABLE
 

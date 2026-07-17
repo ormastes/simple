@@ -160,3 +160,12 @@ jj-only workspace containing `.jj` but no `.git`.
 ## Runtime verification (2026-07-17)
 
 `bin/simple test r3p09_tiny_spec.spl` (env `-u SIMPLE_BOOTSTRAP`) exit 1, failed with `error: semantic: unknown extern function: rt_cli_arg_count`. This extern is declared in current `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:635` — deployed seed binary is skewed vs. current source on some externs (also affects `rt_vulkan_create_offscreen_render_pass`). Net effect matches doc's claim (`bin/simple test <spec>` unreliable on this host) though specific error differs. Broader note: deployed `bin/release/x86_64-unknown-linux-gnu/simple` lacks `rt_cli_arg_count` and `rt_vulkan_create_offscreen_render_pass` present in current `src/compiler_rust` — pending in-flight seed redeploy.
+
+The retained pure release at SHA-256
+`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`
+also reproduced exit 139 for `bin/release/simple test
+test/01_unit/compiler/semantics/borrow_check_conflict_spec.spl
+--mode=interpreter --clean`. GDB reaches the already-proven stale two-argument
+`rt_env_set` before runner evidence, with `SIMPLE_TEST_DEPTH` and value pointer
+`0x11`. This is binary/source skew requiring rebuild, not a test-runner source
+workaround; see `self_hosted_simpleos_target_native_build_crash_2026-07-11.md`.

@@ -35,8 +35,8 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
-| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The seed LLVM `mcall_direct` repair has focused verifier coverage and removed all Stage 2 arity errors; Stage 2 now stops on 6 undeclared-global diagnostics | Qualify the remaining imported enum variants, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
+| Production runtime | BLOCKED | The latest full/manual bootstrap exits normally at Stage 2 on imported-enum `Shared` lowering in the HIP/OpenCL dependency closures; no fresh CLI exists | Fix import-aware enum-owner lowering, rebuild, admit, and atomically deploy | P0 |
+| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. Owner-qualified `CompareExchange` removed both diagnostics and the CUDA failing root; Stage 2 now stops only on imported-enum `Shared` lowering | Fix the remaining enum-owner lowering, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending safe recursive discovery; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Repair native directory-walk parity, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
 | Bootstrap essential tools | SOURCE WIRED | The exact fresh Stage 4 CLI now gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd; raw-source duplicate dispatch is structurally forbidden | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
@@ -91,12 +91,11 @@ so executable qualification is still blocked.
 
 ## Current blockers
 
-1. A clean admitted full-CLI runtime is unavailable. Phase profiling showed
-   Stage 4 receiving 10,503 sources because the bootstrap entry path passed
-   complete source roots before closure pruning. The source fix now seeds only
-   the entry and reuses the driver's import resolver. Its final bounded build
-   stopped before compilation because the compiler-backfill archive is stale
-   and requires `--full-bootstrap`; the three-cycle cap is exhausted.
+1. A clean admitted full-CLI runtime is unavailable. The latest full/manual
+   bootstrap clears the prior `CompareExchange` frontier but exits normally at
+   Stage 2 on imported-enum `Shared` lowering in the HIP/OpenCL dependency
+   closures. Two bounded spelling workarounds did not advance that frontier,
+   so the next lane must fix import-aware enum-owner lowering rather than retry.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -505,9 +504,10 @@ so executable qualification is still blocked.
 - Seed HIR match lowering now distinguishes enum units from real bindings,
   initializes bindings before guards, restores shadows, and preserves `mut`.
   Four focused HIR/MIR regressions PASS. Bounded bootstrap showed no regression
-  but correctly left imported-enum `Shared` unresolved; after concurrent
-  `C`/`Array` repairs, six diagnostics remain (`Shared` 4,
-  `CompareExchange` 2).
+  but correctly left imported-enum `Shared` unresolved. Owner-qualified
+  `CompareExchange` then removed both diagnostics and the CUDA failing root.
+  Stage 2 now fails only on `Shared` in HIP/OpenCL dependency closures; two
+  bounded source-spelling attempts did not advance and were not retained.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
