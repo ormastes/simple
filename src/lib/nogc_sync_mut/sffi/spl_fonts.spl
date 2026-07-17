@@ -37,7 +37,7 @@ use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.encoding.sfnt.{font_runtime_ttf_default_supported, parse_offset_table}
 use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
 use std.common.encoding.sfnt_glyf.{rasterize_sfnt_glyf}
-use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset, load_selected_font_file}
+use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset, load_selected_font_file, selected_font_asset_identity_for_path}
 #
 # Usage:
 #   val maybe = FontRasterizer.load("build/libspl_fonts.dylib",
@@ -162,16 +162,13 @@ impl FontRasterizer:
         FontRasterizer._load_selected_bytes(ttf_path, blob, false)
 
     static fn _load_selected_bytes(ttf_path: text, blob: [u8], file_backed: bool) -> FontRasterizer?:
-        val selected = selected_font_asset_candidate_for_path(ttf_path)
-        if selected == nil:
+        # No Option-unwrap + field access here: `opt.?` then `.field` on the
+        # candidate FAULTS on baremetal (cr2=0x0, 2026-07-18). The identity is
+        # computed inside font_registry on a direct array-element struct — the
+        # kernel-proven access pattern — and "" doubles as the unmanaged gate.
+        val cand_identity: text = selected_font_asset_identity_for_path(ttf_path)
+        if cand_identity == "":
             return nil
-        val candidate = selected.?
-        # Typed intermediates: struct-field access nested inside string
-        # interpolation on an Option-derived receiver is the baremetal
-        # "field access on nil" fault class (guest EXCEPTION cr2=0x0 at this
-        # constructor once the validate gate first passed, 2026-07-18).
-        val cand_sha: text = candidate.sha256
-        val cand_axes: text = candidate.default_axes
         if not file_backed and not validate_selected_font_asset(ttf_path, blob).valid:
             return nil
         if not font_runtime_ttf_default_supported(blob):
@@ -182,7 +179,7 @@ impl FontRasterizer:
             line_metric_fp: 0, layout_fp: 0, layout_glyph_metric_fp: 0,
             glyph_pixels_ptr_fp: 0, glyph_pixels_len_fp: 0, glyph_free_fp: 0,
             has_glyph_fp: 0, generation_fp: 0, font_path: ttf_path,
-            dylib_path: "", font_cache_identity: "sha256={cand_sha};axes={cand_axes}",
+            dylib_path: "", font_cache_identity: cand_identity,
             loaded_generation: 1, selected_blob: blob,
         )
 

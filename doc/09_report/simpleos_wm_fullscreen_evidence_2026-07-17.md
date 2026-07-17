@@ -10,13 +10,13 @@
 - simple bin version: simple-bootstrap 1.0.0-beta
 - simple bin sha256: 6faa17dbe4342c9fa94c48025c7c57cfdf150c1dea9b8cd9b99877610f9291e7
 - qmp socket: build/simpleos_wm_fullscreen_evidence/qmp.sock
-- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=9a234dfee2d24de66ec90e09e481bbe5bacac0e361087a83f126b85c75115ae7)
-- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=a44bc224418bd899287a02a74129c9c1fe171342b9faf2fdb3ab7c6560fb6c42)
+- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=a00ee8d8274f548b936ea2b81221aadb54b492c4b5339ee51020ec3370ddec3c)
+- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=99ecbceb0868967085495e80d3127f906b86e08ac9437c4ce47740dc934ac4f0)
 - pinned font asset: assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf (1708408 bytes, sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081)
 - guest font marker: -
 - font region: build/simpleos_wm_fullscreen_evidence/font-region.rgb (0 bytes, sha256=-, origin=qemu-pmemsave)
-- scanout: address=4160749568 width=3840 height=2160 byte-pitch=15360 format=argb8888 generation=1
-- host nonce: simpleos-wm-1784305743-98191
+- scanout: address=- width=0 height=0 byte-pitch=0 format=- generation=0
+- host nonce: simpleos-wm-1784306052-3985
 - input sequences: baseline=0 maximize=0 restore=0
 - maximize IRQ/state/frame: - | - | -
 - restore IRQ/state/frame: - | - | -
@@ -27,7 +27,7 @@
 - baseline ppm: build/simpleos_wm_fullscreen_evidence/baseline.ppm (0 bytes)
 - maximized ppm: build/simpleos_wm_fullscreen_evidence/fullscreen.ppm (0 bytes)
 - restored ppm: build/simpleos_wm_fullscreen_evidence/restored.ppm (0 bytes)
-- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (48761 bytes)
+- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (5068 bytes)
 
 This wrapper boots the wm-simple-web SimpleOS QEMU target directly
 (same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),
