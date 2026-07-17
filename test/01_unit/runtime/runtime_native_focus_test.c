@@ -7,6 +7,8 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -49,7 +51,49 @@ static int64_t text(const char* value) {
     return rt_string_new((const uint8_t*)value, strlen(value));
 }
 
+static int walk_contains(SplArray* paths, const char* expected) {
+    for (int64_t i = 0; i < spl_array_len(paths); i++) {
+        const char* actual = spl_as_str(spl_array_get(paths, i));
+        if (actual && strcmp(actual, expected) == 0) return 1;
+    }
+    return 0;
+}
+
 int main(void) {
+    char walk_root[] = "/tmp/simple-dir-walk-XXXXXX";
+    assert(mkdtemp(walk_root) != NULL);
+    char walk_nested[256], walk_suffix_dir[256], walk_regular[256];
+    char walk_child[256], walk_file_link[256], walk_cycle[256];
+    snprintf(walk_nested, sizeof(walk_nested), "%s/nested", walk_root);
+    snprintf(walk_suffix_dir, sizeof(walk_suffix_dir), "%s/x.spl", walk_root);
+    snprintf(walk_regular, sizeof(walk_regular), "%s/regular.spl", walk_root);
+    snprintf(walk_child, sizeof(walk_child), "%s/child.spl", walk_nested);
+    snprintf(walk_file_link, sizeof(walk_file_link), "%s/file-link.spl", walk_root);
+    snprintf(walk_cycle, sizeof(walk_cycle), "%s/back", walk_nested);
+    assert(mkdir(walk_nested, 0700) == 0);
+    assert(mkdir(walk_suffix_dir, 0700) == 0);
+    FILE* walk_file = fopen(walk_regular, "w");
+    assert(walk_file != NULL && fclose(walk_file) == 0);
+    walk_file = fopen(walk_child, "w");
+    assert(walk_file != NULL && fclose(walk_file) == 0);
+    assert(symlink(walk_regular, walk_file_link) == 0);
+    assert(symlink(walk_root, walk_cycle) == 0);
+    SplArray* walked = rt_dir_walk(walk_root);
+    assert(spl_array_len(walked) == 4);
+    assert(walk_contains(walked, walk_regular));
+    assert(walk_contains(walked, walk_child));
+    assert(walk_contains(walked, walk_file_link));
+    assert(walk_contains(walked, walk_cycle));
+    assert(!walk_contains(walked, walk_nested));
+    assert(!walk_contains(walked, walk_suffix_dir));
+    assert(unlink(walk_cycle) == 0);
+    assert(unlink(walk_file_link) == 0);
+    assert(unlink(walk_child) == 0);
+    assert(unlink(walk_regular) == 0);
+    assert(rmdir(walk_nested) == 0);
+    assert(rmdir(walk_suffix_dir) == 0);
+    assert(rmdir(walk_root) == 0);
+
     int64_t builder = rt_string_builder_new();
     assert(builder != 0);
     assert(rt_string_builder_push(builder, text("hello")) == 1);

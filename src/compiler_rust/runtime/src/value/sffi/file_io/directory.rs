@@ -218,8 +218,7 @@ pub unsafe extern "C" fn rt_mkdir_p(path_ptr: *const u8, path_len: u64) -> bool 
     rt_dir_create_all(path_ptr, path_len)
 }
 
-/// Walk directory recursively, returning all files and directories
-/// Returns List[String] of all paths found
+/// Walk directory recursively, returning non-directory entries without following links.
 #[no_mangle]
 pub unsafe extern "C" fn rt_dir_walk(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     use std::fs;
@@ -242,12 +241,13 @@ pub unsafe extern "C" fn rt_dir_walk(path_ptr: *const u8, path_len: u64) -> Runt
             for entry in entries.flatten() {
                 let path = entry.path();
 
-                if let Some(path_str) = path.to_str() {
-                    results.push(path_str.to_string());
-                }
-
-                if path.is_dir() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
                     walk_recursive(&path, results);
+                } else if let Some(path_str) = path.to_str() {
+                    results.push(path_str.to_string());
                 }
             }
         }
@@ -499,8 +499,27 @@ mod tests {
         unsafe {
             let result = rt_dir_walk(ptr, len);
             let count = rt_array_len(result);
-            // Should find: file1.txt, subdir, subdir/file2.txt
-            assert_eq!(count, 3);
+            assert_eq!(count, 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_walk_emits_links_once_without_following_directory_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join("regular.spl"), "").unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/child.spl"), "").unwrap();
+        fs::create_dir(root.join("x.spl")).unwrap();
+        symlink(root.join("regular.spl"), root.join("file-link.spl")).unwrap();
+        symlink(root, root.join("nested/back")).unwrap();
+
+        let (ptr, len) = str_to_ptr(root.to_str().unwrap());
+        unsafe {
+            assert_eq!(rt_array_len(rt_dir_walk(ptr, len)), 4);
         }
     }
 

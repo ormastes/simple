@@ -21,6 +21,7 @@
 #include <process.h>
 #include <windows.h>
 #else
+#include <dirent.h>
 #include <unistd.h>
 #endif
 
@@ -62,6 +63,53 @@ SplValue spl_str(const char* s) {
 
 const char* spl_as_str(SplValue v) {
     return v.tag == SPL_STRING && v.as_str ? v.as_str : "";
+}
+
+#if defined(_WIN32)
+static void core_dir_walk_impl(const char* path, SplArray* result) {
+    char pattern[4096];
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    WIN32_FIND_DATAA entry;
+    HANDLE handle = FindFirstFileA(pattern, &entry);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    do {
+        if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
+        char full[4096];
+        snprintf(full, sizeof(full), "%s\\%s", path, entry.cFileName);
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            !(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            core_dir_walk_impl(full, result);
+        } else {
+            spl_array_push(result, spl_str(full));
+        }
+    } while (FindNextFileA(handle, &entry));
+    FindClose(handle);
+}
+#else
+static void core_dir_walk_impl(const char* path, SplArray* result) {
+    DIR* dir = opendir(path);
+    if (!dir) return;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char full[4096];
+        snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+        struct stat metadata;
+        if (lstat(full, &metadata) != 0) continue;
+        if (S_ISDIR(metadata.st_mode)) {
+            core_dir_walk_impl(full, result);
+        } else {
+            spl_array_push(result, spl_str(full));
+        }
+    }
+    closedir(dir);
+}
+#endif
+
+SplArray* rt_dir_walk(const char* path) {
+    SplArray* result = spl_array_new();
+    if (path) core_dir_walk_impl(path, result);
+    return result;
 }
 
 char* spl_strdup(const char* s) {

@@ -958,6 +958,47 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn dir_walk_emits_links_once_without_following_directory_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("regular.spl"), "").expect("regular file");
+        std::fs::create_dir(root.join("nested")).expect("nested directory");
+        std::fs::write(root.join("nested/child.spl"), "").expect("nested file");
+        std::fs::create_dir(root.join("x.spl")).expect("directory with source suffix");
+        symlink(root.join("regular.spl"), root.join("file-link.spl")).expect("file symlink");
+        symlink(root, root.join("nested/back")).expect("cycle symlink");
+
+        let result = rt_dir_walk(&[Value::text(root.to_string_lossy().to_string())]).expect("walk");
+        let Value::Array(paths) = result else {
+            panic!("dir walk did not return an array");
+        };
+        let mut relative: Vec<String> = paths
+            .iter()
+            .map(|path| match path {
+                Value::Str(value) => std::path::Path::new(value.as_str())
+                    .strip_prefix(root)
+                    .expect("path under fixture")
+                    .to_string_lossy()
+                    .to_string(),
+                other => panic!("non-text walk entry: {other:?}"),
+            })
+            .collect();
+        relative.sort();
+        assert_eq!(
+            relative,
+            vec![
+                "file-link.spl".to_string(),
+                "nested/back".to_string(),
+                "nested/child.spl".to_string(),
+                "regular.spl".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn write_text_at_creates_and_appends_without_rewrite() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1179,9 +1220,13 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                results.push(Value::text(path.to_string_lossy().to_string()));
-                if path.is_dir() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
                     walk_recursive(&path, results);
+                } else {
+                    results.push(Value::text(path.to_string_lossy().to_string()));
                 }
             }
         }

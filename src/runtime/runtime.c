@@ -1582,7 +1582,8 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
         char full[4096];
         snprintf(full, sizeof(full), "%s\\%s", path, find_data.cFileName);
 
-        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if ((find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            !(find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
             rt_dir_walk_impl(full, result);
         } else {
             spl_array_push(result, spl_str(full));
@@ -1604,7 +1605,7 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
         snprintf(full, sizeof(full), "%s/%s", path, ent->d_name);
 
         struct stat st;
-        if (stat(full, &st) != 0) continue;
+        if (lstat(full, &st) != 0) continue;
 
         if (S_ISDIR(st.st_mode)) {
             rt_dir_walk_impl(full, result);
