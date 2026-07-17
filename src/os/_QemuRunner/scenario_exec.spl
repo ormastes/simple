@@ -271,7 +271,18 @@ fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) 
             "grep -a -q 'SMF' \"{img_path}\"; " +
             "fi"
         val (_stdout, _stderr, exit_code) = process_run_timeout("/bin/sh", ["-c", cmd], 5000)
-        return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
+        val font_cmd =
+            "if command -v mtype >/dev/null 2>&1 && (command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1); then " +
+            "font_tmp=/tmp/simpleos-arm-font-$$; trap 'rm -f \"$font_tmp\"' EXIT HUP INT TERM; " +
+            "mtype -i \"{img_path}\" ::/SYS/FONTS/NOTOSANS >\"$font_tmp\" 2>/dev/null && " +
+            "[ \"$(wc -c <\"$font_tmp\" | tr -d ' ')\" = 1708408 ] && " +
+            "if command -v sha256sum >/dev/null 2>&1; then " +
+            "sha256sum \"$font_tmp\" | grep -q '^2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081  '; " +
+            "else shasum -a 256 \"$font_tmp\" | grep -q '^2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081  '; fi; " +
+            "else exit 1; " +
+            "fi"
+        val (_font_stdout, _font_stderr, font_exit_code) = process_run_timeout("/bin/sh", ["-c", font_cmd], 5000)
+        return exit_code == 0 and font_exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
     false
 
 fn _riscv_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
@@ -669,12 +680,14 @@ fn arm64_wm_ramfb_required_marker_fragments() -> [text]:
         "[WM] fw_cfg sig: 81 69 77 85",
         "[WM] Found etc/ramfb in fw_cfg",
         "[WM] ramfb configured successfully via fw_cfg DMA",
+        "[desktop-gui-arm64] font registered source=virtio-fat32",
         "[desktop-gui-arm64] desktop-ready revision="
     ]
 
 fn arm64_desktop_engine2d_required_marker_fragments() -> [text]:
     [
         "[WM] ramfb configured successfully via fw_cfg DMA",
+        "[desktop-gui-arm64] font registered source=virtio-fat32",
         "[desktop-gui] first-frame-rendered scene_revision=",
         "[desktop-gui-arm64] desktop-ready revision="
     ]
@@ -817,6 +830,8 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
 
 fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     """Materialize required host-side disk media for scenarios that attach storage."""
+    if scenario.name == "arm64-wm-ramfb" or scenario.name == "arm64-desktop-engine2d":
+        return ensure_arm_fs_exec_disk_image(Architecture.Arm64)
     if scenario.name == "x64-nvme-fat32" or scenario.name == "x64-ssh" or scenario.name == "x64-desktop-disk" or scenario.name == "x64-desktop-uefi" or scenario.name == "x64-toolchain-vfs-probe":
         if val ready = _ensure_desktop_scenario_media(scenario.name):
             return ready

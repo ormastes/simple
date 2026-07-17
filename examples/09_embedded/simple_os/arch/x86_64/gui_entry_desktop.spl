@@ -34,6 +34,7 @@ use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
 use os.compositor.input_backend.{Ps2InputBackend}
 use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.desktop.shell.{DesktopShell}
+use os.desktop.font_bootstrap.{simpleos_desktop_register_default_font_from_vfs}
 use os.services.launcher.launcher.{launcher_get_app_count}
 use os.services.vfs.vfs_init.{vfs_boot_init, vfs_mount_removable, g_vfs_read_file_bytes}
 use os.services.vfs.vfs_write_ops.{g_vfs_file_exists}
@@ -48,10 +49,6 @@ use os.kernel.boot.monotonic_hardware.{boot_monotonic_prepare, boot_monotonic_no
 use os.kernel.arch.x86_64.host_gpu_ivshmem_vmm.{map_qemu_host_gpu_ivshmem_bar2_active_vmm}
 use common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
-use std.common.encoding.font_registry.{validate_selected_font_asset, font_registry_debug_expected_names}
-use std.common.encoding.sfnt.{sfnt_debug_selected_names}
-use std.common.string_core.{char_from_code}
 
 @export("C", name: "rt_file_exists")
 fn rt_file_exists(path: text) -> bool:
@@ -309,6 +306,7 @@ fn spl_start():
     var fb = FramebufferDriver.from_scanout_raw(scanout.address, scanout.width, scanout.height, scanout.stride, framebuffer_bpp)
     val screen_width = scanout.width.to_i32()
     val screen_height = scanout.height.to_i32()
+    val font_loaded = simpleos_desktop_register_default_font_from_vfs()
     var engine = create_fb_engine_sized(fb, screen_width, screen_height)
     serial_println("[desktop-gui] framebuffer ready width={scanout.width} height={scanout.height} pitch={scanout.stride}")
     serial_println("[desktop-gui] engine2d-ready backend=baremetal-framebuffer persistent=true")
@@ -346,62 +344,6 @@ fn spl_start():
     _mouse_bootstrap_init(mouse)
     serial_println("[desktop-gui] mouse ready")
 
-    val font_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
-    # load_font_bytes routes through the selected-asset registry validator,
-    # including exact byte length, SHA-256, sfnt tables, names, and axes.
-    # Always attempt the read (no longer gated on g_vfs_mounted): the hosted
-    # Fat32Core/BlockDevice trait path (g_root_fat32) is still avoided --
-    # g_vfs_read_file_bytes now tries the pure-Simple scalar/direct FAT32
-    # reader first (vfs_boot_read_pure_nvme_fat32_path_bytes), which never
-    # touches g_root_fat32, before falling back to the g_vfs_initialized-gated
-    # hosted path. On a failed FAT32/NVMe mount (`[vfs] mount_failed`) the
-    # direct reader itself no-ops safely (returns []), and the existing
-    # g_vfs_initialized gate inside g_vfs_read_file_bytes still protects the
-    # hosted Fat32Core dispatch from the null-deref (cr2=0x0) miscompile
-    # described below -- so this remains crash-safe on every degraded boot
-    # path while unblocking the common case where the disk + direct reader
-    # are healthy but the hosted mount was skipped for the C8
-    # blockdevice-dispatch-codegen-bug.
-    font_renderer_use_registered_selected_bytes_only()
-    var font_loaded = false
-    var font_blob: [u8] = []
-    font_blob = g_vfs_read_file_bytes("/" + font_path)
-    serial_println("[desktop-gui] font read canonical bytes={font_blob.len()}")
-    font_loaded = engine.load_font_bytes(font_path, font_blob)
-    if not font_loaded:
-        # The direct FAT32 builder uses an 8.3 alias. Retry it when the
-        # canonical file is missing or invalid, while retaining canonical identity.
-        font_blob = g_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS")
-        serial_println("[desktop-gui] font read alias bytes={font_blob.len()}")
-        font_loaded = engine.load_font_bytes(font_path, font_blob)
-        serial_println("[desktop-gui] font validator accepted={font_loaded}")
-        if not font_loaded:
-            # Affordable now: sha256 is allocation-light and sfnt parsing
-            # indexes the blob directly, so one diagnostic re-validate fits.
-            val diag = validate_selected_font_asset(font_path, font_blob)
-            val v_selected = diag.selected
-            val v_valid = diag.valid
-            val v_reason: text = diag.reason
-            serial_println("[desktop-gui] font validate selected={v_selected} valid={v_valid} reason={v_reason}")
-            val names_diag: text = sfnt_debug_selected_names(font_blob)
-            serial_println("[desktop-gui] font names decoded={names_diag}")
-            serial_println("[desktop-gui] font names expected=|Noto Sans Mono|Regular|Noto Sans Mono Regular|NotoSansMono-Regular|Version 2.014")
-            val expected_rt: text = font_registry_debug_expected_names(font_path)
-            serial_println("[desktop-gui] font names expected-runtime={expected_rt}")
-            # Micro-probe of the exact ops _sfnt_utf16be_text uses per char.
-            # Probes BOTH the `.chr()` builtin (no native-lane lowering — known
-            # empty on baremetal) and the pure-Simple char_from_code workaround
-            # the decode path now uses.
-            val cp_a: i64 = 65
-            val chr_a: text = cp_a.chr()
-            val cfc_a: text = char_from_code(cp_a)
-            var cat_t: text = ""
-            cat_t = cat_t + cfc_a
-            val cat_len = cat_t.len()
-            serial_println("[desktop-gui] chr-probe chr='{chr_a}' cfc='{cfc_a}' cat='{cat_t}' len={cat_len}")
-    if font_loaded:
-        font_loaded = font_renderer_register_selected_bytes(font_path, font_blob)
-        serial_println("[desktop-gui] font register accepted={font_loaded}")
     if font_loaded:
         serial_println("[desktop-gui] font identity=sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100 raster=pure-sfnt-glyf")
     else:

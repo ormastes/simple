@@ -30,8 +30,24 @@ use a bounded 32 MiB ceiling, leaving 8,428,920 bytes above the largest pinned
 The pure-Simple disk writer emits checksummed ASCII VFAT slots, collision-safe
 short aliases, and multi-cluster directory chains; the shared reader resolves
 the long path first and preserves the raw short-name reader as boot fallback.
-Before the canonical WM DrawIR frame, the desktop enables registered-only font
-resolution and registers the exact VFS bytes; it has no private post-frame text draw.
+One shared desktop bootstrap enables registered-only font resolution, reads the
+default face from its registry-owned long VFS path and then its 8.3 alias, and
+registers the exact bytes under the canonical identity. It checks VFS readiness
+before either read, so a failed x86_64 mount cannot enter the FAT32 path. The
+x86_64 and AArch64 canonical entries call it before creating Engine2D; neither
+owns a private font loader or post-frame text draw. AArch64 first resets and
+mounts the existing VirtIO-BLK FAT32 initializer. Its canonical desktop QEMU
+targets attach the existing ARM filesystem image arguments, and the scenario
+media gate builds that image before launch. Existing ARM images are accepted
+only when `mtype` plus `sha256sum`/`shasum` prove `/SYS/FONTS/NOTOSANS` is
+exactly 1,708,408 bytes with the pinned SHA-256; hosts without those tools fail
+closed instead of trusting image manifest text. Successful registration
+selects the VFS face; only failed mount or validation selects bitmap fallback.
+The ARM initializer clears VFS state both before probing and after a failed
+post-mount executable probe, so a rejected image cannot remain marked ready.
+RV64 is intentionally unchanged: its current driver path is ARM-only and its
+64 KiB runtime heap cannot support this vector-font bootstrap, so the existing
+bitmap lane makes no vector-font claim.
 The Simple Browser independently iterates the same 16-candidate registry, reads
 each readable long path with its short alias as the only fallback, registers
 bytes under the canonical repository identity, and refuses to render when the
