@@ -67,16 +67,32 @@ describe "dynSMF manifest":
         expect(manifest[4].id).to_equal("gui_renderer")
         expect(manifest[5].id).to_equal("tui_renderer")
         expect(manifest[6].id).to_equal("ui_html")
+        expect(manifest[7].id).to_equal("mcp_diag_tools")
+        expect(manifest[8].id).to_equal("fmt_tool")
+        expect(manifest[9].id).to_equal("lint_tool")
+        expect(manifest[10].id).to_equal("fix_tool")
+        expect(manifest[11].id).to_equal("todo_scan")
+        expect(manifest.len()).to_equal(12)
         expect(dynsmf_manifest_all_precompiled(manifest)).to_equal(true)
         expect(manifest[0].artifact_kind).to_equal("precompiled_smf")
         expect(manifest[0].default_autoload).to_equal(true)
         expect(manifest[5].default_autoload).to_equal(true)
         expect(manifest[6].default_autoload).to_equal(true)
 
+    it "gates the 5 new toolchain entries out of default autoload (on-demand only)":
+        val manifest = dynsmf_default_manifest()
+        expect(manifest[7].default_autoload).to_equal(false)
+        expect(manifest[8].default_autoload).to_equal(false)
+        expect(manifest[9].default_autoload).to_equal(false)
+        expect(manifest[10].default_autoload).to_equal(false)
+        expect(manifest[11].default_autoload).to_equal(false)
+        expect(manifest[7].artifact_kind).to_equal("precompiled_smf")
+        expect(manifest[7].abi_version).to_equal("1")
+
     it "creates deterministic compile plans for all precompiled artifacts":
         val manifest = dynsmf_default_manifest()
         val plans = dynsmf_build_plans(manifest)
-        expect(plans.len()).to_equal(7)
+        expect(plans.len()).to_equal(12)
         expect(dynsmf_build_plans_ready(plans)).to_equal(true)
         expect(plans[0].source_path).to_equal("src/lib/nogc_sync_mut/io/file.spl")
         expect(plans[0].command).to_equal("bin/simple compile src/lib/nogc_sync_mut/io/file.spl -o build/dynsmf/file_io.smf")
@@ -85,6 +101,30 @@ describe "dynSMF manifest":
         expect(plans[5].output_path).to_equal("build/dynsmf/tui_renderer.smf")
         expect(plans[6].source_path).to_equal("src/lib/common/ui/html_ui/dynsmf_entry.spl")
         expect(plans[6].output_path).to_equal("build/dynsmf/ui_html.smf")
+
+    it "creates ready build plans for the 5 new on-demand toolchain entries":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        expect(plans[7].library_id).to_equal("mcp_diag_tools")
+        expect(plans[7].source_path).to_equal("src/app/mcp/main_lazy_diag_tools.spl")
+        expect(plans[7].output_path).to_equal("build/dynsmf/mcp_diag_tools.smf")
+        expect(plans[7].status).to_equal("ready")
+        expect(plans[8].library_id).to_equal("fmt_tool")
+        expect(plans[8].source_path).to_equal("src/compiler/90.tools/formatter/main.spl")
+        expect(plans[8].command).to_equal("bin/simple compile src/compiler/90.tools/formatter/main.spl -o build/dynsmf/fmt_tool.smf")
+        expect(plans[8].status).to_equal("ready")
+        expect(plans[9].library_id).to_equal("lint_tool")
+        expect(plans[9].source_path).to_equal("src/compiler/90.tools/lint/main.spl")
+        expect(plans[9].output_path).to_equal("build/dynsmf/lint_tool.smf")
+        expect(plans[9].status).to_equal("ready")
+        expect(plans[10].library_id).to_equal("fix_tool")
+        expect(plans[10].source_path).to_equal("src/compiler/90.tools/fix/main.spl")
+        expect(plans[10].output_path).to_equal("build/dynsmf/fix_tool.smf")
+        expect(plans[10].status).to_equal("ready")
+        expect(plans[11].library_id).to_equal("todo_scan")
+        expect(plans[11].source_path).to_equal("src/app/todo_scan/main.spl")
+        expect(plans[11].command).to_equal("bin/simple compile src/app/todo_scan/main.spl -o build/dynsmf/todo_scan.smf")
+        expect(plans[11].status).to_equal("ready")
 
     it "records general background compile evidence for non-gui and gui artifacts":
         val manifest = [
@@ -369,3 +409,33 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         file_delete(source_path)
         file_delete(dynsmf_abi_path(artifact_path))
         file_delete(dynsmf_srchash_path(artifact_path))
+
+describe "dynSMF toolchain entries — fresh-sidecar status transitions (on-demand, default_autoload:false)":
+    it "reports each new toolchain entry ready when abi and srchash sidecars match current source":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        var idx = 7
+        while idx < 12:
+            val entry = manifest[idx]
+            val source_path = plans[idx].source_path
+            file_write(dynsmf_abi_path(entry.path), entry.abi_version)
+            file_write(dynsmf_srchash_path(entry.path), dynsmf_source_hash_current(source_path).to_text())
+            val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+            expect(status.ready).to_equal(true)
+            expect(status.reason).to_equal("smf_artifact_ready")
+            file_delete(dynsmf_abi_path(entry.path))
+            file_delete(dynsmf_srchash_path(entry.path))
+            idx = idx + 1
+
+    it "flags a missing abi sidecar as abi_mismatch for a new toolchain entry too (fail-closed applies uniformly)":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        val entry = manifest[11]
+        val source_path = plans[11].source_path
+        expect(entry.id).to_equal("todo_scan")
+        file_write(dynsmf_srchash_path(entry.path), dynsmf_source_hash_current(source_path).to_text())
+        # Deliberately do NOT write an `.abi` sidecar.
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("abi_mismatch")
+        file_delete(dynsmf_srchash_path(entry.path))

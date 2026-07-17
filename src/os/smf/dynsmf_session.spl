@@ -74,7 +74,15 @@ fn dynsmf_default_manifest() -> [DynSmfManifestEntry]:
         DynSmfManifestEntry(id: "web_renderer", path: "build/dynsmf/web_renderer.smf", source_module: "app.ui.render.html_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_html"]),
         DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/gui_renderer.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"]),
         DynSmfManifestEntry(id: "tui_renderer", path: "build/dynsmf/tui_renderer.smf", source_module: "app.ui.render.tui_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_tui_tree"]),
-        DynSmfManifestEntry(id: "ui_html", path: "build/dynsmf/ui_html.smf", source_module: "std.ui.html", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_html_ui"])
+        DynSmfManifestEntry(id: "ui_html", path: "build/dynsmf/ui_html.smf", source_module: "std.ui.html", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_html_ui"]),
+        # Toolchain entries (on-demand only): qualification audit 2026-07-17 selected these
+        # pre-existing seams so tooling changes avoid a full rebuild. default_autoload is
+        # false for all five — they are invoked on demand, not startup libraries.
+        DynSmfManifestEntry(id: "mcp_diag_tools", path: "build/dynsmf/mcp_diag_tools.smf", source_module: "app.mcp.main_lazy_diag_tools", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["format_new_diagnostics_block"]),
+        DynSmfManifestEntry(id: "fmt_tool", path: "build/dynsmf/fmt_tool.smf", source_module: "compiler.tools.formatter", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"]),
+        DynSmfManifestEntry(id: "lint_tool", path: "build/dynsmf/lint_tool.smf", source_module: "compiler.tools.lint", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: []),
+        DynSmfManifestEntry(id: "fix_tool", path: "build/dynsmf/fix_tool.smf", source_module: "compiler.tools.fix", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"]),
+        DynSmfManifestEntry(id: "todo_scan", path: "build/dynsmf/todo_scan.smf", source_module: "app.todo_scan", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"])
     ]
 
 fn dynsmf_manifest_all_precompiled(manifest: [DynSmfManifestEntry]) -> bool:
@@ -107,6 +115,16 @@ fn dynsmf_manifest_source_path(entry: DynSmfManifestEntry) -> text:
         return "src/app/ui.render/tui_widgets.spl"
     if entry.id == "ui_html":
         return "src/lib/common/ui/html_ui/dynsmf_entry.spl"
+    if entry.id == "mcp_diag_tools":
+        return "src/app/mcp/main_lazy_diag_tools.spl"
+    if entry.id == "fmt_tool":
+        return "src/compiler/90.tools/formatter/main.spl"
+    if entry.id == "lint_tool":
+        return "src/compiler/90.tools/lint/main.spl"
+    if entry.id == "fix_tool":
+        return "src/compiler/90.tools/fix/main.spl"
+    if entry.id == "todo_scan":
+        return "src/app/todo_scan/main.spl"
     ""
 
 fn dynsmf_build_plan(entry: DynSmfManifestEntry) -> DynSmfBuildPlan:
@@ -324,7 +342,20 @@ fn dynsmf_session_request_background_compiles(session: DynSmfSession, manifest: 
     dynsmf_session_request_background_compiles_from_statuses(session, manifest, [], true, true)
 
 fn dynsmf_session_queue_missing_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
-    dynsmf_session_request_background_compiles_from_statuses(session, manifest, [], false, false)
+    # Startup only pre-warms entries that startup itself will autoload. On-demand
+    # entries (default_autoload:false, e.g. toolchain entries invoked lazily by
+    # their own callers) are excluded here so plain startup evidence/behavior does
+    # not regress when new on-demand entries are added to the manifest. They still
+    # get their own build plan (dynsmf_build_plan/dynsmf_build_plans) for an
+    # explicit/manual compile; this function just does not auto-queue a background
+    # compile for them on every ordinary startup.
+    var autoload_only: [DynSmfManifestEntry] = []
+    var idx = 0
+    while idx < manifest.len():
+        if manifest[idx].default_autoload:
+            autoload_only.push(manifest[idx])
+        idx = idx + 1
+    dynsmf_session_request_background_compiles_from_statuses(session, autoload_only, [], false, false)
 
 fn dynsmf_policy_default() -> DynSmfPolicy:
     DynSmfPolicy(disabled_all: false, disabled_ids: [], source: "default")
