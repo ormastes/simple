@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -136,6 +136,52 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_memtrack_provider_symbol_contract(exact + "         w spl_hidden_dependency\n", "elf").is_err()).to_be(true)
         expect(stage4_validate_memtrack_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
 
+    it "accepts the exact hosted time and progress ABI":
+        val exact = "00000000 T rt_progress_get_elapsed_seconds\n00000010 T rt_progress_init\n00000020 T rt_progress_reset\n00000030 T rt_time_now_seconds_f64\n00000040 T rt_timestamp_add_days\n00000050 T rt_timestamp_diff_days\n00000060 T rt_timestamp_from_components\n00000070 T rt_timestamp_get_day\n00000080 T rt_timestamp_get_hour\n00000090 T rt_timestamp_get_microsecond\n000000a0 T rt_timestamp_get_minute\n000000b0 T rt_timestamp_get_month\n000000c0 T rt_timestamp_get_second\n000000d0 T rt_timestamp_get_year\n"
+        val prefixed = exact.replace(" T rt_", " T _rt_")
+        val elf = exact + "         U clock_gettime\n"
+        val macho = prefixed + "         U _clock_gettime\n"
+        val msvc = exact + "00000000 A @feat.00\n         U rt_time_now_unix_micros\n         U rt_time_now_nanos\n         U __chkstk\n"
+        val mingw = prefixed + "         U _rt_time_now_unix_micros\n         U _rt_time_now_nanos\n         U ___chkstk_ms\n"
+        expect(stage4_validate_time_provider_symbol_contract(elf, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(msvc, "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(mingw, "coff-mingw").is_ok()).to_be(true)
+
+    it "rejects time ABI and runtime dependency drift":
+        val exact = "00000000 T rt_progress_get_elapsed_seconds\n00000010 T rt_progress_init\n00000020 T rt_progress_reset\n00000030 T rt_time_now_seconds_f64\n00000040 T rt_timestamp_add_days\n00000050 T rt_timestamp_diff_days\n00000060 T rt_timestamp_from_components\n00000070 T rt_timestamp_get_day\n00000080 T rt_timestamp_get_hour\n00000090 T rt_timestamp_get_microsecond\n000000a0 T rt_timestamp_get_minute\n000000b0 T rt_timestamp_get_month\n000000c0 T rt_timestamp_get_second\n000000d0 T rt_timestamp_get_year\n"
+        val windows = exact + "         U rt_time_now_unix_micros\n         U rt_time_now_nanos\n"
+        expect(stage4_validate_time_provider_symbol_contract(exact.replace("000000d0 T rt_timestamp_get_year\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(exact + "000000e0 T rt_time_extra\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(exact + "000000e0 T rt_progress_init\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(windows.replace("         U rt_time_now_nanos\n", ""), "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(windows + "         U spl_hidden_dependency\n", "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(windows + "         U rt_time_now_nanos\n", "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_time_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+
+    it "compiles stages validates and cleans the time provider after memtrack":
+        expect(stage4_time_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_time.a")
+        expect(stage4_time_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_time.lib")
+        expect(stage4_time_provider_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_time_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_time_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_time_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        val compiler_source = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        expect(compiler_source).to_contain("\"runtime_memtrack\", \"runtime_timestamp\", \"runtime_fork\"")
+        expect(compiler_source).to_contain("{object_prefix}runtime_timestamp{ext}")
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val time_pos = source.last_index_of("llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
+        expect(time_pos).to_be_greater_than(memtrack_pos)
+        expect(barrier_pos).to_be_greater_than(time_pos)
+        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_timestamp\"")
+        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_timestamp\"], [archive_path])")
+        expect(source).to_contain("stage4_validate_time_provider_symbol_contract(scans[0], object_format)")
+        expect(source).to_contain("file_delete(memtrack_provider_archive)\n                if bootstrap_support_obj != \"\":\n                    file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 time provider failed")
+        expect(source).to_contain("file_delete(time_provider_archive)")
+
     it "stages validates and cleans the memtrack provider before the fail-closed barrier":
         expect(stage4_memtrack_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_memtrack.a")
         expect(stage4_memtrack_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_memtrack.lib")
@@ -174,6 +220,7 @@ describe "Stage4 aggregate final symbol closure":
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 dynamic-loader provider failed")
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 font provider failed")
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 memtrack provider failed")
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 time provider failed")
 
     it "rejects hosted constructor and destructor section families":
         val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
@@ -254,7 +301,7 @@ not-an-address W rt_malformed
         val combine_pos = source.find("# Step 3: Combine all objects and link")
         expect(barrier_pos).to_be_greater_than(closure_pos)
         expect(combine_pos).to_be_greater_than(barrier_pos)
-        expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        file_delete(entry_obj_path)\n        file_delete(dynload_provider_archive)\n        file_delete(font_provider_archive)\n        file_delete(memtrack_provider_archive)\n        if bootstrap_support_obj != \"\":\n            file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
+        expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        file_delete(entry_obj_path)\n        file_delete(dynload_provider_archive)\n        file_delete(font_provider_archive)\n        file_delete(memtrack_provider_archive)\n        file_delete(time_provider_archive)\n        if bootstrap_support_obj != \"\":\n            file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
 
     it "selects uniquely owning archives in declared order":
         val result = stage4_select_requested_archive_indices(

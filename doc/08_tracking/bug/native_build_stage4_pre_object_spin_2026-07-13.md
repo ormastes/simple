@@ -679,6 +679,18 @@ ELF or Mach-O archive could retain an undeclared weak runtime dependency while
 still passing the four-symbol undefined contract. A focused regression rejects
 that fail-open shape; measured archive execution remains pending.
 
+## 2026-07-17 production time/progress provider inventory
+
+The pure-Simple hosted runtime compiler now includes the sole
+`runtime_timestamp.c` owner in its aligned source/object lists. The strict
+Stage4 path stages that fresh object as a deterministic one-member time archive
+after memtrack, validates exactly its 14 time/timestamp/progress exports, and
+deletes it at the existing fail-closed barrier. POSIX objects may not import any
+`rt_*`/`spl_*` owner; Windows COFF objects must import exactly
+`rt_time_now_unix_micros` and `rt_time_now_nanos`. Non-runtime system/compiler
+imports remain a measured platform-link concern, so archive selection, hashing,
+cache admission, and executable ELF/Mach-O/COFF proof remain open.
+
 Timestamp time-of-day extraction now shares one floor-day microsecond
 remainder. Negative sub-second values such as `-1` therefore produce
 `23:59:59.999999` for the preceding date instead of the inconsistent
