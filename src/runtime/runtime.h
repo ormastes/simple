@@ -778,8 +778,8 @@ int64_t  rt_sdl2_get_window_height(int64_t handle);
 void     rt_sdl2_set_window_title(int64_t handle, const char* title);
 
 /* Framebuffer present (pixels = SplArray* of packed i64 RGBA) */
-void     rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
-                               int64_t width, int64_t height);
+bool     rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
+                              int64_t width, int64_t height);
 
 /* Event polling (returns event type code: 0=none, 1=quit, 2=keydown, etc.) */
 int64_t  rt_sdl2_poll_event(void);
@@ -817,8 +817,8 @@ void     rt_sdl_destroy_window(int64_t handle);
 int64_t  rt_sdl_get_window_width(int64_t handle);
 int64_t  rt_sdl_get_window_height(int64_t handle);
 void     rt_sdl_set_window_title(int64_t handle, const char* title);
-void     rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels,
-                              int64_t width, int64_t height);
+bool     rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels,
+                             int64_t width, int64_t height);
 int64_t  rt_sdl_poll_event(void);
 int64_t  rt_sdl_event_key_sym(void);
 int64_t  rt_sdl_event_key_mod(void);

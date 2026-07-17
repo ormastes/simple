@@ -131,7 +131,31 @@ completion requires a separate backend-specific plan and live GUI evidence.
 
 ## Shared Evidence Inputs
 
-- Shared sample: `src/app/ui_shared_mdi/main.spl`
+- Shared live sample: `src/app/ui_shared_mdi/live_window.spl` (using the HTML
+  shared with the IPC producer in `src/app/ui_shared_mdi/main.spl`)
+- Production launch input: a freshly compiled, nontrivial SMF artifact; the
+  `.app` launcher accepts `.smf` directly and does not reparse the source graph.
+- Live acceptance also requires structured native event evidence: the gate
+  focuses the Aqua window, targets visible MDI controls, injects keyboard and
+  pointer/click input, and requires the host to render updated event counters.
+  Pointer evidence comes from explicit mouse-move event counts, click evidence
+  requires a completed primary-button release, and a unique completion-only
+  screenshot color must be present after all structured counters are positive. Separate
+  titlebar-control and body-control hitbox receipts prevent clicks on blank
+  window space from satisfying live acceptance. The hitbox/completion policy is
+  isolated from the native host and passes a focused six-example interpreter
+  regression covering both injected centers, blank space, inclusive boundaries,
+  primary-release acceptance, pressed/non-primary rejection, and every required
+  counter.
+- The typed winit facade preserves the runtime present result. Initial,
+  event-driven, and periodic presentation failures stop the host, and positive
+  event receipts are written only after the updated frame is presented.
+- The SDL software-present owner now returns actual blit/update success instead
+  of `void`. App/window facades preserve that result, WebUI stops its loop on a
+  failed present, the editor SDL bridge exposes failure to its caller, the
+  standalone browser returns nonzero, and software Engine2D/3D loops stop and
+  expose `presentation_failed`. The focused source contract passes 4/4 and the
+  C owner passes a syntax-only build with the canonical `sdl2-config` flags.
 - Shared terminal fragment: `src/app/ui_shared_mdi/terminal_window_html.spl`
 - Linux browser event helper: `tools/web-render-backend/wm_event_check.js`
 - Existing evidence matrix:

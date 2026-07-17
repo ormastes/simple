@@ -7,8 +7,42 @@
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
 use std.nogc_sync_mut.env.platform.{is_macos}
+extern fn rt_file_read_text(path: text) -> text
 
 describe "Metal Engine2D framebuffer readback":
+
+    it "constructs one-call readback arrays in the selected runtime owner":
+        val core = rt_file_read_text("src/runtime/simple_core/core_array_ops.spl") ?? ""
+        val gate = rt_file_read_text("scripts/check/check-simple-core-runtime-smoke.shs") ?? ""
+
+        expect(core).to_contain("pub fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> i64:")
+        expect(core).to_contain("rt_typed_words_u32_push_known_at(result, i, word)")
+        expect(gate).to_contain("rt_u32s_from_raw")
+
+    it "retains unknown Metal submission dependencies in the runtime facade":
+        val owner = rt_file_read_text("src/lib/nogc_sync_mut/io/metal_sffi.spl") ?? ""
+        val backend = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl") ?? ""
+
+        expect(owner).to_contain("fn metal_sffi_quarantine_submission(command: i64, encoder: i64, source: i64, framebuffer: i64) -> bool:")
+        expect(owner).to_contain("fn metal_sffi_reap_submission_quarantine() -> bool:")
+        expect(owner).to_contain("metal_sffi_quarantine_release_proven(wait_succeeded, existing_command_released_after_wait)")
+        expect(backend).to_contain("metal_sffi_quarantine_submission(")
+        expect(owner).to_contain("fn metal_sffi_release_uncommitted_submission(command: i64, encoder: i64, source: i64):")
+        expect(backend).to_contain("metal_sffi_release_uncommitted_submission(cmd, encoder, src_buf)")
+        expect(backend).to_contain("Metal image composite commit failed")
+        expect(backend).to_contain("Metal auxiliary image commit failed")
+        expect(backend).to_not_contain("not committed or not metal_sffi_wait_completed")
+        expect(backend).to_contain("self.d_framebuffer = 0")
+
+    it "has a strict native proof for the unknown-command retention path":
+        val probe = rt_file_read_text("test/02_integration/rendering/metal_sffi_quarantine_native_probe.spl") ?? ""
+
+        expect(probe).to_contain("metal_sffi_quarantine_submission(0x5a5a5a, 0, 0, 0)")
+        expect(probe).to_contain("fn _metal_registry_lifecycle_available() -> bool:")
+        expect(probe).to_contain("val command_released = metal_sffi_destroy_command_buffer(command)")
+        expect(probe).to_contain("if not metal_sffi_is_available() or not _metal_registry_lifecycle_available():")
+        expect(probe).to_contain("if metal_sffi_reap_submission_quarantine():")
+        expect(probe).to_contain("metal-sffi-quarantine: pass")
 
     context "raw GPU pixels":
 
@@ -47,6 +81,10 @@ describe "Metal Engine2D framebuffer readback":
                 var b = MetalBackend.create()
                 expect(b.init(8, 8)).to_equal(true)
                 b.use_gpu_only()
+                expect(b.width()).to_equal(8)
+                expect(b.height()).to_equal(8)
+                expect(b.mirror.width()).to_equal(8)
+                expect(b.mirror.height()).to_equal(8)
                 b.clear(0xff000000u32)
                 b.set_clip(2, 2, 3, 2)
                 b.draw_rect_filled(0, 0, 8, 8, 0xffff0000u32)
@@ -59,6 +97,19 @@ describe "Metal Engine2D framebuffer readback":
                 expect(pixels[4 + (3 * 8)]).to_equal(0xffff0000u32)
                 expect(pixels[5 + (3 * 8)]).to_equal(0xff000000u32)
                 expect(pixels[7 + (7 * 8)]).to_equal(0xff00ff00u32)
+                b.shutdown()
+            else:
+                expect(is_macos()).to_equal(false)
+
+        it "fails closed for emulated image blending in GPU-only mode":
+            if is_macos():
+                var b = MetalBackend.create()
+                expect(b.init(4, 4)).to_equal(true)
+                b.use_gpu_only()
+                b.clear(0xff000000u32)
+                b.draw_image_blend(0, 0, 1, 1, [0x80ffffffu32])
+                expect(b.gpu_frame_complete).to_equal(false)
+                expect(b.read_pixels().len()).to_equal(0)
                 b.shutdown()
             else:
                 expect(is_macos()).to_equal(false)

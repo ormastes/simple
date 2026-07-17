@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/tmp/macos_gui_live_window_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_gui_live_window_evidence_$(date -u +%F).md}"
-SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-src/app/ui_shared_mdi/main.spl}"
+SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-src/app/ui_shared_mdi/live_window.spl}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 if [ -z "${SIMPLE_BIN+x}" ]; then
@@ -43,6 +43,12 @@ CAPTURE_BMP="$BUILD_DIR/simplegui-window.bmp"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
 LAUNCH_LOG="$BUILD_DIR/launch.log"
 WINDOW_INFO="$BUILD_DIR/window.env"
+EVENT_EVIDENCE="$BUILD_DIR/native-events.env"
+LIVE_ARTIFACT="${MACOS_GUI_LIVE_WINDOW_ARTIFACT:-$BUILD_DIR/shared-mdi-live-window.smf}"
+LIVE_ARTIFACT_LOG="$BUILD_DIR/live-artifact-compile.out"
+LIVE_LAUNCH_INPUT="$SAMPLE_SPL"
+LIVE_ARTIFACT_STATUS=not-run
+LIVE_ARTIFACT_BYTES=0
 TIMEOUT_SECS="${MACOS_GUI_LIVE_WINDOW_TIMEOUT_SECS:-45}"
 SIMPLE_GUI_DYNLIB_ARTIFACT="${SIMPLE_GUI_DYNLIB_ARTIFACT:-build/gui/pure_gui_hot.smf}"
 gui_smf_artifact_contract_out="$BUILD_DIR/gui-smf-artifact-contract.out"
@@ -59,9 +65,16 @@ capture_titlebar_css_pixels=0
 capture_titlebar_widget_fill_pixels=0
 capture_titlebar_widget_accent_pixels=0
 capture_titlebar_widget_text_pixels=0
+capture_completed_event_counter_pixels=0
+event_focus=false
+event_keyboard_events=0
+event_pointer_events=0
+event_click_events=0
+event_titlebar_click_events=0
+event_body_click_events=0
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$REPORT_PATH" "$gui_smf_artifact_contract_out" "$mdi_titlebar_contract_out"
+rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$EVENT_EVIDENCE" "$REPORT_PATH" "$gui_smf_artifact_contract_out" "$mdi_titlebar_contract_out" "$LIVE_ARTIFACT_LOG"
 
 append_env() {
     env_key="$1"
@@ -102,6 +115,13 @@ write_report() {
         echo "- GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence"
         echo "- Shared MDI titlebar contract status: $mdi_titlebar_contract_status"
         echo "- Shared MDI titlebar sample: $SAMPLE_SPL"
+        echo "- Native event focus: $event_focus"
+        echo "- Native keyboard events: $event_keyboard_events"
+        echo "- Native pointer events: $event_pointer_events"
+        echo "- Native click events: $event_click_events"
+        echo "- Native titlebar-control clicks: $event_titlebar_click_events"
+        echo "- Native body-control clicks: $event_body_click_events"
+        echo "- Rendered completed-event counter pixels: $capture_completed_event_counter_pixels"
         echo
         echo "## Raw Evidence"
         echo
@@ -115,6 +135,11 @@ write_report() {
             echo
             echo "## Shared MDI Titlebar Contract Output"
             sed 's/^/- /' "$mdi_titlebar_contract_out"
+        fi
+        if [ -f "$LIVE_ARTIFACT_LOG" ]; then
+            echo
+            echo "## Live Artifact Compile Output"
+            sed 's/^/- /' "$LIVE_ARTIFACT_LOG"
         fi
     } >"$REPORT_PATH"
 }
@@ -174,12 +199,66 @@ append_mdi_titlebar_contract_env() {
     append_env "macos_gui_live_window_evidence_simple_bin_source" "$SIMPLE_BIN_SOURCE"
     append_env "macos_gui_live_window_evidence_simple_bin_status" "$SIMPLE_BIN_STATUS"
     append_env "macos_gui_live_window_evidence_sample" "$SAMPLE_SPL"
+    append_env "macos_gui_live_window_evidence_launch_input" "$LIVE_LAUNCH_INPUT"
+    append_env "macos_gui_live_window_evidence_live_artifact" "$LIVE_ARTIFACT"
+    append_env "macos_gui_live_window_evidence_live_artifact_status" "$LIVE_ARTIFACT_STATUS"
+    append_env "macos_gui_live_window_evidence_live_artifact_bytes" "$LIVE_ARTIFACT_BYTES"
     append_env "macos_gui_live_window_evidence_mdi_titlebar_contract_status" "$mdi_titlebar_contract_status"
     append_env "macos_gui_live_window_evidence_mdi_titlebar_button_markup_present" "$mdi_titlebar_button_markup_present"
     append_env "macos_gui_live_window_evidence_mdi_titlebar_input_markup_present" "$mdi_titlebar_input_markup_present"
     append_env "macos_gui_live_window_evidence_mdi_body_button_markup_present" "$mdi_body_button_markup_present"
     append_env "macos_gui_live_window_evidence_mdi_body_input_markup_present" "$mdi_body_input_markup_present"
     append_env "macos_gui_live_window_evidence_mdi_titlebar_css_present" "$mdi_titlebar_css_present"
+    append_env "macos_gui_live_window_evidence_event_focus" "$event_focus"
+    append_env "macos_gui_live_window_evidence_event_keyboard_events" "$event_keyboard_events"
+    append_env "macos_gui_live_window_evidence_event_pointer_events" "$event_pointer_events"
+    append_env "macos_gui_live_window_evidence_event_click_events" "$event_click_events"
+    append_env "macos_gui_live_window_evidence_event_titlebar_click_events" "$event_titlebar_click_events"
+    append_env "macos_gui_live_window_evidence_event_body_click_events" "$event_body_click_events"
+}
+
+prepare_live_artifact() {
+    case "$SAMPLE_SPL" in
+        *.smf)
+            LIVE_ARTIFACT="$SAMPLE_SPL"
+            LIVE_LAUNCH_INPUT="$SAMPLE_SPL"
+            LIVE_ARTIFACT_BYTES="$(file_byte_count "$SAMPLE_SPL")"
+            if [ "$LIVE_ARTIFACT_BYTES" -le 300 ]; then
+                LIVE_ARTIFACT_STATUS=invalid
+                return 1
+            fi
+            LIVE_ARTIFACT_STATUS=provided
+            return 0
+            ;;
+        *.spl) ;;
+        *)
+            LIVE_ARTIFACT_STATUS=invalid-source
+            return 1
+            ;;
+    esac
+
+    artifact_tmp="$LIVE_ARTIFACT.tmp.$$"
+    mkdir -p "$(dirname -- "$LIVE_ARTIFACT")"
+    rm -f "$artifact_tmp"
+    set +e
+    "$SIMPLE_BIN" compile --format=smf "$SAMPLE_SPL" -o "$artifact_tmp" >"$LIVE_ARTIFACT_LOG" 2>&1
+    compile_code=$?
+    set -e
+    if [ "$compile_code" -ne 0 ] || [ ! -f "$artifact_tmp" ]; then
+        rm -f "$artifact_tmp"
+        LIVE_ARTIFACT_STATUS=compile-failed
+        return 1
+    fi
+    LIVE_ARTIFACT_BYTES="$(file_byte_count "$artifact_tmp")"
+    if [ "$LIVE_ARTIFACT_BYTES" -le 300 ]; then
+        rm -f "$artifact_tmp"
+        LIVE_ARTIFACT_STATUS=invalid
+        return 1
+    fi
+    mv "$artifact_tmp" "$LIVE_ARTIFACT"
+    LIVE_LAUNCH_INPUT="$LIVE_ARTIFACT"
+    LIVE_ARTIFACT_STATUS=compiled
+    return 0
 }
 
 emit_skip() {
@@ -203,6 +282,7 @@ emit_skip() {
     append_env "macos_gui_live_window_evidence_titlebar_widget_fill_pixels" "$capture_titlebar_widget_fill_pixels"
     append_env "macos_gui_live_window_evidence_titlebar_widget_accent_pixels" "$capture_titlebar_widget_accent_pixels"
     append_env "macos_gui_live_window_evidence_titlebar_widget_text_pixels" "$capture_titlebar_widget_text_pixels"
+    append_env "macos_gui_live_window_evidence_completed_event_counter_pixels" "$capture_completed_event_counter_pixels"
     append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
     append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
     append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
@@ -234,6 +314,7 @@ emit_fail() {
     append_env "macos_gui_live_window_evidence_titlebar_widget_fill_pixels" "$capture_titlebar_widget_fill_pixels"
     append_env "macos_gui_live_window_evidence_titlebar_widget_accent_pixels" "$capture_titlebar_widget_accent_pixels"
     append_env "macos_gui_live_window_evidence_titlebar_widget_text_pixels" "$capture_titlebar_widget_text_pixels"
+    append_env "macos_gui_live_window_evidence_completed_event_counter_pixels" "$capture_completed_event_counter_pixels"
     append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
     append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
     append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
@@ -271,12 +352,16 @@ if [ ! -f "$SAMPLE_SPL" ]; then
     emit_fail "missing-sample"
 fi
 
+if ! prepare_live_artifact; then
+    emit_fail "live-artifact-compile-failed"
+fi
+
 set +e
 # This gate owns bounded window discovery below. Disable the launcher's
 # best-effort AppleScript nudge so an Accessibility prompt or unavailable
 # window cannot block before TIMEOUT_SECS starts.
-SIMPLE_GUI_RUN_SKIP_NUDGE=1 SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-120}" \
-    bash scripts/gui/macos-gui-run.shs "$SAMPLE_SPL" >"$LAUNCH_LOG" 2>&1
+SIMPLE_GUI_RUN_SKIP_NUDGE=1 SIMPLE_GUI_EVENT_EVIDENCE_PATH="$EVENT_EVIDENCE" SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-120}" \
+    bash scripts/gui/macos-gui-run.shs "$LIVE_LAUNCH_INPUT" >"$LAUNCH_LOG" 2>&1
 launch_code=$?
 set -e
 if [ "$launch_code" -ne 0 ]; then
@@ -316,6 +401,65 @@ case "$window_rect" in
     *) emit_fail "invalid-window-rect" ;;
 esac
 
+old_ifs=$IFS
+IFS=,
+set -- $window_rect
+IFS=$old_ifs
+window_x="${1:-0}"
+window_y="${2:-0}"
+if ! osascript - "$window_x" "$window_y" >/dev/null 2>&1 <<'OSA'; then
+on run argv
+  set wx to (item 1 of argv) as integer
+  set wy to (item 2 of argv) as integer
+  tell application "System Events"
+    tell process "SimpleGui" to set frontmost to true
+    delay 0.2
+    click at {wx + 500, wy + 95}
+    keystroke "g"
+    click at {wx + 80, wy + 235}
+  end tell
+end run
+OSA
+    emit_fail "event-focus-failed"
+fi
+event_focus=true
+
+event_deadline=$(($(date +%s) + 5))
+while [ "$(date +%s)" -lt "$event_deadline" ]; do
+    if [ -s "$EVENT_EVIDENCE" ]; then
+        event_keyboard_events="$(sed -n 's/^keyboard_events=//p' "$EVENT_EVIDENCE" | tail -1)"
+        event_pointer_events="$(sed -n 's/^pointer_events=//p' "$EVENT_EVIDENCE" | tail -1)"
+        event_click_events="$(sed -n 's/^click_events=//p' "$EVENT_EVIDENCE" | tail -1)"
+        event_titlebar_click_events="$(sed -n 's/^titlebar_click_events=//p' "$EVENT_EVIDENCE" | tail -1)"
+        event_body_click_events="$(sed -n 's/^body_click_events=//p' "$EVENT_EVIDENCE" | tail -1)"
+        event_keyboard_events="${event_keyboard_events:-0}"
+        event_pointer_events="${event_pointer_events:-0}"
+        event_click_events="${event_click_events:-0}"
+        event_titlebar_click_events="${event_titlebar_click_events:-0}"
+        event_body_click_events="${event_body_click_events:-0}"
+        if [ "$event_keyboard_events" -gt 0 ] && [ "$event_pointer_events" -gt 0 ] && [ "$event_click_events" -gt 0 ] && [ "$event_titlebar_click_events" -gt 0 ] && [ "$event_body_click_events" -gt 0 ]; then
+            break
+        fi
+    fi
+    sleep 1
+done
+
+if [ "$event_keyboard_events" -le 0 ]; then
+    emit_fail "event-keyboard-missing"
+fi
+if [ "$event_pointer_events" -le 0 ]; then
+    emit_fail "event-pointer-missing"
+fi
+if [ "$event_click_events" -le 0 ]; then
+    emit_fail "event-click-missing"
+fi
+if [ "$event_titlebar_click_events" -le 0 ]; then
+    emit_fail "event-titlebar-control-click-missing"
+fi
+if [ "$event_body_click_events" -le 0 ]; then
+    emit_fail "event-body-control-click-missing"
+fi
+
 if ! screencapture -x -R"$window_rect" "$CAPTURE_PNG" >/dev/null 2>&1; then
     emit_fail "screencapture-failed"
 fi
@@ -339,6 +483,7 @@ capture_titlebar_css_pixels="${6:-0}"
 capture_titlebar_widget_fill_pixels="${7:-0}"
 capture_titlebar_widget_accent_pixels="${8:-0}"
 capture_titlebar_widget_text_pixels="${9:-0}"
+capture_completed_event_counter_pixels="${10:-0}"
 
 if [ "${non_background_pixels:-0}" -le 0 ]; then
     emit_fail "capture-has-no-visible-content"
@@ -354,6 +499,10 @@ fi
 
 if [ "${capture_titlebar_widget_text_pixels:-0}" -le 2 ]; then
     emit_fail "capture-titlebar-widget-text-missing"
+fi
+
+if [ "${capture_completed_event_counter_pixels:-0}" -le 2 ]; then
+    emit_fail "capture-completed-event-counters-missing"
 fi
 
 append_env "macos_gui_live_window_evidence_status" "pass"
@@ -376,6 +525,7 @@ append_env "macos_gui_live_window_evidence_titlebar_css_pixels" "$capture_titleb
 append_env "macos_gui_live_window_evidence_titlebar_widget_fill_pixels" "$capture_titlebar_widget_fill_pixels"
 append_env "macos_gui_live_window_evidence_titlebar_widget_accent_pixels" "$capture_titlebar_widget_accent_pixels"
 append_env "macos_gui_live_window_evidence_titlebar_widget_text_pixels" "$capture_titlebar_widget_text_pixels"
+append_env "macos_gui_live_window_evidence_completed_event_counter_pixels" "$capture_completed_event_counter_pixels"
 append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
 append_env "macos_gui_live_window_evidence_release_gate_status" "satisfied"
 mark_gui_smf_macos_pass_if_ready

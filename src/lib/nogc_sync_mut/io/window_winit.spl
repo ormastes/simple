@@ -16,7 +16,7 @@
 # ============================================================================
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]) -> bool
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
@@ -84,9 +84,10 @@ fn winit_window_free(win: WinitWindow):
     if win.is_valid:
         rt_winit_window_free(win.handle)
 
-fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]):
-    if win.is_valid:
-        rt_winit_window_present_rgba(win.handle, w, h, pixels)
+fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
+    if not win.is_valid:
+        return false
+    rt_winit_window_present_rgba(win.handle, w, h, pixels)
 
 # Toggle borderless fullscreen on the native window. The mutation is routed
 # through the event-loop/main thread (required on macOS). Returns true when the
@@ -168,6 +169,7 @@ struct WinitInput:
     # cursor position tracked during this same poll batch.
     mouse_x: f64
     mouse_y: f64
+    mouse_moves: i64
     click_buttons: [i64]
     click_pressed: [bool]
     click_x: [f64]
@@ -181,7 +183,7 @@ fn winit_input_empty() -> WinitInput:
     var cx: [f64] = []
     var cy: [f64] = []
     WinitInput(close: false, keys: keys, scroll_y: 0.0,
-               mouse_x: 0.0, mouse_y: 0.0,
+               mouse_x: 0.0, mouse_y: 0.0, mouse_moves: 0,
                click_buttons: cb, click_pressed: cp, click_x: cx, click_y: cy)
 
 fn winit_poll_input(lp: WinitLoop) -> WinitInput:
@@ -190,6 +192,7 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
     var scroll_y = 0.0
     var mouse_x = 0.0
     var mouse_y = 0.0
+    var mouse_moves = 0
     var click_buttons: [i64] = []
     var click_pressed: [bool] = []
     var click_x: [f64] = []
@@ -209,6 +212,7 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
             val (mx, my) = rt_winit_event_mouse_moved(ev)
             mouse_x = mx
             mouse_y = my
+            mouse_moves = mouse_moves + 1
         elif kind == EVT_MOUSE_BUTTON:
             val (button, pressed) = rt_winit_event_mouse_button(ev)
             click_buttons = click_buttons.push(button)
@@ -221,7 +225,7 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,
-               mouse_x: mouse_x, mouse_y: mouse_y,
+               mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
                click_buttons: click_buttons, click_pressed: click_pressed,
                click_x: click_x, click_y: click_y)
 
@@ -231,6 +235,7 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
     var scroll_y = 0.0
     var mouse_x = 0.0
     var mouse_y = 0.0
+    var mouse_moves = 0
     var click_buttons: [i64] = []
     var click_pressed: [bool] = []
     var click_x: [f64] = []
@@ -250,6 +255,7 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
             val (mx, my) = rt_winit_event_mouse_moved(ev)
             mouse_x = mx
             mouse_y = my
+            mouse_moves = mouse_moves + 1
         elif kind == EVT_MOUSE_BUTTON:
             val (button, pressed) = rt_winit_event_mouse_button(ev)
             click_buttons = click_buttons.push(button)
@@ -262,6 +268,6 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,
-               mouse_x: mouse_x, mouse_y: mouse_y,
+               mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
                click_buttons: click_buttons, click_pressed: click_pressed,
                click_x: click_x, click_y: click_y)

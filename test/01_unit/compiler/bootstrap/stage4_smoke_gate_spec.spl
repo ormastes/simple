@@ -15,7 +15,7 @@ describe "bootstrap stage4 smoke gate":
         val cli = rt_file_read_text("src/app/cli/_CliMain/main_and_help.spl") ?? ""
 
         expect(bootstrap).to_contain("run_logged stage4-essential-tools-smoke run_timeout_kill 180 env")
-        expect(bootstrap).to_contain("SIMPLE_BINARY=\"$(absolute_path \"${full_bin}\")\"")
+        expect(bootstrap).to_contain("SIMPLE_BINARY=\"$(absolute_path \"${{full_bin}}\")\"")
         expect(smoke).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
         expect(smoke).to_contain("timeout -k 5s 60s")
         expect(smoke).to_contain("run_probe test_runner_pass 0")
@@ -38,16 +38,16 @@ describe "bootstrap stage4 smoke gate":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
 
         expect(script).to_contain("--release          Deploy, then run the release-blocking whole test suite")
-        expect(script).to_contain("run_logged stage6-whole-tests \"${deployed_bin}\" test test --whole --mode=interpreter")
+        expect(script).to_contain("run_logged stage6-whole-tests \"${{deployed_bin}}\" test test --whole --mode=interpreter")
 
     it "rejects seed fallback and gates the full candidate before deployment":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
         val admission = rt_file_read_text("scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs") ?? ""
 
         expect(script).to_contain("refusing seed fallback")
-        expect(script).to_contain("CANDIDATE_FRONTEND_ROOT=${repo_root}")
-        expect(script).to_contain(". \"${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs\"")
-        expect(script).to_contain("if ! simple_binary_is_valid \"${full_bin}\"; then")
+        expect(script).to_contain("CANDIDATE_FRONTEND_ROOT=${{repo_root}}")
+        expect(script).to_contain(". \"${{repo_root}}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs\"")
+        expect(script).to_contain("if ! simple_binary_is_valid \"${{full_bin}}\"; then")
         expect(admission).to_contain("candidate_frontend_smoke() (")
         expect(admission).to_contain("fixtures/p2_add.spl")
         expect(admission).to_contain("--runtime-bundle core-c-bootstrap")
@@ -62,15 +62,15 @@ describe "bootstrap stage4 smoke gate":
 
     it "builds and requires the dedicated compiler backfill for a full CLI":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
-        val full_cli_implication: i64 = script.find("if [ \"${deploy}\" -eq 1 ] || [ \"${bootstrap_mode}\" = \"one-binary\" ]; then") ?? -1
-        val reuse_gate: i64 = script.find("if [ \"${full_bootstrap}\" -eq 0 ]; then") ?? -1
+        val full_cli_implication: i64 = script.find("if [ \"${{deploy}}\" -eq 1 ] || [ \"${{bootstrap_mode}}\" = \"one-binary\" ]; then") ?? -1
+        val reuse_gate: i64 = script.find("if [ \"${{full_bootstrap}}\" -eq 0 ]; then") ?? -1
 
-        expect(script).to_contain("compiler_backfill_lib=\"src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}\"")
+        expect(script).to_contain("compiler_backfill_lib=\"src/compiler_rust/target/bootstrap/${{archive_prefix}}simple_compiler_backfill${{archive_suffix}}\"")
         expect(script).to_contain("-p simple-compiler-backfill")
         expect(script).to_contain("full CLI bootstrap needs the compiler backfill archive")
         expect(script).to_contain("full CLI bootstrap refuses a stale compiler backfill")
         expect(script).to_contain("rust_rebuilt=1")
-        expect(script).to_contain("[ \"${rust_rebuilt}\" -eq 1 ]")
+        expect(script).to_contain("[ \"${{rust_rebuilt}}\" -eq 1 ]")
         expect(script).to_contain("supported on native Linux and macOS hosts")
         expect(full_cli_implication).to_be_less_than(reuse_gate)
 
@@ -78,9 +78,9 @@ describe "bootstrap stage4 smoke gate":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
 
         expect(script).to_contain("SIMPLE_BOOTSTRAP_STAGE4=1")
-        expect(script).to_contain("SIMPLE_NATIVE_BUILD_TARGET=\"${PLATFORM}\"")
-        expect(script).to_contain("SIMPLE_NATIVE_BUILD_THREADS=\"${selfhost_jobs}\"")
-        expect(script).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR=\"${native_cache_dir}\"")
+        expect(script).to_contain("SIMPLE_NATIVE_BUILD_TARGET=\"${{PLATFORM}}\"")
+        expect(script).to_contain("SIMPLE_NATIVE_BUILD_THREADS=\"${{selfhost_jobs}}\"")
+        expect(script).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR=\"${{native_cache_dir}}\"")
         expect(script).to_contain("SIMPLE_RUNTIME_PATH=")
         expect(script).to_contain("--runtime-bundle core-c-bootstrap")
         expect(script).to_contain("--low-memory")
@@ -98,6 +98,21 @@ describe "bootstrap stage4 smoke gate":
         expect(compile_targets).to_contain("resolve_cache = _nb_text_cache_add(resolve_cache, seg_key, rp)")
         expect(compile_targets).to_not_contain("var discovered: Dict<text, bool>")
         expect(compile_targets).to_not_contain("var resolve_cache: Dict<text, text>")
+
+    it "keeps bootstrap MIR symbol names compatible with the pure frontend":
+        val globals = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
+        val module_lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+
+        expect(globals).to_contain("fn bootstrap_hir_function_symbol_name(module: HirModule, hir_fn: HirFunction) -> text:")
+        expect(globals).to_contain("val display_name = module.symbols.symbol_display_name(hir_fn.symbol, hir_fn.name)")
+        expect(globals).to_not_contain("function: HirFunction")
+        expect(globals).to_not_contain("symbol_display_name(function.symbol, function.name).replace")
+        expect(lowering).to_contain("val display_name = self.symbols.symbol_display_name(fn_.symbol, fn_.name)")
+        expect(lowering).to_contain("mir_fn_name = display_name.replace(\"::\", \".\")")
+        expect(module_lowering).to_contain("for hir_fn in module.functions.values():")
+        expect(module_lowering).to_contain("function_names.push(hir_fn.name)")
+        expect(module_lowering).to_not_contain("for function in module.functions.values():")
 
     it "parses comma-separated class mixins in the Stage4 frontend":
         val parser = rt_file_read_text("src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl") ?? ""

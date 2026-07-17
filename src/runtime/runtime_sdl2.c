@@ -14,7 +14,8 @@
 
 #include "runtime.h"
 
-#include <SDL2/SDL.h>
+#include <SDL.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -112,20 +113,23 @@ void rt_sdl2_set_window_title(int64_t handle, const char* title) {
  * Converts to SDL surface format and blits to the window surface.
  */
 
-void rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
-                           int64_t width, int64_t height) {
-    if (window_handle == 0 || !pixels) return;
-    if (width <= 0 || height <= 0) return;
+bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
+                          int64_t width, int64_t height) {
+    if (window_handle == 0 || !pixels) return false;
+    if (width <= 0 || height <= 0) return false;
+    if (width > INT_MAX / 4 || height > INT_MAX) return false;
+    if (height > INT64_MAX / width) return false;
 
     SDL_Window* win = (SDL_Window*)(uintptr_t)window_handle;
 
     int64_t expected = width * height;
-    if (pixels->len < expected) return;
+    if (pixels->len < expected) return false;
+    if ((uint64_t)expected > SIZE_MAX / 4) return false;
 
     /* Allocate a temporary 32-bit RGBA pixel buffer */
     int64_t buf_size = width * height * 4;
     uint8_t* rgba_buf = (uint8_t*)malloc((size_t)buf_size);
-    if (!rgba_buf) return;
+    if (!rgba_buf) return false;
 
     /* Unpack i64 packed pixels to RGBA bytes */
     for (int64_t i = 0; i < expected; i++) {
@@ -150,7 +154,7 @@ void rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
 
     if (!src) {
         free(rgba_buf);
-        return;
+        return false;
     }
 
     /*
@@ -164,15 +168,18 @@ void rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
 
     /* Blit to window surface */
     SDL_Surface* dst = SDL_GetWindowSurface(win);
+    bool presented = false;
     if (dst) {
         /* Scale if window size differs from framebuffer size */
         SDL_Rect dst_rect = {0, 0, dst->w, dst->h};
-        SDL_BlitScaled(src, NULL, dst, &dst_rect);
-        SDL_UpdateWindowSurface(win);
+        if (SDL_BlitScaled(src, NULL, dst, &dst_rect) == 0) {
+            presented = SDL_UpdateWindowSurface(win) == 0;
+        }
     }
 
     SDL_FreeSurface(src);
     free(rgba_buf);
+    return presented;
 }
 
 /* ================================================================
@@ -599,8 +606,8 @@ void rt_sdl_set_window_title(int64_t handle, const char* title) {
     rt_sdl2_set_window_title(handle, title);
 }
 
-void rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
-    rt_sdl2_present_rgba(window_handle, pixels, width, height);
+bool rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
+    return rt_sdl2_present_rgba(window_handle, pixels, width, height);
 }
 
 int64_t rt_sdl_poll_event(void) {

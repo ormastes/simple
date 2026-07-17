@@ -84,7 +84,16 @@ The wrapper emits `macos_gui_live_window_evidence_simple_bin`,
 `macos_gui_live_window_evidence_simple_bin_status` before the shared MDI and
 capture fields. A valid host pass or non-macOS skip requires
 `macos_gui_live_window_evidence_simple_bin_status=pass` and the selected binary
-must not be under `src/compiler_rust/`. An explicit seed override must fail with
+must not be under `src/compiler_rust/`. On macOS, a pass additionally requires
+a real Aqua window whose structured event receipt contains keyboard input,
+explicit pointer movement, and completed primary-button releases in both the
+shared terminal titlebar and body control hitboxes. Press events,
+right/middle-button releases, and clicks on blank window space do not satisfy
+the interaction contract. A unique completion-only counter color must also be
+present in the captured bitmap after every event class is positive. The typed
+winit facade must propagate presentation failure; initial, updated, or periodic
+present failure is release-blocking, and an updated event receipt may only be
+written after successful presentation. An explicit seed override must fail with
 `macos_gui_live_window_evidence_reason=simple-bin-forbidden` and
 `macos_gui_live_window_evidence_release_gate_status=not-satisfied`.
 
@@ -158,6 +167,7 @@ The live or skip output must include:
 - `macos_gui_live_window_evidence_titlebar_widget_fill_pixels`
 - `macos_gui_live_window_evidence_titlebar_widget_accent_pixels`
 - `macos_gui_live_window_evidence_titlebar_widget_text_pixels`
+- `macos_gui_live_window_evidence_completed_event_counter_pixels`
 - `macos_gui_live_window_evidence_release_gate`
 - `macos_gui_live_window_evidence_release_gate_status`
 - `macos_gui_live_window_evidence_gui_smf_artifact_contract_status`
@@ -315,13 +325,15 @@ if host_os == "macos":
     expect(stdout).to_contain("macos_gui_live_window_evidence_simple_bin_status=pass")
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_simple_bin=") == "").to_equal(false)
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_simple_bin=").contains("src/compiler_rust/")).to_equal(false)
-    expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/main.spl")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/live_window.spl")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
+    expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_event_titlebar_click_events=")).to_be_greater_than(0)
+    expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_event_body_click_events=")).to_be_greater_than(0)
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_title=SimpleGui")
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_window_title=")).to_equal("SimpleGui")
@@ -339,6 +351,7 @@ if host_os == "macos":
     expect(stdout).to_contain("macos_gui_live_window_evidence_titlebar_widget_fill_pixels=")
     expect(stdout).to_contain("macos_gui_live_window_evidence_titlebar_widget_accent_pixels=")
     expect(stdout).to_contain("macos_gui_live_window_evidence_titlebar_widget_text_pixels=")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_completed_event_counter_pixels=")
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_bytes=")).to_be_greater_than(0)
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_cksum=")).to_be_greater_than(0)
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_width=")).to_be_greater_than(0)
@@ -349,6 +362,7 @@ if host_os == "macos":
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_titlebar_widget_fill_pixels=")).to_be_greater_than(20)
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_titlebar_widget_accent_pixels=")).to_be_greater_than(2)
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_titlebar_widget_text_pixels=")).to_be_greater_than(2)
+    expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_completed_event_counter_pixels=")).to_be_greater_than(2)
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_non_background_ratio=") == "0.000000").to_equal(false)
     expect(_capture_fields_are_coherent(stdout, true)).to_equal(true)
     expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
@@ -363,7 +377,7 @@ if host_os == "macos":
     expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
     expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
     expect(report).to_contain("Shared MDI titlebar contract status: pass")
-    expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/main.spl")
+    expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/live_window.spl")
     expect(report).to_contain("macos_gui_live_window_evidence_status=pass")
     expect(report).to_contain("macos_gui_live_window_evidence_simple_bin_status=pass")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
@@ -393,13 +407,15 @@ else:
     expect(stdout).to_contain("macos_gui_live_window_evidence_simple_bin_status=pass")
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_simple_bin=") == "").to_equal(false)
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_simple_bin=").contains("src/compiler_rust/")).to_equal(false)
-    expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/main.spl")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/live_window.spl")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_event_titlebar_click_events=0")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_event_body_click_events=0")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=false")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_rect=")
     expect(stdout).to_contain("macos_gui_live_window_evidence_capture_path=")
@@ -414,6 +430,7 @@ else:
     expect(stdout).to_contain("macos_gui_live_window_evidence_titlebar_widget_fill_pixels=0")
     expect(stdout).to_contain("macos_gui_live_window_evidence_titlebar_widget_accent_pixels=0")
     expect(stdout).to_contain("macos_gui_live_window_evidence_titlebar_widget_text_pixels=0")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_completed_event_counter_pixels=0")
     expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
     expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate_status=not-satisfied")
     expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=")
@@ -436,6 +453,7 @@ else:
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_titlebar_widget_fill_pixels=")).to_equal(0)
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_titlebar_widget_accent_pixels=")).to_equal(0)
     expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_titlebar_widget_text_pixels=")).to_equal(0)
+    expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_completed_event_counter_pixels=")).to_equal(0)
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_non_background_ratio=")).to_equal("0.000000")
     expect(_capture_fields_are_coherent(stdout, false)).to_equal(true)
     val report = file_read_text(_report_path(run_id))
@@ -447,7 +465,7 @@ else:
     expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT ")
     expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
     expect(report).to_contain("Shared MDI titlebar contract status: pass")
-    expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/main.spl")
+    expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/live_window.spl")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")

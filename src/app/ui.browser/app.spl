@@ -60,7 +60,7 @@ fn browser_winit_event_mouse_button(ev: i64) -> (i64, bool):
 fn browser_winit_event_free(ev: i64):
     _host_gui_event = GuiEvent.none()
 
-fn browser_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]):
+fn browser_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]) -> bool:
     _host_gui.present_rgba(w, h, pixels)
 
 fn browser_winit_window_free(win: i64):
@@ -163,29 +163,35 @@ class BrowserApp:
             return 0
         return 1
 
-    me run():
+    me run() -> bool:
         """Main browser engine loop with a real hosted window."""
+        var presentation_ok = true
         val width = (self.backend.viewport_width() * BROWSER_WINDOW_SCALE).to_i64()
         val height = (self.backend.viewport_height() * BROWSER_WINDOW_SCALE).to_i64()
         val event_loop = browser_winit_event_loop_new()
         if event_loop == 0:
             print "Error: failed to create host event loop"
             self.backend.shutdown()
-            return
+            return false
 
         val window = browser_winit_window_new(event_loop, width, height, HOST_WINDOW_TITLE)
         if window == 0:
             print "Error: failed to create host browser window"
             browser_winit_event_loop_free(event_loop)
             self.backend.shutdown()
-            return
+            return false
         dbg_stage("browser", "window_created")
 
         val initial_state = self.session.current_state()
         dbg_stage("browser", "first_frame_start")
         self.backend.render_frame(initial_state.tree, initial_state)
         dbg_stage("browser", "first_frame_done")
-        self.present_host_window(window)
+        if not self.present_host_window(window):
+            print "Error: failed to present initial browser frame"
+            browser_winit_window_free(window)
+            browser_winit_event_loop_free(event_loop)
+            self.backend.shutdown()
+            return false
 
         var next_present_at = browser_time_now_unix_micros() + 16000
         while self.running:
@@ -206,12 +212,16 @@ class BrowserApp:
             if had_event or now >= next_present_at:
                 val state = self.session.current_state()
                 self.backend.render_frame(state.tree, state)
-                self.present_host_window(window)
+                if not self.present_host_window(window):
+                    print "Error: failed to present browser frame"
+                    presentation_ok = false
+                    self.running = false
                 next_present_at = now + 16000
 
         browser_winit_window_free(window)
         browser_winit_event_loop_free(event_loop)
         self.backend.shutdown()
+        presentation_ok
 
     me consume_file_change_poll(had_event: bool) -> bool:
         """Throttle idle file reload checks while preserving event-time checks."""
@@ -287,7 +297,7 @@ class BrowserApp:
             if translated != nil:
                 self.handle_ui_event(translated)
 
-    me present_host_window(window: i64):
+    me present_host_window(window: i64) -> bool:
         val pixels = self.backend.pixels_rgba_i64()
         browser_winit_window_present_rgba(
             window,
@@ -350,8 +360,9 @@ fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path:
             return 1
         Ok(app):
             dbg_stage("browser", "app_created")
-            app.run()
-            return 0
+            if app.run():
+                return 0
+            return 1
 
 fn parse_backend_flag() -> text:
     """Parse --backend flag from CLI args. Defaults to auto-detect."""

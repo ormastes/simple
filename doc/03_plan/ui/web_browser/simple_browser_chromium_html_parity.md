@@ -747,11 +747,47 @@ Open gaps tied to the active browser objective:
      `doc/09_report/famous_site_corpus_div_geometry_full_2026-06-11.md` is the
      current single-command evidence; it uses no blur, tolerance, downscaling,
      copied Chromium pixels, or text antialiasing normalization
+- Shared MDI HTML composition applies the canonical five-character escaper to
+  its public backend label in both attribute and visible-text positions, and
+  validates the environment-derived browser URL through the strict no-GC
+  HTTP(S)/relative allowlist before escaping it into the iframe `src`; active
+  or unsupported schemes fail closed to `about:blank`. The foreground fragment remains an explicitly trusted
+  sibling-producer composition slot.
 - macOS MDI live-window evidence is now MDI-specific while remaining honestly
    host-gated:
    - `scripts/check/check-macos-gui-live-window-evidence.shs` launches
-     `src/app/ui_shared_mdi/main.spl` by default instead of the generic GUI
-     sample
+     `src/app/ui_shared_mdi/live_window.spl` by default; that host renders the
+     shared MDI HTML through Simple Web and presents it through winit, while
+     `src/app/ui_shared_mdi/main.spl` remains the backend-neutral IPC producer.
+      The evidence owner must compile this source to a nontrivial SMF first and
+      pass that cached artifact to `macos-gui-run.shs`; an exit-zero compile
+      without an artifact fails closed
+   - the live host drains winit input through the typed owner and exposes
+     keyboard, explicit mouse-move, and completed-click counters both in the
+     rendered frame and a structured receipt; the gate focuses the real Aqua
+     window, injects events at visible control coordinates, and fails if any
+     event class is absent. Positive structured receipts are written only after
+     the updated HTML frame renders and presents successfully; the typed winit
+     owner returns the runtime present status and the live host fails closed on
+     initial, updated, or periodic present failure. Completed releases must be
+     primary-button releases and land inside both the shared terminal
+     titlebar-widget hitbox and its body-control hitbox; raw window clicks alone
+     cannot satisfy the gate. The pure event
+     policy passes 6/6 focused examples for injected centers, blank space,
+     boundaries, primary-release acceptance, pressed/non-primary rejection,
+     and completion requirements
+   - presentation failure is propagated across the other hosted consumers too:
+     Chromium routes through the typed winit owner, retains dirty tab state on
+     a failed blit, stops its loop, and returns false; the markdown GUI exits
+     nonzero; and Game2D marks the native window closed. The focused
+     cross-surface source contract passes 3/3
+   - the SDL software fallback no longer manufactures presentation success:
+     the runtime returns actual blit/update status, app and library facades
+     preserve it, WebUI stops on failure, the editor bridge exposes it, the
+     standalone browser returns nonzero, and software Engine2D/3D loops stop
+     with an observable failure flag. The focused SDL source contract passes
+     4/4, `check src/lib` and `check src/app` pass, and `runtime_sdl2.c` passes
+     syntax-only compilation with the canonical SDL2 flags
    - `src/app/ui_shared_mdi/titlebar_contract_probe.spl` emits source-contract
      fields for the shared MDI titlebar button, body button, text input, and
      custom titlebar CSS
@@ -760,7 +796,10 @@ Open gaps tied to the active browser objective:
     `macos_gui_live_window_evidence_titlebar_css_pixels`,
     `macos_gui_live_window_evidence_titlebar_widget_fill_pixels`,
     `macos_gui_live_window_evidence_titlebar_widget_accent_pixels`, and
-    `macos_gui_live_window_evidence_titlebar_widget_text_pixels`
+    `macos_gui_live_window_evidence_titlebar_widget_text_pixels`. A separate
+    `macos_gui_live_window_evidence_completed_event_counter_pixels` metric uses
+    a unique completion-only color, so unrelated desktop text cannot satisfy
+    the visible event-counter gate
   - on a real macOS pass, the wrapper fails if the titlebar widget fill,
     accent, or text CSS colors are missing from the capture; on Linux these
     fields stay zero and the lane remains an explicit `requires-macos` skip

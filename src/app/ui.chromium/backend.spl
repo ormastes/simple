@@ -3,20 +3,18 @@
 # Wraps `BrowserCompositorBackend` from `os.compositor.browser_compositor_backend`
 # so the compositor can render through the in-tree browser engine pipeline,
 # and exposes a thin helper for blitting the produced [u32] pixel buffer
-# into a winit window via `rt_winit_window_present_rgba`.
+# into a winit window via the typed `winit_present_rgba` owner.
 #
 # Pixel path (M1 acceptance criterion):
 #   compositor.render_all() -> BrowserCompositorBackend.[u32] pixel_buffer
 #                           -> pack to [i64]
-#                           -> rt_winit_window_present_rgba(window, w, h, [i64])
+#                           -> winit_present_rgba(window, w, h, [i64])
 #
-# No new Rust SFFI is introduced — only the existing
-# `rt_winit_window_new`, `rt_winit_window_present_rgba`, `rt_winit_window_free`
-# surface listed in `doc/04_architecture/cross_platform_wm.md`.
+# No new Rust SFFI is introduced. Presentation routes through the canonical
+# typed owner so runtime failure remains observable.
 
 use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
-
-extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+use std.nogc_sync_mut.io.window_winit.{WinitWindow, winit_present_rgba}
 
 # ============================================================================
 # ChromiumBackend
@@ -60,9 +58,9 @@ impl ChromiumBackend:
     fn height() -> i32:
         self.h
 
-    me present_to_window():
+    me present_to_window() -> bool:
         """Pack the inner [u32] pixel buffer into [i64] and present it
-        to the winit window via `rt_winit_window_present_rgba`.
+        to the winit window through the typed presentation owner.
 
         This is the only place in the chromium shell that touches the
         host pixel surface — keeping the SFFI footprint to a single call.
@@ -74,8 +72,9 @@ impl ChromiumBackend:
         while i < total:
             packed = packed + [src[i].to_i64()]
             i = i + 1
-        rt_winit_window_present_rgba(
-            self.window_id,
+        val win = WinitWindow(handle: self.window_id, is_valid: self.window_id > 0)
+        winit_present_rgba(
+            win,
             self.w.to_i64(),
             self.h.to_i64(),
             packed

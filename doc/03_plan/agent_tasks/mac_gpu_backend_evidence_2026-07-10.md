@@ -152,10 +152,25 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-h
   source, and framebuffer handles to the canonical SFFI owner. Its deferred
   reaper releases dependencies only after successful completion or registry
   release proves a terminal error; an entry with neither proof remains retained
-  and blocks subsequent surface initialization. Focused source checks pass and
-  the release-decision probe covers success, terminal-error, and retained-unknown
-  branches. TODO 555 remains open only for current-source native failure-path
-  evidence after the pure-Simple deployment gate is restored.
+  and blocks subsequent surface initialization. A registry-missing commit is
+  now kept out of quarantine and the runtime owner immediately releases its
+  encoder, command, and staged source; all five Engine2D dispatch paths separate
+  that known-uncommitted state from committed-but-unknown completion. Focused
+  source checks pass and the release-decision probe covers success,
+  terminal-error, and retained-unknown branches. TODO 555 remains open only for
+  current-source native failure-path evidence after the pure-Simple deployment
+  gate is restored.
+- Live-window click receipts now accept only completed primary-button releases;
+  press events and right/middle-button releases cannot promote titlebar/body
+  controls. The pure policy passes 6/6 and the gate source contract passes 7/7.
+- The typed winit owner now returns the actual presentation result. The live
+  host exits nonzero on initial, updated, or periodic present failure and never
+  writes a positive updated event receipt before a successful present. Its
+  invalid-handle guard passes 4/4.
+- Chromium no longer declares a private raw present extern or clears a dirty
+  tab after a failed blit; its loop returns failure. Markdown GUI returns
+  nonzero and Game2D closes its native window on present failure. The shared
+  caller contract passes 3/3 and all three source trees pass `check`.
 - A macOS-only Rust test-build defect was also fixed by applying the existing
   Linux cfg boundary to the stage-4 compiler-backfill archive test that calls
   a Linux-only helper.

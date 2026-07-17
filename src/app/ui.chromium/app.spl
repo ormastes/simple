@@ -240,7 +240,7 @@ impl ChromiumApp:
             running: true
         ))
 
-    me render_active_tab():
+    me render_active_tab() -> bool:
         """M6 wire-up: route the active tab's dirty flag through the compositor.
 
         On each frame the compositor renders only when the active tab is
@@ -254,15 +254,17 @@ impl ChromiumApp:
         """
         if self.tab_manager.is_empty():
             self.compositor.render_all()
-            self.backend.present_to_window()
-            return
+            return self.backend.present_to_window()
         val tab = self.tab_manager.active_tab()
         if tab.dirty:
             self.compositor.render_all()
-            self.backend.present_to_window()
-            self.tab_manager.active_tab().clear_dirty()
+            val presented = self.backend.present_to_window()
+            if presented:
+                self.tab_manager.active_tab().clear_dirty()
+            return presented
+        true
 
-    me run():
+    me run() -> bool:
         """Render-and-present loop.
 
         M1 has no interactivity requirement, but we still pump the winit
@@ -279,7 +281,9 @@ impl ChromiumApp:
         """
         # Initial frame so the window is not blank before the first event.
         # The initial tab created in `new()` starts dirty, so this is safe.
-        self.render_active_tab()
+        var presentation_ok = self.render_active_tab()
+        if not presentation_ok:
+            self.running = false
 
         while self.running:
             var ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
@@ -312,10 +316,14 @@ impl ChromiumApp:
                 ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
 
             if self.running:
-                self.render_active_tab()
-                thread_sleep(16)
+                presentation_ok = self.render_active_tab()
+                if presentation_ok:
+                    thread_sleep(16)
+                else:
+                    self.running = false
 
         self.shutdown()
+        presentation_ok
 
     me handle_ui_event(event: UIEvent):
         """Route a translated UIEvent into the compositor / shell.

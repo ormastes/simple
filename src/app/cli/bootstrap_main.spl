@@ -10,8 +10,8 @@ extern fn rt_native_build(args: [text]) -> i64
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.driver.bootstrap_api.{aot_native_project_with_backend_fixed}
-use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, compile_result_is_success, compile_result_errors)
-use std.nogc_sync_mut.io_runtime.{env_get, env_set}
+use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
+use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists}
 
 # Keep in sync with ./VERSION file
 fn bootstrap_version() -> text:
@@ -240,6 +240,103 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
             print "error: in-process native-build: {err}"
         1
 
+fn bootstrap_compile_option_takes_value(arg: text) -> bool:
+    arg == "-o" or arg == "--output" or arg == "--backend" or arg == "--format" or arg == "--opt-level" or arg == "--target" or arg == "--cpu"
+
+fn bootstrap_compile_source_from_args(args: [text]) -> text:
+    var i = 2
+    while i < args.len():
+        val arg = args[i]
+        if bootstrap_compile_option_takes_value(arg):
+            i = i + 2
+        elif arg.starts_with("-"):
+            i = i + 1
+        else:
+            return arg
+    ""
+
+fn bootstrap_compile_output_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        ""
+    elif args[i] == "-o" or args[i] == "--output":
+        if i + 1 < args.len(): args[i + 1] else: ""
+    elif args[i].starts_with("-o") and args[i].len() > 2:
+        args[i].substring(2)
+    elif args[i].starts_with("--output="):
+        args[i].substring(9)
+    else:
+        bootstrap_compile_output_from_args(args, i + 1)
+
+fn bootstrap_compile_backend_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        "auto"
+    elif args[i] == "--backend" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--backend="):
+        args[i].substring(10)
+    else:
+        bootstrap_compile_backend_from_args(args, i + 1)
+
+fn bootstrap_compile_requests_smf(args: [text]) -> i64:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--format=smf" or arg == "--emit-smf":
+            return 1
+        if arg == "--format" and i + 1 < args.len() and args[i + 1] == "smf":
+            return 1
+        i = i + 1
+    val output = bootstrap_compile_output_from_args(args, 0)
+    if output.ends_with(".smf"):
+        return 1
+    0
+
+# Stage 3 is a bootstrap CLI, but its compile command must still be honest and
+# useful. Route the supported SMF form through the same in-process driver used
+# by single-entry native-build; never report success without running codegen.
+fn run_compile_bootstrap(args: [text]) -> i64:
+    val source = bootstrap_compile_source_from_args(args)
+    if source == "":
+        print "error: missing source file"
+        return 1
+    if bootstrap_compile_requests_smf(args) != 1:
+        print "error: bootstrap compile supports --format=smf only"
+        return 1
+    var output = bootstrap_compile_output_from_args(args, 0)
+    if output == "":
+        output = source.replace(".spl", ".smf")
+    val backend = bootstrap_compile_backend_from_args(args, 0)
+    if not remove_file_if_exists(output):
+        print "error: cannot replace SMF output '{output}'"
+        return 1
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", source)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
+    var options = driver_core_compile_options_default()
+    options.input_files = [source]
+    options.bootstrap_input_count = 1
+    options.bootstrap_input_0 = source
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = driver_output_format_smf()
+    options.backend = backend
+    options = compileoptions_normalize_mir_optimization(options)
+    val driver = compiler_driver_create(options)
+    val result = compiler_driver_run_compile(driver)
+    if compile_result_is_success(result):
+        if not file_exists(output):
+            print "error: in-process SMF compile reported success without creating '{output}'"
+            return 1
+        val output_bytes = file_size(output)
+        if output_bytes <= 300:
+            remove_file_if_exists(output)
+            print "error: in-process SMF compile produced a stub artifact ({output_bytes} bytes)"
+            return 1
+        0
+    else:
+        for err in compile_result_errors(result):
+            print "error: in-process SMF compile: {err}"
+        1
+
 fn get_cli_args() -> [text]:
     sys_get_args()
 
@@ -265,11 +362,6 @@ fn main() -> i64:
         print "  --list-optimizations"
         return 0
     if first.len() == 7 and first.starts_with("compile"):
-        if argc < 3:
-            print "error: missing source file"
-            return 1
-        val source_file = all_args[2]
-        print "compile: {source_file}"
-        return 0
+        return run_compile_bootstrap(all_args)
     print "error: unknown command '{first}'"
     return 1

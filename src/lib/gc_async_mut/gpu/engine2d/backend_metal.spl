@@ -23,7 +23,8 @@ use std.gc_async_mut.io.metal_sffi.{
     metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
     metal_sffi_destroy_compute_encoder,
     metal_sffi_set_buffer, metal_sffi_set_bytes,
-    metal_sffi_quarantine_submission, metal_sffi_reap_submission_quarantine
+    metal_sffi_quarantine_submission, metal_sffi_reap_submission_quarantine,
+    metal_sffi_release_uncommitted_submission
 }
 
 extern fn rt_alloc(size: i64) -> i64
@@ -335,6 +336,8 @@ class MetalBackend:
                            # unlike lut_buffer/lut_version above it carries no per-call
                            # version/count (init-time upload IS the invalidation contract)
     font: MetalFontBackendState
+    # Appended to preserve the native field offsets of the existing backend ABI.
+    gpu_only: bool
 
     static fn create() -> MetalBackend:
         val backend = make_metal_backend()
@@ -357,6 +360,7 @@ fn make_metal_backend() -> MetalBackend:
         clip_w: 0,
         clip_h: 0,
         clip_enabled: false,
+        gpu_only: false,
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
@@ -433,6 +437,7 @@ impl RenderBackend for MetalBackend:
         self.clip_w = width
         self.clip_h = height
         self.clip_enabled = false
+        self.gpu_only = false
         self.dirty = false
         self.initialized = true
         self.gpu_frame_complete = false
@@ -478,6 +483,7 @@ impl RenderBackend for MetalBackend:
         self.command_queue = self.session.command_queue
         self.w = width
         self.h = height
+        self.gpu_only = false
         val bytes = width.to_i64() * height.to_i64() * 4
         self.d_framebuffer = metal_sffi_alloc_buffer(self.session.device, bytes)
         if self.d_framebuffer == 0:
@@ -561,12 +567,14 @@ impl RenderBackend for MetalBackend:
         self.command_queue = 0
         self.w = 0
         self.h = 0
+        self.gpu_only = false
         self.dirty = false
         self.initialized = false
         self.gpu_frame_complete = false
 
     me clear(color: u32):
-        self.mirror.clear(color)
+        if not self.gpu_only:
+            self.mirror.clear(color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
             self.gpu_frame_complete = self._dispatch_metal_clear(color)
             self.dirty = true
@@ -575,69 +583,79 @@ impl RenderBackend for MetalBackend:
             if not self.initialized:
                 self.last_error = "MetalBackend not initialized"
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        self.mirror.draw_rect(x, y, w, h, color)
+        if not self.gpu_only:
+            self.mirror.draw_rect(x, y, w, h, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_outline != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rect_outline(x, y, w, h, color)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
-        self.mirror.draw_rect_filled(x, y, w, h, color)
+        if not self.gpu_only:
+            self.mirror.draw_rect_filled(x, y, w, h, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rect_filled(x, y, w, h, color)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_line != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_line(x1, y1, x2, y2, color, thickness)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
-        self.mirror.draw_circle(cx, cy, r, color)
+        if not self.gpu_only:
+            self.mirror.draw_circle(cx, cy, r, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, false)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
-        self.mirror.draw_circle_filled(cx, cy, r, color)
+        if not self.gpu_only:
+            self.mirror.draw_circle_filled(cx, cy, r, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle_filled != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, true)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
-        self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+        if not self.gpu_only:
+            self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rounded_rect != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rounded_rect(x, y, w, h, radius, color)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
-        self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        if not self.gpu_only:
+            self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_triangle != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_triangle(x1, y1, x2, y2, x3, y3, color)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
-        self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        if not self.gpu_only:
+            self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_gradient != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_gradient_rect(x, y, w, h, top_color, bottom_color)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        self.mirror.draw_text(x, y, text_val, color, font_size)
+        if not self.gpu_only:
+            self.mirror.draw_text(x, y, text_val, color, font_size)
         # GPU-dict use case #2 (design W4): one kernel_glyph_atlas_blit
         # dispatch for the whole string, gated on the atlas pipeline AND the
         # uploaded buffer — no other fallback path. A missing pipeline/buffer
-        # is the normal D2 CPU-lane fallthrough (design §3.4): the mirror
-        # above already holds the correct pixels, so read_pixels() falls back
-        # to it. (Deliberately NOT gated on pipe_rect_filled — the former
+        # is the normal D2 CPU-lane fallthrough (design §3.4): outside explicit
+        # GPU-only mode the mirror already holds the correct pixels, so
+        # read_pixels() falls back to it. (Deliberately NOT gated on
+        # pipe_rect_filled — the former
         # per-lit-glyph-pixel rect_filled dispatch path is retired.)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_glyph_atlas_blit != 0 and self.glyph_lut_buffer != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_glyph_atlas_blit(x, y, text_val, color, font_size)
@@ -645,36 +663,48 @@ impl RenderBackend for MetalBackend:
         else:
             self.gpu_frame_complete = false
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        self.mirror.draw_image(x, y, w, h, pixels)
+        if not self.gpu_only:
+            self.mirror.draw_image(x, y, w, h, pixels)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_blit != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_image(x, y, w, h, pixels)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if self.gpu_only:
+            # The emulation helper reads the destination before blending. A
+            # GPU-only destination has no mirror readback contract, so refuse
+            # the unsupported operation instead of indexing an empty buffer.
+            self.gpu_frame_complete = false
+            return
         emu_draw_image_blend(self, x, y, w, h, pixels)
     me set_clip(x: i32, y: i32, w: i32, h: i32):
-        self.mirror.set_clip(x, y, w, h)
+        if not self.gpu_only:
+            self.mirror.set_clip(x, y, w, h)
         self.clip_x = x
         self.clip_y = y
         self.clip_w = w
         self.clip_h = h
         self.clip_enabled = true
     me clear_clip():
-        self.mirror.clear_clip()
+        if not self.gpu_only:
+            self.mirror.clear_clip()
         self.clip_x = 0
         self.clip_y = 0
         self.clip_w = self.w
         self.clip_h = self.h
         self.clip_enabled = false
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
-        self.mirror.set_mask(mask_pixels, w, h)
+        if not self.gpu_only:
+            self.mirror.set_mask(mask_pixels, w, h)
         self.gpu_frame_complete = false
     me clear_mask():
-        self.mirror.clear_mask()
+        if not self.gpu_only:
+            self.mirror.clear_mask()
         self.gpu_frame_complete = false
     me present():
-        self.mirror.present()
+        if not self.gpu_only:
+            self.mirror.present()
     fn read_pixels() -> [u32]:
         # Checksum-free: read_pixels_with_source() runs an O(n) interpreted
         # checksum loop (engine2d_readback_with_handle) — ~8.8s at 1024x768 and
@@ -684,6 +714,9 @@ impl RenderBackend for MetalBackend:
             val gpu_pixels = self.read_pixels_gpu_only()
             if gpu_pixels.len() == (self.w * self.h):
                 return gpu_pixels
+        if self.gpu_only:
+            var empty: [u32] = []
+            return empty
         self.mirror.read_pixels()
 
     fn read_pixels_with_source() -> Engine2DReadback:
@@ -693,6 +726,10 @@ impl RenderBackend for MetalBackend:
                 val source = readback_source_label(ReadbackSource.DeviceReadback)
                 val readback = engine2d_readback_with_handle(gpu_pixels, source, self.d_framebuffer)
                 return readback
+        if self.gpu_only:
+            var empty: [u32] = []
+            val source = readback_source_label(ReadbackSource.DeviceReadback)
+            return engine2d_readback_with_handle(empty, source, self.d_framebuffer)
         val mirror_pixels = self.mirror.read_pixels()
         val source = readback_source_label(ReadbackSource.CpuMirror)
         val readback = engine2d_readback(mirror_pixels, source)
@@ -736,16 +773,15 @@ impl MetalBackend:
         if not self.initialized or not self.gpu_frame_complete:
             return 0
         val done = self.font.draw_font_batch(self.session, self.d_framebuffer, self.mirror,
-            self.w, self.h, origin_x, origin_y, batch)
+            not self.gpu_only, self.w, self.h, origin_x, origin_y, batch)
         if done > 0:
             self.dirty = true
         done
 
-    # True when use_gpu_only() has shrunk the CPU mirror to 1x1 while the GPU
-    # framebuffer still holds the full surface — i.e. the GPU is the sole source
-    # of truth and clip/readback decisions must go through it, not the mirror.
+    # True when the device framebuffer is the sole source of truth. The mirror
+    # retains full dimensions for ABI/fallback stability but is not rasterized.
     fn _gpu_only_mode() -> bool:
-        (self.initialized and self.d_framebuffer != 0 and (self.w * self.h) > 1 and self.mirror.width() <= 1 and self.mirror.height() <= 1)
+        self.initialized and self.d_framebuffer != 0 and self.gpu_only
 
     # Honest self-description (D3/backend_capability.spl): an op is only
     # advertised as accelerated when the device is present AND its compute
@@ -790,10 +826,10 @@ impl MetalBackend:
     # LUT upload/invalidation contract (design §3.3) — re-upload only happens
     # when the version (or entry count) changes, never per-primitive/per-frame.
     me indexed_fill(x: i32, y: i32, w: i32, h: i32, idx: [u8], palette: [u32], palette_version: i64):
-        # CPU-lane mirror: the SoftwareBackend oracle body, always runs so the
-        # mirror stays a valid fallback/readback source (same pattern every
-        # other draw op in this file follows).
-        self.mirror.indexed_fill(x, y, w, h, idx, palette)
+        # CPU-lane mirror: retain the SoftwareBackend oracle outside explicit
+        # GPU-only mode so the mirror remains a valid fallback/readback source.
+        if not self.gpu_only:
+            self.mirror.indexed_fill(x, y, w, h, idx, palette)
         if w <= 0 or h <= 0:
             return
         if not self.initialized or self.d_framebuffer == 0 or self.session.pipe_indexed_fill == 0:
@@ -802,15 +838,17 @@ impl MetalBackend:
             # normal D2 CPU-lane path, not a special case. Do NOT flip
             # gpu_frame_complete for the "gpu-only mode, clip is a no-op" style
             # exception below — indexed_fill has no such prior exception, so a
-            # miss here means read_pixels() correctly falls back to the mirror.
+            # miss here means normal mode falls back to the mirror; explicit
+            # GPU-only mode fails closed with an empty readback.
             self.gpu_frame_complete = false
             return
         val count = palette.len().to_i32()
         if count > GPU_LUT_MAX_ENTRIES:
             # Loud fall-through: an oversized LUT is refused outright rather
-            # than silently truncated/wrapped (design §3.4). The mirror above
-            # already has the correct pixels; this print makes the refusal
-            # observable instead of a silent wrong-pixel GPU write.
+            # than silently truncated/wrapped (design §3.4). In normal mode the
+            # mirror already has the correct pixels; GPU-only mode fails closed.
+            # This print makes the refusal observable instead of a silent
+            # wrong-pixel GPU write.
             print "backend_metal: indexed_fill palette has {count} entries > GPU_LUT_MAX_ENTRIES={GPU_LUT_MAX_ENTRIES}; refusing GPU dispatch (CPU-lane result stands)"
             self.gpu_frame_complete = false
             return
@@ -935,16 +973,19 @@ impl MetalBackend:
 
     me read_pixels_gpu_only() -> [u32]:
         if not self.initialized or self.d_framebuffer == 0:
+            self.last_error = "Metal GPU-only readback unavailable: backend not initialized or framebuffer missing"
             return []
         val total_i32 = self.w * self.h
         val total_pixels = _metal_i64(total_i32)
         val byte_size = total_pixels * 4
         val host = metal_host_alloc(byte_size + 8)
         if host == 0:
+            self.last_error = "Metal GPU-only readback host allocation failed"
             return []
         val ok = metal_buffer_download_ptr(host, self.d_framebuffer, byte_size)
         if ok == 0:
             metal_host_free(host)
+            self.last_error = "Metal GPU-only framebuffer download failed"
             return []
         # One-call fast path: rt_u32s_from_raw builds the whole [u32] Rust-side.
         # The per-8-byte metal_host_read_i64 loop below costs ~1.4s at 1024x768
@@ -959,7 +1000,9 @@ impl MetalBackend:
             val fast_pixels = metal_u32s_from_ptr(host, total_pixels)
             metal_host_free(host)
             if fast_pixels.len() != total_i32:
+                self.last_error = "Metal GPU-only one-call conversion length mismatch"
                 return []
+            self.last_error = ""
             return fast_pixels
         var pixels: [u32] = [0u32; total_i32]
         var i: i64 = 0
@@ -971,19 +1014,17 @@ impl MetalBackend:
                 pixels[i as i32] = ((pair >> 32) & 0xFFFFFFFF) as u32
                 i = i + 1
         metal_host_free(host)
+        self.last_error = ""
         pixels
 
-    # Shrink the CPU software mirror to 1x1 so it costs nothing. At native Retina
-    # resolution the mirror would re-rasterize millions of pixels per op under the
-    # interpreter (clear/rect fills), which dominates runtime. The GPU framebuffer
-    # is the source of truth here — gpu_frame_complete stays true so readback is
-    # GPU — and SoftwareBackend clamps every fill to its buffer bounds, so a 1x1
-    # mirror makes each mirror op clip to a single pixel without changing GPU
-    # output. Use for offscreen/native backends whose pixels are read back from
-    # the GPU, never presented via the mirror.
+    # Disable CPU mirror rasterization. At native Retina resolution the mirror
+    # would duplicate millions of pixels of work per op under the interpreter.
+    # Retain its full-sized storage as a stable fallback/readback object; only
+    # the device framebuffer is mutated while gpu_only is true.
     me use_gpu_only():
-        self.mirror.shutdown()
-        val ok = self.mirror.init(1, 1)
+        # Keep full-sized fallback storage so device readback remains ABI-stable;
+        # draw methods use gpu_only to skip CPU mirror rasterization entirely.
+        self.gpu_only = true
 
     # Blit a host RGBA pixel block (block_w x block_h, u32/pixel) into the GPU
     # framebuffer at (x, y) via the kernel_blit_image compute pipeline. One
@@ -1045,7 +1086,16 @@ impl MetalBackend:
         self.pending_composite_encoder = encoder
         self.pending_composite_source = src_buf
         val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed or not metal_sffi_wait_completed(cmd):
+        if not committed:
+            metal_sffi_release_uncommitted_submission(cmd, encoder, src_buf)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal image blit commit failed"
+            return false
+        if not metal_sffi_wait_completed(cmd):
             self.initialized = false
             self.gpu_frame_complete = false
             self.last_error = "Metal image blit completion unknown"
@@ -1129,14 +1179,22 @@ impl MetalBackend:
             metal_sffi_destroy_command_buffer(cmd)
             return false
 
-        # Once commit is attempted, a false return does not prove that Metal
-        # never observed the source buffer. Keep it owned until completion is
-        # positively observed, and make this surface receipt-ineligible.
+        # Ownership transfers to the deferred path only after commit succeeds.
+        # A missing command handle cannot submit and is reclaimed immediately.
         self.pending_composite_command = cmd
         self.pending_composite_encoder = encoder
         self.pending_composite_source = src_buf
         val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed or not metal_sffi_wait_completed(cmd):
+        if not committed:
+            metal_sffi_release_uncommitted_submission(cmd, encoder, src_buf)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal image composite commit failed"
+            return false
+        if not metal_sffi_wait_completed(cmd):
             self.initialized = false
             self.gpu_frame_complete = false
             self.last_error = "Metal image composite completion unknown"
@@ -1210,7 +1268,8 @@ impl MetalBackend:
         var mscale = px_size / 16
         if mscale < 1:
             mscale = 1
-        self.mirror.draw_text(x, y, text_val, color, mscale)
+        if not self.gpu_only:
+            self.mirror.draw_text(x, y, text_val, color, mscale)
         if not self.initialized or self.d_framebuffer == 0 or self.session.pipe_blit == 0:
             self.gpu_frame_complete = false
             return
@@ -1575,7 +1634,16 @@ impl MetalBackend:
         self.pending_composite_encoder = encoder
         self.pending_composite_source = source
         val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed or not metal_sffi_wait_completed(cmd):
+        if not committed:
+            metal_sffi_release_uncommitted_submission(cmd, encoder, source)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal auxiliary image commit failed"
+            return false
+        if not metal_sffi_wait_completed(cmd):
             self.initialized = false
             self.gpu_frame_complete = false
             self.last_error = "Metal auxiliary image completion unknown"
@@ -1630,7 +1698,16 @@ impl MetalBackend:
         self.pending_composite_encoder = encoder
         self.pending_composite_source = 0
         val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed or not metal_sffi_wait_completed(cmd):
+        if not committed:
+            metal_sffi_release_uncommitted_submission(cmd, encoder, 0)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal 1D dispatch commit failed"
+            return false
+        if not metal_sffi_wait_completed(cmd):
             self.initialized = false
             self.gpu_frame_complete = false
             self.last_error = "Metal 1D dispatch completion unknown"
@@ -1671,7 +1748,16 @@ impl MetalBackend:
         self.pending_composite_encoder = encoder
         self.pending_composite_source = 0
         val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed or not metal_sffi_wait_completed(cmd):
+        if not committed:
+            metal_sffi_release_uncommitted_submission(cmd, encoder, 0)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal 2D dispatch commit failed"
+            return false
+        if not metal_sffi_wait_completed(cmd):
             self.initialized = false
             self.gpu_frame_complete = false
             self.last_error = "Metal 2D dispatch completion unknown"
@@ -1684,43 +1770,53 @@ impl MetalBackend:
 
 impl MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        if not self.gpu_only:
+            self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
         self.gpu_frame_complete = false
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        self.mirror.draw_ellipse(cx, cy, rx, ry, color)
+        if not self.gpu_only:
+            self.mirror.draw_ellipse(cx, cy, rx, ry, color)
         self.gpu_frame_complete = false
 
     me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
+        if not self.gpu_only:
+            self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
         self.gpu_frame_complete = false
 
     me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
-        self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
         self.gpu_frame_complete = false
 
     me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
         self.gpu_frame_complete = false
 
     me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
-        self.mirror.draw_polygon_filled(xs, ys, count, color)
+        if not self.gpu_only:
+            self.mirror.draw_polygon_filled(xs, ys, count, color)
         self.gpu_frame_complete = false
 
     me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
-        self.mirror.draw_polyline(xs, ys, count, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_polyline(xs, ys, count, color, thickness)
         self.gpu_frame_complete = false
 
     me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
-        self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
         self.gpu_frame_complete = false
 
     me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
-        self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
         self.gpu_frame_complete = false
 
     me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
-        self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rounded_rect_outline != 0:
             self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rounded_rect_outline(x, y, w, h, radius, color, thickness)
             self.dirty = true
@@ -1728,43 +1824,53 @@ impl MetalBackend:
             self.gpu_frame_complete = false
 
     me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
-        self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+        if not self.gpu_only:
+            self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
         self.gpu_frame_complete = false
 
     me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
-        self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+        if not self.gpu_only:
+            self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
         self.gpu_frame_complete = false
 
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
-        self.mirror.draw_rect_blend(x, y, w, h, color)
+        if not self.gpu_only:
+            self.mirror.draw_rect_blend(x, y, w, h, color)
         self.gpu_frame_complete = false
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        self.mirror.draw_image_blend(x, y, w, h, pixels)
+        if not self.gpu_only:
+            self.mirror.draw_image_blend(x, y, w, h, pixels)
         self.gpu_frame_complete = false
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-        self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        if not self.gpu_only:
+            self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
         self.gpu_frame_complete = false
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
-        self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
+        if not self.gpu_only:
+            self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
         self.gpu_frame_complete = false
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
-        self.mirror.draw_blur_rect(x, y, w, h, radius)
+        if not self.gpu_only:
+            self.mirror.draw_blur_rect(x, y, w, h, radius)
         self.gpu_frame_complete = false
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
-        self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        if not self.gpu_only:
+            self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
         self.gpu_frame_complete = false
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
-        self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        if not self.gpu_only:
+            self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
         self.gpu_frame_complete = false
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-        self.mirror.draw_rect_blend(x, y, w, h, color)
+        if not self.gpu_only:
+            self.mirror.draw_rect_blend(x, y, w, h, color)
         self.gpu_frame_complete = false
 
 export MetalBackend
