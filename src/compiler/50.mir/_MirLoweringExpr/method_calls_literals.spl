@@ -109,6 +109,146 @@ impl MirLowering:
                 return ets_new_local
         ets_raw
 
+    me lower_text_split_lines(receiver: HirExpr) -> LocalId:
+        """Lower `text.split_lines()` (bug: pure_simple_text_split_lines_missing).
+
+        Semantics (matches Rust's str::lines(), per the bug doc): split on
+        "\\n", treating "\\r\\n" as a single separator (a trailing "\\r" is
+        stripped from every line), and never emit a trailing empty line when
+        the text ends with a newline.
+
+        Built ENTIRELY out of already-supported primitives -- no new extern:
+          1. normalized = receiver.replace("\\r\\n", "\\n")   (existing
+             rt_string_replace, same call shape as the "replace" special
+             case above -- collapses CRLF to LF in one pass, so no
+             per-line \\r-stripping loop is needed).
+          2. ends_nl = normalized.ends_with("\\n")   (existing
+             rt_string_ends_with, same call shape as the "ends_with"
+             special case above).
+          3. If ends_nl: strip exactly the final "\\n" via the same
+             rt_interp_cstr + spl_str_len + spl_str_slice sequence the
+             "substring"/"slice" special case above already uses (raw-buffer
+             slice, then re-tag via ensure_tagged_str).
+          4. lines = body.split("\\n")   (existing rt_string_split, same
+             call shape as the "split" special case above); flagged
+             runtime_array_locals exactly like plain `.split()` so
+             downstream indexing/for-in/.len() route through rt_array_get.
+
+        No loop/array-copy machinery is required: collapsing CRLF up front
+        and trimming at most one trailing separator before the single
+        split() call reuses 100% pre-existing call shapes.
+        """
+        val sl_recv_raw = self.lower_expr(receiver)
+        val ts_recv = self.ensure_tagged_str(sl_recv_raw)
+
+        val str_ty = MirType(kind: MirTypeKind.Opaque("str"))
+
+        var b_crlf = self.builder
+        val crlf_raw = b_crlf.new_temp(str_ty)
+        b_crlf.emit_const(crlf_raw, MirConstValue.Str("\r\n"), str_ty)
+        self.builder = b_crlf
+        val crlf_lit = self.ensure_tagged_str(crlf_raw)
+
+        var b_lf = self.builder
+        val lf_raw = b_lf.new_temp(str_ty)
+        b_lf.emit_const(lf_raw, MirConstValue.Str("\n"), str_ty)
+        self.builder = b_lf
+        val lf_lit = self.ensure_tagged_str(lf_raw)
+
+        # normalized = receiver.replace("\r\n", "\n")
+        val replace_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_replace"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: str_ty, is_variadic: false)))
+        ))
+        var b_repl = self.builder
+        val normalized_res = b_repl.emit_call(replace_op, [mir_operand_copy(ts_recv), mir_operand_copy(crlf_lit), mir_operand_copy(lf_lit)], str_ty)
+        val normalized = normalized_res ?? b_repl.new_temp(str_ty)
+        self.builder = b_repl
+
+        # ends_nl = normalized.ends_with("\n")  (raw i64 0/1, normalized to Bool via != 0)
+        val ew_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_ends_with"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b_ew = self.builder
+        val ends_res = b_ew.emit_call(ew_op, [mir_operand_copy(normalized), mir_operand_copy(lf_lit)], MirType.i64())
+        val ends_nl = ends_res ?? b_ew.new_temp(MirType.i64())
+        val zero_i = b_ew.emit_const_int(0)
+        val cond = b_ew.emit_binop(MirBinOp.Ne, mir_operand_copy(ends_nl), mir_operand_copy(zero_i), MirType.bool())
+        self.builder = b_ew
+
+        var b_prep = self.builder
+        val strip_block = b_prep.new_block(Some("split_lines_strip"))
+        val keep_block = b_prep.new_block(Some("split_lines_keep"))
+        val merge_block = b_prep.new_block(Some("split_lines_merge"))
+        val body_local = b_prep.new_temp(str_ty)
+        b_prep.terminate_if(mir_operand_copy(cond), strip_block, keep_block)
+        self.builder = b_prep
+
+        # strip_block: body = normalized[0 .. len-1)  (drop the trailing "\n")
+        var b_strip = self.builder
+        b_strip.switch_to_block(strip_block)
+        self.builder = b_strip
+
+        val cstr_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: str_ty, is_variadic: false)))
+        ))
+        var b_cstr = self.builder
+        val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(normalized)], str_ty)
+        val raw_buf = cstr_res ?? normalized
+        self.builder = b_cstr
+
+        val slen_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("spl_str_len"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b_slen = self.builder
+        val slen_res = b_slen.emit_call(slen_op, [mir_operand_copy(raw_buf)], MirType.i64())
+        val full_len = slen_res ?? b_slen.new_temp(MirType.i64())
+        val one_i = b_slen.emit_const_int(1)
+        val trimmed_len = b_slen.emit_binop(MirBinOp.Sub, mir_operand_copy(full_len), mir_operand_copy(one_i), MirType.i64())
+        val zero_idx = b_slen.emit_const_int(0)
+        self.builder = b_slen
+
+        val sslice_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("spl_str_slice"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: str_ty, is_variadic: false)))
+        ))
+        var b_slice = self.builder
+        val slice_res = b_slice.emit_call(sslice_op, [mir_operand_copy(raw_buf), mir_operand_copy(zero_idx), mir_operand_copy(trimmed_len)], str_ty)
+        val stripped_raw = slice_res ?? raw_buf
+        self.builder = b_slice
+        val stripped_tagged = self.ensure_tagged_str(stripped_raw)
+
+        var b_strip_end = self.builder
+        b_strip_end.emit_copy(body_local, stripped_tagged)
+        b_strip_end.terminate_goto(merge_block)
+        self.builder = b_strip_end
+
+        # keep_block: body = normalized (no trailing newline to drop)
+        var b_keep = self.builder
+        b_keep.switch_to_block(keep_block)
+        b_keep.emit_copy(body_local, normalized)
+        b_keep.terminate_goto(merge_block)
+        self.builder = b_keep
+
+        var b_merge = self.builder
+        b_merge.switch_to_block(merge_block)
+        self.builder = b_merge
+
+        # lines = body.split("\n")
+        val split_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_split"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b_split = self.builder
+        val split_res = b_split.emit_call(split_op, [mir_operand_copy(body_local), mir_operand_copy(lf_lit)], MirType.i64())
+        val lines_local = split_res ?? body_local
+        self.builder = b_split
+        self.runtime_array_locals[lines_local.id] = true
+        lines_local
+
     me result_ok_hir_type(receiver: HirExpr) -> HirType?:
         val receiver_type = self.enum_match_expr_type(receiver)
         if receiver_type != nil:
@@ -1637,6 +1777,30 @@ impl MirLowering:
                         self.runtime_array_locals[ts_local.id] = true
                     return ts_local
                 return ts_recv
+
+        # Bug (pure_simple_text_split_lines_missing, 2026-07-16): `text.split_lines()`
+        # had no MIR lowering at all (fell to the generic Unresolved loud-fail:
+        # "unresolved method call: split_lines"). Guard against a positively-known
+        # array/slice receiver first -- same rationale as the `contains`/
+        # `substring` guards above: an array also resolves Unresolved for this
+        # (unregistered) method name, and without the guard its raw handle would
+        # get silently treated as a string pointer instead of loud-failing.
+        var split_lines_recv_is_array = false
+        if method == "split_lines":
+            if val slr_ty = receiver.type_:
+                match slr_ty.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        split_lines_recv_is_array = true
+                    case _: ()
+            if not split_lines_recv_is_array:
+                match receiver.kind:
+                    case Var(_) | NamedVar(_, _):
+                        val slr_probe = self.lower_expr(receiver)
+                        if self.local_is_runtime_array(slr_probe):
+                            split_lines_recv_is_array = true
+                    case _: ()
+        if method == "split_lines" and args.len() == 0 and resolution_is_unresolved and not split_lines_recv_is_array:
+            return self.lower_text_split_lines(receiver)
 
         if (method == "substring" or method == "slice"):
             val maybe_receiver_type = receiver.type_
