@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -47,6 +47,20 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_dynload_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
         expect(stage4_dynload_provider_object_format("linux", true).is_err()).to_be(true)
         expect(stage4_dynload_provider_object_format("plan9", false).is_err()).to_be(true)
+
+    it "derives Windows object ABI from the selected C driver and linker contract":
+        expect(stage4_windows_c_object_uses_msvc_abi("linux", "host", "/usr/bin/clang", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "cl.exe", true).unwrap()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-pc-windows-msvc", "C:/LLVM/BIN/CLANG-CL.EXE", true).unwrap()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "C:\\mingw64\\bin\\gcc.exe", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x64", "x86_64-w64-mingw32-gcc", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "clang.exe", true).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "clang.exe", false).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "cl.exe", false).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "gcc.exe", true).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-pc-windows-msvc", "gcc.exe", false).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "compiler-wrapper.exe", true).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("linux", "host", "clang", true).is_err()).to_be(true)
 
     it "accepts exact ELF Mach-O and COFF dynamic-loader provider contracts":
         val elf = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
@@ -182,8 +196,8 @@ describe "Stage4 aggregate final symbol closure":
         expect(compiler_source).to_contain("\"runtime_memtrack\", \"runtime_timestamp\", \"runtime_fork\"")
         expect(compiler_source).to_contain("{object_prefix}runtime_timestamp{ext}")
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
-        val time_pos = source.last_index_of("llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val time_pos = source.last_index_of("llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
         val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
         expect(time_pos).to_be_greater_than(memtrack_pos)
         expect(barrier_pos).to_be_greater_than(time_pos)
@@ -199,8 +213,8 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_memtrack_provider_object_format("macos", false).unwrap()).to_equal("macho")
         expect(stage4_memtrack_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        val font_pos = source.last_index_of("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
-        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val font_pos = source.last_index_of("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
         val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
         expect(memtrack_pos).to_be_greater_than(font_pos)
         expect(barrier_pos).to_be_greater_than(memtrack_pos)
@@ -211,7 +225,7 @@ describe "Stage4 aggregate final symbol closure":
 
     it "builds inventories validates and cleans the font provider before the fail-closed barrier":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        val build_pos = source.find("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid)")
+        val build_pos = source.find("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
         val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
         expect(build_pos).to_be_greater_than(-1)
         expect(barrier_pos).to_be_greater_than(build_pos)
@@ -638,7 +652,7 @@ not-an-address W rt_malformed
         expect(inventory_source).to_contain("retained constructor/destructor sections")
         expect(inventory_source).to_contain("stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == \"windows\")")
         val build_pos = source.find("fn llvm_stage4_build_single_object_provider_archive")
-        val production_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val production_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
         val fail_closed_pos = source.find("remaining provider inventory and unique-owner selection are wired")
         val step3_pos = source.find("# Step 3: Combine all objects and link")
         val build_source = source.substring(build_pos, source.find("# Configuration"))
@@ -657,7 +671,12 @@ not-an-address W rt_malformed
         expect(inventory_call_pos).to_be_greater_than(list_pos)
         expect(contract_pos).to_be_greater_than(inventory_call_pos)
         expect(source).to_contain("find_archive_portable()")
-        expect(source).to_contain("stage4_runtime_provider_object_matches(object, object_stem, object_ext, _is_windows())")
+        expect(source).to_contain("stage4_runtime_provider_object_matches(object, object_stem, object_ext, windows_paths)")
+        expect(source.contains("_obj_ext() == \".obj\"")).to_be(false)
+        expect(source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1).to_equal(4)
+        expect(source.split("archive_file, object_ext, target_os_name == \"windows\", pid").len() - 1).to_equal(4)
+        expect(source).to_contain("compile_entry_point_c(pid, verbose, options.opt_level, hosted_cc)")
+        expect(source).to_contain("compile_bootstrap_native_all_support_c(pid, verbose, options.opt_level, hosted_cc)")
         expect(source.contains("object.ends_with(object_stem + object_ext)")).to_be(false)
         expect(source).to_contain("provider_objects.len() != 1")
         expect(source).to_contain("file_copy(provider_objects[0], staged_object)")

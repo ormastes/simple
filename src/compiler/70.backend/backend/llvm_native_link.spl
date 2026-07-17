@@ -16,9 +16,9 @@ use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
-use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
@@ -82,11 +82,10 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         i = i + 1
     Ok(scans)
 
-fn llvm_stage4_build_single_object_provider_archive(runtime_objects: [text], object_stem: text, provider: text, archive_file: text, pid: i64) -> Result<text, text>:
-    val object_ext = _obj_ext()
+fn llvm_stage4_build_single_object_provider_archive(runtime_objects: [text], object_stem: text, provider: text, archive_file: text, object_ext: text, windows_paths: bool, pid: i64) -> Result<text, text>:
     var provider_objects: [text] = []
     for object in runtime_objects:
-        if stage4_runtime_provider_object_matches(object, object_stem, object_ext, _is_windows()):
+        if stage4_runtime_provider_object_matches(object, object_stem, object_ext, windows_paths):
             provider_objects = provider_objects.push(object)
     if provider_objects.len() != 1:
         return Err("Stage4 " + provider + " provider requires exactly one fresh " + object_stem + object_ext + " object")
@@ -125,15 +124,15 @@ fn llvm_stage4_build_single_object_provider_archive(runtime_objects: [text], obj
 
     Ok(archive_path)
 
-fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
-    val msvc_objects = target_os_name == "windows" and _obj_ext() == ".obj"
-    val archive_file = match stage4_dynload_provider_archive_file(target_os_name, msvc_objects):
+fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_dynload_provider_archive_file(target_os_name, msvc_linker):
         case Ok(name): name
         case Err(err): return Err(err)
     val object_format = match stage4_dynload_provider_object_format(target_os_name, msvc_objects):
         case Ok(format): format
         case Err(err): return Err(err)
-    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_dynload", "dynamic-loader", archive_file, pid):
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_dynload", "dynamic-loader", archive_file, object_ext, target_os_name == "windows", pid):
         case Ok(path): path
         case Err(err): return Err(err)
 
@@ -149,15 +148,15 @@ fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os
         case Ok(()): ()
     Ok(archive_path)
 
-fn llvm_stage4_build_font_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
-    val msvc_objects = target_os_name == "windows" and _obj_ext() == ".obj"
-    val archive_file = match stage4_font_provider_archive_file(target_os_name, msvc_objects):
+fn llvm_stage4_build_font_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_font_provider_archive_file(target_os_name, msvc_linker):
         case Ok(name): name
         case Err(err): return Err(err)
     val object_format = match stage4_font_provider_object_format(target_os_name, msvc_objects):
         case Ok(format): format
         case Err(err): return Err(err)
-    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_font", "font", archive_file, pid):
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_font", "font", archive_file, object_ext, target_os_name == "windows", pid):
         case Ok(path): path
         case Err(err): return Err(err)
     val scans = match llvm_stage4_candidate_archive_inventory(["runtime_font"], [archive_path]):
@@ -172,15 +171,15 @@ fn llvm_stage4_build_font_provider_archive(runtime_objects: [text], target_os_na
         case Ok(()): ()
     Ok(archive_path)
 
-fn llvm_stage4_build_memtrack_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
-    val msvc_objects = target_os_name == "windows" and _obj_ext() == ".obj"
-    val archive_file = match stage4_memtrack_provider_archive_file(target_os_name, msvc_objects):
+fn llvm_stage4_build_memtrack_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_memtrack_provider_archive_file(target_os_name, msvc_linker):
         case Ok(name): name
         case Err(err): return Err(err)
     val object_format = match stage4_memtrack_provider_object_format(target_os_name, msvc_objects):
         case Ok(format): format
         case Err(err): return Err(err)
-    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_memtrack", "memtrack", archive_file, pid):
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_memtrack", "memtrack", archive_file, object_ext, target_os_name == "windows", pid):
         case Ok(path): path
         case Err(err): return Err(err)
     val scans = match llvm_stage4_candidate_archive_inventory(["runtime_memtrack"], [archive_path]):
@@ -195,15 +194,15 @@ fn llvm_stage4_build_memtrack_provider_archive(runtime_objects: [text], target_o
         case Ok(()): ()
     Ok(archive_path)
 
-fn llvm_stage4_build_time_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
-    val msvc_objects = target_os_name == "windows" and _obj_ext() == ".obj"
-    val archive_file = match stage4_time_provider_archive_file(target_os_name, msvc_objects):
+fn llvm_stage4_build_time_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_time_provider_archive_file(target_os_name, msvc_linker):
         case Ok(name): name
         case Err(err): return Err(err)
     val object_format = match stage4_time_provider_object_format(target_os_name, msvc_objects):
         case Ok(format): format
         case Err(err): return Err(err)
-    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_timestamp", "time", archive_file, pid):
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_timestamp", "time", archive_file, object_ext, target_os_name == "windows", pid):
         case Ok(path): path
         case Err(err): return Err(err)
     val scans = match llvm_stage4_candidate_archive_inventory(["runtime_timestamp"], [archive_path]):
@@ -274,9 +273,9 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
 # C-Based Entry Point Compiler (no llc needed)
 # ============================================================================
 
-fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text, text>:
+fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
     """Compile entry point as C source (no llc needed)."""
-    val cc = find_c_compiler()
+    val cc = if compiler != "": compiler else: find_c_compiler()
     if cc == "":
         return Err("No C compiler found")
     val tmp_dir = _get_temp_dir()
@@ -369,9 +368,9 @@ pub fn bootstrap_native_all_support_source() -> text:
     c_source = c_source + "}\n"
     c_source
 
-fn compile_bootstrap_native_all_support_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text, text>:
+fn compile_bootstrap_native_all_support_c(pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
     """Compile the bootstrap native_all C ABI support object."""
-    val cc = find_c_compiler()
+    val cc = if compiler != "": compiler else: find_c_compiler()
     if cc == "":
         return Err("No C compiler found")
     val tmp_dir = _get_temp_dir()
@@ -475,6 +474,17 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         return Err("host C runtime/entry compilation unsupported: target '{hosted_target}' on host '{hosted_arch}-{hosted_os}'")
     if not hosted_native_link_arch_supported(hosted_os, hosted_arch):
         return Err(hosted_native_link_unsupported_arch_error(hosted_os, hosted_arch))
+    val hosted_cc = find_c_compiler()
+    if hosted_cc == "":
+        return Err("No C compiler found. Install clang or gcc.")
+
+    var stage4_msvc_linker = false
+    var stage4_msvc_objects = false
+    if stage4_requested:
+        stage4_msvc_linker = hosted_os == "windows" and not _is_mingw()
+        match stage4_windows_c_object_uses_msvc_abi(hosted_os, hosted_target, hosted_cc, stage4_msvc_linker):
+            case Ok(msvc): stage4_msvc_objects = msvc
+            case Err(err): return Err(err)
 
     # Link the Rust native_all archive whenever SIMPLE_RUNTIME_PATH points at
     # one — not only under SIMPLE_BOOTSTRAP=1. The normal path needs it too for
@@ -507,7 +517,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     else:
         # native_all already owns spl_dl* in Rust; otherwise the pure hosted
         # runtime supplies the C owner for both LLVM and Cranelift.
-        val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "")
+        val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc)
         if trace:
             print "[LLVM-LINK] compile_runtime_objects returned"
         match rt_result:
@@ -519,7 +529,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
 
     val bootstrap_support_result = if native_all_replaces_c_runtime:
-        compile_bootstrap_native_all_support_c(pid, verbose, options.opt_level)
+        compile_bootstrap_native_all_support_c(pid, verbose, options.opt_level, hosted_cc)
     else:
         Ok("")
     val bootstrap_support_obj = match bootstrap_support_result:
@@ -532,7 +542,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # Step 2: Generate and compile entry point
     if trace:
         print "[LLVM-LINK] step 2: compile entry point..."
-    val c_result = compile_entry_point_c(pid, verbose, options.opt_level)
+    val c_result = compile_entry_point_c(pid, verbose, options.opt_level, hosted_cc)
     if trace:
         print "[LLVM-LINK] entry point compiled"
     val entry_obj_path = match c_result:
@@ -567,7 +577,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 return Err(err)
         if trace:
             print "[LLVM-LINK] Stage4 requested runtime symbols: {stage4_requested_symbols.len()}"
-        val dynload_provider_archive = match llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, pid):
+        val dynload_provider_archive = match llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
             case Ok(path): path
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -575,7 +585,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return Err("Stage4 dynamic-loader provider failed: " + err)
-        val font_provider_archive = match llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid):
+        val font_provider_archive = match llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
             case Ok(path): path
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -584,7 +594,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return Err("Stage4 font provider failed: " + err)
-        val memtrack_provider_archive = match llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, pid):
+        val memtrack_provider_archive = match llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
             case Ok(path): path
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -594,7 +604,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return Err("Stage4 memtrack provider failed: " + err)
-        val time_provider_archive = match llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, pid):
+        val time_provider_archive = match llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
             case Ok(path): path
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)

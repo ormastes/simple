@@ -78,6 +78,29 @@ pub fn stage4_time_provider_archive_file(target_os_name: text, msvc_linker: bool
     """Return the target/linker-specific time/progress archive name without selecting it."""
     stage4_hosted_provider_archive_file("time", target_os_name, msvc_linker)
 
+pub fn stage4_windows_c_object_uses_msvc_abi(target_os_name: text, target: text, cc: text, msvc_linker: bool) -> Result<bool, text>:
+    """Classify the selected Windows C driver and reject linker-ABI disagreement."""
+    if target_os_name != "windows":
+        if msvc_linker:
+            return Err("Stage4 MSVC linker policy requires a Windows target")
+        return Ok(false)
+
+    val normalized = cc.lower().replace("\\", "/")
+    val parts = normalized.split("/")
+    val driver = parts[parts.len() - 1]
+    val msvc_driver = driver == "cl" or driver == "cl.exe" or driver == "clang-cl" or driver == "clang-cl.exe"
+    val mingw_driver = driver == "gcc" or driver == "gcc.exe" or driver == "cc" or driver == "cc.exe" or driver.ends_with("-gcc") or driver.ends_with("-gcc.exe")
+
+    if not msvc_driver and not mingw_driver:
+        return Err("Stage4 cannot determine Windows object ABI from C compiler '" + cc + "'")
+    if msvc_driver and not msvc_linker:
+        return Err("Stage4 MSVC C compiler is incompatible with the MinGW linker policy")
+    if mingw_driver and msvc_linker:
+        return Err("Stage4 MinGW C compiler is incompatible with the MSVC linker policy")
+    if target.contains("-") and target.ends_with("-pc-windows-msvc") and not msvc_driver:
+        return Err("Stage4 MinGW C compiler is incompatible with explicit MSVC target '" + target + "'")
+    Ok(msvc_driver)
+
 fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     if target_os_name == "windows":
         return Ok(if msvc_objects: "coff-msvc" else: "coff-mingw")
