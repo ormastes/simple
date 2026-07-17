@@ -223,7 +223,8 @@ dynamic-loader case through the staged compiler; their first CI execution remain
 pending. The pure-Simple strict path now stages its already-compiled dynload
 object under a canonical member name, creates and inventories the deterministic
 dedicated archive, validates the exact hosted ABI, cleans it, and remains
-fail-closed before selection; execution proof is pending. The same production
+fail-closed before selection; addressless weak undefined dependencies are
+rejected, and execution proof is pending. The same production
 path now stages, inventories, and exact-ABI validates the dedicated font archive
 with vendored STB exports held translation-unit-local and the dedicated
 memtrack archive with its 15-global ABI; execution proof and selection remain

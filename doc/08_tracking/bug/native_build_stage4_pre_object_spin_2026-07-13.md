@@ -671,6 +671,14 @@ must first exclude the same object from core-C so the unique-owner validator
 does not correctly reject that overlap; hashing, cache admission, link ordering,
 and executable proof remain open.
 
+## 2026-07-17 weak-undefined provider closure
+
+The exact dynload ABI validator now treats addressless weak `w`/`v` rows as
+undefined symbols, matching the shared hosted provider validator. Previously an
+ELF or Mach-O archive could retain an undeclared weak runtime dependency while
+still passing the four-symbol undefined contract. A focused regression rejects
+that fail-open shape; measured archive execution remains pending.
+
 Timestamp time-of-day extraction now shares one floor-day microsecond
 remainder. Negative sub-second values such as `-1` therefore produce
 `23:59:59.999999` for the preceding date instead of the inconsistent
