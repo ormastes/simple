@@ -82,18 +82,26 @@ The unchanged binaries and adjacent metadata/licenses are bundled under
 accepted in source policy—nine identity-profile families, the sans Devanagari
 and Arabic witness faces, and exact-corpus Noto Emoji. Serif Devanagari/Arabic
 and two rank-eleven Bengali faces remain candidates.
-The distribution-size gate counts all 57 files under `assets/fonts` plus root
-`LICENSE` and `THIRD_PARTY_NOTICES.md`: 59 files and 53,433,272 bytes against
-the 80 MiB ceiling.
-The release installer copies `assets/fonts/`, `LICENSE`, and
-`THIRD_PARTY_NOTICES.md` below `share/simple`. Its wrapper exports that share
-directory as `SIMPLE_ASSET_ROOT`; the registry byte-load boundary resolves the
-same canonical paths there. Portable bootstrap/full archives also bundle the
+`selected_font_bundle_asset_pins()` is the single immutable distribution list:
+49 paths derived from the 16 candidate binary/metadata/license/notice fields,
+plus `CORPUS.sdn` and seven pinned CLDR resources. The distribution-size gate
+requires that exact 57-path set, then counts root `LICENSE` and
+`THIRD_PARTY_NOTICES.md`: 59 files and 53,433,272 bytes against the 80 MiB
+ceiling.
+Before its first font copy, the release installer rejects a wrong pin count,
+missing or extra source paths, missing bytes, or a source hash mismatch. It
+copies only pinned paths and verifies each destination against the same hash;
+`LICENSE` and `THIRD_PARTY_NOTICES.md` remain separate root resources below
+`share/simple`. Its wrapper exports that share directory as `SIMPLE_ASSET_ROOT`;
+the registry byte-load boundary resolves the same canonical paths there.
+Portable bootstrap/full archives also bundle the
 tree and launch `simple-runtime` through an asset-root wrapper. Unix installer
 packages use `/usr/local/share/simple`; Windows portable/NSIS packages use the
 installed package root. A configured
 installed root takes precedence; without one, repository-relative paths remain
-unchanged.
+unchanged. The resolver accepts any nonempty share or portable package root,
+normalizes trailing separators and Windows backslashes, and appends only the
+registry-owned relative asset path; unmanaged paths are never redirected.
 Installed paths do not create a second catalog or change pinned identities.
 The two serif script candidates have bounded default-instance source profiles
 and independent glyph/advance/offset probes. They remain unavailable to normal

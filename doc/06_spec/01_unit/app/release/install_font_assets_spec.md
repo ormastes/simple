@@ -9,9 +9,13 @@ Executable source:
 
 ## Preserve the installer-owned font tree
 
-The source installer copies all 57 tracked files below `assets/fonts`, plus the
-root license and third-party notices, into `share/simple`. Its launcher exports
-that directory as `SIMPLE_ASSET_ROOT` before starting the runtime.
+The source installer reads the registry-owned immutable list of exactly 57
+font-resource paths and SHA-256 values. Before its first font copy, it rejects a
+wrong pin count, missing or extra source paths, missing files, or any source hash
+mismatch. It then copies only pinned paths and verifies every destination hash.
+The root license and third-party notices are copied separately into
+`share/simple`. The launcher exports that directory as `SIMPLE_ASSET_ROOT`
+before starting the runtime.
 
 ## Stage fonts in every host package
 

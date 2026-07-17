@@ -64,6 +64,11 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
 
 ### Bundled assets and notices
 
+- The registry derives one closed 57-path/SHA-256 bundle: 49 candidate binary,
+  metadata, license, and notice files; one `CORPUS.sdn`; and seven CLDR files.
+  The executable scenario rejects duplicate pins, missing or extra tree paths,
+  and any byte/hash mismatch. CLDR and corpus checks consume these owner pins
+  rather than repeating their hash literals.
 - Exactly 16 unique font paths and 16 unique SHA-256 values.
 - Every binary, adjacent `METADATA.pb`, and adjacent license file exists below
   `assets/fonts/google-fonts/`, and the metadata/license text is nonempty.

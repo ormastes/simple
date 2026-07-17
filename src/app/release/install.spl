@@ -12,6 +12,7 @@
 use app.io.mod.{process_run}
 use std.io_runtime.{cwd}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.font_registry.{selected_font_bundle_asset_pins}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -136,16 +137,36 @@ fn copy_source_tree(src: text, dst: text):
     print "  Copied " + count.to_text() + " source files"
 
 fn copy_font_tree(src: text, dst: text) -> bool:
+    val pins = selected_font_bundle_asset_pins()
     val files = rt_dir_walk(src)
-    var count = 0
+    if pins.len() != 57 or files.len() != pins.len(): return false
+
     for f in files:
         val rel = f.slice(src.len() + 1)
+        var pinned = false
+        for pin in pins:
+            if pin.path == "assets/fonts/" + rel:
+                pinned = true
+        if not pinned: return false
+
+    for pin in pins:
+        val prefix = "assets/fonts/"
+        if not pin.path.starts_with(prefix): return false
+        val rel = pin.path.slice(prefix.len(), pin.path.len())
+        val source_path = src + "/" + rel
+        if not rt_file_exists(source_path): return false
+        if sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256: return false
+
+    for pin in pins:
+        val prefix = "assets/fonts/"
+        val rel = pin.path.slice(prefix.len(), pin.path.len())
+        val source_path = src + "/" + rel
         val dst_file = dst + "/" + rel
         rt_dir_create(get_parent(dst_file), true)
-        if copy_file_unchanged(f, dst_file):
-            count = count + 1
-    print "  Copied " + count.to_text() + " resource files"
-    count == 57
+        if not rt_file_copy(source_path, dst_file): return false
+        if sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256: return false
+    print "  Copied " + pins.len().to_text() + " resource files"
+    true
 
 fn copy_file_unchanged(src: text, dst: text) -> bool:
     if not rt_file_copy(src, dst): return false

@@ -834,15 +834,14 @@ jobs:
           # Extract Linux binary from bootstrap .spk
           if ls bootstrap-artifact/simple-bootstrap-*.spk 1>/dev/null 2>&1; then
             cd bootstrap-artifact
-            tar -xzf simple-bootstrap-*.spk
-            if [ -f bin/simple-runtime ]; then
-              cp bin/simple-runtime ../bin/release/simple
+            LINUX_ARCHIVE=$(find . -maxdepth 1 -name 'simple-bootstrap-*.spk' -print -quit)
+            LINUX_PKG_ROOT="${LINUX_ARCHIVE%.spk}"
+            tar -xzf "$LINUX_ARCHIVE"
+            if [ -f "$LINUX_PKG_ROOT/bin/simple-runtime" ]; then
+              cp "$LINUX_PKG_ROOT/bin/simple-runtime" ../bin/release/simple
               chmod +x ../bin/release/simple
-            elif [ -f bin/simple ]; then
-              cp bin/simple ../bin/release/simple
-              chmod +x ../bin/release/simple
-            elif [ -f simple ]; then
-              cp simple ../bin/release/simple
+            elif [ -f "$LINUX_PKG_ROOT/bin/simple" ]; then
+              cp "$LINUX_PKG_ROOT/bin/simple" ../bin/release/simple
               chmod +x ../bin/release/simple
             fi
             cd ..
@@ -852,11 +851,11 @@ jobs:
           mkdir -p bin/release/windows-x86_64
           if ls bootstrap-artifact-win/simple-bootstrap-*.spk 1>/dev/null 2>&1; then
             cd bootstrap-artifact-win
-            tar -xzf simple-bootstrap-*.spk
-            if [ -f bin/simple.exe ]; then
-              cp bin/simple.exe ../bin/release/windows-x86_64/simple.exe
-            elif [ -f simple.exe ]; then
-              cp simple.exe ../bin/release/windows-x86_64/simple.exe
+            WINDOWS_ARCHIVE=$(find . -maxdepth 1 -name 'simple-bootstrap-*.spk' -print -quit)
+            WINDOWS_PKG_ROOT="${WINDOWS_ARCHIVE%.spk}"
+            tar -xzf "$WINDOWS_ARCHIVE"
+            if [ -f "$WINDOWS_PKG_ROOT/bin/simple.exe" ]; then
+              cp "$WINDOWS_PKG_ROOT/bin/simple.exe" ../bin/release/windows-x86_64/simple.exe
             fi
             cd ..
           fi
@@ -1021,13 +1020,19 @@ jobs:
 
   build-full:
     name: Build Full Package
-    needs: check-version
-    if: needs.check-version.outputs.changed == 'true'
+    needs: [check-version, build-bootstrap]
+    if: needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Download Linux x86_64 bootstrap artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-linux-x86_64
+          path: bootstrap-artifact
 
       - name: Build full package
         run: |
@@ -1049,6 +1054,14 @@ jobs:
             cp -r resources "$PKG_ROOT/" 2>/dev/null || true
             cp -r assets "$PKG_ROOT/"
             mkdir -p "$PKG_ROOT/bin"
+            FULL_ARCHIVE=$(find bootstrap-artifact -maxdepth 1 -name 'simple-bootstrap-*-linux-x86_64.spk' -print -quit)
+            test -n "$FULL_ARCHIVE"
+            FULL_BOOTSTRAP_ROOT="${FULL_ARCHIVE%.spk}"
+            tar -xzf "$FULL_ARCHIVE" -C bootstrap-artifact
+            test -x "$FULL_BOOTSTRAP_ROOT/bin/simple-runtime"
+            test -x "$FULL_BOOTSTRAP_ROOT/bin/simple"
+            cp "$FULL_BOOTSTRAP_ROOT/bin/simple-runtime" "$PKG_ROOT/bin/"
+            cp "$FULL_BOOTSTRAP_ROOT/bin/simple" "$PKG_ROOT/bin/"
             cp bin/README.md "$PKG_ROOT/bin/" 2>/dev/null || true
             cp bin/FILE.md "$PKG_ROOT/bin/" 2>/dev/null || true
 
@@ -1084,6 +1097,8 @@ jobs:
           path: |
             simple-full-*.tar.gz
             simple-full-*.tar.gz.sha256
+            dist/simple-full-*.tar.gz
+            dist/simple-full-*.tar.gz.sha256
           retention-days: 7
 
   simpleos-build:

@@ -102,6 +102,20 @@ class FontAssetCandidate:
     coverage_corpus_ref: text
     fallback_role: text
 
+class FontBundleAssetPin:
+    path: text
+    sha256: text
+
+fn _font_bundle_corpus_pin() -> FontBundleAssetPin:
+    FontBundleAssetPin(
+        path: "assets/fonts/google-fonts/CORPUS.sdn",
+        sha256: "c7cffbf3e1a29c75dcd481593c6880d071966c5cbf0611e2185fe0d73e0c83f6"
+    )
+
+fn _font_bundle_corpus_ref() -> text:
+    val pin = _font_bundle_corpus_pin()
+    pin.path + "#sha256:" + pin.sha256
+
 fn _font_candidate_coverage_state(upstream_path: text) -> text:
     if upstream_path.contains("notosanssc/") or upstream_path.contains("notoserifsc/"):
         return "accepted-simple: exact Pure Simple identity shaping accepted for en,zh,es,fr,pt,ru,id"
@@ -236,7 +250,7 @@ fn _google_font_candidate(family: text, category: text, upstream_path: text,
         embedded_postscript_name: _font_candidate_embedded_postscript_name(family),
         embedded_version: _font_candidate_embedded_version(family),
         default_axes: _font_candidate_default_axes(family),
-        coverage_corpus_ref: "assets/fonts/google-fonts/CORPUS.sdn#sha256:c7cffbf3e1a29c75dcd481593c6880d071966c5cbf0611e2185fe0d73e0c83f6",
+        coverage_corpus_ref: _font_bundle_corpus_ref(),
         fallback_role: _font_candidate_fallback_role(category, family)
     )
 
@@ -261,23 +275,55 @@ fn selected_font_asset_candidates() -> [FontAssetCandidate]:
         _google_font_candidate("Noto Emoji", "emoji", "ofl/notoemoji/NotoEmoji[wght].ttf", "ofl/notoemoji/OFL.txt", "OFL-1.1", "Copyright 2013 Google LLC", "none declared", 1982596, "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551", "GSUB,HVAR,OS/2,STAT,VVAR,cmap,fvar,gasp,glyf,gvar,head,hhea,hmtx,loca,maxp,name,post,vhea,vmtx", "emoji")
     ]
 
+fn selected_font_bundle_asset_pins() -> [FontBundleAssetPin]:
+    """Return the closed 57-file immutable font distribution."""
+    var pins: [FontBundleAssetPin] = []
+    val google_root = "assets/fonts/google-fonts/"
+    for candidate in selected_font_asset_candidates():
+        pins.push(FontBundleAssetPin(path: candidate.local_path, sha256: candidate.sha256))
+        pins.push(FontBundleAssetPin(path: google_root + candidate.metadata_path, sha256: candidate.metadata_sha256))
+        pins.push(FontBundleAssetPin(path: google_root + candidate.license_path, sha256: candidate.license_sha256))
+        if candidate.notice_path != "":
+            pins.push(FontBundleAssetPin(path: google_root + candidate.notice_path, sha256: candidate.notice_sha256))
+    pins.push(_font_bundle_corpus_pin())
+
+    val cldr_root = "assets/fonts/cldr/release-48-2/"
+    val source = selected_font_language_ranking_source()
+    pins.push(FontBundleAssetPin(path: cldr_root + "common/supplemental/supplementalData.xml", sha256: source.supplemental_data_sha256))
+    pins.push(FontBundleAssetPin(path: cldr_root + "common/supplemental/supplementalMetadata.xml", sha256: source.supplemental_metadata_sha256))
+    pins.push(FontBundleAssetPin(path: cldr_root + "common/supplemental/likelySubtags.xml", sha256: source.likely_subtags_sha256))
+    pins.push(FontBundleAssetPin(path: cldr_root + "LICENSE", sha256: "b49d0e9f8ead51ca8b7df6fec89cc3ae6809198b4b9d43c74216da0118f23f5b"))
+    pins.push(FontBundleAssetPin(path: cldr_root + "TAG.txt", sha256: "b95ecf54f9dc853dbf6d2f5bb2fd3c418d3ecc72922b06f8481e8004210e2e05"))
+    pins.push(FontBundleAssetPin(path: cldr_root + "SOURCE.sdn", sha256: "f64ee0280b246a5f0f47b39cca6bddcdfe2e0d3e93488e5558b76ca7d626f4b4"))
+    pins.push(FontBundleAssetPin(path: cldr_root + "RANKING.sdn", sha256: "e4279236032d02966eaaeb502af7b19edc8d371e454a3fc6beb676ef4e7c70df"))
+    pins
+
 class FontAssetRuntimeValidation:
     selected: bool
     valid: bool
     family: text
     reason: text
 
+fn _font_asset_normalized_root(root: text) -> text:
+    var normalized = root.trim().replace("\\", "/")
+    while normalized.len() > 1 and normalized.ends_with("/"):
+        normalized = normalized.slice(0, normalized.len() - 1)
+    normalized
+
+fn _font_asset_path_beneath_root(root: text, path: text) -> text:
+    if root == "/": return root + path
+    root + "/" + path
+
 fn _selected_font_asset_candidate_index_for_path_with_root(path: text, root: text) -> i64:
-    val clean = root.trim()
-    val base = if clean.ends_with("/"): clean.slice(0, clean.len() - 1) else: clean
+    val base = _font_asset_normalized_root(root)
+    val normalized_path = path.replace("\\", "/")
     val candidates = selected_font_asset_candidates()
     var index: i64 = 0
     while index < candidates.len():
         val candidate = candidates[index]
-        if candidate.local_path == path:
+        if candidate.local_path == normalized_path:
             return index
-        if ((base == "share/simple" or base.ends_with("/share/simple")) and
-            path == base + "/" + candidate.local_path):
+        if base != "" and normalized_path == _font_asset_path_beneath_root(base, candidate.local_path):
             return index
         index = index + 1
     -1
@@ -294,11 +340,9 @@ fn selected_font_asset_candidate_for_path(path: text) -> FontAssetCandidate?:
 
 fn _selected_font_asset_physical_path_from_root(path: text, root: text) -> text:
     val candidate = _selected_font_asset_candidate_for_path_with_root(path, root)
-    val clean = root.trim()
-    if candidate == nil or clean == "": return path
-    val base = if clean.ends_with("/"): clean.slice(0, clean.len() - 1) else: clean
-    if base != "share/simple" and not base.ends_with("/share/simple"): return path
-    base + "/" + candidate.?.local_path
+    val base = _font_asset_normalized_root(root)
+    if candidate == nil or base == "": return path
+    _font_asset_path_beneath_root(base, candidate.?.local_path)
 
 fn selected_font_asset_physical_path(path: text) -> text:
     """Resolve a selected asset beneath the installed Simple share root."""

@@ -12,7 +12,7 @@ use std.nogc_sync_mut.sffi.io.{file_exists, file_read_text, file_read_bytes, dir
 use std.nogc_sync_mut.sffi.package.{package_sha256}
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_dylib_candidates}
-use std.common.encoding.font_registry.{FontAssetCandidate, FontCoverageCell, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_asset_candidates, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_simple_tuple_accepted}
+use std.common.encoding.font_registry.{FontAssetCandidate, FontBundleAssetPin, FontCoverageCell, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_asset_candidates, selected_font_bundle_asset_pins, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_simple_tuple_accepted}
 use std.common.encoding.font_cldr_rank.{CldrLanguagePopulationRow, cldr_scan_language_population, cldr_rank_languages, cldr_serialize_language_totals}
 use std.common.encoding.sfnt.{validate_default_glyf_font, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match}
 use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, parse_offset_table, find_table, read_u16_be, read_i16_be, read_u32_be}
@@ -21,8 +21,6 @@ use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_outline}
 
 val FONT_ASSET_ROOT = "assets/fonts/google-fonts/"
 val FONT_CORPUS_PATH = FONT_ASSET_ROOT + "CORPUS.sdn"
-val FONT_CORPUS_SHA256 = "c7cffbf3e1a29c75dcd481593c6880d071966c5cbf0611e2185fe0d73e0c83f6"
-val FONT_CORPUS_REF = FONT_CORPUS_PATH + "#sha256:" + FONT_CORPUS_SHA256
 val CLDR_ROOT = "assets/fonts/cldr/release-48-2/"
 val CLDR_DATA = CLDR_ROOT + "common/supplemental/supplementalData.xml"
 val CLDR_METADATA = CLDR_ROOT + "common/supplemental/supplementalMetadata.xml"
@@ -46,7 +44,28 @@ fn setup_shared_font_fixture() -> [FontAssetCandidate]:
     expect(assets.len()).to_equal(16)
     assets
 
-fn expect_font_license(asset: FontAssetCandidate):
+fn font_bundle_pin_sha256(pins: [FontBundleAssetPin], path: text) -> text:
+    for pin in pins:
+        if pin.path == path: return pin.sha256
+    fail("missing font bundle pin: " + path)
+    ""
+
+fn expect_font_bundle(pins: [FontBundleAssetPin]):
+    expect(pins.len()).to_equal(57)
+    var pinned_paths = "|"
+    for pin in pins:
+        expect(pin.path).to_start_with("assets/fonts/")
+        expect(pin.sha256.len()).to_equal(64)
+        expect(pinned_paths.contains("|" + pin.path + "|")).to_be(false)
+        expect(file_exists(pin.path)).to_be(true)
+        expect(package_sha256(pin.path)).to_equal("sha256:" + pin.sha256)
+        pinned_paths = pinned_paths + pin.path + "|"
+    val actual_paths = dir_walk("assets/fonts")
+    expect(actual_paths.len()).to_equal(pins.len())
+    for path in actual_paths:
+        expect(pinned_paths).to_contain("|" + path + "|")
+
+fn expect_font_license(asset: FontAssetCandidate, corpus_ref: text):
     expect(asset.upstream_revision).to_equal("ec0464b978de222073645d6d3366f3fdf03376d8")
     expect(asset.sha256.len()).to_equal(64)
     expect(asset.byte_len).to_be_greater_than(0)
@@ -63,7 +82,7 @@ fn expect_font_license(asset: FontAssetCandidate):
     expect(asset.embedded_version).to_start_with("Version ")
     expect(asset.default_axes.len()).to_be_greater_than(0)
     expect(asset.metadata_scripts.len()).to_be_greater_than(0)
-    expect(asset.coverage_corpus_ref).to_equal(FONT_CORPUS_REF)
+    expect(asset.coverage_corpus_ref).to_equal(corpus_ref)
     expect("|candidate-script-primary|candidate-category-witness|rank11-cutoff-only|common-emoji-fallback|").to_contain("|" + asset.fallback_role + "|")
     expect("|OFL-1.1|Apache-2.0|").to_contain("|" + asset.license + "|")
     expect(file_exists(asset.local_path)).to_be(true)
@@ -260,18 +279,17 @@ describe "shared multilingual font manifest":
     it "should pin the CLDR source, selected top ten, and cutoff evidence":
         step("Load the pinned multilingual font manifest")
         val source = selected_font_language_ranking_source()
+        val bundle_pins = selected_font_bundle_asset_pins()
         val selected = selected_font_language_ranks()
         val evidence = font_language_ranking_evidence()
         expect(source.release).to_equal("release-48-2")
         expect(source.tag_object).to_equal("fc1fd058cc6f50544a450a3b15a4bba0e0c1e653")
         expect(source.source_commit).to_equal("11299982335beb974c1c63c45265184e759c0f41")
-        expect(package_sha256(CLDR_DATA)).to_equal("sha256:" + source.supplemental_data_sha256)
-        expect(package_sha256(CLDR_METADATA)).to_equal("sha256:" + source.supplemental_metadata_sha256)
-        expect(package_sha256(CLDR_LIKELY)).to_equal("sha256:" + source.likely_subtags_sha256)
-        expect(package_sha256(CLDR_ROOT + "LICENSE")).to_equal("sha256:b49d0e9f8ead51ca8b7df6fec89cc3ae6809198b4b9d43c74216da0118f23f5b")
-        expect(package_sha256(CLDR_ROOT + "TAG.txt")).to_equal("sha256:b95ecf54f9dc853dbf6d2f5bb2fd3c418d3ecc72922b06f8481e8004210e2e05")
-        expect(package_sha256(CLDR_ROOT + "SOURCE.sdn")).to_equal("sha256:f64ee0280b246a5f0f47b39cca6bddcdfe2e0d3e93488e5558b76ca7d626f4b4")
-        expect(package_sha256(CLDR_RANKING)).to_equal("sha256:e4279236032d02966eaaeb502af7b19edc8d371e454a3fc6beb676ef4e7c70df")
+        expect(source.supplemental_data_sha256).to_equal(font_bundle_pin_sha256(bundle_pins, CLDR_DATA))
+        expect(source.supplemental_metadata_sha256).to_equal(font_bundle_pin_sha256(bundle_pins, CLDR_METADATA))
+        expect(source.likely_subtags_sha256).to_equal(font_bundle_pin_sha256(bundle_pins, CLDR_LIKELY))
+        for path in [CLDR_DATA, CLDR_METADATA, CLDR_LIKELY, CLDR_ROOT + "LICENSE", CLDR_ROOT + "TAG.txt", CLDR_ROOT + "SOURCE.sdn", CLDR_RANKING]:
+            expect(package_sha256(path)).to_equal("sha256:" + font_bundle_pin_sha256(bundle_pins, path))
         expect(file_read_text(CLDR_ROOT + "TAG.txt")).to_contain("object " + source.source_commit)
         expect(source.license).to_equal("Unicode-3.0")
         expect(selected.len()).to_equal(10)
@@ -328,13 +346,17 @@ describe "shared multilingual font manifest":
     # @req NFR-001 NFR-003
     it "should verify every immutable bundled font and adjacent notice":
         val assets = setup_shared_font_fixture()
+        val bundle_pins = selected_font_bundle_asset_pins()
+        val corpus_sha256 = font_bundle_pin_sha256(bundle_pins, FONT_CORPUS_PATH)
+        val corpus_ref = FONT_CORPUS_PATH + "#sha256:" + corpus_sha256
+        expect_font_bundle(bundle_pins)
         expect(file_exists(FONT_CORPUS_PATH)).to_be(true)
-        expect(package_sha256(FONT_CORPUS_PATH)).to_equal("sha256:" + FONT_CORPUS_SHA256)
+        expect(package_sha256(FONT_CORPUS_PATH)).to_equal("sha256:" + corpus_sha256)
         var total_bytes: i64 = 0
         var paths = "|"
         var hashes = "|"
         for asset in assets:
-            expect_font_license(asset)
+            expect_font_license(asset, corpus_ref)
             expect(paths.contains("|" + asset.upstream_path + "|")).to_be(false)
             expect(hashes.contains("|" + asset.sha256 + "|")).to_be(false)
             paths = paths + asset.upstream_path + "|"

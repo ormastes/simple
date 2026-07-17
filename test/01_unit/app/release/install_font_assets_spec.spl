@@ -2,16 +2,24 @@ use std.spec.*
 use std.io_runtime.{rt_file_read_text}
 
 describe "release installer font assets":
-    it "installs the pinned font tree and resolves it through one share root":
+    it "should install only the preflighted immutable font bundle through one share root":
         val source = rt_file_read_text("src/app/release/install.spl") ?? ""
+        val font_copy = source.slice(source.index_of("fn copy_font_tree"), source.index_of("fn copy_file_unchanged"))
 
         expect(source).to_contain("copy_font_tree(src: script_dir + \"/assets/fonts\"")
         expect(source.index_of("copy_font_tree(src: script_dir + \"/assets/fonts\"") < source.index_of("# Install runtime binary")).to_be(true)
         expect(source).to_contain("prefix + \"/share/simple/assets/fonts\"")
         expect(source).to_contain("export SIMPLE_ASSET_ROOT=\\\"$SHARE_DIR\\\"")
-        expect(source).to_contain("count == 57")
-        expect(source).to_contain("copy_file_unchanged(f, dst_file)")
-        expect(source).to_contain("sha256_u8_hex(rt_file_read_bytes(src)) == sha256_u8_hex(rt_file_read_bytes(dst))")
+        expect(font_copy).to_contain("selected_font_bundle_asset_pins()")
+        expect(font_copy).to_contain("pins.len() != 57 or files.len() != pins.len()")
+        expect(font_copy).to_contain("pin.path == \"assets/fonts/\" + rel")
+        expect(font_copy).to_contain("if not pinned: return false")
+        expect(font_copy).to_contain("if not rt_file_exists(source_path): return false")
+        expect(font_copy).to_contain("sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256")
+        expect(font_copy).to_contain("rt_file_copy(source_path, dst_file)")
+        expect(font_copy).to_contain("sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256")
+        expect(font_copy.index_of("rt_file_read_bytes(source_path)") < font_copy.index_of("rt_dir_create(get_parent(dst_file)")).to_be(true)
+        expect(font_copy.contains("rt_file_copy(f, dst_file)")).to_be(false)
         expect(source).to_contain("bundled font installation incomplete")
         expect(source).to_contain("return 1")
         expect(source).to_contain("if not rt_file_copy(runtime_src, runtime_dst)")
@@ -20,7 +28,7 @@ describe "release installer font assets":
         expect(source).to_contain("THIRD_PARTY_NOTICES.md")
         expect(source).to_contain("/share/simple/LICENSE")
 
-    it "stages fonts and root notices in every host release package":
+    it "should stage fonts and root notices in every host release package":
         val workflow = rt_file_read_text(".github/workflows/release.yml") ?? ""
         val nsis = rt_file_read_text("config/packaging/windows/simple.nsi") ?? ""
 
@@ -33,7 +41,8 @@ describe "release installer font assets":
         expect(workflow).to_contain("BIN_NAME=\"simple-runtime\"")
         expect(workflow).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
         expect(workflow).to_contain("set \"SIMPLE_ASSET_ROOT=%~dp0..\"")
-        expect(workflow).to_contain("if [ -f bin/simple-runtime ]; then")
+        expect(workflow).to_contain("$LINUX_PKG_ROOT/bin/simple-runtime")
+        expect(workflow.contains("if [ -f bin/simple-runtime ]; then")).to_be(false)
         expect(workflow).to_contain("export SIMPLE_ASSET_ROOT=/usr/local/share/simple")
         expect(nsis).to_contain("File /r \"${SOURCE_DIR}\\assets\\fonts\\*.*\"")
         expect(nsis).to_contain("File \"${SOURCE_DIR}\\THIRD_PARTY_NOTICES.md\"")
