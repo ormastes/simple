@@ -1,6 +1,8 @@
 # Struct/class param mutation semantics — decision doc (task #35)
 
-- **Status:** OPEN — decision needed before implementing a fix
+- **Status:** CLASS HALF FIXED (2026-07-17, lane s19) — struct/interpreter half
+  no longer reproduces (see "Verification (2026-07-17)" below); class/native
+  half root-caused and fixed, see "Fix (2026-07-17, lane s19)" below.
 - **Discovered:** 2026-07-03 (task #35 investigation)
 - **Area:** language semantics — value vs reference passing for `struct`/`class` params; divergence between interpreter and JIT/compiled backend
 - **Severity:** High — silently corrupts any builder/accumulator/mock pattern that mutates an argument (hal_smp IPI mock counters, DOM decoration in `simple_browser_page.spl`)
@@ -179,3 +181,124 @@ Runtime repro at tip 9feac6ef6e5:
 
 **Status:** STILL-REPRODUCES (class/compiled half). Struct/interpreter half no
 longer reproduces as written.
+
+## Fix (2026-07-17, lane s19)
+
+### Oracle semantics table (confirmed via `env -u SIMPLE_BOOTSTRAP bin/simple
+run`, the tree-walking interpreter path, treated as ground truth per task
+instructions)
+
+| Shape | Interpreter (oracle) | Native, before fix | Native, after fix |
+|---|---|---|---|
+| class, free fn plain param, `me` method mutates field | n=1 | n=0 (BUG) | n=1 |
+| struct, free fn plain param, direct field mutation | n=0 | n=0 | n=0 (unchanged) |
+| class, mutated through 2 nested free-fn calls | n=1 | n=0 (BUG) | n=1 |
+| class, method-mutation vs direct-field-mutation (both plain params) | 1,1 | 0,0 (BUG) | 1,1 |
+
+Classes are reference-like (mutation through a plain param is visible to the
+caller); structs remain value types (plain-param mutation stays local) —
+confirmed by the oracle and preserved exactly, not changed by this fix.
+
+### Root cause
+
+The bug was NOT in the Rust bootstrap seed's own codegen. The currently
+deployed `bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`) is the
+Rust seed, but `native-build` on an ordinary user script dynamically executes
+the **self-hosted `.spl` compiler sources** (`src/compiler/**.spl`,
+interpreted by the seed) — confirmed empirically by editing
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`-adjacent code
+and observing the change take effect on a fresh `native-build` run with no
+rebuild/redeploy/cargo involved.
+
+Two conflations compounded:
+
+1. **Frontend (`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl`,
+   the flat-AST bridge used by `native-build`):** every `class` OR `struct`
+   declaration (`tag_text == "3"`) was unconditionally built as a `Struct` and
+   inserted into `structs[...]`; the resulting `Module`'s `classes` field was
+   hardcoded to `{}`. The parser already sets a reliable `is_value_type` flag
+   per decl (`decl_set_is_value_type(struct_d, 0)` for `class`, default `1` for
+   `struct` — already consulted correctly by the interpreter's
+   `interp_struct_is_value_type`, which is exactly why the interpreter oracle
+   was already right), but nothing downstream of this one bridge file ever
+   read it.
+2. **MIR (`src/compiler/50.mir/_MirLowering/function_lowering.spl`,
+   `lower_function`'s parameter-binding loop):** because `module.classes` was
+   always empty, `self.symbols.get_symbol(type_symbol).kind` for a `class`
+   read back as `SymbolKind.Struct` (confirmed by a temporary debug print:
+   `[dbg] name=Counter kind=<constructor:Struct>`), and the only signal this
+   layer had (`struct_field_order.has(name)`) could not distinguish class from
+   struct. A plain (non-`mut`, non-`me`) `Named`-typed param therefore always
+   took the Bug #167 defensive-copy arm (materialize a fresh aggregate,
+   rebind the callee's local to the copy) — correct for a `struct` (value
+   type), but silently wrong for a `class` (reference type): the callee's `me`
+   method (itself correctly bound-by-reference) mutated the *copy*, not the
+   caller's original instance.
+
+### Fix
+
+- `module_assembly.spl`: route a decl into `classes[name] = Class(...)`
+  instead of `structs[name] = Struct(...)` when `decl_get_is_value_type(idx)
+  == 0`; `classes: classes` instead of the hardcoded `classes: {}` at the
+  `parser_module_new(...)` call. Class methods keep flowing through the
+  existing synthesized `impl` block (`tag_text == "9"`), unchanged.
+- `mir_lowering_types.spl` / `_MirLowering/module_lowering.spl`: new
+  `MirLowering.class_type_names: Dict<text, bool>` field, populated (name-keyed,
+  alongside the existing `struct_field_order` bookkeeping so field/method
+  dispatch on a class instance keeps working exactly as before) in the
+  `module.classes` loop already present in `lower_module`. Updated all 3
+  `MirLowering(...)` literal-construction sites (`module_lowering.spl`'s
+  `new_for_target`, and two in `80.driver/driver_pipeline.spl`) to initialize
+  the new field.
+- `_MirLowering/function_lowering.spl`: `is_class_param =
+  self.class_type_names.has(parameter_type.name)`; a class param now takes the
+  "bind directly to the raw incoming arg local, no copy" branch
+  unconditionally (alongside the existing `me`-receiver / `mut`-param cases),
+  regardless of `mut`/`me`. A plain `struct` param (not a class) is the only
+  case still reaching the Bug #167 value-copy — exactly its original,
+  correct scope.
+
+### Files changed
+
+- `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl`
+- `src/compiler/50.mir/mir_lowering_types.spl`
+- `src/compiler/50.mir/_MirLowering/module_lowering.spl`
+- `src/compiler/50.mir/_MirLowering/function_lowering.spl`
+- `src/compiler/80.driver/driver_pipeline.spl`
+
+### Verification transcript (2026-07-17, worktree `/home/ormastes/dev/wt_s10`
+at origin tip `b82d196ac7c`)
+
+All probes in `scratchpad/s19_probes/` (interpreter via `bin/simple run`,
+native via `bin/simple native-build --entry ... -o ... --clean` then running
+the binary), both BEFORE and AFTER the fix (before-state captured via `git
+stash`/`git stash pop` in the same worktree, no other change):
+
+- `p1_class_free_fn_*.spl` (class, free fn, `me` method mutates field):
+  before native rc=0, oracle n=1 → **after native rc=1 (FIXED, matches oracle)**
+- `p2_struct_free_fn_*.spl` (struct, free fn, direct field mutation): native
+  rc=0 both before and after (**unchanged — struct value semantics preserved,
+  no regression**), oracle n=0.
+- `p3_class_two_levels_*.spl` (class mutated through 2 nested free-fn calls):
+  before native rc=0, oracle n=1 → **after native rc=1 (FIXED)**.
+- `p4_method_vs_direct_*.spl` (class, method-mutation vs direct-field-mutation
+  on separate instances): before native rc=00 (both dropped), oracle
+  n=1,1(rc=11) → **after native rc=11 (FIXED, both mutation styles)**.
+- `p5_class_in_array_*.spl` (class instance inside an array, `arr[0].bump()`):
+  hits a **pre-existing, unrelated** MIR gap — "unresolved method call: bump"
+  (tagged `Task #145` in the compiler's own warning) — for method calls on an
+  indexed array element; not attempted or touched by this fix.
+- `p5b_class_in_array_direct_*.spl` (same shape, direct field write
+  `arr[0].value = ...` instead of a method call, to dodge the Task #145 gap):
+  reproduces a **pre-existing, unrelated SIGSEGV** in `native-build`,
+  confirmed present identically both BEFORE and AFTER this fix via `git
+  stash`/`git stash pop` (same crash address pattern either way) — a distinct
+  defect in array-element field mutation through a function parameter, not
+  caused or fixed by this change. Flagged for separate follow-up, not blocking.
+
+Regression gate: `sh scripts/check/native-smoke-matrix.shs` →
+`total=15 pass=15 fail=0 xfail=0 xpass=0 codegen_fallback_hits=0`.
+
+Patch: `scratchpad/s19_class_mutation.patch` (staged `src` + `doc` only, no
+`bin/` artifacts). Report:
+`scratchpad/s19_class_mutation_report.md`.

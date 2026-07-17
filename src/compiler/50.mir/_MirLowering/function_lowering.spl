@@ -201,13 +201,32 @@ impl MirLowering:
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol(type_symbol)
                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
-                    if is_named_struct and (is_me_receiver or is_mut_param):
-                        # Bind the receiver/mut-param directly to the raw
-                        # incoming arg local (already mapped via
+                    # bug s19_class_free_fn_mutation_dropped_native_2026-07-17:
+                    # a plain (non-`mut`, non-`me`) `class`-typed param used to
+                    # fall into the `elif is_named_struct` Bug #167 value-copy
+                    # arm below unconditionally, because this layer had no
+                    # class-vs-struct signal at all (module.classes stayed
+                    # empty -- see module_assembly.spl's is_value_type routing
+                    # fix and module_lowering.spl's class loop, which now
+                    # populates `class_type_names` alongside
+                    # `struct_field_order`). A class instance is documented
+                    # reference-like (see
+                    # doc/08_tracking/bug/struct_param_mutation_semantics_2026-07-03.md
+                    # and the interpreter's own `interp_struct_is_value_type`
+                    # behavior, confirmed by oracle probes): mutation through
+                    # ANY class param -- `me`/`mut` or plain -- must reach the
+                    # caller's instance. Only a genuine `struct` param keeps
+                    # the defensive per-call copy when it's neither a `me`
+                    # receiver nor an explicit `mut` param.
+                    val is_class_param = parameter_type != nil and self.class_type_names.has(parameter_type.name)
+                    if is_named_struct and (is_me_receiver or is_mut_param or is_class_param):
+                        # Bind the receiver/mut-param/class-param directly to
+                        # the raw incoming arg local (already mapped via
                         # self.local_map above) -- NO defensive copy, NO
                         # local_map rebind -- so a `me.field = v` /
-                        # `mut s: S` store inside the callee body writes
-                        # through to the exact same memory the caller passed.
+                        # `mut s: S` store / a plain class-param mutation
+                        # inside the callee body writes through to the exact
+                        # same memory the caller passed.
                         self.struct_value_syms[local.id] = parameter_type.name
                     elif is_named_struct:
                         self.struct_value_syms[local.id] = parameter_type.name
@@ -226,25 +245,29 @@ impl MirLowering:
                         # then rebind the parameter symbol to the COPY instead
                         # of the raw arg local.
                         #
-                        # NOTE (found during this fix, NOT addressed here --
-                        # out of lane / a broader pre-existing frontend gap):
-                        # `self.struct_field_order` is keyed by NAME only (fed
-                        # from module.structs, see module_lowering.spl) and a
-                        # `class` declaration currently lands in `module.structs`
-                        # too (confirmed empirically: a `class K: n: i64`, with
-                        # or without methods, satisfies
-                        # `struct_field_order.has("K")`, and never appears in
-                        # `module.classes`; `Symbol.kind` resolved here also
-                        # read back as `SymbolKind.Struct` for that same class).
-                        # So this MIR layer currently has no reliable class-vs-
-                        # struct signal at all -- native codegen doesn't yet
-                        # implement class reference semantics as a distinct
-                        # concept; a class param only "looked" reference-typed
-                        # before this fix by accident (nothing was ever copied
-                        # for anyone). This copy therefore applies uniformly to
-                        # every `Named` aggregate param reachable through
-                        # struct_field_order, class included, until the
-                        # upstream class/struct conflation is fixed separately.
+                        # UPDATE (bug s19_class_free_fn_mutation_dropped_native_
+                        # 2026-07-17): `self.struct_field_order` is keyed by
+                        # NAME only (fed from BOTH module.structs AND
+                        # module.classes, see module_lowering.spl) and used to
+                        # be the ONLY signal reaching this far, so a `class`
+                        # declaration fell through to this same value-copy arm
+                        # (`class` decls used to land in `module.structs`
+                        # itself -- `Symbol.kind` resolved here also read back
+                        # as `SymbolKind.Struct` for a class -- because
+                        # module_assembly.spl's flat-AST bridge routed every
+                        # `tag_text == "3"` decl into `structs`, ignoring the
+                        # `decl_get_is_value_type` flag the parser already set
+                        # correctly for `class` vs `struct`, and hardcoded
+                        # `classes: {}` on the resulting Module). module_assembly.spl
+                        # now routes a `class` decl into `module.classes`
+                        # instead, and `is_class_param` above (backed by the
+                        # new `self.class_type_names`, populated in
+                        # module_lowering.spl's class loop) is the reliable
+                        # class-vs-struct signal that was missing -- a class
+                        # param no longer reaches this copy arm at all. This
+                        # copy now applies only to a genuine `struct` param
+                        # that is neither a `me` receiver nor `mut`-marked,
+                        # which is exactly Bug #167's original, correct scope.
                         val field_names = self.struct_field_order[parameter_type.name]
                         var copy_ops: [MirOperand] = []
                         var cfi = 0

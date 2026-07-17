@@ -12,7 +12,7 @@ use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
-use compiler.core.ast.{decl_is_packed}
+use compiler.core.ast.{decl_is_packed, decl_get_is_value_type}
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
@@ -118,6 +118,21 @@ fn flat_ast_to_module(path: text) -> Module:
         eprint("[flat-bridge] decl_count {decl_count}")
     var functions: Dict<text, Function> = {}
     var structs: Dict<text, Struct> = {}
+    # bug s19_class_free_fn_mutation_dropped_native_2026-07-17: `class` decls
+    # used to always land in `structs` below (this dict was the only sink),
+    # so HIR/MIR never saw a distinct `class` (module.classes stayed
+    # permanently empty -- see the old hardcoded `classes: {}` at this
+    # function's `parser_module_new(...)` call). That erased the one signal
+    # (`decl_get_is_value_type(idx) == 0` for `class`, `1` for `struct`,
+    # already set correctly by the parser's `parse_struct_decl` /
+    # `decl_set_is_value_type`, and already consulted by the interpreter's
+    # `interp_struct_is_value_type`) that downstream MIR param-binding needs
+    # to give a `class` instance reference semantics instead of silently
+    # copying it like a `struct` (native-build only: a class instance passed
+    # to a free function and mutated inside had the mutation dropped for the
+    # caller; the tree-walking interpreter path already got this right via
+    # `interp_struct_is_value_type`).
+    var classes: Dict<text, Class> = {}
     var enums: Dict<text, Enum> = {}
     var constants: Dict<text, Const> = {}
     var imports: [Import] = []
@@ -275,17 +290,39 @@ fn flat_ast_to_module(path: text) -> Module:
                         span: span
                     ))
                     s_tpi = s_tpi + 1
-                structs[s_name] = Struct(
-                    name: s_name,
-                    type_params: s_type_params,
-                    fields: fields,
-                    visibility: s_visibility,
-                    is_public: decl_get_visibility_text(idx) == "public",
-                    attributes: [],
-                    has_doc_comment: false,
-                    doc_comment: "",
-                    span: span
-                )
+                if decl_get_is_value_type(idx) == 0:
+                    # `class` decl (parse_struct_decl(is_class: true) ->
+                    # decl_set_is_value_type(struct_d, 0)) -- route into the
+                    # dedicated `classes` dict instead of `structs` so HIR/MIR
+                    # can finally tell classes apart from structs (see the
+                    # bug note above `var classes` at the top of this fn).
+                    # `methods` stays empty: class methods are carried via the
+                    # synthesized `impl` block (tag_text == "9" below), the
+                    # same mechanism plain structs already use.
+                    classes[s_name] = Class(
+                        name: s_name,
+                        type_params: s_type_params,
+                        fields: fields,
+                        methods: {},
+                        visibility: s_visibility,
+                        is_public: decl_get_visibility_text(idx) == "public",
+                        has_doc_comment: false,
+                        doc_comment: "",
+                        attributes: [],
+                        span: span
+                    )
+                else:
+                    structs[s_name] = Struct(
+                        name: s_name,
+                        type_params: s_type_params,
+                        fields: fields,
+                        visibility: s_visibility,
+                        is_public: decl_get_visibility_text(idx) == "public",
+                        attributes: [],
+                        has_doc_comment: false,
+                        doc_comment: "",
+                        span: span
+                    )
         elif tag_text == "8":
             val e_name = decl_get_name(idx)
             # Recover variant NAMES from the flat AST (stored in the FIELD_NAMES
@@ -514,7 +551,7 @@ fn flat_ast_to_module(path: text) -> Module:
         exports: exports,
         domain_blocks: domain_blocks,
         functions: functions,
-        classes: {},
+        classes: classes,
         actors: {},
         structs: structs,
         enums: enums,
