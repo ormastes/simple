@@ -624,3 +624,177 @@ lane's output uncommitted). Scratch/one-off repro sources and kernel builds
 `build/os/simpleos_desktop_c8check.elf`, both deleted after use) were kept
 under the session scratchpad and `build/os/` (gitignored) and are not part
 of this repo's tracked state.
+
+### C8-PROBE lane (2026-07-17) — decisive same-boot A/B: fix locus is
+### stored-field readback, position/register-pressure RULED OUT
+
+Ran the recommended runtime experiment: instrumented `_vfs_boot_init_pure_
+nvme_fat32` (entry = `gui_entry_desktop.spl`, per the earlier lane's entry
+correction) with staged serial probes, rebuilt (`--entry-closure --backend
+cranelift --cpu x86-64-v1 --opt-level=aggressive --target x86_64-unknown-
+none`, isolated `--cache-dir build/os/_wk/c8probe-cache`, 672 files then 666
+cached across iterations, 0 failed each time) and booted 4 times under QEMU
+`-name c8probe` with the NVMe drive attached
+(`build/os/_wk/fat32-font.img`), toggling `vfs_boot_init.spl:374` to
+`if false:` for the duration. Two real findings, one retraction of this
+lane's own first-pass reasoning.
+
+**Retraction #0 (methodology): `unsafe_addr_of()` on a concrete-class value
+passed through an `any`-typed extern parameter does NOT return the live
+object's address.** First attempt followed the doc's suggested raw-
+pointer-chase (`extern fn unsafe_addr_of(ref: any) -> u64` +
+`extern`-avoided `mmio_read64` reads, masked `& 0xFFFFFFFFFFFFFFF8` per the
+disassembled `and reg,~7` pattern) on `adapter` (a concrete
+`NvmeBlockAdapter` local, not a trait value — believed safe per the prior
+C8-RELOC lane's narrower warning, which only flagged trait-typed values).
+Result: `unsafe_addr_of(adapter) & mask` then `mmio_read64(that_addr)`
+reported `adapter_vtable=0` — implying a corrupt/missing vtable stamp.
+**In the same boot, at the same moment, a BEHAVIORAL dispatch on the exact
+same object** (`val bd_early: BlockDevice = adapter;
+bd_early.sector_size()`) **returned `ss_early=64` with no fault.** A live
+object cannot have both a null vtable pointer (raw read) and a working
+dispatch (behavioral call) — the raw-pointer method is reading the wrong
+memory (almost certainly an ephemeral copy/box made when lowering the
+`any`-typed argument, not the live object), not real corruption. This
+extends the C8-RELOC lane's warning: `unsafe_addr_of` is unreliable for
+*any* value crossing an `any`-typed argument boundary, concrete class or
+trait, not just trait values. **Do not use `unsafe_addr_of` for pointer-
+chase probing in this codegen; use behavioral dispatch-and-print instead**
+(as done for the rest of this lane, and as the C8-RELOC lane's own
+steps 1-3 already did).
+
+**Finding #1: exact-signature reproduction via a 3-statement minimal
+behavioral trigger.** Switched to behavioral probes only. Right after
+`g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)` (late in the function —
+after grant/init/transfer-evidence/lease/bounce-buffer/DMA/boot-sector-read/
+direct-FAT32-scalar-mount/version-probe/exec-probe code has already run),
+added:
+```
+val c8p2_mid = g_pure_nvme_root_fat32.inner
+val c8p2_bd: BlockDevice = c8p2_mid.device
+val c8p2_ss = c8p2_bd.sector_size()
+serial_println("[c8probe2] ss_late_split_hop={c8p2_ss}")
+```
+This is the split-hop shape (C8-RELOC's storage-vs-chained-read
+discriminator) — deliberately NOT the single chained expression
+`g_pure_nvme_root_fat32.inner.device.sector_size()`, to also test that
+discriminator. **Result: faulted before the print ever ran, with
+`rip=cr2=0x0001e0ec8148e589` — byte-identical to the original report and
+every prior reproduction.** 34,370 recovered-fault storm entries, `cr2`
+incrementing by 2 per fault (the documented fixed-2-byte RIP-advance
+recovery), `ra=0x000000000a5ed46c` constant across every frame (the return
+address one call-frame up, in `vfs_boot_init`'s call to
+`_vfs_boot_init_pure_nvme_fat32` — the crude single-level backtrace cannot
+localize further inside that ~31KB function; re-attempting a manual
+disassembly walk to the exact faulting instruction was not repeated here
+since two prior lanes already hit the same objdump-desync wall on this
+function). **This also answers C8-RELOC's storage-vs-chained-read
+discriminator: the SPLIT-hop form faults identically to the combined form,
+so "chained/erased expression syntax" is not the mechanism** — ruling out
+the specific "chained methods on erased receivers" landmine
+(`.claude/rules/language.md`) as C8's cause.
+
+**Finding #2 (the earned verdict): a same-position discriminator rules out
+position/register-pressure and isolates the trigger to stored-field
+readback.** This lane's first read of finding #1 (early bare-local dispatch
+clean, late two-hop-through-field dispatch faults) was that LATE POSITION
+in a large, register-heavy function was the trigger — plausible, and it
+would have matched the doc's own standing hypothesis ("conditions
+(register pressure, specific surrounding code...) not reproduced by this
+lane's fixtures"). **This was wrong, and a cheap same-boot control
+disproves it.** Immediately before the split-hop probe above, at the
+IDENTICAL late position (same register pressure, same surrounding code,
+same call depth), added two more behavioral dispatches:
+```
+val c8p2_direct_local: BlockDevice = adapter
+serial_println("[c8probe2] ss_direct_local={c8p2_direct_local.sector_size()}")
+val c8p2_direct_global: BlockDevice = g_adapter
+serial_println("[c8probe2] ss_direct_global={c8p2_direct_global.sector_size()}")
+```
+**Both printed cleanly — `ss_direct_local=64`, `ss_direct_global=64`, no
+fault — immediately followed by the split-hop probe faulting with the
+identical `cr2=0x0001e0ec8148e589` signature, in the same boot, same
+position.** Position and register pressure are held constant across all
+three dispatches; the only thing that differs is *provenance*: `adapter`
+and `g_adapter` are bare local/global values, never stored into a struct
+field, while `g_pure_nvme_root_fat32.inner.device` is a value that passed
+through `Fat32Core.new(g_adapter)` → nested struct-literal field store
+(`SharedFat32Driver.inner: Fat32Core`, `Fat32Core.device: BlockDevice`) →
+field read-back. **Verdict: the fix locus is trait-typed struct-field
+store/read lowering specifically for the real `Fat32Core`/
+`SharedFat32Driver` construction shape** — not dispatch/call-site codegen
+in general (direct dispatch is clean, always, everywhere this lane and
+prior lanes tested it), not chained-vs-split expression syntax (both
+fault), not position/register-pressure (both hold constant across the
+pass/fail boundary), and — per the early-construction calibration above
+(`ss_early=64` on `adapter` immediately after construction, before any
+intervening boot code) — not simple storage-corrupt-at-rest from unrelated
+later code either, since the object that fails (`g_pure_nvme_root_fat32`)
+is itself constructed fresh, late, from the very same `adapter`/`g_adapter`
+that dispatch cleanly at that same late point.
+
+**Why C8-FIELD's synthetic fixtures (6 pipelines, all clean) didn't catch
+this — one CONFIRMED gap, one untested hypothesis, do not conflate them.**
+
+*Confirmed: the fixture those four "two_level"/"single_level" tests share
+(`C8_FIELD_FIXTURE_PREFIX`, `local_execution_tests.rs:250-265`) declares a
+trait with a SINGLE method, `size_x`, at slot 0* — not the 3-method
+`read_x`/`write_x`/`size_x` shape at slot `0x10` the C8-FIELD doc text
+itself says is "required" ("A 1-method trait was tried first and
+discarded — slot offset 0 makes 'correct 2-deref dispatch' and 'one extra
+deref' produce identical bytes... the 3-method/slot-`0x10` shape is
+required," line ~294 above). The two claims disagree: the doc's prose says
+3-method/slot-0x10 was used "throughout," but the actual constant in the
+test file that backs the four most-analogous tests (including
+`two_level_split_hops`, the exact discriminator this lane re-ran live) is
+1-method/slot-0. At slot 0, `[rax+0]` (correct) and a hypothetical
+extra-deref read at the same offset are byte-identical — **the fixture
+those four tests use cannot discriminate the extra-deref hypothesis at
+all, independent of field count.** This is a concrete, fixable defect in
+the existing test harness, separate from and prior to any new enrichment.
+
+*Untested hypothesis: field count/type mix.* The real `Fat32Core` has ~24
+fields after `device` (mixed `u32`/`bool`/array/`[u8]`/`[[u8]]` types,
+several leading underscore-prefixed cache fields), and `SharedFat32Driver`
+wraps it inside another multi-field struct (`inner`, `handles:
+[SharedFileHandle]`, `handle_ids: [u64]`, `next_handle: u64`, `mounted:
+bool`) — versus the synthetic fixture's 2-3 total fields. This lane
+believes field count/mix is *also* likely relevant (a 1-field struct has
+no layout/spill pressure a 24-field one does), but this was **not tested**
+this session — say so plainly rather than asserting it.
+
+**Recommended next step for whoever picks this up:** fix the fixture to
+use a proper 3-method/slot-`0x10` trait (matching `BlockDevice` exactly, as
+the doc's own prose already specifies) AND separately enrich field
+count/type mix toward `Fat32Core`'s actual shape, as two independent axes —
+run the slot-0x10 fix alone first (cheapest, fastest, and directly
+addresses a real harness defect regardless of the field-count question) to
+see if it alone flips any of the four tests red before conflating it with
+field-count enrichment. This is a fast (seconds, not QEMU-boot-minutes),
+Rust-side seed-level repro search — this lane did not attempt it due to
+time; it is the natural continuation of C8-FIELD's existing 4-test harness
+in `src/compiler_rust/compiler/src/codegen/local_execution_tests.rs` and
+`c8_nested_field_dispatch_tests.rs` per the task brief, once a repro shape
+is found. No fix was attempted this session without that fast feedback
+loop — editing seed struct-literal/field lowering on a hypothesis with a
+~4-minute rebuild+boot verification cycle risked breaking the already-
+correct `RenderBackend`/24-slot dispatch path for no confirmed gain, and a
+parallel worktree lane was already mid-`cargo test` on this same crate
+when this lane finished, so no cargo build was started here either.
+
+**Static reference addresses for this exact build** (`build/os/_wk/
+c8probe_desktop.elf`, gitignored scratch, deleted after use): `nm` showed
+`__vtable__NvmeBlockAdapter__for__BlockDevice` at `0a7bc4c8`
+(175883464 decimal), `NvmeBlockAdapter_dot_sector_size` at `0a5ec0aa`
+(173981866 decimal) — both stable across every rebuild in this lane (only
+the instrumented function's own bytes changed between iterations).
+
+**Files touched, final state confirmed:** `src/os/services/vfs/
+vfs_boot_init.spl` — all `c8p0_`/`c8p2_`/`c8probe`-prefixed instrumentation
+and the `extern fn unsafe_addr_of` declaration added by this lane were
+stripped after the final boot; `vfs_boot_init.spl:374` toggled `if true:`
+-> `if false:` -> `if true:` (restored, verified via `sed -n '374p'` and an
+empty `git diff` on the file). No files outside `src/os/services/vfs/
+vfs_boot_init.spl` were edited by this lane. Scratch kernel builds, cache
+dirs, and serial logs live under `build/os/_wk/` (gitignored); serial logs
+gzipped, kernel ELF and native-build cache dir removed after use.
