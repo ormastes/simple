@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong)
 **Found:** 2026-07-14, exprdispatch2 lane
-**Resolved:** 2026-07-15
+**Resolved:** 2026-07-15 (triage-confirmed 2026-07-17: `toplevel_array_len` case verified present in `scripts/check/check-native-seed-parity.shs`)
 **Backend:** native-build `--entry`
 
 ## Symptom

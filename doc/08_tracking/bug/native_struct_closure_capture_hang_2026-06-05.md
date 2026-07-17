@@ -2,7 +2,7 @@
 
 Status: hang no longer reproducible — native-build now loud-fails on unsupported lambda forms (2026-07-16)
 
-**Status:** hang no longer reproducible — native-build now loud-fails on unsupported lambda forms (2026-07-16)
+**Status:** RESOLVED — hang no longer reproducible; native-build now loud-fails on unsupported lambda forms (2026-07-16) (triage-confirmed 2026-07-17: doc's own 4-variant regression re-run, all builds fail loud or match interpreter oracle, zero hangs)
 **Severity:** medium
 **Date:** 2026-06-05
 

@@ -1,7 +1,7 @@
 # Blanket "sync working changes" commit deleted another session's files
 
 ## Status
-Recovered (2026-07-06). 3 of 4 files restored by this record's fix; the 4th
+**RESOLVED** — Recovered (2026-07-06; triage-confirmed 2026-07-17: all 4 files verified present on disk, deleting commit 620fc04479e6 confirmed via `git log`). 3 of 4 files restored by this record's fix; the 4th
 (the parity harness spec) was restored concurrently by a different session —
 see Files Deleted below for the split.
 

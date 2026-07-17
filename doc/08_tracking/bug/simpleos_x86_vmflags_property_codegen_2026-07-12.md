@@ -2,7 +2,7 @@
 
 ## Status
 
-Source fix implemented and verified (2026-07-12). Fresh x86 Cranelift build reports zero failed/skipped files for paging/VMM modules.
+**RESOLVED** — Source fix implemented and verified (2026-07-12). Fresh x86 Cranelift build reports zero failed/skipped files for paging/VMM modules. (triage-confirmed 2026-07-17: `VmFlags(bits: flags.bits | VM_NO_EXECUTE)` accessor pattern verified present in `src/os/kernel/arch/x86_64/paging.spl:287`; no property-syntax assignment remains)
 
 ## Evidence
 
