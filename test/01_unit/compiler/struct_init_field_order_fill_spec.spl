@@ -1,0 +1,49 @@
+# Regression spec: struct-init field values must land in the DECLARED field
+# slot regardless of the order named args are written in, and a field
+# omitted at the call site must zero/nil-fill rather than bleeding a
+# neighboring argument's value into its slot.
+#
+# Mirrors Rust-seed fix 6b59a8c4bf7 ("lower struct-init fields by declared
+# order with nil default fill"). Self-hosted mirror site:
+# src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# `lower_struct_construct`.
+#
+# Surface bug (pre-fix): the field-selection loop there defaulted every
+# declared field to `args[fi]` (or, once `fi` ran past the end of `args`, a
+# repeated `args[0]`) and only overrode that guess when some LATER arg's
+# NAME happened to match the field being visited. A field with no matching
+# named arg (e.g. `Triple(b: 5)` omitting `a` and `c`) silently inherited an
+# unrelated arg's value instead of a zero/nil fill -- and reading `args[0]`
+# with zero args supplied was an out-of-bounds access.
+#
+# tag: unit
+
+struct Triple:
+    a: i64
+    b: i64
+    c: i64
+
+describe "struct-init field ordering and omitted-field fill":
+    it "fills omitted leading and trailing fields with zero, not a neighbor's value":
+        val t = Triple(b: 5)
+        expect(t.a).to_equal(0)
+        expect(t.b).to_equal(5)
+        expect(t.c).to_equal(0)
+
+    it "fills an omitted middle field with zero":
+        val t = Triple(a: 1, c: 3)
+        expect(t.a).to_equal(1)
+        expect(t.b).to_equal(0)
+        expect(t.c).to_equal(3)
+
+    it "keeps fully positional construction working":
+        val t = Triple(1, 2, 3)
+        expect(t.a).to_equal(1)
+        expect(t.b).to_equal(2)
+        expect(t.c).to_equal(3)
+
+    it "keeps reordered named-arg construction working":
+        val t = Triple(c: 3, a: 1, b: 2)
+        expect(t.a).to_equal(1)
+        expect(t.b).to_equal(2)
+        expect(t.c).to_equal(3)

@@ -16,6 +16,13 @@
   regression. Residual risk noted: bare-variable Try (`resp?` with no `)`)
   would still be stripped by the rewrite — none exist in the kernel closure
   today.
+- **Residual-risk audit (2026-07-17):** repo-wide scan found 915 line-end `?`
+  occurrences, ALL type annotations/comments/`.?` chains — ZERO bare-variable
+  Try operators in any closure (kernel, bootstrap_main, GUI entries). Blast
+  radius zero. Extending the protection set is provably unsafe by character
+  inspection alone (`dict[k]?` vs `[T]?` both end `]?`) — requires
+  context-aware detection; file a feature request if bare-Try is ever needed
+  under SIMPLE_BOOTSTRAP. No code change made.
 - **Date:** 2026-07-16
 - **Severity:** critical (SimpleOS x86_64: fat32 `exec probe failed` → `mount_failed` → diskless desktop)
 - **Component:** rust seed — HIR `?`-unwrap type propagation + MIR dynamic method dispatch

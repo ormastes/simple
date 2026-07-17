@@ -214,7 +214,24 @@ impl HirLowering:
         # rt_enum_new (registered in enum_variant_index as Option -> Some=0,
         # None=1); without this they decayed to "unresolved name: Some".
         val is_option_variant = name == "Some" or name == "None"
-        if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant or is_option_variant:
+        # Bare `Result`/`Option` RECEIVER names, e.g. `Result.Ok(x)` /
+        # `Option.Some(x)`: these builtin generic enums' TYPE annotations
+        # are special-cased in hir_lowering/types.spl's `lower_named_kind`
+        # (HirTypeKind.Result / HirTypeKind.Optional) without ever calling
+        # `self.symbols.define`. A module that only ever writes
+        # `Result<T,E>`/`Option<T>` as a type annotation -- and never
+        # imports the stdlib struct/enum declaration itself (mirrors the
+        # Rust seed bug: freestanding/entry-closure kernel modules without
+        # the std prelude) -- therefore has no "Result"/"Option" symbol, so
+        # `self.symbols.lookup` above misses and the qualified receiver used
+        # to hard-error "unresolved name: Result" here, even though MIR's
+        # enum_variant_index ALWAYS registers Result/Option's variants
+        # module-wide (module_lowering.spl) and happily routes
+        # `.Ok(...)`/`.Some(...)` through lower_enum_construct_named once
+        # the receiver resolves to a NamedVar carrying the name. Emit one so
+        # it reaches that routing instead of failing to compile.
+        val is_result_or_option_type_name = name == "Result" or name == "Option"
+        if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant or is_option_variant or is_result_or_option_type_name:
             val symbol_type = if is_bootstrap_builtin:
                 bootstrap_builtin_signature(name, span)
             else:

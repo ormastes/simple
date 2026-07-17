@@ -818,9 +818,6 @@ impl MirLowering:
                     match found_callee_type.kind:
                         case HirTypeKind.Function(_, ret, _): return Some(ret)
                         case _: ()
-            case MethodCall(_, _, _, resolution):
-                if val method_id = resolution.get_symbol_id():
-                    return self.resolved_call_hir_return_type(method_id)
             case _: ()
         nil
 
@@ -1283,6 +1280,28 @@ impl MirLowering:
         otherwise falls back to positional order. Yields a pointer to the
         constructed storage (see backend translate_aggregate Struct branch)."""
         val field_names = self.struct_field_order[struct_name]
+        # ROOT FIX (mirrors seed bug
+        # simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16,
+        # Symptom A -- "lower struct-init fields by declared order with nil
+        # default fill"): the field-selection loop below used to default
+        # every declared field to `args[fi]` (or, once `fi` ran past the end
+        # of `args`, a repeated `args[0]`) and only override that guess when
+        # some LATER arg's NAME happened to match the field being visited.
+        # A field with no matching named arg -- e.g. `Point(y: 2)` omitting
+        # `x` -- silently inherited an unrelated arg's value (`y: 2`'s own
+        # value here) instead of a nil/zero fill, shifting every subsequent
+        # field's stored value out of its slot (and OOB'd reading `args[0]`
+        # when `args` was empty). Separate named args (matched by declared
+        # field name) from positional args (consumed in declared-field
+        # order for whichever fields no name claims); a field neither
+        # claims gets a zero/nil fill below instead.
+        var named_args: Dict<text, HirExpr> = {}
+        var positional_args: [HirExpr] = []
+        for a in args:
+            if a.has_name:
+                named_args[a.name] = a.value
+            else:
+                positional_args.push(a.value)
         var ops: [MirOperand] = []
         # Bug #166: learn this struct's per-field TYPE names from the argument
         # values. Struct field types are `Infer` in the native/bootstrap path
@@ -1296,16 +1315,23 @@ impl MirLowering:
         # instead of silently defaulting to index 0.
         var field_type_names: [text] = []
         var fi = 0
+        var pos_i = 0
         while fi < field_names.len():
             val want = field_names[fi]
-            # Default to the positional arg at this field index; a named arg
-            # whose name matches overrides it.
-            var chosen = if fi < args.len(): args[fi].value else: args[0].value
-            var ai = 0
-            while ai < args.len():
-                if args[ai].has_name and args[ai].name == want:
-                    chosen = args[ai].value
-                ai = ai + 1
+            val has_named = named_args.has(want)
+            if not has_named and pos_i >= positional_args.len():
+                # Declared field omitted at the call site (no named arg, no
+                # positional arg left to consume): zero/nil-fill instead of
+                # bleeding an unrelated arg's value into this slot (matches
+                # the "unsupported initializer" fallback just below).
+                ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+                field_type_names.push("")
+                fi = fi + 1
+                continue
+            val chosen = if has_named: named_args[want] else: positional_args[pos_i]
+            if not has_named:
+                pos_i = pos_i + 1
+
             # A Lambda literal in field-initializer position (`Holder(f: \x:
             # x+1)`) is a first-class function VALUE -- `self.lower_expr` has no
             # generic Lambda case and returns nil, which then crashed on `v.id`
@@ -1521,24 +1547,6 @@ impl MirLowering:
             case _:
                 nil
 
-    me lower_inline_lambda_with_locals(params: [HirParam], body: HirExpr, arg_locals: [LocalId]) -> LocalId:
-        """Lower a lambda body at its call site with already-lowered args."""
-        val live_map = self.local_map
-        var call_map: Dict<i64, LocalId> = {}
-        for k in live_map.keys():
-            call_map[k] = live_map[k]
-        self.local_map = call_map
-        var pi = 0
-        while pi < params.len():
-            if pi < arg_locals.len():
-                val pid = mir_expr_symbol_id_value(params[pi].symbol)
-                if pid >= 0:
-                    self.local_map[pid] = arg_locals[pi]
-            pi = pi + 1
-        val result = self.lower_expr(body)
-        self.local_map = live_map
-        result
-
     me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower an Immediately-Invoked Function Expression: a raw lambda
         literal used directly as a call callee, `(\x: x + 1)(5)`.
@@ -1557,7 +1565,21 @@ impl MirLowering:
             if ai < args.len():
                 arg_locals = arg_locals.push(self.lower_expr(args[ai].value))
             ai = ai + 1
-        self.lower_inline_lambda_with_locals(params, body, arg_locals)
+        val live_map = self.local_map
+        var call_map: Dict<i64, LocalId> = {}
+        for k in live_map.keys():
+            call_map[k] = live_map[k]
+        self.local_map = call_map
+        var pi = 0
+        while pi < params.len():
+            if pi < arg_locals.len():
+                val pid = mir_expr_symbol_id_value(params[pi].symbol)
+                if pid >= 0:
+                    self.local_map[pid] = arg_locals[pi]
+            pi = pi + 1
+        val result = self.lower_expr(body)
+        self.local_map = live_map
+        result
 
     me lambda_body_captures(body: HirExpr, param_syms: [i64]) -> bool:
         """Conservative free-variable scan for a lambda body being lifted to a
