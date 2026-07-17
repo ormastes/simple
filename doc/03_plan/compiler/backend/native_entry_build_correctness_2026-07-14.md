@@ -99,11 +99,13 @@ the shared binary — deploys require explicit user go-ahead).
   `interp_bool_float`, and `static_ctor_disambiguated` pin the entrypoint,
   closure, dict-call, collection, interpolation, and constructor fixes. The
   expanded dual-backend matrix still requires the executable gate above.
-- The `brace_literal_scope` parity case carries the June unmatched-brace
-  cross-function reproduction adapted for the CLI harness: it returns `i64`
-  from `main` and omits the trailing `main()` call because the CLI invokes the
-  entry point. Its source is present, but execution is pending and the original
-  bug remains open.
+- The normal `brace_literal_scope` parity case retains the native-entry
+  adaptation. `NATIVE_OPEN_BUG_REPROS=1` additionally selects the exact June
+  cross-function source as `brace_literal_scope_exact`, including Unit `main`
+  and the trailing top-level `main()` call that exercises `_expr_N` restoration
+  plus `functions.contains("main")`. Candidate map-initialization fix
+  `f06e5829` was reverted by `0f535b099788`; there is no active source fix.
+  Exact Linux execution remains pending and the original bug stays open.
 - Open filed bugs, in bottom-up order:
   - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements `?`
     for authoritatively typed flat and boxed Option locals/direct-call returns;

@@ -264,6 +264,24 @@ parity_build_native=$(sed -n '/^build_native() {$/,/^}$/p' scripts/check/check-n
 if printf '%s\n' "${parity_build_native}" | grep -Fq 'NATIVE_PARITY_BACKEND'; then
   fail "native parity backend selector leaks into shared dual-backend builds"
 fi
+brace_literal_scope_body=$(sed -n '/^write_case_brace_literal_scope_exact() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+for required in \
+  'fn open_brace(x: text) -> text:' \
+  '    " { "' \
+  'fn main():' \
+  '    val ob = open_brace("unused")' \
+  '    val rule = ".a" + ob + "color: red" + " } "' \
+  '    print("RULE: [" + rule + "]")' \
+  'main()'; do
+  printf '%s\n' "${brace_literal_scope_body}" | grep -Fxq -- "${required}" || fail "exact brace-literal scope reproduction missing: ${required}"
+done
+if printf '%s\n' "${brace_literal_scope_body}" | grep -Eq 'fn main\(\) -> i64:|^[[:space:]]+return 0$'; then
+  fail "brace-literal scope reproduction was adapted away from the original trigger"
+fi
+open_bug_repros=$(sed -n '/^if \[ "${NATIVE_OPEN_BUG_REPROS:-0}" = 1 \]; then$/,/^fi$/p' scripts/check/check-native-seed-parity.shs)
+printf '%s\n' "${open_bug_repros}" | grep -Fq 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' || fail "exact brace-literal scope reproduction is not an opt-in known-red case"
+[ "$(grep -Fc 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "exact brace-literal scope reproduction must be registered exactly once"
+grep -Fq 'run_parity_case brace_literal_scope write_case_brace_literal_scope "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs || fail "adapted brace-literal scope parity registration missing"
 parity_loud_fail=$(sed -n '/^run_loud_fail_case() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "loud-fail parity backend selection missing"
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "loud-fail parity does not select Cranelift explicitly"

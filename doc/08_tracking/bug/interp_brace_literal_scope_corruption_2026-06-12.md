@@ -69,13 +69,14 @@ unmatched `" { "` opener, but it has no live call root and therefore is not
 evidence that the historical cross-function scope-corruption reproduction is
 fixed. No speculative bootstrap-helper change is retained in this lane.
 
-The parity harness contains the June reproduction adapted for CLI execution:
-`main` returns `i64`, and the source-level trailing `main()` call is omitted
-because the CLI invokes the entry point. It asserts both seed and native outputs
-after the harness's standard whitespace normalization. The expected output is
-`RULE:[.a{color:red}]`. This regression has not been executed in the current
-lane, so the original bug remains open until the seed/native run proves that
-scope isolation and entry-point preservation both hold.
+The parity harness now retains both forms. The normal `brace_literal_scope`
+case is the native-entry adaptation. With `NATIVE_OPEN_BUG_REPROS=1`,
+`brace_literal_scope_exact` preserves Unit `main` and the trailing top-level
+`main()` call so `_expr_N` restoration and the `functions.contains("main")`
+branch cannot be adapted away. Both expect normalized output
+`RULE:[.a{color:red}]`. The exact case is deliberately opt-in and red until a
+source fix lands and Linux execution proves scope isolation plus entry-point
+preservation.
 
 The focused core CI lane additionally executes
 `test/01_unit/compiler/frontend/interp_fragment_sticky_error_spec.spl`, which
@@ -87,3 +88,8 @@ coverage only: the full CLI parity reproduction below remains the closure gate.
 ## Runtime verification (2026-07-17)
 
 Ran exact repro: `bin/simple run` output matches byte-for-byte: `HIR lowering error: Unknown variable: rule while lowering open_brace` then `error[E1002]: function 'main' not found`. Scope bleed across functions triggered by brace literal confirmed STILL-REPRODUCES.
+
+Candidate fix `f06e5829` replaced the frontend bridge's brace-initialized maps
+with explicit `Map.new()` construction, but `0f535b099788` reverted it before
+this lane synced. There is therefore no active source fix to verify. The exact
+opt-in Linux parity case above remains the closure gate for the eventual fix.
