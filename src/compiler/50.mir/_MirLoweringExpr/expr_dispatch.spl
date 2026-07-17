@@ -754,8 +754,34 @@ impl MirLowering:
                     if val bitfield_local = bitfield_result:
                         return bitfield_local
                     val field_idx = self.resolve_field_index(base, base_local, field_name, resolved)
+                    # Bug (native_class_array_field_mutation_segfault /
+                    # native_bool_array_element_interpolation_special_garbage,
+                    # 2026-07-17): look up the field's DECLARED array element
+                    # type (from the class/struct definition itself, always
+                    # available regardless of whether expression
+                    # type-inference ran) BEFORE computing field_type, so an
+                    # Array/Slice field's MIR type carries its real element
+                    # type instead of whatever expr_value.type_ resolved to
+                    # (observed: an untyped/erased Array HIR type lowers its
+                    # element through lower_type's `case _:` catch-all to a
+                    # bare I64 placeholder, so a bool/text array field's
+                    # elements silently decoded as raw i64 downstream --
+                    # `<special:N>` garbage or a raw heap-handle number
+                    # instead of true/false or the string).
+                    val base_struct_name_pre = self.resolve_base_struct_name(base, base_local)
+                    var field_elem_type_override: HirType? = nil
+                    if val bsn_pre = base_struct_name_pre:
+                        if self.struct_field_array_elem_type.has(bsn_pre):
+                            val field_elem_types_pre = self.struct_field_array_elem_type[bsn_pre]
+                            if field_idx >= 0 and field_idx < field_elem_types_pre.len():
+                                val field_elem_type_pre = field_elem_types_pre[field_idx]
+                                match field_elem_type_pre.kind:
+                                    case HirTypeKind.Error: ()
+                                    case _: field_elem_type_override = Some(field_elem_type_pre)
                     var field_type = MirType.i64()
-                    if val expr_type = expr_value.type_:
+                    if val field_elem_type = field_elem_type_override:
+                        field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type), 0))
+                    elif val expr_type = expr_value.type_:
                         field_type = self.lower_type(expr_type)
                     val projected_struct_name = self.resolve_base_struct_name(base, base_local)
                     if val psn = projected_struct_name:
@@ -768,6 +794,12 @@ impl MirLowering:
                     self.builder = field_builder
                     # Keep chained aggregate and array-field identity on the
                     # projected local for later field/index/method lowering.
+                    # (The field_elem_type_override computed above already
+                    # gave field_type -- and therefore this local's own MIR
+                    # type -- the real Array(elem) shape when known, so the
+                    # Index case's base_mir_type check picks the right
+                    # element type directly; no separate local_hir_types
+                    # registration is needed here.)
                     self.remember_field_projection_provenance(base, base_local, field_idx, field_result)
                     return field_result
                 case _:
@@ -2038,8 +2070,26 @@ impl MirLowering:
                 if val bitfield_local = bitfield_result:
                     return bitfield_local
                 val field_idx = self.resolve_field_index(base, base_local, field_name, resolved)
+                # Bug (native_class_array_field_mutation_segfault /
+                # native_bool_array_element_interpolation_special_garbage,
+                # 2026-07-17): same pre-lookup as the disc-guarded Field arm
+                # above, kept in sync for this fallback dispatch path -- see
+                # that arm's comment for why field_type must be overridden
+                # BEFORE emit_get_field rather than patched up afterward.
+                val base_struct_name_pre2 = self.resolve_base_struct_name(base, base_local)
+                var field_elem_type_override2: HirType? = nil
+                if val bsn_pre2 = base_struct_name_pre2:
+                    if self.struct_field_array_elem_type.has(bsn_pre2):
+                        val field_elem_types_pre2 = self.struct_field_array_elem_type[bsn_pre2]
+                        if field_idx >= 0 and field_idx < field_elem_types_pre2.len():
+                            val field_elem_type_pre2 = field_elem_types_pre2[field_idx]
+                            match field_elem_type_pre2.kind:
+                                case HirTypeKind.Error: ()
+                                case _: field_elem_type_override2 = Some(field_elem_type_pre2)
                 var field_type = MirType.i64()
-                if val expr_type = expr_value.type_:
+                if val field_elem_type3 = field_elem_type_override2:
+                    field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type3), 0))
+                elif val expr_type = expr_value.type_:
                     field_type = self.lower_type(expr_type)
                 val projected_struct_name2 = self.resolve_base_struct_name(base, base_local)
                 if val psn2 = projected_struct_name2:
@@ -2050,6 +2100,10 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                 self.builder = b
+                # Same rationale as the disc-guarded Field arm above: the
+                # field_elem_type_override2 computed above already gave
+                # field_type the real Array(elem) shape when known, so no
+                # separate local_hir_types registration is needed here.
                 self.remember_field_projection_provenance(base, base_local, field_idx, result)
                 result
 
