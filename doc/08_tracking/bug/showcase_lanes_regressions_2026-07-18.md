@@ -27,6 +27,24 @@ current main with the deployed `bin/simple` (v1.0.0-beta, self-hosted).
    (copy-paste from the 808x632 graphics host) — web host-WM window could
    never render its page (998293f5).
 
+## Root causes isolated after the first sweep (2026-07-18 late)
+9. **Class-param paint detach (interpreter):** paints made through an
+   `Engine2D` function parameter are lost to the caller (checkpoint bisect:
+   every section healthy inside the callee, caller reads all-zero; `mut`
+   alone does not write back). Workaround: thread the engine through the
+   return value (landed for graphics_2d_showcase: 320x240 now renders
+   76789/76800 nonzero, semantic gate 4/4, 217s interpret). The widget
+   showcase's ~15 `w_*(b: Engine2D, ...)` helpers have the same exposure.
+10. **JIT SIGSEGV on the 2D showcase** (exit 101 via isolated child; direct:
+   SIGSEGV KERN_INVALID_ADDRESS at 0x890 inside JIT-generated code, frame
+   `simple_compiler::codegen::jit::JitCompiler::call_i64_void` — macOS
+   .ips report 2026-07-18-084220). This is the long-standing "graphics apps
+   need SIMPLE_EXECUTION_MODE=interpret or JIT panics" class, now with a
+   precise backtrace. Consequence: the fast lane for showcase apps is JIT,
+   and it cannot run them; the 07-14 96s widget pass was therefore an
+   interpreter run — meaning the interpreter itself slowed 3-4x since
+   (item 6) and BOTH must be fixed for 720p-class showcase evidence.
+
 ## Open
 6. **Interpreter throughput regression ~3-4x since 2026-07-14.** Widget
    standalone: 96s (07-14 PASS) → >280s timeout now; 2D 640x480: >280s
