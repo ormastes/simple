@@ -105,16 +105,15 @@ the shared binary — deploys require explicit user go-ahead).
   entry point. Its source is present, but execution is pending and the original
   bug remains open.
 - Open filed bugs, in bottom-up order:
-  - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements a
-    fail-closed path for authoritatively typed locals, direct-call returns, and
-    resolved-method returns before Result decoding. Unresolved late-dispatch
-    methods are deliberately not guessed. Default-LLVM and explicit-Cranelift
-    loud-fail cases for annotated locals/direct calls are wired on hosted
-    Linux/macOS/Windows and FreeBSD x86_64. ARM32 default LLVM and Windows
-    ARM64 LLVM/Cranelift add target-directed compile-refusal/no-object gates.
-    Execution is pending; these target gates do not claim Option support.
-    Resolved-method execution and full tagged-Option support remain blocked on
-    a runnable pure-Simple `native-build` gate.
+  - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements `?`
+    for authoritatively typed flat and boxed Option locals/direct-call returns;
+    resolved-method support is source-only and unresolved late dispatch is not
+    guessed. Native-authoritative annotated/direct cases select flagless LLVM
+    or explicit Cranelift on hosted Linux/macOS/Windows and FreeBSD x86_64.
+    ARM32 default LLVM and Windows ARM64 LLVM/Cranelift require successful,
+    nonempty target objects without the retired fail-closed diagnostic.
+    Execution is pending. The flat payload-3 collision and uniform tagged
+    Option ABI remain open.
   - The cross-module `Result<[u8], E>` control now routes both its Ok and Err
     paths through `?`. Existing LLVM and Cranelift gates schedule it on FreeBSD
     x86_64 and AArch64/RISC-V QEMU without adding another cross build; execution

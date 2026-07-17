@@ -173,8 +173,8 @@ if grep -q '^  windows-arm64:' .github/workflows/windows-tests.yml; then
 fi
 [ "$(grep -Fc "'.github/workflows/windows-tests.yml'" "${multiplatform}")" -eq 2 ] || fail "legacy Windows workflow trigger missing"
 [ "$(grep -Fc "'.github/workflows/freebsd-build.yml'" "${multiplatform}")" -eq 2 ] || fail "FreeBSD workflow trigger missing"
-[ "$(grep -Fc "'scripts/check/check-native-option-try-target-fail.shs'" "${multiplatform}")" -eq 2 ] || fail "target Option refusal helper workflow trigger missing"
-[ "$(grep -Fc "'test/fixtures/compiler/native_option_try_*_loud.spl'" "${multiplatform}")" -eq 2 ] || fail "target Option refusal fixture workflow trigger missing"
+[ "$(grep -Fc "'scripts/check/check-native-option-try-target-fail.shs'" "${multiplatform}")" -eq 2 ] || fail "target Option compile helper workflow trigger missing"
+[ "$(grep -Fc "'test/fixtures/compiler/native_option_try_*_loud.spl'" "${multiplatform}")" -eq 2 ] || fail "target Option compile fixture workflow trigger missing"
 grep -Fq 'run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download' "${freebsd_workflow}" || fail "FreeBSD full execution wiring missing"
 grep -Eq '^[[:space:]]*SMOKE_OUT=.*native-build .*--backend cranelift .*--output \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe build missing"
 grep -Eq '^[[:space:]]*SMOKE_RESULT=.*test -x \$\{SMOKE_DIR\}/probe && \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe execution missing"
@@ -184,6 +184,7 @@ grep -Fq 'for PARITY_BACKEND in llvm cranelift; do' scripts/check/check-freebsd-
 grep -Fq '[ "$PARITY_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity exit status is not enforced"
 grep -Fq 'total=2 pass=2 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity strict summary missing"
 [ "$(grep -c "test/fixtures/compiler/llvm_simd_row_native_probe.spl" "${multiplatform}")" -eq 2 ] || fail "native architecture probe trigger missing"
+[ "$(grep -c "test/fixtures/compiler/stage4_struct_enum_array_probe.spl" "${multiplatform}")" -eq 2 ] || fail "Cranelift aggregate probe trigger missing"
 grep -q 'bootstrap-from-scratch.sh' "${multiplatform}" || fail "multiplatform workflow bypasses canonical bootstrap"
 grep -q '^  native-architectures:' "${multiplatform}" || fail "pure-Simple native architecture job missing"
 grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native architecture job does not consume Linux LLVM pure stage"
@@ -207,7 +208,11 @@ parity_loud_fail=$(sed -n '/^run_loud_fail_case() {$/,/^}$/p' scripts/check/chec
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "loud-fail parity backend selection missing"
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "loud-fail parity does not select Cranelift explicitly"
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" || build_rc=$?' || fail "loud-fail parity does not preserve flagless LLVM"
-option_parity_body=$(sed -n '/- name: Run strict Option fail-closed parity/,/- name: Run full native seed parity gate/p' "${multiplatform}")
+parity_native_authoritative=$(sed -n '/^run_native_authoritative_case() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "native-authoritative parity backend selection missing"
+printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "native-authoritative parity does not select Cranelift explicitly"
+printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'elif build_native "$src" "$bin" "$build_log"; then' || fail "native-authoritative parity does not preserve flagless LLVM"
+option_parity_body=$(sed -n '/- name: Run strict Option native-authoritative parity/,/- name: Run full native seed parity gate/p' "${multiplatform}")
 for required in \
   'SIMPLE_BINARY="$stage3"' \
   'NATIVE_PARITY_BACKEND=${{ matrix.backend }}' \
@@ -241,10 +246,10 @@ for invocation in \
   'build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu'; do
   grep -Fq "${invocation}" "${arch_gate}" || fail "native architecture invocation missing: ${invocation}"
 done
-grep -Fq 'sh scripts/check/check-native-option-try-target-fail.shs' "${arch_gate}" || fail "ARM32 Option refusal helper missing"
-grep -Fq 'armv7-unknown-linux-gnueabihf llvm' "${arch_gate}" || fail "ARM32 Option refusal target/backend missing"
+grep -Fq 'sh scripts/check/check-native-option-try-target-fail.shs' "${arch_gate}" || fail "ARM32 Option compile helper missing"
+grep -Fq 'armv7-unknown-linux-gnueabihf llvm' "${arch_gate}" || fail "ARM32 Option compile target/backend missing"
 if grep -Fq 'check-native-option-try-target-fail.shs' scripts/check/check-cranelift-aot-aggregate-cross.shs; then
-  fail "unsupported Cranelift ARM32 lane must not claim Option target refusal"
+  fail "unsupported Cranelift ARM32 lane must not claim Option target compilation"
 fi
 arm_object_body=$(sed -n '/^build_object_arch() {$/,/^}$/p' "${arch_gate}")
 printf '%s\n' "${arm_object_body}" | grep -Fq -- '--emit-object' || fail "ARM32 object gate does not emit an object"
@@ -260,16 +265,20 @@ for required in \
   'test/fixtures/compiler/native_option_try_direct_loud.spl' \
   '"$SIMPLE_BIN" native-build --backend cranelift --emit-object' \
   '"$SIMPLE_BIN" native-build --emit-object --target "$TARGET"' \
-  '[ "$status" -ne 0 ]' \
-  '[ ! -e "$out" ]' \
-  'grep -qF "$DIAGNOSTIC" "$log"'; do
-  grep -Fq -- "${required}" "${option_target_gate}" || fail "target Option refusal gate missing: ${required}"
+  '[ "$status" -eq 0 ]' \
+  '[ -s "$out" ]' \
+  'if grep -qF "$DIAGNOSTIC" "$log"; then'; do
+  grep -Fq -- "${required}" "${option_target_gate}" || fail "target Option compile gate missing: ${required}"
 done
 if grep -Eq -- '--backend([=[:space:]]+)(llvm|"\$BACKEND")|\|\|[[:space:]]*true' "${option_target_gate}"; then
-  fail "target Option refusal gate does not preserve flagless LLVM or is optional"
+  fail "target Option compile gate does not preserve flagless LLVM or is optional"
 fi
 grep -Fq 'cp test/fixtures/compiler/native_option_try_annotated_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "annotated Option parity fixture drift"
 grep -Fq 'cp test/fixtures/compiler/native_option_try_direct_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "direct Option parity fixture drift"
+grep -Fq 'val value: i64? = 5' test/fixtures/compiler/native_option_try_annotated_loud.spl || fail "annotated Option fixture must use a non-sentinel present payload"
+grep -Fq '    4' test/fixtures/compiler/native_option_try_direct_loud.spl || fail "direct Option fixture payload drift"
+grep -Fq 'run_native_authoritative_case option_try_annotated_loud write_case_option_try_annotated_loud "5"' scripts/check/check-native-seed-parity.shs || fail "annotated Option expected payload drift"
+grep -Fq 'run_native_authoritative_case option_try_direct_loud write_case_option_try_direct_loud "4"' scripts/check/check-native-seed-parity.shs || fail "direct Option expected payload drift"
 result_try_fixture=test/fixtures/native_crossmodule_result_u8/main.spl
 for required in \
   'val data = load_bytes()?' \

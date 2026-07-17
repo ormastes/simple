@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** typed local/direct-call/resolved-method forms now fail closed; tagged Option support open
+**Status:** typed local/direct-call support implemented; execution and uniform tagged Option ABI pending
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -139,3 +139,19 @@ cases now loud-fail with the expected diagnostic and no binary.
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes (Option `?` alongside Result `?`).
+
+## Support and platform-gate update (2026-07-17)
+
+The fail-closed boundary above is historical: `lower_try_expr` now supports
+authoritatively typed flat and boxed Option locals/direct-call returns.
+Resolved-method provenance is source-implemented; unresolved late dispatch is
+still not guessed. The two durable fixtures use ordinary present payloads `5`
+and `4`; payload `3` is deliberately excluded because treating its collision
+with the flat nil sentinel as success would encode the remaining ABI bug.
+
+Hosted Linux/macOS/Windows and FreeBSD x86_64 select the same two
+native-authoritative cases under flagless LLVM and explicit Cranelift. ARM32
+default LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target
+objects and reject the retired fail-closed diagnostic. Static portability
+coverage pins backend selection and the target-object contract. Execution is
+pending; the payload-3 collision and uniform tagged Option ABI remain open.
