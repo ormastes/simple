@@ -2720,6 +2720,7 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     let error = builder.selected_runtime_library(temp.path()).unwrap_err();
     assert!(error.contains("missing Engine2D queue symbols"));
     assert!(error.contains("rt_host_gpu_queue_emit_payload"));
+    assert!(error.contains("rt_host_gpu_queue_emit_payload_text"));
 }
 
 #[cfg(target_os = "linux")]
