@@ -1,0 +1,72 @@
+# Regression spec (interpreter view): a struct field omitted at construction
+# time — brace or paren form, leading/middle/trailing position — must be
+# nil-filled, never bleed a neighboring argument's value, never error.
+#
+# Companion to test/01_unit/compiler/struct_init_field_order_fill_spec.spl,
+# which pins the COMPILED/MIR-path zero-value semantic for typed (i64)
+# fields with no explicit `=` default (omitted field -> 0). This file pins
+# the separate, currently-live INTERPRETER semantic: the tree-walking
+# interpreter's own struct construction (both `Expr::StructInit` brace form
+# and paren-form `instantiate_class`) pre-fills every declared field with its
+# default expression or `Value::Nil` when no default is given — never 0 for a
+# bare `i64` field. Verified empirically: `run`-ing the existing
+# struct_init_field_order_fill_spec.spl's `==0` assertions on the current
+# seed binary fails with "expected nil to equal 0", while `to_be_nil()`
+# assertions on the same omitted fields pass. Both semantics are real and
+# both are worth pinning; they simply belong to different execution paths
+# (see fix commits 6b59a8c4bf7 for the HIR/MIR path and 0ee3727522d for the
+# interpreter's brace-form path, which explicitly nil-fills — never
+# zero-fills — declared-but-undefaulted fields).
+#
+# tag: unit
+
+struct NilFillTriple:
+    a: i64
+    b: i64
+    c: i64
+
+describe "paren-form omitted fields are nil (interpreter view)":
+    it "an omitted leading field is nil, a supplied middle field keeps its value":
+        val t = NilFillTriple(b: 5)
+        expect(t.a).to_be_nil()
+        expect(t.b).to_equal(5)
+        expect(t.c).to_be_nil()
+
+    it "an omitted middle field is nil, surrounding fields keep their values":
+        val t = NilFillTriple(a: 1, c: 3)
+        expect(t.a).to_equal(1)
+        expect(t.b).to_be_nil()
+        expect(t.c).to_equal(3)
+
+    it "fully positional construction leaves no field nil":
+        val t = NilFillTriple(1, 2, 3)
+        expect(t.a).to_equal(1)
+        expect(t.b).to_equal(2)
+        expect(t.c).to_equal(3)
+
+describe "brace-form omitted fields are nil (interpreter view)":
+    it "an omitted leading field is nil, a supplied middle field keeps its value":
+        val t = NilFillTriple { b: 5 }
+        expect(t.a).to_be_nil()
+        expect(t.b).to_equal(5)
+        expect(t.c).to_be_nil()
+
+    it "an omitted middle field is nil, surrounding fields keep their values":
+        val t = NilFillTriple { a: 1, c: 3 }
+        expect(t.a).to_equal(1)
+        expect(t.b).to_be_nil()
+        expect(t.c).to_equal(3)
+
+    it "written order does not change which declared slot a named field fills":
+        val t = NilFillTriple { c: 3, a: 1, b: 2 }
+        expect(t.a).to_equal(1)
+        expect(t.b).to_equal(2)
+        expect(t.c).to_equal(3)
+
+describe "brace and paren forms agree on omitted-field nil-fill":
+    it "produce structs with the same field values for the same omitted-field input":
+        val brace_t = NilFillTriple { b: 5 }
+        val paren_t = NilFillTriple(b: 5)
+        expect(brace_t.a).to_equal(paren_t.a)
+        expect(brace_t.b).to_equal(paren_t.b)
+        expect(brace_t.c).to_equal(paren_t.c)
