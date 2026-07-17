@@ -1,6 +1,6 @@
 ---
 id: native_build_cross_module_trait_only_and_unimported_method_gaps_2026-07-17
-status: OPEN
+status: PARTIAL
 severity: medium
 discovered: 2026-07-17
 discovered_by: lane S49, while building the cross-module probe matrix for #190
@@ -56,6 +56,15 @@ an extra harmless free function (e.g. `fn greeter_marker() -> i64: return
 0`) so its MIR module is non-empty. Real-world trait modules almost always
 have more than one declaration, so this is a narrow edge case, but a
 single-declaration trait module is valid Simple and should build.
+
+### Gap 1 source fix (2026-07-17)
+
+`driver_native_module_is_export_facade` now accepts a trait declaration as
+evidence for a code-free module while retaining every existing exclusion for
+functions, data, impls, and other code-bearing declarations. The #190 system
+probe no longer adds `greeter190_marker`; its original two-file scenario is the
+regression. Execution and SPipe doc generation remain pending under the current
+no-runtime-command restriction.
 
 ## Gap 2 — calling ANY method (not just a trait default) on a value of an imported struct type, when only the type itself is imported, fails MIR lowering
 
