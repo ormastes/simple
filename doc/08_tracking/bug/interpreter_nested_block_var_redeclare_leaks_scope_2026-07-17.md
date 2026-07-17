@@ -54,3 +54,8 @@ Confirmed reproducing at commit `985885cb314` in
 `/home/ormastes/dev/wt_q_optdyn` via `bin/simple run` (Rust seed interpreter
 fallback path). Not yet checked against the pure-Simple self-hosted
 interpreter/compiler (`src/compiler/`).
+
+The exact source repro is preserved as ignored Rust regression
+`test_nested_block_var_redeclaration_restores_outer_binding` in
+`src/compiler_rust/compiler/tests/interpreter_coverage_line.rs`; remove the
+ignore when block scopes restore shadowed bindings.

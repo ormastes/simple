@@ -65,3 +65,19 @@ root-cause pass — reproduce with `--backend cranelift` too to see if it's
 LLVM-specific, and get a real crash-address symbol (build with
 `--release`-off / check for a debug build or `gdb`/backtrace tooling) before
 guessing at the fix.
+
+## Durable reproducer
+
+The exact two-element/static-constructor shape is checked in at
+`test/fixtures/compiler/native_class_array_param_field_mutation.spl`.
+Run it through both native backends with:
+
+```sh
+NATIVE_OPEN_BUG_REPROS=1 \
+NATIVE_PARITY_CASES=class_array_param_field_mutation \
+sh scripts/check/check-native-seed-parity.shs
+```
+
+It is intentionally excluded from the default green parity gate while this
+issue is OPEN; it is a strict repro, not an expected-failure waiver. Remove
+the opt-in guard only after both backend legs print exactly `1` and exit 0.

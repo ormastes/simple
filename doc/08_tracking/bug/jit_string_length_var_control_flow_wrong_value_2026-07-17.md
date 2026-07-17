@@ -90,6 +90,11 @@ against the freshly built binary — `.length()` on strings/arrays/dicts and
 the var-reassigned-in-a-while-loop repro all now match the interpreter's
 correct values, `.len()` is unchanged, and `s.lenggth()` still errors loudly.
 
+Durable HIR coverage now lives in
+`src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs` and pins
+`I64` inference for string, array, dictionary, and reassigned string
+`.length()` calls through `if` and `while` flow.
+
 **Not in scope / noted for a future lane:** the pure-Simple self-hosted
 compiler (`src/compiler/`) has the identical `"len"`-only gap in several
 places (e.g. `10.frontend/core/compiler/cg_expr.spl:500`,

@@ -16,6 +16,15 @@ ELECTRON_BIN="${ELECTRON_BIN:-tools/electron-shell/node_modules/.bin/electron}"
 CHROME_CAPTURE_SCRIPT="${CHROME_CAPTURE_SCRIPT:-tools/chrome-live-bitmap/capture_html_argb.js}"
 ELECTRON_CAPTURE_SCRIPT="${ELECTRON_CAPTURE_SCRIPT:-tools/electron-live-bitmap/capture_html_argb.js}"
 SIMPLE_RENDER_SCRIPT="${SIMPLE_RENDER_SCRIPT:-tools/pixel_compare/render_simple_html.spl}"
+DRAW_IR_FIXTURE="${MACOS_METAL_DRAW_IR_FIXTURE:-test/fixtures/native_web_draw_ir_provenance/main.spl}"
+DRAW_IR_BIN="$BUILD_DIR/native-web-draw-ir-provenance"
+DRAW_IR_STDOUT="$BUILD_DIR/native-web-draw-ir-provenance.stdout"
+DRAW_IR_STDERR="$BUILD_DIR/native-web-draw-ir-provenance.stderr"
+DRAW_IR_EXPECTED_STDOUT="$BUILD_DIR/native-web-draw-ir-provenance.expected.stdout"
+DRAW_IR_BUILD_LOG="$BUILD_DIR/native-web-draw-ir-provenance.build.log"
+TIMEOUT_SECS="${MACOS_METAL_NATIVE_TIMEOUT_SECS:-300}"
+SIMPLE_LIB="${SIMPLE_LIB:-src}"
+export SIMPLE_LIB
 
 ENV_PATH="$BUILD_DIR/evidence.env"
 SIMPLE_ARGB="$BUILD_DIR/simple.argb.json"
@@ -29,7 +38,13 @@ ELECTRON_SOURCE="$BUILD_DIR/electron-source.env"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$ENV_PATH" "$REPORT_PATH" "$SIMPLE_ARGB" "$CHROME_ARGB" "$ELECTRON_ARGB" \
-    "$CHROME_PROOF" "$ELECTRON_PROOF" "$CHROME_GEOMETRY" "$CHROME_SOURCE" "$ELECTRON_SOURCE"
+    "$CHROME_PROOF" "$ELECTRON_PROOF" "$CHROME_GEOMETRY" "$CHROME_SOURCE" "$ELECTRON_SOURCE" \
+    "$DRAW_IR_BIN" "$DRAW_IR_STDOUT" "$DRAW_IR_STDERR" "$DRAW_IR_EXPECTED_STDOUT" "$DRAW_IR_BUILD_LOG"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout() {
+    if have timeout; then timeout "$TIMEOUT_SECS" "$@"; else "$@"; fi
+}
 
 simple_status=unavailable
 simple_reason=not-run
@@ -37,6 +52,41 @@ chrome_status=unavailable
 chrome_reason=not-run
 electron_status=unavailable
 electron_reason=not-run
+draw_ir_status=unavailable
+draw_ir_reason=not-run
+draw_ir_exit=not-run
+draw_ir_stderr_empty=false
+
+printf '%s\n' \
+    'producer=4 rects=4 embedding=0,0,320,240,1000 rendered=4 skipped=0 source=device_readback' \
+    >"$DRAW_IR_EXPECTED_STDOUT"
+
+if [ "$(uname -s 2>/dev/null || echo unknown)" != "Darwin" ]; then
+    draw_ir_reason=macos-required
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    draw_ir_reason=missing-simple-bin
+elif run_with_timeout "$SIMPLE_BIN" native-build \
+    --backend llvm --source src/lib --source test/fixtures --entry-closure \
+    --entry "$DRAW_IR_FIXTURE" --output "$DRAW_IR_BIN" >"$DRAW_IR_BUILD_LOG" 2>&1; then
+    set +e
+    run_with_timeout "$DRAW_IR_BIN" >"$DRAW_IR_STDOUT" 2>"$DRAW_IR_STDERR"
+    draw_ir_exit=$?
+    set -e
+    if [ ! -s "$DRAW_IR_STDERR" ]; then
+        draw_ir_stderr_empty=true
+    fi
+    if [ "$draw_ir_exit" -eq 0 ] && cmp "$DRAW_IR_EXPECTED_STDOUT" "$DRAW_IR_STDOUT" >/dev/null 2>&1 \
+        && [ "$draw_ir_stderr_empty" = true ]; then
+        draw_ir_status=pass
+        draw_ir_reason=pass
+    else
+        draw_ir_status=fail
+        draw_ir_reason=native-web-draw-ir-provenance-mismatch
+    fi
+else
+    draw_ir_status=fail
+    draw_ir_reason=native-web-draw-ir-provenance-build-failed
+fi
 
 if [ "$(uname -s 2>/dev/null || echo unknown)" != "Darwin" ]; then
     simple_reason=macos-required
@@ -236,6 +286,16 @@ emit("macos_metal_electron_capture_compositor_mode", electronProof?.capture_comp
 emit("macos_metal_electron_capture_offscreen_paint", electronProof?.offscreen_paint ? "true" : "false");
 NODE
 
+{
+    echo "macos_metal_native_web_draw_ir_provenance_status=$draw_ir_status"
+    echo "macos_metal_native_web_draw_ir_provenance_reason=$draw_ir_reason"
+    echo "macos_metal_native_web_draw_ir_provenance_fixture=$DRAW_IR_FIXTURE"
+    echo "macos_metal_native_web_draw_ir_provenance_exit_code=$draw_ir_exit"
+    echo "macos_metal_native_web_draw_ir_provenance_stderr_empty=$draw_ir_stderr_empty"
+    echo "macos_metal_native_web_draw_ir_provenance_stdout_artifact=$DRAW_IR_STDOUT"
+    echo "macos_metal_native_web_draw_ir_provenance_stderr_artifact=$DRAW_IR_STDERR"
+} >>"$ENV_PATH"
+
 status="$(sed -n 's/^macos_metal_browser_backing_status=//p' "$ENV_PATH" | tail -1)"
 pixel_status="$(sed -n 's/^macos_metal_pixel_comparison_status=//p' "$ENV_PATH" | tail -1)"
 {
@@ -245,8 +305,9 @@ pixel_status="$(sed -n 's/^macos_metal_pixel_comparison_status=//p' "$ENV_PATH" 
     echo "- size: ${WIDTH}x${HEIGHT}"
     echo "- browser_backing_status: $status"
     echo "- pixel_comparison_status: $pixel_status"
+    echo "- native_web_draw_ir_provenance_status: $draw_ir_status"
     echo "- evidence: $ENV_PATH"
 } >"$REPORT_PATH"
 
 cat "$ENV_PATH"
-[ "$status" = "pass" ] && [ "$pixel_status" = "pass" ]
+[ "$status" = "pass" ] && [ "$pixel_status" = "pass" ] && [ "$draw_ir_status" = "pass" ]

@@ -23,6 +23,93 @@ fn bare_dict_annotation_lowers_as_dynamic_container() {
 }
 
 #[test]
+fn length_alias_is_i64_for_string_array_dict_and_reassigned_string() {
+    let module = parse_and_lower(
+        r#"fn string_length() -> i64:
+    val value = "abc"
+    return value.length()
+
+fn array_length() -> i64:
+    val value = [1, 2, 3]
+    return value.length()
+
+fn dict_length() -> i64:
+    val value = {"a": 1, "b": 2}
+    return value.length()
+
+fn flow_length(flag: bool) -> i64:
+    var value = "aa"
+    if flag:
+        value = "bbbbb"
+    var result = value.length()
+    var i = 0
+    while i < 1:
+        value = "d"
+        result = value.length()
+        i = i + 1
+    return result
+"#,
+    )
+    .unwrap();
+
+    for name in ["string_length", "array_length", "dict_length"] {
+        let function = module.functions.iter().find(|f| f.name == name).expect(name);
+        let expr = function
+            .body
+            .iter()
+            .find_map(|stmt| match stmt {
+                HirStmt::Return(Some(expr)) => Some(expr),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected {name} to return its length expression"));
+        assert_eq!(expr.ty, TypeId::I64, "{name} .length() must infer i64");
+        assert!(
+            matches!(&expr.kind, HirExprKind::MethodCall { method, .. } if method == "length"),
+            "{name} must retain the length method call"
+        );
+    }
+
+    let flow = module
+        .functions
+        .iter()
+        .find(|f| f.name == "flow_length")
+        .expect("flow_length");
+    let initial_length = flow
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let {
+                value: Some(value),
+                ..
+            } if matches!(&value.kind, HirExprKind::MethodCall { method, .. } if method == "length") => Some(value),
+            _ => None,
+        })
+        .expect("expected result length initializer after the if block");
+    assert_eq!(initial_length.ty, TypeId::I64);
+
+    let body = flow
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::While { body, .. } => Some(body),
+            _ => None,
+        })
+        .expect("expected flow_length while loop");
+    let loop_length = body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Assign { value, .. }
+                if matches!(&value.kind, HirExprKind::MethodCall { method, .. } if method == "length") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .expect("expected .length() assignment in loop");
+    assert_eq!(loop_length.ty, TypeId::I64);
+}
+
+#[test]
 fn text_rfind_uses_string_method_lowering() {
     let module = parse_and_lower(
         r#"struct text:

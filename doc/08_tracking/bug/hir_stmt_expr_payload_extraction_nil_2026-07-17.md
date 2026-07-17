@@ -88,6 +88,12 @@ nil-dropped return value would misbehave without a compile error (the
 existing code treats nil payload as "no return value", a valid state for
 `Return`, so a genuine bug there would not be loud).
 
+**2026-07-17 follow-up:** the adjacent `Return(Expr?)` path now uses the same
+single-arm match extraction as `StmtKind.Expr`; it no longer depends on
+`rt_enum_payload`. `statement_payload_types_source_spec.spl` pins both
+payload paths and rejects the old helper form. Runtime execution remains
+pending under the tooling caveat below.
+
 ## Separate, unrelated downstream observation (NOT investigated)
 
 With the primary bug fixed, the same repro command still exits 1 — but with

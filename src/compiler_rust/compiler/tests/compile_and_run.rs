@@ -178,6 +178,23 @@ fn main() -> i64:
 }
 
 #[test]
+#[ignore = "OPEN: Rust-seed native inlining corrupts false bool arguments; remove after the linked bug's single- and two-call probes pass"]
+fn native_bool_argument_false_survives_inlined_calls() {
+    let code = r#"
+fn f(x: bool) -> i64:
+    if x:
+        return 1
+    return 0
+
+fn main() -> i64:
+    return f(false) * 10 + f(true)
+"#;
+
+    // Decimal packing checks both calls: false must contribute 0, true must contribute 1.
+    assert_eq!(compile_native_and_run(code), 1);
+}
+
+#[test]
 fn native_compile_addition() {
     let code = r#"
 fn main() -> i64:

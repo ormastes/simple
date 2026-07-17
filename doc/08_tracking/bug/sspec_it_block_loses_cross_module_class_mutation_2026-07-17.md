@@ -28,49 +28,36 @@ ANY of the six files touched by commit 335e2d2284f (`dom_accessors.spl`,
 `location_api.spl`) — even though standalone-script use of the exact same
 functions works correctly today.
 
-## Repro (standalone script — WORKS, no bug)
+## Positive control (standalone script — WORKS, no bug)
 
-```simple
-use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
-use std.gc_async_mut.gpu.browser_engine.script.timer_api.{set_timeout}
-
-fn main() -> i32:
-    val loop_ref = EventLoop.new()
-    val tid = set_timeout(loop_ref, 100, 1000)
-    print("tid={tid} pending={loop_ref.pending_timer_count()}")
-    0
-```
-Output: `tid=1 pending=1` — correct, no crash, mutation persists.
+The checked-in positive control is
+`test/fixtures/browser/event_loop_set_timeout_standalone.spl`. It must exit
+successfully and print the exact line `tid=1 pending=1`, proving the mutation
+persists without the SSpec harness. The existing
+`scripts/check/check-gui-hardening-open-gates.shs` gate runs it in interpreter
+mode and requires exactly one output line equal to that value. The staged
+bootstrap workflow also runs it with the pure-Simple stage3 binary and
+requires byte-exact stdout plus empty stderr.
 
 The same result holds for `dom_accessors.be_dom_set_attr`/`be_dom_add_child`,
 `clipboard_api.clipboard_write_text` (including a second overwrite), and
 `worker_api.worker_post_message` (`.push()` accumulation) called directly
 from a standalone `fn main()`.
 
-## Repro (inside `std.spec` `it` — FAILS)
+## OPEN repro/guard (inside `std.spec` `it` — FAILS)
 
-The *exact same* standalone-working functions fail when called from inside a
-real `describe`/`it` block (the only way any `.spl` spec in this repo is
-written):
+Keep one canonical failing shape: the existing "schedules a one-shot timer"
+case in `test/01_unit/browser/script/timer_api_spec.spl`. Its
+`expect(loop_ref.pending_timer_count()).to_equal(1)` assertion exercises the
+same call as the standalone positive control from a real `it` block. It
+remains an OPEN repro/guard and is deliberately not added to green CI or
+rewritten as an expected failure. Clipboard, DOM, and worker observations are
+supporting narrowing evidence, not additional checked-in failing repros.
 
-```simple
-use std.spec.{describe, it, expect}
-use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.{BrowserClipboard, clipboard_write_text, clipboard_read_text}
-
-describe "probe":
-    it "clipboard write persists":
-        val clip = BrowserClipboard.new()
-        clipboard_write_text(clip, "hello")
-        expect(clipboard_read_text(clip)).to_equal("hello")   # FAILS: expected "" to equal "hello"
-```
-Result: `expected  to equal hello` — the write is lost even though `clip` is
-constructed and mutated within the SAME `it` block (not captured from an
-outer scope, not read from a different `it`). This reproduces identically for
-`dom_accessors.be_dom_set_attr` and `worker_api.worker_post_message`, and
-matches (with the same failure shape) the pre-existing, currently-red
-`timer_api_spec.spl` (`test/01_unit/browser/script/timer_api_spec.spl`,
-8 failures) and `event_api_spec.spl` (2 failures) that the 2026-07-11 doc
-already tracks.
+Promotion condition: when that existing timer assertion passes under SSpec
+with the same runtime that passes the standalone fixture, add the timer spec
+to a green gate and remove the OPEN caveat. Keep the standalone fixture as the
+control that distinguishes API mutation regressions from SSpec regressions.
 
 ## Narrowing attempt — not purely about colon-block trailing-lambda syntax
 

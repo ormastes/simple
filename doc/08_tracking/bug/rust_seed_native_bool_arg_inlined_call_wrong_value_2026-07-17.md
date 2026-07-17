@@ -62,6 +62,20 @@ its own, already-correct, short-circuit evaluator in
 verification of C3 needs this bug fixed (or a repro shape that avoids
 separate-function `bool` arguments) first.
 
+## Contained regression coverage
+
+The exact two-call shape is preserved as the ignored Rust integration test
+`native_bool_argument_false_survives_inlined_calls` in
+`src/compiler_rust/compiler/tests/compile_and_run.rs`. Its decimal-packed
+result, `f(false) * 10 + f(true)`, must equal `1`, so the tens digit directly
+covers the broken `f(false)` value while the ones digit checks the known-good
+`f(true)` control.
+
+The test is intentionally ignored while this issue is OPEN because the current
+native path can return the wrong value or crash the test process. Remove the
+`#[ignore]` only after the standalone `f(false)` repro returns `0` and the
+two-call packed repro repeatedly returns `1` without a crash.
+
 ## Suggested next step
 
 Bisect the inliner / cranelift GVN pass with `SIMPLE_DEBUG_DUMP_CLIF`-style

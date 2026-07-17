@@ -148,6 +148,18 @@ own harness plumbing, not module boundaries). See
 for the full repro and narrowing. The `mut` adoption in this commit remains
 correct and necessary; only the stated root cause needed correcting.
 
+The standalone behavior now has a checked-in positive control at
+`test/fixtures/browser/event_loop_set_timeout_standalone.spl`, wired through
+`scripts/check/check-gui-hardening-open-gates.shs`, requiring exactly one
+output line equal to `tid=1 pending=1`, and through the pure-Simple staged
+bootstrap workflow with byte-exact output. The only retained OPEN SSpec guard is the existing
+"schedules a one-shot timer" assertion in
+`test/01_unit/browser/script/timer_api_spec.spl`; it is not run in green CI
+and is not marked as an expected failure. Promote that existing spec into a
+green gate, and remove this SSpec caveat, only after it passes with the same
+runtime as the standalone control. The standalone control remains afterward
+as the browser API mutation regression test.
+
 ## Expected
 
 Cross-module mutation of a class/collection argument via a `me` method or field

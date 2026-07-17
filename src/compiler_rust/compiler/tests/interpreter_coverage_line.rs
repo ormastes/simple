@@ -63,6 +63,22 @@ main = flags.a"#;
 }
 
 #[test]
+#[ignore = "OPEN: nested block declarations share the caller Env; see interpreter_nested_block_var_redeclare_leaks_scope_2026-07-17.md"]
+fn test_nested_block_var_redeclaration_restores_outer_binding() {
+    let code = r#"fn probe() -> i32:
+    var kpath = 40
+    for item in [1]:
+        if item == 1:
+            var kpath = 2
+            kpath = kpath + 1
+    return kpath
+
+main = probe()"#;
+
+    assert_eq!(run_interpreter(code).unwrap(), 40);
+}
+
+#[test]
 fn test_line_coverage_basic() {
     if !check_coverage_enabled() {
         println!("Coverage disabled, skipping test");

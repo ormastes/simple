@@ -85,6 +85,7 @@
 #        /tmp/check-native-seed-parity.$$), NATIVE_PARITY_CASES (optional
 #        space-separated case IDs), NATIVE_PARITY_BACKEND (llvm default or
 #        cranelift for backend-selected loud-fail/native-authoritative cases),
+#        NATIVE_OPEN_BUG_REPROS=1 (opt in to strict known-red repro cases),
 #        NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional strict gate),
 #        SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S (default 20)
 set -eu
@@ -1607,6 +1608,14 @@ build_native() {
     fi
 }
 
+build_native_fixture() {
+    # Checked-in fixtures may import sibling fixture modules and stdlib code.
+    src="$1"; bin="$2"; log="$3"; backend="$4"
+    env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+        --backend="$backend" --source test/fixtures --source src/lib --entry-closure \
+        --entry "$src" -o "$bin" --clean >"$log" 2>&1
+}
+
 # Memoized capability probe for the strict-cranelift leg. The cranelift
 # adapter (src/compiler/70.backend/backend/cranelift_codegen_adapter.spl) is
 # interpreted live and calls rt_cranelift_* SFFI externs that must be exported
@@ -1641,8 +1650,14 @@ cranelift_seed_supported() {
 run_strict_dual_backend_case() {
     id="$1"; writer="$2"; expected="$3"; mode="${4:-}"
     case_selected "$id" || return 0
-    src="$WORK_DIR/case_${id}_${STAMP}.spl"
-    "$writer" "$src"
+    checked_in=0
+    if [ -f "$writer" ]; then
+        src="$writer"
+        checked_in=1
+    else
+        src="$WORK_DIR/case_${id}_${STAMP}.spl"
+        "$writer" "$src"
+    fi
 
     for backend in llvm cranelift; do
         if [ "$backend" = "cranelift" ] && ! cranelift_seed_supported; then
@@ -1653,7 +1668,11 @@ run_strict_dual_backend_case() {
         bin="$WORK_DIR/case_${id}_${backend}_${STAMP}_bin"
         build_log="$WORK_DIR/case_${id}_${backend}_${STAMP}.build.log"
         build_ok=0
-        if [ "$backend" = "llvm" ] && [ "$mode" != "" ]; then
+        if [ "$checked_in" -eq 1 ]; then
+            if build_native_fixture "$src" "$bin" "$build_log" "$backend"; then
+                build_ok=1
+            fi
+        elif [ "$backend" = "llvm" ] && [ "$mode" != "" ]; then
             if env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
                 --mode="$mode" --entry "$src" -o "$bin" --clean >"$build_log" 2>&1; then
                 build_ok=1
@@ -1836,6 +1855,12 @@ run_parity_case toplevel_array_len write_case_toplevel_array_len
 run_parity_case result_cross_fn_text write_case_result_cross_fn_text
 run_parity_case struct_array_field write_case_struct_array_field
 run_strict_dual_backend_case class_array_field_mutation write_case_class_array_field_mutation "2742274299"
+if [ "${NATIVE_OPEN_BUG_REPROS:-0}" = 1 ]; then
+    run_strict_dual_backend_case class_array_param_field_mutation test/fixtures/compiler/native_class_array_param_field_mutation.spl "1"
+fi
+run_strict_dual_backend_case nested_struct_array_text_projection test/fixtures/native_nested_struct_array_text_projection/main.spl "result=5"
+run_strict_dual_backend_case draw_ir_command_text_projection test/fixtures/native_draw_ir_command_text_projection/main.spl "result=1"
+run_strict_dual_backend_case engine2d_draw_ir_param_projection test/fixtures/native_engine2d_draw_ir_param_projection/main.spl "direct=1batch_rendered=1batch_skipped=0composition_rendered=1composition_skipped=0"
 run_parity_case array_of_structs write_case_array_of_structs
 run_parity_case array_2d write_case_array_2d
 run_parity_case tuple_access write_case_tuple_access
