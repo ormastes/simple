@@ -533,6 +533,14 @@ so executable qualification is still blocked.
   it emitted an unbounded diagnostic stream and stopped on an unrelated
   `database.spl` parser failure. Executable admission therefore remains the
   next bounded Stage 2 run.
+- Lowercase `shared` was independently found to bind as a lowercase pattern
+  but parse as capitalized `Shared` when read, allowing lenient project
+  lowering to turn an ordinary local into an undeclared enum-like global.
+  Parser and HIR regressions now pin lowercase parameter, local, and read
+  spelling; capitalized enum variants still lex as ordinary identifiers. The
+  exact parser regression passes 1/1. The exact compiler regression is source-
+  complete but its crate currently fails before test execution on unrelated
+  upstream `wrap_entry_script_as_main` visibility/signature mismatches.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

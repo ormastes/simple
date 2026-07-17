@@ -17,6 +17,14 @@ fn test_lower_literals() {
 }
 
 #[test]
+fn shared_keyword_local_read_does_not_become_global_variant() {
+    let module = parse_and_lower("fn value() -> i64:\n    val shared = 1\n    return shared\n").unwrap();
+    let function = &module.functions[0];
+    assert!(function.locals.iter().any(|local| local.name == "shared"));
+    assert!(!format!("{module:?}").contains("Global(\"Shared\")"));
+}
+
+#[test]
 fn bare_dict_annotation_lowers_as_dynamic_container() {
     let module = parse_and_lower("fn size(values: Dict) -> i64:\n    return 0\n").unwrap();
     assert_eq!(module.functions[0].params[0].ty, TypeId::ANY);

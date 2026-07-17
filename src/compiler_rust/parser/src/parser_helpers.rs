@@ -757,7 +757,7 @@ impl<'a> Parser<'a> {
             TokenKind::Loop => "loop".to_string(),
             TokenKind::Vec => "Vec".to_string(),
             TokenKind::Gpu => "gpu".to_string(),
-            TokenKind::Shared => "Shared".to_string(),
+            TokenKind::Shared => "shared".to_string(),
             TokenKind::Repr => "repr".to_string(),
             TokenKind::Super => "super".to_string(),
             TokenKind::Extern => "extern".to_string(),

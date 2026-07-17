@@ -12,6 +12,19 @@ fn parse_ok(src: &str) {
     parser.parse().expect("should parse");
 }
 
+#[test]
+fn shared_keyword_parameter_and_read_keep_source_case() {
+    let items = parse("fn identity(shared: i64) -> i64:\n    return shared\n");
+    let Node::Function(function) = &items[0] else {
+        panic!("expected function");
+    };
+    assert_eq!(function.params[0].name, "shared");
+    let Node::Return(ret) = &function.body.statements[0] else {
+        panic!("expected return");
+    };
+    assert_eq!(ret.value, Some(Expr::Identifier("shared".to_string())));
+}
+
 // Function definitions
 #[test]
 fn parse_function_definition() {

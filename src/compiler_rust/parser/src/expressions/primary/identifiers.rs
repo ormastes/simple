@@ -89,7 +89,7 @@ impl<'a> Parser<'a> {
             TokenKind::Extern => self.parse_keyword_identifier("extern"),
             TokenKind::Static => self.parse_keyword_identifier("static"),
             TokenKind::Const => self.parse_keyword_identifier("const"),
-            TokenKind::Shared => self.parse_keyword_identifier("Shared"),
+            TokenKind::Shared => self.parse_keyword_identifier("shared"),
             TokenKind::Dyn => self.parse_keyword_identifier("dyn"),
             TokenKind::Macro => self.parse_keyword_identifier("macro"),
             TokenKind::Mixin => self.parse_keyword_identifier("mixin"),
