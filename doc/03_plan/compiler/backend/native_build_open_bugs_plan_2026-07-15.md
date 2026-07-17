@@ -221,8 +221,10 @@ dynamic-loader case through the staged compiler; their first CI execution remain
 pending. The pure-Simple strict path now stages its already-compiled dynload
 object under a canonical member name, creates and inventories the deterministic
 dedicated archive, validates the exact hosted ABI, cleans it, and remains
-fail-closed before selection; execution proof is pending. GPU/font,
-window, HTTP, remaining process/thread,
+fail-closed before selection; execution proof is pending. The same production
+path now stages, inventories, and exact-ABI validates the dedicated font archive
+with vendored STB exports held translation-unit-local; execution proof and
+selection remain pending. GPU, window, HTTP, remaining process/thread,
 SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
 `libsimple_native_all.a` selection and allow-multiple-definition are still
 invalid for the strict profile, and provider ownership needs a separate link

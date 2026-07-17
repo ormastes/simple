@@ -21,7 +21,7 @@ fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
         return name.substring(1)
     name
 
-fn stage4_dynload_provider_symbol(name: text, object_format: text) -> text:
+fn stage4_provider_symbol(name: text, object_format: text) -> text:
     var symbol = name
     if object_format == "macho" and symbol.starts_with("_"):
         symbol = symbol.substring(1)
@@ -38,29 +38,43 @@ fn stage4_dynload_provider_symbol(name: text, object_format: text) -> text:
             symbol = symbol.substring(0, decoration)
     symbol
 
-pub fn stage4_dynload_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
-    """Return the target/linker-specific archive name without building or selecting it."""
+fn stage4_hosted_provider_archive_file(provider: text, target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     if target_os_name == "windows":
         if msvc_linker:
-            return Ok("simple_stage4_dynload.lib")
-        return Ok("libsimple_stage4_dynload.a")
+            return Ok("simple_stage4_" + provider + ".lib")
+        return Ok("libsimple_stage4_" + provider + ".a")
     if msvc_linker:
-        return Err("Stage4 MSVC dynamic-loader archives require a Windows target")
+        return Err("Stage4 MSVC provider archives require a Windows target")
     if target_os_name == "linux" or target_os_name == "macos" or target_os_name == "freebsd":
-        return Ok("libsimple_stage4_dynload.a")
-    Err("Stage4 dynamic-loader provider has no archive policy for target OS '" + target_os_name + "'")
+        return Ok("libsimple_stage4_" + provider + ".a")
+    Err("Stage4 provider has no archive policy for target OS '" + target_os_name + "'")
 
-pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
-    """Return the portable-nm contract for a hosted dynamic-loader provider."""
+pub fn stage4_dynload_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the target/linker-specific archive name without building or selecting it."""
+    stage4_hosted_provider_archive_file("dynload", target_os_name, msvc_linker)
+
+pub fn stage4_font_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the target/linker-specific font archive name without selecting it."""
+    stage4_hosted_provider_archive_file("font", target_os_name, msvc_linker)
+
+fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     if target_os_name == "windows":
         return Ok(if msvc_objects: "coff-msvc" else: "coff-mingw")
     if msvc_objects:
-        return Err("Stage4 MSVC dynamic-loader objects require a Windows target")
+        return Err("Stage4 MSVC provider objects require a Windows target")
     if target_os_name == "macos":
         return Ok("macho")
     if target_os_name == "linux" or target_os_name == "freebsd":
         return Ok("elf")
-    Err("Stage4 dynamic-loader provider has no object-format policy for target OS '" + target_os_name + "'")
+    Err("Stage4 provider has no object-format policy for target OS '" + target_os_name + "'")
+
+pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for a hosted dynamic-loader provider."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_font_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for a hosted font provider."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
 pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
     """Validate the exact dedicated dynamic-loader ABI from a portable nm scan."""
@@ -78,7 +92,7 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         val raw_symbol = parts[parts.len() - 1]
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_dynload_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if type_code == "U":
             if undefined.has(symbol):
                 return Err("Stage4 dynamic-loader provider repeats undefined symbol '" + symbol + "'")
@@ -95,6 +109,45 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
             return Err("Stage4 dynamic-loader provider undefined symbols differ from the Windows contract: " + undefined.keys().join(", "))
     elif undefined.len() != 4 or not undefined.has("dlclose") or not undefined.has("dlopen") or not undefined.has("dlsym") or not undefined.has("rt_interp_cstr"):
         return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
+    Ok(())
+
+pub fn stage4_validate_font_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the exact public font ABI and forbid hidden runtime dependencies."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 font object format '" + object_format + "'")
+
+    val expected = [
+        "rt_font_load_bytes", "rt_font_load", "rt_font_free",
+        "rt_font_glyph_bitmap", "rt_font_glyph_index", "rt_font_glyph_bitmap_index",
+        "rt_font_bitmap_width", "rt_font_bitmap_height", "rt_font_bitmap_xoff",
+        "rt_font_bitmap_yoff", "rt_font_bitmap_get_pixel", "rt_font_bitmap_free",
+        "rt_font_glyph_advance", "rt_font_glyph_advance_index", "rt_font_line_height",
+        "rt_font_ascent", "rt_font_descent", "rt_font_line_gap"
+    ]
+    var definitions: Dict<text, bool> = {}
+    for line in nm_output.split("\n"):
+        val parts = line.split_whitespace()
+        if parts.len() < 2:
+            continue
+        val type_index = parts.len() - 2
+        val type_code = parts[type_index]
+        val raw_symbol = parts[parts.len() - 1]
+        if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if type_code == "U":
+            if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
+                return Err("Stage4 font provider has runtime dependency '" + symbol + "'")
+        elif stage4_nm_has_address(parts, type_index):
+            if definitions.has(symbol):
+                return Err("Stage4 font provider repeats global definition '" + symbol + "'")
+            definitions[symbol] = true
+
+    if definitions.len() != expected.len():
+        return Err("Stage4 font provider definitions differ from the exact ABI: " + definitions.keys().join(", "))
+    for symbol in expected:
+        if not definitions.has(symbol):
+            return Err("Stage4 font provider is missing exact ABI symbol '" + symbol + "'")
     Ok(())
 
 fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:

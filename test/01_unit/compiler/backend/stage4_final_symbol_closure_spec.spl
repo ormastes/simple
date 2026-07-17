@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -57,6 +57,78 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_dynload_provider_symbol_contract(wrong_arity, "coff-msvc").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(repeated_import_alias, "coff-msvc").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+
+    it "defines target-explicit font archive identities and object formats":
+        expect(stage4_font_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_font.a")
+        expect(stage4_font_provider_archive_file("macos", false).unwrap()).to_equal("libsimple_stage4_font.a")
+        expect(stage4_font_provider_archive_file("freebsd", false).unwrap()).to_equal("libsimple_stage4_font.a")
+        expect(stage4_font_provider_archive_file("windows", false).unwrap()).to_equal("libsimple_stage4_font.a")
+        expect(stage4_font_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_font.lib")
+        expect(stage4_font_provider_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_font_provider_archive_file("plan9", false).is_err()).to_be(true)
+        expect(stage4_font_provider_object_format("linux", false).unwrap()).to_equal("elf")
+        expect(stage4_font_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_font_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_font_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_font_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+
+    it "accepts the exact 18-symbol font ABI across hosted object formats":
+        val exact = """
+00000000 T rt_font_load_bytes
+00000010 T rt_font_load
+00000020 T rt_font_free
+00000030 T rt_font_glyph_bitmap
+00000040 T rt_font_glyph_index
+00000050 T rt_font_glyph_bitmap_index
+00000060 T rt_font_bitmap_width
+00000070 T rt_font_bitmap_height
+00000080 T rt_font_bitmap_xoff
+00000090 T rt_font_bitmap_yoff
+000000a0 T rt_font_bitmap_get_pixel
+000000b0 T rt_font_bitmap_free
+000000c0 T rt_font_glyph_advance
+000000d0 T rt_font_glyph_advance_index
+000000e0 T rt_font_line_height
+000000f0 T rt_font_ascent
+00000100 T rt_font_descent
+00000110 T rt_font_line_gap
+         U malloc
+"""
+        val prefixed = exact.replace(" T rt_", " T _rt_")
+        expect(stage4_validate_font_provider_symbol_contract(exact, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(prefixed, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(exact + "00000000 A @feat.00\n", "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(prefixed, "coff-mingw").is_ok()).to_be(true)
+
+    it "rejects font ABI drift duplicate exports and runtime dependencies":
+        val exact = "00000000 T rt_font_load_bytes\n00000010 T rt_font_load\n00000020 T rt_font_free\n00000030 T rt_font_glyph_bitmap\n00000040 T rt_font_glyph_index\n00000050 T rt_font_glyph_bitmap_index\n00000060 T rt_font_bitmap_width\n00000070 T rt_font_bitmap_height\n00000080 T rt_font_bitmap_xoff\n00000090 T rt_font_bitmap_yoff\n000000a0 T rt_font_bitmap_get_pixel\n000000b0 T rt_font_bitmap_free\n000000c0 T rt_font_glyph_advance\n000000d0 T rt_font_glyph_advance_index\n000000e0 T rt_font_line_height\n000000f0 T rt_font_ascent\n00000100 T rt_font_descent\n00000110 T rt_font_line_gap\n"
+        expect(stage4_validate_font_provider_symbol_contract(exact.replace("00000110 T rt_font_line_gap\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(exact + "00000120 T stbtt_leaked\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(exact + "00000120 T rt_font_load\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_font_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+
+    it "builds inventories validates and cleans the font provider before the fail-closed barrier":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val build_pos = source.find("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid)")
+        val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
+        expect(build_pos).to_be_greater_than(-1)
+        expect(barrier_pos).to_be_greater_than(build_pos)
+        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_font\"], [archive_path])")
+        expect(source).to_contain("stage4_validate_font_provider_symbol_contract(scans[0], object_format)")
+        expect(source).to_contain("file_delete(font_provider_archive)")
+        val font_source = rt_file_read_text("src/runtime/runtime_font.c") ?? ""
+        expect(font_source).to_contain("#define STBTT_STATIC\n#define STB_TRUETYPE_IMPLEMENTATION")
+
+    it "cleans bootstrap support on every strict provider failure exit":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val strict_start = source.find("if stage4_requested:")
+        val strict_end = source.find("# Step 3: Combine all objects and link")
+        val strict_source = source.substring(strict_start, strict_end)
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n            return Err(\"Stage4 strict profile rejects")
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(err)")
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 dynamic-loader provider failed")
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 font provider failed")
 
     it "rejects hosted constructor and destructor section families":
         val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
@@ -137,7 +209,7 @@ not-an-address W rt_malformed
         val combine_pos = source.find("# Step 3: Combine all objects and link")
         expect(barrier_pos).to_be_greater_than(closure_pos)
         expect(combine_pos).to_be_greater_than(barrier_pos)
-        expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        rt_file_delete(entry_obj_path)\n        if bootstrap_support_obj != \"\":\n            rt_file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
+        expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        file_delete(entry_obj_path)\n        file_delete(dynload_provider_archive)\n        file_delete(font_provider_archive)\n        if bootstrap_support_obj != \"\":\n            file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
 
     it "selects uniquely owning archives in declared order":
         val result = stage4_select_requested_archive_indices(
@@ -462,12 +534,12 @@ not-an-address W rt_malformed
         expect(inventory_source).to_contain("section scan was empty")
         expect(inventory_source).to_contain("retained constructor/destructor sections")
         expect(inventory_source).to_contain("stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == \"windows\")")
-        val build_pos = source.find("fn llvm_stage4_build_dynload_provider_archive")
+        val build_pos = source.find("fn llvm_stage4_build_single_object_provider_archive")
         val production_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
         val fail_closed_pos = source.find("remaining provider inventory and unique-owner selection are wired")
         val step3_pos = source.find("# Step 3: Combine all objects and link")
         val build_source = source.substring(build_pos, source.find("# Configuration"))
-        val copy_pos = build_source.find("file_copy(dynload_objects[0], staged_object)")
+        val copy_pos = build_source.find("file_copy(provider_objects[0], staged_object)")
         val archive_pos = build_source.find("process_run(archiver, [\"rcsD\", archive_path, staged_object])")
         val list_pos = build_source.find("process_run(archiver, [\"t\", archive_path])")
         val inventory_call_pos = build_source.find("llvm_stage4_candidate_archive_inventory([\"runtime_dynload\"], [archive_path])")
@@ -482,9 +554,10 @@ not-an-address W rt_malformed
         expect(inventory_call_pos).to_be_greater_than(list_pos)
         expect(contract_pos).to_be_greater_than(inventory_call_pos)
         expect(source).to_contain("find_archive_portable()")
-        expect(source).to_contain("dynload_objects.len() != 1")
-        expect(source).to_contain("file_copy(dynload_objects[0], staged_object)")
-        expect(source).to_contain("val expected_member = \"runtime_dynload\" + object_ext")
+        expect(source).to_contain("provider_objects.len() != 1")
+        expect(source).to_contain("file_copy(provider_objects[0], staged_object)")
+        expect(source).to_contain("val expected_member = object_stem + object_ext")
+        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_dynload\"")
         expect(source).to_contain("process_run(archiver, [\"rcsD\", archive_path, staged_object])")
         expect(source).to_contain("process_run(archiver, [\"t\", archive_path])")
         expect(source).to_contain("members_out.replace(\"\\r\", \"\").trim()")

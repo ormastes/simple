@@ -523,7 +523,8 @@ The font runtime now defines `STBTT_STATIC` before instantiating the vendored
 therefore stay translation-unit-local while the existing 18 `rt_font_*`
 functions remain the public runtime ABI. This removes a future archive-owner
 collision prerequisite; it does not yet create or select a font provider
-archive.
+archive. The production inventory update below closes the creation/inventory
+half while selection remains fail-closed.
 
 Explicit candidate validation now accepts `.a` and `.lib` archive path forms,
 normalizes all hosted-Windows path separators and case, rejects `.dll.a` import
@@ -627,6 +628,25 @@ it returned absolute process-monotonic seconds, so reset did not reset elapsed
 time. The provider's logical Windows dependencies remain
 `rt_time_now_unix_micros` and `rt_time_now_nanos`; a dedicated archive policy
 still awaits measured COFF helper symbols and is not selected by Stage4.
+
+## 2026-07-17 production font provider inventory
+
+The strict pure-Simple LLVM link path now reuses one deterministic single-object
+archive staging helper for the already-compiled dynload and font objects. It
+requires exactly one canonical `runtime_font.o`/`.obj` member, rejects forbidden
+constructor/destructor sections through the shared inventory, and validates
+that the measured archive exposes exactly the 18 `rt_font_*` ABI functions with
+no `rt_*`/`spl_*` dependency. The validator handles ELF, Mach-O, COFF-MSVC, and
+COFF-MinGW symbol spelling while allowing platform C-library imports. The
+runtime now actually defines `STBTT_STATIC`, matching the earlier documented
+ownership prerequisite and preventing vendored `stbtt_*` exports.
+
+Both temporary provider archives are deleted before the existing strict
+composition error. Bootstrap-support objects are now also deleted on every
+earlier strict-provider failure exit instead of leaking on fail-closed errors.
+This advances production provider inventory only: unique
+owner selection, hashing/cache admission, link ordering, execution proof, and
+the remaining provider families are still open.
 
 Timestamp time-of-day extraction now shares one floor-day microsecond
 remainder. Negative sub-second values such as `-1` therefore produce

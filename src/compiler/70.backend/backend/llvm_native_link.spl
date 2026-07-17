@@ -18,7 +18,7 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
@@ -82,35 +82,27 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         i = i + 1
     Ok(scans)
 
-fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
+fn llvm_stage4_build_single_object_provider_archive(runtime_objects: [text], object_stem: text, provider: text, archive_file: text, pid: i64) -> Result<text, text>:
     val object_ext = _obj_ext()
-    var dynload_objects: [text] = []
+    var provider_objects: [text] = []
     for object in runtime_objects:
-        if object.ends_with("runtime_dynload" + object_ext):
-            dynload_objects = dynload_objects.push(object)
-    if dynload_objects.len() != 1:
-        return Err("Stage4 dynamic-loader provider requires exactly one fresh runtime_dynload" + object_ext + " object")
-
-    val msvc_objects = target_os_name == "windows" and object_ext == ".obj"
-    val archive_file = match stage4_dynload_provider_archive_file(target_os_name, msvc_objects):
-        case Ok(name): name
-        case Err(err): return Err(err)
-    val object_format = match stage4_dynload_provider_object_format(target_os_name, msvc_objects):
-        case Ok(format): format
-        case Err(err): return Err(err)
+        if object.ends_with(object_stem + object_ext):
+            provider_objects = provider_objects.push(object)
+    if provider_objects.len() != 1:
+        return Err("Stage4 " + provider + " provider requires exactly one fresh " + object_stem + object_ext + " object")
     val archiver = find_archive_portable()
     if archiver == "":
-        return Err("Stage4 dynamic-loader provider requires llvm-ar or ar")
+        return Err("Stage4 " + provider + " provider requires llvm-ar or ar")
 
-    val stage_dir = "{_get_temp_dir()}/simple_stage4_dynload_{pid}"
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_{provider}_{pid}"
     dir_remove_all(stage_dir)
     if not dir_create_all(stage_dir):
-        return Err("Stage4 dynamic-loader provider staging directory creation failed")
-    val expected_member = "runtime_dynload" + object_ext
+        return Err("Stage4 " + provider + " provider staging directory creation failed")
+    val expected_member = object_stem + object_ext
     val staged_object = stage_dir + "/" + expected_member
-    if not file_copy(dynload_objects[0], staged_object):
+    if not file_copy(provider_objects[0], staged_object):
         dir_remove_all(stage_dir)
-        return Err("Stage4 dynamic-loader provider canonical object staging failed")
+        return Err("Stage4 " + provider + " provider canonical object staging failed")
 
     val archive_path = _get_temp_dir() + "/simple_stage4_{pid}_" + archive_file
     if file_exists(archive_path):
@@ -119,17 +111,31 @@ fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os
     if archive_code != 0:
         dir_remove_all(stage_dir)
         file_delete(archive_path)
-        return Err("Stage4 dynamic-loader provider archive creation failed: " + archive_err.trim())
+        return Err("Stage4 " + provider + " provider archive creation failed: " + archive_err.trim())
 
     val (members_out, members_err, members_code) = process_run(archiver, ["t", archive_path])
     val members = members_out.replace("\r", "").trim()
     if members_code != 0 or members != expected_member:
         dir_remove_all(stage_dir)
         file_delete(archive_path)
-        return Err("Stage4 dynamic-loader provider archive must contain exactly '" + expected_member + "': " + members_err.trim())
+        return Err("Stage4 " + provider + " provider archive must contain exactly '" + expected_member + "': " + members_err.trim())
     if not dir_remove_all(stage_dir):
         file_delete(archive_path)
-        return Err("Stage4 dynamic-loader provider staging cleanup failed")
+        return Err("Stage4 " + provider + " provider staging cleanup failed")
+
+    Ok(archive_path)
+
+fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
+    val msvc_objects = target_os_name == "windows" and _obj_ext() == ".obj"
+    val archive_file = match stage4_dynload_provider_archive_file(target_os_name, msvc_objects):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_dynload_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_dynload", "dynamic-loader", archive_file, pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
 
     val scans = match llvm_stage4_candidate_archive_inventory(["runtime_dynload"], [archive_path]):
         case Ok(outputs): outputs
@@ -137,6 +143,29 @@ fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os
             file_delete(archive_path)
             return Err(err)
     match stage4_validate_dynload_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+fn llvm_stage4_build_font_provider_archive(runtime_objects: [text], target_os_name: text, pid: i64) -> Result<text, text>:
+    val msvc_objects = target_os_name == "windows" and _obj_ext() == ".obj"
+    val archive_file = match stage4_font_provider_archive_file(target_os_name, msvc_objects):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_font_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_font", "font", archive_file, pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_font"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_font_provider_symbol_contract(scans[0], object_format):
         case Err(err):
             file_delete(archive_path)
             return Err(err)
@@ -474,6 +503,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         if bootstrap_native_all != "":
             cleanup_runtime_objects(runtime_objects)
             file_delete(entry_obj_path)
+            if bootstrap_support_obj != "":
+                file_delete(bootstrap_support_obj)
             return Err("Stage4 strict profile rejects libsimple_native_all.a")
         var final_simple_objects: [text] = []
         for object in user_objects:
@@ -485,6 +516,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
                 return Err(err)
         if trace:
             print "[LLVM-LINK] Stage4 requested runtime symbols: {stage4_requested_symbols.len()}"
@@ -493,10 +526,22 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
                 return Err("Stage4 dynamic-loader provider failed: " + err)
+        val font_provider_archive = match llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(dynload_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return Err("Stage4 font provider failed: " + err)
         cleanup_runtime_objects(runtime_objects)
         file_delete(entry_obj_path)
         file_delete(dynload_provider_archive)
+        file_delete(font_provider_archive)
         if bootstrap_support_obj != "":
             file_delete(bootstrap_support_obj)
         return Err("Stage4 strict archive composition is unavailable until the remaining provider inventory and unique-owner selection are wired; requested: " + stage4_requested_symbols.join(", "))
