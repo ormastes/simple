@@ -44,6 +44,10 @@ sha256_file() {
     fi
 }
 
+sha256_valid() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
 one_line() {
     tr '\r\n=' '   ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
 }
@@ -322,16 +326,22 @@ write_generated_vulkan_font_source() {
         echo "vulkan_font_generated_source_sha256=$generated_source_sha"
         echo "vulkan_font_pinned_source_sha256=$PINNED_VULKAN_FONT_SOURCE_SHA256"
     } >>"$BUILD_DIR/evidence.env"
-    if [ "$emitter_source_sha" != "$PINNED_VULKAN_FONT_SOURCE_SHA256" ] || [ "${#generated_source_sha}" -ne 64 ]; then
+    if ! sha256_valid "$emitter_source_sha" || ! sha256_valid "$generated_source_sha"; then
+        echo "vulkan_font_source_equivalent=false" >>"$BUILD_DIR/evidence.env"
+        echo "generated Vulkan font source provenance is missing or malformed" >>"$BUILD_DIR/vulkan_font_source.err"
+        return 1
+    fi
+    if [ "$emitter_source_sha" != "$PINNED_VULKAN_FONT_SOURCE_SHA256" ]; then
         echo "vulkan_font_source_equivalent=false" >>"$BUILD_DIR/evidence.env"
         {
             echo "generated Vulkan font source identity mismatch"
             echo "expected emitter source SHA-256: $PINNED_VULKAN_FONT_SOURCE_SHA256"
             echo "actual emitter source SHA-256: $emitter_source_sha"
         } >>"$BUILD_DIR/vulkan_font_source.err"
-        return 1
+    else
+        VULKAN_FONT_SOURCE_EQUIVALENT=true
+        echo "vulkan_font_source_equivalent=true" >>"$BUILD_DIR/evidence.env"
     fi
-    echo "vulkan_font_source_equivalent=true" >>"$BUILD_DIR/evidence.env"
 }
 
 status_for_artifact() {
@@ -683,6 +693,7 @@ EOF
 run_vulkan_font() {
     src="$BUILD_DIR/simple_2d_optimization_font_atlas.comp"
     out="$BUILD_DIR/simple_2d_optimization_font_atlas.spv"
+    VULKAN_FONT_SOURCE_EQUIVALENT=false
     rm -f "$out"
     if ! write_generated_vulkan_font_source "$src"; then
         cmd="$SIMPLE_EXEC_BIN run <vulkan font emitter> > $src"
@@ -728,6 +739,10 @@ EOF
     else
         echo "vulkan_font_artifact_equivalent=false" >>"$BUILD_DIR/evidence.env"
         emit_font_result vulkan invalid pinned-artifact-hash-mismatch "$bytes" "$cmd" "$out"
+        return
+    fi
+    if [ "$VULKAN_FONT_SOURCE_EQUIVALENT" != true ]; then
+        emit_font_result vulkan invalid pinned-source-hash-mismatch "$bytes" "$cmd" "$out"
         return
     fi
     if [ "$valid" = "valid" ]; then
