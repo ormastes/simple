@@ -85,3 +85,16 @@ The verified Stage 3 compiler was used for the exact Stage 4 `main.spl` entry wi
 - `src/app/mcp/bugdb_resource.spl` is now a compatibility facade over the
   canonical `std.nogc_async_mut.mcp.bugdb_resource` implementation, eliminating
   the second mutable BugDB implementation and its stale fake-success behavior.
+
+## Current-source host-GPU continuation
+
+- The canonical simple-core archive builder now works with Apple `nm`, proves
+  every required symbol independently, and removes per-entry `_init_all.o`
+  aggregators before composition. The resulting 132 KiB archive is ABI-complete
+  and no longer has duplicate `__simple_call_module_inits` owners.
+- The explicit `host-gpu` lane built the current CPU/Metal parity executable
+  with stub fallback disabled: 106 units compiled, zero failed, 1.4 MiB output.
+- With modern one-call readback, all normal scenes are bit-exact CPU versus
+  Metal. GPU-only clip remains open because readback collapses from 1,024 pixels
+  to the 1x1 mirror despite `gpu_frame_complete=true`; see
+  `doc/08_tracking/bug/metal_gpu_only_native_readback_collapses_to_one_pixel_2026-07-17.md`.

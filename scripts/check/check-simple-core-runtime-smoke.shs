@@ -55,6 +55,11 @@ if "$SIMPLE_BINARY" native-build --help 2>/dev/null | rg -q -- '--emit-archive';
         fi
         mkdir -p "$CORE_ARCHIVE_PART_DIR/objects/$part_name"
         (cd "$CORE_ARCHIVE_PART_DIR/objects/$part_name" && ar x "../../$part_name.a")
+        # Each standalone archive contains an entry-specific module-init
+        # aggregator. The final user executable generates its own aggregator;
+        # retaining one copy per runtime source creates duplicate
+        # __simple_call_module_inits owners at link time.
+        rm -f "$CORE_ARCHIVE_PART_DIR/objects/$part_name/_init_all.o"
     done
     rm -f "$CORE_ARCHIVE"
     ar rcs "$CORE_ARCHIVE" "$CORE_ARCHIVE_PART_DIR"/objects/*/*.o
@@ -64,12 +69,35 @@ else
     exit 1
 fi
 
-if ! nm -g --defined-only "$CORE_ARCHIVE" | rg -q ' rt_string_replace| rt_to_string| rt_array_new| stdin_read_char'; then
+archive_has_symbol() {
+    # Apple nm has no GNU --defined-only flag and prefixes external symbols
+    # with an underscore.  Compare the final field after normalizing that
+    # platform prefix so this gate proves every required ABI owner on both
+    # macOS and GNU hosts.
+    nm -g "$CORE_ARCHIVE" 2>/dev/null |
+        awk '{print $NF}' |
+        sed 's/^_//' |
+        rg -q -x "$1"
+}
+
+for required_symbol in rt_string_replace rt_to_string rt_array_new stdin_read_char; do
+    if ! archive_has_symbol "$required_symbol"; then
+        echo "simple_core_archive_complete=false"
+        echo "error=missing_required_symbol:$required_symbol"
+        exit 1
+    fi
+done
+
+if archive_has_symbol "__simple_call_module_inits"; then
     echo "simple_core_archive_complete=false"
+    echo "error=unexpected_entry_init_aggregator"
     exit 1
 fi
 
-SIMPLE_CORE_RUNTIME_PATH="$ROOT_DIR/$CORE_ARCHIVE"
+case "$CORE_ARCHIVE" in
+    /*) SIMPLE_CORE_RUNTIME_PATH="$CORE_ARCHIVE" ;;
+    *) SIMPLE_CORE_RUNTIME_PATH="$ROOT_DIR/$CORE_ARCHIVE" ;;
+esac
 export SIMPLE_CORE_RUNTIME_PATH
 
 if [ "$ARCHIVE_ONLY" = "1" ]; then
