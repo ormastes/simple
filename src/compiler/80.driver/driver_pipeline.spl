@@ -43,10 +43,17 @@ fn _driver_env_bool(key: text) -> bool:
 # native-build worker path (nothing outside 70.backend read it), so a bare
 # `nosuchfn(1)` call or an unsupported construct produced broken MIR that
 # only surfaced later as an llc crash / nil-callee far from the real cause.
-# Keep native diagnostics message-only: compiled optional Span handling can
-# bind a nil payload as present and hide the original error with a second trap.
+# Format each MirError the same way jit_interpreter.spl / compiler.spl
+# already report them (message, plus file:line:col when the span is known).
 fn _format_mir_error(err: MirError) -> text:
-    "MIR lowering error: {err.message}"
+    match err.span:
+        Some(sp):
+            if sp.file != "":
+                "MIR lowering error ({sp.file}:{sp.line}:{sp.col}): {err.message}"
+            else:
+                "MIR lowering error: {err.message}"
+        nil:
+            "MIR lowering error: {err.message}"
 
 # MirLowering.errors mixes genuine "this MIR is broken" failures with
 # recoverable/informational entries the lowering pipeline pushes through the
@@ -129,8 +136,6 @@ fn _mir_error_is_fatal(message: text) -> bool:
         message.starts_with("for-in over non-array iterables")
 
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
-    if errors.len() > 0:
-        log_phase("mir:diagnostics count={errors.len()}")
     for err in errors:
         if _mir_error_is_fatal(err.message):
             ctx.add_error(_format_mir_error(err))

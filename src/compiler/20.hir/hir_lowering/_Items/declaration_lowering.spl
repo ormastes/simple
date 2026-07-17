@@ -423,6 +423,18 @@ impl HirLowering:
         for tp in class_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
+        # Phase A gate (#158): a generic class (`class Box<T>: v: T`) is NOT
+        # monomorphized on the native build path. Unlike a bare generic struct
+        # (which degraded to a silent garbage read), the class aggregate path
+        # bails during codegen and surfaces only as a cryptic downstream
+        # `ld.lld: cannot open ...p_class.o: No such file` link error with no
+        # mention of the generic class or #158. Fail loud and precise here,
+        # mirroring lower_struct (see above) and lower_function (see :198), until
+        # real monomorphization lands (#158 Phase B). MDSOC+ makes classes the
+        # default aggregate, so this tier matters.
+        if class_type_params.len() > 0:
+            self.error("generic classes are not supported on the native build path yet: class '{class_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", class_span)
+
         var fields: [HirField] = []
         for f in class_fields:
             val cf: Field = f
@@ -500,6 +512,19 @@ impl HirLowering:
         var type_params: [HirTypeParam] = []
         for tp in struct_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
+
+        # Phase A gate (#158): a generic struct (`struct Box<T>: v: T`) is NOT
+        # monomorphized on the native build path. Its `T`-typed field never gets
+        # a concrete layout -- at MIR the field degrades to an opaque
+        # pointer-width slot, so a fat value (e.g. `text`) stored in it is
+        # truncated and read back as a garbage integer (silent wrong answer, no
+        # diagnostic). Mirrors lower_function's gate (see :198) and
+        # trait_impl_lowering's generic-method gate: loud-fail at declaration
+        # until real monomorphization lands (#158 Phase B). The bare-generic-fn
+        # and generic-method tiers were already gated; this closes the residual
+        # plain-generic-struct hole.
+        if struct_type_params.len() > 0:
+            self.error("generic structs are not supported on the native build path yet: struct '{struct_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", struct_span)
 
         var fields: [HirField] = []
         for f in struct_fields:

@@ -391,6 +391,33 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
     }
 }
 
+/// Wraps `prefer_package_init_for_member_import` with a guard against
+/// self-referential redirect cycles (task #153).
+///
+/// A `Group`/`Glob` import from `X.spl` normally prefers a sibling
+/// `X/__init__.spl` package aggregator when one exists — many legitimate
+/// "thin file + real package" pairs rely on this (see
+/// `prefers_package_init_for_group_imports_when_both_exist`). But if `X/__init__.spl`
+/// itself re-exports from the very module path that led here (e.g. a stale
+/// duplicate `X/__init__.spl` doing `export use pkg.X.{...}`), the redirect
+/// sends us right back into a module already on the load stack. That hits
+/// the circular-import branch below, which returns empty/partial exports —
+/// silently dropping every symbol the redirect exists to serve. This is
+/// exactly how `compiler_driver_create` went missing for standalone
+/// `simple run` scripts when a stale `80.driver/driver/__init__.spl` shadowed
+/// the real `80.driver/driver.spl` (see
+/// doc/08_tracking/bug/selfhost_bootstrap_unresolved_symbols_2026-06-24.md).
+/// In that specific case, keep the already-resolved file — it has the real
+/// definitions instead of a stale/self-referential aggregator.
+fn resolve_member_import_target(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
+    let redirected = prefer_package_init_for_member_import(module_path, use_stmt);
+    if redirected != module_path && is_module_loading(&redirected) {
+        module_path.to_path_buf()
+    } else {
+        redirected
+    }
+}
+
 /// Validate that imported function effects are compatible with importer's capabilities.
 ///
 /// If the importer has no `requires [capabilities]`, it's unrestricted and can import anything.
@@ -625,7 +652,7 @@ pub fn load_and_merge_module(
         }
     };
     let original_module_path = module_path.clone();
-    let module_path = prefer_package_init_for_member_import(&module_path, use_stmt);
+    let module_path = resolve_member_import_target(&module_path, use_stmt);
     if module_path != original_module_path {
         loader_trace!(
             "init-redirect",
@@ -1015,7 +1042,8 @@ pub fn load_and_merge_module(
 mod tests {
     use super::{
         enforce_gc_boundary_policy, gc_boundary_warning_message, load_and_merge_module, loader_trace_enabled,
-        prefer_package_init_for_member_import, should_keep_selective_export,
+        mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
+        should_keep_selective_export, unmark_module_loading,
     };
     use crate::value::Value;
     use simple_parser::ast::{ImportTarget, ModulePath, Node, UseStmt};
@@ -1135,6 +1163,50 @@ mod tests {
         );
 
         assert_eq!(resolved, init_path);
+    }
+
+    #[test]
+    fn resolve_member_import_target_falls_back_to_file_on_self_referential_redirect_cycle() {
+        // task #153 shape: `driver.spl` (real definitions) sits next to a
+        // stale `driver/__init__.spl` that re-exports from the very module
+        // path that resolves back to it. `80.driver/driver/__init__.spl` did
+        // exactly this (`export use compiler.driver.driver.{compiler_driver_create, ...}`),
+        // which shadowed `compiler_driver_create` for every standalone
+        // `simple run` script that imported `compiler.driver.driver.{...}`.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let file_path = root.join("driver.spl");
+        let package_dir = root.join("driver");
+        let init_path = package_dir.join("__init__.spl");
+        fs::write(&file_path, "fn compiler_driver_create(): 42\n").unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(&init_path, "export use driver.{compiler_driver_create}\n").unwrap();
+
+        let use_stmt = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single(
+            "compiler_driver_create".to_string(),
+        )]));
+
+        // Baseline (no cycle in progress): the package init is preferred,
+        // same as any other legitimate "thin file + real package" pair
+        // (`prefers_package_init_for_group_imports_when_both_exist`).
+        let resolved = resolve_member_import_target(&file_path, &use_stmt);
+        assert_eq!(resolved, init_path);
+
+        // Simulate the interpreter mid-way through loading `init_path` when
+        // its own self-referential re-export re-resolves the same import.
+        // Without the guard, `resolve_member_import_target` would collapse
+        // to `prefer_package_init_for_member_import` and redirect back into
+        // `init_path` — which the circular-import branch in
+        // `load_and_merge_module` then answers with empty/partial exports,
+        // silently dropping `compiler_driver_create`.
+        mark_module_loading(&init_path);
+        let resolved_during_cycle = resolve_member_import_target(&file_path, &use_stmt);
+        unmark_module_loading(&init_path);
+
+        assert_eq!(
+            resolved_during_cycle, file_path,
+            "must keep the already-resolved file instead of re-entering a package-init already on the load stack"
+        );
     }
 
     #[test]

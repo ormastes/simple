@@ -91,6 +91,51 @@ brace corrupts HIR lowering scope), `string_interp_brace_across_concat_literals_
 (brace spanning concatenated literals leaks source text), `parser_grid_identifier_keyword_collision_2026-07-03.md`
 (unrelated `grid` keyword collision, found in the same session)
 
+## 2026-07-17 follow-up: minimal nested-brace case is swallowed to EMPTY, not verbatim (lane S47, task #178 round 2)
+
+Regression-checking this doc's own "s2 JSON/SDN-shaped repro is unchanged and
+does NOT regress" claim (which was re-verified correct for
+`"{ x {inner} y }"`-shaped strings — outer opening has literal text before the
+nested placeholder) turned up a **narrower** sub-case this doc's fix does not
+cover: when the outer brace span has **no other literal text**, only
+whitespace, around the nested placeholder — `"{ {inner} }"` or
+`"{ {inner}}"` — the native path does not fall back to verbatim literal text
+(as the oracle does, and as the documented `s2`-class behavior promises).
+Instead it **silently swallows the entire span to an empty string**, which is
+a *different and worse* failure mode than the one this doc's "Expected"
+section describes.
+
+```simple
+fn main():
+    val inner = 9
+    print "N1:{ {inner} }|END"
+    print "N2:a{ {inner} }b|END"
+    print "N3:{ {inner}}|END"
+```
+
+- Oracle (`bin/simple run`): `N1:{ {inner} }|ENDN2:a{ {inner} }b|ENDN3:{ {inner}}|END`
+  (verbatim fallback in all three, consistent with the documented `s2` class).
+- Native (`native-build`, `SIMPLE_BOOTSTRAP` unset): `N1:|ENDN2:ab|ENDN3:|END`
+  — the entire `{ ... }` span (including surrounding whitespace) vanishes with
+  no error, leaving only whatever literal text was outside it.
+
+For contrast, the already-fixed `{{`/`}}` escape and the wider `{ x {inner} y
+}` shape (extra literal text alongside the nested placeholder, not just
+whitespace) both still match the oracle exactly on the current tip
+(`ffc0c360ba4`, fetched 2026-07-17) — this is specifically the
+whitespace-only-padding-around-a-lone-nested-placeholder shape that regresses
+to a silent empty string instead of a literal-text fallback.
+
+**Status:** open sub-case, not yet root-caused to an exact line. Likely in the
+same `flat_bridge_build_string_interps` (frontend bridge) /
+`split_interpolation_segments` (`50.mir/_MirLoweringExpr/expr_dispatch.spl`)
+region this doc's main fix touched — the positional-alignment contract
+between "regions" and "interps" probably drops the region's captured literal
+text entirely in this shape instead of falling back to it. Left for a
+follow-up session rather than fixed inline (shared frontend/MIR positional
+contract, not a small isolated change, per this lane's fix-vs-file
+threshold).
+
 ## Symptom
 
 A double-quoted interpolated string that contains a literal `{ ... }` span

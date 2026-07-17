@@ -8,10 +8,6 @@ use compiler.mir.mir_data.{MirFunction}
 use compiler.mir.mir_instructions.{MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId}
 
-extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_enum_payload(value: Any) -> Any
-extern fn rt_value_as_int(value: i64) -> i64
-
 struct GemmAddFusion:
     dest: LocalId
     matmul_left: MirOperand
@@ -19,13 +15,9 @@ struct GemmAddFusion:
     addend: MirOperand
 
 fn operand_copy_local_id(operand: MirOperand) -> i64?:
-    val kind = operand.kind
-    val disc = rt_enum_discriminant(kind)
-    val copy_disc = rt_enum_discriminant(MirOperandKind.Copy(LocalId(0)))
-    val move_disc = rt_enum_discriminant(MirOperandKind.Move(LocalId(0)))
-    if disc != copy_disc and disc != move_disc:
-        return nil
-    Some(rt_value_as_int(rt_enum_payload(kind)))
+    match operand.kind:
+        case Copy(local) | Move(local): Some(local.id)
+        case _: nil
 
 fn operand_uses_local(operand: MirOperand, local_id: i64) -> bool:
     # NOTE: explicit match, not `if found.?:` -- the operand's local id can
@@ -94,16 +86,9 @@ fn instruction_operand_use_count(inst: MirInst, local_id: i64) -> i64:
             0
 
 fn terminator_operand_use_count(term: MirTerminator, local_id: i64) -> i64:
-    val ret_disc = rt_enum_discriminant(MirTerminator.Ret(nil))
-    if rt_enum_discriminant(term) == ret_disc:
-        val value: Any = rt_enum_payload(term)
-        val some_disc = rt_enum_discriminant(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(0)))))
-        if rt_enum_discriminant(value) != some_disc:
-            return 0
-        val operand: MirOperand = rt_enum_payload(value)
-        return if operand_uses_local(operand, local_id): 1 else: 0
-
     match term:
+        case Ret(value):
+            if value.? and operand_uses_local(value.unwrap(), local_id): 1 else: 0
         case If(cond, _, _) | Switch(cond, _, _):
             if operand_uses_local(cond, local_id): 1 else: 0
         case CallTerminator(_, func_op, args, _, _):
@@ -124,38 +109,21 @@ fn local_use_count_in_function(func: MirFunction, local_id: i64) -> i64:
     count
 
 fn detect_gemm_add_pair(func: MirFunction, matmul_inst: MirInst, add_inst: MirInst) -> GemmAddFusion?:
-    val binop_disc = rt_enum_discriminant(MirInstKind.BinOp(
-        LocalId(0),
-        MirBinOp.Add,
-        MirOperand(kind: MirOperandKind.Copy(LocalId(0))),
-        MirOperand(kind: MirOperandKind.Copy(LocalId(0)))
-    ))
-    val matmul_kind = matmul_inst.kind
-    val add_kind = add_inst.kind
-    if rt_enum_discriminant(matmul_kind) != binop_disc or rt_enum_discriminant(add_kind) != binop_disc:
-        return nil
+    match matmul_inst.kind:
+        case BinOp(matmul_dest, MatMul, matmul_left, matmul_right):
+            match add_inst.kind:
+                case BinOp(add_dest, BroadcastAdd, add_left, add_right):
+                    if not local_is_temp(func, matmul_dest.id):
+                        return nil
+                    if local_use_count_in_function(func, matmul_dest.id) != 1:
+                        return nil
+                    if operand_uses_local(add_left, matmul_dest.id):
+                        return Some(GemmAddFusion(dest: add_dest, matmul_left: matmul_left, matmul_right: matmul_right, addend: add_right))
+                    if operand_uses_local(add_right, matmul_dest.id):
+                        return Some(GemmAddFusion(dest: add_dest, matmul_left: matmul_left, matmul_right: matmul_right, addend: add_left))
+                    nil
+                case _:
+                    nil
+        case _:
+            nil
 
-    val matmul_payload: [Any] = rt_enum_payload(matmul_kind)
-    val add_payload: [Any] = rt_enum_payload(add_kind)
-    val matmul_op: MirBinOp = matmul_payload[1]
-    val add_op: MirBinOp = add_payload[1]
-    if rt_enum_discriminant(matmul_op) != rt_enum_discriminant(MirBinOp.MatMul):
-        return nil
-    if rt_enum_discriminant(add_op) != rt_enum_discriminant(MirBinOp.BroadcastAdd):
-        return nil
-
-    val matmul_dest_id = rt_value_as_int(matmul_payload[0])
-    val add_dest_id = rt_value_as_int(add_payload[0])
-    val matmul_left: MirOperand = matmul_payload[2]
-    val matmul_right: MirOperand = matmul_payload[3]
-    val add_left: MirOperand = add_payload[2]
-    val add_right: MirOperand = add_payload[3]
-    if not local_is_temp(func, matmul_dest_id):
-        return nil
-    if local_use_count_in_function(func, matmul_dest_id) != 1:
-        return nil
-    if operand_uses_local(add_left, matmul_dest_id):
-        return Some(GemmAddFusion(dest: LocalId(add_dest_id), matmul_left: matmul_left, matmul_right: matmul_right, addend: add_right))
-    if operand_uses_local(add_right, matmul_dest_id):
-        return Some(GemmAddFusion(dest: LocalId(add_dest_id), matmul_left: matmul_left, matmul_right: matmul_right, addend: add_left))
-    nil

@@ -2078,6 +2078,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("sys_get_args", system::sys_get_args);
     insert_simple!("sys_malloc", memory::sys_malloc);
     insert_simple!("sys_realloc", memory::sys_realloc);
+    // Native/codegen paths call the runtime-facing `rt_get_args` name directly
+    // (see codegen/instr/calls.rs and codegen/llvm/functions/calls.rs, which
+    // both alias `sys_get_args` -> `rt_get_args`), and much of the .spl stdlib
+    // (`std.sys`, `nogc_sync_mut.ffi.system`, etc.) declares
+    // `extern fn rt_get_args()` and calls it directly rather than going
+    // through `sys_get_args`. The interpreter only had `sys_get_args`
+    // registered, so any standalone-run script that calls `rt_get_args()`
+    // failed with "unknown extern function: rt_get_args" (task #152). Same
+    // handler as `sys_get_args` — it just reads process argv either way.
+    insert_simple!("rt_get_args", system::sys_get_args);
     insert_simple!("to_int", conversion::to_int);
     insert_simple!("to_string", conversion::to_string);
 
@@ -2468,6 +2478,34 @@ mod tests {
     #[test]
     fn dispatch_registers_scalar_stage4_test_bridge() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_run_tests_process_args"));
+    }
+
+    #[test]
+    fn dispatch_registers_rt_get_args_alias_of_sys_get_args() {
+        // task #152: standalone `simple run script.spl` scripts declare
+        // `extern fn rt_get_args()` directly (std.sys, nogc_sync_mut ffi,
+        // native/codegen paths all alias sys_get_args -> rt_get_args), so the
+        // interpreter must resolve the bare `rt_get_args` name too, not just
+        // `sys_get_args`.
+        assert!(EXTERN_DISPATCH.contains_key("rt_get_args"), "missing rt_get_args");
+        assert!(EXTERN_DISPATCH.contains_key("sys_get_args"), "missing sys_get_args");
+
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let rt_result = call_extern_function_with_values(
+            "rt_get_args",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        );
+        assert!(rt_result.is_ok(), "rt_get_args() should resolve under interpretation: {rt_result:?}");
     }
 
     #[test]
