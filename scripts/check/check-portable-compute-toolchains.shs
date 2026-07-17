@@ -18,8 +18,11 @@ METAL_TOOL="${METAL_TOOL:-metal}"
 METALLIB_TOOL="${METALLIB_TOOL:-metallib}"
 VULKAN_GLSL_TOOL="${VULKAN_GLSL_TOOL:-glslangValidator}"
 VULKAN_GLSLC_TOOL="${VULKAN_GLSLC_TOOL:-glslc}"
+SPIRV_VAL_TOOL="${SPIRV_VAL_TOOL:-spirv-val}"
 CUDA_ARCH="${CUDA_ARCH:-}"
 HIP_ARCH="${HIP_ARCH:-gfx1100}"
+PORTABLE_COMPUTE_TARGETS="${PORTABLE_COMPUTE_TARGETS:-cuda,hip,opencl,metal,vulkan}"
+PORTABLE_COMPUTE_EXPECTED_SEMANTICS="${PORTABLE_COMPUTE_EXPECTED_SEMANTICS:-2}"
 TIMEOUT_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_SECS:-180}"
 KILL_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_KILL_SECS:-10}"
 PINNED_VULKAN_FONT_SOURCE_SHA256="c94b13736bdf7022835c008c09d714507da4cd0b6ef4607a5eadc9a23549cd2c"
@@ -28,10 +31,41 @@ PINNED_CUDA_FONT_SOURCE_SHA256="bf34912f7e1bad76e9178d5ac39640a60f1075d7b0177086
 PINNED_CUDA_FONT_VERSION_SHA256="e1f58dd9ee7237bc5cc556dda8563f596ccc2e1a1f61ffdd824b90d90ccec68a"
 PINNED_CUDA_FONT_ARTIFACT_SHA256="40afab945e6c40c239a6859d63723e76599758ea50e120e0edf7a058aa6922b4"
 
+case "$PORTABLE_COMPUTE_EXPECTED_SEMANTICS" in
+    ''|*[!0-9]*)
+        echo "PORTABLE_COMPUTE_EXPECTED_SEMANTICS must be a nonnegative integer" >&2
+        exit 2
+        ;;
+esac
+
+PORTABLE_COMPUTE_TARGETS="$(printf '%s' "$PORTABLE_COMPUTE_TARGETS" | tr -d '[:space:]')"
+case "$PORTABLE_COMPUTE_TARGETS" in
+    ''|,*|*,|*,,*)
+        echo "PORTABLE_COMPUTE_TARGETS must be a nonempty comma-separated target list" >&2
+        exit 2
+        ;;
+esac
+for requested_target in $(printf '%s' "$PORTABLE_COMPUTE_TARGETS" | tr ',' ' '); do
+    case "$requested_target" in
+        cuda|hip|opencl|metal|vulkan) ;;
+        *)
+            echo "unsupported PORTABLE_COMPUTE_TARGETS entry: $requested_target" >&2
+            exit 2
+            ;;
+    esac
+done
+
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+target_requested() {
+    case ",$PORTABLE_COMPUTE_TARGETS," in
+        *,"$1",*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 sha256_file() {
@@ -144,9 +178,9 @@ canonical_wrapper_runtime() {
 
 tool_version() {
     tool="$1"
-    if version="$("$tool" --version 2>&1)"; then
+    if version="$(run_with_timeout "$tool" --version 2>&1)"; then
         :
-    elif version="$("$tool" -v 2>&1)"; then
+    elif version="$(run_with_timeout "$tool" -v 2>&1)"; then
         :
     else
         return 1
@@ -163,12 +197,17 @@ record_tool_provenance() {
     if [ "$path" != "" ]; then
         version="$(tool_version "$path" || true)"
     fi
+    tool_sha=""
+    if [ "$path" != "" ]; then
+        tool_sha="$(sha256_file "$path" || true)"
+    fi
     {
         echo "${target}_${role}_requested=$(printf '%s' "$tool" | one_line)"
         echo "${target}_${role}_path=$(printf '%s' "$path" | one_line)"
         echo "${target}_${role}_version=$version"
+        echo "${target}_${role}_sha256=$tool_sha"
     } >>"$BUILD_DIR/evidence.env"
-    [ "$path" != "" ] && [ "$version" != "" ]
+    [ "$path" != "" ] && [ "$version" != "" ] && sha256_valid "$tool_sha"
 }
 
 record_simple_provenance() {
@@ -277,6 +316,7 @@ write_generated_sources() {
     emitter_version_sha="$(awk -F= '$1 == "__PORTABLE_COMPUTE_EMITTER_VERSION_SHA256__" { print $2 }' "$raw_output")"
     font_emitter_source_sha="$(awk -F= '$1 == "__PORTABLE_FONT_EMITTER_SOURCE_SHA256__" { print $2 }' "$raw_output")"
     font_emitter_version_sha="$(awk -F= '$1 == "__PORTABLE_FONT_EMITTER_VERSION_SHA256__" { print $2 }' "$raw_output")"
+    font_semantics_revision="$(awk -F= '$1 == "__PORTABLE_FONT_SEMANTICS_REVISION__" { print $2 }' "$raw_output")"
     generated_source_sha="$(sha256_file "$path" || true)"
     generated_font_source_sha="$(sha256_file "$font_path" || true)"
     for sha in "$emitter_source_sha" "$emitter_version_sha" "$font_emitter_source_sha" "$font_emitter_version_sha" "$generated_source_sha" "$generated_font_source_sha"; do
@@ -296,7 +336,12 @@ write_generated_sources() {
         echo "${target}_font_emitter_source_sha256=$font_emitter_source_sha"
         echo "${target}_font_emitter_version_sha256=$font_emitter_version_sha"
         echo "${target}_font_generated_source_sha256=$generated_font_source_sha"
+        echo "${target}_font_semantics_revision=$font_semantics_revision"
     } >>"$BUILD_DIR/evidence.env"
+    if [ "$font_semantics_revision" != "$PORTABLE_COMPUTE_EXPECTED_SEMANTICS" ]; then
+        echo "generated font semantics revision mismatch: expected $PORTABLE_COMPUTE_EXPECTED_SEMANTICS, got $font_semantics_revision" >>"$BUILD_DIR/${target}_source.err"
+        return 1
+    fi
     for symbol in simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32; do
         if ! grep -F "$symbol" "$path" >/dev/null 2>&1; then
             echo "generated source is missing entry symbol: $symbol" >>"$BUILD_DIR/${target}_source.err"
@@ -324,12 +369,19 @@ write_generated_vulkan_font_source() {
         return 1
     fi
     emitter_source_sha="$(awk -F= '$1 == "__VULKAN_FONT_EMITTER_SOURCE_SHA256__" { print $2 }' "$raw_output")"
+    font_semantics_revision="$(awk -F= '$1 == "__PORTABLE_FONT_SEMANTICS_REVISION__" { print $2 }' "$raw_output")"
     generated_source_sha="$(sha256_file "$path" || true)"
     {
         echo "vulkan_font_emitter_source_sha256=$emitter_source_sha"
         echo "vulkan_font_generated_source_sha256=$generated_source_sha"
         echo "vulkan_font_pinned_source_sha256=$PINNED_VULKAN_FONT_SOURCE_SHA256"
+        echo "vulkan_font_semantics_revision=$font_semantics_revision"
     } >>"$BUILD_DIR/evidence.env"
+    if [ "$font_semantics_revision" != "$PORTABLE_COMPUTE_EXPECTED_SEMANTICS" ]; then
+        echo "vulkan_font_source_equivalent=false" >>"$BUILD_DIR/evidence.env"
+        echo "generated Vulkan font semantics revision mismatch: expected $PORTABLE_COMPUTE_EXPECTED_SEMANTICS, got $font_semantics_revision" >>"$BUILD_DIR/vulkan_font_source.err"
+        return 1
+    fi
     if ! sha256_valid "$emitter_source_sha" || ! sha256_valid "$generated_source_sha"; then
         echo "vulkan_font_source_equivalent=false" >>"$BUILD_DIR/evidence.env"
         echo "generated Vulkan font source provenance is missing or malformed" >>"$BUILD_DIR/vulkan_font_source.err"
@@ -417,10 +469,25 @@ emit_result() {
     if [ -f "$artifact" ]; then
         artifact_sha="$(sha256_file "$artifact" || true)"
     fi
-    if [ "$status" = "compiled_artifact_verified" ] && [ "${#artifact_sha}" -ne 64 ]; then
-        status="invalid"
-        reason="artifact-sha256-unavailable"
-    fi
+    case "$status" in
+        compiled_artifact_verified|candidate_compiled)
+            if [ "${#artifact_sha}" -ne 64 ]; then
+                status="invalid"
+                reason="artifact-sha256-unavailable"
+            fi
+            ;;
+    esac
+    candidate_compiled=false
+    artifact_validated=false
+    case "$status" in
+        compiled_artifact_verified|candidate_compiled)
+            candidate_compiled=true
+            artifact_validated=true
+            ;;
+        invalid)
+            if [ -s "$artifact" ]; then candidate_compiled=true; fi
+            ;;
+    esac
     {
         echo "${target}_status=$status"
         echo "${target}_reason=$reason"
@@ -429,6 +496,8 @@ emit_result() {
         echo "${target}_artifact_sha256=$artifact_sha"
         echo "${target}_required_symbols=simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
         echo "${target}_command=$command_line"
+        echo "${target}_candidate_compiled=$candidate_compiled"
+        echo "${target}_artifact_validated=$artifact_validated"
     } >>"$BUILD_DIR/evidence.env"
 }
 
@@ -439,6 +508,7 @@ emit_font_result() {
     bytes="$4"
     command_line="$5"
     artifact="$6"
+    pinned_verified="${7:-false}"
     artifact_sha=""
     required_symbols="simple_font_atlas_composite_v1_u32"
     if [ "$target" = "vulkan" ]; then
@@ -447,9 +517,31 @@ emit_font_result() {
     if [ -f "$artifact" ]; then
         artifact_sha="$(sha256_file "$artifact" || true)"
     fi
-    if [ "$status" = "compiled_artifact_verified" ] && [ "${#artifact_sha}" -ne 64 ]; then
-        status="invalid"
-        reason="artifact-sha256-unavailable"
+    case "$status" in
+        compiled_artifact_verified|candidate_compiled)
+            if [ "${#artifact_sha}" -ne 64 ]; then
+                status="invalid"
+                reason="artifact-sha256-unavailable"
+                pinned_verified=false
+            fi
+            ;;
+    esac
+    candidate_compiled=false
+    artifact_validated=false
+    case "$status" in
+        compiled_artifact_verified|candidate_compiled)
+            candidate_compiled=true
+            artifact_validated=true
+            ;;
+        invalid)
+            if [ -s "$artifact" ]; then candidate_compiled=true; fi
+            ;;
+    esac
+    if [ "$artifact_validated" != true ]; then
+        pinned_verified=false
+    fi
+    if [ "$target" = vulkan ] && ! grep -q '^vulkan_font_validator_result=' "$BUILD_DIR/evidence.env"; then
+        echo "vulkan_font_validator_result=not-run" >>"$BUILD_DIR/evidence.env"
     fi
     {
         echo "${target}_font_status=$status"
@@ -459,6 +551,9 @@ emit_font_result() {
         echo "${target}_font_artifact_sha256=$artifact_sha"
         echo "${target}_font_required_symbols=$required_symbols"
         echo "${target}_font_command=$command_line"
+        echo "${target}_font_candidate_compiled=$candidate_compiled"
+        echo "${target}_font_artifact_validated=$artifact_validated"
+        echo "${target}_font_pinned_verified=$pinned_verified"
     } >>"$BUILD_DIR/evidence.env"
 }
 
@@ -490,7 +585,7 @@ run_cuda() {
     fi
     cuda_arch="$CUDA_ARCH"
     if [ "$cuda_arch" = "" ]; then
-        cuda_arch="$($NVCC_TOOL --list-gpu-arch 2>/dev/null | sed -n '1p')"
+        cuda_arch="$(run_with_timeout "$NVCC_TOOL" --list-gpu-arch 2>/dev/null | sed -n '1p')"
     fi
     if [ "$cuda_arch" = "" ]; then
         cmd="$NVCC_TOOL --ptx -arch=<auto> -o $out $src"
@@ -501,9 +596,9 @@ run_cuda() {
     cmd="$NVCC_TOOL --ptx -arch=$cuda_arch -o $out $src"
     font_cmd="$NVCC_TOOL --ptx -arch=$cuda_arch -o $font_out $font_src"
     if rm -f "$out" "$BUILD_DIR/cuda.out" "$BUILD_DIR/cuda.err" &&
-       $NVCC_TOOL --ptx "-arch=$cuda_arch" -o "$out" "$src" >"$BUILD_DIR/cuda.out" 2>"$BUILD_DIR/cuda.err" &&
+       run_with_timeout "$NVCC_TOOL" --ptx "-arch=$cuda_arch" -o "$out" "$src" >"$BUILD_DIR/cuda.out" 2>"$BUILD_DIR/cuda.err" &&
        rm -f "$font_out" "$BUILD_DIR/cuda_font.out" "$BUILD_DIR/cuda_font.err" &&
-       $NVCC_TOOL --ptx "-arch=$cuda_arch" -o "$font_out" "$font_src" >"$BUILD_DIR/cuda_font.out" 2>"$BUILD_DIR/cuda_font.err"; then
+       run_with_timeout "$NVCC_TOOL" --ptx "-arch=$cuda_arch" -o "$font_out" "$font_src" >"$BUILD_DIR/cuda_font.out" 2>"$BUILD_DIR/cuda_font.err"; then
         IFS=: read -r valid reason bytes <<EOF
 $(status_for_artifact cuda "$out" simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32)
 EOF
@@ -517,9 +612,6 @@ EOF
            [ "$font_emitter_version_sha" = "$PINNED_CUDA_FONT_VERSION_SHA256" ] &&
            [ "$font_artifact_sha" = "$PINNED_CUDA_FONT_ARTIFACT_SHA256" ]; then
             cuda_font_pinned_equivalent=true
-        elif [ "$font_valid" = "valid" ]; then
-            font_valid=invalid
-            font_reason=pinned-artifact-identity-mismatch
         fi
         {
             echo "cuda_font_pinned_source_sha256=$PINNED_CUDA_FONT_SOURCE_SHA256"
@@ -527,12 +619,17 @@ EOF
             echo "cuda_font_pinned_artifact_sha256=$PINNED_CUDA_FONT_ARTIFACT_SHA256"
             echo "cuda_font_pinned_equivalent=$cuda_font_pinned_equivalent"
         } >>"$BUILD_DIR/evidence.env"
-        if [ "$valid" = "valid" ] && [ "$font_valid" = "valid" ]; then
+        if [ "$valid" = "valid" ]; then
             emit_result cuda compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out"
-            emit_font_result cuda compiled_artifact_verified "$font_reason" "$font_bytes" "$font_cmd" "$font_out"
         else
-            emit_result cuda invalid "${reason};font=${font_reason}" "$bytes" "$cmd" "$out"
+            emit_result cuda invalid "$reason" "$bytes" "$cmd" "$out"
+        fi
+        if [ "$font_valid" != "valid" ]; then
             emit_font_result cuda "$font_valid" "$font_reason" "$font_bytes" "$font_cmd" "$font_out"
+        elif [ "$cuda_font_pinned_equivalent" = true ]; then
+            emit_font_result cuda compiled_artifact_verified "$font_reason" "$font_bytes" "$font_cmd" "$font_out" true
+        else
+            emit_font_result cuda candidate_compiled pinned-artifact-identity-mismatch "$font_bytes" "$font_cmd" "$font_out" false
         fi
     else
         emit_result cuda toolchain_failed "toolchain_failed" 0 "$cmd" "$out"
@@ -717,7 +814,7 @@ run_vulkan_font() {
         fi
         cmd="$VULKAN_GLSLC_TOOL --target-env=vulkan1.1 -fshader-stage=compute -o $out $src"
         rm -f "$out" "$BUILD_DIR/vulkan_font.out" "$BUILD_DIR/vulkan_font.err"
-        if ! "$VULKAN_GLSLC_TOOL" --target-env=vulkan1.1 -fshader-stage=compute -o "$out" "$src" >"$BUILD_DIR/vulkan_font.out" 2>"$BUILD_DIR/vulkan_font.err"; then
+        if ! run_with_timeout "$VULKAN_GLSLC_TOOL" --target-env=vulkan1.1 -fshader-stage=compute -o "$out" "$src" >"$BUILD_DIR/vulkan_font.out" 2>"$BUILD_DIR/vulkan_font.err"; then
             emit_font_result vulkan toolchain_failed toolchain_failed 0 "$cmd" "$out"
             return
         fi
@@ -728,7 +825,7 @@ run_vulkan_font() {
         fi
         cmd="$VULKAN_GLSL_TOOL --target-env vulkan1.1 -V -S comp -o $out $src"
         rm -f "$out" "$BUILD_DIR/vulkan_font.out" "$BUILD_DIR/vulkan_font.err"
-        if ! "$VULKAN_GLSL_TOOL" --target-env vulkan1.1 -V -S comp -o "$out" "$src" >"$BUILD_DIR/vulkan_font.out" 2>"$BUILD_DIR/vulkan_font.err"; then
+        if ! run_with_timeout "$VULKAN_GLSL_TOOL" --target-env vulkan1.1 -V -S comp -o "$out" "$src" >"$BUILD_DIR/vulkan_font.out" 2>"$BUILD_DIR/vulkan_font.err"; then
             emit_font_result vulkan toolchain_failed toolchain_failed 0 "$cmd" "$out"
             return
         fi
@@ -742,33 +839,60 @@ run_vulkan_font() {
     IFS=: read -r valid reason bytes <<EOF
 $(status_for_artifact vulkan "$out" main)
 EOF
+    if [ "$valid" != "valid" ]; then
+        emit_font_result vulkan invalid "$reason" "$bytes" "$cmd" "$out" false
+        return
+    fi
+    if ! have "$SPIRV_VAL_TOOL"; then
+        record_tool_provenance vulkan_font validator "$SPIRV_VAL_TOOL" || true
+        echo "vulkan_font_validator_result=missing-tool" >>"$BUILD_DIR/evidence.env"
+        emit_font_result vulkan invalid missing-validator-tool "$bytes" "$cmd" "$out" false
+        return
+    fi
+    if ! record_tool_provenance vulkan_font validator "$SPIRV_VAL_TOOL"; then
+        echo "vulkan_font_validator_result=missing-provenance" >>"$BUILD_DIR/evidence.env"
+        emit_font_result vulkan invalid missing-validator-provenance "$bytes" "$cmd" "$out" false
+        return
+    fi
+    rm -f "$BUILD_DIR/vulkan_font_validator.out" "$BUILD_DIR/vulkan_font_validator.err"
+    if ! run_with_timeout "$SPIRV_VAL_TOOL" --target-env vulkan1.1 "$out" >"$BUILD_DIR/vulkan_font_validator.out" 2>"$BUILD_DIR/vulkan_font_validator.err"; then
+        echo "vulkan_font_validator_result=failed" >>"$BUILD_DIR/evidence.env"
+        emit_font_result vulkan invalid validator-failed "$bytes" "$cmd" "$out" false
+        return
+    fi
+    echo "vulkan_font_validator_result=pass" >>"$BUILD_DIR/evidence.env"
     artifact_sha="$(sha256_file "$out" || true)"
+    vulkan_font_pinned_verified=false
     if [ "$artifact_sha" = "$PINNED_VULKAN_FONT_ARTIFACT_SHA256" ]; then
         echo "vulkan_font_artifact_equivalent=true" >>"$BUILD_DIR/evidence.env"
     else
         echo "vulkan_font_artifact_equivalent=false" >>"$BUILD_DIR/evidence.env"
-        emit_font_result vulkan invalid pinned-artifact-hash-mismatch "$bytes" "$cmd" "$out"
-        return
+        :
     fi
-    if [ "$VULKAN_FONT_SOURCE_EQUIVALENT" != true ]; then
-        emit_font_result vulkan invalid pinned-source-hash-mismatch "$bytes" "$cmd" "$out"
-        return
+    if [ "$artifact_sha" = "$PINNED_VULKAN_FONT_ARTIFACT_SHA256" ] && [ "$VULKAN_FONT_SOURCE_EQUIVALENT" = true ]; then
+        vulkan_font_pinned_verified=true
     fi
-    if [ "$valid" = "valid" ]; then
-        emit_font_result vulkan compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out"
+    if [ "$vulkan_font_pinned_verified" = true ]; then
+        emit_font_result vulkan compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out" true
+    elif [ "$artifact_sha" != "$PINNED_VULKAN_FONT_ARTIFACT_SHA256" ]; then
+        emit_font_result vulkan candidate_compiled pinned-artifact-hash-mismatch "$bytes" "$cmd" "$out" false
     else
-        emit_font_result vulkan "$valid" "$reason" "$bytes" "$cmd" "$out"
+        emit_font_result vulkan candidate_compiled pinned-source-hash-mismatch "$bytes" "$cmd" "$out" false
     fi
 }
 
 rm -f "$BUILD_DIR/evidence.env"
+{
+    echo "portable_compute_targets=$PORTABLE_COMPUTE_TARGETS"
+    echo "portable_compute_expected_semantics=$PORTABLE_COMPUTE_EXPECTED_SEMANTICS"
+} >"$BUILD_DIR/evidence.env"
 assert_evidence_parser_contract
 record_simple_provenance
-run_cuda
-run_hip
-run_opencl
-run_metal
-run_vulkan_font
+if target_requested cuda; then run_cuda; fi
+if target_requested hip; then run_hip; fi
+if target_requested opencl; then run_opencl; fi
+if target_requested metal; then run_metal; fi
+if target_requested vulkan; then run_vulkan_font; fi
 
 rm -f "$REPORT_PATH"
 {
@@ -779,6 +903,7 @@ rm -f "$REPORT_PATH"
     echo "| Target | Kind | Status | Reason | Bytes | Artifact |"
     echo "|---|---|---|---|---:|---|"
     for target in cuda hip opencl metal; do
+        if ! target_requested "$target"; then continue; fi
         status="$(field_of "${target}_status" "$BUILD_DIR/evidence.env")"
         reason="$(field_of "${target}_reason" "$BUILD_DIR/evidence.env")"
         bytes="$(field_of "${target}_bytes" "$BUILD_DIR/evidence.env")"
@@ -790,36 +915,63 @@ rm -f "$REPORT_PATH"
         echo "| $target | optimization | $status | $reason | $bytes | $artifact |"
         echo "| $target | font-atlas | $font_status | $font_reason | $font_bytes | $font_artifact |"
     done
-    vulkan_font_status="$(field_of vulkan_font_status "$BUILD_DIR/evidence.env")"
-    vulkan_font_reason="$(field_of vulkan_font_reason "$BUILD_DIR/evidence.env")"
-    vulkan_font_bytes="$(field_of vulkan_font_bytes "$BUILD_DIR/evidence.env")"
-    vulkan_font_artifact="$(field_of vulkan_font_artifact "$BUILD_DIR/evidence.env")"
-    echo "| vulkan | font-atlas | $vulkan_font_status | $vulkan_font_reason | $vulkan_font_bytes | $vulkan_font_artifact |"
+    if target_requested vulkan; then
+        vulkan_font_status="$(field_of vulkan_font_status "$BUILD_DIR/evidence.env")"
+        vulkan_font_reason="$(field_of vulkan_font_reason "$BUILD_DIR/evidence.env")"
+        vulkan_font_bytes="$(field_of vulkan_font_bytes "$BUILD_DIR/evidence.env")"
+        vulkan_font_artifact="$(field_of vulkan_font_artifact "$BUILD_DIR/evidence.env")"
+        echo "| vulkan | font-atlas | $vulkan_font_status | $vulkan_font_reason | $vulkan_font_bytes | $vulkan_font_artifact |"
+    fi
     echo
     echo "## Commands"
     echo
     for target in cuda hip opencl metal; do
+        if ! target_requested "$target"; then continue; fi
         command_line="$(field_of "${target}_command" "$BUILD_DIR/evidence.env")"
         font_command="$(field_of "${target}_font_command" "$BUILD_DIR/evidence.env")"
         echo "- $target optimization: \`$command_line\`"
         echo "- $target font-atlas: \`$font_command\`"
     done
-    vulkan_font_command="$(field_of vulkan_font_command "$BUILD_DIR/evidence.env")"
-    echo "- vulkan font-atlas: \`$vulkan_font_command\`"
+    if target_requested vulkan; then
+        vulkan_font_command="$(field_of vulkan_font_command "$BUILD_DIR/evidence.env")"
+        echo "- vulkan font-atlas: \`$vulkan_font_command\`"
+    fi
 } >"$REPORT_PATH"
 
-all_portable_compute_toolchains_verified=true
+all_portable_compute_candidates_validated=true
+all_portable_compute_pins_verified=true
 for target in cuda hip opencl metal; do
-    status="$(field_of "${target}_status" "$BUILD_DIR/evidence.env")"
-    font_status="$(field_of "${target}_font_status" "$BUILD_DIR/evidence.env")"
-    if [ "$status" != "compiled_artifact_verified" ] || [ "$font_status" != "compiled_artifact_verified" ]; then
-        all_portable_compute_toolchains_verified=false
+    if ! target_requested "$target"; then continue; fi
+    candidate_compiled="$(field_of "${target}_candidate_compiled" "$BUILD_DIR/evidence.env")"
+    artifact_validated="$(field_of "${target}_artifact_validated" "$BUILD_DIR/evidence.env")"
+    font_candidate_compiled="$(field_of "${target}_font_candidate_compiled" "$BUILD_DIR/evidence.env")"
+    font_artifact_validated="$(field_of "${target}_font_artifact_validated" "$BUILD_DIR/evidence.env")"
+    if [ "$candidate_compiled" != true ] || [ "$artifact_validated" != true ] ||
+       [ "$font_candidate_compiled" != true ] || [ "$font_artifact_validated" != true ]; then
+        all_portable_compute_candidates_validated=false
+        all_portable_compute_pins_verified=false
+    fi
+    if [ "$target" = cuda ] && [ "$(field_of cuda_font_pinned_verified "$BUILD_DIR/evidence.env")" != true ]; then
+        all_portable_compute_pins_verified=false
     fi
 done
-vulkan_font_status="$(field_of vulkan_font_status "$BUILD_DIR/evidence.env")"
-if [ "$vulkan_font_status" != "compiled_artifact_verified" ]; then
-    all_portable_compute_toolchains_verified=false
+if target_requested vulkan; then
+    if [ "$(field_of vulkan_font_candidate_compiled "$BUILD_DIR/evidence.env")" != true ] ||
+       [ "$(field_of vulkan_font_artifact_validated "$BUILD_DIR/evidence.env")" != true ]; then
+        all_portable_compute_candidates_validated=false
+        all_portable_compute_pins_verified=false
+    fi
+    if [ "$(field_of vulkan_font_pinned_verified "$BUILD_DIR/evidence.env")" != true ]; then
+        all_portable_compute_pins_verified=false
+    fi
 fi
-echo "all_portable_compute_toolchains_verified=$all_portable_compute_toolchains_verified"
+{
+    echo "all_portable_compute_candidates_validated=$all_portable_compute_candidates_validated"
+    echo "all_portable_compute_pins_verified=$all_portable_compute_pins_verified"
+    echo "all_portable_compute_toolchains_verified=$all_portable_compute_pins_verified"
+} >>"$BUILD_DIR/evidence.env"
+echo "all_portable_compute_candidates_validated=$all_portable_compute_candidates_validated"
+echo "all_portable_compute_pins_verified=$all_portable_compute_pins_verified"
+echo "all_portable_compute_toolchains_verified=$all_portable_compute_pins_verified"
 echo "report_path=$REPORT_PATH"
 cat "$BUILD_DIR/evidence.env"

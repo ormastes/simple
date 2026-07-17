@@ -8,6 +8,13 @@ atlas replacement, checksums, exact packed-pixel equality, promotion classificat
 session lifecycle, artifact validation, batch validation, and idempotent shared
 session cleanup.
 
+The portable checker separates candidate compilation, artifact validation, and
+pin admission. It records semantics revision 2, runs the selected Vulkan
+compiler and `spirv-val` through bounded timeouts, and retains a validated new
+candidate with `pinned_verified=false` until tracked pins are independently
+updated. The embedded revision-1 SPIR-V remains unchanged and rejected by the
+runtime semantics gate.
+
 Stage promotion additionally requires retained precompiled artifact identity,
 `main` plus program version, batch/payload identity, positive fused queue/device,
 fence-observation, readback, and CPU-oracle timing, observed handles, changed

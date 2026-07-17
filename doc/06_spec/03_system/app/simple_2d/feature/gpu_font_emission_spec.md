@@ -74,11 +74,18 @@ validity is metadata validation, not compilation or GPU execution evidence.
 The emitter writes each delimited body with raw output, and the toolchain
 checker requires the extracted optimization, font, and Vulkan bytes to match
 their emitter-declared SHA-256 values before compilation. Missing, malformed,
-or byte-mismatched provenance fails closed. When a well-formed generated source
-differs only from the admitted source pin, it records
-`vulkan_font_source_equivalent=false`, compiles and retains the candidate
-`.comp`/`.spv` for review, then reports an invalid result; only matching source
-and artifact pins may report `compiled_artifact_verified`.
+or byte-mismatched provenance fails closed. Each emitter record also includes
+its compositor semantics revision. The checker requires it to equal
+`PORTABLE_COMPUTE_EXPECTED_SEMANTICS` before compilation, routes CUDA and
+Vulkan tools through bounded timeouts, validates Vulkan output with
+provenance-bound `spirv-val`, and limits execution to
+`PORTABLE_COMPUTE_TARGETS`.
+
+Candidate admission remains two-phase. A well-formed semantics-2 artifact with
+stale pins records `candidate_compiled=true`, `artifact_validated=true`, and
+`pinned_verified=false`; it is retained for independent review without being
+promoted. Only a later pin update plus a fresh matching run may set
+`pinned_verified=true` and `compiled_artifact_verified`.
 
 | Target | Source marker | Source | Planned output | Tool hint |
 |---|---|---|---|---|

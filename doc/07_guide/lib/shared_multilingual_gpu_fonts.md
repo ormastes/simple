@@ -396,8 +396,9 @@ and `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`
 identities exactly. A mismatch
 fails closed; the checker does not install its fresh artifact. Missing or
 malformed source hashes stop before compilation. A well-formed stale source is
-compiled and its `.comp`/`.spv` candidate is retained for review, but evidence
-remains invalid; only matching source and artifact pins may report
+compiled and its `.comp`/`.spv` candidate is retained for review. It may report
+candidate compilation and artifact validation, but pin verification remains
+false; only matching source and artifact pins may report
 `compiled_artifact_verified`. Production keeps
 the independently pinned embedded SPIR-V, but `VulkanSession` currently rejects
 its stale semantics before resource creation.
@@ -445,15 +446,28 @@ candidate generation attempt is bounded to one invocation:
 CUDA_ARCH=compute_75 \
   SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
   VULKAN_GLSLC_TOOL="$PINNED_GLSLC" \
+  PORTABLE_COMPUTE_TARGETS=cuda,vulkan \
+  PORTABLE_COMPUTE_EXPECTED_SEMANTICS=2 \
   BUILD_DIR=build/portable_compute_toolchains-semantics2 \
   REPORT_PATH=build/portable_compute_toolchains-semantics2/report.md \
   sh scripts/check/check-portable-compute-toolchains.shs
 ```
 
-Both variable paths must name current, admitted binaries. The authoritative
-result is `build/portable_compute_toolchains-semantics2/evidence.env`, not the
-checker exit alone; accept only rows whose Simple, compiler, emitter, source,
-and artifact provenance matches the independently reviewed candidate tuple.
+Both variable paths must be defined by the operator and name current, admitted
+binaries; this host does not currently provide a `PINNED_GLSLC` value. The
+authoritative result is
+`build/portable_compute_toolchains-semantics2/evidence.env`, not the checker
+exit alone. CUDA and Vulkan compilers plus `spirv-val` run through bounded
+timeouts, and the requested-target aggregate ignores unrequested toolchains.
+
+Admission has two explicit phases. Candidate generation requires semantics
+revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
+`vulkan_font_validator_result=pass` and validator path/version/SHA-256. With
+the retained revision-1 pins, the expected result is
+`pinned_verified=false`; that is a reviewable candidate, not promotion. After
+independent review updates the tracked source/artifact pins and embedded
+companions, a fresh run must reproduce the same tuple and set
+`pinned_verified=true`. Never update pins merely to make the first run green.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
