@@ -214,7 +214,10 @@ providers → core-C → system libraries. The current provider inventory covers
 compiler hooks, time/progress, SQLite, memtrack, and POSIX/macOS/BSD plus Windows
 process-timeout source ownership. Hosted macOS arm64/x64 and Windows x64 jobs, plus the FreeBSD x86_64 VM gate, now run the focused strict-dual
 dynamic-loader case through the staged compiler; their first CI execution remains
-pending. GPU/font/dynload,
+pending. The pure-Simple strict path now stages its already-compiled dynload
+object under a canonical member name, creates and inventories the deterministic
+dedicated archive, validates the exact hosted ABI, cleans it, and remains
+fail-closed before selection; execution proof is pending. GPU/font,
 window, HTTP, remaining process/thread,
 SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
 `libsimple_native_all.a` selection and allow-multiple-definition are still

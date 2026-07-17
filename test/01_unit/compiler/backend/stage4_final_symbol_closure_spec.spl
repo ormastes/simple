@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_validate_dynload_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_validate_dynload_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -17,6 +17,15 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_dynload_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_dynload.lib")
         expect(stage4_dynload_provider_archive_file("linux", true).is_err()).to_be(true)
         expect(stage4_dynload_provider_archive_file("plan9", false).is_err()).to_be(true)
+
+    it "maps hosted dynamic-loader objects to exact portable nm contracts":
+        expect(stage4_dynload_provider_object_format("linux", false).unwrap()).to_equal("elf")
+        expect(stage4_dynload_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_dynload_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_dynload_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_dynload_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+        expect(stage4_dynload_provider_object_format("linux", true).is_err()).to_be(true)
+        expect(stage4_dynload_provider_object_format("plan9", false).is_err()).to_be(true)
 
     it "accepts exact ELF Mach-O and COFF dynamic-loader provider contracts":
         val elf = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
@@ -427,7 +436,7 @@ not-an-address W rt_malformed
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         expect(source).to_contain("if hosted_os == \"windows\": \"simple_native_all.lib\" else: \"libsimple_native_all.a\"")
 
-    it "keeps explicit inventory scanning validated and outside production linking":
+    it "builds and validates the dedicated dynload archive before the strict fail-closed boundary":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         val inventory_pos = source.find("fn llvm_stage4_candidate_archive_inventory")
         val config_pos = source.find("# Configuration")
@@ -453,8 +462,36 @@ not-an-address W rt_malformed
         expect(inventory_source).to_contain("section scan was empty")
         expect(inventory_source).to_contain("retained constructor/destructor sections")
         expect(inventory_source).to_contain("stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == \"windows\")")
-        val occurrences = source.split("llvm_stage4_candidate_archive_inventory").len() - 1
-        expect(occurrences).to_equal(1)
+        val build_pos = source.find("fn llvm_stage4_build_dynload_provider_archive")
+        val production_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, pid)") ?? -1
+        val fail_closed_pos = source.find("remaining provider inventory and unique-owner selection are wired")
+        val step3_pos = source.find("# Step 3: Combine all objects and link")
+        val build_source = source.substring(build_pos, source.find("# Configuration"))
+        val copy_pos = build_source.find("file_copy(dynload_objects[0], staged_object)")
+        val archive_pos = build_source.find("process_run(archiver, [\"rcsD\", archive_path, staged_object])")
+        val list_pos = build_source.find("process_run(archiver, [\"t\", archive_path])")
+        val inventory_call_pos = build_source.find("llvm_stage4_candidate_archive_inventory([\"runtime_dynload\"], [archive_path])")
+        val contract_pos = build_source.find("stage4_validate_dynload_provider_symbol_contract(scans[0], object_format)")
+        expect(build_pos).to_be_greater_than(inventory_pos)
+        expect(production_pos).to_be_greater_than(build_pos)
+        expect(fail_closed_pos).to_be_greater_than(production_pos)
+        expect(step3_pos).to_be_greater_than(fail_closed_pos)
+        expect(copy_pos).to_be_greater_than(-1)
+        expect(archive_pos).to_be_greater_than(copy_pos)
+        expect(list_pos).to_be_greater_than(archive_pos)
+        expect(inventory_call_pos).to_be_greater_than(list_pos)
+        expect(contract_pos).to_be_greater_than(inventory_call_pos)
+        expect(source).to_contain("find_archive_portable()")
+        expect(source).to_contain("dynload_objects.len() != 1")
+        expect(source).to_contain("file_copy(dynload_objects[0], staged_object)")
+        expect(source).to_contain("val expected_member = \"runtime_dynload\" + object_ext")
+        expect(source).to_contain("process_run(archiver, [\"rcsD\", archive_path, staged_object])")
+        expect(source).to_contain("process_run(archiver, [\"t\", archive_path])")
+        expect(source).to_contain("members_out.replace(\"\\r\", \"\").trim()")
+        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_dynload\"], [archive_path])")
+        expect(source).to_contain("stage4_validate_dynload_provider_symbol_contract(scans[0], object_format)")
+        expect(source).to_contain("dir_remove_all(stage_dir)")
+        expect(source.contains("runtime_dynload.c")).to_be(false)
 
     it "routes both Stage4 symbol scans through the portable nm resolver":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
@@ -488,6 +525,19 @@ not-an-address W rt_malformed
         expect(newest_pos).to_be_greater_than(override_pos)
         expect(fallback_pos).to_be_greater_than(newest_pos)
         expect(source).to_contain("for path in out.split(\"\\n\")")
+
+    it "keeps the deterministic archiver override and ar-compatible fallbacks":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_capability.spl") ?? ""
+        val resolver_pos = source.find("pub fn find_archive_portable")
+        val next_pos = source.find("pub fn find_objdump_portable")
+        val resolver_source = source.substring(resolver_pos, next_pos)
+        val override_pos = resolver_source.find("env_get(\"SIMPLE_AR\")")
+        val newest_pos = resolver_source.find("\"llvm-ar-22\"")
+        val fallback_pos = resolver_source.last_index_of("\"ar\"") ?? -1
+        expect(override_pos).to_be_greater_than(-1)
+        expect(newest_pos).to_be_greater_than(override_pos)
+        expect(fallback_pos).to_be_greater_than(newest_pos)
+        expect(resolver_source.contains("\"lib\"")).to_be(false)
 
     it "keeps the portable section-reader override and platform-safe fallbacks":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_capability.spl") ?? ""
