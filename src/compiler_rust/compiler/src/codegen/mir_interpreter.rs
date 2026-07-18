@@ -614,12 +614,15 @@ impl CodegenEmitter for MirInterpreterEmitter {
         Ok(())
     }
     fn emit_option_some(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error> {
-        // Tag: (value << 1) | 1 (Some flag)
-        self.set(dest, (self.get(value) << 1) | 1);
+        let payload = simple_runtime::RuntimeValue::from_raw(self.get(value) as u64);
+        self.set(dest, simple_runtime::rt_enum_new(1, 0, payload).to_raw() as i64);
         Ok(())
     }
     fn emit_option_none(&mut self, dest: VReg) -> Result<(), Self::Error> {
-        self.set(dest, 0);
+        self.set(
+            dest,
+            simple_runtime::rt_enum_new(1, 1, simple_runtime::RuntimeValue::NIL).to_raw() as i64,
+        );
         Ok(())
     }
     fn emit_result_ok(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error> {

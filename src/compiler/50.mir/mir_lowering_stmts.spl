@@ -439,6 +439,15 @@ impl MirLowering:
                                 MirType.i64()
 
                         var init_local = self.lower_expr(let_init)
+                        match let_type:
+                            case Some(declared_type):
+                                match declared_type.kind:
+                                    case HirTypeKind.Optional(_):
+                                        init_local = self.ensure_option_handle(init_local, declared_type)
+                                    case _:
+                                        ()
+                            case nil:
+                                ()
                         val annotated_narrow_int = match mir_type.kind:
                             case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: true
                             case _: false
@@ -579,6 +588,8 @@ impl MirLowering:
                                     self.runtime_dict_locals[local.id] = true
                                 if self.runtime_value_locals.has(init_local.id):
                                     self.runtime_value_locals[local.id] = true
+                                if self.option_value_locals.has(init_local.id):
+                                    self.option_value_locals[local.id] = true
                                 if self.nil_locals.has(init_local.id):
                                     self.nil_locals[local.id] = true
                                 if self.local_hir_types.has(init_local.id):
@@ -883,32 +894,45 @@ impl MirLowering:
                 b.emit_copy(local, result)
                 self.builder = b
                 self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                self.option_value_locals = self.option_value_locals.remove(local.id)
                 self.nil_locals = self.nil_locals.remove(local.id)
                 self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
                 self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
                 self.local_hir_types = self.local_hir_types.remove(local.id)
             else:
+                var assigned_value = value_local
+                if self.local_hir_types.has(local.id):
+                    val declared_type = self.local_hir_types[local.id]
+                    match declared_type.kind:
+                        case HirTypeKind.Optional(_):
+                            assigned_value = self.ensure_option_handle(value_local, declared_type)
+                        case _:
+                            ()
                 var b = self.builder
-                b.emit_copy(local, value_local)
+                b.emit_copy(local, assigned_value)
                 self.builder = b
-                if self.runtime_value_locals.has(value_local.id):
+                if self.runtime_value_locals.has(assigned_value.id):
                     self.runtime_value_locals[local.id] = true
                 else:
                     self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
-                if self.runtime_array_locals.has(value_local.id):
+                if self.option_value_locals.has(assigned_value.id):
+                    self.option_value_locals[local.id] = true
+                else:
+                    self.option_value_locals = self.option_value_locals.remove(local.id)
+                if self.runtime_array_locals.has(assigned_value.id):
                     self.runtime_array_locals[local.id] = true
                 else:
                     self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
-                if self.runtime_dict_locals.has(value_local.id):
+                if self.runtime_dict_locals.has(assigned_value.id):
                     self.runtime_dict_locals[local.id] = true
                 else:
                     self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
-                if self.nil_locals.has(value_local.id):
+                if self.nil_locals.has(assigned_value.id):
                     self.nil_locals[local.id] = true
                 else:
                     self.nil_locals = self.nil_locals.remove(local.id)
-                if self.local_hir_types.has(value_local.id):
-                    self.local_hir_types[local.id] = self.local_hir_types[value_local.id]
+                if self.local_hir_types.has(assigned_value.id):
+                    self.local_hir_types[local.id] = self.local_hir_types[assigned_value.id]
                 else:
                     self.local_hir_types = self.local_hir_types.remove(local.id)
                 # Bug (array-of-structs field misread), CONFLICT-FLAG
@@ -917,8 +941,8 @@ impl MirLowering:
                 # array_element_struct_syms forward the same way
                 # runtime_array_locals does above, or a reassigned
                 # array-of-structs variable loses its element struct name.
-                if self.array_element_struct_syms.has(value_local.id):
-                    self.array_element_struct_syms[local.id] = self.array_element_struct_syms[value_local.id]
+                if self.array_element_struct_syms.has(assigned_value.id):
+                    self.array_element_struct_syms[local.id] = self.array_element_struct_syms[assigned_value.id]
                 else:
                     self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
@@ -948,8 +972,20 @@ impl MirLowering:
                     self.builder = bitfield_b
                     return
                 val field_index = self.resolve_field_index(base, receiver, field, resolved)
+                var assigned_field_value = value_local
+                val field_owner = self.resolve_base_struct_name(base, receiver)
+                if val owner_name = field_owner:
+                    if self.struct_field_hir_type.has(owner_name):
+                        val field_types = self.struct_field_hir_type[owner_name]
+                        if field_index >= 0 and field_index < field_types.len():
+                            val declared_field_type = field_types[field_index]
+                            match declared_field_type.kind:
+                                case HirTypeKind.Optional(_):
+                                    assigned_field_value = self.ensure_option_handle(value_local, declared_field_type)
+                                case _:
+                                    ()
                 var b = self.builder
-                b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(value_local))
+                b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(assigned_field_value))
                 self.builder = b
 
             case Index(base, index):
@@ -1149,7 +1185,7 @@ impl MirLowering:
 # Control Flow Lowering
 # ============================================================================
 
-    me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?) -> LocalId:
+    me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         val cond_local = self.lower_expr(cond)
 
@@ -1165,7 +1201,7 @@ impl MirLowering:
         var b2 = self.builder
         b2.switch_to_block(then_block)
         self.builder = b2
-        val then_result = self.lower_block(then_)
+        val then_result = self.lower_block_expected(then_, expected_type)
         var b3 = self.builder
         var result_defined = false
         if not b3.current_block_has_explicit_terminator():
@@ -1186,7 +1222,7 @@ impl MirLowering:
         b4.switch_to_block(else_block)
         self.builder = b4
         if val else_block_value = else_:
-            val else_result = self.lower_block(else_block_value)
+            val else_result = self.lower_block_expected(else_block_value, expected_type)
             var b5 = self.builder
             if not b5.current_block_has_explicit_terminator():
                 if val else_local = else_result:
@@ -1210,6 +1246,15 @@ impl MirLowering:
         if not result_defined:
             b6.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b6
+
+        if val found_expected = expected_type:
+            match found_expected.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.runtime_value_locals[result.id] = true
+                    self.local_hir_types[result.id] = found_expected
+                case _:
+                    ()
 
         result
 

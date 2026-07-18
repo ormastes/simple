@@ -252,6 +252,16 @@ int main(void) {
     assert(rt_tuple_set(tuple, 8, rt_value_int(88)));
     assert(rt_tuple_get(tuple, 8) == rt_value_int(88));
     assert(rt_is_none(rt_value_nil()));
+    assert(!rt_is_none(0));
+    assert(rt_is_some(0));
+    int64_t option_none = rt_enum_new(1, 1, rt_value_nil());
+    int64_t option_some_zero = rt_enum_new(1, 0, 0);
+    int64_t other_none_ordinal = rt_enum_new(7, 1, rt_value_nil());
+    assert(rt_is_none(option_none));
+    assert(!rt_is_some(option_none));
+    assert(!rt_is_none(option_some_zero));
+    assert(rt_is_some(option_some_zero));
+    assert(!rt_is_none(other_none_ordinal));
     assert(!rt_is_some(rt_value_nil()));
     assert(rt_math_pow(2.0, 3.0) == 8.0);
     uint64_t mmio = 0;

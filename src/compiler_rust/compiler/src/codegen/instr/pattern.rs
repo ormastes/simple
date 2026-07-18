@@ -76,8 +76,15 @@ pub(crate) fn compile_pattern_test<M: Module>(
             // rt_enum_discriminant extracts the discriminant.
             let disc = call_runtime_1(ctx, builder, "rt_enum_discriminant", subject_val);
 
-            // All enums use hashed variant name discriminants consistently
-            let expected_disc = calculate_variant_discriminant(variant_name) as i64;
+            let expected_disc = if enum_name == "Option" {
+                if variant_name == "Some" {
+                    0
+                } else {
+                    1
+                }
+            } else {
+                calculate_variant_discriminant(variant_name) as i64
+            };
             let expected_val = builder.ins().iconst(types::I64, expected_disc);
             builder
                 .ins()

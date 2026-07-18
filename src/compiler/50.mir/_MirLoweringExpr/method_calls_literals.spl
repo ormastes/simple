@@ -363,6 +363,16 @@ impl MirLowering:
         self.builder = b_text
         text_res ?? value_local
 
+    me option_payload_or_self(value_local: LocalId) -> LocalId:
+        val unwrap_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_unwrap_or_self"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val result = b.emit_call(unwrap_op, [mir_operand_copy(value_local)], MirType.i64())
+        self.builder = b
+        result ?? value_local
+
     me option_bool_value(value_local: LocalId) -> LocalId:
         """Decode an `Option<bool>` receiver back to a genuine i1.
 
@@ -545,6 +555,7 @@ impl MirLowering:
             val receiver_local = self.lower_expr(receiver)
             var unwrap_result_type = MirType.i64()
             var unwrap_is_text = false
+            var unwrap_is_bool = false
             val inner_type_uw = self.option_inner_hir_type_for_local(receiver, receiver_local)
             if inner_type_uw != nil:
                 val found_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
@@ -552,6 +563,9 @@ impl MirLowering:
                     case HirTypeKind.Str:
                         unwrap_result_type = self.bootstrap_text_type()
                         unwrap_is_text = true
+                    case HirTypeKind.Bool:
+                        unwrap_result_type = MirType.bool()
+                        unwrap_is_bool = true
                     case _: unwrap_result_type = self.lower_type(found_inner_uw)
             elif self.local_is_str(receiver_local):
                 unwrap_result_type = self.bootstrap_text_type()
@@ -583,11 +597,13 @@ impl MirLowering:
             var b_some_uw = self.builder
             b_some_uw.switch_to_block(some_block_uw)
             self.builder = b_some_uw
-            var some_val_uw = receiver_local
+            var some_val_uw = self.option_payload_or_self(receiver_local)
             if unwrap_is_text:
-                some_val_uw = self.option_text_value(receiver_local, unwrap_result_type)
-            elif self.runtime_value_locals.has(receiver_local.id):
+                some_val_uw = self.option_text_value(some_val_uw, unwrap_result_type)
+            elif self.runtime_value_locals.has(receiver_local.id) and not self.option_value_locals.has(receiver_local.id):
                 some_val_uw = self.decode_runtime_value(receiver_local, unwrap_result_type)
+            elif unwrap_is_bool:
+                some_val_uw = self.option_bool_value(some_val_uw)
             b_some_uw = self.builder
             b_some_uw.emit_copy(result_local_uw, some_val_uw)
             b_some_uw.terminate_goto(merge_block_uw)
@@ -673,10 +689,10 @@ impl MirLowering:
             match uo_result_type.kind:
                 case MirTypeKind.Bool: uo_is_bool = true
                 case _: ()
-            var some_val_uo = receiver_local
+            var some_val_uo = self.option_payload_or_self(receiver_local)
             if uo_is_text:
-                some_val_uo = self.option_text_value(receiver_local, uo_result_type)
-            elif self.runtime_value_locals.has(receiver_local.id):
+                some_val_uo = self.option_text_value(some_val_uo, uo_result_type)
+            elif self.runtime_value_locals.has(receiver_local.id) and not self.option_value_locals.has(receiver_local.id):
                 some_val_uo = self.decode_runtime_value(receiver_local, uo_result_type)
             elif uo_is_bool:
                 # Bare `some_bool.unwrap_or(default)` (no `.map()` in
@@ -685,7 +701,7 @@ impl MirLowering:
                 # yet routed through box_runtime_value/decode_runtime_value's
                 # tagged-Bool scheme (that only applies to a `.map()` result).
                 # Decode the same way.
-                some_val_uo = self.option_bool_value(receiver_local)
+                some_val_uo = self.option_bool_value(some_val_uo)
             b_some_uo = self.builder
             b_some_uo.emit_copy(result_local_uo, some_val_uo)
             b_some_uo.terminate_goto(merge_block_uo)
@@ -774,12 +790,12 @@ impl MirLowering:
                         var b_some_map = self.builder
                         b_some_map.switch_to_block(some_block_map)
                         self.builder = b_some_map
-                        var some_val_map = receiver_local
+                        var some_val_map = self.option_payload_or_self(receiver_local)
                         var map_inner_is_bool = false
                         match map_inner_type.kind:
                             case MirTypeKind.Bool: map_inner_is_bool = true
                             case _: ()
-                        if self.runtime_value_locals.has(receiver_local.id):
+                        if self.runtime_value_locals.has(receiver_local.id) and not self.option_value_locals.has(receiver_local.id):
                             some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
                         elif map_inner_is_bool:
                             # `Option<bool>` receiver: see option_bool_value's
@@ -789,17 +805,22 @@ impl MirLowering:
                             # it straight to the lambda's `x: bool` parameter
                             # would feed a `ptr` value into `not x` / any bool
                             # op. Decode explicitly.
-                            some_val_map = self.option_bool_value(receiver_local)
+                            some_val_map = self.option_bool_value(some_val_map)
                         val map_call_local = self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])
                         val map_value_type = self.option_map_value_hir_type(map_call_local, map_body.span)
                         var map_call_tagged = map_call_local
+                        var mapped_option_type = HirType(kind: HirTypeKind.Optional(
+                            HirType(kind: HirTypeKind.Error, span: map_body.span)
+                        ), span: map_body.span)
                         if map_value_type == nil:
                             self.error("unsupported Option.map result type", Some(map_body.span))
                             var b_bad_map = self.builder
                             map_call_tagged = b_bad_map.emit_const_int(3)
                             self.builder = b_bad_map
                         else:
-                            map_call_tagged = self.box_runtime_value(map_call_local)
+                            val mapped_inner = map_value_type ?? HirType(kind: HirTypeKind.Error, span: map_body.span)
+                            mapped_option_type = HirType(kind: HirTypeKind.Optional(mapped_inner), span: map_body.span)
+                            map_call_tagged = self.ensure_option_handle(map_call_local, mapped_option_type)
                         var b_some_map2 = self.builder
                         b_some_map2.emit_copy(result_local_map, map_call_tagged)
                         b_some_map2.terminate_goto(merge_block_map)
@@ -808,7 +829,12 @@ impl MirLowering:
                         var b_none_map = self.builder
                         b_none_map.switch_to_block(none_block_map)
                         self.builder = b_none_map
-                        b_none_map.emit_const(result_local_map, MirConstValue.Int(3), MirType.i64())
+                        val map_none = b_none_map.emit_const_int(3)
+                        self.builder = b_none_map
+                        self.nil_locals[map_none.id] = true
+                        val map_none_tagged = self.ensure_option_handle(map_none, mapped_option_type)
+                        b_none_map = self.builder
+                        b_none_map.emit_copy(result_local_map, map_none_tagged)
                         b_none_map.terminate_goto(merge_block_map)
                         self.builder = b_none_map
 
@@ -816,11 +842,8 @@ impl MirLowering:
                         b_merge_map.switch_to_block(merge_block_map)
                         self.builder = b_merge_map
                         self.runtime_value_locals[result_local_map.id] = true
-                        if val found_map_value_type = map_value_type:
-                            self.local_hir_types[result_local_map.id] = HirType(
-                                kind: HirTypeKind.Optional(found_map_value_type),
-                                span: receiver.span
-                            )
+                        self.option_value_locals[result_local_map.id] = true
+                        self.local_hir_types[result_local_map.id] = mapped_option_type
                         return result_local_map
                     case _: ()
 
