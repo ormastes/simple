@@ -56,6 +56,48 @@ below):
    `[u8]` (including the originally-reported `llvm_backend_tools.spl`)
    needed no consumer-side change at all: they already assumed a bare
    array, which is now what they get.
+
+   **Follow-up audit gate** (advisor-prompted, before declaring the fix
+   complete): a broader tree-wide grep for *any* remaining
+   `Some(`/`case Some(` match on `rt_file_read_bytes(...)` or its
+   `rt_file_read_bytes(args)`-forwarding alias `rt_file_mmap_read_bytes`
+   (not just the files that literally declare the extern nearby — the
+   original audit only checked declaration sites) turned up **two more**
+   genuinely-affected consumers, both under `src/os/port/`, both declaring
+   the extern (incorrectly) as **non-optional** `[u8]` yet pattern-matching
+   `case Some(bytes)/case None` on it anyway — the inverse inconsistency
+   from `llvm_backend_tools.spl` (there: non-optional declaration + direct
+   use; here: non-optional declaration + Option-style match, which only
+   ever "worked" because the runtime shape used to actually be
+   Option-wrapped regardless of the declared type):
+   - `src/os/port/host_fat32_tree_populator.spl` (`_read_host_bytes`):
+     rewritten to `rt_file_exists(path)` pre-check (added, mirroring the
+     sibling file's existing pattern) + `rt_file_read_bytes(path) ?? []`,
+     preserving the original error message on a missing file.
+   - `src/os/port/cached_raw_image_block_device.spl`
+     (`load_with_sector_size`): already had an `rt_file_exists` pre-check
+     immediately above the match; simplified to `rt_file_read_bytes(...) ??
+     []` directly (the pre-check already covers the missing-file error
+     path; the removed `case None` branch was only reachable on a rare
+     exists-but-unreadable race, previously silently defaulting is an
+     acceptable, minor behavior narrowing there).
+   Both files' `extern fn rt_file_read_bytes` declarations were also
+   corrected from `-> [u8]` to `-> [u8]?` to match what they actually do
+   (match/coalesce on a possibly-missing value) — matching the
+   `?? []`-consuming, `[u8]?`-declaring shape already proven native-safe by
+   `mcp_tools_helpers.spl`/`launch_meta_check.spl`. Re-grepped after these
+   two fixes: no further `Some(`/`case Some(` matches remain anywhere in
+   the tree against `rt_file_read_bytes`/`rt_file_mmap_read_bytes` (only 2
+   docstring mentions of the old behavior, one of which — in
+   `sfm/container.spl`'s header comment — was also updated to describe the
+   corrected contract). `simple lint` on both newly-touched files reproduces
+   one **pre-existing, unrelated** error (`method 'get' not found on type
+   'str' (receiver value: CachedRawImageBlockDevice(Adapter))`) —
+   independently confirmed present on the untouched original file content
+   too (compared via `git show HEAD:<path>` into a scratch copy, never via
+   `git stash` — see the stale-`LANE_HEAD` incident below for why stash is
+   avoided entirely in this investigation), so it is not attributable to
+   this fix.
 3. **Not changed, flagged for awareness:** `rt_file_read_lines`
    (`file_io.rs`, two functions above `rt_file_read_bytes`) still returns
    `make_some(...)`/`make_none()` — the same Option-wrapping this fix
