@@ -199,6 +199,33 @@ pub fn bytes_to_u32_le_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result as i64))
 }
 
+/// Get element `index` from a tuple (or array), returning the element `Value`.
+///
+/// Callable from Simple as: `rt_tuple_get(tuple, index)`. The `.spl` extern
+/// declares i64 params/return (SFFI handle convention), but the interpreter
+/// passes the real `Value::Tuple` and returns the element `Value` directly.
+/// This is registered on the native codegen side (codegen/instr/pattern.rs,
+/// common_backend.rs, methods.rs) but was missing here, so every `native-build`
+/// failed with "unknown extern function: rt_tuple_get" — native-build interprets
+/// the compiler, whose HIR lowering (20.hir/hir_lowering/statements.spl) calls it.
+pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let items: &[Value] = match args.first() {
+        Some(Value::Tuple(arr)) => arr,
+        Some(Value::LabeledTuple { values, .. }) => values,
+        Some(Value::Array(arr)) => arr.as_ref(),
+        Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        _ => return Ok(Value::Nil),
+    };
+    let idx = match args.get(1) {
+        Some(Value::Int(i)) => *i,
+        _ => return Ok(Value::Nil),
+    };
+    if idx < 0 || idx as usize >= items.len() {
+        return Ok(Value::Nil);
+    }
+    Ok(items[idx as usize].clone())
+}
+
 /// Assemble a [u8] array into a u32 (big-endian).
 ///
 /// Callable from Simple as: `bytes_to_u32_be(bytes)`
