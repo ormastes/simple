@@ -123,6 +123,11 @@ for candidate_dir in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/lib
     fi
 done
 [ -n "$OBJCOPY_PREFIX" ] || fail_blocker "llvm-objcopy-not-found"
+command -v grub-mkstandalone >/dev/null 2>&1 || fail_blocker "grub-mkstandalone-not-on-PATH"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+[ -f "$OVMF_CODE" ] || fail_blocker "OVMF_CODE-not-found:$OVMF_CODE"
+[ -f "$OVMF_VARS_SRC" ] || fail_blocker "OVMF_VARS-not-found:$OVMF_VARS_SRC"
 
 mkdir -p build/os
 
@@ -162,15 +167,51 @@ SPL
 fi
 echo "kernel: $KERNEL_OUTPUT ($(wc -c <"$KERNEL_OUTPUT") bytes)"
 
-# --- 2. Boot under QEMU with QMP ---------------------------------------------
+# --- 2. Package the kernel as a self-contained UEFI boot app (OVMF pflash) --
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path semantics. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84): grub-mkstandalone builds a
+# self-contained BOOTX64.EFI with the multiboot1 kernel + grub.cfg embedded in
+# an in-memory memdisk, so OVMF -> GRUB -> multiboot -> kernel _start runs the
+# full real-firmware handoff instead of QEMU's kernel-injection shortcut.
+UEFI_BUILD="build/os/wm_x86_64_uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM render-event (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_OUTPUT"
+[ -f "$EFIAPP" ] || fail_blocker "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+
+# --- 3. Boot under REAL UEFI firmware (OVMF pflash) with QMP -----------------
 rm -f "$QMP_SOCKET" "$SERIAL_LOG" "$SERIAL_CLEAN" "$QEMU_STDERR" "$PPM_OUT" "$PPM_OUT.raw"
 qemu-system-x86_64 \
     -no-user-config -monitor none -net none \
     -machine q35 -cpu qemu64 -m 2G \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
     -serial "file:$SERIAL_LOG" \
     -display none \
     -no-reboot \
-    -kernel "$KERNEL_OUTPUT" \
     -vga std \
     -qmp "unix:$QMP_SOCKET,server,nowait" \
     2>"$QEMU_STDERR" &
@@ -185,6 +226,13 @@ while [ "$waited" -le 15000 ]; do
 done
 [ -S "$QMP_SOCKET" ] || { tail -5 "$QEMU_STDERR" 2>/dev/null; fail_blocker "qmp-socket-missing"; }
 kill -0 "$QEMU_PID" 2>/dev/null || { tail -5 "$QEMU_STDERR" 2>/dev/null; fail_blocker "qemu-exited-early"; }
+
+# --- Migration-correctness ladder (isolates OVMF boot-path success from
+# kernel render correctness, which is tracked separately) ---
+rung() { grep -qa "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
 
 # --- 3. RENDER GATE: ready marker -> QMP capture -> anchor validation -------
 if ! wait_serial_marker "$READY_MARKER" "$READY_TIMEOUT_MS"; then

@@ -6,6 +6,8 @@ QEMU_BIN="${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}"
 QEMU_TIMEOUT="${X86_64_WM_QEMU_READINESS_TIMEOUT:-3}"
 # Bounded wait (seconds) for the real boot-verification step below.
 BOOT_WAIT="${X86_64_WM_QEMU_BOOT_WAIT:-60}"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 # Earliest reliable serial marker emitted by gui_entry_desktop.spl's own entry point
 # (the very first statement of fn spl_start()) — see report_gap below for why
 # this one was picked over the generic "[boot] memory init OK" marker other
@@ -49,6 +51,9 @@ elif [ ! -f "$GUIDE" ]; then
 elif ! qemu_path="$(command -v "$QEMU_BIN" 2>/dev/null)"; then
     status="not-ready"
     reason="qemu-system-x86_64 not found"
+elif ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    status="not-ready"
+    reason="grub-mkstandalone not found"
 else
     if "$QEMU_BIN" -machine help 2>/dev/null | grep -Eq '(^|[[:space:]])q35([[:space:],]|$)'; then
         machine_q35="true"
@@ -97,14 +102,51 @@ if [ "$status" = "ready" ]; then
     if [ -z "$KERNEL_ELF" ] || [ ! -f "$KERNEL_ELF" ]; then
         status="skip"
         boot_skipped_reason="SIMPLEOS_KERNEL_ELF not set or file missing (arg-parse pre-check passed, but no kernel was booted)"
+    elif [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS_SRC" ]; then
+        status="not-ready"
+        reason="OVMF firmware not found ($OVMF_CODE / $OVMF_VARS_SRC)"
     else
         SERIAL_LOG="${ROOT_DIR}/build/os/check_simpleos_x86_64_wm_qemu_readiness.serial.log"
+        UEFI_BUILD="${ROOT_DIR}/build/os/wm_qemu_readiness_uefi"
+        ESP="$UEFI_BUILD/esp"
+        EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+        OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
         mkdir -p "$(dirname "$SERIAL_LOG")"
         rm -f "$SERIAL_LOG"
+        rm -rf "$UEFI_BUILD"
+        mkdir -p "$ESP/EFI/BOOT"
+        cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+        cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM qemu-readiness (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+        set +e
+        grub-mkstandalone \
+            --format=x86_64-efi \
+            --output="$EFIAPP" \
+            --modules="multiboot normal echo part_gpt fat" \
+            "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+            "boot/kernel.elf=$KERNEL_ELF"
+        grub_mkstandalone_code=$?
+        set -e
+        if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+            status="not-ready"
+            reason="grub-mkstandalone did not produce BOOTX64.EFI"
+        else
         "$QEMU_BIN" -no-user-config -monitor none -nographic -no-reboot \
             -machine q35 -cpu "$cpu" -accel "$accelerator" -m 512M \
-            -kernel "$KERNEL_ELF" -serial "file:$SERIAL_LOG" \
-            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+            -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+            -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+            -device virtio-blk-pci,drive=esp,bootindex=0 \
+            -serial "file:$SERIAL_LOG" \
             -vga std &
         QEMU_PID=$!
 
@@ -137,7 +179,15 @@ if [ "$status" = "ready" ]; then
             tail -60 "$SERIAL_LOG" 2>/dev/null || true
             echo "======================="
         fi
+        fi
     fi
+fi
+
+grub_efi_ran="false"
+kernel_start_reached="false"
+if [ -n "${SERIAL_LOG:-}" ] && [ -f "$SERIAL_LOG" ]; then
+    grep -qa "\[grub-uefi\] multiboot loading" "$SERIAL_LOG" 2>/dev/null && grub_efi_ran="true"
+    grep -qa "\[BOOT64\] call _start" "$SERIAL_LOG" 2>/dev/null && kernel_start_reached="true"
 fi
 
 echo "x86_64_wm_qemu_readiness: $status"
@@ -147,6 +197,8 @@ echo "machine_q35: $machine_q35"
 echo "vga_std: $vga_std"
 echo "dry_run_parse: $dry_run_parse"
 echo "boot_verified: $boot_verified"
+echo "grub_efi_ran: $grub_efi_ran"
+echo "kernel_start_reached: $kernel_start_reached"
 if [ -n "$boot_skipped_reason" ]; then
     echo "boot_verification_skipped: $boot_skipped_reason"
 fi

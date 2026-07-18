@@ -264,6 +264,21 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    emit_failure "grub-mkstandalone-not-found"
+    exit 1
+fi
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+if [ ! -f "$OVMF_CODE" ]; then
+    emit_failure "ovmf-code-not-found:$OVMF_CODE"
+    exit 1
+fi
+if [ ! -f "$OVMF_VARS_SRC" ]; then
+    emit_failure "ovmf-vars-not-found:$OVMF_VARS_SRC"
+    exit 1
+fi
+
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-$BUILD_DIR/simpleos_wm_production_desktop.elf}"
@@ -366,6 +381,42 @@ if ! is_sha256 "$DISK_IMAGE_SHA256"; then
     exit 1
 fi
 
+# --- Package the kernel as a self-contained UEFI boot app (OVMF pflash) -----
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path semantics. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84).
+UEFI_BUILD="$BUILD_DIR/uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM fullscreen (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+set +e
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_OUTPUT"
+grub_mkstandalone_code=$?
+set -e
+if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+    emit_failure "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+    exit 1
+fi
+
 # Launch QEMU directly with the exact wm-simple-web QMP-capture flags used by
 # os.qemu_runner._wm_simple_web_qmp_capture_target(): q35/max/2G, serial
 # routed to a file, no display, BGA std VGA, QMP over a unix socket.
@@ -378,7 +429,10 @@ qemu-system-x86_64 \
     -serial "file:$SERIAL_LOG" \
     -display none \
     -no-reboot \
-    -kernel "$KERNEL_OUTPUT" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
     -vga std -global VGA.vgamem_mb=64 \
     -drive "file=$DISK_IMAGE,if=none,id=nvm,format=raw,snapshot=on" \
     -device "nvme,serial=deadbeef,drive=nvm" \
@@ -434,6 +488,13 @@ if [ ! -S "$QMP_SOCKET" ]; then
 elif ! kill -0 "$QEMU_PID" 2>/dev/null; then
     reason="qemu-exited-early"
 else
+    # --- Migration-correctness ladder (isolates OVMF boot-path success from
+    # kernel render correctness, which is tracked separately) ---
+    rung() { grep -qa "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+    echo "===== UEFI boot ladder ====="
+    rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+    rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
+
     # The guest marker is the only source of scanout metadata. No BGA address,
     # dimensions, pitch, format, or generation defaults are accepted here.
     waited=0

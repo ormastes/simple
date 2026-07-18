@@ -295,6 +295,17 @@ fi
 if ! command -v python3 >/dev/null 2>&1; then
     fail_now "python3-missing"
 fi
+if ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    fail_now "grub-mkstandalone-not-found"
+fi
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+if [ ! -f "$OVMF_CODE" ]; then
+    fail_now "ovmf-code-not-found"
+fi
+if [ ! -f "$OVMF_VARS_SRC" ]; then
+    fail_now "ovmf-vars-not-found"
+fi
 
 display_supported() {
     grep -Eq "(^|[[:space:]])$1([[:space:],]|$)" "$DISPLAY_HELP"
@@ -423,7 +434,43 @@ else
     build_reason=existing-kernel
 fi
 
-qemu_command="$QEMU_BIN -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:$SERIAL_LOG -display $display_backend -no-reboot -kernel $KERNEL_PATH -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04 -qmp unix:$QMP_SOCKET,server,nowait"
+# --- Package the kernel as a self-contained UEFI boot app (OVMF pflash) -----
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path AND `isa-debug-exit`. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84). isa-debug-exit is dropped
+# entirely below (grep confirms this script never reads its exit code).
+UEFI_BUILD="$BUILD_DIR/uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM visible-display (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+set +e
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_PATH"
+grub_mkstandalone_code=$?
+set -e
+if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+    fail_now "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+fi
+
+qemu_command="$QEMU_BIN -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:$SERIAL_LOG -display $display_backend -no-reboot -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$OVMF_VARS -drive file=fat:rw:$ESP,format=raw,id=esp,if=none -device virtio-blk-pci,drive=esp,bootindex=0 -vga std -qmp unix:$QMP_SOCKET,server,nowait"
 set +e
 "$QEMU_BIN" \
     -no-user-config \
@@ -435,9 +482,11 @@ set +e
     -serial "file:$SERIAL_LOG" \
     -display "$display_backend" \
     -no-reboot \
-    -kernel "$KERNEL_PATH" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
     -vga std \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -qmp "unix:$QMP_SOCKET,server,nowait" >"$QEMU_STDOUT_LOG" 2>"$QEMU_STDERR_LOG" &
 QEMU_PID=$!
 set -e
@@ -459,6 +508,13 @@ if [ ! -S "$QMP_SOCKET" ]; then
     qemu_launch_reason=qmp-socket-timeout
     fail_now "qmp-socket-timeout"
 fi
+
+# --- Migration-correctness ladder (isolates OVMF boot-path success from
+# kernel render correctness, which is tracked separately) ---
+rung() { grep -aq "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
 
 waited=0
 while [ "$waited" -le "$MARKER_TIMEOUT_SECS" ]; do
