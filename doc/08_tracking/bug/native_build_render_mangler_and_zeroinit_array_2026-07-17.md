@@ -98,8 +98,33 @@ on 3 giant files (simple_web_html_layout_renderer.spl, backend_vulkan_font_spirv
 --timeout 300. Fix the self-hosted compiler's big-literal compile perf or split
 the blobs; do not lower the timeout until then.
 
-REMAINING for harness PASS: `guest-pinned-font-evidence-unavailable` — the guest
-cannot load the pinned NotoSansMono TTF from the FAT32/NVMe disk (vfs boot-init
-degrades pure-nvme io → font_renderer never gets selected bytes → taskbar-clock
-renders as non-glyph). The RENDER path is fully proven; this is the FONT-LOAD
-(storage io) path.
+REMAINING for harness PASS: `guest-pinned-font-evidence-unavailable`. The outer
+desktop `vfs_is_ready()` gate was removed because `g_vfs_read_file_bytes`
+intentionally tries its safe scalar FAT reader before the hosted-mount gate.
+Retained run3 then read the exact `NOTOSANS` chain (clusters 15951..16368) and
+reported `bytes=1708408 selected=1 valid=0 reason=sha256`. The retained disk
+entry, extracted bytes, size, and SHA-256 are correct, so storage routing and
+FAT traversal are now proven. The remaining blocker is the pure-Simple
+freestanding `sha256_u8_hex` result or its native byte-array lowering; repair
+that without weakening the pinned digest check, then recapture the taskbar
+clock oracle. Evidence: `build/simpleos_wm_font_oracle_run3/serial.log` and
+`build/simpleos_wm_font_oracle_run3/report.md`.
+
+A first allocation-constant rewrite was deliberately rejected before QEMU.
+It extracted a caller-buffer `sha256_process_block_into` helper, but the
+pure-Simple Stage2/core-C native probe returned exit 10 for the empty canonical
+vector even when the helper returned and the caller reassigned its output.
+The source rewrite was reverted. Retained focused source and binary are
+`test/01_unit/lib/common/crypto/sha256_u8_large_native.spl` and
+`build/native_probe/sha256-u8-large-native`. The next safe implementation must
+keep reusable SHA state inside one function/object whose mutation is native
+proven, or first repair cross-function mutable-list output lowering; do not
+restore the rejected helper or substitute the C/TLS hash.
+
+The replacement keeps block/schedule mutation and scalar digest state entirely
+inside `sha256_u8_hex`. Its pure-Simple Stage2/core-C native probe now passes
+empty, `abc`, 65,592 bytes, and an exact 1,708,408-byte deterministic payload.
+Run4 advances beyond SHA into SFNT name parsing, where repeated
+`unresolved fn: i64.chr` warnings identify the next blocker. That downstream
+text-lowering bug is tracked in
+`doc/08_tracking/bug/simpleos_sfnt_utf16_chr_native_lowering_2026-07-17.md`.

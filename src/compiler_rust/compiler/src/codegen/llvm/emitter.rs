@@ -1348,7 +1348,32 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
         if matches!(method, "chr" | "to_char") {
             let recv = self.get(receiver)?;
-            let result = self.call_runtime("char_from_code", &[recv])?;
+            let code_type = self.backend.context_ref().i64_type();
+            let recv = match recv {
+                BasicValueEnum::IntValue(value) if value.get_type() == code_type => value,
+                BasicValueEnum::IntValue(value) if value.get_type().get_bit_width() < 64 => self
+                    .builder
+                    .build_int_z_extend(value, code_type, "chr_code_zext")
+                    .map_err(|e| format!("LLVM chr code extension failed: {}", e))?,
+                BasicValueEnum::IntValue(value) => self
+                    .builder
+                    .build_int_truncate(value, code_type, "chr_code_trunc")
+                    .map_err(|e| format!("LLVM chr code truncation failed: {}", e))?,
+                _ => return Err("unsupported receiver kind for chr method".to_string()),
+            };
+            let rv_type = self.backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[code_type.into()], false);
+            let function = self
+                .module
+                .get_function("text_dot_from_char_code")
+                .unwrap_or_else(|| self.module.add_function("text_dot_from_char_code", fn_type, None));
+            let result = self
+                .builder
+                .build_call(function, &[recv.into()], "text_dot_from_char_code")
+                .map_err(|e| format!("LLVM text_dot_from_char_code call failed: {}", e))?
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| "text_dot_from_char_code did not return a value".to_string())?;
             if let Some(d) = dest {
                 self.set(*d, result);
             }

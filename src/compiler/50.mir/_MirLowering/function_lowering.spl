@@ -363,6 +363,15 @@ impl MirLowering:
 
     me lower_const(const_: HirConst):
         """Lower HIR constant to MIR static."""
+        # Register every module binding before scalar constant folding. The
+        # global read/write hooks consume this set for ordinary `var`/`val`
+        # access, and function-valued globals are intentionally non-scalar:
+        # calls through those mutable slots must lower as LoadGlobal +
+        # CallIndirect instead of a direct call to the data symbol.
+        val sym_id = const_.symbol.id
+        if sym_id >= 0:
+            self.global_symbol_ids[sym_id] = true
+
         val value = self.lower_const_expr(const_.value)
         if val const_value = value:
             val const_type = self.lower_type(const_.type_)
@@ -380,27 +389,6 @@ impl MirLowering:
             module.constants = constants
             bldr.module = module
             self.builder = bldr
-
-            # mutglobal2 lane (module-level `var`/`val` mutation end-to-end,
-            # see scratchpad/mutglobal_plan.md + scratchpad/mutglobal2
-            # report): register this module-level binding's symbol id in an
-            # i64-keyed bool set so expr_dispatch.spl's NamedVar/Var read
-            # hook and mir_lowering_stmts.spl's lower_assign_var write hook
-            # can recognize "this identifier is a module global" instead of
-            # erroring "undefined variable" the moment it's referenced from
-            # any function body (neither `self.local_map` nor anything else
-            # downstream of parsing previously carried this information).
-            # Covers `var` AND `val` alike -- the read hook distinguishes
-            # mutable-vs-immutable itself by checking `module.statics`
-            # (mutable-only) first, falling back to `module.constants`
-            # (populated for both, just above) for the immutable case. This
-            # runs once per module-level binding, before this lane, and
-            # `mir_lowering.spl`'s `lower_module` now runs this loop BEFORE
-            # any function body is lowered (see the reordering in
-            # module_lowering.spl), so every function body sees the full set.
-            val sym_id = const_.symbol.id
-            if sym_id >= 0:
-                self.global_symbol_ids[sym_id] = true
 
     me lower_type(type_: HirType) -> MirType:
         """Lower HIR type to MIR type."""

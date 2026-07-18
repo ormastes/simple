@@ -969,7 +969,34 @@ fn apply_bootstrap_rewrite_for_target(source: &str, preserve_module_global_optio
                     j += 1;
                 }
             }
-            if j < bytes.len() && bytes[j] == b':' {
+            let line_start = s[..i].rfind('\n').map_or(0, |pos| pos + 1);
+            let line_end = s[j..].find('\n').map_or(s.len(), |offset| j + offset);
+            let declaration_prefix = &s[line_start..i];
+            let initializer = s[j..line_end]
+                .trim_start()
+                .strip_prefix('=')
+                .map(str::trim)
+                .and_then(|value| value.split('#').next())
+                .map(str::trim);
+            let is_module_global_fn_slot = bytes[i] == b':'
+                && !declaration_prefix.chars().next().is_some_and(char::is_whitespace)
+                && ["var ", "val ", "static ", "const "]
+                    .iter()
+                    .any(|keyword| declaration_prefix.starts_with(keyword))
+                && initializer.is_some_and(|value| {
+                    !value.is_empty()
+                        && value
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':'))
+                });
+            if is_module_global_fn_slot {
+                // Native-project bootstrap builds must retain the function
+                // type of module-global callback slots. HIR uses that type to
+                // classify calls through the slot as GlobalLoad +
+                // IndirectCall; rewriting it to `any` makes codegen attempt a
+                // direct call to the data export instead.
+                result.push_str(&s[fn_start..j]);
+            } else if j < bytes.len() && bytes[j] == b':' {
                 // `fn(...)` directly followed by `:` is a lambda EXPRESSION
                 // (`run_fn: fn(m): body`, `val f = fn(m): body`), not a
                 // function-type annotation. Preserve its parameter list —
@@ -1113,6 +1140,42 @@ mod bootstrap_rewrite_tests {
         let src = "struct P:\n    run_fn: fn(Module) -> any\n    done: bool\n";
         let out = apply_bootstrap_rewrite(src);
         assert!(out.contains("run_fn: any\n"), "got: {out}");
+    }
+
+    #[test]
+    fn module_global_function_slot_keeps_type_for_indirect_call_lowering() {
+        let src = "fn default_cleanup():\n    ()\n\nvar cleanup: fn() = default_cleanup\nfn run():\n    cleanup()\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(out.contains("var cleanup: fn() = default_cleanup\n"), "got: {out}");
+        let mut parser = simple_parser::Parser::new(&out);
+        let ast = parser.parse().expect("rewritten source should parse");
+        let hir = crate::hir::lower(&ast).expect("rewritten source should lower to HIR");
+        assert_eq!(
+            hir.global_init_functions.get("cleanup").map(String::as_str),
+            Some("default_cleanup")
+        );
+        let mir = crate::mir::lower_to_mir(&hir).expect("rewritten source should lower to MIR");
+        let instructions = mir
+            .functions
+            .iter()
+            .flat_map(|function| function.blocks.iter().flat_map(|block| block.instructions.iter()));
+        let instructions: Vec<_> = instructions.collect();
+        assert!(instructions.iter().any(
+            |inst| matches!(inst, crate::mir::MirInst::GlobalLoad { global_name, .. } if global_name == "cleanup")
+        ));
+        assert!(instructions
+            .iter()
+            .any(|inst| matches!(inst, crate::mir::MirInst::IndirectCall { .. })));
+        assert!(!instructions
+            .iter()
+            .any(|inst| matches!(inst, crate::mir::MirInst::Call { target, .. } if target.name() == "cleanup")));
+    }
+
+    #[test]
+    fn module_global_lambda_slot_still_becomes_any() {
+        let src = "var cleanup: fn() = fn(): pass\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(out.contains("var cleanup: any = fn(): pass\n"), "got: {out}");
     }
 
     /// Regression for 610b4572a32: a `?` immediately preceded by `)` is

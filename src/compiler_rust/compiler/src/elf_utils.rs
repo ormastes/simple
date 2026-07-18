@@ -549,6 +549,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 
         // String operations
         "rt_string_new" => simple_runtime::rt_string_new as *const () as usize,
+        "text_dot_from_char_code" => simple_runtime::text_dot_from_char_code as *const () as usize,
         "rt_string_concat" => simple_runtime::rt_string_concat as *const () as usize,
         "rt_any_add" => simple_runtime::rt_any_add as *const () as usize,
         "rt_string_builder_new" => simple_runtime::rt_string_builder_new as *const () as usize,
@@ -890,5 +891,10 @@ mod tests {
     #[test]
     fn resolves_cranelift_emit_object_raw() {
         assert!(resolve_runtime_symbol("rt_cranelift_emit_object_raw").unwrap_or(0) != 0);
+    }
+
+    #[test]
+    fn resolves_text_from_char_code() {
+        assert!(resolve_runtime_symbol("text_dot_from_char_code").unwrap_or(0) != 0);
     }
 }

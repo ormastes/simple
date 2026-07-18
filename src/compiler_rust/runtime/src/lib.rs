@@ -93,6 +93,10 @@ static SIMPLE_KEEP_RT_DYN_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i
 static SIMPLE_KEEP_RT_PS_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
     rt_ps_torch_tensor_from_bits_1d;
 
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_TEXT_DOT_FROM_CHAR_CODE: extern "C" fn(i64) -> RuntimeValue = value::text_dot_from_char_code;
+
 #[allow(clashing_extern_declarations)]
 unsafe extern "C" {
     pub fn rt_pool_submit(entry: extern "C" fn(i64) -> i64, closure_ptr: i64) -> i64;
@@ -605,6 +609,7 @@ pub use value::{
     rt_string_eq,
     rt_string_len,
     rt_string_new,
+    text_dot_from_char_code,
     // Tuple operations
     rt_tuple_get,
     rt_tuple_len,

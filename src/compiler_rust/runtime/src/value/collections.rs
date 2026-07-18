@@ -1811,6 +1811,9 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
 /// Compiled symbol for `text.from_char_code(code)`.
 #[no_mangle]
 pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
+    if !(0..=0x10FFFF).contains(&code) {
+        return RuntimeValue::NIL;
+    }
     let Some(ch) = char::from_u32(code as u32) else {
         return RuntimeValue::NIL;
     };

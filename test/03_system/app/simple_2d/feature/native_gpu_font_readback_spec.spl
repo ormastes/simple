@@ -84,6 +84,7 @@ class Engine3DFontReadbackEvidence:
     readback_matches_evidence: bool
     nonblank_pixels: bool
     cpu_oracle_parity: bool
+    translucent_destination_parity: bool
 
 class SimpleOsFontPixelEvidence:
     status: text
@@ -114,7 +115,7 @@ fn _engine3d_unavailable(reason: text) -> Engine3DFontReadbackEvidence:
         fence_waited: false, fence_destroyed: false, readback_source: "none",
         color_image_handle: 0, readback_bytes: 0,
         readback_matches_evidence: false, nonblank_pixels: false,
-        cpu_oracle_parity: false)
+        cpu_oracle_parity: false, translucent_destination_parity: false)
 
 fn expect_engine2d_font_readback(evidence: Engine2DFontReadbackEvidence) -> bool:
     evidence.status == "pass" and evidence.device_identity > 0 and
@@ -142,7 +143,7 @@ fn expect_engine3d_font_readback(evidence: Engine3DFontReadbackEvidence) -> bool
         evidence.fence_destroyed and evidence.readback_source == "device_image_readback" and
         evidence.color_image_handle > 0 and evidence.readback_bytes == 16384 and
         evidence.readback_matches_evidence and evidence.nonblank_pixels and
-        evidence.cpu_oracle_parity
+        evidence.cpu_oracle_parity and evidence.translucent_destination_parity
 
 fn classify_native_font_promotion(engine2d: Engine2DFontReadbackEvidence,
                                   engine3d: Engine3DFontReadbackEvidence) -> text:
@@ -349,6 +350,27 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     engine.clear(0u32)
     engine.enable_font_cpu_comparator(true)
     engine.begin_frame()
+    val translucent_first_drawn = engine.draw_text_hud(4, 4, "A", 0x80c08040u32, 18)
+    val translucent_second_drawn = engine.draw_text_hud(4, 4, "A", 0x804020c0u32, 18)
+    engine.end_frame()
+    val translucent_target = engine.font_execution_target()
+    val translucent_device_pixels = engine.read_pixels()
+    val translucent_cpu_pixels = engine.read_cpu_comparator_pixels()
+    var translucent_destination_parity = (translucent_first_drawn and translucent_second_drawn and
+        translucent_target == "vulkan" and translucent_device_pixels.len() == 4096 and
+        translucent_device_pixels.len() == translucent_cpu_pixels.len())
+    var translucent_pixel_found = false
+    var translucent_i: i64 = 0
+    while translucent_i < translucent_device_pixels.len():
+        val alpha = (translucent_device_pixels[translucent_i] >> 24u32) & 255u32
+        if alpha > 0u32 and alpha < 255u32:
+            translucent_pixel_found = true
+        if translucent_destination_parity and translucent_device_pixels[translucent_i] != translucent_cpu_pixels[translucent_i]:
+            translucent_destination_parity = false
+        translucent_i = translucent_i + 1
+    translucent_destination_parity = translucent_destination_parity and translucent_pixel_found
+    engine.clear(0u32)
+    engine.begin_frame()
     val mixed_hud_drawn = engine.draw_text_hud(4, 4, "HUD", 0xffffffffu32, 18)
     val world_drawn = engine.draw_text_world(0.5f32, 0.0f32, 0.0f32, "WORLD", 0xff40ff40u32, 14)
     engine.end_frame()
@@ -413,7 +435,8 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
                 native.pixels_rgba8[byte_index + 3] == ((pixel >> 24u32) & 255u32).to_u8())
         i = i + 1
     val passed = (native.ready and distinct_pipelines and adapter_reused and hud_placement_verified and mixed_hud_drawn and
-        world_drawn and world_depth_verified and matches_evidence and nonblank and parity)
+        world_drawn and world_depth_verified and translucent_destination_parity and
+        matches_evidence and nonblank and parity)
     val evidence = Engine3DFontReadbackEvidence(
         status: if passed: "pass" elif native.ready: "failed" else: "unavailable",
         reason: if not native.ready: native.reason
@@ -421,6 +444,7 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
             elif not adapter_reused: "native-vulkan-font-reinstall-replaced-adapter"
             elif not world_depth_verified: "native-world-depth-oracle-failed"
             elif not hud_placement_verified: "native-hud-placement-oracle-failed"
+            elif not translucent_destination_parity: "native-translucent-destination-parity-failed"
             elif not mixed_hud_drawn or not world_drawn: "native-font-draw-failed"
             elif not matches_evidence: "native-readback-evidence-mismatch"
             elif not nonblank: "native-readback-blank"
@@ -446,7 +470,7 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
         color_image_handle: native.device.color_image_handle,
         readback_bytes: native.device.readback_bytes, readback_matches_evidence: matches_evidence,
         nonblank_pixels: nonblank,
-        cpu_oracle_parity: parity)
+        cpu_oracle_parity: parity, translucent_destination_parity: translucent_destination_parity)
     engine.shutdown()
     evidence
 
@@ -538,7 +562,8 @@ describe "native GPU font promotion evidence":
             fence_handle: 1, fence_waited: true, fence_destroyed: true,
             readback_source: "device_image_readback", color_image_handle: 1,
             readback_bytes: 16384, readback_matches_evidence: false,
-            nonblank_pixels: true, cpu_oracle_parity: true)
+            nonblank_pixels: true, cpu_oracle_parity: true,
+            translucent_destination_parity: false)
         expect(classify_native_font_promotion(forged_2d, forged_3d)).to_equal("rejected")
         expect(expect_engine2d_font_readback(forged_2d)).to_be(false)
         expect(expect_engine3d_font_readback(forged_3d)).to_be(false)
@@ -551,7 +576,7 @@ describe "native GPU font promotion evidence":
         val engine3d = _collect_engine3d_font_readback()
         val promotion = classify_native_font_promotion(engine2d, engine3d)
         print "engine2d_font status={engine2d.status} reason={engine2d.reason} device={engine2d.device_identity} pipeline={engine2d.pipeline_handle} atlas={engine2d.atlas_handle} fence={engine2d.fence_handle} readback_bytes={engine2d.readback_bytes}"
-        print "engine3d_font status={engine3d.status} reason={engine3d.reason} device={engine3d.device_handle} hud_pipeline={engine3d.pipeline_handle} world_pipeline={engine3d.world_pipeline_handle} texture={engine3d.texture_handle} atlas_owner={engine3d.atlas_owner_identity} atlas_generation={engine3d.atlas_generation} atlas_sha256={engine3d.atlas_payload_sha256} sampler={engine3d.sampler_handle} fence={engine3d.fence_handle} readback_bytes={engine3d.readback_bytes}"
+        print "engine3d_font status={engine3d.status} reason={engine3d.reason} device={engine3d.device_handle} hud_pipeline={engine3d.pipeline_handle} world_pipeline={engine3d.world_pipeline_handle} texture={engine3d.texture_handle} atlas_owner={engine3d.atlas_owner_identity} atlas_generation={engine3d.atlas_generation} atlas_sha256={engine3d.atlas_payload_sha256} sampler={engine3d.sampler_handle} fence={engine3d.fence_handle} readback_bytes={engine3d.readback_bytes} translucent_destination_parity={engine3d.translucent_destination_parity}"
         if promotion != "pass":
             fail_test("native font promotion " + promotion + ": Engine2D=" +
                 engine2d.reason + " Engine3D=" + engine3d.reason)

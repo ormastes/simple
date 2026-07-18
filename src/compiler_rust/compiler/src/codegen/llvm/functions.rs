@@ -2088,14 +2088,15 @@ impl LlvmBackend {
 
                 if matches!(method, "chr" | "to_char") {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
-                    let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
-                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    let code_type = self.context_ref().i64_type();
+                    let recv_casted = self.coerce_value_to_type(recv_val, Some(code_type.into()), builder)?;
+                    let fn_type = i64_type.fn_type(&[code_type.into()], false);
                     let rt_func = module
-                        .get_function("char_from_code")
-                        .unwrap_or_else(|| module.add_function("char_from_code", fn_type, None));
+                        .get_function("text_dot_from_char_code")
+                        .unwrap_or_else(|| module.add_function("text_dot_from_char_code", fn_type, None));
                     let call_site = builder
-                        .build_call(rt_func, &[recv_casted.into()], "char_from_code")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("char_from_code call", &e))?;
+                        .build_call(rt_func, &[recv_casted.into()], "text_dot_from_char_code")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("text_dot_from_char_code call", &e))?;
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().left() {
                             vreg_map.insert(*d, ret_val);
@@ -2950,6 +2951,53 @@ mod tests {
         for raw in ["@substring(", "str.bytes", "str.chars", "str.ord", "rt_string_contains"] {
             assert!(!ir.contains(raw), "raw call {raw} leaked:\n{ir}");
         }
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn rv32_chr_uses_i64_codepoint_and_pointer_width_text_handle() {
+        let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rv32_chr_abi").unwrap();
+
+        let mut method = MirFunction::new(
+            "method_chr".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        method.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 0x4e2d,
+        });
+        method.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "i64.chr".to_string(),
+            args: vec![],
+        });
+        method.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&method).unwrap();
+
+        let mut qualified = MirFunction::new(
+            "qualified_chr".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        qualified.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 0x1f600,
+        });
+        qualified.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(1)),
+            target: CallTarget::from_name("i64.chr"),
+            args: vec![VReg(0)],
+        });
+        qualified.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&qualified).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("declare i32 @text_dot_from_char_code(i64)"), "{ir}");
+        assert!(ir.contains("call i32 @text_dot_from_char_code(i64"), "{ir}");
         backend.verify().unwrap();
     }
 

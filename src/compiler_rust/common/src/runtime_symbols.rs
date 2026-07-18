@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 5 };
+    pub const CURRENT: Self = Self { major: 1, minor: 6 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -145,6 +145,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_typed_words_u32_push",
     "rt_typed_words_u32_set",
     "rt_string_new",
+    "text_dot_from_char_code",
     "rt_string_len",
     "rt_string_data",
     "rt_string_bytes",
@@ -310,6 +311,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_contains")
         || name.starts_with("rt_len")
         || name.starts_with("rt_string_")
+        || name == "text_dot_from_char_code"
         || name.starts_with("rt_utf8_")
         || name == "rt_text_count_codepoints"
         || name.starts_with("rt_swi_")
@@ -451,6 +453,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_any_add",
     // String operations
     "rt_string_new",
+    "text_dot_from_char_code",
     "rt_string_concat",
     "rt_string_builder_new",
     "rt_string_builder_push",
@@ -1961,6 +1964,7 @@ mod tests {
 
     #[test]
     fn test_abi_version_compatibility() {
+        assert_eq!(AbiVersion::CURRENT, AbiVersion::new(1, 6));
         let v1_0 = AbiVersion::new(1, 0);
         let v1_1 = AbiVersion::new(1, 1);
         let v2_0 = AbiVersion::new(2, 0);
@@ -1998,6 +2002,7 @@ mod tests {
         // Verify the list has a reasonable number of symbols
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"text_dot_from_char_code"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
@@ -2018,6 +2023,7 @@ mod tests {
     fn test_symbol_classification_marks_core_abi_and_hosted_symbols() {
         assert_eq!(symbol_class_of("rt_alloc"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(symbol_class_of("text_dot_from_char_code"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_file_read_text"), RuntimeSymbolClass::HostedOnly);
         assert_eq!(

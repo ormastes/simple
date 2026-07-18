@@ -932,6 +932,36 @@ impl MirLowering:
                     return offset_result
                 case _: ()
 
+        # Primitive integer `.chr()` / `.to_char()` has no symbol-bearing HIR
+        # method, so both bootstrap and normal native lowering leave it
+        # Unresolved. Route only integer receivers to the canonical Unicode
+        # runtime entrypoint; a same-named method on another type must continue
+        # through ordinary unresolved instance-method recovery below.
+        if (method == "chr" or method == "to_char") and args.len() == 0 and resolution_is_unresolved:
+            val chr_receiver = self.lower_expr(receiver)
+            var chr_receiver_is_integer = false
+            if val chr_receiver_type = self.local_mir_type_of(chr_receiver):
+                match chr_receiver_type.kind:
+                    case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.I64 | MirTypeKind.U64:
+                        chr_receiver_is_integer = true
+                    case _: ()
+            if chr_receiver_is_integer:
+                var b_chr = self.builder
+                val chr_code = b_chr.emit_cast(mir_operand_copy(chr_receiver), MirType.i64())
+                self.builder = b_chr
+                val chr_text_type = MirType(kind: MirTypeKind.Opaque("str"))
+                val chr_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("text_dot_from_char_code"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: chr_text_type, is_variadic: false
+                    )))
+                ))
+                return self.emit_resolved_direct_call(
+                    chr_op, [mir_operand_copy(chr_code)], chr_text_type
+                )
+            prelowered_method_receiver = chr_receiver
+            has_prelowered_method_receiver = true
+
         var receiver_is_dict = false
         if maybe_receiver_type_for_call != nil:
             val found_receiver_type = maybe_receiver_type_for_call

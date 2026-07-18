@@ -1334,6 +1334,34 @@ int64_t rt_raw_i64_to_string(int64_t raw) {
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
+int64_t text_dot_from_char_code(int64_t code) {
+    uint8_t buf[4];
+    uint64_t len;
+    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+        return rt_core_nil();
+    }
+    if (code <= 0x7F) {
+        buf[0] = (uint8_t)code;
+        len = 1;
+    } else if (code <= 0x7FF) {
+        buf[0] = (uint8_t)(0xC0 | (code >> 6));
+        buf[1] = (uint8_t)(0x80 | (code & 0x3F));
+        len = 2;
+    } else if (code <= 0xFFFF) {
+        buf[0] = (uint8_t)(0xE0 | (code >> 12));
+        buf[1] = (uint8_t)(0x80 | ((code >> 6) & 0x3F));
+        buf[2] = (uint8_t)(0x80 | (code & 0x3F));
+        len = 3;
+    } else {
+        buf[0] = (uint8_t)(0xF0 | (code >> 18));
+        buf[1] = (uint8_t)(0x80 | ((code >> 12) & 0x3F));
+        buf[2] = (uint8_t)(0x80 | ((code >> 6) & 0x3F));
+        buf[3] = (uint8_t)(0x80 | (code & 0x3F));
+        len = 4;
+    }
+    return rt_string_new(buf, len);
+}
+
 /* rt_raw_bool_to_string — same "raw operand, no tag check" contract as
  * rt_raw_i64_to_string (see its callers in switch_operators_calls.spl's
  * lower_bootstrap_print_call), but for a bool-typed MIR local: those are

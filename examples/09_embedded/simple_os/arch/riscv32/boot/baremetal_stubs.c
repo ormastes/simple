@@ -266,3 +266,5 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
         "j 1b\n"
     );
 }
+
+#include "../../common/boot/text_codepoint_runtime.h"

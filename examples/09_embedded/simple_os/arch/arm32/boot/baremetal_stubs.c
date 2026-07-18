@@ -2235,3 +2235,4 @@ int __modsi3(int a, int b)
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
+#include "../../common/boot/text_codepoint_runtime.h"

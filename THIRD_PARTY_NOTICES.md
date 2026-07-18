@@ -41,7 +41,7 @@ Some checked-in or workspace-populated paths may contain third-party binaries or
 - `src/compiler_rust/target/`
 - `build/`
 
-Treat those as upstream-controlled artifacts with their own licenses and do not assume they are covered solely by the root MIT license.
+Treat those as upstream-controlled artifacts with their own licenses and do not assume they are covered solely by the root Apache-2.0 license.
 
 ## MIT License Text
 

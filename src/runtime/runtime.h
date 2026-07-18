@@ -286,6 +286,7 @@ void     rt_sleep_ms(int64_t ms);
 void     rt_sleep_secs(int64_t seconds);
 void     rt_panic(const char* msg);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
+int64_t  text_dot_from_char_code(int64_t code);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
 const char* rt_interp_cstr(int64_t value);

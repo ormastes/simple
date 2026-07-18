@@ -75,6 +75,7 @@ use super::{
     rt_string_to_upper,
     rt_string_to_lower,
     rt_string_to_int,
+    text_dot_from_char_code,
     rt_to_string,
     // Index/slice functions
     rt_index_get,
@@ -1914,6 +1915,20 @@ fn test_rt_contains_string() {
 fn test_rt_contains_invalid() {
     let not_a_collection = RuntimeValue::from_int(42);
     assert_eq!(rt_contains(not_a_collection, RuntimeValue::from_int(1)), 0);
+}
+
+#[test]
+fn text_from_char_code_encodes_unicode_scalars_and_rejects_invalid_values() {
+    for (code, expected) in [(0x41, "A"), (0x4e2d, "中"), (0x1f600, "😀")] {
+        let value = text_dot_from_char_code(code);
+        assert_eq!(rt_string_len(value), expected.len() as i64);
+        let bytes = unsafe { std::slice::from_raw_parts(rt_string_data(value), expected.len()) };
+        assert_eq!(bytes, expected.as_bytes());
+    }
+    assert!(text_dot_from_char_code(-1).is_nil());
+    assert!(text_dot_from_char_code(0xd800).is_nil());
+    assert!(text_dot_from_char_code(0x110000).is_nil());
+    assert!(text_dot_from_char_code(0x1_0000_0041).is_nil());
 }
 
 #[test]

@@ -32,8 +32,10 @@ short aliases, and multi-cluster directory chains; the shared reader resolves
 the long path first and preserves the raw short-name reader as boot fallback.
 One shared desktop bootstrap enables registered-only font resolution, reads the
 default face from its registry-owned long VFS path and then its 8.3 alias, and
-registers the exact bytes under the canonical identity. It checks VFS readiness
-before either read, so a failed x86_64 mount cannot enter the FAT32 path. The
+registers the exact bytes under the canonical identity. The shared VFS reader
+attempts the pure NVMe/FAT32 boot path before requiring a mounted VFS, so early
+desktop font bootstrap can read validated media without weakening later mounted
+filesystem checks. The
 x86_64 and AArch64 canonical entries call it before creating Engine2D; neither
 owns a private font loader or post-frame text draw. AArch64 first resets and
 mounts the existing VirtIO-BLK FAT32 initializer. Its canonical desktop QEMU

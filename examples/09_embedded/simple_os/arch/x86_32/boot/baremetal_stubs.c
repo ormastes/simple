@@ -1425,5 +1425,6 @@ RuntimeValue rt_x86_32_fpu_restore(RuntimeValue ctx_ptr_val)
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
+#include "../../common/boot/text_codepoint_runtime.h"
 
 /* End of x86_32 baremetal_stubs.c */

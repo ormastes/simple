@@ -1445,6 +1445,8 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
     );
 }
 
+#include "../../common/boot/text_codepoint_runtime.h"
+
 /* ---- Lane BR64: in-guest Simple toolchain staging gate --------------------
  * Probes the REAL riscv64-unknown-simpleos `simple` interpreter ELF staged by
  * scripts/os/fsexec_mkimg_simple.spl at the FAT32 root (/FSEXEC.ELF, aliased

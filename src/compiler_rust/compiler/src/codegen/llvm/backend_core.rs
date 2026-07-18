@@ -1305,6 +1305,13 @@ impl NativeBackend for LlvmBackend {
                         continue;
                     }
 
+                    if spec.name == "text_dot_from_char_code" {
+                        let fn_type = rv_type.fn_type(&[self.context_ref().i64_type().into()], false);
+                        let f = m.add_function(spec.name, fn_type, None);
+                        f.set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+
                     // Only pre-declare functions with ALL i64 params and i64 return.
                     // (The Cranelift spec uses I64 universally; on 32-bit targets we
                     // map these to the RuntimeValue width via rv_type.)

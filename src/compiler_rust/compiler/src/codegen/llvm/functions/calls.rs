@@ -2038,14 +2038,17 @@ impl LlvmBackend {
 
             if matches!(method, "chr" | "to_char") && !args.is_empty() {
                 let recv = self.get_vreg(&args[0], vreg_map)?;
-                let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
-                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                let code_type = self.context_ref().i64_type();
+                let recv = self.coerce_value_to_type(recv, Some(code_type.into()), builder)?;
+                let fn_type = i64_type.fn_type(&[code_type.into()], false);
                 let rt_func = module
-                    .get_function("char_from_code")
-                    .unwrap_or_else(|| module.add_function("char_from_code", fn_type, None));
+                    .get_function("text_dot_from_char_code")
+                    .unwrap_or_else(|| module.add_function("text_dot_from_char_code", fn_type, None));
                 let call_site = builder
-                    .build_call(rt_func, &[recv.into()], "qualified_char_from_code")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified char_from_code call", &e))?;
+                    .build_call(rt_func, &[recv.into()], "qualified_text_dot_from_char_code")
+                    .map_err(|e| {
+                        crate::error::factory::llvm_build_failed("qualified text_dot_from_char_code call", &e)
+                    })?;
                 if let Some(d) = dest {
                     if let Some(ret_val) = call_site.try_as_basic_value().left() {
                         vreg_map.insert(d, ret_val);

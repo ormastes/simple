@@ -350,6 +350,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // String operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_string_new", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("text_dot_from_char_code", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_concat", &[I64, I64], &[I64]),
     // ANY+ANY dynamic add: two RuntimeValue args, one RuntimeValue return (all
     // i64-sized). Emitted by MIR lowering for ANY-typed operands. Without this
@@ -1778,6 +1779,17 @@ mod tests {
             let _tier = tier_of(spec.name);
             // Just ensure it doesn't panic
         }
+    }
+
+    #[test]
+    fn text_from_char_code_is_registered_as_alloc() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "text_dot_from_char_code")
+            .expect("Unicode character construction must be registered for native codegen");
+        assert_eq!(spec.params, [I64]);
+        assert_eq!(spec.returns, [I64]);
+        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Alloc);
     }
 
     #[test]

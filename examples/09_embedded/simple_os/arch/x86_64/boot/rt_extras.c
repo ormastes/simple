@@ -4161,11 +4161,5 @@ RuntimeValue rt_webgpu_is_available(void) { return FALSE_VALUE; }
 RuntimeValue rt_webgpu_present(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_shutdown(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_upload_pixels(void) { return NIL_VALUE; }
-RuntimeValue text_dot_from_char_code(RuntimeValue code) {
-    char buf[2];
-    buf[0] = (char)(DECODE_INT(code) & 0x7F);
-    buf[1] = '\0';
-    return rt_string_from_cstr(buf);
-}
-
+#include "../../common/boot/text_codepoint_runtime.h"
 /* End of rt_extras.c */

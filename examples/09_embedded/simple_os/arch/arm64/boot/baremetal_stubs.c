@@ -4203,3 +4203,4 @@ int64_t rt_pool_safepoint(void)
 #define CRYPTO_HAS_SERIAL_PUTHEX
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
+#include "../../common/boot/text_codepoint_runtime.h"
