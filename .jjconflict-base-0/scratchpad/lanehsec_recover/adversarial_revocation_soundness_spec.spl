@@ -1,0 +1,154 @@
+"""
+# Adversarial: Revocation Soundness (OCap Hardening)
+
+**Feature IDs:** #OS-OCAP-HARDEN
+**Category:** Runtime / Security (adversarial)
+**Difficulty:** 4/5
+**Status:** Implemented
+**Plan:** doc/04_architecture/os/security/ocap_privilege_architecture.md (§P1)
+
+## Overview
+
+These specs TRY TO USE authority AFTER it was revoked and assert every derived
+capability FAILS CLOSED.
+
+Requirement 3 (revocation soundness):
+  - `revoke_transitive` on a root token kills the WHOLE delegation subtree — no
+    use-after-revoke at any depth of the lineage.
+  - Revoking a MIDDLE token kills its descendants but leaves ANCESTORS intact
+    (revocation flows down the lineage, never up into unrelated authority).
+  - A session teardown bumps the session epoch, so every capability bound at the
+    stale epoch is denied (generation/epoch staleness).
+  - Revocation is idempotent: a second `revoke_transitive` of the same root finds
+    nothing to resurrect and the child stays denied.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE}
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, CspaceMint, spawn_with_cspace, atten_identity}
+
+# ============================================================================
+# Fixtures — a 3-level delegation lineage rooted at parent token 101
+# ============================================================================
+
+val CAL_OBJ: u64 = 4242u64
+val CAL_GEN: u64 = 7u64
+
+fn _calendar_rw() -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: CAL_GEN, rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE)
+
+fn _calendar_ro() -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: CAL_GEN, rights: CAP_RIGHT_READ)
+
+fn _fread_var() -> CapabilityKind:
+    CapabilityKind.FileRead(path_prefix: "/var")
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64, depth: i64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: 1u64, token_id: tid, parent_token_id: 0u64, depth: depth)
+
+fn _cal_spec() -> SpawnSpec:
+    SpawnSpec(
+        image_hash: "blake3:same",
+        grants: [CapGrant(label: "mem.calendar", requested: _calendar_rw(), atten: atten_identity())],
+        isolation: "sandbox", budget: 0u64
+    )
+
+# ============================================================================
+# Group 1 — Transitive revocation kills the whole lineage
+# ============================================================================
+
+describe "adversarial revocation: no use-after-revoke down a 3-level lineage":
+    """grandparent(tid 101) -> child(tid 400) -> grandchild(tid 500).
+    A revoke of the root removes every derived cap; none survives."""
+
+    it "revoke_transitive(root) denies grandparent, child AND grandchild":
+        var mgr = CapabilityManager.new()
+        val gp = TaskId(id: 1)
+        val ch = TaskId(id: 21)
+        val gc = TaskId(id: 31)
+        val gp_caps = CapabilitySet(caps: [_tok(_calendar_rw(), 2u64, 101u64, 2)], is_pledged: true)
+        mgr.install_sandbox_capability_set(gp, gp_caps)
+        val ch_mint = spawn_with_cspace(gp_caps, _cal_spec(), 21u64, 2000u64, 400u64)
+        mgr.install_sandbox_capability_set(ch, ch_mint.caps)
+        val gc_mint = spawn_with_cspace(ch_mint.caps, _cal_spec(), 31u64, 3000u64, 500u64)
+        mgr.install_sandbox_capability_set(gc, gc_mint.caps)
+        # All three hold the derived calendar cap before revocation.
+        expect(mgr.check(gp, _calendar_ro())).to_equal(true)
+        expect(mgr.check(ch, _calendar_ro())).to_equal(true)
+        expect(mgr.check(gc, _calendar_ro())).to_equal(true)
+        # Lineage: child derived from 101, grandchild from 400.
+        expect(ch_mint.source_token_ids[0]).to_equal(101u64)
+        expect(gc_mint.source_token_ids[0]).to_equal(400u64)
+        # Transitive revoke of the ROOT cascades to the whole subtree.
+        val n = mgr.revoke_transitive(101u64)
+        expect(n).to_be_greater_than(2)
+        expect(mgr.check(gp, _calendar_ro())).to_equal(false)
+        expect(mgr.check(ch, _calendar_ro())).to_equal(false)
+        expect(mgr.check(gc, _calendar_ro())).to_equal(false)
+
+    it "revoking a MIDDLE token kills descendants but spares the ancestor":
+        var mgr = CapabilityManager.new()
+        val gp = TaskId(id: 1)
+        val ch = TaskId(id: 22)
+        val gc = TaskId(id: 32)
+        val gp_caps = CapabilitySet(caps: [_tok(_calendar_rw(), 2u64, 101u64, 2)], is_pledged: true)
+        mgr.install_sandbox_capability_set(gp, gp_caps)
+        val ch_mint = spawn_with_cspace(gp_caps, _cal_spec(), 22u64, 2000u64, 400u64)
+        mgr.install_sandbox_capability_set(ch, ch_mint.caps)
+        val gc_mint = spawn_with_cspace(ch_mint.caps, _cal_spec(), 32u64, 3000u64, 500u64)
+        mgr.install_sandbox_capability_set(gc, gc_mint.caps)
+        # Revoke the MIDDLE (child token 400): grandchild dies, grandparent lives.
+        val n = mgr.revoke_transitive(400u64)
+        expect(n).to_be_greater_than(1)
+        expect(mgr.check(gp, _calendar_ro())).to_equal(true)
+        expect(mgr.check(ch, _calendar_ro())).to_equal(false)
+        expect(mgr.check(gc, _calendar_ro())).to_equal(false)
+
+    it "revocation is idempotent — a second revoke resurrects nothing":
+        var mgr = CapabilityManager.new()
+        val gp = TaskId(id: 1)
+        val ch = TaskId(id: 23)
+        val gp_caps = CapabilitySet(caps: [_tok(_calendar_rw(), 2u64, 101u64, 2)], is_pledged: true)
+        mgr.install_sandbox_capability_set(gp, gp_caps)
+        val ch_mint = spawn_with_cspace(gp_caps, _cal_spec(), 23u64, 2000u64, 400u64)
+        mgr.install_sandbox_capability_set(ch, ch_mint.caps)
+        val n1 = mgr.revoke_transitive(101u64)
+        expect(n1).to_be_greater_than(0)
+        expect(mgr.check(ch, _calendar_ro())).to_equal(false)
+        # Second revoke of the same root finds nothing left to remove.
+        val n2 = mgr.revoke_transitive(101u64)
+        expect(n2).to_equal(0)
+        expect(mgr.check(ch, _calendar_ro())).to_equal(false)
+
+# ============================================================================
+# Group 2 — Session epoch staleness (generation revoke)
+# ============================================================================
+
+describe "adversarial revocation: stale session epoch denies bound caps":
+    """A capability bound to a session is denied the instant the session is torn
+    down (its epoch bumps), with no per-token walk."""
+
+    it "a session-bound cap is live before teardown and DEAD after":
+        var mgr = CapabilityManager.new()
+        val caps = CapabilitySet(caps: [_tok(_fread_var(), 1u64, 60u64, 2)], is_pledged: true)
+        val sess = mgr.login("alice", caps)
+        val task = TaskId(id: 77)
+        mgr.install_sandbox_capability_set(task, caps)
+        mgr.bind_task_to_session(task, sess.id)
+        expect(mgr.check(task, _fread_var())).to_equal(true)
+        mgr.session_teardown(sess)
+        expect(mgr.check(task, _fread_var())).to_equal(false)
+
+    it "the torn-down session stays sealed (no re-open resurrects it)":
+        var mgr = CapabilityManager.new()
+        val caps = CapabilitySet(caps: [_tok(_fread_var(), 1u64, 61u64, 2)], is_pledged: true)
+        val sess = mgr.login("bob", caps)
+        val task = TaskId(id: 78)
+        mgr.install_sandbox_capability_set(task, caps)
+        mgr.bind_task_to_session(task, sess.id)
+        mgr.session_teardown(sess)
+        # Re-binding the SAME task to the (now-sealed) session id does not revive it.
+        mgr.bind_task_to_session(task, sess.id)
+        expect(mgr.check(task, _fread_var())).to_equal(false)

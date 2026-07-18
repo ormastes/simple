@@ -1,0 +1,159 @@
+use std.io_runtime.{file_exists, read_file}
+
+pub class LlmRuntimeAdapter:
+    name: text
+    path: text
+
+pub class LlmRuntimeManifest:
+    backend: text
+    base_model: text
+    endpoint: text
+    chat_template: text
+    lora_adapters: [LlmRuntimeAdapter]
+    dynamic_lora: text
+    tensor_parallel_size: i64
+    data_parallel_size: i64
+    memory_fraction_static: text
+    invalid_adapter_count: i64
+
+pub fn llm_runtime_manifest(base_model: text, endpoint: text, chat_template: text, lora_adapters: [LlmRuntimeAdapter], dynamic_lora: text) -> LlmRuntimeManifest:
+    llm_runtime_manifest_with_backend("vllm", base_model, endpoint, chat_template, lora_adapters, dynamic_lora, 0, 0, "")
+
+pub fn llm_runtime_manifest_with_backend(backend: text, base_model: text, endpoint: text, chat_template: text, lora_adapters: [LlmRuntimeAdapter], dynamic_lora: text, tensor_parallel_size: i64, data_parallel_size: i64, memory_fraction_static: text) -> LlmRuntimeManifest:
+    LlmRuntimeManifest(
+        backend: _serving_backend(backend),
+        base_model: base_model.trim(),
+        endpoint: endpoint.trim(),
+        chat_template: chat_template.trim(),
+        lora_adapters: lora_adapters,
+        dynamic_lora: _dynamic_lora_mode(dynamic_lora),
+        tensor_parallel_size: _non_negative(tensor_parallel_size),
+        data_parallel_size: _non_negative(data_parallel_size),
+        memory_fraction_static: memory_fraction_static.trim(),
+        invalid_adapter_count: 0
+    )
+
+pub fn llm_runtime_manifest_from_file(path: text) -> LlmRuntimeManifest:
+    if path.trim() == "" or not file_exists(path):
+        return llm_runtime_manifest("", "", "", [], "disabled")
+    llm_runtime_manifest_from_text(read_file(path) ?? "")
+
+pub fn llm_runtime_manifest_from_text(content: text) -> LlmRuntimeManifest:
+    var base_model = ""
+    var endpoint = ""
+    var chat_template = ""
+    var dynamic_lora = "disabled"
+    var backend = "vllm"
+    var tensor_parallel_size: i64 = 0
+    var data_parallel_size: i64 = 0
+    var memory_fraction_static = ""
+    var invalid_adapter_count: i64 = 0
+    var adapters: [LlmRuntimeAdapter] = []
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val parts = line.split("=")
+        if parts.len() < 2:
+            continue
+        val key = parts[0].trim()
+        val value = _join_tail(parts, 1, "=").trim()
+        if key == "base_model" or key == "model":
+            base_model = value
+        else if key == "backend" or key == "engine":
+            backend = value
+        else if key == "endpoint" or key == "endpoint_url":
+            endpoint = value
+        else if key == "chat_template":
+            chat_template = value
+        else if key == "dynamic_lora":
+            dynamic_lora = value
+        else if key == "tensor_parallel_size" or key == "tp":
+            tensor_parallel_size = value.to_i64() ?? 0
+        else if key == "data_parallel_size" or key == "dp":
+            data_parallel_size = value.to_i64() ?? 0
+        else if key == "memory_fraction_static" or key == "mem_fraction_static":
+            memory_fraction_static = value
+        else if key == "lora_adapters" or key == "adapters":
+            invalid_adapter_count = _invalid_adapter_count(value)
+            adapters = _parse_adapters(value)
+    LlmRuntimeManifest(
+        backend: _serving_backend(backend),
+        base_model: base_model.trim(),
+        endpoint: endpoint.trim(),
+        chat_template: chat_template.trim(),
+        lora_adapters: adapters,
+        dynamic_lora: _dynamic_lora_mode(dynamic_lora),
+        tensor_parallel_size: _non_negative(tensor_parallel_size),
+        data_parallel_size: _non_negative(data_parallel_size),
+        memory_fraction_static: memory_fraction_static.trim(),
+        invalid_adapter_count: invalid_adapter_count
+    )
+
+fn _parse_adapters(value: text) -> [LlmRuntimeAdapter]:
+    var adapters: [LlmRuntimeAdapter] = []
+    for raw in value.split(","):
+        val item = raw.trim()
+        if item == "":
+            continue
+        val parts = item.split(":")
+        if parts.len() < 2:
+            val eq_parts = item.split("@")
+            if eq_parts.len() >= 2:
+                adapters.push(LlmRuntimeAdapter(name: eq_parts[0].trim(), path: _join_tail(eq_parts, 1, "@").trim()))
+            continue
+        adapters.push(LlmRuntimeAdapter(name: parts[0].trim(), path: _join_tail(parts, 1, ":").trim()))
+    adapters
+
+fn _invalid_adapter_count(value: text) -> i64:
+    var invalid: i64 = 0
+    for raw in value.split(","):
+        val item = raw.trim()
+        if item == "":
+            continue
+        if not _valid_adapter_entry(item):
+            invalid = invalid + 1
+    invalid
+
+fn _valid_adapter_entry(item: text) -> bool:
+    val colon_parts = item.split(":")
+    if colon_parts.len() >= 2:
+        return colon_parts[0].trim() != "" and _join_tail(colon_parts, 1, ":").trim() != ""
+    val at_parts = item.split("@")
+    if at_parts.len() >= 2:
+        return at_parts[0].trim() != "" and _join_tail(at_parts, 1, "@").trim() != ""
+    false
+
+fn _join_tail(parts: [text], start: i64, separator: text) -> text:
+    var out: [text] = []
+    var i = start
+    while i < parts.len():
+        out.push(parts[i])
+        i = i + 1
+    out.join(separator)
+
+fn _dynamic_lora_mode(value: text) -> text:
+    val mode = value.trim()
+    if mode == "trusted":
+        return "trusted"
+    if mode == "" or mode == "none" or mode == "disabled":
+        return "disabled"
+    if mode == "blocked":
+        return "blocked"
+    "blocked"
+
+fn _serving_backend(value: text) -> text:
+    val backend = value.trim().to_lower()
+    if backend == "" or backend == "vllm":
+        return "vllm"
+    if backend == "sglang":
+        return "sglang"
+    "unsupported"
+
+fn _non_negative(value: i64) -> i64:
+    if value < 0:
+        return 0
+    value
+
+export LlmRuntimeAdapter, LlmRuntimeManifest
+export llm_runtime_manifest, llm_runtime_manifest_with_backend, llm_runtime_manifest_from_text, llm_runtime_manifest_from_file

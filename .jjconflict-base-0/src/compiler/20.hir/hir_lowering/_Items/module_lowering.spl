@@ -1,0 +1,1431 @@
+# HIR item lowering - module, import, and bootstrap-flat lowering.
+use compiler.hir.hir_lowering.items.*
+# HIR Lowering - Item Lowering
+#
+# This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.{int_to_str}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+fn hir_module_env_get(key: text) -> text:
+    rt_env_get(key)
+
+# Isolated single-arm extraction (the reliable seed idiom: ONE match per
+# function boundary, explicit return per arm). Used by the fn-signature
+# registration pass to capture tuple-return element types into
+# fn_tuple_returns while the HirType is freshly constructed.
+fn hir_tuple_return_elem_list(t: HirType) -> [HirType]:
+    match t.kind:
+        case HirTypeKind.Tuple(tuple_elems):
+            return tuple_elems
+        case _:
+            return []
+
+fn hir_module_phase_probe(msg: text):
+    if hir_module_diag_enabled():
+        eprint("[BOOTSTRAP-PHASE] " + msg)
+
+fn hir_module_diag_enabled() -> bool:
+    val phase = hir_module_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
+    val trace = hir_module_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+    val diag = hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+    if phase == "1":
+        return true
+    if trace == "1":
+        return true
+    diag == "1"
+
+struct HirReexportSource:
+    """Result of chasing a re-export facade chain (find_reexport_source).
+    A struct (not an anonymous tuple) on purpose: multi-value tuple returns
+    are unreliable on the seed interpreter."""
+    found: bool
+    module_name: text
+    item_name: text
+
+fn hir_module_declares_item(m: Module, name: text) -> bool:
+    """True when module `m` itself declares `name` as any importable decl
+    kind register_imported_symbol knows how to register (functions covers
+    `extern fn` too — the parser stores externs in Module.functions with
+    is_extern=true)."""
+    if m.functions.contains_key(name):
+        return true
+    if m.classes.contains_key(name):
+        return true
+    if m.structs.contains_key(name):
+        return true
+    if m.enums.contains_key(name):
+        return true
+    if m.traits.contains_key(name):
+        return true
+    m.constants.contains_key(name)
+
+fn hir_module_logical_name_from_path(path: text) -> text:
+    """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
+    source path (e.g. `src/_wallB_mod_a.spl`), matching
+    `_driver_module_name_from_path` (80.driver/driver_source_loading.spl) --
+    reimplemented locally rather than imported to avoid a 20.hir ->
+    80.driver layering violation. Under `SIMPLE_BOOTSTRAP=1`,
+    `Module.name`/`HirModule.name` is the raw parsed PATH
+    (`flat_ast_to_module`, `_FlatAstBridge/module_assembly.spl`, `name:
+    path`), not the logical name an `use module.{..}` import statement
+    references -- qualifying a function's accumulator/symbol name by the
+    RAW path instead of this normalized form would mismatch the plain
+    `imp.module` text used at cross-module call sites and produce an
+    unparseable `/`- and `.`-laden LLVM identifier (bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+    var mod_path = path.replace("\\", "/")
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    val absolute_src = mod_path.find("/src/") ?? -1
+    if absolute_src >= 0:
+        mod_path = mod_path.substring(absolute_src + 5)
+    else:
+        val absolute_examples = mod_path.find("/examples/") ?? -1
+        if absolute_examples >= 0:
+            mod_path = mod_path.substring(absolute_examples + 1)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path = mod_path.replace("-", "_")
+    mod_path = mod_path.replace(" ", "_")
+    mod_path.replace("/", ".")
+
+fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
+    """Whether `module_name` (a raw parsed-module path, e.g.
+    `src/_wallB_entry.spl`) is the --entry-closure entry module. Used to
+    keep the entry module's own same-module function-name qualification OFF
+    (bootstrap_lower_hir_globals_to_mir_module, the entry's flat MIR
+    accumulator, never qualifies names -- see bootstrap_globals.spl) while
+    turning it ON for closure helper modules (whose flat accumulator,
+    bootstrap_lower_extra_hir_module_to_mir, always qualifies by
+    module.function to avoid same-name collisions across modules, bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+    val entry_path = hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if entry_path == "":
+        return false
+    hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
+
+impl HirLowering:
+    me prescan_composite_field_types(name: text, fields: [Field]):
+        """Register parser struct/class fields before function lowering."""
+        var field_types: Dict<text, HirType> = {}
+        var field_order: [text] = []
+        for field in fields:
+            field_types[field.name] = self.lower_type(field.type_)
+            field_order = field_order.push(field.name)
+        self.struct_field_types_by_name[name] = field_types
+        self.struct_field_order_by_name[name] = field_order
+
+    # Nested-field-access support (native --entry path bug, see
+    # struct_field_types_by_name doc comment in types.spl): record this
+    # struct's field NAME -> declared HirType, purely from the static
+    # declaration (`struct S: arr: [i64]`), independent of any inference.
+    # Used later by Field-expr lowering to give a chained/array/struct-typed
+    # field access its real MIR type instead of the untyped-path's i64
+    # default (which silently reads garbage for a non-i64 field, e.g. an
+    # array field indexed on the native path).
+    me register_struct_field_types(hir_struct: HirStruct):
+        var field_types: Dict<text, HirType> = {}
+        for f in hir_struct.fields:
+            field_types[f.name] = f.type_
+        self.struct_field_types_by_name[hir_struct.name] = field_types
+
+    # Untyped-return inference (native --entry path) -- see the `ReturnScan`
+    # doc comment in lowering_helpers.spl for the full rationale. Runs over
+    # the raw parser AST (`Function.body`), NOT the HIR, because it has to
+    # happen during this module's up-front signature-declaration pass --
+    # before ANY function body is lowered -- so a caller elsewhere in the
+    # module sees the promoted return type too, not just the callee's own
+    # generated `ret` instruction.
+    me infer_untyped_return_type(fn_decl: Function) -> HirType:
+        val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
+        if not scan.found_value_return:
+            return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
+        if scan.ambiguous or not scan.resolved_name.?:
+            self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
+            return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
+        HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name.unwrap()), span: fn_decl.span)
+
+    me declared_callable_type(fn_decl: Function, owner_symbol: SymbolId?) -> HirType?:
+        # Generic callables keep the existing untyped-symbol behavior until
+        # monomorphization supplies a concrete signature.
+        if fn_decl.type_params.len() > 0:
+            return nil
+
+        var param_types: [HirType] = []
+        val raw_params = fn_decl.params
+        var first_raw_param = 0
+        match owner_symbol:
+            case Some(owner_id):
+                if not fn_decl.is_static:
+                    param_types.push(HirType(
+                        kind: HirTypeKind.Named(owner_id, []),
+                        span: fn_decl.span
+                    ))
+                    if raw_params.len() > 0:
+                        if raw_params[0].name == "self" or raw_params[0].name == "me":
+                            first_raw_param = 1
+            case None:
+                ()
+        while first_raw_param < raw_params.len():
+            param_types.push(self.lower_type(raw_params[first_raw_param].type_))
+            first_raw_param = first_raw_param + 1
+
+        val return_type = if fn_decl.has_return_type:
+            self.lower_type(fn_decl.return_type)
+        else:
+            self.infer_untyped_return_type(fn_decl)
+        Some(HirType(
+            kind: HirTypeKind.Function(param_types, return_type, []),
+            span: fn_decl.span
+        ))
+
+    me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
+        match e.kind:
+            case ExprKind.IntLit(_):
+                Some("i64")
+            case ExprKind.FloatLit(_):
+                Some("f64")
+            case ExprKind.StringLit(_, _):
+                Some("text")
+            case ExprKind.BoolLit(_):
+                Some("bool")
+            case ExprKind.Ident(name):
+                var i = 0
+                var found: HirType? = nil
+                while i < params.len():
+                    if params[i].name == name:
+                        found = Some(self.lower_type(params[i].type_))
+                    i = i + 1
+                if found.?: hir_type_simple_name(found.unwrap()) else: nil
+            case ExprKind.Unary(op, operand):
+                match op:
+                    case UnaryOp.Not:
+                        Some("bool")
+                    case UnaryOp.Neg:
+                        self.infer_simple_type_name_ast(operand, params)
+                    case _:
+                        nil
+            case ExprKind.Binary(op, left, right):
+                if ast_binop_is_comparison(op):
+                    Some("bool")
+                elif ast_binop_is_arith(op):
+                    val lt = self.infer_simple_type_name_ast(left, params)
+                    val rt = self.infer_simple_type_name_ast(right, params)
+                    if lt.? and rt.? and lt.unwrap() == rt.unwrap() and hir_simple_type_name_is_known(lt.unwrap()):
+                        lt
+                    else:
+                        nil
+                else:
+                    nil
+            case ExprKind.Cast(_, target):
+                hir_type_simple_name(self.lower_type(target))
+            case _:
+                # Anything else (a call, index, field access, struct/enum
+                # literal, ...) is deliberately left un-inferred here rather
+                # than guessed at -- this also conservatively covers a
+                # self-recursive call: `return f(...)` (whether or not `f`
+                # is the function being scanned) always resolves to `nil`,
+                # which `merge_return_scan` turns into `ambiguous`, which
+                # `infer_untyped_return_type` turns into the fatal route-(b)
+                # error instead of a silently-wrong return type.
+                nil
+
+    me scan_ast_block_for_returns(b: Block, params: [Param]) -> ReturnScan:
+        var acc = return_scan_empty()
+        for stmt in b.stmts:
+            acc = merge_return_scan(acc, self.scan_ast_stmt_for_returns(stmt, params))
+        acc
+
+    me scan_ast_stmt_for_returns(s: Stmt, params: [Param]) -> ReturnScan:
+        match s.kind:
+            case StmtKind.Expr(expr):
+                self.scan_ast_expr_for_returns(expr, params)
+            case StmtKind.Val(_, _, init):
+                self.scan_ast_expr_for_returns(init, params)
+            case StmtKind.Var(_, _, init):
+                if init.?: self.scan_ast_expr_for_returns(init.unwrap(), params) else: return_scan_empty()
+            case StmtKind.Assign(target, _, value):
+                merge_return_scan(self.scan_ast_expr_for_returns(target, params), self.scan_ast_expr_for_returns(value, params))
+            case StmtKind.Return(value):
+                if value.?:
+                    val v = value.unwrap()
+                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
+                else:
+                    return_scan_empty()
+            case StmtKind.For(_, iter, body):
+                merge_return_scan(self.scan_ast_expr_for_returns(iter, params), self.scan_ast_block_for_returns(body, params))
+            case StmtKind.While(cond, body):
+                merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(body, params))
+            case StmtKind.Loop(body):
+                self.scan_ast_block_for_returns(body, params)
+            case StmtKind.Yield(value):
+                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
+            case StmtKind.Throw(value):
+                self.scan_ast_expr_for_returns(value, params)
+            case StmtKind.With(_, body):
+                self.scan_ast_block_for_returns(body, params)
+            case _:
+                return_scan_empty()
+
+    # Walks reachable sub-expressions looking for `return <value>` sites,
+    # EXCEPT inside a nested `Lambda` body (its own function scope -- a
+    # `return` inside one belongs to the closure, not this function). Rare
+    # shapes fall through to `case _` (no descent): under-covering here is
+    # conservative, not unsound -- a `return` hidden in an unhandled shape is
+    # exactly as broken as it already was before this change (the
+    # pre-existing Unit-return default is unchanged), so it cannot regress a
+    # working case.
+    me scan_ast_expr_for_returns(e: Expr, params: [Param]) -> ReturnScan:
+        match e.kind:
+            case ExprKind.Return(value):
+                if value.?:
+                    val v = value.unwrap()
+                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
+                else:
+                    return_scan_empty()
+            case ExprKind.If(cond, then_, else_):
+                var acc = merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(then_, params))
+                if else_.?:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_.unwrap(), params))
+                acc
+            case ExprKind.MatchCase(scrutinee, arms):
+                var acc = self.scan_ast_expr_for_returns(scrutinee, params)
+                for arm in arms:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(arm.body, params))
+                    if arm.has_guard:
+                        acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(arm.guard, params))
+                acc
+            case ExprKind.TryCatch(body, clauses, finally_):
+                var acc = self.scan_ast_block_for_returns(body, params)
+                for clause in clauses:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(clause.body, params))
+                if finally_.?:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(finally_.unwrap(), params))
+                acc
+            case ExprKind.Block(block):
+                self.scan_ast_block_for_returns(block, params)
+            case ExprKind.LossBlock(body):
+                self.scan_ast_block_for_returns(body, params)
+            case ExprKind.NogradBlock(body):
+                self.scan_ast_block_for_returns(body, params)
+            case ExprKind.UnsafeBlock(body):
+                self.scan_ast_block_for_returns(body, params)
+            case ExprKind.Lambda(_, _):
+                return_scan_empty()
+            case ExprKind.Binary(_, left, right):
+                merge_return_scan(self.scan_ast_expr_for_returns(left, params), self.scan_ast_expr_for_returns(right, params))
+            case ExprKind.Unary(_, operand):
+                self.scan_ast_expr_for_returns(operand, params)
+            case ExprKind.Call(callee, args):
+                var acc = self.scan_ast_expr_for_returns(callee, params)
+                for a in args:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
+                acc
+            case ExprKind.MethodCall(receiver, _, args):
+                var acc = self.scan_ast_expr_for_returns(receiver, params)
+                for a in args:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
+                acc
+            case ExprKind.Cast(expr, _):
+                self.scan_ast_expr_for_returns(expr, params)
+            case ExprKind.Index(base, index):
+                merge_return_scan(self.scan_ast_expr_for_returns(base, params), self.scan_ast_expr_for_returns(index, params))
+            case ExprKind.Field(base, _):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.OptionalChain(base, _):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.NullCoalesce(left, right):
+                merge_return_scan(self.scan_ast_expr_for_returns(left, params), self.scan_ast_expr_for_returns(right, params))
+            case ExprKind.ExistsCheck(base):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.ForceUnwrap(base):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.Range(start, end, _, step):
+                var acc = return_scan_empty()
+                if start.?:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(start.unwrap(), params))
+                if end.?:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(end.unwrap(), params))
+                if step.?:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(step.unwrap(), params))
+                acc
+            case ExprKind.Await(expr):
+                self.scan_ast_expr_for_returns(expr, params)
+            case ExprKind.Yield(value):
+                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
+            case ExprKind.Throw(value):
+                self.scan_ast_expr_for_returns(value, params)
+            case ExprKind.Try(expr):
+                self.scan_ast_expr_for_returns(expr, params)
+            case ExprKind.ArrayLit(elements):
+                var acc = return_scan_empty()
+                for el in elements:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
+                acc
+            case ExprKind.TupleLit(elements):
+                var acc = return_scan_empty()
+                for el in elements:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
+                acc
+            case ExprKind.SetLit(elements):
+                var acc = return_scan_empty()
+                for el in elements:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
+                acc
+            case ExprKind.ArrayRepeat(value, count):
+                merge_return_scan(self.scan_ast_expr_for_returns(value, params), self.scan_ast_expr_for_returns(count, params))
+            case ExprKind.Break(_):
+                return_scan_empty()
+            case _:
+                return_scan_empty()
+
+    me register_imported_symbol(imported_mod: Module, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
+        val as_cls: Class? = imported_mod.classes.get(imported_name)
+        val as_str: Struct? = imported_mod.structs.get(imported_name)
+        val as_enum: Enum? = imported_mod.enums.get(imported_name)
+        val as_trait: Trait? = imported_mod.traits.get(imported_name)
+        val as_fn: Function? = imported_mod.functions.get(imported_name)
+        val as_const: Const? = imported_mod.constants.get(imported_name)
+
+        if as_cls != nil:
+            val imported_type = self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.symbols.rename_symbol(imported_type, imported_name)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+        elif as_str != nil:
+            val imported_type = self.symbols.define(local_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.symbols.rename_symbol(imported_type, imported_name)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+        elif as_enum != nil:
+            val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.symbols.rename_symbol(imported_type, imported_name)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+        elif as_trait != nil:
+            self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            # #190: an imported trait is only registered as a symbol here --
+            # it never runs through the module-level `for trait_ in
+            # module.traits: self.lower_trait(trait_)` loop (that loop only
+            # walks THIS module's own decls), so `self.lowered_traits` (the
+            # registry `lower_impl`'s default-method injection reads, task
+            # #55/#157) stays empty for it. When an impl in THIS module
+            # implements a cross-module trait, the injection then finds
+            # nothing to inject and an un-overridden default dies at MIR time
+            # with "unresolved method call" (interpreter oracle unaffected --
+            # it resolves defaults dynamically, not via this HIR-time table).
+            # Lower the imported trait on demand, guarded so a repeated
+            # import (e.g. two `use` items reaching the same trait) or a glob
+            # import does not re-lower it. Deliberately NOT an eager
+            # import-graph walk: only traits actually named in a `use`
+            # resolve here, so this cannot blast-radius into unrelated
+            # stdlib traits that happen to sit in an imported module.
+            if not self.lowered_traits.contains_key(imported_name):
+                self.lower_trait(as_trait.unwrap())
+            if local_name != imported_name and self.lowered_traits.contains_key(imported_name):
+                # Aliased import (`use .mod.{Trait as T}`): lower_trait keys
+                # the registry by the trait's OWN declared name, but
+                # lower_impl looks it up by the name the impl clause uses
+                # locally -- alias that key too.
+                self.lowered_traits[local_name] = self.lowered_traits[imported_name]
+        elif as_fn != nil:
+            val fn_type = self.declared_callable_type(as_fn, nil)
+            val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
+        elif as_const != nil:
+            self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        else:
+            # Re-export facade chase: the imported module does not declare
+            # `imported_name` itself — it may re-export it (`export use
+            # backend.{name}`), e.g. std.env.types forwarding the rt_env_*
+            # externs from std.nogc_sync_mut.env.types. Without this, the
+            # import silently registered NOTHING and every use site died
+            # later with "unresolved name: rt_env_get" (native-build
+            # entry-closure path; parity case dynload_tagged_text).
+            val hop = self.find_reexport_source(imported_mod, imported_name, 0)
+            if hop.found:
+                val src_mod: Module? = self.modules_by_name.get(hop.module_name)
+                if src_mod != nil:
+                    self.register_imported_symbol(src_mod, hop.module_name, hop.item_name, local_name, import_span)
+
+    me find_reexport_source(facade_mod: Module, wanted: text, depth: i64) -> HirReexportSource:
+        """Resolve which transitive module actually DECLARES `wanted` when
+        `facade_mod` only re-exports it. Follows the facade's own imports
+        (explicit items, alias-aware; glob imports too) up to a small depth
+        bound so import cycles terminate. Only returns a module that declares
+        the item directly, so the caller's re-entry into
+        register_imported_symbol cannot recurse back in here for that hit."""
+        if depth > 8:
+            return HirReexportSource(found: false, module_name: "", item_name: "")
+        var import_idx = 0
+        while import_idx < facade_mod.imports.len():
+            val imp = facade_mod.imports[import_idx]
+            var matches = imp.items.len() == 0
+            var source_item = wanted
+            var item_idx = 0
+            while item_idx < imp.items.len():
+                val item = imp.items[item_idx]
+                val local = if item.has_alias: item.alias else: item.name
+                if local == wanted:
+                    matches = true
+                    source_item = item.name
+                item_idx = item_idx + 1
+            if matches:
+                val next_mod: Module? = self.modules_by_name.get(imp.module)
+                if next_mod != nil:
+                    if hir_module_declares_item(next_mod, source_item):
+                        return HirReexportSource(found: true, module_name: imp.module, item_name: source_item)
+                    val deeper = self.find_reexport_source(next_mod, source_item, depth + 1)
+                    if deeper.found:
+                        return deeper
+            import_idx = import_idx + 1
+        HirReexportSource(found: false, module_name: "", item_name: "")
+
+    me register_imported_type_methods(imported_mod: Module, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span):
+        val owner_module = hir_module_logical_name_from_path(imported_mod_name)
+        for impl_ in imported_mod.impls:
+            if parser_type_kind_named_name(impl_.type_.kind) != imported_name:
+                continue
+            for method_name in impl_.methods.keys():
+                val method = impl_.methods[method_name]
+                val symbol_name = "{owner_module}.{imported_name}::{method_name}"
+                if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                    val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+                    val method_type = self.declared_callable_type(method, Some(local_owner))
+                    self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
+            if impl_.has_trait_:
+                val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+                val trait_: Trait? = imported_mod.traits.get(trait_name)
+                if trait_ != nil:
+                    for trait_method in trait_.methods:
+                        val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
+                        if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                            val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                            val method_type = self.declared_callable_type(trait_method, Some(local_owner))
+                            self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
+
+    me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
+        """Under a --entry-closure bootstrap build, rename a cross-module
+        imported function's stored symbol name to `<module>.<original name>`
+        so it stays distinct from a same-named function imported (under
+        whatever local alias) from a DIFFERENT module. `resolve_import_symbols`
+        registers the symbol under the LOCAL alias (`local_name`, e.g.
+        `compute_a`) for scope lookup, but the flat bootstrap MIR accumulator
+        (`bootstrap_lower_extra_hir_module_to_mir`,
+        `_MirLowering/bootstrap_globals.spl`) keys/emits each closure module's
+        functions the same qualified way -- without this, MIR call-site
+        emission (which resolves the call name from this symbol) and the
+        accumulator's emitted definitions can name the SAME symbol two
+        different ways, or two DIFFERENT modules' same-named functions the
+        SAME way (bug bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B).
+        A plain (non-closure) bootstrap_main.spl build has no cross-module
+        imports to qualify, and a normal (non-bootstrap) compile keeps the
+        local alias name -- both are unaffected by this rename."""
+        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if bootstrap_closure:
+            self.symbols.rename_symbol(sym_id, "{imported_mod_name}.{imported_name}")
+
+    me register_glob_imported_symbols(imported_mod: any, imported_mod_name: text, import_span: Span):
+        var keys = imported_mod.classes.keys()
+        var idx = 0
+        while idx < keys.len():
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            idx = idx + 1
+
+        keys = imported_mod.structs.keys()
+        idx = 0
+        while idx < keys.len():
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            idx = idx + 1
+
+        keys = imported_mod.enums.keys()
+        idx = 0
+        while idx < keys.len():
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            idx = idx + 1
+
+        keys = imported_mod.traits.keys()
+        idx = 0
+        while idx < keys.len():
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            idx = idx + 1
+
+        keys = imported_mod.functions.keys()
+        idx = 0
+        while idx < keys.len():
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            idx = idx + 1
+
+        keys = imported_mod.constants.keys()
+        idx = 0
+        while idx < keys.len():
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            idx = idx + 1
+
+    me resolve_import_symbols(module: Module):
+        var import_idx = 0
+        while import_idx < module.imports.len():
+            val imp = module.imports[import_idx]
+            val imported_mod: Module? = self.modules_by_name.get(imp.module)
+            if imported_mod != nil:
+                if imp.items.len() == 0:
+                    self.register_glob_imported_symbols(imported_mod, imp.module, imp.span)
+                else:
+                    var item_idx = 0
+                    while item_idx < imp.items.len():
+                        val item = imp.items[item_idx]
+                        val local_name = if item.has_alias: item.alias else: item.name
+                        self.register_imported_symbol(imported_mod, imp.module, item.name, local_name, imp.span)
+                        item_idx = item_idx + 1
+            import_idx = import_idx + 1
+
+    # Uniquely-named entry point for the driver's unstub `-c`/`run` path.
+    # `lowering.lower_module(...)` from the driver never enters this impl's body
+    # on the stage4 binary: `lower_module` is also defined on MirLowering with
+    # the same arity, and the seed's method-name dispatch can resolve the call
+    # to the wrong same-named sibling (the process_module hazard of iteration
+    # 14, recurring here — bug doc iteration 17). The unique name forces
+    # dispatch to the real HIR lowering body.
+    me lower_parser_module_unstub(module: Module) -> HirModule:
+        # Trap D (iteration 17): env-GATED eprint probes are mute in the
+        # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
+        # false on stage4 even when X=1 — while UNGATED eprint works fine.
+        # Probe builds must use ungated eprint here.
+        self.lower_module(module)
+
+    me lower_module(module: Module) -> HirModule:
+        # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
+        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_diag = bootstrap_mode and hir_module_diag_enabled()
+        # A multi-module --entry-closure build under SIMPLE_BOOTSTRAP=1 parses
+        # EVERY module in the closure for real (see flat_is_bootstrap_entry_path
+        # in the flat-AST bridge), not just the single bootstrap_main.spl entry.
+        # The bootstrap branch below only pre-declares SAME-module function
+        # names (bootstrap_decl_idx loop); it never ran resolve_import_symbols,
+        # so a helper module's functions never entered the importing module's
+        # symbol table and every cross-module call HIR-failed with "unresolved
+        # name: <fn>" even though the helper module itself lowered fine (bug
+        # bootstrap_stage2_empty_mir_bodies_2026-07-05, cross-module closure
+        # gap). Single-entry bootstrap_main.spl builds (no closure flag) never
+        # had real cross-module imports to resolve, so this only widens
+        # behavior for the closure path.
+        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if bootstrap_diag:
+            # NOTE: parser Module has no `path` field (parser_types.spl) — a
+            # `{module.path}` interpolation here aborted the whole worker under
+            # SIMPLE_COMPILER_TRACE=1 ("class `Module` has no field named `path`").
+            eprint("[hir-lower] lower_module:start module={module.name}")
+        self.lowered_impl_functions = {}
+        # NOTE (moved): the struct field-type pre-scan that used to run HERE
+        # now runs AFTER Pass 0 (imports) and the declare pass below — see the
+        # "Pass -1 (relocated)" block. Running it first meant every
+        # struct-typed field (`inner: Inner`, `driver: FramebufferDriver`)
+        # hit lower_named_kind before ANY type symbol was defined and emitted
+        # "unresolved type" — historically swallowed, but fatal since HIR
+        # lowering errors became build errors (type lowering diagnostic
+        # recovery). The consumers of struct_field_types_by_name /
+        # struct_field_order_by_name are all in FUNCTION-BODY lowering, which
+        # still runs after the relocated pre-scan, so the "registry is
+        # populated before any function body" guarantee is unchanged — with
+        # strictly better fidelity, since module-local and imported type
+        # names now resolve to real Named kinds instead of decaying to Error.
+        # Pre-scan every enum-variant short name (needs no symbol resolution,
+        # so it keeps running first) so lower_pattern can give a subject-owned enum
+        # variant precedence over an unrelated same-named struct/class. Keeps
+        # `case Const(a, b, c):` a refutable enum-variant pattern instead of
+        # an irrefutable struct-positional pattern
+        # (native_const_pattern_lowers_irrefutably bug).
+        val prescan_enum_names = module.enums.keys()
+        var prescan_enum_idx = 0
+        while prescan_enum_idx < prescan_enum_names.len():
+            val prescan_enum: Enum = module.enums[prescan_enum_names[prescan_enum_idx]]
+            for prescan_variant in prescan_enum.variants:
+                self.enum_variant_names[prescan_variant.name] = true
+            prescan_enum_idx = prescan_enum_idx + 1
+        # Pass 0: pre-register imported type names so explicit `use` paths win
+        # over module load order when two modules export the same short name.
+        if not bootstrap_mode or bootstrap_closure:
+            hir_module_phase_probe("phase3:hir:imports:start {module.name}")
+            if bootstrap_diag:
+                eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
+            self.resolve_import_symbols(module)
+            if bootstrap_diag:
+                eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
+            hir_module_phase_probe("phase3:hir:imports:done {module.name}")
+
+        # First pass: declare all top-level symbols
+        if bootstrap_diag:
+            eprint("[hir-lower] declare:start module={module.name}")
+        if not bootstrap_mode or bootstrap_closure:
+            hir_module_phase_probe("phase3:hir:declare:start {module.name}")
+            # Under a closure build, a module's own struct/enum/class/trait
+            # names must be pre-declared before its functions are lowered --
+            # a constructor referencing its own module's struct (e.g.
+            # `Point(x: a, y: b)` inside `make_point`) otherwise hits
+            # lower_unresolved_ident -> "unresolved name: Point" (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe A). Bootstrap
+            # mode already pre-declares its own function names via the
+            # bootstrap_decl_idx loop below, so this only widens declaration
+            # coverage to types/consts for the closure path.
+            self.declare_module_symbols(module)
+            hir_module_phase_probe("phase3:hir:declare:done {module.name}")
+        if bootstrap_diag:
+            eprint("[hir-lower] declare:done module={module.name}")
+
+        # Pass -1 (relocated): pre-scan struct/class field TYPES (name-keyed) before
+        # ANY function body is lowered. Nested-field-access support (see
+        # struct_field_types_by_name doc comment in types.spl) needs this
+        # available while lowering `val s = S(...)` higher up in a function
+        # body, but this module's main struct-lowering pass (which fully
+        # resolves each HirStruct, further down in lower_module) runs AFTER
+        # functions are lowered -- too late for that Let-statement lowering to
+        # see it. This pre-scan is deliberately separate from (and superseded
+        # by) that later full pass. It MUST run after resolve_import_symbols
+        # (Pass 0) and declare_module_symbols above: lowering an aggregate-typed
+        # field (`driver: FramebufferDriver`) resolves the field type through
+        # lower_named_kind, and before those passes no type symbol exists yet,
+        # so every such field emitted "unresolved type" -- historically
+        # swallowed, but a fatal build error since HIR lowering errors became
+        # fatal (crossmodule_field_index_collision parity case: the provider
+        # module's own sibling struct failed to resolve and the whole
+        # native-build aborted).
+        # NOTE: aggregate field type ANNOTATIONS are unreliable on this path
+        # (`arr: [i64]` parses to TypeKind.Infer, both parser- and HIR-level --
+        # a documented pre-existing limitation, see bug #156's
+        # method_calls_literals.spl comment). This pre-scan is still worth
+        # doing (cheap, and correct for any field shape the parser DOES
+        # preserve); the construction-site inference in
+        # try_register_local_struct_type (statements.spl) is what actually
+        # recovers array-typed fields in practice, and it MERGES into
+        # (overwrites) whatever this pass records.
+        val prescan_struct_names = module.structs.keys()
+        var prescan_idx = 0
+        while prescan_idx < prescan_struct_names.len():
+            val prescan_name = prescan_struct_names[prescan_idx]
+            val prescan_struct: Struct = module.structs[prescan_name]
+            self.prescan_composite_field_types(prescan_name, prescan_struct.fields)
+            prescan_idx = prescan_idx + 1
+        val prescan_class_names = module.classes.keys()
+        prescan_idx = 0
+        while prescan_idx < prescan_class_names.len():
+            val prescan_name = prescan_class_names[prescan_idx]
+            val prescan_class: Class = module.classes[prescan_name]
+            self.prescan_composite_field_types(prescan_name, prescan_class.fields)
+            prescan_idx = prescan_idx + 1
+
+        # Second pass: lower definitions
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:functions:init module={module.name}")
+        var functions: Dict<SymbolId, HirFunction> = {}
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:classes:init module={module.name}")
+        var classes: Dict<SymbolId, HirClass> = {}
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:structs:init module={module.name}")
+        var structs: Dict<SymbolId, HirStruct> = {}
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:enums:init module={module.name}")
+        var enums: Dict<SymbolId, HirEnum> = {}
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:bitfields:init module={module.name}")
+        var bitfields: Dict<SymbolId, HirBitfield> = {}
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:traits:init module={module.name}")
+        var traits: Dict<SymbolId, HirTrait> = {}
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:impls:init module={module.name}")
+        var impls: [HirImpl] = []
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:constants:init module={module.name}")
+        var constants: Dict<SymbolId, HirConst> = {}
+
+        var lower_idx = 0
+        if bootstrap_mode:
+            bootstrap_hir_functions_reset()
+            # Lower the REAL parsed functions of the entry module. They are held
+            # in `module.functions` (populated by the flat-AST bridge at parse
+            # time — see parse_and_build_module). The prior implementation re-read
+            # the fragile SIMPLE_BOOTSTRAP_DECL_TAG_* environment (overwritten by
+            # every later module parse, so at this point it reflected some other
+            # module) and, unless SIMPLE_BOOTSTRAP_REAL_HIR=1, deferred to ZERO
+            # functions — which produced an all-stub bootstrap binary that linked
+            # cleanly but did nothing (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05).
+            val bootstrap_module_functions = module.functions
+            val bootstrap_function_keys = bootstrap_module_functions.keys()
+            if bootstrap_diag:
+                eprint("[hir-lower] functions:count module={module.name} count={bootstrap_function_keys.len()}")
+            # Pre-declare every module-level function name BEFORE lowering any
+            # body. declare_module_symbols is skipped under bootstrap, so
+            # without this a same-module callee (`check(...)`) hits
+            # lower_unresolved_ident -> HirExprKind.Error, and MIR lower_call's
+            # indirect arm then emits `call i64 %lN(...)` through whatever
+            # garbage local the Error expr lowered to (#135-class SIGSEGV).
+            # A closure HELPER module's (non-entry) own functions are keyed
+            # in the flat MIR accumulator by `module.function`
+            # (bootstrap_lower_extra_hir_module_to_mir,
+            # bootstrap_globals.spl) so a same-named function from a
+            # DIFFERENT module doesn't collide/drop it (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B). A
+            # same-module call between two of THIS module's own functions
+            # must resolve through that same qualified name, so pre-declare
+            # under the qualified name here too -- but only for a non-entry
+            # module: the ENTRY's own accumulator
+            # (bootstrap_lower_hir_globals_to_mir_module) never qualifies,
+            # so qualifying its pre-declared names would break every
+            # same-module call in bootstrap_main.spl itself.
+            val bootstrap_decl_qualify = bootstrap_closure and not hir_module_is_bootstrap_entry(module.name)
+            val bootstrap_decl_module_name = hir_module_logical_name_from_path(module.name)
+            var bootstrap_decl_idx = 0
+            while bootstrap_decl_idx < bootstrap_function_keys.len():
+                val bootstrap_decl_fn: Function = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
+                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
+                if bootstrap_decl_qualify:
+                    self.symbols.rename_symbol(bootstrap_decl_sym, "{bootstrap_decl_module_name}.{bootstrap_decl_fn.name}")
+                bootstrap_decl_idx = bootstrap_decl_idx + 1
+            while lower_idx < bootstrap_function_keys.len():
+                val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
+                if bootstrap_diag:
+                    eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
+                val hir_fn = self.lower_function(bootstrap_fn)
+                val fn_key: SymbolId = SymbolId(id: lower_idx)
+                functions[fn_key] = hir_fn
+                bootstrap_hir_functions_add(hir_fn)
+                if bootstrap_diag:
+                    eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
+                lower_idx = lower_idx + 1
+        else:
+            val lower_module_functions = module.functions
+            val lower_function_keys = lower_module_functions.keys()
+            while lower_idx < lower_function_keys.len():
+                val name = lower_function_keys[lower_idx]
+                hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
+                val fn_: Function = lower_module_functions[name]
+                val hir_fn = self.lower_function(fn_)
+                # Key the HIR functions Dict by a distinct per-function SymbolId
+                # derived from the loop index, NOT by `hir_fn.symbol`. On stage4
+                # (seed-compiled pure-Simple compiler) `SymbolTable.lookup(name)`
+                # returns a shared/corrupt SymbolId struct instance for every
+                # top-level function in a module — the seed's
+                # `Dict<text, SymbolId>.get()` yields the LAST-defined struct for
+                # all names (struct-value corruption, Layer-5 family). As a Dict
+                # KEY those identical structs collide, so `functions[hir_fn.symbol]
+                # = hir_fn` for a second function OVERWRITES the first, collapsing
+                # a 2+-function module to a single entry and silently dropping
+                # `main` (multi-fn run files no-op, rc=0 — bug
+                # stage4_unstub_multifn_silent_noop_2026-07-03, iteration 19). The
+                # real symbol ids ARE distinct in the table (next_symbol_id
+                # advances per `define`); only the looked-up struct handle is
+                # shared. Every HIR-functions consumer iterates `.keys()`/`.values()`
+                # (monomorphize_integration, backend translate, interpreter
+                # main-by-name scan) and re-indexes with the yielded key, so a
+                # distinct synthetic key preserves all entries and all consumers.
+                val fn_key: SymbolId = SymbolId(id: lower_idx)
+                functions[fn_key] = hir_fn
+                hir_module_phase_probe("phase3:hir:function:done {module.name}.{name}")
+                lower_idx = lower_idx + 1
+
+        if bootstrap_mode:
+            # Closure builds need real struct/enum/class/bitfield/trait
+            # definitions in the returned HirModule, not just their names in
+            # the symbol table (declare_module_symbols above only defines
+            # names). Without this, MIR lowering's `struct_field_order` (built
+            # by walking `HirModule.structs`) never learns about a module's
+            # own struct, so `Point(x: a, y: b)` falls through lower_call's
+            # generic-function-call path and the backend emits `call @Point`
+            # -> link failure `undefined symbol: Point` instead of a real
+            # struct construction (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe A). A plain
+            # (non-closure) bootstrap_main.spl build never declares its own
+            # struct/enum/class types, so these dicts stay empty there and
+            # this is additive only.
+            if bootstrap_closure:
+                val bootstrap_module_classes = module.classes
+                val bootstrap_class_keys = bootstrap_module_classes.keys()
+                var bootstrap_class_idx = 0
+                while bootstrap_class_idx < bootstrap_class_keys.len():
+                    val bootstrap_class_: Class = bootstrap_module_classes[bootstrap_class_keys[bootstrap_class_idx]]
+                    val bootstrap_hir_class = self.lower_class(bootstrap_class_)
+                    classes[bootstrap_hir_class.symbol] = bootstrap_hir_class
+                    bootstrap_class_idx = bootstrap_class_idx + 1
+
+                val bootstrap_module_structs = module.structs
+                val bootstrap_struct_keys = bootstrap_module_structs.keys()
+                var bootstrap_struct_idx = 0
+                while bootstrap_struct_idx < bootstrap_struct_keys.len():
+                    val bootstrap_struct_: Struct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
+                    val bootstrap_hir_struct = self.lower_struct(bootstrap_struct_)
+                    structs[bootstrap_hir_struct.symbol] = bootstrap_hir_struct
+                    self.register_struct_field_types(bootstrap_hir_struct)
+                    bootstrap_struct_idx = bootstrap_struct_idx + 1
+
+                val bootstrap_module_enums = module.enums
+                val bootstrap_enum_keys = bootstrap_module_enums.keys()
+                var bootstrap_enum_idx = 0
+                while bootstrap_enum_idx < bootstrap_enum_keys.len():
+                    val bootstrap_enum_: Enum = bootstrap_module_enums[bootstrap_enum_keys[bootstrap_enum_idx]]
+                    val bootstrap_hir_enum = self.lower_enum(bootstrap_enum_)
+                    enums[bootstrap_hir_enum.symbol] = bootstrap_hir_enum
+                    bootstrap_enum_idx = bootstrap_enum_idx + 1
+
+                val bootstrap_module_bitfields = module.bitfields
+                val bootstrap_bitfield_keys = bootstrap_module_bitfields.keys()
+                var bootstrap_bitfield_idx = 0
+                while bootstrap_bitfield_idx < bootstrap_bitfield_keys.len():
+                    val bootstrap_bf_: Bitfield = bootstrap_module_bitfields[bootstrap_bitfield_keys[bootstrap_bitfield_idx]]
+                    val bootstrap_hir_bf = self.lower_bitfield(bootstrap_bf_)
+                    bitfields[bootstrap_hir_bf.symbol] = bootstrap_hir_bf
+                    bootstrap_bitfield_idx = bootstrap_bitfield_idx + 1
+
+                val bootstrap_module_traits = module.traits
+                val bootstrap_trait_keys = bootstrap_module_traits.keys()
+                var bootstrap_trait_idx = 0
+                while bootstrap_trait_idx < bootstrap_trait_keys.len():
+                    val bootstrap_trait_: Trait = bootstrap_module_traits[bootstrap_trait_keys[bootstrap_trait_idx]]
+                    val bootstrap_hir_trait = self.lower_trait(bootstrap_trait_)
+                    traits[bootstrap_hir_trait.symbol] = bootstrap_hir_trait
+                    bootstrap_trait_idx = bootstrap_trait_idx + 1
+
+                var bootstrap_impl_idx = 0
+                while bootstrap_impl_idx < module.impls.len():
+                    impls = impls.push(self.lower_impl(module.impls[bootstrap_impl_idx]))
+                    bootstrap_impl_idx = bootstrap_impl_idx + 1
+                var bootstrap_impl_fn_key = functions.len()
+                for bootstrap_impl_sym in self.lowered_impl_functions.keys():
+                    functions[SymbolId(id: bootstrap_impl_fn_key)] = self.lowered_impl_functions[bootstrap_impl_sym]
+                    bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
+            if bootstrap_diag:
+                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
+            return HirModule(
+                name: module.name,
+                path: "",
+                imports: [],
+                exports: [],
+                domain_blocks: [],
+                symbols: self.symbols,
+                functions: functions,
+                classes: classes,
+                structs: structs,
+                enums: enums,
+                bitfields: bitfields,
+                traits: traits,
+                impls: impls,
+                constants: {},
+                static_asserts: [],
+                aop_advices: [],
+                di_bindings: [],
+                arch_rules: [],
+                mock_decls: [],
+                types: []
+            )
+
+        val lower_module_classes = module.classes
+        val lower_class_keys = lower_module_classes.keys()
+        lower_idx = 0
+        while lower_idx < lower_class_keys.len():
+            val name = lower_class_keys[lower_idx]
+            val class_: Class = lower_module_classes[name]
+            val hir_class = self.lower_class(class_)
+            classes[hir_class.symbol] = hir_class
+            lower_idx = lower_idx + 1
+
+        val lower_module_structs = module.structs
+        val lower_struct_keys = lower_module_structs.keys()
+        lower_idx = 0
+        while lower_idx < lower_struct_keys.len():
+            val name = lower_struct_keys[lower_idx]
+            val struct_: Struct = lower_module_structs[name]
+            val hir_struct = self.lower_struct(struct_)
+            structs[hir_struct.symbol] = hir_struct
+            self.register_struct_field_types(hir_struct)
+            lower_idx = lower_idx + 1
+
+        # Imported enum names are registered above, but their definitions used
+        # to be dropped here. Preserve the variants and payload types so native
+        # match bindings do not treat text payloads as integer-shaped values.
+        var lower_module_enums: Dict<text, Enum> = {}
+        val local_enum_keys = module.enums.keys()
+        var import_enum_idx = 0
+        while import_enum_idx < local_enum_keys.len():
+            val local_enum_name = local_enum_keys[import_enum_idx]
+            lower_module_enums[local_enum_name] = module.enums[local_enum_name]
+            import_enum_idx = import_enum_idx + 1
+        var enum_import_idx = 0
+        while enum_import_idx < module.imports.len():
+            val imp = module.imports[enum_import_idx]
+            val imported_mod: Module? = self.modules_by_name.get(imp.module)
+            if imported_mod != nil:
+                if imp.items.len() == 0:
+                    val imported_enum_keys = imported_mod.enums.keys()
+                    import_enum_idx = 0
+                    while import_enum_idx < imported_enum_keys.len():
+                        val imported_name = imported_enum_keys[import_enum_idx]
+                        # Imports are registered before local declarations and
+                        # type symbols are first-write-wins, so the imported
+                        # definition must win here too.
+                        lower_module_enums[imported_name] = imported_mod.enums[imported_name]
+                        import_enum_idx = import_enum_idx + 1
+                else:
+                    var enum_item_idx = 0
+                    while enum_item_idx < imp.items.len():
+                        val item = imp.items[enum_item_idx]
+                        val imported_enum: Enum? = imported_mod.enums.get(item.name)
+                        # ponytail: alias-aware enum type substitution is still
+                        # required for self-referential payloads; keep aliases
+                        # on the existing path until that syntax is requested.
+                        if imported_enum != nil and not item.has_alias:
+                            lower_module_enums[item.name] = imported_enum
+                        enum_item_idx = enum_item_idx + 1
+            enum_import_idx = enum_import_idx + 1
+        val lower_enum_keys = lower_module_enums.keys()
+        lower_idx = 0
+        while lower_idx < lower_enum_keys.len():
+            val name = lower_enum_keys[lower_idx]
+            val enum_: Enum = lower_module_enums[name]
+            val hir_enum = self.lower_enum(enum_)
+            enums[hir_enum.symbol] = hir_enum
+            lower_idx = lower_idx + 1
+
+        val lower_module_bitfields = module.bitfields
+        val lower_bitfield_keys = lower_module_bitfields.keys()
+        lower_idx = 0
+        while lower_idx < lower_bitfield_keys.len():
+            val name = lower_bitfield_keys[lower_idx]
+            val bf: Bitfield = lower_module_bitfields[name]
+            val hir_bf = self.lower_bitfield(bf)
+            bitfields[hir_bf.symbol] = hir_bf
+            lower_idx = lower_idx + 1
+
+        val lower_module_traits = module.traits
+        val lower_trait_keys = lower_module_traits.keys()
+        lower_idx = 0
+        while lower_idx < lower_trait_keys.len():
+            val name = lower_trait_keys[lower_idx]
+            val trait_: Trait = lower_module_traits[name]
+            val hir_trait = self.lower_trait(trait_)
+            traits[hir_trait.symbol] = hir_trait
+            lower_idx = lower_idx + 1
+
+        lower_idx = 0
+        while lower_idx < module.impls.len():
+            val impl_ = module.impls[lower_idx]
+            impls = impls.push(self.lower_impl(impl_))
+            lower_idx = lower_idx + 1
+        val lowered_impl_function_keys = self.lowered_impl_functions.keys()
+        lower_idx = 0
+        while lower_idx < lowered_impl_function_keys.len():
+            val sym = lowered_impl_function_keys[lower_idx]
+            functions[sym] = self.lowered_impl_functions[sym]
+            lower_idx = lower_idx + 1
+
+        val lower_module_constants = module.constants
+        val lower_const_keys = lower_module_constants.keys()
+        lower_idx = 0
+        while lower_idx < lower_const_keys.len():
+            val name = lower_const_keys[lower_idx]
+            val const_: Const = lower_module_constants[name]
+            val hir_const = self.lower_const(const_)
+            constants[hir_const.symbol] = hir_const
+            lower_idx = lower_idx + 1
+
+        # Lower static assertions
+        var static_asserts: [HirStaticAssert] = []
+        for assert_ in module.static_asserts:
+            static_asserts = static_asserts.push(self.lower_static_assert(assert_))
+
+        # Lower AOP advices
+        var aop_advices: [HirAopAdvice] = []
+        for advice in module.aop_advices:
+            aop_advices = aop_advices.push(self.lower_aop_advice(advice))
+
+        # Lower DI bindings
+        var di_bindings: [HirDiBinding] = []
+        for binding in module.di_bindings:
+            di_bindings = di_bindings.push(self.lower_di_binding(binding))
+
+        # Lower architecture rules
+        var arch_rules: [HirArchRule] = []
+        for rule in module.arch_rules:
+            arch_rules = arch_rules.push(self.lower_arch_rule(rule))
+
+        # Lower mock declarations
+        var mock_decls: [HirMockDecl] = []
+        for mock_decl in module.mock_decls:
+            mock_decls = mock_decls.push(self.lower_mock_decl(mock_decl))
+
+        # Lower imports
+        var imports: [HirImport] = []
+        for imp in module.imports:
+            imports = imports.push(self.lower_import(imp))
+
+        var domain_blocks: [HirDomainBlock] = []
+        for block in module.domain_blocks:
+            domain_blocks = domain_blocks.push(self.lower_domain_block(block))
+
+        # Collect exports
+        var exports: [text] = []
+        for exp in module.exports:
+            for item in exp.items:
+                exports = exports.push(item)
+
+        HirModule(
+            name: module.name,
+            path: "",
+            imports: imports,
+            exports: exports,
+            domain_blocks: domain_blocks,
+            symbols: self.symbols,
+            functions: functions,
+            classes: classes,
+            structs: structs,
+            enums: enums,
+            bitfields: bitfields,
+            traits: traits,
+            impls: impls,
+            constants: constants,
+            static_asserts: static_asserts,
+            aop_advices: aop_advices,
+            di_bindings: di_bindings,
+            arch_rules: arch_rules,
+            mock_decls: mock_decls,
+            types: []
+        )
+
+    me declare_module_symbols(module: Module):
+        # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
+        # call site in lower_module) so a module's own struct/enum/class/
+        # trait names resolve inside its own function bodies.
+        val declare_bootstrap_closure = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not declare_bootstrap_closure:
+            return
+        # Pass module filename for visibility tracking
+        val mod_name = if self.module_filename != "": Some(self.module_filename) else: nil
+        val decl_span = Span.empty()
+        val decl_visibility = Visibility.Public
+
+        # Use while loops instead of for-in (for-in doesn't work in compiled native code)
+        val module_classes = module.classes
+        val cls_keys = module_classes.keys()
+        var idx = 0
+        while idx < cls_keys.len():
+            val name = cls_keys[idx]
+            self.symbols.define(name, SymbolKind.Class, nil, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        val module_structs = module.structs
+        val str_keys = module_structs.keys()
+        idx = 0
+        while idx < str_keys.len():
+            val name = str_keys[idx]
+            self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        val module_enums = module.enums
+        val enum_keys = module_enums.keys()
+        idx = 0
+        while idx < enum_keys.len():
+            val name = enum_keys[idx]
+            self.symbols.define(name, SymbolKind.Enum, nil, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        val module_bitfields = module.bitfields
+        val bf_keys = module_bitfields.keys()
+        idx = 0
+        while idx < bf_keys.len():
+            val name = bf_keys[idx]
+            self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        val module_traits = module.traits
+        val trait_keys = module_traits.keys()
+        idx = 0
+        while idx < trait_keys.len():
+            val name = trait_keys[idx]
+            self.symbols.define(name, SymbolKind.Trait, nil, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        # Function signatures are lowered after type symbols so named returns
+        # and recursive calls are typed before any function body is lowered.
+        val module_functions = module.functions
+        val fn_keys = module_functions.keys()
+        idx = 0
+        while idx < fn_keys.len():
+            val name = fn_keys[idx]
+            val fn_decl: Function = module_functions[name]
+            if (hir_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1":
+                val return_name: text = parser_type_kind_named_name(fn_decl.return_type.kind)
+                eprint("[flat-function-roundtrip] phase=hir name={fn_decl.name} return={return_name}")
+            val fn_type = self.declared_callable_type(fn_decl, nil)
+            # Capture tuple-return element types by NAME while a freshly
+            # lower_type'd HirType is same-pass (see fn_tuple_returns in
+            # types.spl: reading the Tuple payload back out of the stored
+            # symbol type at destructure time yields garbage on the seed
+            # interpreter). Explicit annotations only; generics skipped.
+            if fn_decl.type_params.len() == 0 and fn_decl.has_return_type:
+                val fn_ret_tuple_elems = hir_tuple_return_elem_list(self.lower_type(fn_decl.return_type))
+                if fn_ret_tuple_elems.len() > 0:
+                    self.fn_tuple_returns[name] = fn_ret_tuple_elems
+            self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        val module_constants = module.constants
+        val const_keys = module_constants.keys()
+        idx = 0
+        while idx < const_keys.len():
+            val name = const_keys[idx]
+            self.symbols.define(name, SymbolKind.Const, nil, decl_span, decl_visibility, false, mod_name)
+            idx = idx + 1
+
+        # Declare impl methods
+        var impl_idx = 0
+        while impl_idx < module.impls.len():
+            val impl_ = module.impls[impl_idx]
+            val owner_name = parser_type_kind_named_name(impl_.type_.kind)
+            val meth_keys = impl_.methods.keys()
+            var mi = 0
+            while mi < meth_keys.len():
+                val name = meth_keys[mi]
+                val method = impl_.methods[name]
+                val owner_symbol = self.symbols.lookup_or_invalid(owner_name)
+                val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+                val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
+                val method_type = self.declared_callable_type(method, owner_context)
+                self.symbols.define(symbol_name, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
+                mi = mi + 1
+            impl_idx = impl_idx + 1
+
+    me lower_import(imp: Import) -> HirImport:
+        var items: [HirImportItem] = []
+        for item in imp.items:
+            match item:
+                case ImportItem(name, true, alias):
+                    items = items.push(HirImportItem(
+                        name: name,
+                        alias: Some(alias),
+                        resolved: nil
+                    ))
+                case ImportItem(name, false, _):
+                    items = items.push(HirImportItem(
+                        name: name,
+                        alias: nil,
+                        resolved: nil
+                    ))
+
+        HirImport(
+            module_path: imp.module,
+            items: items,
+            is_lazy: imp.is_lazy,
+            span: imp.span
+        )
+
+    fn lower_domain_block(block: DomainBlock) -> HirDomainBlock:
+        HirDomainBlock(block.kind, block.payload, block.context, block.span)
+
+    fn bootstrap_hir_type_from_tag(tag: i64) -> HirType:
+        val span = Span.empty()
+        if tag == TYPE_TEXT:
+            return HirType(kind: HirTypeKind.Str, span: span)
+        if tag == TYPE_I64:
+            return HirType(kind: HirTypeKind.Int(64, true), span: span)
+        if tag == TYPE_BOOL:
+            return HirType(kind: HirTypeKind.Bool, span: span)
+        if tag == TYPE_VOID:
+            return HirType(kind: HirTypeKind.Unit, span: span)
+        HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+
+    fn bootstrap_hir_bin_op(op: i64) -> HirBinOp:
+        if op == TOK_MINUS:
+            return HirBinOp.Sub
+        if op == TOK_STAR:
+            return HirBinOp.Mul
+        if op == TOK_SLASH:
+            return HirBinOp.Div
+        if op == TOK_PERCENT:
+            return HirBinOp.Mod
+        if op == TOK_EQ:
+            return HirBinOp.Eq
+        if op == TOK_NOT_EQ:
+            return HirBinOp.NotEq
+        if op == TOK_LT:
+            return HirBinOp.Lt
+        if op == TOK_LT_EQ:
+            return HirBinOp.LtEq
+        if op == TOK_GT:
+            return HirBinOp.Gt
+        if op == TOK_GT_EQ:
+            return HirBinOp.GtEq
+        HirBinOp.Add
+
+    me lower_bootstrap_flat_expr(expr_idx: i64) -> HirExpr:
+        val span = Span.empty()
+        if expr_idx < 0:
+            return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        val tag = expr_get_tag(expr_idx)
+        if tag == EXPR_STRING_LIT:
+            val raw_str_value = expr_get_str(expr_idx)
+            if expr_get_int(expr_idx) == 1:
+                return HirExpr(kind: HirExprKind.StringLit(raw_str_value, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
+            # Bug #136: the bootstrap flat parser stores the raw string value
+            # with any `{expr}` interpolations copied VERBATIM (e.g.
+            # "simple-bootstrap {bootstrap_version()}") but never parses the
+            # inner sub-expressions -- it passed `nil` for the parts list, so
+            # the MIR interpolation lowering had nothing to substitute and the
+            # `{...}` printed literally. Parse the raw value for top-level
+            # `{...}` regions here and build a real [HirInterpolation] list so
+            # the downstream lower_string_interpolation + rt_interp_cstr chain
+            # can evaluate and splice each part.
+            val interp_parts = self.build_bootstrap_interpolations(raw_str_value, span)
+            val str_interps = if interp_parts.len() > 0: Some(interp_parts) else: nil
+            return HirExpr(kind: HirExprKind.StringLit(raw_str_value, str_interps), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
+        if tag == EXPR_INT_LIT:
+            return HirExpr(kind: HirExprKind.IntLit(expr_get_int(expr_idx), nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+        if tag == EXPR_BOOL_LIT:
+            return HirExpr(kind: HirExprKind.BoolLit(expr_get_int(expr_idx) != 0), has_type_: true, type_: HirType(kind: HirTypeKind.Bool, span: span), span: span)
+        if tag == EXPR_NIL_LIT:
+            return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        if tag == EXPR_IDENT:
+            val name = expr_get_str(expr_idx)
+            var sym = bootstrap_hir_symbol_for_name(name)
+            val found = self.symbols.lookup(name)
+            if val found_symbol = found:
+                sym = found_symbol
+            return HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_BINARY:
+            return HirExpr(kind: HirExprKind.Binary(self.bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_right(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_CALL:
+            val callee = self.lower_bootstrap_flat_expr(expr_get_left(expr_idx))
+            val arg_ids = expr_get_args(expr_idx)
+            val arg_names = expr_get_arg_names(expr_idx)
+            var args: [HirCallArg] = []
+            var ai = 0
+            while ai < arg_ids.len():
+                val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+                args.push(HirCallArg(has_name: arg_name != "", name: arg_name, value: self.lower_bootstrap_flat_expr(arg_ids[ai]), span: span))
+                ai = ai + 1
+            return HirExpr(kind: HirExprKind.Call(callee, args, []), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_FIELD_ACCESS:
+            return HirExpr(kind: HirExprKind.Field(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), nil), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_METHOD_CALL:
+            return HirExpr(kind: HirExprKind.MethodCall(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), [], MethodResolution.Unresolved), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_RETURN:
+            return HirExpr(kind: HirExprKind.Return(Some(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)))), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        if tag == EXPR_BLOCK:
+            return HirExpr(kind: HirExprKind.Block(self.lower_bootstrap_flat_block(expr_get_stmts(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+
+    me bootstrap_flat_var_expr(name: text, span: Span) -> HirExpr:
+        """Build a bootstrap-flat HIR Var expr for `name`, mirroring the
+        EXPR_IDENT case (bootstrap symbol, overridden by a scope lookup hit)."""
+        var sym = bootstrap_hir_symbol_for_name(name)
+        val found = self.symbols.lookup(name)
+        if val found_symbol = found:
+            sym = found_symbol
+        HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+
+    me bootstrap_interp_expr_from_source(inner: text, span: Span) -> HirExpr:
+        """Build an HIR expr for a single `{...}` interpolation inner source.
+
+        Bootstrap uses only two forms: a zero-arg call `name()` and a bare
+        identifier `name`. `name()` -> Call(Var(name), []); anything else ->
+        Var(inner)."""
+        if inner.ends_with("()"):
+            val fn_name = inner[0:inner.len() - 2]
+            val callee = self.bootstrap_flat_var_expr(fn_name, span)
+            HirExpr(kind: HirExprKind.Call(callee, [], []), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        else:
+            self.bootstrap_flat_var_expr(inner, span)
+
+    me build_bootstrap_interpolations(value: text, span: Span) -> [HirInterpolation]:
+        """Bug #136: scan a raw bootstrap string value for top-level `{...}`
+        regions and build the interpolation parts list. Brace depth is tracked
+        so nested braces inside an expr stay in one region; the inner source of
+        each top-level region is parsed into an HIR expr. The literal text
+        outside braces is ignored here (the MIR side re-splits `value` on the
+        same top-level brace logic to recover the surrounding segments)."""
+        var parts: [HirInterpolation] = []
+        var depth = 0
+        var inner = ""
+        var i = 0
+        val n = value.len()
+        while i < n:
+            val ch = value[i:i + 1]
+            if depth == 0 and ch == "{":
+                depth = 1
+                inner = ""
+            elif depth > 0 and ch == "{":
+                depth = depth + 1
+                inner = inner + ch
+            elif depth > 0 and ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    val part_expr = self.bootstrap_interp_expr_from_source(inner, span)
+                    parts = parts.push(HirInterpolation(expr: part_expr, has_format: false, format: "", span: span))
+                else:
+                    inner = inner + ch
+            elif depth > 0:
+                inner = inner + ch
+            i = i + 1
+        parts
+
+    me lower_bootstrap_flat_stmt(stmt_idx: i64) -> HirStmt:
+        val span = Span.empty()
+        eprint("[hir-lower] flat_stmt:start {stmt_idx}")
+        val tag = stmt_get_tag(stmt_idx)
+        eprint("[hir-lower] flat_stmt:tag {stmt_idx} {tag}")
+        if tag == STMT_EXPR:
+            return HirStmt(kind: HirStmtKind.Expr(self.lower_bootstrap_flat_expr(stmt_get_expr(stmt_idx))), span: span)
+        if tag == STMT_RETURN:
+            val expr_idx = stmt_get_expr(stmt_idx)
+            val value = if expr_idx >= 0: Some(self.lower_bootstrap_flat_expr(expr_idx)) else: nil
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(value), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+
+    me lower_bootstrap_flat_block(stmt_ids: [i64]) -> HirBlock:
+        val span = Span.empty()
+        var stmts: [HirStmt] = []
+        var has_value = false
+        var value_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        var i = 0
+        while i < stmt_ids.len():
+            eprint("[hir-lower] flat_block:stmt {i}")
+            val stmt = self.lower_bootstrap_flat_stmt(stmt_ids[i])
+            eprint("[hir-lower] flat_block:stmt:done {i}")
+            if i == stmt_ids.len() - 1:
+                match stmt.kind:
+                    case Expr(expr):
+                        has_value = true
+                        value_expr = expr
+                    case _:
+                        stmts.push(stmt)
+            else:
+                stmts.push(stmt)
+            i = i + 1
+        HirBlock(stmts: stmts, has: has_value, value: value_expr, span: span)

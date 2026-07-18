@@ -1,0 +1,49 @@
+# codex-system-test
+# @req REQ-009
+"""# RenderDoc Replay XML Inspection
+
+Validates capture-content parsing independently from a local RenderDoc install.
+"""
+use std.spec.*
+use app.test.renderdoc_replay_inspect.{parse_renderdoc_capture_xml}
+
+fn valid_xml() -> text:
+    "<?xml version=\"1.0\"?><rdc><header><driver id=\"8\">Vulkan</driver></header><chunks version=\"32\">" +
+        "<chunk name=\"vkCreateBuffer\"></chunk>" +
+        "<chunk name=\"vkCreateShaderModule\"></chunk>" +
+        "<chunk name=\"vkCreateComputePipelines\"></chunk>" +
+        "<chunk name=\"vkCmdDispatch\"></chunk></chunks></rdc>"
+
+describe "RenderDoc replay XML inspection":
+    it "should accept Vulkan actions pipeline shaders and resources":
+        step("Parse a converted Vulkan capture")
+        val result = parse_renderdoc_capture_xml(valid_xml(), "capture.rdc", "capture.xml", 0, "")
+        expect(result.status).to_equal("pass")
+        expect(result.driver).to_equal("vulkan")
+        expect(result.relevant_action_count).to_equal(1)
+        expect(result.pipeline_count).to_equal(1)
+        expect(result.shader_count).to_equal(1)
+        expect(result.resource_count).to_equal(1)
+
+    # @manual: folded
+    it "should reject magic or text without RenderDoc XML structure":
+        step("Parse a magic-only synthetic capture conversion")
+        expect(parse_renderdoc_capture_xml("RDOCsynthetic", "fake.rdc", "fake.xml", 0, "").reason).to_equal("invalid-renderdoc-xml")
+
+    # @manual: folded
+    it "should reject conversion failure":
+        step("Report a nonzero RenderDoc conversion result")
+        expect(parse_renderdoc_capture_xml("", "bad.rdc", "bad.xml", 2, "open failed").reason).to_equal("capture-open-failed")
+
+    # @manual: folded
+    it "should reject captures without relevant rendering actions":
+        step("Remove draw and dispatch actions")
+        val xml = valid_xml().replace("<chunk name=\"vkCmdDispatch\"></chunk>", "")
+        expect(parse_renderdoc_capture_xml(xml, "empty.rdc", "empty.xml", 0, "").reason).to_equal("missing-relevant-actions")
+
+    # @manual: folded
+    it "should reject captures without pipeline evidence":
+        step("Remove pipeline creation")
+        val xml = valid_xml().replace("<chunk name=\"vkCreateComputePipelines\"></chunk>", "")
+        expect(parse_renderdoc_capture_xml(xml, "no-pipeline.rdc", "no-pipeline.xml", 0, "").reason).to_equal("missing-pipeline-evidence")
+

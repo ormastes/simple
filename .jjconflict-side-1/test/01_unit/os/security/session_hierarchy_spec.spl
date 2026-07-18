@@ -1,0 +1,265 @@
+"""
+# Session Hierarchy Specification (OCap Privilege — S1/S2/S3)
+
+**Feature IDs:** #OS-OCAP-S1 #OS-OCAP-S2 #OS-OCAP-S3
+**Category:** Runtime / Security
+**Difficulty:** 4/5
+**Status:** Implemented
+**Plan:** doc/04_architecture/os/security/ocap_privilege_architecture.md
+**Design:** doc/01_research/os/security/session_subprivilege_hierarchy_research.md
+
+## Overview
+
+The session foundation of the OCap privilege model: an authenticated `login`
+mints a root **User** session whose ceiling == current == the principal's
+granted capabilities. A **SubRole** drops into an irreversibly narrowed slice
+of its parent (AND-mask via pledge) — it can never regain a dropped cap and can
+never exceed the parent ceiling. **Teardown** DFS-seals a session subtree and
+bumps each epoch, which bulk-revokes every capability bound to those sessions in
+O(1) (no per-token walk) — this is what SSH disconnect must call.
+
+The gate asserts:
+  - login mints a User session holding the principal's max caps (ceiling+current);
+  - two logins are disjoint in both id and epoch;
+  - open_subrole cannot regain a dropped cap and cannot exceed the parent ceiling
+    (child current ⊆ parent current, monotonic);
+  - a child cap is invalidated the instant the parent session epoch bumps
+    (teardown cascade seals the whole subtree);
+  - ceiling(child) ⊆ current(parent) is enforced at session creation (fail closed);
+  - budget is refunded upward on teardown.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.session_types.{Session, SessionKind, capset_subset, capset_clone_unpledged}
+use os.kernel.ipc.capability.{CapabilityManager}
+
+# ============================================================================
+# Fixtures — a principal's ceiling: FileRead, FileWrite, ProcessSpawn (NO NetRaw)
+# ============================================================================
+
+fn _fr() -> CapabilityKind:
+    CapabilityKind.FileRead(path_prefix: "/")
+
+fn _fw() -> CapabilityKind:
+    CapabilityKind.FileWrite(path_prefix: "/")
+
+fn _spawn() -> CapabilityKind:
+    CapabilityKind.ProcessSpawn
+
+fn _netraw() -> CapabilityKind:
+    CapabilityKind.NetRaw
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: 7u64, token_id: tid, parent_token_id: 0u64, depth: 2)
+
+fn make_max_caps() -> CapabilitySet:
+    """The principal's granted ceiling: read + write + spawn, but NOT NetRaw.
+    Concrete, pledged tokens (so subset/containment checks are meaningful)."""
+    CapabilitySet(caps: [_tok(_fr(), 1u64, 10u64), _tok(_fw(), 2u64, 11u64), _tok(_spawn(), 3u64, 12u64)], is_pledged: true)
+
+fn is_user(s: Session) -> bool:
+    s.kind == SessionKind.User
+
+fn is_subrole(s: Session) -> bool:
+    s.kind == SessionKind.SubRole
+
+fn sealed_of(o: Session?) -> bool:
+    if o == nil:
+        return false
+    val s = o
+    s.sealed
+
+fn epoch_of(o: Session?) -> u64:
+    if o == nil:
+        return 0u64
+    val s = o
+    s.epoch
+
+fn budget_of(o: Session?) -> u64:
+    if o == nil:
+        return 0u64
+    val s = o
+    s.budget
+
+fn eq_u64(a: u64, b: u64) -> bool:
+    # Wrap `==` in a helper: the spec runner auto-expands an inline `==`/`!=`
+    # inside expect(...) into the assertion itself (dropping the outer matcher),
+    # so bare `expect(a == b).to_equal(false)` misfires. A plain bool value does not.
+    a == b
+
+# ============================================================================
+# Group 1 — login mints a User session with the principal's max caps
+# ============================================================================
+
+describe "login: mints a User session with the principal's max caps":
+    """An authenticated login is the root of a principal's session tree."""
+
+    it "login session kind is User":
+        var mgr = CapabilityManager.new()
+        val s = mgr.login("alice", make_max_caps())
+        expect(is_user(s)).to_equal(true)
+
+    it "login current holds every granted cap":
+        var mgr = CapabilityManager.new()
+        val s = mgr.login("alice", make_max_caps())
+        expect(s.current.has(_fr())).to_equal(true)
+        expect(s.current.has(_fw())).to_equal(true)
+        expect(s.current.has(_spawn())).to_equal(true)
+
+    it "login ceiling holds the granted caps (ceiling == current)":
+        var mgr = CapabilityManager.new()
+        val s = mgr.login("alice", make_max_caps())
+        expect(s.ceiling.has(_fr())).to_equal(true)
+        expect(s.ceiling.has(_spawn())).to_equal(true)
+
+    it "login current does NOT hold a cap the principal was not granted":
+        var mgr = CapabilityManager.new()
+        val s = mgr.login("alice", make_max_caps())
+        expect(s.current.has(_netraw())).to_equal(false)
+
+    it "login mints a root session (no parent)":
+        var mgr = CapabilityManager.new()
+        val s = mgr.login("alice", make_max_caps())
+        expect(s.parent).to_equal(0u64)
+
+# ============================================================================
+# Group 2 — two logins are disjoint in id and epoch
+# ============================================================================
+
+describe "login: two logins are disjoint sessions":
+    """Independent principals get isolated session trees; one teardown must
+    never invalidate another login's capabilities."""
+
+    it "two logins get distinct session ids":
+        var mgr = CapabilityManager.new()
+        val a = mgr.login("alice", make_max_caps())
+        val b = mgr.login("bob", make_max_caps())
+        expect(eq_u64(a.id, b.id)).to_equal(false)
+
+    it "two logins get distinct epochs":
+        var mgr = CapabilityManager.new()
+        val a = mgr.login("alice", make_max_caps())
+        val b = mgr.login("bob", make_max_caps())
+        expect(eq_u64(a.epoch, b.epoch)).to_equal(false)
+
+# ============================================================================
+# Group 3 — open_subrole: irreversible, monotonic narrowing
+# ============================================================================
+
+describe "open_subrole: irreversible sub-privilege drop (monotonic)":
+    """A subrole is an AND-mask on the parent's current authority: it can only
+    ever shrink, never regain a dropped cap, never exceed the parent."""
+
+    it "subrole session kind is SubRole":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        expect(is_subrole(sr)).to_equal(true)
+
+    it "subrole keeps a masked-in cap it inherited":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        expect(sr.current.has(_fr())).to_equal(true)
+
+    it "subrole drops caps outside the mask (write + spawn dropped)":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        expect(sr.current.has(_fw())).to_equal(false)
+        expect(sr.current.has(_spawn())).to_equal(false)
+
+    it "subrole cannot REGAIN a cap the parent never held (NetRaw)":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_netraw()])
+        expect(sr.current.has(_netraw())).to_equal(false)
+
+    it "subrole current is a subset of parent current (monotonic)":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        expect(capset_subset(sr.current, u.current)).to_equal(true)
+
+    it "subrole cannot EXCEED the parent even when the mask over-asks":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr(), _netraw()])
+        expect(sr.current.has(_fr())).to_equal(true)
+        expect(sr.current.has(_netraw())).to_equal(false)
+        expect(capset_subset(sr.current, u.current)).to_equal(true)
+
+# ============================================================================
+# Group 4 — teardown cascade: epoch bump invalidates bound child caps
+# ============================================================================
+
+describe "session_teardown: epoch cascade invalidates bound caps":
+    """Tearing down a session bumps every subtree epoch — the O(1) bulk revoke
+    that SSH disconnect must trigger."""
+
+    it "a bound child cap is live before teardown and dead after parent teardown":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        val child_task = TaskId(id: 99)
+        mgr.install_sandbox_capability_set(child_task, sr.current)
+        mgr.bind_task_to_session(child_task, sr.id)
+        expect(mgr.check(child_task, _fr())).to_equal(true)
+        mgr.session_teardown(u)
+        expect(mgr.check(child_task, _fr())).to_equal(false)
+
+    it "teardown seals the whole subtree (parent AND child)":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        mgr.session_teardown(u)
+        expect(sealed_of(mgr.session_of(u.id))).to_equal(true)
+        expect(sealed_of(mgr.session_of(sr.id))).to_equal(true)
+
+    it "teardown bumps the child session epoch (generation revoke)":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val sr = mgr.open_subrole(u, [_fr()])
+        val before = sr.epoch
+        mgr.session_teardown(u)
+        expect(eq_u64(epoch_of(mgr.session_of(sr.id)), before)).to_equal(false)
+
+# ============================================================================
+# Group 5 — ceiling(child) ⊆ current(parent) is enforced at creation
+# ============================================================================
+
+describe "create_child_session: enforces ceiling(child) subset of current(parent)":
+    """A child can never be minted above its parent — fail closed."""
+
+    it "REJECTS a child whose ceiling exceeds the parent's current authority":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val over = CapabilitySet(caps: [_tok(_netraw(), 9u64, 90u64)], is_pledged: true)
+        val res = mgr.create_child_session(u.id, SessionKind.SubRole, "alice", over, over, 0u64)
+        expect(res).to_equal(nil)
+
+    it "ACCEPTS a child whose ceiling is within the parent's current authority":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val within = CapabilitySet(caps: [_tok(_fr(), 9u64, 91u64)], is_pledged: true)
+        val res = mgr.create_child_session(u.id, SessionKind.Tenant, "alice", within, within, 0u64)
+        expect(res != nil).to_equal(true)
+
+# ============================================================================
+# Group 6 — teardown refunds budget upward
+# ============================================================================
+
+describe "session_teardown: refunds budget upward":
+    """Freed subtree budget flows back to the teardown root's parent."""
+
+    it "child budget is refunded to the parent on teardown":
+        var mgr = CapabilityManager.new()
+        val u = mgr.login("alice", make_max_caps())
+        val within = CapabilitySet(caps: [_tok(_fr(), 9u64, 91u64)], is_pledged: true)
+        val child_opt = mgr.create_child_session(u.id, SessionKind.Tenant, "alice", within, within, 500u64)
+        expect(child_opt != nil).to_equal(true)
+        val child = child_opt
+        mgr.session_teardown(child)
+        expect(budget_of(mgr.session_of(u.id))).to_equal(500u64)

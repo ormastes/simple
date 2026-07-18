@@ -1,0 +1,273 @@
+# Winit Windowing SFFI Wrapper
+#
+# Typed, leak-safe wrapper over the raw `rt_winit_*` extern surface so GUI apps
+# do not declare externs inline. Mirrors the struct/`is_valid` convention used by
+# window_sffi.spl (SDL2).
+#
+# Pixel buffers are passed as [i64] packed RGBA (one pixel per i64).
+#
+# IMPORTANT (memory): the runtime stores every polled event in a global map and
+# only releases it when `rt_winit_event_free` is called. `winit_poll_close_requested`
+# therefore DRAINS and FREES every pending event each call — never poll without
+# freeing, or the event map grows unbounded over a long present loop.
+
+# ============================================================================
+# Tier 1: Raw extern declarations (winit_sffi runtime)
+# ============================================================================
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]) -> bool
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
+extern fn rt_winit_event_mouse_wheel(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_winit_window_set_fullscreen(win: i64, on: bool) -> bool
+extern fn rt_winit_window_is_fullscreen(win: i64) -> bool
+extern fn rt_winit_window_get_size(win: i64) -> (i64, i64)
+extern fn rt_winit_window_scale_factor(win: i64) -> f64
+extern fn rt_winit_window_position_x(win: i64) -> i64
+extern fn rt_winit_window_position_y(win: i64) -> i64
+extern fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64
+extern fn rt_winit_event_window_x(ev: i64) -> i64
+extern fn rt_winit_event_window_y(ev: i64) -> i64
+
+# Event types returned by rt_winit_event_get_type.
+val EVT_CLOSE: i64 = 3
+val EVT_KEYBOARD: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVED: i64 = 21
+val EVT_MOUSE_WHEEL: i64 = 22
+
+# ============================================================================
+# Tier 2: Typed handles
+# ============================================================================
+struct WinitLoop:
+    handle: i64
+    is_valid: bool
+
+struct WinitWindow:
+    handle: i64
+    is_valid: bool
+
+struct WinitWindowPosition:
+    x: i32
+    y: i32
+
+# ============================================================================
+# Tier 3: Safe API
+# ============================================================================
+
+# Create the native event loop. Returns an invalid handle when no GUI runtime
+# is available (handle == 0).
+fn winit_loop_new() -> WinitLoop:
+    val h = rt_winit_event_loop_new()
+    WinitLoop(handle: h, is_valid: h > 0)
+
+fn winit_loop_free(lp: WinitLoop):
+    if lp.is_valid:
+        rt_winit_event_loop_free(lp.handle)
+
+fn winit_window_new(lp: WinitLoop, w: i64, h: i64, title: text) -> WinitWindow:
+    if not lp.is_valid:
+        WinitWindow(handle: 0, is_valid: false)
+    else:
+        val win = rt_winit_window_new(lp.handle, w, h, title)
+        WinitWindow(handle: win, is_valid: win > 0)
+
+fn winit_window_free(win: WinitWindow):
+    if win.is_valid:
+        rt_winit_window_free(win.handle)
+
+fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
+    if not win.is_valid:
+        return false
+    rt_winit_window_present_rgba(win.handle, w, h, pixels)
+
+# Toggle borderless fullscreen on the native window. The mutation is routed
+# through the event-loop/main thread (required on macOS). Returns true when the
+# request was applied.
+fn winit_window_set_fullscreen(win: WinitWindow, on: bool) -> bool:
+    if not win.is_valid:
+        return false
+    rt_winit_window_set_fullscreen(win.handle, on)
+
+# Read the current fullscreen state from the runtime window record.
+fn winit_window_is_fullscreen(win: WinitWindow) -> bool:
+    if not win.is_valid:
+        return false
+    rt_winit_window_is_fullscreen(win.handle)
+
+# Current inner size (width, height) in physical pixels from the runtime window
+# record. Updated by present/resize handling, so it reflects fullscreen growth.
+fn winit_window_get_size(win: WinitWindow) -> (i64, i64):
+    if not win.is_valid:
+        return (0, 0)
+    rt_winit_window_get_size(win.handle)
+
+# Backing scale factor of the window (1.0 non-Retina, 2.0 Retina). Combined with
+# the physical inner size from winit_window_get_size this lets a caller confirm it
+# is rendering at native/physical resolution rather than logical points.
+fn winit_window_scale_factor(win: WinitWindow) -> f64:
+    if not win.is_valid:
+        return 1.0
+    rt_winit_window_scale_factor(win.handle)
+
+# Native outer position in physical desktop coordinates.
+fn winit_window_get_position(win: WinitWindow) -> WinitWindowPosition:
+    if not win.is_valid:
+        return WinitWindowPosition(x: 0, y: 0)
+    WinitWindowPosition(
+        x: rt_winit_window_position_x(win.handle).to_i32(),
+        y: rt_winit_window_position_y(win.handle).to_i32()
+    )
+
+# Request a native outer-position change. Window-management policy remains in
+# the Simple caller; this wrapper only transports typed coordinates.
+fn winit_window_set_position(win: WinitWindow, position: WinitWindowPosition) -> bool:
+    if not win.is_valid:
+        return false
+    rt_winit_window_set_position(win.handle, position.x.to_i64(), position.y.to_i64()) != 0
+
+# Position carried by an EVT_WINDOW_MOVED event.
+fn winit_event_window_position(event: i64) -> WinitWindowPosition:
+    WinitWindowPosition(
+        x: rt_winit_event_window_x(event).to_i32(),
+        y: rt_winit_event_window_y(event).to_i32()
+    )
+
+# Drain every pending event, freeing each one, and report whether a window-close
+# was requested. Freeing each event is mandatory: the runtime never reclaims
+# polled events on its own, so a non-draining poll leaks the global event map.
+fn winit_poll_close_requested(lp: WinitLoop) -> bool:
+    if not lp.is_valid:
+        return false
+    var close_requested = false
+    var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    while ev > 0:
+        if rt_winit_event_get_type(ev) == EVT_CLOSE:
+            close_requested = true
+        rt_winit_event_free(ev)
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    close_requested
+
+# Input drained from one poll: a close request plus the key codes pressed this
+# frame (drains + frees every pending event, like winit_poll_close_requested).
+# Lets an app be interactive (scroll, keys) without touching raw rt_* externs.
+struct WinitInput:
+    close: bool
+    keys: [i64]
+    scroll_y: f64
+    # Mouse: last cursor position seen this poll (window pixel coords), plus the
+    # button events this poll as parallel arrays. The runtime's mouse-button
+    # extern carries no coordinates, so each click is tagged with the most recent
+    # cursor position tracked during this same poll batch.
+    mouse_x: f64
+    mouse_y: f64
+    mouse_moves: i64
+    click_buttons: [i64]
+    click_pressed: [bool]
+    click_x: [f64]
+    click_y: [f64]
+
+# Construct an empty/idle input snapshot (no events this poll).
+fn winit_input_empty() -> WinitInput:
+    var keys: [i64] = []
+    var cb: [i64] = []
+    var cp: [bool] = []
+    var cx: [f64] = []
+    var cy: [f64] = []
+    WinitInput(close: false, keys: keys, scroll_y: 0.0,
+               mouse_x: 0.0, mouse_y: 0.0, mouse_moves: 0,
+               click_buttons: cb, click_pressed: cp, click_x: cx, click_y: cy)
+
+fn winit_poll_input(lp: WinitLoop) -> WinitInput:
+    var close_requested = false
+    var keys: [i64] = []
+    var scroll_y = 0.0
+    var mouse_x = 0.0
+    var mouse_y = 0.0
+    var mouse_moves = 0
+    var click_buttons: [i64] = []
+    var click_pressed: [bool] = []
+    var click_x: [f64] = []
+    var click_y: [f64] = []
+    if not lp.is_valid:
+        return winit_input_empty()
+    var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    while ev != 0:
+        val kind = rt_winit_event_get_type(ev)
+        if kind == EVT_CLOSE:
+            close_requested = true
+        elif kind == EVT_KEYBOARD:
+            val (ignored_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
+            if pressed:
+                keys = keys.push(keycode)
+        elif kind == EVT_MOUSE_MOVED:
+            val (mx, my) = rt_winit_event_mouse_moved(ev)
+            mouse_x = mx
+            mouse_y = my
+            mouse_moves = mouse_moves + 1
+        elif kind == EVT_MOUSE_BUTTON:
+            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            click_buttons = click_buttons.push(button)
+            click_pressed = click_pressed.push(pressed)
+            click_x = click_x.push(mouse_x)
+            click_y = click_y.push(mouse_y)
+        elif kind == EVT_MOUSE_WHEEL:
+            val (ignored_wx, wy) = rt_winit_event_mouse_wheel(ev)
+            scroll_y = scroll_y + wy
+        rt_winit_event_free(ev)
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,
+               mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
+               click_buttons: click_buttons, click_pressed: click_pressed,
+               click_x: click_x, click_y: click_y)
+
+fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
+    var close_requested = false
+    var keys: [i64] = []
+    var scroll_y = 0.0
+    var mouse_x = 0.0
+    var mouse_y = 0.0
+    var mouse_moves = 0
+    var click_buttons: [i64] = []
+    var click_pressed: [bool] = []
+    var click_x: [f64] = []
+    var click_y: [f64] = []
+    if not lp.is_valid:
+        return winit_input_empty()
+    var ev = rt_winit_event_loop_wait_events(lp.handle, timeout_ms)
+    while ev != 0:
+        val kind = rt_winit_event_get_type(ev)
+        if kind == EVT_CLOSE:
+            close_requested = true
+        elif kind == EVT_KEYBOARD:
+            val (ignored_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
+            if pressed:
+                keys = keys.push(keycode)
+        elif kind == EVT_MOUSE_MOVED:
+            val (mx, my) = rt_winit_event_mouse_moved(ev)
+            mouse_x = mx
+            mouse_y = my
+            mouse_moves = mouse_moves + 1
+        elif kind == EVT_MOUSE_BUTTON:
+            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            click_buttons = click_buttons.push(button)
+            click_pressed = click_pressed.push(pressed)
+            click_x = click_x.push(mouse_x)
+            click_y = click_y.push(mouse_y)
+        elif kind == EVT_MOUSE_WHEEL:
+            val (ignored_wx, wy) = rt_winit_event_mouse_wheel(ev)
+            scroll_y = scroll_y + wy
+        rt_winit_event_free(ev)
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,
+               mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
+               click_buttons: click_buttons, click_pressed: click_pressed,
+               click_x: click_x, click_y: click_y)

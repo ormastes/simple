@@ -1,0 +1,93 @@
+# @tag:system
+#
+# Backend-isolation Gap B: pins the CURRENT, HONEST contract of the
+# BrowserBackend chromium lane (--web-engine chromium, wired through the
+# shared WebRenderBackend facade) under the interpreter.
+#
+# As of 2026-07-07 the facade's `env_get as web_backend_env_get` re-export
+# alias (std.gc_async_mut.io.mod_stub -> env_ops multi-hop chain) is
+# unresolved by the interpreter (see
+# doc/08_tracking/bug/web_backend_env_get_alias_unresolved_interpret_2026-07-07.md).
+# The chromium lane therefore does NOT silently substitute pure_simple
+# pixels or return an empty buffer on failure — it crashes LOUDLY with
+# error[E1002] "function `web_backend_env_get` not found" the first time a
+# frame render reaches the facade. This spec asserts exactly that: a loud,
+# non-zero-exit, E1002-tagged failure — not a silent fallback and not a
+# quiet success.
+#
+# WHEN THE FACADE BUG IS FIXED: flip this spec's assertions to expect
+# `code == 0` and real ARGB pixel bytes from the chromium probe (drop the
+# E1002/"web_backend_env_get" checks), matching the pattern already used by
+# test/03_system/interpreter/lazy_shb_system_spec.spl's
+# "circular lazy wildcard imports" case for a known-limitation -> fixed flip.
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+fn _find_simple_binary() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    ""
+
+fn _is_windows() -> bool:
+    val (uname_out, _stderr, _code) = rt_process_run("uname", ["-s"])
+    val os = uname_out.trim()
+    os.starts_with("MINGW") or os.starts_with("MSYS") or os.starts_with("CYGWIN") or os.starts_with("Windows")
+
+val _probe_path = "test/03_system/gui/ui_browser/backend_isolation_chromium_env_get_probe.spl"
+val _simple_bin = _find_simple_binary()
+
+fn _lane_available() -> bool:
+    # Skip-visible: this probe needs the `env` shell wrapper (to force
+    # SIMPLE_EXECUTION_MODE=interpret onto the child without disturbing the
+    # spec runner's own process env) and a runnable Simple binary. Neither
+    # of those is a chromium/Electron dependency — the chromium lane itself
+    # never gets far enough to need Electron before it crashes on E1002.
+    if _is_windows():
+        return false
+    if _simple_bin == "":
+        return false
+    if not rt_file_exists(_probe_path):
+        return false
+    true
+
+fn _run_probe() -> (text, text, i64):
+    rt_process_run("env", ["SIMPLE_EXECUTION_MODE=interpret", _simple_bin, "run", _probe_path])
+
+describe "backend-isolation Gap B: chromium facade lane honest-failure contract (interpret mode)":
+    it "fails loudly with E1002 on web_backend_env_get instead of a silent fallback":
+        if not _lane_available():
+            expect(_lane_available()).to_equal(false)
+        else:
+            val result = _run_probe()
+            val stdout = result[0]
+            val stderr = result[1]
+            val code = result[2]
+            val combined = stdout + stderr
+            # Loud failure: non-zero exit.
+            expect(code).to_not_equal(0)
+            # Tagged with the exact known error, not some unrelated crash.
+            expect(combined).to_contain("E1002")
+            expect(combined).to_contain("web_backend_env_get")
+            # Never got past construction to a successful pixel readout —
+            # confirms this is not a silent/degraded success path.
+            expect(combined).to_not_contain("rendered pixels_len=")
+
+    it "still succeeds through construction (only the render call crashes)":
+        if not _lane_available():
+            expect(_lane_available()).to_equal(false)
+        else:
+            val result = _run_probe()
+            val stdout = result[0]
+            val stderr = result[1]
+            expect(stdout + stderr).to_contain("constructed")

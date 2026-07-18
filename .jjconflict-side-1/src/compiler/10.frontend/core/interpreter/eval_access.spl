@@ -1,0 +1,646 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Core Interpreter — Access, Literals, Assignment, Enums, Lambdas, Comprehensions
+#
+# Split from eval_ops.spl. Contains:
+# - Access evaluation (eval_field_access, eval_index_expr, eval_slice_expr)
+# - Collection literals (eval_array_lit, eval_tuple_lit, eval_struct_lit, eval_dict_lit)
+# - Assignment (eval_assign_expr, eval_compound_assign_expr)
+# - Misc (eval_return_expr, eval_interpolated_string, eval_null_coalesce)
+# - Enum variants (eval_enum_variant_call, eval_enum_variant_access)
+# - Lambda (eval_lambda)
+# - Comprehensions (eval_list_comp, eval_dict_comp)
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+# ===== Field Access =====
+
+fn eval_field_access(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val base_eid = e_node.left
+    val field_name = e_node.s_val
+
+    # Check for enum variant access: EnumType.Variant (no-arg)
+    val base_node2 = expr_get(base_eid)
+    val base_tag = base_node2.tag
+    if base_tag == EXPR_IDENT:
+        val type_name = base_node2.s_val
+        val enum_variants = enum_table_lookup(type_name)
+        if enum_variants != "":
+            # Only treat as variant if field_name is a known variant
+            val variant_list2 = enum_variants.split(",")
+            var is_variant2 = false
+            for vn2 in variant_list2:
+                if vn2 == field_name:
+                    is_variant2 = true
+                    break
+            if is_variant2:
+                return eval_enum_variant_access(type_name, field_name)
+        # Check for static method reference: Type.method
+        val static_fn = type_name + "__" + field_name
+        val static_decl = func_table_lookup(static_fn)
+        if static_decl >= 0:
+            return val_make_function(static_fn, static_decl)
+
+        # Try deferred (lazy) modules for Type.field or Enum.Variant
+        val forced_fa = try_force_any_deferred_for(type_name)
+        if forced_fa == 1:
+            # Retry enum variant access
+            val enum_variants3 = enum_table_lookup(type_name)
+            if enum_variants3 != "":
+                val variant_list3 = enum_variants3.split(",")
+                var is_variant3 = false
+                for vn3 in variant_list3:
+                    if vn3 == field_name:
+                        is_variant3 = true
+                        break
+                if is_variant3:
+                    return eval_enum_variant_access(type_name, field_name)
+            # Retry static method reference
+            val static_fn2 = type_name + "__" + field_name
+            val static_decl2 = func_table_lookup(static_fn2)
+            if static_decl2 >= 0:
+                return val_make_function(static_fn2, static_decl2)
+
+    val base_val = eval_expr(base_eid)
+    if eval_had_error: return -1
+
+    if val_is_struct(base_val):
+        # Fast path: cached field index from previous access
+        val cached_idx = expr_i_val[eid]
+        if cached_idx >= 0:
+            val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
+            if ok:
+                return val_struct_get_field_idx(base_val, cached_idx)
+        # Slow path: linear search + cache index
+        val fi = val_struct_find_field_idx(base_val, field_name)
+        if fi >= 0:
+            expr_i_val[eid] = fi
+            return val_struct_get_field_idx(base_val, fi)
+        eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
+        return -1
+
+    eval_set_error("cannot access field on " + val_kind_name(val_get_kind(base_val)))
+    -1
+
+# ===== Index Expression =====
+
+fn eval_index_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val base_eid = e_node.left
+    val index_eid = e_node.right
+
+    val base_val = eval_expr(base_eid)
+    if eval_had_error: return -1
+    val index_val = eval_expr(index_eid)
+    if eval_had_error: return -1
+
+    if val_is_array(base_val):
+        val elements = val_get_array(base_val)
+        if val_is_int(index_val):
+            val idx = val_get_int(index_val)
+            if idx >= 0:
+                val len = elements.len()
+                if idx < len:
+                    return elements[idx]
+            eval_set_error("array index out of bounds: " + "{idx}")
+            return -1
+
+    if val_is_text(base_val):
+        val s = val_get_text(base_val)
+        if val_is_int(index_val):
+            val idx = val_get_int(index_val)
+            if idx >= 0:
+                if idx < s.len():
+                    return val_make_text(s[idx])
+            eval_set_error("string index out of bounds: " + "{idx}")
+            return -1
+
+    # Dict/struct indexing: dict["key"] -> struct field lookup by name
+    if val_is_struct(base_val):
+        val key_text = val_to_text(index_val)
+        val field_val = val_struct_get_field(base_val, key_text)
+        if field_val >= 0:
+            return field_val
+        # Key not found — return nil (dict access semantics)
+        return val_make_nil()
+
+    eval_set_error("cannot index " + val_kind_name(val_get_kind(base_val)))
+    -1
+
+# ===== Slice Expression =====
+
+fn eval_slice_expr(eid: i64) -> i64:
+    """Evaluate slice expression: base[start:end]
+
+    Handles string and array slicing with support for:
+    - [:end] - slice from start (start=0)
+    - [start:] - slice to end (end=-1 means len)
+    - [start:end] - explicit range
+    """
+    val e_node = expr_get(eid)
+    val base_eid = e_node.left
+    val start_eid = e_node.right
+    val end_eid = e_node.extra
+
+    val base_val = eval_expr(base_eid)
+    if eval_had_error: return -1
+    val start_val = eval_expr(start_eid)
+    if eval_had_error: return -1
+    val end_val = eval_expr(end_eid)
+    if eval_had_error: return -1
+
+    if val_is_text(base_val):
+        val s = val_get_text(base_val)
+        val slen = s.len()
+
+        # Get start index (default 0)
+        var start_idx = 0
+        if val_is_int(start_val):
+            start_idx = val_get_int(start_val)
+            if start_idx < 0:
+                start_idx = 0
+
+        # Get end index (default slen, -1 means slen)
+        var end_idx = slen
+        if val_is_int(end_val):
+            end_idx = val_get_int(end_val)
+            if end_idx < 0:
+                end_idx = slen
+            if end_idx > slen:
+                end_idx = slen
+
+        # Slice the string
+        if start_idx >= slen:
+            return val_make_text("")
+        if end_idx <= start_idx:
+            return val_make_text("")
+
+        return val_make_text(s[start_idx:end_idx])
+
+    if val_is_array(base_val):
+        val elements = val_get_array(base_val)
+        val alen = elements.len()
+
+        # Get start index (default 0)
+        var start_idx = 0
+        if val_is_int(start_val):
+            start_idx = val_get_int(start_val)
+            if start_idx < 0:
+                start_idx = 0
+
+        # Get end index (default alen, -1 means alen)
+        var end_idx = alen
+        if val_is_int(end_val):
+            end_idx = val_get_int(end_val)
+            if end_idx < 0:
+                end_idx = alen
+            if end_idx > alen:
+                end_idx = alen
+
+        # Slice the array
+        var result: [i64] = []
+        if start_idx < alen and end_idx > start_idx:
+            for i in start_idx..end_idx:
+                result.push(elements[i])
+
+        return val_make_array(result)
+
+    eval_set_error("cannot slice " + val_kind_name(val_get_kind(base_val)))
+    -1
+
+# ===== Array Literal =====
+
+fn eval_array_lit(eid: i64) -> i64:
+    val elem_eids = expr_get(eid).args
+    var elements: [i64] = []
+    for e_eid in elem_eids:
+        val ev = eval_expr(e_eid)
+        if eval_had_error: return -1
+        elements.push(ev)
+    val_make_array(elements)
+
+# ===== Tuple Literal =====
+# Tuples are evaluated as arrays in the interpreter
+
+fn eval_tuple_lit(eid: i64) -> i64:
+    val elem_eids = expr_get(eid).args
+    var elements: [i64] = []
+    for e_eid in elem_eids:
+        val ev = eval_expr(e_eid)
+        if eval_had_error: return -1
+        elements.push(ev)
+    val_make_array(elements)
+
+# ===== Struct Literal =====
+
+fn eval_struct_lit(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val type_name = e_node.s_val
+    val field_name_eids = e_node.args
+    val field_value_eids = e_node.stmts
+
+    # Field names stored as ident expressions
+    var field_names: [text] = []
+    for fn_eid in field_name_eids:
+        field_names.push(expr_get(fn_eid).s_val)
+
+    var field_values: [i64] = []
+    for fv_eid in field_value_eids:
+        val fv = eval_expr(fv_eid)
+        if eval_had_error: return -1
+        field_values.push(fv)
+
+    val_make_struct(type_name, field_names, field_values)
+
+# ===== Dict Literal =====
+# Dict literals are represented as structs with type name "__dict".
+# Keys are evaluated as text field names, values are evaluated normally.
+# Empty {} creates an empty __dict struct that supports dynamic field add/get.
+
+fn eval_dict_lit(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val key_eids = e_node.args
+    val value_eids = e_node.stmts
+
+    var field_names: [text] = []
+    var field_values: [i64] = []
+
+    var i: i64 = 0
+    for k_eid in key_eids:
+        val key_val = eval_expr(k_eid)
+        if eval_had_error: return -1
+        # Convert key to text for struct field name
+        val key_text = val_to_text(key_val)
+        field_names.push(key_text)
+
+        val v_val = eval_expr(value_eids[i])
+        if eval_had_error: return -1
+        field_values.push(v_val)
+        i = i + 1
+
+    val_make_struct("__dict", field_names, field_values)
+
+# ===== Assignment Expression =====
+
+fn eval_assign_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val target_eid = e_node.left
+    val value_eid = e_node.right
+
+    val new_val = eval_expr(value_eid)
+    if eval_had_error: return -1
+
+    val target_node = expr_get(target_eid)
+    val target_tag = target_node.tag
+    if target_tag == EXPR_IDENT:
+        val name = target_node.s_val
+        val ok = env_assign(name, new_val)
+        if ok == false:
+            eval_set_error("undefined variable: " + name)
+            return -1
+        return new_val
+
+    if target_tag == EXPR_FIELD_ACCESS:
+        val base_eid2 = target_node.left
+        val field_name = target_node.s_val
+        val base_val = eval_expr(base_eid2)
+        if eval_had_error: return -1
+        if val_is_struct(base_val):
+            # Fast path: cached field index
+            val cached_idx = expr_i_val[target_eid]
+            if cached_idx >= 0:
+                val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
+                if ok:
+                    val_struct_set_field_idx(base_val, cached_idx, new_val)
+                    return new_val
+            # Slow path: find + set + cache
+            val fi = val_struct_find_field_idx(base_val, field_name)
+            if fi >= 0:
+                val_struct_set_field_idx(base_val, fi, new_val)
+                expr_i_val[target_eid] = fi
+                return new_val
+            eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
+            return -1
+        eval_set_error("cannot set field on " + val_kind_name(val_get_kind(base_val)))
+        return -1
+
+    # Index assignment: base[key] = value (dict/array)
+    if target_tag == EXPR_INDEX:
+        val idx_base_eid = target_node.left
+        val idx_key_eid = target_node.right
+        val base_val = eval_expr(idx_base_eid)
+        if eval_had_error: return -1
+        val key_val = eval_expr(idx_key_eid)
+        if eval_had_error: return -1
+
+        if val_is_struct(base_val):
+            val key_text = val_to_text(key_val)
+            # Try to update existing field
+            val fi = val_struct_find_field_idx(base_val, key_text)
+            if fi >= 0:
+                val_struct_set_field_idx(base_val, fi, new_val)
+                return new_val
+            # Add new field to dict struct
+            var fields = val_get_struct_fields(base_val)
+            var values = val_get_struct_values(base_val)
+            fields.push(key_text)
+            values.push(new_val)
+            val_struct_fields[base_val] = fields
+            val_struct_values[base_val] = values
+            return new_val
+
+        if val_is_array(base_val):
+            if val_is_int(key_val):
+                val idx = val_get_int(key_val)
+                var elements = val_get_array(base_val)
+                if idx >= 0:
+                    if idx < elements.len():
+                        elements[idx] = new_val
+                        val_arrays[base_val] = elements
+                        return new_val
+                eval_set_error("array index out of bounds: " + "{idx}")
+                return -1
+
+        eval_set_error("cannot index-assign " + val_kind_name(val_get_kind(base_val)))
+        return -1
+
+    eval_set_error("invalid assignment target")
+    -1
+
+fn eval_compound_assign_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val op = e_node.i_val
+    val target_eid = e_node.left
+    val value_eid = e_node.right
+
+    val target_node = expr_get(target_eid)
+    val target_tag = target_node.tag
+    if target_tag == EXPR_IDENT:
+        val name = target_node.s_val
+        val old_val = env_lookup(name)
+        if old_val < 0:
+            eval_set_error("undefined variable: " + name)
+            return -1
+        val rhs_val = eval_expr(value_eid)
+        if eval_had_error: return -1
+        val new_val = val_compound_op(op, old_val, rhs_val)
+        if new_val < 0:
+            val err = ops_get_error()
+            if err != "":
+                eval_set_error(err)
+            return -1
+        env_assign(name, new_val)
+        return new_val
+
+    eval_set_error("invalid compound assignment target")
+    -1
+
+# ===== Return Expression =====
+
+fn eval_return_expr(eid: i64) -> i64:
+    val value_eid = expr_get(eid).left
+    var ret_val = val_make_nil()
+    if value_eid >= 0:
+        ret_val = eval_expr(value_eid)
+        if eval_had_error: return -1
+    eval_returning = true
+    eval_return_value = ret_val
+    ret_val
+
+# ===== Interpolated String =====
+
+fn eval_interpolated_string(eid: i64) -> i64:
+    val parts = expr_get(eid).args
+    var parts_text: [text] = []
+    for part_eid in parts:
+        val part_val = eval_expr(part_eid)
+        if eval_had_error: return -1
+        parts_text.push(val_to_text(part_val))
+    val result = parts_text.join("")
+    val_make_text(result)
+
+# ===== Null Coalesce =====
+
+fn eval_null_coalesce(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val left = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    # Plain nil → use right side
+    if val_is_nil(left):
+        return eval_expr(e_node.right)
+    # Enum/Option handling: struct with __tag field
+    if val_is_struct(left):
+        val tag_field = val_struct_get_field(left, "__tag")
+        if tag_field != VAL_NONE:
+            val tag_text = val_get_text(tag_field)
+            if tag_text == "None" or tag_text == "nil":
+                # None variant → use right side (fallback)
+                return eval_expr(e_node.right)
+            if tag_text == "Some" or tag_text == "Ok":
+                # Some/Ok variant → unwrap payload
+                val payload = val_struct_get_field(left, "__payload")
+                if payload != VAL_NONE:
+                    return payload
+                return left
+    # Non-nil, non-enum → return as-is
+    left
+
+# EXPR_TRY: the `?` operator. Unwraps Ok/Some payload; on Err/None/nil it
+# early-returns the whole error value from the enclosing function via the
+# eval_returning / eval_return_value control-flow signal (same mechanism as
+# `return`). This is distinct from `.?` (EXPR_EXISTS_CHECK), which yields a
+# present-or-nil value and never propagates.
+fn eval_try(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val left = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    # Plain nil → propagate nil out of the enclosing function.
+    if val_is_nil(left):
+        eval_returning = true
+        eval_return_value = left
+        return left
+    # Result/Option enum values are structs constructed as
+    # [__tag, __payload] (see eval_enum_variant_call below): field index 0 is
+    # "__tag", field index 1 is "__payload". Mirroring the (now-fixed)
+    # `.unwrap()` path (eval_methods.spl) keeps `?` consistent with
+    # unwrap/match rather than reading the tag by mistake.
+    if val_is_struct(left):
+        val sname = val_get_struct_name(left)
+        if sname == "Result::Ok" or sname == "Option::Some":
+            # Present → unwrap payload (value flows on).
+            return val_struct_get_field_idx(left, 1)
+        if sname == "Result::Err" or sname == "Option::None":
+            # Absent → early-return the error/none value from the caller.
+            eval_returning = true
+            eval_return_value = left
+            return left
+    # Non-nil, non-enum → treat as present, pass through unchanged.
+    left
+
+# ===== Enum Variant Construction =====
+
+fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) -> i64:
+    # EnumType.Variant(payload) → struct with __tag and __payload fields
+    val tag_val = val_make_text(variant_name)
+    var payload_val = val_make_nil()
+    if arg_eids.len() == 1:
+        payload_val = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+    elif arg_eids.len() > 1:
+        # Multiple args → tuple payload
+        var payload_elems: [i64] = []
+        for aeid in arg_eids:
+            val av = eval_expr(aeid)
+            if eval_had_error: return -1
+            payload_elems.push(av)
+        payload_val = val_make_array(payload_elems)
+    val full_name = type_name + "::" + variant_name
+    var field_names: [text] = []
+    field_names.push("__tag")
+    field_names.push("__payload")
+    var field_values: [i64] = []
+    field_values.push(tag_val)
+    field_values.push(payload_val)
+    val_make_struct(full_name, field_names, field_values)
+
+fn eval_enum_variant_access(type_name: text, variant_name: text) -> i64:
+    # EnumType.Variant (no parens) → struct with __tag, no payload
+    val tag_val = val_make_text(variant_name)
+    val full_name = type_name + "::" + variant_name
+    var field_names: [text] = []
+    field_names.push("__tag")
+    field_names.push("__payload")
+    var field_values: [i64] = []
+    field_values.push(tag_val)
+    field_values.push(val_make_nil())
+    val_make_struct(full_name, field_names, field_values)
+
+# ===== Lambda Expression =====
+# EXPR_LAMBDA: args = [EXPR_IDENT params], stmts = [body exprs]
+# Desugared from \x: expr, _ placeholders, _N numbered, &:method
+
+var lambda_counter: i64 = 0
+
+fn eval_lambda(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val param_idents = e_node.args
+    val body_exprs = e_node.stmts
+
+    # Extract param names from EXPR_IDENT nodes
+    var param_names: [text] = []
+    var param_types: [i64] = []
+    for pid in param_idents:
+        param_names.push(expr_get(pid).s_val)
+        param_types.push(0)
+
+    # Wrap body expressions as stmt_expr_stmt nodes
+    var body_stmts: [i64] = []
+    for beid in body_exprs:
+        body_stmts.push(stmt_expr_stmt(beid, 0))
+
+    # Create anonymous function declaration
+    lambda_counter = lambda_counter + 1
+    val fn_name = "__lambda_{lambda_counter}"
+    var type_params: [text] = []
+    val decl_id = decl_fn(fn_name, param_names, param_types, 0, body_stmts, 0, type_params, 0)
+
+    # Register in function table
+    func_table_register(fn_name, decl_id)
+
+    # Return function value
+    val_make_function(fn_name, decl_id)
+
+# ===== List Comprehension =====
+# EXPR_LIST_COMP: s_val=iter_var, left=iterable, right=body, extra=cond (-1 if none)
+
+fn eval_list_comp(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val iter_name = e_node.s_val
+    val iterable_eid = e_node.left
+    val body_eid = e_node.right
+    val cond_eid = e_node.extra
+
+    # Evaluate iterable
+    val iterable_val = eval_expr(iterable_eid)
+    if eval_had_error: return -1
+
+    var result_elements: [i64] = []
+    val kind = val_get_kind(iterable_val)
+
+    val iterable_array = val_iterable_array(iterable_val)
+    if iterable_array >= 0:
+        val elements = val_get_array(iterable_array)
+        for elem_vid in elements:
+            if eval_had_error: break
+            env_push_scope()
+            env_define(iter_name, elem_vid)
+            # Check condition if present
+            var include = true
+            if cond_eid >= 0:
+                val cond_result = eval_expr(cond_eid)
+                if eval_had_error:
+                    env_pop_scope()
+                    return -1
+                include = val_is_truthy(cond_result)
+            if include:
+                val body_val = eval_expr(body_eid)
+                if eval_had_error:
+                    env_pop_scope()
+                    return -1
+                result_elements.push(body_val)
+            env_pop_scope()
+        return val_make_array(result_elements)
+
+    # Range support: check if iterable_eid is a RANGE expression
+    if kind == VAL_INT:
+        val iterable_tag = expr_get(iterable_eid).tag
+        if iterable_tag == EXPR_RANGE:
+            val range_node = expr_get(iterable_eid)
+            val start_val = eval_expr(range_node.left)
+            if eval_had_error: return -1
+            val end_val = eval_expr(range_node.right)
+            if eval_had_error: return -1
+            val inclusive = range_node.i_val
+            val start_n = val_get_int(start_val)
+            val end_n = val_get_int(end_val)
+            var current = start_n
+            var _iter: i64 = 0
+            while _iter < 1000001:
+                val should_stop = current > end_n
+                val at_limit = current == end_n
+                if inclusive != 0:
+                    if should_stop: break
+                else:
+                    if at_limit: break
+                    if should_stop: break
+                env_push_scope()
+                env_define(iter_name, val_make_int(current))
+                var include = true
+                if cond_eid >= 0:
+                    val cond_result = eval_expr(cond_eid)
+                    if eval_had_error:
+                        env_pop_scope()
+                        return -1
+                    include = val_is_truthy(cond_result)
+                if include:
+                    val body_val = eval_expr(body_eid)
+                    if eval_had_error:
+                        env_pop_scope()
+                        return -1
+                    result_elements.push(body_val)
+                env_pop_scope()
+                current = current + 1
+                _iter = _iter + 1
+            return val_make_array(result_elements)
+
+    eval_set_error("comprehension: cannot iterate over " + val_kind_name(kind))
+    -1
+
+# ===== Dict Comprehension =====
+# EXPR_DICT_COMP: s_val=iter_var, left=iterable, args=[key_body, val_body], extra=cond
+
+fn eval_dict_comp(eid: i64) -> i64:
+    # Dict comprehension not supported in tree-walking interpreter (no dict value type)
+    # Works via compiled path (HIR/MIR)
+    eval_set_error("dict comprehension not supported in interpreter mode")
+    -1

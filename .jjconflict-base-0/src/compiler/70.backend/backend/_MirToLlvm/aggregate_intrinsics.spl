@@ -1,0 +1,642 @@
+# Part 2 of src/compiler/70.backend/backend/mir_to_llvm.spl
+use compiler.backend.backend.mir_to_llvm.*
+# MIR to LLVM IR Translation
+#
+# MirToLlvm class that translates MIR to LLVM IR.
+# Implements MirTextCodegen trait for shared instruction dispatch.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
+use compiler.backend.backend_api.*
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_type_mapper.LlvmTypeMapper
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
+    llvm_ir_builder_build}
+use compiler.backend.common.mir_text_codegen.MirTextCodegen
+
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# MIR to LLVM IR Translation
+# ============================================================================
+
+impl MirToLlvm:
+    me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val base_val = self.translate_operand(base)
+        val base_ptr = self.value_as_type(base_val, self.get_operand_type(base), "ptr")
+        var index_vals: [text] = []
+        for idx in indices:
+            index_vals = index_vals.push(self.translate_operand(idx))
+        val base_ty = self.valid_llvm_type(self.get_operand_type(base))
+        self.mark_ptr_local(dest_id)
+        self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)
+
+    # === Overrides: aggregates ===
+
+    me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        match kind:
+            case Array(_):
+                self.mark_ptr_local(dest_id)
+                self.value_types[dest_name] = "ptr"
+                self.remember_function_return_type("rt_array_new", "ptr")
+                self.remember_function_param_types("rt_array_new", ["i64"])
+                self.unknown_func_decls["rt_array_new"] = true
+                self.remember_function_return_type("rt_array_push", "i8")
+                self.remember_function_param_types("rt_array_push", ["ptr", "i64"])
+                self.unknown_func_decls["rt_array_push"] = true
+                self.builder.emit("  {dest_name} = call ptr @rt_array_new(i64 {operands.len()})")
+                for i in 0..operands.len():
+                    val raw_elem = self.translate_operand(operands[i])
+                    val elem_value = self.value_as_type(raw_elem, self.get_operand_type(operands[i]), "i64")
+                    self.builder.emit("  call i8 @rt_array_push(ptr {dest_name}, i64 {elem_value})")
+                return
+            case Struct(_):
+                # Struct value = pointer to N i64 words. Reserve N words, store
+                # each field, and yield the POINTER (do NOT load by value). The
+                # per-field GEP form is byte-identical to translate_get_field
+                # (element type native_int, single index) so construct offsets
+                # exactly match field-read offsets.
+                #
+                # HEAP-allocated via rt_alloc (mirrors the Array case above),
+                # NOT a stack `alloca`: a struct constructed inside a callee
+                # and returned BY VALUE (`fn make() -> P: return P(x:1,y:2)`)
+                # yields a POINTER (see the final getelementptr below) that
+                # outlives the callee's stack frame once the caller reads a
+                # field off the returned value. An alloca's storage is scoped
+                # to the current function -- the pointer aliases a dead frame
+                # the instant the callee returns, and the caller reads
+                # whatever garbage now occupies that stack slot. rt_alloc
+                # gives the storage the same heap lifetime as an array/enum
+                # payload, so a returned-by-value struct's fields stay valid
+                # for as long as any live pointer to it exists.
+                val nit = self.native_int()
+                val n = operands.len()
+                val agg = self.builder.fresh_local()
+                self.remember_function_return_type("rt_alloc", "ptr")
+                self.remember_function_param_types("rt_alloc", ["i64"])
+                self.unknown_func_decls["rt_alloc"] = true
+                val word_bytes = natural_alignment(nit)
+                self.builder.emit("  {agg} = call ptr @rt_alloc(i64 {n * word_bytes})")
+                for i in 0..n:
+                    val raw = self.translate_operand(operands[i])
+                    val v = self.store_field_bits(raw, self.get_operand_type(operands[i]), nit)
+                    val fp = self.builder.fresh_local()
+                    self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
+                    self.builder.emit_store(nit, v, fp)
+                self.mark_ptr_local(dest_id)
+                self.local_types[dest_id] = "ptr"
+                self.value_types[dest_name] = "ptr"
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {agg}, {nit} 0  ; struct ptr")
+                return
+            case Tuple:
+                # Tuple value = pointer to N i64 words, IDENTICAL physical
+                # layout to Struct above (mirrored 1:1 -- deliberately
+                # duplicated rather than falling through to the generic
+                # aggregate path below). Falling through here resolves
+                # `valid_llvm_type(get_local_type(dest_id))` to plain "ptr"
+                # for a MirTypeKind.Tuple (no LlvmTypeMapper entry maps Tuple
+                # to a sized LLVM aggregate type), so the generic path below
+                # allocas a bare 8-byte `ptr` slot and then GEPs it with a
+                # 2-index STRUCT-style GEP (`getelementptr inbounds ptr, ptr
+                # %t0, i32 0, i32 {i}`) -- invalid on an opaque `ptr` type
+                # ("invalid getelementptr indices"), reproduced with a native
+                # `--entry` build of `val t = (3, 5); print(t.0 + t.1)`. The
+                # single-index native-int-word layout here is also what tuple
+                # readers already assume: the non-literal tuple-destructure
+                # desugar (lower_tuple_destructure, 20.hir/hir_lowering/
+                # statements.spl) and the `.0`/`.1` positional field-access
+                # fix (HirExprKind.Index routing in 20.hir/hir_lowering/
+                # expressions.spl) both read tuple elements via a single
+                # 8-byte-stride index off one pointer level, matching
+                # translate_get_field / the Index/array read path exactly.
+                # Same dangling-alloca hazard as the Struct case above applies
+                # here (a tuple returned by value from a callee): HEAP-allocate
+                # via rt_alloc instead of a stack `alloca` so the returned
+                # pointer stays valid past the callee's return.
+                val tup_nit = self.native_int()
+                val tup_n = operands.len()
+                val tup_agg = self.builder.fresh_local()
+                self.remember_function_return_type("rt_alloc", "ptr")
+                self.remember_function_param_types("rt_alloc", ["i64"])
+                self.unknown_func_decls["rt_alloc"] = true
+                val tup_word_bytes = natural_alignment(tup_nit)
+                self.builder.emit("  {tup_agg} = call ptr @rt_alloc(i64 {tup_n * tup_word_bytes})")
+                for i in 0..tup_n:
+                    val tup_raw = self.translate_operand(operands[i])
+                    val tup_v = self.store_field_bits(tup_raw, self.get_operand_type(operands[i]), tup_nit)
+                    val tup_fp = self.builder.fresh_local()
+                    self.builder.emit("  {tup_fp} = getelementptr inbounds {tup_nit}, ptr {tup_agg}, i32 {i}")
+                    self.builder.emit_store(tup_nit, tup_v, tup_fp)
+                self.mark_ptr_local(dest_id)
+                self.local_types[dest_id] = "ptr"
+                self.value_types[dest_name] = "ptr"
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {tup_agg}, {tup_nit} 0  ; tuple ptr")
+                return
+            case _: ()
+        val agg_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        val agg_ptr = self.builder.fresh_local()
+        self.builder.emit_alloca(agg_ptr, agg_ty)
+        for i in 0..operands.len():
+            val raw_elem_val = self.translate_operand(operands[i])
+            val elem_ty = self.valid_llvm_type(self.get_operand_type(operands[i]))
+            val elem_val = self.value_as_type(raw_elem_val, self.get_operand_type(operands[i]), elem_ty)
+            val elem_ptr = self.builder.fresh_local()
+            self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
+            self.builder.emit_store(elem_ty, elem_val, elem_ptr)
+        self.builder.emit_load(dest_name, agg_ty, agg_ptr)
+
+    me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val raw_base_val = self.translate_operand(base)
+        val base_val = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
+        val nit = self.native_int()
+        val field_ptr = self.builder.fresh_local()
+        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
+        # Aggregates store every field as one native-int word (see
+        # lower_struct_construct's docstring), so the physical load is always
+        # native_int. But a field's declared MIR type can be pointer-flavored
+        # (Array/Slice/Dict -- nested-field-access support, see
+        # struct_field_types_by_name in 20.hir/hir_lowering/types.spl), in
+        # which case `dest` was pre-registered (self.ptr_locals / local_types,
+        # from the MIR local declaration) as "ptr" even though the value
+        # physically loaded here is native_int. Loading straight into
+        # `dest_name` in that case leaves a value textually reused as "ptr" at
+        # later use sites (value_as_type trusts the registered type and skips
+        # its own cast) while its REAL LLVM definition is native_int -- an
+        # `llc` type mismatch ("defined with type 'i64' but expected 'ptr'"),
+        # observed indexing a struct's array-typed field on the native
+        # --entry path. Load into a fresh native-int temp and inttoptr it
+        # into `dest_name` so the value's real definition matches its
+        # registered type. Struct-typed nested fields are unaffected (their
+        # declared type stays native_int here today, so get_local_type
+        # returns native_int and this branch does not fire).
+        val dest_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        if dest_ty == "ptr":
+            val raw_field_val = self.builder.fresh_local()
+            self.builder.emit_load(raw_field_val, nit, field_ptr)
+            self.builder.emit("  {dest_name} = inttoptr {nit} {raw_field_val} to ptr")
+        elif is_float_type(dest_ty):
+            # float-field fix (native_float_struct_field_fptosi_corruption):
+            # the field's real declared type is float (e.g. f64), but the
+            # physical storage word is still one native-int word (see the
+            # doc comment above / translate_aggregate's Struct case). Loading
+            # straight into `dest_name` typed as `double` while the word's
+            # LLVM-defined type is `i64` is an `llc` type mismatch; loading
+            # it as an integer VALUE (sitofp) would also be wrong -- it
+            # would treat the word's raw bits as a numeric integer instead of
+            # reinterpreting them as the float bits they already are (see
+            # store_field_bits). Load the native-int word, then `bitcast` it
+            # to the field's real float type -- the exact mirror of
+            # store_field_bits on write.
+            self.load_field_bits(dest_name, field_ptr, dest_ty, nit)
+        else:
+            self.builder.emit_load(dest_name, nit, field_ptr)
+
+    me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
+        val raw_base_val = self.translate_operand(base)
+        val base_val = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
+        val raw_value_val = self.translate_operand(value)
+        val nit = self.native_int()
+        val value_val = self.store_field_bits(raw_value_val, self.get_operand_type(value), nit)
+        val field_ptr = self.builder.fresh_local()
+        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
+        self.builder.emit_store(nit, value_val, field_ptr)
+
+    # === Helpers: bit-preserving float<->native-int-word reinterpret ===
+    #
+    # Struct/tuple aggregates store every field as one native-int word
+    # (translate_aggregate's Struct/Tuple cases, translate_get_field,
+    # translate_set_field). A float-typed field's VALUE must round-trip
+    # through that word's BITS unchanged: `value_as_type`'s normal
+    # float<->int coercion is `fptosi`/`sitofp`, which converts the NUMERIC
+    # value (3.5 -> 3, truncating the fraction) -- correct for an explicit
+    # `as` cast, wrong here, where the int word is just float-bits wearing an
+    # integer LLVM type for storage purposes. `bitcast` reinterprets the same
+    # bits instead (native_float_struct_field_fptosi_corruption bug: `p.x`
+    # constructed from `1.5` printed back as `1`).
+
+    fn float_int_equiv(ty: text) -> text:
+        """The LLVM integer type with the same bit width as a float type,
+        for a bit-preserving `bitcast` (double <-> i64, float <-> i32)."""
+        if ty == "double":
+            return "i64"
+        if ty == "float":
+            return "i32"
+        ty
+
+    me store_field_bits(raw_val: text, operand_ty: text, nit: text) -> text:
+        """Convert an operand's translated value into the native-int WORD
+        used for aggregate field storage. A float source is BIT-PRESERVED
+        via `bitcast` (never `fptosi`); everything else keeps the existing
+        `value_as_type` integer coercion unchanged."""
+        var src_ty = self.valid_llvm_type(operand_ty)
+        val maybe_actual_ty = self.value_types.get(raw_val)
+        if maybe_actual_ty.?:
+            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        if not is_float_type(src_ty):
+            return self.value_as_type(raw_val, src_ty, nit)
+        val int_equiv = self.float_int_equiv(src_ty)
+        val bits = self.builder.fresh_local()
+        self.builder.emit("  {bits} = bitcast {src_ty} {raw_val} to {int_equiv}")
+        if int_equiv == nit:
+            return bits
+        self.value_as_type(bits, int_equiv, nit)
+
+    me load_field_bits(dest_name: text, field_ptr: text, dest_ty: text, nit: text):
+        """Load a struct/tuple field's native-int storage word and
+        reinterpret it as the field's real float type (mirror of
+        store_field_bits on read): `bitcast`, never `sitofp` -- the loaded
+        word's bits are already float bits (written by store_field_bits),
+        not a raw integer value to convert."""
+        val int_equiv = self.float_int_equiv(dest_ty)
+        val raw = self.builder.fresh_local()
+        self.builder.emit_load(raw, nit, field_ptr)
+        var bits = raw
+        if int_equiv != nit:
+            bits = self.value_as_type(raw, nit, int_equiv)
+        self.builder.emit("  {dest_name} = bitcast {int_equiv} {bits} to {dest_ty}")
+
+    # === Overrides: casts ===
+
+    me translate_cast(dest: LocalId, operand: MirOperand, target: MirType):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val operand_val = self.translate_operand(operand)
+        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        self.local_types[dest_id] = target_ty
+        self.value_types[dest_name] = target_ty
+        self.unsigned_locals[dest_id] = self.is_unsigned_mir_kind(target.kind)
+        if target_ty == "ptr":
+            self.mark_ptr_local(dest_id)
+        elif target_ty == "i1":
+            self.bool_locals[dest_id] = true
+        # Explicit `as` widening of an unsigned MIR-level source (u8/u16/u32)
+        # must zext, not sext -- value_as_type always sext's i8/i16/i32
+        # widening (see is_unsigned_mir_kind / value_as_type_signed). Without
+        # this, `(200u8) as i64` sign-extends the high bit and yields -56
+        # instead of 200.
+        val casted = self.value_as_type_signed(operand_val, src_ty, target_ty, self.get_operand_unsigned(operand))
+        if casted == operand_val:
+            if is_float_type(target_ty):
+                self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, 0.0  ; cast")
+            elif target_ty == "ptr":
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {casted}, {nit} 0  ; cast")
+            else:
+                self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast")
+        else:
+            if is_float_type(target_ty):
+                self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, 0.0  ; cast")
+            elif target_ty == "ptr":
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {casted}, {nit} 0  ; cast")
+            else:
+                self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast")
+
+    me translate_bitcast(dest: LocalId, operand: MirOperand, target: MirType):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val operand_val = self.translate_operand(operand)
+        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        self.local_types[dest_id] = target_ty
+        self.value_types[dest_name] = target_ty
+        if target_ty == "ptr":
+            self.mark_ptr_local(dest_id)
+        elif target_ty == "i1":
+            self.bool_locals[dest_id] = true
+        if src_ty == target_ty:
+            if is_float_type(target_ty):
+                self.builder.emit("  {dest_name} = fadd {target_ty} {operand_val}, 0.0  ; bitcast")
+            elif target_ty == "ptr":
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {operand_val}, {nit} 0  ; bitcast")
+            else:
+                self.builder.emit("  {dest_name} = add {target_ty} {operand_val}, 0  ; bitcast")
+        else:
+            self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
+
+    # === Overrides: indirect calls / intrinsics ===
+
+    me translate_call_indirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
+        # Guard (#138 Wall #1): a CallIndirect whose callee operand carries a
+        # nil local means the frontend lowered an unresolved callee
+        # (HirExprKind.Error -> CallIndirect(func=Copy(nil))). Reading `.id`
+        # off that nil (local_id_value in core_codegen.spl) crashed the whole
+        # build with a bare "semantic: undefined field 'id'". Fail as a
+        # readable compile error instead.
+        match ptr.kind:
+            case Copy(callee_local) | Move(callee_local):
+                if callee_local == nil:
+                    panic("compile error: indirect call with unresolved callee — likely an unresolved import or unsupported first-class function value")
+            case _:
+                ()
+        val dest_name: text? = match dest:
+            case Some(dest_local): Some(self.get_local(self.local_id_value(dest_local)))
+            case nil: nil
+        val raw_ptr_val = self.translate_operand(ptr)
+        val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
+        var arg_vals: [text] = []
+        var arg_i = 0
+        for arg in args:
+            var arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
+            var arg_val = self.translate_operand(arg)
+            if arg_i < sig.params.len():
+                val param_ty = sig.params[arg_i]
+                if param_ty != nil:
+                    arg_ty = self.valid_llvm_type(self.llvm_type_text(param_ty))
+            arg_val = self.value_as_type(arg_val, self.get_operand_type(arg), arg_ty)
+            arg_vals = arg_vals.push("{arg_ty} {arg_val}")
+            arg_i = arg_i + 1
+        val ret_ty = match dest:
+            case Some(dest_local): self.valid_llvm_type(self.get_local_type(self.local_id_value(dest_local)))
+            case nil:
+                if sig.return_type == nil: "void" else: self.valid_llvm_type(self.llvm_type_text(sig.return_type))
+        self.builder.emit_call_indirect(dest_name, ret_ty, ptr_val, arg_vals)
+
+    me phi_block_id_arg(arg: MirOperand) -> i64?:
+        match arg.kind:
+            case Const(value, _):
+                match value:
+                    case Int(v): Some(v)
+                    case _: nil
+            case _: nil
+
+    me emit_ssa_phi_intrinsic(dest: LocalId?, args: [MirOperand]) -> bool:
+        if not dest.?:
+            return false
+        if args.len() < 4:
+            return false
+        val then_block = self.phi_block_id_arg(args[0])
+        val else_block = self.phi_block_id_arg(args[2])
+        if not then_block.? or not else_block.?:
+            return false
+        match dest:
+            Some(dest_local):
+                match then_block:
+                    Some(then_id):
+                        match else_block:
+                            Some(else_id):
+                                val dest_id = self.local_id_value(dest_local)
+                                val dest_name = self.get_local(dest_id)
+                                val then_ty = self.valid_llvm_type(self.get_operand_type(args[1]))
+                                val else_ty = self.valid_llvm_type(self.get_operand_type(args[3]))
+                                val phi_ty = if then_ty == "ptr" or else_ty == "ptr": "ptr" else: self.valid_llvm_type(self.get_local_type(dest_id))
+                                if phi_ty == "ptr":
+                                    self.mark_ptr_local(dest_id)
+                                val then_raw = self.translate_operand(args[1])
+                                val else_raw = self.translate_operand(args[3])
+                                val then_val = self.value_as_type(then_raw, then_ty, phi_ty)
+                                val else_val = self.value_as_type(else_raw, else_ty, phi_ty)
+                                self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
+                                true
+                            nil:
+                                false
+                    nil:
+                        false
+            nil:
+                false
+
+    me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
+        # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
+        # Falls back to __simple_intrinsic_<name> for unknown names.
+        match name:
+            case "__simple_ssa_phi":
+                if not self.emit_ssa_phi_intrinsic(dest, args):
+                    eprint("[mir-to-llvm] ERROR: malformed __simple_ssa_phi intrinsic")
+            case "crypto_aes_round":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenc", args)
+            case "crypto_aes_round_last":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenclast", args)
+            case "crypto_aes_inv_round":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesdec", args)
+            case "crypto_aes_inv_round_last":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesdeclast", args)
+            case "crypto_sha256_rounds2":
+                self.emit_sha256_rnds2_intrinsic(dest, args)
+            case "crc32_u8":
+                self.emit_crc32_intrinsic(dest, "llvm.x86.sse42.crc32.32.8", "i32", "i8", args)
+            case "crc32_u32":
+                self.emit_crc32_intrinsic(dest, "llvm.x86.sse42.crc32.32.32", "i32", "i32", args)
+            case "clmul_lo":
+                self.emit_clmul_intrinsic(dest, args, "0")
+            case "clmul_hi":
+                self.emit_clmul_intrinsic(dest, args, "17")
+            case _:
+                # Generic fallback: forward to runtime stub
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push("i64 " + self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                match dest:
+                    Some(dest_local):
+                        val dest_id = self.local_id_value(dest_local)
+                        val dest_name = self.get_local(dest_id)
+                        val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+                        self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+                    nil:
+                        self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+
+    me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text]):
+        """Translate inline assembly to LLVM inline asm call."""
+        var constraint_parts: [text] = []
+        var arg_values: [text] = []
+        var arg_types: [text] = []
+
+        for output in outputs:
+            val constraint = self.build_output_constraint(output)
+            constraint_parts.push(constraint)
+
+        for input in inputs:
+            val constraint = self.build_input_constraint(input)
+            constraint_parts.push(constraint)
+            val operand_value = self.translate_operand(input.operand)
+            arg_values.push(operand_value)
+            arg_types.push(self.native_int())
+
+        for clobber in clobbers:
+            constraint_parts.push("~{{clobber}}")
+
+        val constraints = constraint_parts.join(",")
+
+        var arg_list_parts: [text] = []
+        for i in 0..arg_values.len():
+            arg_list_parts.push("{arg_types[i]} {arg_values[i]}")
+        val arg_list = arg_list_parts.join(", ")
+
+        val volatile_flag = if is_volatile: " sideeffect" else: ""
+
+        if outputs.len() == 0:
+            # No outputs: call void
+            val asm_call = "  call void asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+        elif outputs.len() == 1:
+            # Single output: capture result directly
+            val out_op = outputs[0]
+            val out_val = self.translate_operand(out_op.operand)
+            val out_ty = self.native_int()
+            val asm_call = "  {out_val} = call {out_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+        else:
+            # Multiple outputs: use struct return type
+            var out_types: [text] = []
+            for out in outputs:
+                out_types.push(self.native_int())
+            val struct_ty = "{{ " + out_types.join(", ") + " }}"
+            val first_out_val = self.translate_operand(outputs[0].operand)
+            val tmp_name = "{first_out_val}.asm_ret"
+            val asm_call = "  {tmp_name} = call {struct_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+            # Extract each output value
+            var out_idx = 0
+            for out in outputs:
+                val out_val = self.translate_operand(out.operand)
+                val out_ty = self.native_int()
+                self.builder.emit("  {out_val} = extractvalue {struct_ty} {tmp_name}, {out_idx}")
+                out_idx = out_idx + 1
+
+    # === Overrides: pipeline operators ===
+
+    me translate_pipe_forward(dest: LocalId, value: MirOperand, func: MirOperand):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val value_val = self.translate_operand(value)
+        val func_val = self.translate_operand(func)
+        val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        self.builder.emit("  {dest_name} = call {ret_ty} {func_val}(i64 {value_val})  ; pipe forward")
+
+    me translate_compose(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val f_val = self.translate_operand(f)
+        val g_val = self.translate_operand(g)
+        val dir = if forward: "forward" else: "backward"
+        self.mark_ptr_local(dest_id)
+        self.builder.emit("  {dest_name} = call ptr @__simple_runtime_compose(ptr {f_val}, ptr {g_val})  ; compose ({dir})")
+
+    me translate_parallel(dest: LocalId, funcs: [MirOperand]):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val count = funcs.len()
+        self.mark_ptr_local(dest_id)
+        self.builder.emit("  {dest_name} = call ptr @__simple_runtime_parallel(i64 {count})  ; parallel ({count} functions)")
+
+    me translate_layer_connect(dest: LocalId, l1: MirOperand, l2: MirOperand):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val l1_val = self.translate_operand(l1)
+        val l2_val = self.translate_operand(l2)
+        self.mark_ptr_local(dest_id)
+        self.builder.emit("  {dest_name} = call ptr @__simple_runtime_layer_connect(ptr {l1_val}, ptr {l2_val})  ; layer connect")
+
+    # === Overrides: borrow checking ===
+
+    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val place_val = self.get_local(self.local_id_value(place.local))
+        val nit = self.native_int()
+        self.builder.emit("  {dest_name} = add {nit} {place_val}, 0  ; Ref (borrow)")
+
+    # === Overrides: unsupported async/actor lowering ===
+
+    me translate_create_promise(dest: LocalId, body: LocalId, result_type: MirType):
+        self.emit_unsupported_panic("LLVM backend does not support async CreatePromise lowering yet")
+
+    me translate_await(dest: LocalId, promise: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support async Await lowering yet")
+
+    me translate_yield(value: MirOperand?):
+        self.emit_unsupported_panic("LLVM backend does not support async Yield lowering yet")
+
+    me translate_spawn(dest: LocalId, handler: MirOperand, args: [MirOperand]):
+        self.emit_unsupported_panic("LLVM backend does not support async Spawn lowering yet")
+
+    me translate_send(target: MirOperand, message: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support actor Send lowering yet")
+
+    me translate_receive(dest: LocalId, timeout: MirOperand?):
+        self.emit_unsupported_panic("LLVM backend does not support actor Receive lowering yet")
+
+    # === Overrides: unsupported GPU lowering ===
+
+    me translate_gpu_kernel_def(name: text):
+        self.emit_unsupported_panic("LLVM text backend does not support GPU kernel definitions")
+
+    me translate_gpu_launch(args: [text]):
+        self.emit_unsupported_panic("LLVM text backend does not support GPU launches")
+
+    me translate_gpu_global_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuGlobalId")
+
+    me translate_gpu_local_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuLocalId")
+
+    me translate_gpu_block_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBlockId")
+
+    me translate_gpu_block_dim(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBlockDim")
+
+    me translate_gpu_grid_dim(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuGridDim")
+
+    me translate_gpu_barrier(scope: GpuBarrierScope):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBarrier")
+
+    me translate_gpu_mem_fence(scope: GpuMemoryScope):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuMemFence")
+
+    me translate_gpu_shared_alloc(dest: LocalId, type_: MirType, size: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuSharedAlloc")
+
+    me translate_gpu_atomic_op(dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuAtomicOp")
+
+    me translate_gpu_atomic_cas(dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuAtomicCas")
+
+    # === Overrides: unsupported VHDL lowering ===
+
+    me translate_vhdl_process(kind: VhdlProcessKind, body_block: BlockId):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL process lowering")
+
+    me translate_vhdl_signal_assign(target: MirOperand, value: MirOperand, delay_ns: i64?):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL signal assignment lowering")
+
+    me translate_vhdl_var_assign(target: MirOperand, value: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL variable assignment lowering")
+
+    me translate_vhdl_port_map(entity: text, instance: text, connections: [(text, MirOperand)]):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL port maps")
+
+    me translate_vhdl_resize(dest: LocalId, operand: MirOperand, new_width: i64, signed: bool):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL resize")
+
+    me translate_vhdl_slice(dest: LocalId, signal: MirOperand, hi: i64, lo: i64):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL slice")
+
+    me translate_vhdl_concat(dest: LocalId, parts: [MirOperand]):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL concat")
+
+    # === Overrides: unsupported SIMD lowering ===
+
+    me translate_simd_binop(dest: LocalId, a: MirOperand, b: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+    me translate_simd_fma(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+    me translate_simd_horizontal(dest: LocalId, a: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+# ============================================================================
+# LLVM-Specific Helpers (not part of trait)
+# ============================================================================

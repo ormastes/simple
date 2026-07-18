@@ -1,0 +1,53 @@
+use std.spec.*
+use app.io.mod.{file_read}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_render_request_with_theme, simple_web_content_revision}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache}
+
+describe "Simple Web compositor adapter":
+
+    it "uses the canonical Web Draw IR and Engine2D backend by default":
+        val renderer = file_read("src/os/compositor/simple_web_window_renderer.spl")
+        val host = file_read("src/os/compositor/host_compositor_core.spl")
+        val surface = file_read("src/os/compositor/web_render_surface.spl")
+        expect(renderer).to_contain("std.gc_async_mut.ui.web_render_pixel_backend")
+        expect(host).to_contain("std.gc_async_mut.ui.web_render_pixel_backend")
+        expect(surface).to_contain("std.gc_async_mut.ui.web_render_pixel_backend")
+        expect(surface).to_contain("web_render_request_to_pixel_artifact(req)")
+        expect(renderer.contains("web_render_pixel_software_backend")).to_be(false)
+        expect(host.contains("web_render_pixel_software_backend")).to_be(false)
+        expect(surface.contains("web_render_request_to_native_safe_pixel_artifact")).to_be(false)
+
+    it "produces an authoritative shared-WM frame from runtime HTML":
+        val cache = web_render_pixel_artifact_cache(36, 18, "software")
+        val body = "<p data-runtime='yes'>runtime-created content</p>"
+        val frame = simple_web_content_frame_cached(cache, "window-42", 9, 4, "glass_dark", "Arbitrary runtime title", body, 36, 18, 0)
+        expect(frame.window_id).to_equal("window-42")
+        expect(frame.scene_revision).to_equal(9)
+        expect(frame.content_revision).to_equal(4)
+        expect(frame.origin_kind).to_equal(WM_CONTENT_ORIGIN_SIMPLE_WEB)
+        expect(frame.width).to_equal(36)
+        expect(frame.height).to_equal(18)
+        expect(frame.pixels.len()).to_equal(36 * 18)
+        expect(frame.checksum).to_be_greater_than(0u64)
+
+    it "keeps shared-WM content requests free of a duplicate inner titlebar":
+        val req = simple_web_content_render_request_with_theme("glass_dark", "Runtime title", "<p>body</p>", 80, 40)
+        expect(req.body_html.contains("wm-app-titlebar")).to_be(false)
+        expect(req.body_html.contains("wm-app-content")).to_be(true)
+
+    it "keeps unchanged content identity stable and changes it on mutation":
+        val first_cache = web_render_pixel_artifact_cache(96, 48, "software")
+        val second_cache = web_render_pixel_artifact_cache(96, 48, "software")
+        val changed_cache = web_render_pixel_artifact_cache(96, 48, "software")
+        val stable_revision = simple_web_content_revision("动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val repeated_revision = simple_web_content_revision("动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val changed_revision = simple_web_content_revision("动态 title", "<b>changed pixels</b>", 96, 48, 0)
+        val first = simple_web_content_frame_cached(first_cache, "w", 1, stable_revision, "glass_dark", "动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val second = simple_web_content_frame_cached(second_cache, "w", 2, repeated_revision, "glass_dark", "动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val changed = simple_web_content_frame_cached(changed_cache, "w", 3, changed_revision, "glass_dark", "动态 title", "<b>changed pixels</b>", 96, 48, 0)
+        expect(stable_revision).to_equal(repeated_revision)
+        assert_not_equal(stable_revision, changed_revision)
+        expect(first.checksum).to_equal(second.checksum)
+        expect(first.pixels).to_equal(second.pixels)
+        assert_not_equal(first.checksum, changed.checksum)

@@ -1,0 +1,471 @@
+# payload.spl — base64 payload helpers and .spl source code generation.
+#
+# IMPORTANT: generated Simple source strings must NEVER contain a raw CSS/HTML
+# literal with brace characters, because {ident} in Simple string literals is
+# interpolation. All payload content is kept base64-encoded. The generated
+# source code itself is constructed via string concatenation that never places
+# '{' immediately before an identifier token.
+#
+# Interpreter-safe base64: the stdlib base64_encode calls text.bytes() which
+# is not available in interpreter mode ("Function 'str.bytes' not found").
+# This module provides a pure-Simple fallback using char_at + char_code
+# (from std.common.string_core) that works in both interpreter and compiled
+# modes. char_at() is byte-indexed; char_code() returns the codepoint as i64.
+
+use std.common.string_core.{char_code}
+
+# Element-to-part mapping for dyn builds.
+struct UiPartMap:
+    tags: [text]
+    parts: [text]
+
+# ---------------------------------------------------------------------------
+# Interpreter-safe base64 (RFC 4648 standard, with '=' padding)
+# Derives UTF-8 bytes from codepoints via arithmetic — no .bytes() call.
+# ---------------------------------------------------------------------------
+
+val _B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+# Convert text to a list of raw UTF-8 byte values (i64).
+# char_at(i) is codepoint-indexed: advance i by 1 per codepoint.
+# char_code(ch) returns the Unicode codepoint as i64.
+# ch.len() is the UTF-8 byte-width used for encoding, not for indexing.
+# length() in interpreter includes a trailing NUL — skip cp==0.
+fn _text_to_utf8_bytes(data: text) -> [i64]:
+    val n = data.length()
+    var bytes: [i64] = []
+    var i = 0
+    while i < n:
+        val ch = data.char_at(i)
+        val cp = char_code(ch)
+        i = i + 1
+        # Skip null bytes (interpreter length() counts trailing NUL).
+        if cp > 0 and cp < 0x80:
+            bytes.push(cp)
+        else if cp >= 0x80 and cp < 0x800:
+            val hi = 0xC0 | (cp >> 6)
+            val lo = 0x80 | (cp & 0x3F)
+            bytes.push(hi)
+            bytes.push(lo)
+        else if cp >= 0x800 and cp < 0x10000:
+            val b0 = 0xE0 | (cp >> 12)
+            val b1 = 0x80 | ((cp >> 6) & 0x3F)
+            val b2 = 0x80 | (cp & 0x3F)
+            bytes.push(b0)
+            bytes.push(b1)
+            bytes.push(b2)
+        else if cp >= 0x10000:
+            val b0 = 0xF0 | (cp >> 18)
+            val b1 = 0x80 | ((cp >> 12) & 0x3F)
+            val b2 = 0x80 | ((cp >> 6) & 0x3F)
+            val b3 = 0x80 | (cp & 0x3F)
+            bytes.push(b0)
+            bytes.push(b1)
+            bytes.push(b2)
+            bytes.push(b3)
+    bytes
+
+# Decode a base64 char to its 6-bit value; returns -1 for invalid/whitespace.
+fn _b64_char_value(c: i64) -> i64:
+    # A-Z: 0-25
+    if c >= 65 and c <= 90:
+        return c - 65
+    # a-z: 26-51
+    if c >= 97 and c <= 122:
+        return c - 71
+    # 0-9: 52-61
+    if c >= 48 and c <= 57:
+        return c + 4
+    # '+': 62
+    if c == 43:
+        return 62
+    # '/': 63
+    if c == 47:
+        return 63
+    -1
+
+# Encode arbitrary text as standard base64 (RFC 4648 §4, with '=' padding).
+# Works in interpreter mode — uses char_at and codepoint arithmetic only.
+fn _interp_base64_encode(data: text) -> text:
+    val bytes = _text_to_utf8_bytes(data)
+    val n = bytes.len()
+    var out_parts: [text] = []
+    var i = 0
+    while i < n:
+        val b1 = bytes[i]
+        var b2: i64 = 0
+        var b3: i64 = 0
+        if i + 1 < n:
+            b2 = bytes[i + 1]
+        if i + 2 < n:
+            b3 = bytes[i + 2]
+        val idx0 = b1 >> 2
+        val idx1 = ((b1 & 3) << 4) | (b2 >> 4)
+        val idx2 = ((b2 & 15) << 2) | (b3 >> 6)
+        val idx3 = b3 & 63
+        out_parts.push(_B64_TABLE.char_at(idx0))
+        out_parts.push(_B64_TABLE.char_at(idx1))
+        if i + 1 < n:
+            out_parts.push(_B64_TABLE.char_at(idx2))
+        else:
+            out_parts.push("=")
+        if i + 2 < n:
+            out_parts.push(_B64_TABLE.char_at(idx3))
+        else:
+            out_parts.push("=")
+        i = i + 3
+    out_parts.join("")
+
+# Decode standard base64 text back to UTF-8 text.
+# Works in interpreter mode — uses char_at only.
+fn _interp_base64_decode(encoded: text) -> text:
+    val n = encoded.length()
+    var out_bytes: [i64] = []
+    var acc = 0
+    var bits = 0
+    var i = 0
+    while i < n:
+        val raw = char_code(encoded.char_at(i))
+        i = i + 1
+        # Skip whitespace and nulls; handle padding and data chars.
+        if raw == 32 or raw == 9 or raw == 10 or raw == 13 or raw == 0:
+            pass_dn
+        else if raw == 61:
+            # padding terminates
+            bits = 0
+        else:
+            val v = _b64_char_value(raw)
+            if v >= 0:
+                acc = (acc << 6) | v
+                bits = bits + 6
+                if bits >= 8:
+                    bits = bits - 8
+                    val byte_val = (acc >> bits) & 0xFF
+                    out_bytes.push(byte_val)
+    # Reconstruct text from UTF-8 bytes (codepoints).
+    var result_parts: [text] = []
+    var bi = 0
+    val bn = out_bytes.len()
+    while bi < bn:
+        val b = out_bytes[bi]
+        if b == 0:
+            # Null bytes: chr(0) renders as space in interpreter; skip.
+            bi = bi + 1
+        else if b < 0x80:
+            result_parts.push(b.chr())
+            bi = bi + 1
+        else if b < 0xC0:
+            # Continuation byte without lead — skip
+            result_parts.push("?")
+            bi = bi + 1
+        else if b < 0xE0:
+            if bi + 1 < bn:
+                val b2 = out_bytes[bi + 1]
+                val cp = ((b & 0x1F) << 6) | (b2 & 0x3F)
+                result_parts.push(cp.chr())
+                bi = bi + 2
+            else:
+                result_parts.push("?")
+                bi = bi + 1
+        else if b < 0xF0:
+            if bi + 2 < bn:
+                val b2 = out_bytes[bi + 1]
+                val b3 = out_bytes[bi + 2]
+                val cp = ((b & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+                result_parts.push(cp.chr())
+                bi = bi + 3
+            else:
+                result_parts.push("?")
+                bi = bi + 1
+        else:
+            if bi + 3 < bn:
+                val b2 = out_bytes[bi + 1]
+                val b3 = out_bytes[bi + 2]
+                val b4 = out_bytes[bi + 3]
+                val cp = ((b & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)
+                result_parts.push(cp.chr())
+                bi = bi + 4
+            else:
+                result_parts.push("?")
+                bi = bi + 1
+    result_parts.join("")
+
+# ---------------------------------------------------------------------------
+# Public API: encode/decode wrappers
+# ---------------------------------------------------------------------------
+
+fn payload_encode(data: text) -> text:
+    _interp_base64_encode(data)
+
+fn payload_decode(encoded: text) -> text:
+    _interp_base64_decode(encoded)
+
+# Split a base64 string into chunks of at most chunk_len characters.
+fn payload_split(b64_text: text, chunk_len: i64) -> [text]:
+    var chunks: [text] = []
+    val n = b64_text.len()
+    var pos = 0
+    while pos < n:
+        val end = if pos + chunk_len > n: n else: pos + chunk_len
+        chunks.push(b64_text.slice(pos, end))
+        pos = end
+    chunks
+
+# ---------------------------------------------------------------------------
+# Code generation
+# ---------------------------------------------------------------------------
+
+# Generate a single-module std-form source that embeds html + css as b64 consts.
+# name         : module identifier (ASCII, no spaces)
+# html_b64     : base64-encoded HTML content
+# css_b64s     : list of base64-encoded CSS contents (one per sheet)
+#
+# The generated module exports:
+#   ui_name()         -> text
+#   ui_elements()     -> [text]   (populated externally; returns [] here)
+#   ui_html_b64()     -> text
+#   ui_css_b64(idx)   -> text
+fn gen_std_module_source(name: text, html_b64: text, css_b64s: [text]) -> text:
+    val nl = "\n"
+    val q = "\""
+    var src_parts: [text] = []
+    src_parts.push("# Generated std UI module: ")
+    src_parts.push(name)
+    src_parts.push(nl)
+    src_parts.push("# Do not edit — produced by html_ui payload codegen.")
+    src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("fn ui_name() -> text:")
+    src_parts.push(nl)
+    src_parts.push("    ")
+    src_parts.push(q)
+    src_parts.push(name)
+    src_parts.push(q)
+    src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("fn ui_elements() -> [text]:")
+    src_parts.push(nl)
+    src_parts.push("    []")
+    src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("fn ui_html_b64() -> text:")
+    src_parts.push(nl)
+    src_parts.push("    ")
+    src_parts.push(q)
+    src_parts.push(html_b64)
+    src_parts.push(q)
+    src_parts.push(nl)
+    src_parts.push(nl)
+    # css_b64 by index via if/elif chain (no struct literals needed)
+    src_parts.push("fn ui_css_b64(idx: i64) -> text:")
+    src_parts.push(nl)
+    val css_count = css_b64s.len()
+    if css_count == 0:
+        src_parts.push("    ")
+        src_parts.push(q)
+        src_parts.push(q)
+        src_parts.push(nl)
+    else:
+        var i = 0
+        while i < css_count:
+            if i == 0:
+                src_parts.push("    if idx == 0:")
+                src_parts.push(nl)
+            else:
+                src_parts.push("    else if idx == ")
+                src_parts.push(i.to_text())
+                src_parts.push(":")
+                src_parts.push(nl)
+            src_parts.push("        ")
+            src_parts.push(q)
+            src_parts.push(css_b64s[i])
+            src_parts.push(q)
+            src_parts.push(nl)
+            i = i + 1
+        src_parts.push("    else:")
+        src_parts.push(nl)
+        src_parts.push("        ")
+        src_parts.push(q)
+        src_parts.push(q)
+        src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("export ui_name")
+    src_parts.push(nl)
+    src_parts.push("export ui_elements")
+    src_parts.push(nl)
+    src_parts.push("export ui_html_b64")
+    src_parts.push(nl)
+    src_parts.push("export ui_css_b64")
+    src_parts.push(nl)
+    src_parts.join("")
+
+# Generate the dyn main module source. This is the module with the element→part
+# map. For merged (small) builds, embed the full payloads directly.
+#
+# name              : module name
+# map               : element-to-part-filename map
+# embedded_html_b64 : html payload (may be "" if split into parts)
+# embedded_css_b64s : css payloads (may be [] if split into parts)
+fn gen_dyn_main_source(name: text, map: UiPartMap, embedded_html_b64: text, embedded_css_b64s: [text]) -> text:
+    val nl = "\n"
+    val q = "\""
+    var src_parts: [text] = []
+    src_parts.push("# Generated dyn main UI module: ")
+    src_parts.push(name)
+    src_parts.push(nl)
+    src_parts.push("# Do not edit — produced by html_ui payload codegen.")
+    src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("fn ui_name() -> text:")
+    src_parts.push(nl)
+    src_parts.push("    ")
+    src_parts.push(q)
+    src_parts.push(name)
+    src_parts.push(q)
+    src_parts.push(nl)
+    src_parts.push(nl)
+    # ui_elements — list all tags in the map
+    src_parts.push("fn ui_elements() -> [text]:")
+    src_parts.push(nl)
+    val tag_count = map.tags.len()
+    if tag_count == 0:
+        src_parts.push("    []")
+        src_parts.push(nl)
+    else:
+        src_parts.push("    [")
+        src_parts.push(nl)
+        var i = 0
+        while i < tag_count:
+            val comma = if i + 1 < tag_count: "," else: ""
+            src_parts.push("        ")
+            src_parts.push(q)
+            src_parts.push(map.tags[i])
+            src_parts.push(q)
+            src_parts.push(comma)
+            src_parts.push(nl)
+            i = i + 1
+        src_parts.push("    ]")
+        src_parts.push(nl)
+    src_parts.push(nl)
+    # ui_html_b64 — embedded or empty
+    src_parts.push("fn ui_html_b64() -> text:")
+    src_parts.push(nl)
+    src_parts.push("    ")
+    src_parts.push(q)
+    src_parts.push(embedded_html_b64)
+    src_parts.push(q)
+    src_parts.push(nl)
+    src_parts.push(nl)
+    # ui_css_b64 — embedded or empty
+    src_parts.push("fn ui_css_b64(idx: i64) -> text:")
+    src_parts.push(nl)
+    val embedded_css_count = embedded_css_b64s.len()
+    if embedded_css_count == 0:
+        src_parts.push("    ")
+        src_parts.push(q)
+        src_parts.push(q)
+        src_parts.push(nl)
+    else:
+        var ci = 0
+        while ci < embedded_css_count:
+            if ci == 0:
+                src_parts.push("    if idx == 0:")
+                src_parts.push(nl)
+            else:
+                src_parts.push("    else if idx == ")
+                src_parts.push(ci.to_text())
+                src_parts.push(":")
+                src_parts.push(nl)
+            src_parts.push("        ")
+            src_parts.push(q)
+            src_parts.push(embedded_css_b64s[ci])
+            src_parts.push(q)
+            src_parts.push(nl)
+            ci = ci + 1
+        src_parts.push("    else:")
+        src_parts.push(nl)
+        src_parts.push("        ")
+        src_parts.push(q)
+        src_parts.push(q)
+        src_parts.push(nl)
+    src_parts.push(nl)
+    # ui_part_for — element → part filename
+    src_parts.push("fn ui_part_for(tag: text) -> text:")
+    src_parts.push(nl)
+    if tag_count == 0:
+        src_parts.push("    ")
+        src_parts.push(q)
+        src_parts.push(q)
+        src_parts.push(nl)
+    else:
+        var pi = 0
+        while pi < tag_count:
+            if pi == 0:
+                src_parts.push("    if tag == ")
+            else:
+                src_parts.push("    else if tag == ")
+            src_parts.push(q)
+            src_parts.push(map.tags[pi])
+            src_parts.push(q)
+            src_parts.push(":")
+            src_parts.push(nl)
+            src_parts.push("        ")
+            src_parts.push(q)
+            src_parts.push(map.parts[pi])
+            src_parts.push(q)
+            src_parts.push(nl)
+            pi = pi + 1
+        src_parts.push("    else:")
+        src_parts.push(nl)
+        src_parts.push("        ")
+        src_parts.push(q)
+        src_parts.push(q)
+        src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("export ui_name")
+    src_parts.push(nl)
+    src_parts.push("export ui_elements")
+    src_parts.push(nl)
+    src_parts.push("export ui_html_b64")
+    src_parts.push(nl)
+    src_parts.push("export ui_css_b64")
+    src_parts.push(nl)
+    src_parts.push("export ui_part_for")
+    src_parts.push(nl)
+    src_parts.join("")
+
+# Generate a dyn part module source.
+# name        : parent module name
+# idx         : part index
+# payload_b64 : the b64-encoded payload chunk for this part
+fn gen_dyn_part_source(name: text, idx: i64, payload_b64: text) -> text:
+    val nl = "\n"
+    val q = "\""
+    var src_parts: [text] = []
+    src_parts.push("# Generated dyn part module: ")
+    src_parts.push(name)
+    src_parts.push("_part_")
+    src_parts.push(idx.to_text())
+    src_parts.push(nl)
+    src_parts.push("# Do not edit — produced by html_ui payload codegen.")
+    src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("fn ui_part_payload() -> text:")
+    src_parts.push(nl)
+    src_parts.push("    ")
+    src_parts.push(q)
+    src_parts.push(payload_b64)
+    src_parts.push(q)
+    src_parts.push(nl)
+    src_parts.push(nl)
+    src_parts.push("export ui_part_payload")
+    src_parts.push(nl)
+    src_parts.join("")
+
+export UiPartMap
+export payload_encode
+export payload_decode
+export payload_split
+export gen_std_module_source
+export gen_dyn_main_source
+export gen_dyn_part_source

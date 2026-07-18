@@ -1,0 +1,36 @@
+# @tag:system
+# @req REQ-005 REQ-006
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_read, file_write, file_exists}
+use os.installer.image_builder.{build_install_image_with_simple_binary}
+use os.tools.pkg.pkg_format.{PkgArch}
+
+describe "SimpleOS deploy image Simple toolchain payload":
+    it "rejects marker payloads and requires focused target toolchain provenance":
+        val root = "build/tmp/simpleos_deploy_image_simple_toolchain"
+        dir_create_all(root)
+        val payload = root + "/simple-target.smf"
+        val image = root + "/simpleos-disk.img"
+
+        step("Reject a marker pretending to be a target compiler")
+        expect(file_write(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_be(true)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", image, 64, payload)
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("lacks target provenance")
+        expect(file_exists("{image}.contents/rootfs/SYS/SIMPLETOOL.SDN")).to_be(false)
+
+        step("Require the focused compiler/interpreter/loader entry closure")
+        val builder = file_read("scripts/os/simpleos-native-build.shs")
+        expect(builder).to_contain("--entry-closure")
+        expect(builder).to_contain("src/app/simpleos_tool/main.spl")
+        expect(builder).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+        expect(builder).to_contain(".build_stamp")
+
+        step("Require target provenance before any role is staged")
+        val image_builder = file_read("src/os/installer/image_builder.spl")
+        expect(image_builder).to_contain("_validate_simple_binary(simple_binary, self.config.arch)")
+        expect(image_builder).to_contain("target={expected_target}")
+        expect(image_builder).to_contain("entry=src/app/simpleos_tool/main.spl")
+        expect(image_builder).to_contain("entry_closure=true")

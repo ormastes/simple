@@ -1,0 +1,32 @@
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_timed_ns}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+fn _perf_batch() -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "perf-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: [])
+
+describe "Vulkan font performance evidence counters":
+    it "calculates bounded elapsed and live buffer bytes":
+        expect(vulkan_font_elapsed_ns(10, 25)).to_equal(15)
+        expect(vulkan_font_elapsed_ns(25, 10)).to_equal(0)
+        expect(vulkan_font_timed_ns(25, 10)).to_equal(15)
+        expect(vulkan_font_timed_ns(10, 25)).to_equal(0)
+        expect(vulkan_font_gpu_resource_bytes(64, 128, true)).to_equal(244)
+        expect(vulkan_font_gpu_resource_bytes(-1, 128, true)).to_equal(0)
+
+    it "publishes cumulative counters on unavailable returns":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_upload_count = 2
+        backend.font_atlas_upload_bytes = 128
+        backend.font_gpu_resource_high_water_bytes = 4096
+        val evidence = backend.composite_font_batch(0, 0, _perf_batch())
+        expect(evidence.status).to_equal("unavailable")
+        expect(evidence.elapsed_ns >= 0).to_be(true)
+        expect(evidence.atlas_upload_count).to_equal(2)
+        expect(evidence.atlas_upload_bytes).to_equal(128)
+        expect(evidence.gpu_resource_high_water_bytes).to_equal(4096)

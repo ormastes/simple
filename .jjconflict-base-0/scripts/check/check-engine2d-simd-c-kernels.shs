@@ -1,0 +1,144 @@
+#!/bin/sh
+set -eu
+
+# Bit-exactness gate for the engine2d C SIMD row kernels.
+#
+# Every other engine2d gate runs in interpreter mode, which uses a Rust shim
+# rather than the C kernels in src/runtime/runtime_simd_dispatch.c. This is the
+# ONLY check that exercises the C kernels' bit-exactness (fill/copy/blend),
+# including the NEON-vectorized blend path on aarch64.
+#
+# It slices the four pure helper functions
+#   engine2d_fill_into / engine2d_copy_into / engine2d_blend_pixel /
+#   engine2d_blend_into
+# verbatim out of the source into a generated header, compiles the standalone
+# test against them with -O2, runs it, and reports pass/fail. Slicing on every
+# run means the test always compiles against the live kernels -- drift is
+# impossible.
+#
+# On a host with no C compiler the check skips cleanly (exit 0).
+#
+# Usage:
+#   sh scripts/check/check-engine2d-simd-c-kernels.shs
+#
+# Env knobs:
+#   CC          C compiler override (else clang/cc autodetected)
+#   BUILD_DIR   default: build/check/engine2d-simd-c-kernels
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SRC="src/runtime/runtime_simd_dispatch.c"
+TEST="test/09_baselines/engine2d_simd/engine2d_simd_c_test.c"
+SPAN_TEST="test/09_baselines/engine2d_simd/engine2d_simd_span_test.c"
+BUILD_DIR="${BUILD_DIR:-build/check/engine2d-simd-c-kernels}"
+GEN_HDR="$BUILD_DIR/engine2d_simd_helpers.generated.h"
+BIN="$BUILD_DIR/engine2d_simd_c_test"
+SPAN_OBJ="$BUILD_DIR/runtime_simd_dispatch_span.o"
+SPAN_TEST_OBJ="$BUILD_DIR/engine2d_simd_span_test.o"
+SPAN_BIN="$BUILD_DIR/engine2d_simd_span_test"
+EXTRA_CFLAGS="${ENGINE2D_SIMD_C_KERNELS_CFLAGS:-}"
+RUNNER="${ENGINE2D_SIMD_C_KERNELS_RUNNER:-}"
+
+fail() {
+    echo "engine2d-simd-c-kernels: fail"
+    exit 1
+}
+
+if [ ! -f "$SRC" ]; then
+    echo "ERROR: source not found: $SRC" >&2
+    fail
+fi
+if [ ! -f "$TEST" ]; then
+    echo "ERROR: test not found: $TEST" >&2
+    fail
+fi
+if [ ! -f "$SPAN_TEST" ]; then
+    echo "ERROR: source not found: $SPAN_TEST" >&2
+    fail
+fi
+
+# Locate a C compiler; skip cleanly if none.
+CC_BIN=""
+if [ -n "${CC:-}" ] && command -v "${CC%% *}" >/dev/null 2>&1; then
+    CC_BIN="$CC"
+elif command -v clang >/dev/null 2>&1; then
+    CC_BIN="clang"
+elif command -v cc >/dev/null 2>&1; then
+    CC_BIN="cc"
+elif command -v gcc >/dev/null 2>&1; then
+    CC_BIN="gcc"
+fi
+
+if [ -z "$CC_BIN" ]; then
+    echo "SKIP: no C compiler (clang/cc/gcc) found on this host"
+    echo "engine2d-simd-c-kernels: skip"
+    exit 0
+fi
+
+mkdir -p "$BUILD_DIR"
+
+# Slice the helper blocks out of the real source verbatim. Keep the pure
+# raw-buffer helpers and their AVX2/RVV specializations, but exclude the
+# runtime-coupled SplArray entry points between them.
+awk '
+    /^static atomic_uint_fast64_t g_engine2d_simd_row_hits/ { grab = 1 }
+    /^static SplArray\* engine2d_new_pixel_array\(/ { grab = 0 }
+    /^SplArray\* rt_engine2d_simd_blend_row_u32\(/ { saw_return_api = 1 }
+    saw_return_api && !appended_backend_helpers && /^#if defined\(__x86_64__\)/ { grab = 1; appended_backend_helpers = 1 }
+    /^int64_t rt_engine2d_simd_fill_u32\(/ { grab = 0 }
+    grab { print }
+' "$SRC" > "$GEN_HDR"
+
+if [ ! -s "$GEN_HDR" ]; then
+    echo "ERROR: failed to extract engine2d helpers from $SRC" >&2
+    fail
+fi
+
+# Sanity: all four helpers must be present in the slice.
+for fn in engine2d_fill_into engine2d_copy_into engine2d_blend_pixel engine2d_blend_into; do
+    if ! grep -q "$fn" "$GEN_HDR"; then
+        echo "ERROR: helper $fn missing from extracted slice ($GEN_HDR)" >&2
+        fail
+    fi
+done
+
+CFLAGS="-O2 -I$BUILD_DIR -Wall $EXTRA_CFLAGS"
+
+# On Apple aarch64, force arm64 so the NEON (#if __aarch64__) path compiles.
+case "$(uname -s)" in
+    Darwin)
+        if [ "$(uname -m)" = "arm64" ]; then
+            CFLAGS="$CFLAGS -arch arm64"
+        fi
+        ;;
+esac
+
+echo "Compiling $TEST with $CC_BIN $CFLAGS"
+if ! $CC_BIN $CFLAGS "$TEST" -o "$BIN"; then
+    echo "ERROR: compilation failed" >&2
+    fail
+fi
+
+echo "Running $BIN"
+# shellcheck disable=SC2086
+if ! $RUNNER "$BIN"; then
+    fail
+fi
+
+GC_SECTIONS="-Wl,--gc-sections"
+if [ "$(uname -s)" = "Darwin" ]; then
+    GC_SECTIONS="-Wl,-dead_strip"
+fi
+
+echo "Compiling in-place span ABI test"
+$CC_BIN $CFLAGS -ffunction-sections -fdata-sections -Isrc/runtime -c "$SRC" -o "$SPAN_OBJ"
+$CC_BIN $CFLAGS -ffunction-sections -fdata-sections -Isrc/runtime -c "$SPAN_TEST" -o "$SPAN_TEST_OBJ"
+$CC_BIN $CFLAGS $GC_SECTIONS "$SPAN_OBJ" "$SPAN_TEST_OBJ" -o "$SPAN_BIN"
+if $RUNNER "$SPAN_BIN"; then
+    sh scripts/check/check-engine2d-row-scheduling.shs
+    echo "engine2d-simd-c-kernels: pass"
+    exit 0
+fi
+
+fail

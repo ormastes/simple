@@ -1,0 +1,113 @@
+# ============================================================================
+# game_net/udp_transport.spl — real UDP socket transport (netcode plan P4
+# transport swap: "Real UDP ... is a drop-in transport swap later")
+#
+# Same minimal surface the loopback harness exercises manually in specs —
+# `send(bytes)` / `poll() -> [[u8]]` (drain everything currently available) —
+# so client/server wiring code stays transport-agnostic between
+# `LoopbackChannel` (deterministic virtual-clock BDD default) and this real
+# socket. `LoopbackChannel` schedules delivery against an explicit virtual
+# clock tick (`send(now_ms, payload)` / `drain_ready(now_ms)`); real UDP has
+# no virtual clock to advance — the OS delivers on its own schedule — so this
+# adapter's `send`/`poll` drop the `now_ms` parameter entirely rather than
+# faking one.
+#
+# Extern reuse: wraps the `native_udp_*` extern family already registered in
+# the interpreter (interpreter_extern/network/udp.rs, dispatch table in
+# interpreter_extern/mod.rs) and already proven wired end-to-end by
+# `src/lib/nogc_async_mut/io/quic/quic_udp_socket.spl`. NO new externs.
+#
+# NOTE: `std.net.udp.UdpSocket` (net/sffi.spl's `udp_socket_*` extern names)
+# and `std.io.udp` (`rt_io_udp_*` names) are NOT usable here — neither name
+# family appears in interpreter_extern/mod.rs's dispatch table (only
+# "native_udp_*" keys are registered), so calling them from the interpreter
+# fails to resolve. `native_udp_*` is the only wired UDP surface.
+#
+# ponytail: no `native_udp_local_addr` extern exists, so an OS-assigned
+# ephemeral port (bind to port 0) can't be queried back — the integration
+# spec binds two FIXED high ports instead of ephemeral+query. Add
+# `native_udp_local_addr` (mirroring `native_udp_peer_addr`) if ephemeral
+# port discovery is ever required.
+# ============================================================================
+
+extern fn native_udp_bind(addr: text) -> (i64, i64)
+extern fn native_udp_send_to(fd: i64, data: [u8], data_len: i64, addr: text) -> (i64, i64)
+extern fn native_udp_recv_from(fd: i64, max_size: i64) -> Result<[i64], text>
+extern fn native_udp_set_read_timeout(fd: i64, ms: i64) -> Result<i64, text>
+extern fn native_udp_close(fd: i64) -> i64
+
+val MAX_DATAGRAM: i64 = 65507
+val DEFAULT_POLL_TIMEOUT_MS: i64 = 5
+
+class UdpTransport:
+    fd: i64
+    peer_addr: text
+    is_open: bool
+
+impl UdpTransport:
+    static fn bind(local_addr: text, peer_addr: text) -> UdpTransport?:
+        """Bind a real UDP socket to `local_addr`, targeting `peer_addr` for
+        `send()`. Returns nil if the OS refuses the bind (port in use, etc.)
+        — callers must fail-closed on nil, never proceed silently."""
+        val (hdl, err) = native_udp_bind(local_addr)
+        if err != 0:
+            return nil
+        val _ = native_udp_set_read_timeout(hdl, DEFAULT_POLL_TIMEOUT_MS)
+        UdpTransport(fd: hdl, peer_addr: peer_addr, is_open: true)
+
+    me send(payload: [u8]):
+        """Fire-and-forget send to the configured peer. UDP is unreliable by
+        design — same fire-and-forget contract as
+        `LoopbackChannel.send` (caller-level ack/replay handles loss).
+
+        BUG udp_send_to_rejects_typed_u8_array_2026-07-04: `native_udp_send_to`
+        (native_io_helpers::extract_bytes) only accepts array elements boxed
+        as the generic `Value::Int`; a genuinely `[u8]`-typed array (e.g.
+        `wire.spl`'s `encode_*` output) is boxed as `Value::U8` and is
+        rejected with "byte array element must be integer, got u8" — see
+        doc/08_tracking/bug/udp_send_to_rejects_typed_u8_array_2026-07-04.md.
+        Workaround: re-box through a plain `[i64]` local before the extern
+        call (an untyped/`[i64]` array of the same values crosses the FFI
+        boundary fine)."""
+        if self.is_open:
+            var plain: [i64] = []
+            var i: u64 = 0
+            while i < payload.len().to_u64():
+                plain.push(payload[i].to_i64())
+                i = i + 1
+            val n: i64 = plain.len()
+            val _ = native_udp_send_to(self.fd, plain, n, self.peer_addr)
+
+    me poll() -> [[u8]]:
+        """Drain every datagram currently available. Each underlying
+        `recv_from` is bounded by the read timeout set at bind time, so this
+        never hangs — it returns as soon as no more datagrams are queued,
+        mirroring `LoopbackChannel.drain_ready` but driven by real OS
+        arrival instead of a virtual clock tick."""
+        var out: [[u8]] = []
+        if not self.is_open:
+            return out
+        var draining = true
+        while draining:
+            match native_udp_recv_from(self.fd, MAX_DATAGRAM):
+                case Ok(arr):
+                    if arr.len() < 3:
+                        draining = false
+                    else:
+                        var raw: [u8] = []
+                        val data_arr = arr[2]
+                        var di = 0
+                        while di < data_arr.len():
+                            raw.push(data_arr[di] & 0xff)
+                            di = di + 1
+                        out.push(raw)
+                case Err(_msg):
+                    draining = false
+        out
+
+    me close():
+        if self.is_open:
+            val _ = native_udp_close(self.fd)
+            self.is_open = false
+
+export UdpTransport

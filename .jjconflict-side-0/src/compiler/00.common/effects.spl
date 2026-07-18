@@ -1,0 +1,448 @@
+"""
+Effect System - Canonical Standalone Effect Infrastructure
+
+This is the single canonical effect module for the 00.common layer.
+All other 00.common/effects_*.spl files import from here.
+
+The HIR layer (20.hir/hir_types.spl) defines the richer Effect/EffectKind types
+used in the compiler pipeline. This module provides a lightweight EffectTag enum
+for standalone effect inference that maps to EffectKind.Asynchronous / default.
+
+## Algorithm
+
+1. Initialize all functions as Synchronous
+2. Mark built-in async functions (SFFI)
+3. Fixed-point iteration:
+   - Scan function bodies for suspension operators (~, ~=, if~, while~, for~)
+   - Scan function calls (async calls -> function becomes async)
+   - Repeat until no changes
+4. Validate `fn sync` annotations
+5. Propagate effects to HirFunction.effects via effect_pass.spl
+"""
+
+# Symbol type alias for function names
+type Symbol = text
+
+fn _effect_symbol_append_unique(items: [Symbol], sym: Symbol) -> [Symbol]:
+    if items.contains(sym):
+        return items
+    items + [sym]
+
+# ============================================================================
+# Effect Tag (lightweight, maps to HIR EffectKind.Asynchronous / default)
+# ============================================================================
+
+enum EffectTag:
+    """
+    Lightweight effect tag for standalone inference in 00.common layer.
+
+    Maps to HIR EffectKind:
+    - Synchronous -> no Asynchronous in EffectKind list (default/pure)
+    - Asynchronous -> EffectKind.Asynchronous present
+
+    The full Effect/EffectKind types live in 20.hir/hir_types.spl.
+    """
+    PureTag
+    SuspendingTag
+
+    fn to_string() -> text:
+        match self:
+            case EffectTag.PureTag: "sync"
+            case EffectTag.SuspendingTag: "async"
+
+    fn is_async() -> bool:
+        """Check if effect is Asynchronous"""
+        match self:
+            case EffectTag.SuspendingTag: true
+            case EffectTag.PureTag: false
+
+    fn is_sync() -> bool:
+        """Check if effect is Synchronous"""
+        match self:
+            case EffectTag.PureTag: true
+            case EffectTag.SuspendingTag: false
+
+    fn combine(other: EffectTag) -> EffectTag:
+        """
+        Combine two effects: if either is Asynchronous, result is Asynchronous
+        """
+        match (self, other):
+            case (EffectTag.SuspendingTag, _): EffectTag.SuspendingTag
+            case (_, EffectTag.SuspendingTag): EffectTag.SuspendingTag
+            case (EffectTag.PureTag, EffectTag.PureTag): EffectTag.PureTag
+
+impl EffectTag:
+    static fn combine_all(effects: [EffectTag]) -> EffectTag:
+        """
+        Combine multiple effects: if any is Asynchronous, result is Asynchronous
+        """
+        var result = EffectTag.PureTag
+        for eff in effects:
+            result = result.combine(eff)
+        result
+
+# ============================================================================
+# Effect Environment
+# ============================================================================
+
+class EffectEnv:
+    """
+    Tracks function effects during inference.
+
+    Fields:
+    - effects: Function name -> inferred EffectTag
+    - builtins: Built-in SFFI function effects (http.get, file.read_async, etc.)
+    - dirty: Functions whose effect changed (for fixed-point iteration)
+    """
+    effects: Dict<Symbol, EffectTag>
+    builtins: Dict<text, EffectTag>
+    dirty: [Symbol]
+
+impl EffectEnv:
+    static fn new() -> EffectEnv:
+        """Create new effect environment with built-in annotations"""
+        EffectEnv(
+            effects: {},
+            builtins: init_builtins(),
+            dirty: {}
+        )
+
+    fn get_effect(sym: Symbol) -> EffectTag:
+        """
+        Get effect for function symbol.
+
+        Priority:
+        1. Local effects (inferred)
+        2. Built-ins (SFFI annotations)
+        3. Default to Synchronous
+        """
+        # NOTE: `Dict.get()` returns the raw value or nil, NOT a
+        # Some(..)-tagged Option -- `if val Some(x) = d.get(k):` silently
+        # never matches (documented interpreter landmine, see
+        # std.nogc_sync_mut.diag.spl's header comment). Use a direct
+        # nil-check instead, or every symbol would silently skip its
+        # inferred/builtin effect and fall through to the Synchronous default.
+        # Check local effects first
+        val local_eff = self.effects.get(sym)
+        if local_eff != nil:
+            return local_eff
+
+        # Check builtins by function name
+        val builtin_eff = self.builtins.get(sym)
+        if builtin_eff != nil:
+            return builtin_eff
+
+        # Default to Synchronous
+        EffectTag.PureTag
+
+    me set_effect(sym: Symbol, eff: EffectTag):
+        """
+        Set effect for function symbol.
+
+        If effect changed, mark symbol as dirty for next iteration.
+        """
+        val old_eff = self.get_effect(sym)
+
+        if old_eff != eff:
+            self.effects[sym] = eff
+            self.dirty = _effect_symbol_append_unique(self.dirty, sym)
+
+    fn is_dirty() -> bool:
+        """Check if any functions changed effect (for fixed-point check)"""
+        not self.dirty.is_empty()
+
+    me clear_dirty():
+        """Clear dirty set (start new fixed-point iteration)"""
+        self.dirty = []
+
+    fn iter_effects() -> [(Symbol, EffectTag)]:
+        """Iterate over all inferred effects"""
+        self.effects.iter().collect()
+
+    fn count_async() -> i64:
+        """Count number of async functions"""
+        var count = 0
+        for key in self.effects.keys():
+            val eff = self.effects[key]
+            if eff.is_async():
+                count = count + 1
+        count
+
+    fn count_sync() -> i64:
+        """Count number of sync functions"""
+        var count = 0
+        for key in self.effects.keys():
+            val eff = self.effects[key]
+            if eff.is_sync():
+                count = count + 1
+        count
+
+# ============================================================================
+# Built-in Effect Annotations (SFFI Functions)
+# ============================================================================
+
+fn init_builtins() -> Dict<text, EffectTag>:
+    """
+    Initialize built-in effect annotations for SFFI functions.
+
+    Categories:
+    - HTTP: All async (network I/O)
+    - File: Asynchronous variants marked
+    - Sleep/Timer: Asynchronous
+    - Synchronous I/O: Marked sync explicitly
+    """
+    var builtins: Dict<text, EffectTag> = {}
+
+    # HTTP module - all async
+    builtins["http.get"] = EffectTag.SuspendingTag
+    builtins["http.post"] = EffectTag.SuspendingTag
+    builtins["http.put"] = EffectTag.SuspendingTag
+    builtins["http.delete"] = EffectTag.SuspendingTag
+    builtins["http.patch"] = EffectTag.SuspendingTag
+    builtins["http.request"] = EffectTag.SuspendingTag
+
+    # WebSocket - async
+    builtins["websocket.connect"] = EffectTag.SuspendingTag
+    builtins["websocket.send"] = EffectTag.SuspendingTag
+    builtins["websocket.receive"] = EffectTag.SuspendingTag
+
+    # File I/O - async variants
+    builtins["file.read_async"] = EffectTag.SuspendingTag
+    builtins["file.write_async"] = EffectTag.SuspendingTag
+    builtins["file.append_async"] = EffectTag.SuspendingTag
+    builtins["file.read"] = EffectTag.PureTag      # Blocking sync variant
+    builtins["file.write"] = EffectTag.PureTag     # Blocking sync variant
+
+    # Timer/Sleep - async
+    builtins["sleep"] = EffectTag.SuspendingTag
+    builtins["timer.wait"] = EffectTag.SuspendingTag
+    builtins["timeout"] = EffectTag.SuspendingTag
+
+    # Database - async
+    builtins["db.query"] = EffectTag.SuspendingTag
+    builtins["db.execute"] = EffectTag.SuspendingTag
+    builtins["db.transaction"] = EffectTag.SuspendingTag
+
+    # Process - async
+    builtins["process.spawn"] = EffectTag.SuspendingTag
+    builtins["process.wait"] = EffectTag.SuspendingTag
+
+    # Console/stdio - sync (buffered)
+    builtins["print"] = EffectTag.PureTag
+    builtins["println"] = EffectTag.PureTag
+    builtins["eprint"] = EffectTag.PureTag
+    builtins["eprintln"] = EffectTag.PureTag
+
+    # Math/String/Collection ops - all sync
+    # (No need to list, default is Synchronous)
+
+    builtins
+
+# ============================================================================
+# Effect Error
+# ============================================================================
+
+class EffectError:
+    """
+    Effect inference error.
+
+    Examples:
+    - Function annotated `fn sync` but contains suspension operators
+    - Suspend operator on non-Promise type
+    - Fixed-point solver failed to converge
+    """
+    message: text
+    func_name: text
+    # # DESUGARED: span_text: text
+    has_span_text: bool
+    span_text: text
+
+    fn to_string() -> text:
+        "[Effect Error] {self.func_name}: {self.message}"
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+class EffectStats:
+    """Statistics about effect inference run"""
+    total_functions: i64
+    async_functions: i64
+    sync_functions: i64
+    iterations: i64
+    builtins_count: i64
+
+    fn to_string() -> text:
+        """
+        Effect Inference Statistics:
+        - Total functions: 150
+        - Asynchronous functions: 42 (28%)
+        - Synchronous functions: 108 (72%)
+        - Fixed-point iterations: 3
+        - Built-in annotations: 30
+        """
+        val async_pct = if self.total_functions > 0:
+            (self.async_functions * 100) / self.total_functions
+        else:
+            0
+
+        val sync_pct = if self.total_functions > 0:
+            (self.sync_functions * 100) / self.total_functions
+        else:
+            0
+
+        """
+Effect Inference Statistics:
+- Total functions: {self.total_functions}
+- Asynchronous functions: {self.async_functions} ({async_pct}%)
+- Synchronous functions: {self.sync_functions} ({sync_pct}%)
+- Fixed-point iterations: {self.iterations}
+- Built-in annotations: {self.builtins_count}
+        """
+
+# ============================================================================
+# FunctionEffectInfo - Lightweight descriptor for effect inference
+# ============================================================================
+
+struct FunctionEffectInfo:
+    """Lightweight function descriptor for effect inference.
+
+    Used by the effect pass to collect function metadata before
+    running fixed-point inference. Maps to real HirFunction data
+    via effect_pass.spl.
+    """
+    name: text
+    is_async: bool
+    contains_suspension: bool
+    called_functions: [text]
+
+# ============================================================================
+# Module Functions
+# ============================================================================
+
+fn effect_tag_to_string(eff: EffectTag) -> text:
+    """Convert effect tag to string (convenience function)"""
+    eff.to_string()
+
+fn tag_is_async(eff: EffectTag) -> bool:
+    """Check if effect tag is async (convenience function)"""
+    eff.is_async()
+
+fn tag_is_sync(eff: EffectTag) -> bool:
+    """Check if effect tag is sync (convenience function)"""
+    eff.is_sync()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# ============================================================================
+# Tests (Inline Unit Tests)
+# ============================================================================
+
+fn test_effect_basic():
+    """Test basic effect operations"""
+    val pure_eff = EffectTag.PureTag
+    val async_ = EffectTag.SuspendingTag
+
+    # to_string
+    assert effect_tag_to_string(pure_eff) == "sync"
+    assert effect_tag_to_string(async_) == "async"
+
+    # is_async / is_sync
+    assert pure_eff.is_sync()
+    assert not pure_eff.is_async()
+    assert async_.is_async()
+    assert not async_.is_sync()
+
+fn test_effect_combine():
+    """Test effect combination"""
+    val pure_eff = EffectTag.PureTag
+    val async_ = EffectTag.SuspendingTag
+
+    assert pure_eff.combine(pure_eff) == EffectTag.PureTag
+    assert pure_eff.combine(async_) == EffectTag.SuspendingTag
+    assert async_.combine(pure_eff) == EffectTag.SuspendingTag
+    assert async_.combine(async_) == EffectTag.SuspendingTag
+
+fn test_effect_combine_all():
+    """Test combining multiple effects"""
+    assert EffectTag.combine_all([]) == EffectTag.PureTag
+    assert EffectTag.combine_all([EffectTag.PureTag, EffectTag.PureTag]) == EffectTag.PureTag
+    assert EffectTag.combine_all([EffectTag.PureTag, EffectTag.SuspendingTag]) == EffectTag.SuspendingTag
+    assert EffectTag.combine_all([EffectTag.SuspendingTag, EffectTag.PureTag, EffectTag.PureTag]) == EffectTag.SuspendingTag
+
+fn test_effect_env_basic():
+    """Test EffectEnv creation and basic operations"""
+    val env = EffectEnv.new()
+
+    # Should have built-ins
+    assert env.builtins.len() > 0
+
+    # Check specific built-ins
+    assert env.get_effect("http.get") == EffectTag.SuspendingTag
+    assert env.get_effect("print") == EffectTag.PureTag
+    assert env.get_effect("unknown_function") == EffectTag.PureTag  # Default
+
+fn test_effect_env_set_get():
+    """Test setting and getting effects"""
+    val env = EffectEnv.new()
+    val sym = "my_function"
+
+    # Initially Synchronous (default)
+    assert env.get_effect(sym) == EffectTag.PureTag
+
+    # Set to Asynchronous
+    env.set_effect(sym, EffectTag.SuspendingTag)
+    assert env.get_effect(sym) == EffectTag.SuspendingTag
+
+    # Should be marked dirty
+    assert env.is_dirty()
+
+fn test_effect_env_dirty():
+    """Test dirty tracking"""
+    val env = EffectEnv.new()
+    val sym = "test"
+
+    # Initially not dirty
+    assert not env.is_dirty()
+
+    # Setting same effect shouldn't mark dirty
+    env.set_effect(sym, EffectTag.PureTag)
+    env.clear_dirty()
+    env.set_effect(sym, EffectTag.PureTag)
+    assert not env.is_dirty()
+
+    # Changing effect should mark dirty
+    env.set_effect(sym, EffectTag.SuspendingTag)
+    assert env.is_dirty()
+
+fn test_builtins():
+    """Test built-in effect annotations"""
+    val builtins = init_builtins()
+
+    # Check HTTP functions are async
+    assert builtins["http.get"] == EffectTag.SuspendingTag
+    assert builtins["http.post"] == EffectTag.SuspendingTag
+
+    # Check sync I/O
+    assert builtins["print"] == EffectTag.PureTag
+    assert builtins["file.read"] == EffectTag.PureTag
+
+    # Check async I/O
+    assert builtins["file.read_async"] == EffectTag.SuspendingTag
+    assert builtins["sleep"] == EffectTag.SuspendingTag
+
+fn effects_selftest_main():
+    print "Running effect system tests..."
+
+    test_effect_basic()
+    test_effect_combine()
+    test_effect_combine_all()
+    test_effect_env_basic()
+    test_effect_env_set_get()
+    test_effect_env_dirty()
+    test_builtins()
+
+    print "All effect system infrastructure tests passed!"

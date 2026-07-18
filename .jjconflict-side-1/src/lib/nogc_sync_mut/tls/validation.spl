@@ -1,0 +1,70 @@
+# TLS Validation Module
+#
+# Certificate validation: hostname verification, expiry checks, and
+# constant-time comparison for timing resistance.
+#
+# Chain-of-trust signature verification (validate_chain) was removed here:
+# it imported std.cert.chain.{build_certificate_chain} and
+# std.cert.validation.{check_expiry, is_expired, verify_signature}, none of
+# which ever existed in this tree (see
+# doc/08_tracking/bug/hir_stmt_expr_payload_extraction_nil_2026-07-17.md,
+# CERT-IMPORTS lane) — a real X.509 signature-verification primitive
+# (RSA/ECDSA against arbitrary SPKI/signature OIDs) with no implementation
+# anywhere in this codebase, not a renamed/repointable import. validate_chain
+# had no live caller (only re-exported, never invoked) and no test coverage,
+# so it was deleted rather than stubbed. See
+# doc/08_tracking/bug/cert_chain_signature_verification_missing_2026-07-17.md
+# for the tracked follow-up gap.
+
+use std.tls.certificate.{TlsCertificate}
+
+# =============================================================================
+# Hostname Verification
+# =============================================================================
+
+fn validate_hostname(cert: TlsCertificate, hostname: text) -> Result<(), text>:
+    val cn = cert.subject_cn
+    if cn.len() == 0:
+        return Err("certificate has no common name")
+    if matches_hostname(cn, hostname):
+        return Ok(())
+    Err("hostname '{hostname}' does not match certificate CN '{cn}'")
+
+fn matches_hostname(pattern: text, hostname: text) -> bool:
+    if pattern == hostname:
+        return true
+    if pattern.starts_with("*."):
+        val wildcard_domain = pattern.substring(2, pattern.len())
+        val dot_pos = hostname.index_of(".")
+        if dot_pos > 0:
+            val host_domain = hostname.substring(dot_pos + 1, hostname.len())
+            return host_domain == wildcard_domain
+    false
+
+# =============================================================================
+# Expiry Validation
+# =============================================================================
+
+fn validate_expiry(cert: TlsCertificate) -> Result<(), text>:
+    if cert.is_valid():
+        Ok(())
+    else:
+        Err("certificate has expired or is not yet valid")
+
+# =============================================================================
+# Constant-Time Comparison (timing attack resistance)
+# =============================================================================
+
+fn constant_time_compare(a: text, b: text) -> bool:
+    val len_a = a.len()
+    val len_b = b.len()
+    if len_a != len_b:
+        return false
+    var diff: i64 = 0
+    var i: i64 = 0
+    while i < len_a:
+        val byte_a = a.char_code_at(i)
+        val byte_b = b.char_code_at(i)
+        diff = diff | (byte_a ^ byte_b)
+        i = i + 1
+    diff == 0

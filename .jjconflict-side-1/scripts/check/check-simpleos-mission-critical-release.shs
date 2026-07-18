@@ -1,0 +1,235 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/simpleos_mission_critical_release}"
+REPORT_PATH="${REPORT_PATH:-$ROOT_DIR/doc/09_report/simpleos_hardening_evidence_matrix_$(date -u +%F).md}"
+CANONICAL_MATRIX="$ROOT_DIR/scripts/check/check-simpleos-hardening-evidence-matrix.shs"
+MATRIX="${MATRIX:-$CANONICAL_MATRIX}"
+OUT="$BUILD_DIR/matrix.out"
+ERR="$BUILD_DIR/matrix.err"
+prereq_gate="scripts/check/check-simpleos-mission-critical-prereqs.shs"
+
+if [ "${1:-}" = "--self-test" ]; then
+    SELF_TEST_DIR="$BUILD_DIR/self-test.$$"
+    mkdir -p "$SELF_TEST_DIR"
+
+    assert_release_fails_with() {
+        case_name="$1"
+        matrix_path="$2"
+        expected_text="$3"
+        accepted_message="$4"
+        missing_message="$5"
+
+        if ALLOW_CUSTOM_MATRIX=1 MATRIX="$matrix_path" BUILD_DIR="$SELF_TEST_DIR/$case_name" \
+            REPORT_PATH="$SELF_TEST_DIR/$case_name.md" sh "$0" \
+            >"$SELF_TEST_DIR/$case_name.out" 2>"$SELF_TEST_DIR/$case_name.err"; then
+            echo "FAIL: $accepted_message" >&2
+            exit 1
+        fi
+        grep -Fq "$expected_text" "$SELF_TEST_DIR/$case_name.err" || {
+            echo "FAIL: $missing_message" >&2
+            exit 1
+        }
+    }
+
+    fake_ready_matrix="$SELF_TEST_DIR/fake-ready-matrix.shs"
+    cat >"$fake_ready_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=pass"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_status=ready"
+echo "simpleos_hardening_mission_critical_prereqs_missing=none"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=none"
+EOF
+    chmod +x "$fake_ready_matrix"
+
+    if MATRIX="$fake_ready_matrix" BUILD_DIR="$SELF_TEST_DIR/custom-reject" \
+        REPORT_PATH="$SELF_TEST_DIR/custom-reject.md" sh "$0" \
+        >"$SELF_TEST_DIR/custom-reject.out" 2>"$SELF_TEST_DIR/custom-reject.err"; then
+        echo "FAIL: release self-test accepted custom matrix without allow" >&2
+        exit 1
+    fi
+    grep -Fq "reason=non-canonical-matrix" "$SELF_TEST_DIR/custom-reject.err" || {
+        echo "FAIL: release self-test missing non-canonical rejection reason" >&2
+        exit 1
+    }
+
+    ALLOW_CUSTOM_MATRIX=1 MATRIX="$fake_ready_matrix" BUILD_DIR="$SELF_TEST_DIR/ready" \
+        REPORT_PATH="$SELF_TEST_DIR/ready.md" sh "$0" \
+        >"$SELF_TEST_DIR/ready.out" 2>"$SELF_TEST_DIR/ready.err"
+    grep -Fq "STATUS: PASS simpleos-mission-critical-release" "$SELF_TEST_DIR/ready.out" || {
+        echo "FAIL: release self-test fake ready matrix did not pass" >&2
+        exit 1
+    }
+
+    fake_blocked_prereq_matrix="$SELF_TEST_DIR/fake-blocked-prereq-matrix.shs"
+    cat >"$fake_blocked_prereq_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=pass"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_status=blocked"
+echo "simpleos_hardening_mission_critical_prereqs_missing=sby"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=install-formal-stack"
+EOF
+    chmod +x "$fake_blocked_prereq_matrix"
+
+    if ALLOW_CUSTOM_MATRIX=1 MATRIX="$fake_blocked_prereq_matrix" BUILD_DIR="$SELF_TEST_DIR/blocked-prereq" \
+        REPORT_PATH="$SELF_TEST_DIR/blocked-prereq.md" sh "$0" \
+        >"$SELF_TEST_DIR/blocked-prereq.out" 2>"$SELF_TEST_DIR/blocked-prereq.err"; then
+        echo "FAIL: release self-test accepted pass-looking matrix with blocked prereqs" >&2
+        exit 1
+    fi
+    grep -Fq "prereq_status=blocked" "$SELF_TEST_DIR/blocked-prereq.err" || {
+        echo "FAIL: release self-test missing blocked prereq diagnostic" >&2
+        exit 1
+    }
+
+    fake_missing_matrix_status="$SELF_TEST_DIR/fake-missing-matrix-status.shs"
+    cat >"$fake_missing_matrix_status" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_status=ready"
+echo "simpleos_hardening_mission_critical_prereqs_missing=none"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=none"
+EOF
+    chmod +x "$fake_missing_matrix_status"
+    assert_release_fails_with "missing-matrix-status" "$fake_missing_matrix_status" \
+        "matrix_status=missing" \
+        "release self-test accepted pass-looking matrix with missing matrix status" \
+        "release self-test missing absent matrix status diagnostic"
+
+    fake_failed_matrix_status="$SELF_TEST_DIR/fake-failed-matrix-status.shs"
+    cat >"$fake_failed_matrix_status" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=fail"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_status=ready"
+echo "simpleos_hardening_mission_critical_prereqs_missing=none"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=none"
+EOF
+    chmod +x "$fake_failed_matrix_status"
+    assert_release_fails_with "failed-matrix-status" "$fake_failed_matrix_status" \
+        "matrix_status=fail" \
+        "release self-test accepted pass-looking release with failed matrix status" \
+        "release self-test missing failed matrix status diagnostic"
+
+    fake_missing_blockers_matrix="$SELF_TEST_DIR/fake-missing-blockers-matrix.shs"
+    cat >"$fake_missing_blockers_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=pass"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_prereqs_status=ready"
+echo "simpleos_hardening_mission_critical_prereqs_missing=none"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=none"
+EOF
+    chmod +x "$fake_missing_blockers_matrix"
+    assert_release_fails_with "missing-blockers" "$fake_missing_blockers_matrix" \
+        "release_blockers=missing" \
+        "release self-test accepted pass-looking matrix with missing release blockers" \
+        "release self-test missing absent release blocker diagnostic"
+
+    fake_missing_prereq_status_matrix="$SELF_TEST_DIR/fake-missing-prereq-status-matrix.shs"
+    cat >"$fake_missing_prereq_status_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=pass"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_missing=none"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=none"
+EOF
+    chmod +x "$fake_missing_prereq_status_matrix"
+    assert_release_fails_with "missing-prereq-status" "$fake_missing_prereq_status_matrix" \
+        "prereq_status=missing" \
+        "release self-test accepted pass-looking matrix with missing prereq status" \
+        "release self-test missing absent prereq status diagnostic"
+
+    fake_missing_prereq_missing_matrix="$SELF_TEST_DIR/fake-missing-prereq-missing-matrix.shs"
+    cat >"$fake_missing_prereq_missing_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=pass"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_status=ready"
+echo "simpleos_hardening_mission_critical_prereqs_next_action=none"
+EOF
+    chmod +x "$fake_missing_prereq_missing_matrix"
+    assert_release_fails_with "missing-prereq-missing" "$fake_missing_prereq_missing_matrix" \
+        "prereq_missing=missing" \
+        "release self-test accepted pass-looking matrix with missing prereq missing field" \
+        "release self-test missing absent prereq-missing diagnostic"
+
+    fake_missing_next_action_matrix="$SELF_TEST_DIR/fake-missing-next-action-matrix.shs"
+    cat >"$fake_missing_next_action_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "simpleos_hardening_matrix_status=pass"
+echo "simpleos_hardening_mission_critical_release_status=pass"
+echo "simpleos_hardening_mission_critical_release_blockers=none"
+echo "simpleos_hardening_mission_critical_prereqs_status=ready"
+echo "simpleos_hardening_mission_critical_prereqs_missing=none"
+EOF
+    chmod +x "$fake_missing_next_action_matrix"
+    assert_release_fails_with "missing-next-action" "$fake_missing_next_action_matrix" \
+        "prereq_next_action=missing" \
+        "release self-test accepted pass-looking matrix with missing prereq next action" \
+        "release self-test missing absent prereq next action diagnostic"
+
+    fake_crash_matrix="$SELF_TEST_DIR/fake-crash-matrix.shs"
+    cat >"$fake_crash_matrix" <<'EOF'
+#!/usr/bin/env sh
+echo "matrix crashed" >&2
+exit 7
+EOF
+    chmod +x "$fake_crash_matrix"
+    assert_release_fails_with "crashed-matrix" "$fake_crash_matrix" \
+        "matrix_status=matrix-run-failed" \
+        "release self-test accepted crashed matrix" \
+        "release self-test missing crashed matrix diagnostic"
+    grep -Fq "matrix_exit=7" "$SELF_TEST_DIR/crashed-matrix.err" || {
+        echo "FAIL: release self-test missing crashed matrix exit code" >&2
+        exit 1
+    }
+
+    echo "STATUS: PASS simpleos-mission-critical-release self-test"
+    exit 0
+fi
+
+mkdir -p "$BUILD_DIR"
+
+if [ "$MATRIX" != "$CANONICAL_MATRIX" ] && [ "${ALLOW_CUSTOM_MATRIX:-0}" != 1 ]; then
+    echo "STATUS: FAIL simpleos-mission-critical-release reason=non-canonical-matrix matrix=$MATRIX canonical_matrix=$CANONICAL_MATRIX" >&2
+    exit 1
+fi
+
+set +e
+BUILD_DIR="$BUILD_DIR/matrix" REPORT_PATH="$REPORT_PATH" \
+    sh "$MATRIX" >"$OUT" 2>"$ERR"
+matrix_rc=$?
+set -e
+
+matrix_status="$(sed -n 's/^simpleos_hardening_matrix_status=//p' "$OUT" | tail -n 1)"
+status="$(sed -n 's/^simpleos_hardening_mission_critical_release_status=//p' "$OUT" | tail -n 1)"
+blockers="$(sed -n 's/^simpleos_hardening_mission_critical_release_blockers=//p' "$OUT" | tail -n 1)"
+matrix_status="$(sed -n 's/^simpleos_hardening_matrix_status=//p' "$OUT" | tail -n 1)"
+prereq_status="$(sed -n 's/^simpleos_hardening_mission_critical_prereqs_status=//p' "$OUT" | tail -n 1)"
+prereq_missing="$(sed -n 's/^simpleos_hardening_mission_critical_prereqs_missing=//p' "$OUT" | tail -n 1)"
+prereq_next_action="$(sed -n 's/^simpleos_hardening_mission_critical_prereqs_next_action=//p' "$OUT" | tail -n 1)"
+matrix_exit="$matrix_rc"
+
+if [ "$matrix_rc" -ne 0 ] && [ -z "$matrix_status" ]; then
+    matrix_status=matrix-run-failed
+fi
+
+case "$matrix_rc:$matrix_status:$status:$blockers:$prereq_status:$prereq_missing:$prereq_next_action" in
+    0:pass:pass:none:ready:none:none)
+        echo "STATUS: PASS simpleos-mission-critical-release matrix_status=pass release_status=pass release_blockers=none prereq_status=ready prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing}"
+        exit 0
+        ;;
+esac
+
+echo "STATUS: FAIL simpleos-mission-critical-release matrix_status=${matrix_status:-missing} matrix_exit=$matrix_exit release_status=${status:-missing} release_blockers=${blockers:-missing} status=${status:-missing} blockers=${blockers:-missing} prereq_status=${prereq_status:-missing} prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} prereq_gate=$prereq_gate" >&2
+exit 1

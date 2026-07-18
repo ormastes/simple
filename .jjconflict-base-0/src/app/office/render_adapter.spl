@@ -1,0 +1,467 @@
+# Office Render Adapter
+#
+# Unified render adapter for the office suite. Routes a render request to the
+# surface named by `config.adapter_name` (word / sheets / slides), builds a
+# representative demo document for that surface, and renders it through the
+# surface's real model->HTML renderer wrapped in a complete, styled HTML5 page.
+#
+# Unknown or empty adapter names render the suite index: a landing page listing
+# every LibreOffice-branded application. All styling is inline (no <style>
+# selector blocks) because `{`/`}` collide with Simple string interpolation, so
+# inline styles keep the page a pure model->CSS->HTML transform.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.office.word.html_render.{render_document_html}
+use app.office.slides.html_render.{render_slide_html}
+use app.office.slides.slide.{Slide, blank_slide, add_text_box}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text, CellRef, cell_ref_to_string, parse_cell_ref, col_to_letter}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+use app.office.libreoffice.{libreoffice_apps, libreoffice_suite_name}
+use app.office.file_formats.{parse_markdown_document, parse_csv_sheet, recalculate_formula_cells}
+use app.office.mail.html_render.{render_mailbox_html}
+use app.office.mail.mail_app.{MailApp}
+use app.office.planner.html_render.{render_board_html}
+use app.office.planner.planner_app.{PlannerApp}
+use app.office.slides.deck_format.{parse_deck}
+use common.drawing.vector_shapes.{DrawShape, DrawCanvas, empty_canvas, add_shape, canvas_to_svg}
+use app.office.base_db.{DbTable, new_table, insert_row}
+use app.office.math_editor.{math_to_mathml}
+use app.office.sheets.cond_format.{CondRule, cond_css_for_cell}
+use app.office.sheets.chart.{sheet_bar_chart_svg}
+use app.office.sheets.cell_format.{SheetFormats, format_cell_display, format_cell_css}
+
+# =========================================================================
+# Accent per surface
+# =========================================================================
+
+fn _surface_accent(component: text) -> text:
+    """Brand accent color for a surface, matching the LibreOffice family."""
+    if component == "word" or component == "writer":
+        return "#2b579a"
+    if component == "sheets" or component == "excel" or component == "calc":
+        return "#217346"
+    if component == "slides" or component == "ppt" or component == "impress":
+        return "#b7472a"
+    if component == "mail":
+        return "#c5221f"
+    if component == "planner":
+        return "#0079bf"
+    if component == "draw":
+        return "#c9a000"
+    if component == "base" or component == "db":
+        return "#6d2c91"
+    if component == "math":
+        return "#4c7d0e"
+    "#1f2937"
+
+fn _normalize_surface(adapter_name: text) -> text:
+    """Map any accepted alias to a canonical surface key."""
+    val n = adapter_name.lower()
+    if n == "writer" or n == "word":
+        return "word"
+    if n == "calc" or n == "excel" or n == "sheets":
+        return "sheets"
+    if n == "impress" or n == "ppt" or n == "slides":
+        return "slides"
+    if n == "db":
+        return "base"
+    n
+
+# =========================================================================
+# Demo models
+# =========================================================================
+
+fn _text_span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+
+fn _block(kind: BlockKind, s: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [_text_span(s)])
+
+fn office_demo_document() -> RichDocument:
+    """A representative Writer document exercising headings, body, quote, bullets."""
+    var doc = RichDocument.new("Quarterly Business Review")
+    doc.blocks.push(_block(BlockKind.Heading1, "Quarterly Business Review"))
+    doc.blocks.push(_block(BlockKind.Paragraph, "Simple Office reached production readiness this quarter across the Writer, Calc and Impress surfaces, sharing one style substrate."))
+    doc.blocks.push(_block(BlockKind.Heading2, "Highlights"))
+    doc.blocks.push(_block(BlockKind.BulletItem, "Unified HTML export across every surface"))
+    doc.blocks.push(_block(BlockKind.BulletItem, "Shared office style resolver for consistent typography"))
+    doc.blocks.push(_block(BlockKind.BulletItem, "Deterministic, testable render pipeline"))
+    doc.blocks.push(_block(BlockKind.Quote, "The best office document is the one that renders the same everywhere."))
+    doc.blocks.push(_block(BlockKind.CodeBlock, "simple office render word --format html"))
+    doc
+
+fn office_demo_slide() -> Slide:
+    """A representative Impress slide with a title and supporting body."""
+    var s = blank_slide("demo_slide")
+    s = add_text_box(s, "title", "Simple Office", 60, 60, 840, 120)
+    s = add_text_box(s, "subtitle", "A production-ready office suite", 60, 220, 840, 80)
+    s = add_text_box(s, "body", "Writer - Calc - Impress on one shared style substrate", 60, 340, 840, 120)
+    s
+
+fn office_demo_sheet() -> Sheet:
+    """A representative Calc budget sheet."""
+    var sh = Sheet.new("Budget")
+    sh.set_value("A1", "Item")
+    sh.set_value("B1", "Q1")
+    sh.set_value("C1", "Q2")
+    sh.set_value("A2", "Revenue")
+    sh.set_value("B2", "1200")
+    sh.set_value("C2", "1488")
+    sh.set_value("A3", "Costs")
+    sh.set_value("B3", "800")
+    sh.set_value("C3", "920")
+    sh.set_value("A4", "Profit")
+    sh.set_value("B4", "=B2-B3")
+    sh.set_value("C4", "=C2-C3")
+    recalculate_formula_cells(sh)
+
+# =========================================================================
+# Sheet -> HTML table
+# =========================================================================
+
+fn _sheet_cell_html(sheet: Sheet, ref_str: text, header: bool) -> text:
+    val display = cell_display_text(sheet.get_cell(ref_str))
+    if header:
+        return "<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{display}</th>"
+    "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{display}</td>"
+
+fn _grid_chrome_cell(content: text) -> text:
+    """A gray spreadsheet-chrome cell: column letter, row number, or corner."""
+    "<th style=\"border: 1px solid #c7cdd4; padding: 4px 10px; background: #e8ecf1; color: #4b5563; font-weight: 600; font-size: 12px; text-align: center;\">{content}</th>"
+
+fn render_sheet_html(sheet: Sheet) -> text:
+    """Render a sheet's used range as a spreadsheet grid: gray column-letter
+    header, row numbers down the side, bold first data row. Works for any
+    sheet size (demo grids or real CSVs)."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return "<table></table>"
+    var out = "<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\">"
+    # Column-letter chrome row: corner + A, B, C...
+    val corner = _grid_chrome_cell("")
+    out = "{out}<tr>{corner}"
+    var hc = start.col
+    while hc <= end_ref.col:
+        val letter_cell = _grid_chrome_cell(col_to_letter(hc))
+        out = "{out}{letter_cell}"
+        hc = hc + 1
+    out = "{out}</tr>"
+    var r = start.row
+    while r <= end_ref.row:
+        # Row-number chrome cell, then data cells
+        val row_label = "{r + 1}"
+        val row_cell = _grid_chrome_cell(row_label)
+        out = "{out}<tr>{row_cell}"
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            out = "{out}{_sheet_cell_html(sheet, ref_str, r == start.row)}"
+            c = c + 1
+        out = "{out}</tr>"
+        r = r + 1
+    "{out}</table>"
+
+# =========================================================================
+# Sheet -> HTML table, conditional-formatting variant
+# =========================================================================
+
+fn _sheet_cell_html_with_css(sheet: Sheet, ref_str: text, header: bool, extra_css: text) -> text:
+    """Like `_sheet_cell_html`, but merges `extra_css` into a data cell's
+    inline style when non-empty. Header cells are unaffected."""
+    val display = cell_display_text(sheet.get_cell(ref_str))
+    if header:
+        return "<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{display}</th>"
+    if extra_css == "":
+        return "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{display}</td>"
+    "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px; {extra_css}\">{display}</td>"
+
+fn render_sheet_html_with_rules(sheet: Sheet, rules: [CondRule]) -> text:
+    """Like `render_sheet_html`, but evaluates `rules` for every data cell and
+    merges the matching CondRule's CSS into that `<td>`'s inline style.
+
+    Same grid layout (gray column-letter header, row numbers, bold first data
+    row); the default `render_sheet_html` path is unaffected by this variant."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return "<table></table>"
+    var out = "<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\">"
+    val corner = _grid_chrome_cell("")
+    out = "{out}<tr>{corner}"
+    var hc = start.col
+    while hc <= end_ref.col:
+        val letter_cell = _grid_chrome_cell(col_to_letter(hc))
+        out = "{out}{letter_cell}"
+        hc = hc + 1
+    out = "{out}</tr>"
+    var r = start.row
+    while r <= end_ref.row:
+        val row_label = "{r + 1}"
+        val row_cell = _grid_chrome_cell(row_label)
+        out = "{out}<tr>{row_cell}"
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            val extra_css = cond_css_for_cell(sheet, rules, ref_str)
+            out = "{out}{_sheet_cell_html_with_css(sheet, ref_str, r == start.row, extra_css)}"
+            c = c + 1
+        out = "{out}</tr>"
+        r = r + 1
+    "{out}</table>"
+
+# =========================================================================
+# Sheet -> HTML table, number-format + styling + conditional-formatting variant
+# =========================================================================
+
+fn _merge_css(base_css: text, override_css: text) -> text:
+    """Merge two inline CSS fragments; `override_css` is appended after
+    `base_css` so it wins on any conflicting property (the last declaration
+    of a repeated property wins in a single style attribute)."""
+    if base_css == "":
+        return override_css
+    if override_css == "":
+        return base_css
+    "{base_css};{override_css}"
+
+fn _sheet_cell_html_formatted(sheet: Sheet, formats: SheetFormats, ref_str: text, header: bool, cond_css: text) -> text:
+    """Like `_sheet_cell_html_with_css`, but the display text honors the
+    cell's number format (`format_cell_display`) and the base inline style
+    comes from the cell's static bold/bg/fg (`format_cell_css`), with
+    `cond_css` (conditional-format rule CSS) merged in after -- so
+    conditional formatting wins over the static per-cell style on conflict.
+    Header cells are unaffected, same as the other render variants."""
+    if header:
+        val display = cell_display_text(sheet.get_cell(ref_str))
+        return "<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{display}</th>"
+    val display = format_cell_display(sheet, formats, ref_str)
+    val fmt_css = format_cell_css(formats, ref_str)
+    val extra_css = _merge_css(fmt_css, cond_css)
+    if extra_css == "":
+        return "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{display}</td>"
+    "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px; {extra_css}\">{display}</td>"
+
+fn render_sheet_html_formatted(sheet: Sheet, formats: SheetFormats, rules: [CondRule]) -> text:
+    """Like `render_sheet_html_with_rules`, but also applies per-cell number
+    formats and static bold/bg/fg styling from `formats`. Conditional-format
+    rule CSS from `rules` is merged in after the static format CSS, so it
+    wins on any conflicting property. Same grid layout (gray column-letter
+    header, row numbers, bold first data row); `render_sheet_html` and
+    `render_sheet_html_with_rules` are unaffected by this variant."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return "<table></table>"
+    var out = "<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\">"
+    val corner = _grid_chrome_cell("")
+    out = "{out}<tr>{corner}"
+    var hc = start.col
+    while hc <= end_ref.col:
+        val letter_cell = _grid_chrome_cell(col_to_letter(hc))
+        out = "{out}{letter_cell}"
+        hc = hc + 1
+    out = "{out}</tr>"
+    var r = start.row
+    while r <= end_ref.row:
+        val row_label = "{r + 1}"
+        val row_cell = _grid_chrome_cell(row_label)
+        out = "{out}<tr>{row_cell}"
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            val cond_css = cond_css_for_cell(sheet, rules, ref_str)
+            out = "{out}{_sheet_cell_html_formatted(sheet, formats, ref_str, r == start.row, cond_css)}"
+            c = c + 1
+        out = "{out}</tr>"
+        r = r + 1
+    "{out}</table>"
+
+# =========================================================================
+# Chart embedding
+# =========================================================================
+
+fn render_chart_section_html(svg: text, title: text) -> text:
+    """A titled section embedding a pre-rendered chart SVG (from
+    `app.office.sheets.chart`), meant to sit below a sheet grid in an
+    exported Calc page."""
+    val heading = "<h3 style=\"margin: 0 0 12px 0; font-size: 16px; color: #1f2937;\">{title}</h3>"
+    val frame_open = "<div style=\"padding: 12px; border: 1px solid #d0d7de; border-radius: 6px; background: #fafbfc;\">"
+    "<section style=\"margin: 24px 0 0 0;\">{heading}{frame_open}{svg}</div></section>"
+
+fn _office_demo_cond_rules() -> [CondRule]:
+    """Demo conditional-format rule: highlight revenue/cost cells over 1000."""
+    [CondRule(range: "B2:C3", kind: "cell_value", criteria: ">1000", n: 0, css: "background:#d1fae5;color:#065f46;font-weight:600")]
+
+fn render_sheet_export_html(sheet: Sheet) -> text:
+    """The Calc export body: the conditional-formatted grid plus a demo chart
+    section, showing conditional formatting and chart embedding as visible
+    product features rather than standalone APIs."""
+    val sheet_grid = render_sheet_html_with_rules(sheet, _office_demo_cond_rules())
+    val chart_title = "Q1 Revenue vs Costs"
+    val chart_svg = sheet_bar_chart_svg(sheet, "A2:A3", "B2:B3", chart_title)
+    val chart_section = render_chart_section_html(chart_svg, chart_title)
+    "{sheet_grid}{chart_section}"
+
+# =========================================================================
+# Full-page HTML wrapper
+# =========================================================================
+
+fn _html_page(title: text, accent: text, body: text) -> text:
+    val head = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title></head>"
+    val body_style = "margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #f3f4f6; color: #1f2937;"
+    val header = "<header style=\"background: {accent}; color: #ffffff; padding: 16px 32px; font-size: 20px; font-weight: 600;\">{title}</header>"
+    val menubar = "<nav style=\"background: #ffffff; border-bottom: 1px solid #e5e7eb; padding: 7px 32px; font-size: 13px; color: #4b5563; letter-spacing: 0.2px;\">File&nbsp;&nbsp;&nbsp;Edit&nbsp;&nbsp;&nbsp;View&nbsp;&nbsp;&nbsp;Insert&nbsp;&nbsp;&nbsp;Format&nbsp;&nbsp;&nbsp;Tools&nbsp;&nbsp;&nbsp;Help</nav>"
+    val main_open = "<main style=\"max-width: 1000px; margin: 24px auto; background: #ffffff; padding: 32px; box-shadow: 0 1px 4px rgba(0,0,0,0.12); border-radius: 8px;\">"
+    "{head}<body style=\"{body_style}\">{header}{menubar}{main_open}{body}</main></body></html>"
+
+fn _suite_index_body() -> text:
+    var out = "<p>Select an application:</p><ul style=\"line-height: 1.9; font-size: 15px;\">"
+    for app in libreoffice_apps():
+        out = "{out}<li><strong>{app.libre_name}</strong> &mdash; {app.description}</li>"
+    "{out}</ul>"
+
+# =========================================================================
+# Public entry
+# =========================================================================
+
+fn office_demo_planner() -> PlannerApp:
+    """A representative Planner board with tasks spread across all lanes."""
+    var app = PlannerApp.new()
+    app.add_task("Design the launch page")
+    app.add_task("Wire the render pipeline")
+    app.add_task("Ship the office suite")
+    app.move_task("task_1", "In Progress")
+    app.move_task("task_2", "Done")
+    app
+
+fn office_demo_canvas() -> DrawCanvas:
+    """A representative Draw canvas: flowchart-ish shapes with labels."""
+    var canvas = empty_canvas(720, 320)
+    canvas = add_shape(canvas, DrawShape.Rect(x: 40, y: 60, w: 180, h: 80, fill: "#dbeafe"))
+    canvas = add_shape(canvas, DrawShape.Label(x: 80, y: 105, content: "Draft"))
+    canvas = add_shape(canvas, DrawShape.Line(x1: 220, y1: 100, x2: 320, y2: 100, stroke: "#4b5563"))
+    canvas = add_shape(canvas, DrawShape.Rect(x: 320, y: 60, w: 180, h: 80, fill: "#dcfce7"))
+    canvas = add_shape(canvas, DrawShape.Label(x: 355, y: 105, content: "Review"))
+    canvas = add_shape(canvas, DrawShape.Line(x1: 500, y1: 100, x2: 580, y2: 100, stroke: "#4b5563"))
+    canvas = add_shape(canvas, DrawShape.Circle(cx: 630, cy: 100, r: 45, fill: "#fef3c7"))
+    canvas = add_shape(canvas, DrawShape.Label(x: 605, y: 105, content: "Ship"))
+    canvas
+
+fn office_demo_db() -> DbTable:
+    """A representative Base table with a few customer rows."""
+    var t = new_table("Customers", ["Name", "City", "Status"])
+    t = insert_row(t, ["Ada Lovelace", "London", "Active"])
+    t = insert_row(t, ["Grace Hopper", "New York", "Active"])
+    t = insert_row(t, ["Alan Turing", "Manchester", "Archived"])
+    t
+
+fn render_db_table_html(table: DbTable) -> text:
+    """Render a Base table as a styled HTML table with a header row."""
+    var out = "<h3 style=\"margin: 0 0 12px 0; font-size: 16px;\">Table: {table.name}</h3>"
+    out = "{out}<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\"><tr>"
+    for col in table.columns:
+        out = "{out}<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{col}</th>"
+    out = "{out}</tr>"
+    for row in table.rows:
+        out = "{out}<tr>"
+        for cell in row:
+            out = "{out}<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{cell}</td>"
+        out = "{out}</tr>"
+    "{out}</table>"
+
+fn _math_demo_body() -> text:
+    """A representative Math page: expressions rendered as MathML."""
+    val m1 = math_to_mathml("a x ^ 2 + b x + c = 0")
+    val m2 = math_to_mathml("E = m c ^ 2")
+    var out = "<div style=\"font-size: 22px; line-height: 2.4;\">"
+    out = "{out}<div>{m1}</div><div>{m2}</div></div>"
+    out
+
+fn _render_body_for(surface: text) -> text:
+    if surface == "word":
+        return render_document_html(office_demo_document())
+    if surface == "sheets":
+        return render_sheet_export_html(office_demo_sheet())
+    if surface == "slides":
+        return render_slide_html(office_demo_slide())
+    if surface == "mail":
+        return render_mailbox_html(MailApp.new())
+    if surface == "planner":
+        return render_board_html(office_demo_planner())
+    if surface == "draw":
+        return canvas_to_svg(office_demo_canvas())
+    if surface == "base":
+        return render_db_table_html(office_demo_db())
+    if surface == "math":
+        return _math_demo_body()
+    _suite_index_body()
+
+fn _title_for(surface: text) -> text:
+    if surface == "word":
+        return "{libreoffice_suite_name()} Writer"
+    if surface == "sheets":
+        return "{libreoffice_suite_name()} Calc"
+    if surface == "slides":
+        return "{libreoffice_suite_name()} Impress"
+    if surface == "mail":
+        return "{libreoffice_suite_name()} Mail"
+    if surface == "planner":
+        return "{libreoffice_suite_name()} Planner"
+    if surface == "draw":
+        return "{libreoffice_suite_name()} Draw"
+    if surface == "base":
+        return "{libreoffice_suite_name()} Base"
+    if surface == "math":
+        return "{libreoffice_suite_name()} Math"
+    "{libreoffice_suite_name()} Suite"
+
+fn _result_for(surface: text, body: text) -> RenderResult:
+    val accent = _surface_accent(surface)
+    val title = _title_for(surface)
+    val page = _html_page(title, accent, body)
+    val known = (surface == "word" or surface == "sheets" or surface == "slides" or
+        surface == "mail" or surface == "planner" or surface == "draw" or
+        surface == "base" or surface == "math")
+    val label = if known: surface else: "suite"
+    RenderResult(
+        format: "html",
+        text_output: "Office render: {title} ({label}, {page.len()} bytes)",
+        html_output: page,
+        metadata: {},
+        warnings: []
+    )
+
+fn office_render(config: RenderConfig) -> RenderResult:
+    """Render the requested office surface to a complete, styled HTML page.
+
+    Routes by `config.adapter_name`; empty/unknown names render the suite index.
+    `text_output` carries a one-line summary; `html_output` carries the page."""
+    val surface = _normalize_surface(config.adapter_name)
+    _result_for(surface, _render_body_for(surface))
+
+fn office_render_source(adapter_name: text, filename: text, content: text) -> RenderResult:
+    """Render an actual document's `content` (loaded from disk) to a styled page.
+
+    Writer parses markdown; Calc parses CSV; Impress parses the `---`-separated
+    deck format, rendering every slide. Unknown surfaces show the suite index."""
+    val surface = _normalize_surface(adapter_name)
+    if surface == "word":
+        val doc = parse_markdown_document(content, filename)
+        return _result_for(surface, render_document_html(doc))
+    if surface == "sheets":
+        val sheet = parse_csv_sheet(content, filename)
+        return _result_for(surface, render_sheet_html(sheet))
+    if surface == "slides":
+        val slides = parse_deck(content)
+        var body = ""
+        for s in slides:
+            body = "{body}<div style=\"margin: 0 0 24px 0;\">{render_slide_html(s)}</div>"
+        return _result_for(surface, body)
+    _result_for(surface, _render_body_for(surface))

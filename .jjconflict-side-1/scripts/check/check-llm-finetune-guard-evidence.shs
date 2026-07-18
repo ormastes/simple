@@ -1,0 +1,384 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_finetune_guard_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_finetune_guard_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+ACCEPTANCE_EVIDENCE_ENV="${FINETUNE_ACCEPTANCE_EVIDENCE_ENV:-build/llm_finetune_acceptance/evidence.env}"
+DATA_FILE=".spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry2_fixed_format_sample.jsonl"
+RETRY5_ATTEMPT="llm_backed_app_server_dry_run_retry5"
+RETRY6_ATTEMPT="llm_backed_app_server_dry_run_retry6"
+RETRY7_ATTEMPT="llm_backed_app_server_dry_run_retry7"
+STRICT_READY=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-ready)
+            STRICT_READY=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-finetune-guard-evidence.shs [--strict-ready]"
+            echo "  --strict-ready  require FINETUNE_ACCEPTANCE_EVIDENCE_ENV with llm_finetune_acceptance_status=pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+run_check() {
+    key="$1"
+    log="$2"
+    shift 2
+    if "$@" >"$log" 2>&1; then
+        eval "${key}_status=pass"
+        eval "${key}_exit=0"
+    else
+        code=$?
+        eval "${key}_status=fail"
+        eval "${key}_exit=$code"
+    fi
+}
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+expect_log() {
+    key="$1"
+    log="$2"
+    needle="$3"
+    if grep -F "$needle" "$log" >/dev/null 2>&1; then
+        eval "${key}_status=pass"
+    else
+        eval "${key}_status=fail"
+    fi
+}
+
+log_value() {
+    key="$1"
+    log="$2"
+    sed -n "s/^${key}=//p" "$log" 2>/dev/null | tail -n 1
+}
+
+DATA_LOG="$BUILD_DIR/fixed_format_data_quality.log"
+RETRY5_CACHE_LOG="$BUILD_DIR/retry5_cache_manifest.log"
+RETRY6_DIRECT_LOG="$BUILD_DIR/retry6_direct_gate.log"
+RETRY7_DIRECT_LOG="$BUILD_DIR/retry7_direct_gate.log"
+RETRY6_SPEC_LOG="$BUILD_DIR/retry6_spec.log"
+RETRY7_SPEC_LOG="$BUILD_DIR/retry7_spec.log"
+
+run_check data_quality "$DATA_LOG" \
+    .spipe/llm-finetune-process/scripts/check_fixed_format_data_quality.shs "$DATA_FILE"
+
+run_check retry5_cache_exit "$RETRY5_CACHE_LOG" \
+    .spipe/llm-finetune-process/scripts/check_retry5_cache_manifest.shs "$RETRY5_ATTEMPT"
+expect_log retry5_cache_status "$RETRY5_CACHE_LOG" "STATUS: WARN retry5-cache-manifest"
+expect_log retry5_cache_result "$RETRY5_CACHE_LOG" "result=BLOCKED_CACHE_MANIFEST_INCOMPLETE"
+
+run_check retry6_direct_exit "$RETRY6_DIRECT_LOG" \
+    .spipe/llm-finetune-process/scripts/check_retry6_training_eval_gate.shs "$RETRY6_ATTEMPT"
+expect_log retry6_direct_status "$RETRY6_DIRECT_LOG" "STATUS: WARN retry6-training-eval-gate"
+expect_log retry6_direct_result "$RETRY6_DIRECT_LOG" "result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY"
+
+run_check retry7_direct_exit "$RETRY7_DIRECT_LOG" \
+    .spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs "$RETRY7_ATTEMPT"
+expect_log retry7_direct_status "$RETRY7_DIRECT_LOG" "STATUS: WARN retry7-acceptance-gate"
+expect_log retry7_direct_result "$RETRY7_DIRECT_LOG" "result=BLOCKED_RETRY6_NOT_READY"
+
+run_check retry6_spec "$RETRY6_SPEC_LOG" \
+    "$SIMPLE_BIN" test test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl --mode=interpreter --clean
+run_check retry7_spec "$RETRY7_SPEC_LOG" \
+    "$SIMPLE_BIN" test test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl --mode=interpreter --clean
+
+SURFACE_MANIFEST="$BUILD_DIR/fine_tune_guard_surface_manifest.tsv"
+{
+    for path in \
+        "$DATA_FILE" \
+        scripts/check/check-llm-finetune-setup-contract.shs \
+        .spipe/llm-finetune-process/README.md \
+        .spipe/llm-finetune-process/attempts.sdn \
+        .spipe/llm-finetune-process/app_handoffs.sdn \
+        .spipe/llm-finetune-process/data_checks.sdn \
+        .spipe/llm-finetune-process/decisions.sdn \
+        .spipe/llm-finetune-process/eval_results.sdn \
+        .spipe/llm-finetune-process/models.sdn \
+        .spipe/llm-finetune-process/retune_requests.sdn \
+        .spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn \
+        .spipe/llm-finetune-process/scripts/check_fixed_format_data_quality.shs \
+        .spipe/llm-finetune-process/scripts/check_retry5_cache_manifest.shs \
+        .spipe/llm-finetune-process/scripts/check_retry6_training_eval_gate.shs \
+        .spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs \
+        test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl \
+        test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl \
+        doc/07_guide/app/llm/spipe_llm_finetune_process.md \
+        "$DATA_LOG" \
+        "$RETRY5_CACHE_LOG" \
+        "$RETRY6_DIRECT_LOG" \
+        "$RETRY7_DIRECT_LOG" \
+        "$RETRY6_SPEC_LOG" \
+        "$RETRY7_SPEC_LOG"
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+data_log_size="$(artifact_size "$DATA_LOG")"
+data_log_sha256="$(artifact_sha256 "$DATA_LOG")"
+retry5_cache_log_size="$(artifact_size "$RETRY5_CACHE_LOG")"
+retry5_cache_log_sha256="$(artifact_sha256 "$RETRY5_CACHE_LOG")"
+retry5_cache_manifest_exists="$(log_value manifest_exists "$RETRY5_CACHE_LOG")"
+retry5_cache_manifest_artifact_status="$(log_value manifest_artifact_status "$RETRY5_CACHE_LOG")"
+retry5_cache_manifest_size="$(log_value manifest_size "$RETRY5_CACHE_LOG")"
+retry5_cache_manifest_sha256="$(log_value manifest_sha256 "$RETRY5_CACHE_LOG")"
+retry5_cache_license_review="$(log_value license_review "$RETRY5_CACHE_LOG")"
+retry5_cache_data_access="$(log_value data_access "$RETRY5_CACHE_LOG")"
+retry5_cache_path="$(log_value cache_path "$RETRY5_CACHE_LOG")"
+retry5_cache_path_exists="$(log_value cache_path_exists "$RETRY5_CACHE_LOG")"
+retry5_cache_expected_checksum="$(log_value expected_checksum "$RETRY5_CACHE_LOG")"
+retry5_cache_actual_checksum="$(log_value actual_checksum "$RETRY5_CACHE_LOG")"
+retry5_cache_checksum_match="$(log_value checksum_match "$RETRY5_CACHE_LOG")"
+retry5_cache_training_allowed="$(log_value training_allowed "$RETRY5_CACHE_LOG")"
+retry5_cache_result="$(log_value result "$RETRY5_CACHE_LOG")"
+retry6_direct_log_size="$(artifact_size "$RETRY6_DIRECT_LOG")"
+retry6_direct_log_sha256="$(artifact_sha256 "$RETRY6_DIRECT_LOG")"
+retry7_direct_log_size="$(artifact_size "$RETRY7_DIRECT_LOG")"
+retry7_direct_log_sha256="$(artifact_sha256 "$RETRY7_DIRECT_LOG")"
+retry6_spec_log_size="$(artifact_size "$RETRY6_SPEC_LOG")"
+retry6_spec_log_sha256="$(artifact_sha256 "$RETRY6_SPEC_LOG")"
+retry7_spec_log_size="$(artifact_size "$RETRY7_SPEC_LOG")"
+retry7_spec_log_sha256="$(artifact_sha256 "$RETRY7_SPEC_LOG")"
+
+status="pass"
+for key in \
+    data_quality \
+    retry5_cache_exit retry5_cache_status retry5_cache_result \
+    retry6_direct_exit retry6_direct_status retry6_direct_result \
+    retry7_direct_exit retry7_direct_status retry7_direct_result \
+    retry6_spec retry7_spec
+do
+    eval "value=\${${key}_status}"
+    if [ "$value" != "pass" ]; then
+        status="fail"
+    fi
+done
+
+required_gates="data_quality,retry5_cache_manifest,retry6_training_eval,retry7_acceptance,retry6_spec,retry7_spec,tuned_model_acceptance"
+blocked_gates="retry5_cache_manifest|retry6_training_eval|retry7_acceptance|tuned_model_acceptance"
+primary_blocked_gate="retry5_cache_manifest"
+blocker_reason="guard_only_retry5_retry6_retry7_blocked"
+next_action="complete retry5 licensed cache/checksum review before retry6 training"
+
+acceptance_status="not_required"
+acceptance_reason="default_guard_only"
+acceptance_pass_integrity_status="not_required"
+acceptance_attempt="not_required"
+if [ "$STRICT_READY" -eq 1 ]; then
+    acceptance_status="missing"
+    acceptance_reason="missing_finetune_acceptance_evidence"
+    acceptance_pass_integrity_status="missing"
+    acceptance_attempt="missing"
+    if [ -f "$ACCEPTANCE_EVIDENCE_ENV" ]; then
+        evidence_status="$(sed -n 's/^llm_finetune_acceptance_status=//p' "$ACCEPTANCE_EVIDENCE_ENV" | tail -n 1)"
+        evidence_reason="$(sed -n 's/^llm_finetune_acceptance_reason=//p' "$ACCEPTANCE_EVIDENCE_ENV" | tail -n 1)"
+        evidence_pass_integrity="$(sed -n 's/^llm_finetune_acceptance_pass_integrity_status=//p' "$ACCEPTANCE_EVIDENCE_ENV" | tail -n 1)"
+        acceptance_attempt="$(sed -n 's/^llm_finetune_acceptance_attempt=//p' "$ACCEPTANCE_EVIDENCE_ENV" | tail -n 1)"
+        acceptance_pass_integrity_status="${evidence_pass_integrity:-missing}"
+        if [ "${acceptance_attempt:-missing}" != "$RETRY7_ATTEMPT" ]; then
+            acceptance_status="fail"
+            acceptance_reason="finetune_acceptance_attempt_mismatch"
+        elif [ "$evidence_status" = "pass" ] && [ "$evidence_pass_integrity" = "pass" ]; then
+            acceptance_status="pass"
+            acceptance_reason="${evidence_reason:-finetune_acceptance_passed}"
+        elif [ "$evidence_status" = "pass" ]; then
+            acceptance_status="fail"
+            acceptance_reason="finetune_acceptance_pass_integrity_missing"
+        else
+            acceptance_status="${evidence_status:-fail}"
+            acceptance_reason="${evidence_reason:-finetune_acceptance_not_passed}"
+        fi
+    fi
+    if [ "$acceptance_status" != "pass" ]; then
+        status="fail"
+    fi
+    acceptance_blocked="$(sed -n 's/^llm_finetune_acceptance_blocked_gates=//p' "$ACCEPTANCE_EVIDENCE_ENV" 2>/dev/null | tail -n 1 || true)"
+    acceptance_primary="$(sed -n 's/^llm_finetune_acceptance_primary_blocked_gate=//p' "$ACCEPTANCE_EVIDENCE_ENV" 2>/dev/null | tail -n 1 || true)"
+    acceptance_next="$(sed -n 's/^llm_finetune_acceptance_next_action=//p' "$ACCEPTANCE_EVIDENCE_ENV" 2>/dev/null | tail -n 1 || true)"
+    if [ "$acceptance_reason" = "finetune_acceptance_pass_integrity_missing" ]; then
+        acceptance_blocked="acceptance_pass_integrity"
+        acceptance_primary="acceptance_pass_integrity"
+        acceptance_next="rerun fine-tune acceptance evidence and require llm_finetune_acceptance_pass_integrity_status=pass"
+    elif [ "$acceptance_reason" = "finetune_acceptance_attempt_mismatch" ]; then
+        acceptance_blocked="acceptance_attempt_mismatch"
+        acceptance_primary="acceptance_attempt_mismatch"
+        acceptance_next="rerun retry7 acceptance evidence for $RETRY7_ATTEMPT and update FINETUNE_ACCEPTANCE_EVIDENCE_ENV"
+    fi
+    if [ "$acceptance_status" = "pass" ]; then
+        blocked_gates="none"
+        primary_blocked_gate="none"
+        blocker_reason="$acceptance_reason"
+        next_action="release handoff may cite accepted fine-tune evidence"
+    else
+        blocked_gates="${acceptance_blocked:-tuned_model_acceptance}"
+        primary_blocked_gate="${acceptance_primary:-tuned_model_acceptance}"
+        blocker_reason="$acceptance_reason"
+        next_action="${acceptance_next:-provide passing fine-tune acceptance evidence before strict ready completion}"
+    fi
+fi
+
+{
+    printf '%s\n' "llm_finetune_guard_evidence_status=$status"
+    printf '%s\n' "llm_finetune_guard_strict_ready=$STRICT_READY"
+    printf '%s\n' "llm_finetune_guard_required_gates=$required_gates"
+    printf '%s\n' "llm_finetune_guard_blocked_gates=$blocked_gates"
+    printf '%s\n' "llm_finetune_guard_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_finetune_guard_blocker_reason=$blocker_reason"
+    printf '%s\n' "llm_finetune_guard_next_action=$next_action"
+    printf '%s\n' "llm_finetune_guard_acceptance_status=$acceptance_status"
+    printf '%s\n' "llm_finetune_guard_acceptance_reason=$acceptance_reason"
+    printf '%s\n' "llm_finetune_guard_acceptance_attempt=$acceptance_attempt"
+    printf '%s\n' "llm_finetune_guard_acceptance_pass_integrity_status=$acceptance_pass_integrity_status"
+    printf '%s\n' "llm_finetune_guard_acceptance_env=$ACCEPTANCE_EVIDENCE_ENV"
+    printf '%s\n' "llm_finetune_guard_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_finetune_guard_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_finetune_guard_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_finetune_guard_surface_manifest_sha256=$surface_manifest_sha256"
+    printf '%s\n' "llm_finetune_guard_data_quality_status=$data_quality_status"
+    printf '%s\n' "llm_finetune_guard_data_quality_log_size=$data_log_size"
+    printf '%s\n' "llm_finetune_guard_data_quality_log_sha256=$data_log_sha256"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_exit_status=$retry5_cache_exit_status"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_status=$retry5_cache_status_status"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_result_status=$retry5_cache_result_status"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_log_size=$retry5_cache_log_size"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_log_sha256=$retry5_cache_log_sha256"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_manifest_exists=${retry5_cache_manifest_exists:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_manifest_artifact_status=${retry5_cache_manifest_artifact_status:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_manifest_size=${retry5_cache_manifest_size:-0}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_manifest_sha256=${retry5_cache_manifest_sha256:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_license_review=${retry5_cache_license_review:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_data_access=${retry5_cache_data_access:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_path=${retry5_cache_path:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_path_exists=${retry5_cache_path_exists:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_expected_checksum=${retry5_cache_expected_checksum:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_actual_checksum=${retry5_cache_actual_checksum:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_checksum_match=${retry5_cache_checksum_match:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_training_allowed=${retry5_cache_training_allowed:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry5_cache_result=${retry5_cache_result:-missing}"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_exit_status=$retry6_direct_exit_status"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_status=$retry6_direct_status_status"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_result_status=$retry6_direct_result_status"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_log_size=$retry6_direct_log_size"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_log_sha256=$retry6_direct_log_sha256"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_exit_status=$retry7_direct_exit_status"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_status=$retry7_direct_status_status"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_result_status=$retry7_direct_result_status"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_log_size=$retry7_direct_log_size"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_log_sha256=$retry7_direct_log_sha256"
+    printf '%s\n' "llm_finetune_guard_retry6_spec_status=$retry6_spec_status"
+    printf '%s\n' "llm_finetune_guard_retry6_spec_log_size=$retry6_spec_log_size"
+    printf '%s\n' "llm_finetune_guard_retry6_spec_log_sha256=$retry6_spec_log_sha256"
+    printf '%s\n' "llm_finetune_guard_retry7_spec_status=$retry7_spec_status"
+    printf '%s\n' "llm_finetune_guard_retry7_spec_log_size=$retry7_spec_log_size"
+    printf '%s\n' "llm_finetune_guard_retry7_spec_log_sha256=$retry7_spec_log_sha256"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Fine-Tune Guard Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_READY" -eq 1 ]; then
+        printf '%s\n' "- strict_ready: \`true\`"
+    else
+        printf '%s\n' "- strict_ready: \`false\`"
+    fi
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- blocker_reason: \`$blocker_reason\`"
+    printf '%s\n' "- next_action: \`$next_action\`"
+    printf '%s\n' "- acceptance: \`$acceptance_status\`"
+    printf '%s\n' "- acceptance_reason: \`$acceptance_reason\`"
+    printf '%s\n' "- acceptance_attempt: \`$acceptance_attempt\`"
+    printf '%s\n' "- acceptance_pass_integrity_status: \`$acceptance_pass_integrity_status\`"
+    printf '%s\n' "- acceptance_env: \`$ACCEPTANCE_EVIDENCE_ENV\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    printf '%s\n' "- fixed_format_data_quality: \`$data_quality_status\` exit=\`$data_quality_exit\` log=\`$DATA_LOG\`"
+    printf '%s\n' "- fixed_format_data_quality_log_size: \`$data_log_size\`"
+    printf '%s\n' "- fixed_format_data_quality_log_sha256: \`$data_log_sha256\`"
+    printf '%s\n' "- retry5_cache_manifest: exit=\`$retry5_cache_exit_status\` expected_status=\`$retry5_cache_status_status\` expected_result=\`$retry5_cache_result_status\` log=\`$RETRY5_CACHE_LOG\`"
+    printf '%s\n' "- retry5_cache_manifest_log_size: \`$retry5_cache_log_size\`"
+    printf '%s\n' "- retry5_cache_manifest_log_sha256: \`$retry5_cache_log_sha256\`"
+    printf '%s\n' "- retry5_cache_manifest_exists: \`${retry5_cache_manifest_exists:-missing}\`"
+    printf '%s\n' "- retry5_cache_manifest_artifact_status: \`${retry5_cache_manifest_artifact_status:-missing}\`"
+    printf '%s\n' "- retry5_cache_manifest_size: \`${retry5_cache_manifest_size:-0}\`"
+    printf '%s\n' "- retry5_cache_manifest_sha256: \`${retry5_cache_manifest_sha256:-missing}\`"
+    printf '%s\n' "- retry5_cache_license_review: \`${retry5_cache_license_review:-missing}\`"
+    printf '%s\n' "- retry5_cache_data_access: \`${retry5_cache_data_access:-missing}\`"
+    printf '%s\n' "- retry5_cache_path: \`${retry5_cache_path:-missing}\`"
+    printf '%s\n' "- retry5_cache_path_exists: \`${retry5_cache_path_exists:-missing}\`"
+    printf '%s\n' "- retry5_cache_expected_checksum: \`${retry5_cache_expected_checksum:-missing}\`"
+    printf '%s\n' "- retry5_cache_actual_checksum: \`${retry5_cache_actual_checksum:-missing}\`"
+    printf '%s\n' "- retry5_cache_checksum_match: \`${retry5_cache_checksum_match:-missing}\`"
+    printf '%s\n' "- retry5_cache_training_allowed: \`${retry5_cache_training_allowed:-missing}\`"
+    printf '%s\n' "- retry5_cache_result: \`${retry5_cache_result:-missing}\`"
+    printf '%s\n' "- retry6_direct_gate: exit=\`$retry6_direct_exit_status\` expected_status=\`$retry6_direct_status_status\` expected_result=\`$retry6_direct_result_status\` log=\`$RETRY6_DIRECT_LOG\`"
+    printf '%s\n' "- retry6_direct_gate_log_size: \`$retry6_direct_log_size\`"
+    printf '%s\n' "- retry6_direct_gate_log_sha256: \`$retry6_direct_log_sha256\`"
+    printf '%s\n' "- retry7_direct_gate: exit=\`$retry7_direct_exit_status\` expected_status=\`$retry7_direct_status_status\` expected_result=\`$retry7_direct_result_status\` log=\`$RETRY7_DIRECT_LOG\`"
+    printf '%s\n' "- retry7_direct_gate_log_size: \`$retry7_direct_log_size\`"
+    printf '%s\n' "- retry7_direct_gate_log_sha256: \`$retry7_direct_log_sha256\`"
+    printf '%s\n' "- retry6_spec: \`$retry6_spec_status\` exit=\`$retry6_spec_exit\` log=\`$RETRY6_SPEC_LOG\`"
+    printf '%s\n' "- retry6_spec_log_size: \`$retry6_spec_log_size\`"
+    printf '%s\n' "- retry6_spec_log_sha256: \`$retry6_spec_log_sha256\`"
+    printf '%s\n' "- retry7_spec: \`$retry7_spec_status\` exit=\`$retry7_spec_exit\` log=\`$RETRY7_SPEC_LOG\`"
+    printf '%s\n' "- retry7_spec_log_size: \`$retry7_spec_log_size\`"
+    printf '%s\n' "- retry7_spec_log_sha256: \`$retry7_spec_log_sha256\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    if [ "$STRICT_READY" -eq 1 ]; then
+        printf 'This strict ready check requires a separate fine-tune acceptance evidence env with `llm_finetune_acceptance_status=pass` and `llm_finetune_acceptance_pass_integrity_status=pass`. Guard evidence alone is not model training, target-eval, safety, deployment, app-handoff, or release acceptance proof.\n'
+    else
+        printf 'This evidence proves the local fine-tune process guards: fixed-format sample quality passes, retry5 cache-manifest review remains blocked before licensed cache/checksum evidence, retry6 remains blocked before licensed data/model/eval evidence, and retry7 remains blocked before retry6 target-eval plus normal-review evidence. It is not model training, target-eval, safety, deployment, or release-handoff proof. Run with `--strict-ready` when a tuned-model acceptance gate must pass.\n'
+    fi
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-finetune-guard-evidence"
+else
+    echo "STATUS: FAIL llm-finetune-guard-evidence"
+    exit 1
+fi

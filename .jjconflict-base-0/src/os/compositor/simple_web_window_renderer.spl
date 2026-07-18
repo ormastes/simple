@@ -1,0 +1,188 @@
+# Simple Web Window Renderer Adapter
+#
+# SimpleOS compositor adapter for rendering app client areas through the
+# canonical Simple Web renderer and then blitting pixels to CompositorBackend.
+
+use os.compositor.display_backend_core.{CompositorBackend}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
+use os.compositor.web_render_surface.{compositor_render_html_artifact, compositor_render_request_artifact}
+use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
+
+val HOST_WM_DEFAULT_THEME_ID: text = "aetheric_dark"
+
+fn _simple_web_window_css(theme: text) -> text:
+    var accent = "#2563eb"
+    var success = "#22c55e"
+    var warning = "#f59e0b"
+    var muted = "#94a3b8"
+    var title_bg = "#2050a0"
+    var content_bg = "#182230"
+    if theme == "glass_light" or theme == "ios_light":
+        accent = "#0066cc"
+        success = "#16803c"
+        warning = "#a05a00"
+        muted = "#64748b"
+        title_bg = "#dbeafe"
+        content_bg = "#f8fafc"
+    # Built with interpolation + escaped literal braces. Mixing an unescaped
+    # `{` with `+ var +` concatenation makes the interpolation scanner swallow
+    # the closing quote and the concat operators, emitting them verbatim and
+    # producing invalid CSS (blank render). See bug bug_css_concat_brace_interp.
+    ":root \{ --glass-accent: {accent}; --glass-success: {success}; --glass-warning: {warning}; --glass-text-secondary: {muted}; \} .wm-app-container \{ min-height: 100vh; background: {content_bg}; \} .wm-app-titlebar \{ height: 24px; background: {title_bg}; color: #fff; \} .wm-app-content \{ min-height: calc(100vh - 24px); background: {content_bg}; color: #e5e7eb; \} "
+
+# Content-only request for WM-owned windows. The shared WM executor owns the
+# outer titlebar and frame, so this request deliberately emits no nested
+# `.wm-app-titlebar` element.
+fn simple_web_content_render_request_with_theme(theme: text, title: text, body_html: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+    val css = _simple_web_window_css(theme)
+    val app_css = css + "body { margin: 0; overflow: hidden; } #app { min-height: 100vh; padding: 0; } .wm-app-content { min-height: 100vh; }"
+    val app_body = "<div class='wm-app-content'>" + body_html + "</div>"
+    WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, app_body, app_css, "", viewport_w, viewport_h)
+
+fn _simple_web_revision_mix(hash: i64, value: i64) -> i64:
+    ((hash * 131 + value) % 2147483647) + 1
+
+fn simple_web_content_revision(title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
+    var hash: i64 = 17
+    var i = 0
+    while i < title.len():
+        hash = _simple_web_revision_mix(hash, title.char_code_at(i) as i64)
+        i = i + 1
+    hash = _simple_web_revision_mix(hash, 257)
+    i = 0
+    while i < body_html.len():
+        hash = _simple_web_revision_mix(hash, body_html.char_code_at(i) as i64)
+        i = i + 1
+    hash = _simple_web_revision_mix(hash, width.to_i64())
+    hash = _simple_web_revision_mix(hash, height.to_i64())
+    _simple_web_revision_mix(hash, _clamp_scroll_px(scroll_y).to_i64())
+
+fn simple_web_html_pixel_artifact(html: text, cw: i32, ch: i32) -> WebRenderArtifact:
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", html, "", "", cw, ch).with_pixel_output()
+    compositor_render_html_artifact(req, html)
+
+fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text):
+    render_simple_web_html_content_scrolled(backend, cx, cy, cw, ch, html, 0)
+
+# Uncached authoritative-body counterpart of simple_web_content_frame_cached.
+# Baremetal Compositor owns no long-lived WebRender cache yet, but it must use
+# the exact same request construction as the host and must never replace live
+# window HTML with the title-based compatibility/demo markup.
+fn render_simple_web_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, body_html: text):
+    if cw <= 0 or ch <= 0:
+        return
+    val req = simple_web_content_render_request_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html, cw, ch).with_pixel_output()
+    val artifact = compositor_render_request_artifact(req)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
+
+# Content-scroll headroom cap: HostCompositor.scroll_offsets accumulates raw
+# wheel delta unboundedly (no clamp at the input side — see
+# handle_mouse_wheel), so the render-height growth used to reveal scrolled
+# content must be capped independently, or an unbounded scroll accumulation
+# would request an unbounded (and, per the already-tracked quadratic CSS
+# render bug, potentially very slow) raster height. 4000px is generously
+# larger than any hosted-window content used today.
+val _MAX_SCROLL_RENDER_PX: i32 = 4000
+
+fn _clamp_scroll_px(scroll_y: i32) -> i32:
+    if scroll_y < 0:
+        return 0
+    if scroll_y > _MAX_SCROLL_RENDER_PX:
+        return _MAX_SCROLL_RENDER_PX
+    scroll_y
+
+# Public so callers that need to key a cache on the exact render size (e.g.
+# HostCompositor._content_cache_for) can compute the same `full_h`
+# simple_web_content_frame_cached renders at, without duplicating the clamp
+# constant/logic.
+fn content_paint_full_height(ch: i32, scroll_y: i32) -> i32:
+    ch + _clamp_scroll_px(scroll_y)
+
+# Slices the `ch`-tall visible window starting at row `scroll_y` out of a
+# `cw` x `full_h` row-major pixel buffer (full_h >= ch + scroll_y). Rows
+# beyond the source buffer are left as-is (caller pre-sizes full_h so this
+# never triggers in practice); this is pure translation, not resampling —
+# each output row is a verbatim copy of source row `scroll_y + row`.
+fn _window_scrolled_pixels(pixels: [u32], cw: i32, full_h: i32, ch: i32, scroll_y: i32) -> [u32]:
+    if scroll_y <= 0:
+        return pixels
+    val out_len = cw * ch
+    var out: [u32] = [0u32; out_len]
+    var row = 0
+    while row < ch:
+        val src_row = scroll_y + row
+        if src_row < full_h:
+            val src_start = src_row * cw
+            val dst_start = row * cw
+            var col = 0
+            while col < cw:
+                out[dst_start + col] = pixels[src_start + col]
+                col = col + 1
+        row = row + 1
+    out
+
+# Shared implementation behind simple_web_content_frame_cached (top-level,
+# parent_window_id="") and simple_web_child_content_frame_cached (nested,
+# caller-supplied parent_window_id/offset). Keeping one render path means a
+# nested Simple Web panel gets exactly the same render/scroll/checksum
+# behavior as a top-level one.
+#
+# Routes through cache.request_to_pixel_artifact (the full HTML layout/CSS
+# engine), NOT request_to_native_safe_pixel_artifact (the tag-stripping
+# legacy tag-stripping bitmap-glyph fallback).
+# The native-safe path is a crash-recovery fallback only and must be invoked
+# explicitly by a caller that has actually hit that failure mode, not wired
+# in as the default for every desktop window content frame. See
+# WebRenderPixelArtifactCache.request_to_native_safe_pixel_artifact's
+# provenance marking (engine2d_status=compatibility_renderer,
+# engine2d_backend="native-safe-fallback") for how evidence capture can
+# reject a fallback frame that leaked through.
+fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, window_id: text, scene_revision: i64, content_revision: i64, theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32, parent_window_id: text, offset_x: i32, offset_y: i32) -> WmContentFrame:
+    if window_id.len() == 0 or scene_revision <= 0 or content_revision <= 0 or width <= 0 or height <= 0:
+        return WmContentFrame(window_id: window_id, scene_revision: scene_revision, content_revision: content_revision, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: width, height: height, pixels: [], checksum: 0u64, parent_window_id: parent_window_id, offset_x: offset_x, offset_y: offset_y)
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    val full_h = height + clamped_scroll
+    val req = simple_web_content_render_request_with_theme(theme, title, body_html, width, full_h).with_pixel_output()
+    val artifact = cache.request_to_pixel_artifact(req)
+    val visible = _window_scrolled_pixels(artifact.pixels, width, full_h, height, clamped_scroll)
+    WmContentFrame(
+        window_id: window_id,
+        scene_revision: scene_revision,
+        content_revision: content_revision,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: width,
+        height: height,
+        pixels: visible,
+        checksum: wm_content_frame_checksum(visible),
+        parent_window_id: parent_window_id,
+        offset_x: offset_x,
+        offset_y: offset_y
+    )
+
+# Production Simple Web -> shared-WM content adapter. `body_html` is the
+# authoritative runtime window content; unlike simple_web_app_* compatibility
+# helpers this function never selects canned markup from a title allowlist.
+# Top-level frame: parent_window_id="" (not embedded in another content frame).
+fn simple_web_content_frame_cached(cache: WebRenderPixelArtifactCache, window_id: text, scene_revision: i64, content_revision: i64, theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> WmContentFrame:
+    _simple_web_content_frame_cached_impl(cache, window_id, scene_revision, content_revision, theme, title, body_html, width, height, scroll_y, "", 0, 0)
+
+# Nested-content variant of simple_web_content_frame_cached: same Simple Web
+# render/scroll pipeline, but the resulting WmContentFrame is stamped as a
+# child of `parent_window_id`, positioned at (offset_x, offset_y) within the
+# parent's content rect (see WmContentFrame doc in common.ui.window_scene).
+# Used to embed a web-render panel inside a GUI window's content frame.
+fn simple_web_child_content_frame_cached(cache: WebRenderPixelArtifactCache, window_id: text, parent_window_id: text, offset_x: i32, offset_y: i32, scene_revision: i64, content_revision: i64, theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> WmContentFrame:
+    _simple_web_content_frame_cached_impl(cache, window_id, scene_revision, content_revision, theme, title, body_html, width, height, scroll_y, parent_window_id, offset_x, offset_y)
+
+fn render_simple_web_html_content_scrolled(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text, scroll_y: i32):
+    if cw <= 0 or ch <= 0:
+        return
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    val full_h = ch + clamped_scroll
+    val artifact = simple_web_html_pixel_artifact(html, cw, full_h)
+    val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
+
+fn blit_simple_web_pixels(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, pixels: [u32]):
+    backend.blit_pixels(cx, cy, cw, ch, pixels)

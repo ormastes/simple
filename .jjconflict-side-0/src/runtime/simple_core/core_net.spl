@@ -1,0 +1,114 @@
+# Pure-Simple `simple-core` minimal socket ABI.
+#
+# These probes intentionally avoid the hosted runtime network stack. They exist
+# so startup-size audits can compare Simple TCP/UDP/plain-HTTP binaries against
+# equivalent C socket counters without pulling in TLS, HTTP clients, or async
+# runtimes.
+
+extern fn malloc(size: i64) -> i64
+extern fn free(ptr: i64)
+extern fn socket(domain: i64, type_: i64, protocol: i64) -> i64
+extern fn connect(fd: i64, addr: i64, addr_len: i64) -> i64
+extern fn sendto(fd: i64, buf: i64, len: i64, flags: i64, addr: i64, addr_len: i64) -> i64
+extern fn write(fd: i64, ptr: i64, count: i64) -> i64
+extern fn close(fd: i64) -> i64
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+fn sockaddr_loopback(port: i64) -> i64:
+    val addr = malloc(16)
+    if addr < 1:
+        return 0
+    var i = 0
+    while i < 16:
+        spl_store_u8(addr, i, 0)
+        i = i + 1
+    # struct sockaddr_in { sa_family_t, in_port_t, in_addr, zero[8] }.
+    # Linux stores AF_INET little-endian in memory; port/address are network byte order.
+    spl_store_u8(addr, 0, 2)
+    spl_store_u8(addr, 1, 0)
+    spl_store_u8(addr, 2, (port >> 8) & 255)
+    spl_store_u8(addr, 3, port & 255)
+    spl_store_u8(addr, 4, 127)
+    spl_store_u8(addr, 5, 0)
+    spl_store_u8(addr, 6, 0)
+    spl_store_u8(addr, 7, 1)
+    return addr
+
+pub fn rt_net_tcp_connect_local_discard() -> i64:
+    # AF_INET=2, SOCK_STREAM=1.
+    val fd = socket(2, 1, 0)
+    if fd < 0:
+        return -1
+    val addr = sockaddr_loopback(9)
+    if addr < 1:
+        close(fd)
+        return -2
+    connect(fd, addr, 16)
+    free(addr)
+    close(fd)
+    return 0
+
+pub fn rt_net_udp_send_local_discard() -> i64:
+    # AF_INET=2, SOCK_DGRAM=2.
+    val fd = socket(2, 2, 0)
+    if fd < 0:
+        return -1
+    val addr = sockaddr_loopback(9)
+    if addr < 1:
+        close(fd)
+        return -2
+    val msg = malloc(1)
+    if msg < 1:
+        free(addr)
+        close(fd)
+        return -3
+    spl_store_u8(msg, 0, 120)
+    sendto(fd, msg, 1, 0, addr, 16)
+    free(msg)
+    free(addr)
+    close(fd)
+    return 0
+
+fn http_request_bytes() -> i64:
+    val msg = malloc(18)
+    if msg < 1:
+        return 0
+    # "GET / HTTP/1.0\r\n\r\n"
+    spl_store_u8(msg, 0, 71)
+    spl_store_u8(msg, 1, 69)
+    spl_store_u8(msg, 2, 84)
+    spl_store_u8(msg, 3, 32)
+    spl_store_u8(msg, 4, 47)
+    spl_store_u8(msg, 5, 32)
+    spl_store_u8(msg, 6, 72)
+    spl_store_u8(msg, 7, 84)
+    spl_store_u8(msg, 8, 84)
+    spl_store_u8(msg, 9, 80)
+    spl_store_u8(msg, 10, 47)
+    spl_store_u8(msg, 11, 49)
+    spl_store_u8(msg, 12, 46)
+    spl_store_u8(msg, 13, 48)
+    spl_store_u8(msg, 14, 13)
+    spl_store_u8(msg, 15, 10)
+    spl_store_u8(msg, 16, 13)
+    spl_store_u8(msg, 17, 10)
+    return msg
+
+pub fn rt_net_http_plain_local_probe() -> i64:
+    # Plain HTTP only. TLS/HTTPS must stay behind an explicit runtime capsule.
+    val fd = socket(2, 1, 0)
+    if fd < 0:
+        return -1
+    val addr = sockaddr_loopback(80)
+    if addr < 1:
+        close(fd)
+        return -2
+    val ok = connect(fd, addr, 16)
+    free(addr)
+    if ok == 0:
+        val msg = http_request_bytes()
+        if msg > 0:
+            write(fd, msg, 18)
+            free(msg)
+    close(fd)
+    return 0

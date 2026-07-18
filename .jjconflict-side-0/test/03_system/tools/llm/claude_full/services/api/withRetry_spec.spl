@@ -1,0 +1,104 @@
+"""
+# Claude Full With Retry
+
+## Overview
+
+Pins deterministic behavior for the Claude CLI `withRetry.ts` retry utility:
+foreground/background 529 policy, retry delay calculation, context overflow
+adjustment, fallback errors, provider auth retry decisions, and reset-delay
+helpers.
+
+**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Plan:** N/A - target selected from strict checker output.
+**Design:** N/A - source mirror for `tmp/claude/claude-code-main/src/services/api/withRetry.ts`.
+**Research:** N/A - upstream TypeScript file is the source reference.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.services.api.withRetry.*
+
+describe "Claude full withRetry":
+    it "should classify foreground 529 retry sources":
+        step("Compare foreground and background query sources")
+        expect(shouldRetry529("")).to_equal(true)
+        expect(shouldRetry529("repl_main_thread")).to_equal(true)
+        expect(shouldRetry529("title")).to_equal(false)
+
+    it "should build retry errors with source names":
+        step("Create CannotRetryError and fallback error")
+        val context = RetryContext.new("opus")
+        val cannot = CannotRetryError.new("nope", context)
+        val fallback = FallbackTriggeredError.new("opus", "sonnet")
+        expect(cannot.name).to_equal("RetryError")
+        expect(fallback.name).to_equal("FallbackTriggeredError")
+        expect(fallback.message).to_contain("opus -> sonnet")
+
+    it "should compute retry delay from retry-after or exponential backoff":
+        step("Check header override and default exponential delay")
+        expect(getRetryDelay(4, "7", 32000, 0)).to_equal(7000)
+        expect(getRetryDelay(3, "", 32000, 25)).to_equal(2025)
+
+    it "should parse context overflow errors and adjust max tokens":
+        step("Handle max token overflow")
+        val options = RetryOptions.new("opus")
+        val model = WithRetryModel.new(options)
+        val error = ApiError.new(400, "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000")
+        val outcome = model.handleError(error, 1)
+        expect(outcome.status).to_equal("retry")
+        expect(outcome.context.maxTokensOverride).to_equal(10941)
+        expect(model.logs[0]).to_equal("tengu_max_tokens_context_overflow_adjustment")
+
+    it "should drop background 529 without retry amplification":
+        step("Use non-foreground query source")
+        val options = RetryOptions.new("opus")
+        options.querySource = "title"
+        val model = WithRetryModel.new(options)
+        val outcome = model.handleError(ApiError.new(529, "overloaded"), 1)
+        expect(outcome.status).to_equal("fail")
+        expect(outcome.errorName).to_equal("RetryError")
+        expect(model.logs[0]).to_equal("tengu_api_529_background_dropped")
+
+    it "should trigger fallback after repeated 529 errors":
+        step("Seed two prior 529s and provide fallback model")
+        val options = RetryOptions.new("opus")
+        options.initialConsecutive529Errors = 2
+        options.fallbackModel = "sonnet"
+        val model = WithRetryModel.new(options)
+        val outcome = model.handleError(ApiError.new(529, "overloaded"), 1)
+        expect(outcome.status).to_equal("fail")
+        expect(outcome.errorName).to_equal("FallbackTriggeredError")
+
+    it "should honor shouldRetry header and subscriber gates":
+        step("Check retry header decisions")
+        val err = ApiError.new(500, "server")
+        err.shouldRetryHeader = "false"
+        val external = RetryOptions.new("opus")
+        expect(shouldRetryWithOptions(err, external)).to_equal(false)
+        val ant = RetryOptions.new("opus")
+        ant.antUser = true
+        expect(shouldRetryWithOptions(err, ant)).to_equal(true)
+        val rate = ApiError.new(429, "rate")
+        val sub = RetryOptions.new("opus")
+        sub.claudeAiSubscriber = true
+        expect(shouldRetryWithOptions(rate, sub)).to_equal(false)
+
+    it "should classify provider auth and stale connection errors":
+        step("Check cloud and connection helpers")
+        expect(isStaleConnectionError(ApiError.connection("ECONNRESET"))).to_equal(true)
+        expect(isBedrockAuthError(ApiError.new(403, "bad"), true, false)).to_equal(true)
+        expect(isGoogleAuthLibraryCredentialError("Could not refresh access token")).to_equal(true)
+        expect(isVertexAuthError(ApiError.new(401, "expired"), true)).to_equal(true)
+
+    it "should cap rate-limit reset delay":
+        step("Compute reset delay")
+        val err = ApiError.new(429, "rate")
+        err.resetUnixSec = 100
+        expect(getRateLimitResetDelayMs(err, 99000)).to_equal(1000)
+        err.resetUnixSec = 999999
+        expect(getRateLimitResetDelayMs(err, 0)).to_equal(21600000)
+
+    it "should expose source-backed constants":
+        step("Pin source surface")
+        expect(abortError()).to_equal("APIUserAbortError")
+        expect(baseDelayMs()).to_equal(500)
+        expect(withRetrySourceLinesModeled()).to_equal(822)

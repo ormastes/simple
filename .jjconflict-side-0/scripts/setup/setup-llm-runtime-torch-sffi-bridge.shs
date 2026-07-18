@@ -1,0 +1,222 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_torch_sffi_bridge}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+BUILD_LOG="$BUILD_DIR/build.log"
+CXX="${CXX:-g++}"
+MODE="build"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --build)
+            MODE="build"
+            ;;
+        --check)
+            MODE="check"
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$BUILD_LOG"
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_size() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "0"
+    fi
+}
+
+PYTHON_TORCH_ENV="$BUILD_DIR/python_torch.env"
+python3 - "$PYTHON_TORCH_ENV" <<'PY'
+import sys
+from pathlib import Path
+
+out = sys.argv[1]
+values = {
+    "python_torch_module_status": "missing",
+    "python_torch_package_dir": "missing",
+    "python_torch_include_dir": "missing",
+    "python_torch_api_include_dir": "missing",
+    "python_torch_library_dir": "missing",
+    "python_torch_libtorch_status": "missing",
+    "python_torch_libtorch_cpu_status": "missing",
+    "python_torch_libtorch_cuda_status": "missing",
+    "python_torch_libc10_status": "missing",
+    "python_torch_libc10_cuda_status": "missing",
+    "python_torch_error": "none",
+}
+try:
+    import torch
+    package_dir = Path(torch.__file__).parent
+    include_dir = package_dir / "include"
+    api_include_dir = include_dir / "torch" / "csrc" / "api" / "include"
+    library_dir = package_dir / "lib"
+    values["python_torch_module_status"] = "available"
+    values["python_torch_package_dir"] = str(package_dir)
+    values["python_torch_include_dir"] = str(include_dir)
+    values["python_torch_api_include_dir"] = str(api_include_dir)
+    values["python_torch_library_dir"] = str(library_dir)
+    values["python_torch_libtorch_status"] = "ready" if (library_dir / "libtorch.so").is_file() else "missing"
+    values["python_torch_libtorch_cpu_status"] = "ready" if (library_dir / "libtorch_cpu.so").is_file() else "missing"
+    values["python_torch_libtorch_cuda_status"] = "ready" if (library_dir / "libtorch_cuda.so").is_file() else "missing"
+    values["python_torch_libc10_status"] = "ready" if (library_dir / "libc10.so").is_file() else "missing"
+    values["python_torch_libc10_cuda_status"] = "ready" if (library_dir / "libc10_cuda.so").is_file() else "missing"
+except Exception as exc:
+    values["python_torch_error"] = f"{type(exc).__name__}:{exc}"
+
+with open(out, "w", encoding="utf-8") as handle:
+    for key, value in values.items():
+        handle.write(f"{key}={value}\n")
+PY
+
+env_value() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$PYTHON_TORCH_ENV" | tail -n 1
+}
+
+python_torch_module_status="$(env_value python_torch_module_status)"
+python_torch_package_dir="$(env_value python_torch_package_dir)"
+python_torch_include_dir="$(env_value python_torch_include_dir)"
+python_torch_api_include_dir="$(env_value python_torch_api_include_dir)"
+python_torch_library_dir="$(env_value python_torch_library_dir)"
+python_torch_libtorch_status="$(env_value python_torch_libtorch_status)"
+python_torch_libtorch_cpu_status="$(env_value python_torch_libtorch_cpu_status)"
+python_torch_libtorch_cuda_status="$(env_value python_torch_libtorch_cuda_status)"
+python_torch_libc10_status="$(env_value python_torch_libc10_status)"
+python_torch_libc10_cuda_status="$(env_value python_torch_libc10_cuda_status)"
+python_torch_error="$(env_value python_torch_error)"
+
+status="fail"
+reason="python_torch_missing"
+output_path="$BUILD_DIR/libspl_torch.so"
+compile_status="skipped"
+compile_exit="0"
+
+if [ "$python_torch_module_status" = "available" ] &&
+   [ -d "$python_torch_include_dir" ] &&
+   [ -d "$python_torch_api_include_dir" ] &&
+   [ -d "$python_torch_library_dir" ] &&
+   [ "$python_torch_libtorch_status" = "ready" ] &&
+   [ "$python_torch_libtorch_cpu_status" = "ready" ] &&
+   [ "$python_torch_libc10_status" = "ready" ]; then
+    status="pass"
+    reason="python_torch_layout_ready"
+else
+    reason="python_torch_layout_incomplete"
+fi
+
+if [ "$MODE" = "build" ] && [ "$status" = "pass" ]; then
+    libs="-ltorch -ltorch_cpu -lc10"
+    if [ "$python_torch_libtorch_cuda_status" = "ready" ] && [ "$python_torch_libc10_cuda_status" = "ready" ]; then
+        libs="$libs -ltorch_cuda -lc10_cuda"
+    fi
+    # shellcheck disable=SC2086
+    if "$CXX" -std=c++17 -O2 -fPIC -shared src/runtime/torch_sffi.cpp \
+        -o "$output_path" \
+        -I"$python_torch_include_dir" \
+        -I"$python_torch_api_include_dir" \
+        -L"$python_torch_library_dir" \
+        -Wl,-rpath,"$python_torch_library_dir" \
+        $libs >"$BUILD_LOG" 2>&1; then
+        compile_status="pass"
+        reason="libspl_torch_built"
+    else
+        compile_exit="$?"
+        compile_status="fail"
+        status="fail"
+        reason="compile_failed"
+        rm -f "$output_path"
+    fi
+elif [ "$MODE" = "check" ]; then
+    compile_status="not_requested"
+fi
+
+bridge_status="missing"
+if [ -f "$output_path" ]; then
+    bridge_status="visible"
+fi
+if [ "$MODE" = "build" ] && [ "$bridge_status" != "visible" ]; then
+    status="fail"
+fi
+
+{
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_status=$status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_reason=$reason"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_mode=$MODE"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_output_path=$output_path"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_output_status=$bridge_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_output_size=$(artifact_size "$output_path")"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_output_sha256=$(artifact_sha256 "$output_path")"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_compile_status=$compile_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_compile_exit=$compile_exit"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_build_log=$BUILD_LOG"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_build_log_size=$(artifact_size "$BUILD_LOG")"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_build_log_sha256=$(artifact_sha256 "$BUILD_LOG")"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_module_status=$python_torch_module_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_package_dir=$python_torch_package_dir"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_include_dir=$python_torch_include_dir"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_api_include_dir=$python_torch_api_include_dir"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_library_dir=$python_torch_library_dir"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_libtorch_status=$python_torch_libtorch_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_libtorch_cpu_status=$python_torch_libtorch_cpu_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_libtorch_cuda_status=$python_torch_libtorch_cuda_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_libc10_status=$python_torch_libc10_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_libc10_cuda_status=$python_torch_libc10_cuda_status"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_python_torch_error=$python_torch_error"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_simple_sffi_path_export=$BUILD_DIR"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_libtorch_export=$python_torch_library_dir"
+    printf '%s\n' "llm_runtime_torch_sffi_bridge_next_action=export SIMPLE_SFFI_PATH=$BUILD_DIR LIBTORCH=$python_torch_library_dir and prepend LD_LIBRARY_PATH=$python_torch_library_dir before rerunning the Torch optimizer probe; use SIMPLE_TORCH_RUNTIME_PATH=$output_path only on binaries built before SIMPLE_SFFI_PATH Torch bridge auto-discovery"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Runtime Torch SFFI Bridge Setup\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- mode: \`$MODE\`"
+    printf '%s\n' "- output_path: \`$output_path\`"
+    printf '%s\n' "- output_status: \`$bridge_status\`"
+    printf '%s\n' "- output_sha256: \`$(artifact_sha256 "$output_path")\`"
+    printf '%s\n' "- python_torch_package_dir: \`$python_torch_package_dir\`"
+    printf '%s\n' "- python_torch_library_dir: \`$python_torch_library_dir\`"
+    printf '%s\n' "- compile_status: \`$compile_status\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '%s\n' "- build_log: \`$BUILD_LOG\`"
+    printf '\n'
+    printf 'This setup wrapper builds the Simple Torch SFFI bridge from the installed Python Torch package layout. It proves only that `libspl_torch.so` can be built and exposed through `SIMPLE_SFFI_PATH`; the strict optimizer probe remains the authority for `rt_torch_available`, CUDA placement, gradients, and optimizer behavior.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-runtime-torch-sffi-bridge reason=$reason"
+    exit 0
+fi
+
+echo "STATUS: FAIL llm-runtime-torch-sffi-bridge reason=$reason"
+exit 1

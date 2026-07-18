@@ -1,0 +1,1546 @@
+#![allow(large_file)]  # Intentional: backend dispatch state remains in the Engine2D owner.
+# 2D Engine — Engine Facade
+#
+# High-level entry point that auto-selects the best available rendering
+# backend and delegates all drawing operations to it.
+#
+# Backend priority: metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu
+#
+# Usage:
+#   use std.gpu.engine2d.engine.{Engine2D}
+#
+#   var engine = Engine2D.create(800, 600)
+#   engine.clear(color_white())
+#   engine.draw_rect_filled(10, 10, 100, 50, color_red())
+#   engine.present()
+#   val pixels = engine.read_pixels()
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gpu.engine2d.backend_emu.{
+    emu_draw_text_bg,
+    emu_draw_ellipse, emu_draw_ellipse_filled,
+    emu_draw_arc, emu_draw_bezier,
+    emu_draw_polygon_filled, emu_draw_polyline,
+    emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
+    emu_draw_gradient_rect_h, emu_draw_radial_gradient,
+    emu_draw_rect_blend, emu_draw_image_blend,
+    emu_draw_image_scaled, emu_draw_image_scaled_blend,
+    emu_draw_triangle_outline,
+    emu_draw_blur_rect, emu_draw_shadow_rect,
+    emu_draw_image_transform,
+    emu_draw_rect_blend_mode
+}
+use std.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+use std.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
+use std.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.backend_vulkan_font
+use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gpu.engine2d.backend_directx.{DirectXBackend}
+use std.gpu.engine2d.backend_opencl.{OpenClBackend}
+use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gpu.engine2d.backend_rocm.{RocmBackend}
+use std.gpu.engine2d.backend_intel.{IntelBackend}
+use std.gpu.engine2d.backend_webgpu.{WebGpuBackend}
+use std.gpu.engine2d.backend_qualcomm.{QualcommBackend}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_auto, compute_dispatch_for_backend}
+use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
+use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.crypto.sha256.{sha256_text}
+use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
+use std.gc_async_mut.io.mod_stub.{env_get}
+use std.gc_async_mut.text_layout.font_renderer.{
+    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
+    font_execution_plan, font_render_config_selection_supported,
+    font_renderer_registered_selected_bytes_only
+}
+use std.common.encoding.font_registry.{selected_font_asset_candidate_for_identity}
+use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
+
+# ============================================================================
+# Config / environment backend selection
+# ============================================================================
+
+fn engine2d_env_backend_override() -> text:
+    """Config/environment override for the auto-selected 2D backend.
+
+    The 2D API is one surface; which lane runs it — SIMD CPU vs a GPU backend —
+    is selectable by environment without changing any call site. Set
+    `SIMPLE_2D_BACKEND` to a backend key (e.g. `cpu_simd`, `software`, `cuda`,
+    `vulkan`, `metal`, `rocm`). Returns "" when unset.
+    """
+    val raw = engine2d_env_get("SIMPLE_2D_BACKEND") ?? ""
+    raw.trim()
+
+fn engine2d_env_get(key: text) -> text:
+    env_get(key)
+
+fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
+    """Scale every pixel's alpha channel by opacity_milli/1000 (1000 = no
+    change), used by draw_engine_opacity() to fade an embedded surface before
+    compositing it into a parent Engine2D."""
+    val count = pixels.len()
+    var out: [u32] = [0u32; count]
+    var i = 0
+    while i < count:
+        val p = pixels[i]
+        val scaled_a = (color_a(p) * opacity_milli) / 1000
+        out[i] = rgba(color_r(p), color_g(p), color_b(p), scaled_a)
+        i = i + 1
+    out
+
+fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
+                                      atlas_x: i32, atlas_y: i32, width: i32, height: i32,
+                                      color: u32) -> [u32]:
+    font_atlas_subrect_pixels(atlas_pixels, atlas_width, atlas_height,
+        atlas_x, atlas_y, width, height, color)
+# ============================================================================
+# Engine2D
+# ============================================================================
+
+class Engine2D:
+    """2D rendering engine with automatic backend selection.
+
+    Creates the best available backend at initialization time. All drawing
+    methods delegate to the active backend through the RenderBackend trait.
+
+    Lifecycle:
+        1. Engine2D.create(width, height)  — auto-detect and init backend
+        2. clear(), draw_*(), present()     — render frames
+        3. shutdown()                       — release resources
+
+    Example:
+        var engine = Engine2D.create(800, 600)
+        print "Using backend: {engine.backend_name()}"
+
+        engine.clear(rgb(30, 30, 30))
+        engine.draw_rect_filled(10, 10, 200, 100, rgb(255, 0, 0))
+        engine.draw_text(20, 40, "Hello Engine2D", rgb(255, 255, 255), 14)
+        engine.present()
+
+        val pixels = engine.read_pixels()
+        engine.shutdown()
+    """
+
+    backend: RenderBackend
+    # Capability wiring (GPU-dict pilot, design cpu_gpu_dual_algorithm_design.md
+    # §1/§7): the concrete backend's honest self-description, captured at
+    # construction time (before the concrete instance is boxed into the
+    # `backend: RenderBackend` trait field) since `capability()` is NOT a
+    # RenderBackend trait requirement — adding one would force every backend to
+    # implement it at once (backend_capability.spl convention). Backends that
+    # do not yet populate a real capability() report the honest
+    # software-emulation/no-accelerated-ops default.
+    capability: BackendCapability
+    baremetal_backend: BaremetalBackend?
+    virtio_gpu_backend: VirtioGpuBackend?
+    cuda_backend: CudaBackend? = nil
+    vulkan_backend: VulkanBackend? = nil
+    vulkan_font_state_unknown: bool = false
+    last_vulkan_font_evidence: VulkanFontCompositeEvidence? = nil
+    metal_backend: MetalBackend? = nil
+    opencl_backend: OpenClBackend? = nil
+    rocm_backend: RocmBackend? = nil
+    # Set explicitly by create_offscreen() (a software-only embedding target).
+    # Declared with an explicit Option type so its slot is real and its type is
+    # inferable at read sites (draw_software_offscreen_opacity_consume); the
+    # constructor already names it, but without this declaration the read fails
+    # HIR field-type inference and the store may not land in a real slot.
+    software_backend: SoftwareBackend? = nil
+    w: i32
+    h: i32
+    pacing: FramePacingCounters
+    selected_backend_name: text
+    font_renderer: FontRenderer? = nil
+    last_font_execution_attempts: [text] = []
+    last_font_execution_target: text = ""
+
+    me fonts() -> FontRenderer:
+        val active = self.font_renderer
+        if active != nil:
+            return active
+        val created = FontRenderer.new()
+        self.font_renderer = created
+        created
+
+    fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
+    fn font_execution_target() -> text: self.last_font_execution_target
+
+    me install_vulkan_font_spirv(spirv_bytes: [u8]) -> bool:
+        """Install one bounded precompiled font compositor on a real Vulkan engine."""
+        if spirv_bytes.len() == 0 or spirv_bytes.len() > 16777216:
+            return false
+        val active = self.vulkan_backend
+        if active == nil:
+            return false
+        val vulkan = active
+        val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
+        self.vulkan_backend = vulkan
+        evidence.status == "ready"
+
+    me install_cuda_font_ptx(ptx: text) -> bool:
+        """Install one verified generated font companion on a real CUDA engine."""
+        val active = self.cuda_backend
+        if active == nil:
+            return false
+        val cuda = active
+        val installed = cuda.install_font_atlas_ptx(ptx)
+        self.cuda_backend = cuda
+        installed
+
+    me install_cuda_font_artifact(ptx: text, artifact_sha256: text, program_version: i64,
+                                  semantics_version: i64) -> bool:
+        """Install caller-provided PTX only when its payload contract matches."""
+        if (ptx.len() == 0 or ptx.len() > CUDA_FONT_PTX_MAX_BYTES or
+            not font_atlas_composite_program_version_valid(program_version) or
+            semantics_version != FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION or
+            artifact_sha256.len() != 64 or sha256_text(ptx) != artifact_sha256):
+            return false
+        # install_cuda_font_ptx performs the existing bounded `.version` and
+        # exact entry-symbol gate before its session cache can mutate.
+        self.install_cuda_font_ptx(ptx)
+
+    me install_pinned_cuda_font_artifact() -> bool:
+        """Install the source-tracked CUDA font companion through the existing gate."""
+        val ptx = cuda_font_atlas_composite_ptx()
+        if not cuda_font_atlas_composite_ptx_trusted(ptx):
+            return false
+        self.install_cuda_font_artifact(
+            ptx, FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256,
+            FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION,
+            FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION)
+
+    me _poison_vulkan_font_surface(fallback_pixels: [u32]):
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan.mark_completion_unknown()
+            self.vulkan_backend = vulkan
+        var software = SoftwareBackend.create()
+        software.init(self.w, self.h)
+        if fallback_pixels.len() == self.w.to_i64() * self.h.to_i64():
+            software.buf = fallback_pixels
+        self.capability = software.capability()
+        self.backend = software
+        self.selected_backend_name = "vulkan-poisoned-software"
+        self.vulkan_font_state_unknown = true
+
+    # ========================================================================
+    # Constructors
+    # ========================================================================
+
+    static fn create(width: i32, height: i32) -> Engine2D:
+        """Create engine with auto-detected best backend.
+
+        Tries backends in priority order: metal, cuda, rocm/hip, qualcomm, vulkan, directx, opencl, opengl, intel, webgpu, cpu_simd, software, cpu.
+        Falls back to cpu if all others fail.
+
+        Args:
+            width: Framebuffer width in pixels
+            height: Framebuffer height in pixels
+
+        Returns:
+            Initialized Engine2D
+        """
+        val best = Engine2D.detect_best_backend()
+        Engine2D.create_with_backend(width, height, best)
+
+    static fn create_with_backend(width: i32, height: i32, backend_name: text) -> Engine2D:
+        """Create engine with a specific backend.
+
+        Args:
+            width: Framebuffer width in pixels
+            height: Framebuffer height in pixels
+            backend_name: Trimmed, case-insensitive backend key. Supported names include "metal", "cuda", "rocm"/"hip"/"amd-hip"/"amd_rocm", "qualcomm", "vulkan", "directx"/"d3d11"/"dx12", "opencl", "opengl", "intel", "webgpu", "cpu_simd"/"simd_cpu"/"cpu-simd", "software", "cpu", "baremetal"/"native"/"platform-native", and "virtio_gpu"/"virtio-gpu".
+
+        Returns:
+            Initialized Engine2D (falls back to cpu on failure)
+
+        Note: "baremetal" requires a pre-initialized BaremetalBackend. Use
+              create_with_baremetal_backend() instead for baremetal rendering.
+        """
+        val created = Engine2D.create_requested_backend(width, height, backend_name)
+        match created:
+            Ok(engine):
+                return engine
+            Err(_):
+                pass_do_nothing
+
+        # Fallback: CPU backend always succeeds
+        match Engine2D.create_requested_backend(width, height, "cpu"):
+            Ok(engine):
+                engine
+            Err(_):
+                var sw = SoftwareBackend.create()
+                sw.init(width, height)
+                val capability = sw.capability()
+                Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+
+    static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
+        """Create an engine in native-only ("no mirror") fast mode.
+
+        For the Metal backend this shrinks the CPU software mirror to 1x1 so draw
+        ops stop re-rasterizing the full framebuffer under the interpreter (the
+        per-op mirror was the entire render cost — see
+        doc/08_tracking/bug/engine2d_interpreted_mirror_dominates_render_2026-07-03.md).
+        Draw ops forward to the GPU only, and read_pixels() downloads the GPU
+        framebuffer in one FFI hop.
+
+        IMPORTANT: the caller must issue a clear() before drawing so the GPU
+        framebuffer is initialized and gpu_frame_complete becomes true; otherwise
+        readback falls back to the 1x1 mirror.
+
+        Backends other than Metal have no native framebuffer to read back from
+        (their surface lives in a Simple [u32] array with per-op interpreted
+        marshalling), so this transparently falls back to the normal
+        create_with_backend() path for them — correct, but not accelerated.
+        """
+        val requested_backend = backend_canonical_name(backend_name)
+        if requested_backend == "metal":
+            var metal = MetalBackend.create()
+            if metal.init(width, height):
+                metal.use_gpu_only()
+                val capability = metal.capability()
+                return Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
+        Engine2D.create_with_backend(width, height, backend_name)
+
+    static fn create_offscreen(width: i32, height: i32) -> Engine2D:
+        """Create an offscreen CPU/software render target for embedding.
+
+        This is the "rendering-inside-rendering" CPU lane: an Engine2D that is
+        always backed by the software rasterizer — never a window or GPU
+        backend — so a caller can render an independent sub-scene and later
+        stitch its pixels into a parent Engine2D via draw_engine() /
+        draw_engine_opacity(). The buffer starts fully TRANSPARENT (not the
+        default opaque-black fill every other backend init uses) so pixels the
+        embedded scene never touches let the parent's own content show through
+        once composited, instead of punching an opaque black hole in it.
+        """
+        var sw = SoftwareBackend.create()
+        sw.init(width, height)
+        sw.clear(0x00000000u32)
+        val capability = sw.capability()
+        # NOTE(2026-07-16): explicitly pin every optional accelerator-backend
+        # field to nil rather than relying on the class-level `= nil` default
+        # being applied for an omitted named field. On this freestanding
+        # (cranelift, x86_64-unknown-none) codegen path that default was
+        # observed to NOT be applied: an offscreen Engine2D created here (used
+        # to render an embedded batch, e.g. the taskbar) had a garbage
+        # non-nil `vulkan_backend`, so `draw_rect_filled` took the "elif
+        # Some(vulkan)" branch and called through a bogus Vulkan backend,
+        # producing a wild instruction pointer (observed as
+        # 0xf000d43df000d43d). Root cause is a compiler/codegen bug (defaulted
+        # struct-literal fields not zero-initialized when omitted); this is
+        # the workaround at the call site until that's fixed upstream.
+        # Only DECLARED fields: the 2026-07-16 pin-everything workaround also
+        # named software_backend/cpu_backend/directx_backend, which do not
+        # exist on Engine2D — the interpreter rejects unknown named ctor args,
+        # breaking every create_offscreen caller on the hosted lane
+        # (standalone 2D showcase regression, proven 2026-07-18). All declared
+        # defaulted fields stay explicitly pinned per the workaround's intent.
+        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, font_renderer: nil, last_font_execution_attempts: [], last_font_execution_target: "", w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+
+    me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
+        """Create one transparent child framebuffer on this engine's Vulkan session."""
+        val pixel_count = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
+            return Err("invalid-shared-vulkan-surface-size")
+        val active = self.vulkan_backend
+        if active == nil:
+            return Err("shared-vulkan-parent-required")
+        val parent = active
+        if not parent.owns_session or not parent.session.is_valid():
+            return Err("shared-vulkan-session-required")
+        var vulkan = VulkanBackend.create()
+        if not vulkan.init_with_session(width, height, parent.session):
+            return Err(if vulkan.last_error == "": "shared-vulkan-surface-init-failed" else: vulkan.last_error)
+        var child = Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan")
+        child.clear(0x00000000u32)
+        Ok(child)
+
+    me create_shared_metal_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
+        """Create one transparent child framebuffer on this engine's Metal session."""
+        val pixel_count = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
+            return Err("invalid-shared-metal-surface-size")
+        val active = self.metal_backend
+        if active == nil:
+            return Err("shared-metal-parent-required")
+        val parent = active
+        if not parent.session.is_valid():
+            return Err("shared-metal-session-required")
+        var metal = MetalBackend.create()
+        if not metal.init_with_session(width, height, parent.session):
+            return Err(if metal.last_error == "": "shared-metal-surface-init-failed" else: metal.last_error)
+        val capability = metal.capability()
+        Ok(Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
+
+    static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
+        """Create one canonical backend without silently falling back."""
+        val requested_backend = backend_canonical_name(backend_name)
+        if requested_backend == "cuda":
+            var cuda = CudaBackend.create()
+            if cuda.init(width, height):
+                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
+                engine.install_pinned_cuda_font_artifact()
+                return Ok(engine)
+
+        if requested_backend == "vulkan":
+            var vulkan = VulkanBackend.create()
+            if vulkan.init(width, height):
+                return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+
+        if requested_backend == "directx":
+            var directx = DirectXBackend.create()
+            if directx.init(width, height):
+                # Stamp the backend's honest self-reported name
+                # ("directx-software-emulation"): draws are CPU-rasterized by
+                # its internal SoftwareBackend even when the D3D11/DXVK device
+                # chain initializes. "directx" stays valid as the REQUESTED key.
+                val selected_name = directx.name()
+                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
+
+        if requested_backend == "directx-on-vulkan":
+            # DirectX-on-Vulkan emulation: serve a DirectX API request through the
+            # real Vulkan backend (the vkd3d/DXVK concept — DirectX translated to
+            # Vulkan). Pixels are genuinely Vulkan-rendered and verified bit-exact
+            # vs SoftwareBackend; primitive coverage matches VulkanBackend. The
+            # selected name discloses the emulation rather than claiming native
+            # DirectX. Distinct from the "directx" key, which is the CPU raster
+            # path gated by a real vkd3d/Vulkan ICD probe and honestly reported
+            # as "directx-software-emulation".
+            var dx_vk = VulkanBackend.create()
+            if dx_vk.init(width, height):
+                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
+
+        if requested_backend == "opencl":
+            var opencl = OpenClBackend.create()
+            if opencl.init(width, height):
+                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
+
+        if requested_backend == "opengl":
+            var opengl = OpenGLBackend.create()
+            if opengl.init(width, height):
+                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
+
+        if requested_backend == "metal":
+            var metal = MetalBackend.create()
+            if metal.init(width, height):
+                val capability = metal.capability()
+                return Ok(Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
+
+        if requested_backend == "metal-on-vulkan":
+            # Compatibility stays explicit: strict "metal" never claims this lane.
+            var metal_vk = VulkanBackend.create()
+            if metal_vk.init(width, height):
+                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
+
+        if requested_backend == "rocm":
+            var rocm = RocmBackend.create()
+            if rocm.init(width, height):
+                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
+
+        if requested_backend == "intel":
+            var intel = IntelBackend.create()
+            if intel.init(width, height):
+                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
+
+        if requested_backend == "qualcomm":
+            var qualcomm = QualcommBackend.create()
+            if qualcomm.init(width, height):
+                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
+
+        if requested_backend == "webgpu":
+            var webgpu = WebGpuBackend.create()
+            if webgpu.init(width, height):
+                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
+
+        if requested_backend == "software":
+            var sw = SoftwareBackend.create()
+            if sw.init(width, height):
+                val capability = sw.capability()
+                return Ok(Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
+
+        # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
+        # FramebufferDriver and must be created via create_with_baremetal_backend().
+        # If requested here by name, fall through to CPU fallback.
+
+        if requested_backend == "cpu_simd":
+            var cpu_simd = CpuBackend.create_simd()
+            cpu_simd.init(width, height)
+            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
+
+        if requested_backend == "cpu":
+            var cpu = CpuBackend.create()
+            cpu.init(width, height)
+            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
+
+        Err("backend unavailable: " + requested_backend)
+
+    static fn create_vulkan_backend(width: i32, height: i32) -> Result<Engine2D, text>:
+        """Create canonical Vulkan without retaining unrelated backend factories."""
+        var vulkan = VulkanBackend.create()
+        if vulkan.init(width, height):
+            return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+        Err("backend unavailable: vulkan")
+
+    static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
+        """Create engine with a pre-initialized BaremetalBackend.
+
+        The BaremetalBackend wraps a FramebufferDriver and is used for
+        OS-level rendering where only framebuffer hardware is available.
+
+        Args:
+            backend: An already-created BaremetalBackend (via BaremetalBackend.create())
+
+        Returns:
+            Engine2D using the baremetal backend
+        """
+        Engine2D.create_with_baremetal_backend_dims(backend.w, backend.h, backend)
+
+    static fn create_with_baremetal_backend_dims(width: i32, height: i32, backend: BaremetalBackend) -> Engine2D:
+        """Create engine with explicit dimensions for a baremetal backend.
+
+        The dimension arguments avoid reading cached width/height through a
+        fragile backend-parameter path during baremetal boot. The CPU backend
+        remains an unused placeholder on this path, so it must not allocate
+        or initialize any pixel buffer.
+
+        NOTE(2026-07-16): explicitly pin every optional accelerator-backend
+        field to nil rather than relying on the class-level `= nil` default
+        being applied for an omitted named field -- see the identical note
+        on `create_offscreen()` above. This is the root SimpleOS desktop
+        engine, so a garbage non-nil `vulkan_backend`/etc. here would corrupt
+        every draw call that checks it (observed: draw_image_scaled_blend
+        took the bogus "elif Some(vulkan)" branch and faulted).
+        """
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+
+    static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
+        """Create engine with a pre-initialized VirtioGpuBackend."""
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
+
+    static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
+        """Create engine with a specific backend, returning diagnostics on failure.
+
+        Unlike create() which silently falls back to CPU, this returns a typed
+        BackendProbeResult explaining exactly why the requested backend is unavailable.
+        """
+        var probe = Engine2D.probe_backend(width, height, backend_name)
+        if probe.status == BackendStatus.Initialized:
+            match Engine2D.create_requested_backend(width, height, backend_name):
+                Ok(engine):
+                    Ok(engine)
+                Err(message):
+                    Err(BackendProbeResult.failed(backend_canonical_name(backend_name), message))
+        else:
+            Err(probe)
+
+    static fn probe_backend(width: i32, height: i32, backend_name: text) -> BackendProbeResult:
+        """Probe whether a backend is available without creating an engine."""
+        val requested_backend = backend_canonical_name(backend_name)
+        if requested_backend == "cuda":
+            var b = CudaBackend.create()
+            if b.init(width, height):
+                val probe = b.last_probe
+                b.shutdown()
+                return probe
+            return b.last_probe
+
+        if requested_backend == "vulkan":
+            var b = VulkanBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("vulkan", "Vulkan initialized")
+            if b.last_error != "":
+                return BackendProbeResult.unavailable("vulkan", b.last_error)
+            return BackendProbeResult.unavailable("vulkan", "vkCreateInstance failed or no devices")
+
+        if requested_backend == "directx":
+            var b = DirectXBackend.create()
+            # Report the backend's honest self-reported name
+            # ("directx-software-emulation"); "directx" is only the requested key.
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success(b.name(), "DirectX(software-emulation raster) initialized")
+            if b.last_error != "":
+                return BackendProbeResult.unavailable(b.name(), b.last_error)
+            return BackendProbeResult.unavailable(b.name(), "d3d11 device or swapchain creation failed")
+        if requested_backend == "opencl":
+            var b = OpenClBackend.create()
+            if b.init(width, height):
+                val probe = b.last_probe
+                b.shutdown()
+                return probe
+            return b.last_probe
+
+        if requested_backend == "rocm":
+            var b = RocmBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("rocm", "ROCm/HIP initialized")
+            return BackendProbeResult.unavailable("rocm", "ROCm/HIP runtime, device, or module unavailable")
+
+        if requested_backend == "metal":
+            var b = MetalBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("metal", "Metal initialized")
+            return b.last_probe
+
+        if requested_backend == "qualcomm":
+            var b = QualcommBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("qualcomm", "Qualcomm Adreno Vulkan delegate initialized")
+            return BackendProbeResult.unavailable("qualcomm", "Qualcomm Adreno target or Vulkan delegate unavailable")
+
+        if requested_backend == "webgpu":
+            var b = WebGpuBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("webgpu", "WebGPU initialized")
+            return BackendProbeResult.unavailable("webgpu", "WebGPU adapter not found")
+
+        if requested_backend == "opengl":
+            var b = OpenGLBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("opengl", "OpenGL initialized")
+            return BackendProbeResult.unavailable("opengl", "OpenGL context creation failed")
+
+        if requested_backend == "intel":
+            var b = IntelBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("intel", "Intel oneAPI initialized")
+            return BackendProbeResult.unavailable("intel", "Intel oneAPI runtime or device unavailable")
+
+        if requested_backend == "software":
+            return BackendProbeResult.success("software", "Software always available")
+
+        if requested_backend == "cpu":
+            return BackendProbeResult.success("cpu", "CPU always available")
+
+        if requested_backend == "cpu_simd":
+            # cpu_simd uses the CPU renderer surface with SIMD-instrumented row
+            # helpers. It is not a GPU fallback; the exact active arch proof is
+            # exposed by backend_probe.spl and check-cpu-simd-engine2d-evidence.shs.
+            return BackendProbeResult.success("cpu_simd", "CPU SIMD row provider available")
+
+        BackendProbeResult.unavailable(backend_name, "Unknown backend: " + backend_name)
+
+    static fn create_compute_dispatch() -> ComputeDispatchResult:
+        """Create the best available compute dispatch without changing render backend selection."""
+        compute_dispatch_auto()
+
+    static fn create_compute_dispatch_for_backend(backend_name: text) -> ComputeDispatchResult:
+        """Create a compute dispatch for an explicit backend through the strict factory."""
+        compute_dispatch_for_backend(backend_name)
+
+    static fn detect_best_compute_backend() -> text:
+        """Detect the best available compute backend."""
+        Engine2D.create_compute_dispatch().selected_name
+
+    # ========================================================================
+    # Backend Discovery
+    # ========================================================================
+
+    static fn detect_best_backend() -> text:
+        """Detect the best available backend.
+
+        Auto-probe priority: metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu
+
+        Explicit native surfaces such as baremetal and virtio_gpu require a
+        preinitialized framebuffer, so they are not probed from width/height.
+
+        A `SIMPLE_2D_BACKEND` config/environment override takes precedence when
+        the named backend actually initializes; otherwise the auto-probe runs.
+
+        Returns:
+            Backend name string
+        """
+        val override_name = engine2d_env_backend_override()
+        if override_name != "":
+            val override_canon = backend_canonical_name(override_name)
+            val override_probe = Engine2D.probe_backend(1, 1, override_canon)
+            if override_probe.status == BackendStatus.Initialized:
+                return override_canon
+        val order = backend_default_priority_order()
+        var idx = 0
+        val order_len = order.len()
+        while idx < order_len:
+            val name = order[idx]
+            val probe = Engine2D.probe_backend(1, 1, name)
+            if probe.status == BackendStatus.Initialized:
+                return name
+            idx = idx + 1
+        "cpu"
+
+    static fn list_backends() -> [text]:
+        """List all available backend names.
+
+        Returns:
+            Array of backend name strings that can successfully init
+        """
+        var available: [text] = []
+
+        val order = backend_default_priority_order()
+        var idx = 0
+        val order_len = order.len()
+        while idx < order_len:
+            val name = order[idx]
+            val probe = Engine2D.probe_backend(1, 1, name)
+            if probe.status == BackendStatus.Initialized:
+                available.push(name)
+            idx = idx + 1
+
+        available
+
+    static fn create_with_priority(width: i32, height: i32, priority: [text]) -> Engine2D:
+        """Create engine using a custom backend priority order.
+
+        Tries backends in the given order, falling back to CPU if none work.
+
+        Args:
+            width: Framebuffer width in pixels
+            height: Framebuffer height in pixels
+            priority: Ordered list of backend names to try
+
+        Returns:
+            Initialized Engine2D
+        """
+        for backend_name in priority:
+            val requested_backend = backend_canonical_name(backend_name)
+            val engine = Engine2D.create_requested_backend(width, height, requested_backend)
+            match engine:
+                Ok(value):
+                    return value
+                Err(_):
+                    pass_do_nothing
+        # Fallback
+        Engine2D.create_with_backend(width, height, "cpu")
+
+    # ========================================================================
+    # Backend Info
+    # ========================================================================
+
+    me backend_name() -> text:
+        """Get the name of the active backend."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            if self.selected_backend_name != "":
+                return self.selected_backend_name
+            return vg.name()
+        elif val Some(bm) = self.baremetal_backend:
+            if self.selected_backend_name != "":
+                return self.selected_backend_name
+            return bm.name()
+        else:
+            if self.selected_backend_name != "":
+                return self.selected_backend_name
+            return self.backend.name()
+
+    me width() -> i32:
+        self.w
+
+    me height() -> i32:
+        self.h
+
+    # ========================================================================
+    # Drawing Operations (delegate to backend)
+    # ========================================================================
+
+    me clear(color: u32):
+        """Clear the framebuffer to a solid color."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.clear(color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.clear(color)
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.clear(color)
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+        else:
+            self.backend.clear(color)
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Draw a rectangle outline."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_rect(x, y, w, h, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_rect(x, y, w, h, color)
+        else:
+            self.backend.draw_rect(x, y, w, h, color)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Draw a filled rectangle."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_rect_filled(x, y, w, h, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_rect_filled(x, y, w, h, color)
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.draw_rect_filled(x, y, w, h, color)
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+        else:
+            self.backend.draw_rect_filled(x, y, w, h, color)
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        """Draw a line between two points."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_line(x1, y1, x2, y2, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_line(x1, y1, x2, y2, color, thickness)
+        else:
+            self.backend.draw_line(x1, y1, x2, y2, color, thickness)
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        """Draw a circle outline."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_circle(cx, cy, r, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_circle(cx, cy, r, color)
+        else:
+            self.backend.draw_circle(cx, cy, r, color)
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        """Draw a filled circle."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_circle_filled(cx, cy, r, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_circle_filled(cx, cy, r, color)
+        else:
+            self.backend.draw_circle_filled(cx, cy, r, color)
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        """Draw a rounded rectangle outline."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_rounded_rect(x, y, w, h, radius, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_rounded_rect(x, y, w, h, radius, color)
+        else:
+            self.backend.draw_rounded_rect(x, y, w, h, radius, color)
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        """Draw a filled triangle."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        else:
+            self.backend.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        """Draw a rectangle with vertical gradient."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        else:
+            self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+
+    me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
+        self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+
+    me _draw_font_batch_cpu_suffix(x: i32, y: i32, batch: FontRenderBatch, submitted: i64) -> i64:
+        var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
+        while quad_index < batch.quads.len():
+            val quad = batch.quads[quad_index]
+            val pixels = engine2d_font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
+            if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
+                val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
+                val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
+                if dst_x != nil and dst_y != nil:
+                    self.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
+            quad_index = quad_index + 1
+        quad_index
+
+    me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
+        if not batch.material_supported() or plan.len() == 0:
+            return false
+        var quad_index: i64 = 0
+        var attempts: [text] = []
+        var winner = ""
+        for target in plan:
+            if self.vulkan_font_state_unknown and target != "cpu":
+                attempts.push(target + ":poisoned-skip")
+            elif quad_index > 0 and target != "cpu":
+                attempts.push(target + ":skipped-partial")
+            elif target == "cuda":
+                val active = self.cuda_backend
+                if active == nil:
+                    attempts.push("cuda:unavailable")
+                else:
+                    val cuda = active
+                    quad_index = cuda.draw_font_batch(x, y, batch)
+                    self.cuda_backend = cuda
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "cuda:success" else: "cuda:failed")
+                    if quad_index == batch.quads.len(): winner = "cuda"
+            elif target == "metal":
+                val active = self.metal_backend
+                if active == nil:
+                    attempts.push("metal:unavailable")
+                else:
+                    val metal = active
+                    quad_index = metal.draw_font_batch(x, y, batch)
+                    self.metal_backend = metal
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "metal:success" else: "metal:failed")
+                    if quad_index == batch.quads.len(): winner = "metal"
+            elif target == "opencl":
+                val active = self.opencl_backend
+                if active == nil:
+                    attempts.push("opencl:unavailable")
+                else:
+                    val opencl = active
+                    quad_index = opencl.draw_font_batch(x, y, batch)
+                    self.opencl_backend = opencl
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "opencl:success" else: "opencl:failed")
+                    if quad_index == batch.quads.len(): winner = "opencl"
+            elif target == "vulkan":
+                val active = self.vulkan_backend
+                if active == nil:
+                    attempts.push("vulkan:unavailable")
+                else:
+                    val vulkan = active
+                    # var (not val): evidence.fallback_pixels is cleared below;
+                    # W1006 mut-capability failure here silently killed
+                    # whole-program JIT (2026-07-18).
+                    var evidence = vulkan.composite_font_batch(x, y, batch)
+                    self.last_vulkan_font_evidence = evidence
+                    self.vulkan_backend = vulkan
+                    attempts.push("vulkan:" + evidence.reason)
+                    if (evidence.reason == "partial-framebuffer-restore-failed" or
+                        evidence.reason == "missing-command-cleanup-capability" or
+                        evidence.reason == "descriptor-cleanup-failed" or
+                        evidence.reason == "atlas-cleanup-failed" or
+                        evidence.reason == "fence-completion-unknown" or
+                        evidence.reason == "device-lost" or
+                        evidence.reason == "fence-cleanup-failed" or
+                        evidence.reason == "fence-wait-evidence-failed" or
+                        evidence.reason == "cleanup-failed"):
+                        self.last_font_execution_attempts = attempts
+                        self.last_font_execution_target = ""
+                        self._poison_vulkan_font_surface(evidence.fallback_pixels)
+                        evidence.fallback_pixels = []
+                        self.last_vulkan_font_evidence = evidence
+                        quad_index = 0
+                        continue
+                    if evidence.promotion_ready and evidence.dispatch_count == batch.quads.len():
+                        quad_index = batch.quads.len()
+                        winner = "vulkan"
+            elif target == "rocm":
+                val active = self.rocm_backend
+                if active == nil:
+                    attempts.push("rocm:unavailable")
+                else:
+                    val rocm = active
+                    quad_index = rocm.draw_font_batch(x, y, batch)
+                    self.rocm_backend = rocm
+                    if rocm.initialized:
+                        self.backend = rocm
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "rocm:success" else: "rocm:failed")
+                    if quad_index == batch.quads.len(): winner = "rocm"
+            elif target == "cpu":
+                attempts.push("cpu:success")
+                quad_index = self._draw_font_batch_cpu_suffix(x, y, batch, quad_index)
+                winner = "cpu"
+            if winner != "":
+                break
+        self.last_font_execution_attempts = attempts
+        self.last_font_execution_target = winner
+        winner != ""
+
+    me draw_glyph_run(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
+        val fonts = self.fonts()
+        val batch = fonts.prepare_glyph_run(run, color, font_size)
+        self.font_renderer = fonts
+        self._draw_font_batch(x, y, batch)
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        """Draw a selected vector face fail-closed, or use the bitmap default."""
+        val selected = self.font_renderer
+        if selected != nil:
+            val fonts = selected
+            if fonts.has_sffi_ttf():
+                self.draw_text_configured(
+                    x, y, text_val, color, FontRenderConfig.default_for_size(font_size)
+                )
+                return
+        if self.vulkan_font_state_unknown:
+            return
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_text(x, y, text_val, color, font_size)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_text(x, y, text_val, color, font_size)
+        else:
+            self.backend.draw_text(x, y, text_val, color, font_size)
+
+    me draw_text_configured(x: i32, y: i32, text_val: text, color: u32, config: FontRenderConfig) -> bool:
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        if plan.len() == 0 or not font_render_config_selection_supported(config):
+            return false
+        val fonts = self.fonts()
+        val batch = fonts.prepare_text_configured(text_val, color, config)
+        self.font_renderer = fonts
+        self._draw_font_batch_plan(x, y, batch, plan)
+
+    me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
+        """Draw producer-resolved text through the selected vector face."""
+        self.draw_text_with_advances_configured(
+            x, y, text_val, advance_widths, color, FontRenderConfig.default_for_size(font_size)
+        )
+
+    me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        if plan.len() == 0 or not font_render_config_selection_supported(config):
+            return false
+        val fonts = self.fonts()
+        val batch = fonts.prepare_text_with_advances_configured(text_val, advance_widths, color, config)
+        self.font_renderer = fonts
+        self._draw_font_batch_plan(x, y, batch, plan)
+
+    me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
+        """Draw a semantic shaped run through the canonical selected face."""
+        self.draw_shaped_text_configured(
+            x, y, glyph_run, color, FontRenderConfig.default_for_size(font_size)
+        )
+
+    me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        if plan.len() == 0 or not font_render_config_selection_supported(config):
+            return false
+        val fonts = self.fonts()
+        val batch = fonts.prepare_selected_glyph_run_configured(glyph_run, color, config)
+        self.font_renderer = fonts
+        self._draw_font_batch_plan(x, y, batch, plan)
+
+    me load_font(path: text) -> bool:
+        """Select one trusted TTF/OTF for process-wide Simple 2D text."""
+        val active_cuda = self.cuda_backend
+        if active_cuda != nil:
+            val cuda = active_cuda
+            cuda.invalidate_font_atlas()
+            self.cuda_backend = cuda
+        val active_opencl = self.opencl_backend
+        if active_opencl != nil:
+            val opencl = active_opencl
+            opencl.invalidate_font_atlas()
+            self.opencl_backend = opencl
+        val active_metal = self.metal_backend
+        if active_metal != nil:
+            val metal = active_metal
+            metal.invalidate_font_atlas()
+            self.metal_backend = metal
+        val active_rocm = self.rocm_backend
+        if active_rocm != nil:
+            val rocm = active_rocm
+            rocm.invalidate_font_atlas()
+            self.rocm_backend = rocm
+            if rocm.initialized:
+                self.backend = rocm
+        val fonts = self.fonts()
+        val loaded = fonts.try_load_runtime_ttf(path)
+        self.font_renderer = fonts
+        loaded
+
+    me load_font_bytes(path: text, blob: [u8]) -> bool:
+        val fonts = self.fonts()
+        val loaded = fonts.try_load_selected_bytes(path, blob)
+        self.font_renderer = fonts
+        loaded
+
+    me select_font_identity(identity: text) -> bool:
+        """Select the exact bundled face named by a stable Draw IR identity."""
+        if identity == "":
+            return false
+        val active = self.font_renderer
+        if active != nil:
+            val fonts = active
+            val current_identity = fonts.current_font_identity()
+            self.font_renderer = fonts
+            if current_identity == identity:
+                return true
+        val candidate = selected_font_asset_candidate_for_identity(identity)
+        if candidate == nil:
+            return false
+        val fonts = self.fonts()
+        val registered = fonts.try_load_registered_identity(identity)
+        self.font_renderer = fonts
+        if (not registered and
+            (font_renderer_registered_selected_bytes_only() or not self.load_font(candidate.?.local_path))):
+            return false
+        val loaded_fonts = self.fonts()
+        val loaded_identity = loaded_fonts.current_font_identity()
+        self.font_renderer = loaded_fonts
+        if loaded_identity == identity:
+            return true
+        self.unload_font()
+        false
+
+    me unload_font():
+        """Restore the zero-config bitmap text path."""
+        val active_cuda = self.cuda_backend
+        if active_cuda != nil:
+            val cuda = active_cuda
+            cuda.invalidate_font_atlas()
+            self.cuda_backend = cuda
+        val active_opencl = self.opencl_backend
+        if active_opencl != nil:
+            val opencl = active_opencl
+            opencl.invalidate_font_atlas()
+            self.opencl_backend = opencl
+        val active_metal = self.metal_backend
+        if active_metal != nil:
+            val metal = active_metal
+            metal.invalidate_font_atlas()
+            self.metal_backend = metal
+        val active_rocm = self.rocm_backend
+        if active_rocm != nil:
+            val rocm = active_rocm
+            rocm.invalidate_font_atlas()
+            self.rocm_backend = rocm
+            if rocm.initialized:
+                self.backend = rocm
+        val selected = self.font_renderer
+        if selected != nil:
+            val fonts = selected
+            fonts.clear_ttf()
+        self.font_renderer = nil
+
+    me font_cache_stats() -> FontCacheStats:
+        val fonts = self.fonts()
+        fonts.cache_stats()
+
+    fn vulkan_font_performance_evidence() -> VulkanFontCompositeEvidence?:
+        self.last_vulkan_font_evidence
+
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        """Draw text with an explicit background colour per glyph cell.
+
+        A selected vector face uses its measured advance/line height and the
+        same antialiased `draw_text` path. Bitmap mode keeps the existing
+        backend cell painter. This is the method `Engine2dCompositorBackend`
+        and other GUI wrappers should call.
+        """
+        val selected = self.font_renderer
+        if selected != nil:
+            val fonts = selected
+            if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
+                val text_width = fonts.measure_text_width(text_val, font_size)
+                var line_height = fonts.horizontal_line_metric(font_size, 3)
+                self.font_renderer = fonts
+                if line_height <= 0:
+                    line_height = font_size
+                if text_width > 0:
+                    self.draw_rect_filled(x, y, text_width, line_height, bg)
+                self.draw_text(x, y, text_val, fg, font_size)
+                return
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
+        else:
+            emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        """Blit a pixel array onto the framebuffer."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_image(x, y, w, h, pixels)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_image(x, y, w, h, pixels)
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.draw_image(x, y, w, h, pixels)
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+        else:
+            self.backend.draw_image(x, y, w, h, pixels)
+
+    me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_ellipse(self.backend, cx, cy, rx, ry, color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_ellipse(self.backend, cx, cy, rx, ry, color)
+        else:
+            emu_draw_ellipse(self.backend, cx, cy, rx, ry, color)
+
+    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_ellipse_filled(self.backend, cx, cy, rx, ry, color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_ellipse_filled(self.backend, cx, cy, rx, ry, color)
+        else:
+            emu_draw_ellipse_filled(self.backend, cx, cy, rx, ry, color)
+
+    me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_arc(self.backend, cx, cy, r, start_deg, end_deg, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_arc(self.backend, cx, cy, r, start_deg, end_deg, color, thickness)
+        else:
+            emu_draw_arc(self.backend, cx, cy, r, start_deg, end_deg, color, thickness)
+
+    me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_bezier(self.backend, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_bezier(self.backend, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        else:
+            emu_draw_bezier(self.backend, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+
+    me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_polygon_filled(self.backend, xs, ys, count, color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_polygon_filled(self.backend, xs, ys, count, color)
+        else:
+            emu_draw_polygon_filled(self.backend, xs, ys, count, color)
+
+    me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_polyline(self.backend, xs, ys, count, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_polyline(self.backend, xs, ys, count, color, thickness)
+        else:
+            emu_draw_polyline(self.backend, xs, ys, count, color, thickness)
+
+    me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_rect_thick(self.backend, x, y, w, h, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_rect_thick(self.backend, x, y, w, h, color, thickness)
+        else:
+            emu_draw_rect_thick(self.backend, x, y, w, h, color, thickness)
+
+    me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_circle_thick(self.backend, cx, cy, r, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_circle_thick(self.backend, cx, cy, r, color, thickness)
+        else:
+            emu_draw_circle_thick(self.backend, cx, cy, r, color, thickness)
+
+    me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_rounded_rect_outline(self.backend, x, y, w, h, radius, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_rounded_rect_outline(self.backend, x, y, w, h, radius, color, thickness)
+        else:
+            emu_draw_rounded_rect_outline(self.backend, x, y, w, h, radius, color, thickness)
+
+    me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_gradient_rect_h(self.backend, x, y, w, h, left_color, right_color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_gradient_rect_h(self.backend, x, y, w, h, left_color, right_color)
+        else:
+            emu_draw_gradient_rect_h(self.backend, x, y, w, h, left_color, right_color)
+
+    me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_radial_gradient(self.backend, cx, cy, r, center_color, edge_color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_radial_gradient(self.backend, cx, cy, r, center_color, edge_color)
+        else:
+            emu_draw_radial_gradient(self.backend, cx, cy, r, center_color, edge_color)
+
+    me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_rect_blend(self.backend, x, y, w, h, color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_rect_blend(self.backend, x, y, w, h, color)
+        else:
+            emu_draw_rect_blend(self.backend, x, y, w, h, color)
+
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        # Typed receivers on the if-val bindings: bare calls on the erased
+        # bindings trip the AOT ambiguous-method guard (28 candidates) and
+        # blocked `bin/simple compile` of the web showcase (2026-07-18); same
+        # class as draw_image_scaled above.
+        if val Some(vg) = self.virtio_gpu_backend:
+            var vg_typed: VirtioGpuBackend = vg
+            vg_typed.draw_image_blend(x, y, w, h, pixels)
+        elif val Some(bm) = self.baremetal_backend:
+            var bm_typed: BaremetalBackend = bm
+            bm_typed.draw_image_blend(x, y, w, h, pixels)
+        else:
+            # emu_* free-function route like draw_image_scaled: the AOT lane
+            # also flags the `self.backend.<method>` trait-object call as a
+            # bare 28-candidate ambiguity (2026-07-18).
+            emu_draw_image_blend(self.backend, x, y, w, h, pixels)
+
+    me draw_engine(dst_x: i32, dst_y: i32, src: Engine2D):
+        """Composite an embedded render target (typically an offscreen Engine2D
+        from create_offscreen()) into self at (dst_x, dst_y).
+
+        Reads back src's framebuffer and alpha-blends it over self via
+        draw_image_blend — the core "rendering-inside-rendering" primitive:
+        a nested engine's finished frame becomes one blit into the parent.
+        """
+        self.draw_image_blend(dst_x, dst_y, src.width(), src.height(), src.read_pixels())
+
+    me draw_engine_opacity(dst_x: i32, dst_y: i32, src: Engine2D, opacity_milli: i32):
+        """Like draw_engine, but scales src's pixel alpha by opacity_milli/1000
+        (1000 = fully opaque) before compositing.
+
+        draw_image_blend has no opacity parameter of its own, so a
+        sub-opacity embed premultiplies the scale into each source pixel's
+        alpha channel first, then blends normally.
+        """
+        if opacity_milli >= 1000:
+            self.draw_engine(dst_x, dst_y, src)
+            return
+        if opacity_milli <= 0:
+            return
+        val scaled = engine2d_scale_pixel_alpha(src.read_pixels(), opacity_milli)
+        self.draw_image_blend(dst_x, dst_y, src.width(), src.height(), scaled)
+
+    me draw_software_offscreen_opacity_consume(dst_x: i32, dst_y: i32, src: Engine2D, opacity_milli: i32) -> bool:
+        """Composite a SOFTWARE offscreen into self at opacity_milli/1000,
+        CONSUMING src: scale src's own buffer alpha in place and blend it
+        directly, with NO read_pixels() snapshot and NO
+        engine2d_scale_pixel_alpha() copy.
+
+        Returns true when the fast in-place path applied (src is software
+        backed), false otherwise so the caller falls back to
+        draw_engine_opacity(). Only call when src's pixels will not be reused
+        unscaled (e.g. a scratch embedded offscreen cleared before its next
+        use). This keeps translucent-window compositing on the non-reclaiming
+        SimpleOS baremetal bump heap from leaking two full-surface scratch
+        arrays per window.
+        """
+        if opacity_milli <= 0:
+            return true
+        val src_software: SoftwareBackend? = src.software_backend
+        if val Some(sw) = src_software:
+            if opacity_milli < 1000:
+                sw.scale_alpha_in_place(opacity_milli)
+            self.draw_image_blend(dst_x, dst_y, sw.w, sw.h, sw.buf)
+            return true
+        false
+
+    me draw_vulkan_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        """Blend child pixels only through the active checked Vulkan path."""
+        val active = self.vulkan_backend
+        if active == nil:
+            return false
+        val vulkan = active
+        val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+        self.vulkan_backend = vulkan
+        completed
+
+    me draw_metal_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        """Blend child pixels only through the active checked Metal path."""
+        val active = self.metal_backend
+        if active == nil:
+            return false
+        val metal = active
+        val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+        self.metal_backend = metal
+        completed
+
+    me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        if dst_w == src_w and dst_h == src_h:
+            self.draw_image(dst_x, dst_y, dst_w, dst_h, pixels)
+            return
+        if val Some(vulkan) = self.vulkan_backend:
+            # Typed receiver: the if-val binding is type-erased and the AOT
+            # codegen's ambiguous-method guard refuses a bare
+            # draw_image_scaled with 26 candidates (blocked `bin/simple
+            # compile` of every Engine2D user, 2026-07-18).
+            var vulkan_typed: VulkanBackend = vulkan
+            vulkan_typed.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+            self.vulkan_backend = vulkan_typed
+        elif val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_image_scaled(self.backend, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_image_scaled(self.backend, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        else:
+            emu_draw_image_scaled(self.backend, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+
+    me draw_image_scaled_blend(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        if dst_w == src_w and dst_h == src_h:
+            self.draw_image_blend(dst_x, dst_y, dst_w, dst_h, pixels)
+            return
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan.draw_image_scaled_blend(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+            self.vulkan_backend = vulkan
+        else:
+            emu_draw_image_scaled_blend(self.backend, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+
+    me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_triangle_outline(self.backend, x1, y1, x2, y2, x3, y3, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_triangle_outline(self.backend, x1, y1, x2, y2, x3, y3, color, thickness)
+        else:
+            emu_draw_triangle_outline(self.backend, x1, y1, x2, y2, x3, y3, color, thickness)
+
+    me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_blur_rect(self.backend, x, y, w, h, radius)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_blur_rect(self.backend, x, y, w, h, radius)
+        else:
+            emu_draw_blur_rect(self.backend, x, y, w, h, radius)
+
+    me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
+        else:
+            emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_image_transform(self.backend, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_image_transform(self.backend, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        else:
+            emu_draw_image_transform(self.backend, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+
+    me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
+        else:
+            emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
+
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.set_mask(mask_pixels, w, h)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.set_mask(mask_pixels, w, h)
+        else:
+            self.backend.set_mask(mask_pixels, w, h)
+
+    me clear_mask():
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.clear_mask()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.clear_mask()
+        else:
+            self.backend.clear_mask()
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        """Set the clipping rectangle. Drawing outside this rect is discarded."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.set_clip(x, y, w, h)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.set_clip(x, y, w, h)
+        else:
+            self.backend.set_clip(x, y, w, h)
+
+    me clear_clip():
+        """Remove the clipping rectangle."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.clear_clip()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.clear_clip()
+        else:
+            self.backend.clear_clip()
+
+    me present():
+        """Flush the framebuffer to the screen / finalize the frame."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.present()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.present()
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.present()
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+        else:
+            self.backend.present()
+
+    me read_pixels() -> [u32]:
+        # Checksum-free readback: delegate straight to the backend's read_pixels
+        # (which, for the Metal GPU-only/native path, is a single-FFI download
+        # returning the [u32] framebuffer). read_pixels_with_source() still
+        # computes the O(n) Simple checksum for evidence rows; callers that only
+        # need pixels avoid that cost here.
+        if val Some(vg) = self.virtio_gpu_backend:
+            return vg.read_pixels()
+        elif val Some(bm) = self.baremetal_backend:
+            return bm.read_pixels()
+        elif val Some(vulkan) = self.vulkan_backend:
+            val pixels = vulkan.read_pixels()
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+            return pixels
+        else:
+            return self.backend.read_pixels()
+
+    me read_pixels_with_source() -> Engine2DReadback:
+        """Read the framebuffer contents as a flat u32 array."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.read_pixels_with_source()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.read_pixels_with_source()
+        elif val Some(vulkan) = self.vulkan_backend:
+            val readback = vulkan.read_pixels_with_source()
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+            readback
+        else:
+            self.backend.read_pixels_with_source()
+
+    # ========================================================================
+    # Lifecycle
+    # ========================================================================
+
+    me shutdown():
+        """Shut down the backend and release all resources."""
+        self.unload_font()
+        if self.vulkan_font_state_unknown:
+            if val Some(vulkan) = self.vulkan_backend:
+                vulkan.shutdown()
+                if vulkan.completion_unknown:
+                    self.vulkan_backend = vulkan
+                else:
+                    self.vulkan_backend = nil
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.shutdown()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.shutdown()
+        else:
+            self.backend.shutdown()
+
+    # ========================================================================
+    # Frame pacing (AC-7)
+    # ========================================================================
+
+    me tick_forever(draw_fn: fn() -> bool):
+        """Run the frame loop until draw_fn returns false.
+
+        Uses event-sleep pacing (tick_once) instead of tight spinning so the
+        WM thread yields CPU between frames.  FramePacingCounters are updated
+        every tick and are readable via get_frame_pacing().
+
+        Args:
+            draw_fn: Called each tick to issue draw commands and call present().
+                     Return false to stop the loop.
+        """
+        var running = true
+        while running:
+            running = draw_fn()
+            tick_once(self.pacing)
+
+    fn get_frame_pacing() -> FramePacingCounters:
+        """Return the current accumulated frame-pacing counters."""
+        self.pacing

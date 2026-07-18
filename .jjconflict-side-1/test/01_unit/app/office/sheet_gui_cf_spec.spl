@@ -1,0 +1,234 @@
+"""Sheet GUI conditional formatting spec.
+
+sheet_gui_view_with_formats(session, rules, max_rows, max_cols) renders the
+same grid as sheet_gui_view_with_selection but consults the cond_format
+engine's rules per cell (first match wins, the engine's own
+cond_css_for_cell order): matched cells' text_dump entries get a
+"!<marker>" suffix ("!bar<N>" for data-bar bucket N = fill-percent/10,
+"!above"/"!below"/"!dup"/"!uniq" for the average/occurrence kinds, "!hi"
+for plain highlight kinds), and the cell widget carries the matching cf-*
+CSS class painted by office_gui_sheet_minimal_css on the pixel path.
+Evaluation is cond_format.spl's own (cond_rule_matches_cell /
+cond_data_bar_percent) -- nothing is re-decided in the GUI layer.
+
+Hand-computed ground truth used below:
+- data_bar over 10,20,30,40,50 (A1:A5): P = (v-10)/(50-10)*100 gives
+  0/25/50/75/100, so buckets P/10 are 0/2/5/7/10.
+- above_average over 5,3,8,3,6 (A1:A5): mean = (5+3+8+3+6)/5 = 25/5 = 5;
+  strictly above -> ONLY 8 and 6 match (the two 3s and the 5 itself do not).
+- duplicate/unique over "a","b","a" (A1:A3): "a" occurs twice (duplicate),
+  "b" once (unique).
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cond_format.{CondRule}
+use app.office.gui.{session_new, sheet_gui_view_with_formats, sheet_gui_view_with_selection, sheet_gui_cf_html}
+
+fn _bar_demo_sheet() -> Sheet:
+    """A1:A5 = 10,20,30,40,50 (the data-bar hand-computed span)."""
+    var sheet = Sheet.new("Bars")
+    sheet.set_value("A1", "10")
+    sheet.set_value("A2", "20")
+    sheet.set_value("A3", "30")
+    sheet.set_value("A4", "40")
+    sheet.set_value("A5", "50")
+    sheet
+
+fn _score_demo_sheet() -> Sheet:
+    """A1:A5 = 5,3,8,3,6 (mean 5; strictly above: 8 and 6 only)."""
+    var sheet = Sheet.new("Scores")
+    sheet.set_value("A1", "5")
+    sheet.set_value("A2", "3")
+    sheet.set_value("A3", "8")
+    sheet.set_value("A4", "3")
+    sheet.set_value("A5", "6")
+    sheet
+
+fn _text_demo_sheet() -> Sheet:
+    """A1:A3 = a,b,a ("a" duplicated, "b" unique)."""
+    var sheet = Sheet.new("Texts")
+    sheet.set_value("A1", "a")
+    sheet.set_value("A2", "b")
+    sheet.set_value("A3", "a")
+    sheet
+
+describe "sheet_gui_view_with_formats: data-bar buckets":
+    """Bucket N = engine fill-percent / 10 -- proportional over the rule
+    range: min -> bar0, max -> bar10, hand-computed intermediate stops."""
+
+    it "the range minimum gets bucket 0 (P = (10-10)/40*100 = 0)":
+        val sheet = _bar_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|10!bar0")
+
+    it "the midpoint gets bucket 5 (P = (30-10)/40*100 = 50)":
+        val sheet = _bar_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[4]).to_equal("3|30!bar5")
+
+    it "the range maximum gets bucket 10 (P = (50-10)/40*100 = 100)":
+        val sheet = _bar_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[6]).to_equal("5|50!bar10")
+
+    it "quarter stops land on buckets 2 and 7 (P = 25 and 75)":
+        val sheet = _bar_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[3]).to_equal("2|20!bar2")
+        expect(lines[5]).to_equal("4|40!bar7")
+
+    it "a degenerate single-value range gets the full bar (bucket 10)":
+        var sheet = Sheet.new("One")
+        sheet.set_value("A1", "7")
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A1", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|7!bar10")
+
+describe "sheet_gui_view_with_formats: above-average matches":
+    """Mean of 5,3,8,3,6 is exactly 5; strictly-above marks 8 and 6 ONLY --
+    every line is asserted exactly, so a stray marker on any other cell
+    fails the spec."""
+
+    it "marks exactly the cells strictly above the hand-computed mean of 5":
+        val sheet = _score_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "above_average", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|5")
+        expect(lines[3]).to_equal("2|3")
+        expect(lines[4]).to_equal("3|8!above")
+        expect(lines[5]).to_equal("4|3")
+        expect(lines[6]).to_equal("5|6!above")
+
+    it "below_average marks the complementary strict side (the two 3s only)":
+        val sheet = _score_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "below_average", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|5")
+        expect(lines[3]).to_equal("2|3!below")
+        expect(lines[4]).to_equal("3|8")
+        expect(lines[5]).to_equal("4|3!below")
+        expect(lines[6]).to_equal("5|6")
+
+describe "sheet_gui_view_with_formats: duplicate and unique matches":
+    """Occurrence rules over "a","b","a": duplicate marks both "a"s and
+    never "b"; unique marks "b" and neither "a"."""
+
+    it "duplicate marks the two 'a' cells only":
+        val sheet = _text_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A3", kind: "duplicate", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 3, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|a!dup")
+        expect(lines[3]).to_equal("2|b")
+        expect(lines[4]).to_equal("3|a!dup")
+
+    it "unique marks the single 'b' cell only":
+        val sheet = _text_demo_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A3", kind: "unique", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 3, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|a")
+        expect(lines[3]).to_equal("2|b!uniq")
+        expect(lines[4]).to_equal("3|a")
+
+describe "sheet_gui_view_with_formats: highlight kinds and selection":
+    """cell_value rules mark with the generic '!hi' highlight marker, and a
+    selected cell keeps its bracket form with the marker appended."""
+
+    it "a cell_value '>100' rule marks only the matching cell with !hi":
+        var sheet = Sheet.new("Vals")
+        sheet.set_value("A1", "150")
+        sheet.set_value("A2", "50")
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A2", kind: "cell_value", criteria: ">100", n: 0, css: "background:#fde7e9")]
+        val view = sheet_gui_view_with_formats(session, rules, 2, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|150!hi")
+        expect(lines[3]).to_equal("2|50")
+
+    it "a selected matched cell shows bracket form plus the marker":
+        val sheet = _bar_demo_sheet()
+        val session = session_new(sheet, "A1")
+        val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 5, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|[10]!bar0")
+
+describe "sheet_gui_cf_html: cf classes land in the rendered page HTML":
+    """The view builder attaches the cf-* class as the matched cell
+    widget's "class" prop; sheet_gui_cf_html injects it into that cell's
+    class attribute in the REAL render_html_tree output, and the page's
+    stylesheet carries the cf rules that paint it on the pixel path."""
+
+    it "matched cells' class attributes carry their cf classes; unmatched cells stay plain":
+        var sheet = Sheet.new("Html")
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "50")
+        sheet.set_value("A3", "x")
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "A1:A2", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 3, 1)
+        val html = sheet_gui_cf_html(view, "")
+        expect(html).to_contain("class=\"widget-text cf-bar-0\" id=\"cell_A1\"")
+        expect(html).to_contain("class=\"widget-text cf-bar-10\" id=\"cell_A2\"")
+        expect(html).to_contain("class=\"widget-text\" id=\"cell_A3\"")
+        expect(html).to_contain(".cf-bar-10{background:#638ec6;}")
+
+describe "sheet_gui_view_with_formats: no rules and fail-closed edges":
+    """Empty rule lists and rules over empty/invalid ranges must not mark
+    anything -- the dump stays byte-identical to the plain selection view."""
+
+    it "an empty rule list renders byte-identically to sheet_gui_view_with_selection":
+        var sheet = Sheet.new("Plain")
+        sheet.set_value("A1", "1")
+        sheet.set_value("B2", "x")
+        val session = session_new(sheet, "B2")
+        val no_rules: [CondRule] = []
+        val cf_view = sheet_gui_view_with_formats(session, no_rules, 3, 2)
+        val plain_view = sheet_gui_view_with_selection(session, 3, 2)
+        expect(cf_view.text_dump).to_equal(plain_view.text_dump)
+
+    it "rules over an all-empty range fail closed (dump identical to plain view)":
+        var sheet = Sheet.new("Empty")
+        sheet.set_value("A1", "9")
+        val session = session_new(sheet, "")
+        # B1:B2 is INSIDE the rendered 2x2 window but holds only empty
+        # cells: data_bar sees non-numeric cells (-1, no match) and
+        # above_average sees an empty mean population (no match).
+        val rules: [CondRule] = [
+            CondRule(range: "B1:B2", kind: "data_bar", criteria: "", n: 0, css: ""),
+            CondRule(range: "B1:B2", kind: "above_average", criteria: "", n: 0, css: "")
+        ]
+        val cf_view = sheet_gui_view_with_formats(session, rules, 2, 2)
+        val plain_view = sheet_gui_view_with_selection(session, 2, 2)
+        expect(cf_view.text_dump).to_equal(plain_view.text_dump)
+
+    it "a rule with an unparseable range never matches":
+        var sheet = Sheet.new("Bad")
+        sheet.set_value("A1", "9")
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "", kind: "data_bar", criteria: "", n: 0, css: "")]
+        val view = sheet_gui_view_with_formats(session, rules, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|9")

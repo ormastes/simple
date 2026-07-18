@@ -1,0 +1,462 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Core Interpreter — Method Dispatch & Built-in Type Methods
+#
+# Split from eval_ops.spl. Contains:
+# - Method dispatch (eval_method_call, eval_method_with_args)
+# - Built-in array methods (eval_array_method)
+# - Built-in text methods (eval_text_method)
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+# ===== Method Call =====
+
+fn eval_method_call(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val receiver_eid = e_node.left
+    val method_name = e_node.s_val
+    val arg_eids = e_node.args
+
+    val receiver = eval_expr(receiver_eid)
+    if eval_had_error: return -1
+
+    # Built-in methods on types
+    val kind = val_get_kind(receiver)
+
+    # Array methods
+    if kind == VAL_ARRAY:
+        return eval_array_method(receiver, method_name, arg_eids)
+
+    # Text methods — text is immutable so restore receiver after call
+    # (INTERP-METHOD-MUTATE: compiled binary may corrupt receiver binding)
+    if kind == VAL_TEXT:
+        val text_result = eval_text_method(receiver, method_name, arg_eids)
+        if expr_get_tag(receiver_eid) == EXPR_IDENT:
+            val txt_recv_name = expr_s_val[receiver_eid]
+            val txt_fast_slot = expr_i_val[receiver_eid]
+            if txt_fast_slot >= 0 and env_has_frame():
+                env_set_local(txt_fast_slot, receiver)
+            env_assign(txt_recv_name, receiver)
+        return text_result
+
+    # Dict built-in methods (for __dict structs)
+    if kind == VAL_STRUCT:
+        val type_name_chk = val_get_struct_name(receiver)
+        if type_name_chk == "__dict":
+            if method_name == "len":
+                val dict_fields = val_get_struct_fields(receiver)
+                return val_make_int(dict_fields.len())
+            if method_name == "keys":
+                val dict_fields2 = val_get_struct_fields(receiver)
+                var key_vals: [i64] = []
+                for kf in dict_fields2:
+                    key_vals.push(val_make_text(kf))
+                return val_make_array(key_vals)
+            if method_name == "values":
+                val dict_values = val_get_struct_values(receiver)
+                return val_make_array(dict_values)
+            if method_name == "contains":
+                if arg_eids.len() > 0:
+                    val ck = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val ck_text = val_to_text(ck)
+                    val cfi = val_struct_find_field_idx(receiver, ck_text)
+                    return val_make_bool(cfi >= 0)
+                return val_make_bool(false)
+            if method_name == "contains_key":
+                if arg_eids.len() > 0:
+                    val ck = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val ck_text = val_to_text(ck)
+                    val cfi = val_struct_find_field_idx(receiver, ck_text)
+                    return val_make_bool(cfi >= 0)
+                return val_make_bool(false)
+            if method_name == "get":
+                if arg_eids.len() > 0:
+                    val gk = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val gk_text = val_to_text(gk)
+                    val gfi = val_struct_find_field_idx(receiver, gk_text)
+                    if gfi >= 0:
+                        return val_struct_get_field_idx(receiver, gfi)
+                    return val_make_nil()
+                return val_make_nil()
+            if method_name == "get_or":
+                if arg_eids.len() >= 2:
+                    val gok = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val gok_text = val_to_text(gok)
+                    val gofi = val_struct_find_field_idx(receiver, gok_text)
+                    if gofi >= 0:
+                        return val_struct_get_field_idx(receiver, gofi)
+                    val godef = eval_expr(arg_eids[1])
+                    if eval_had_error: return -1
+                    return godef
+                return val_make_nil()
+            if method_name == "set" or method_name == "insert":
+                if arg_eids.len() >= 2:
+                    val sk = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val sv = eval_expr(arg_eids[1])
+                    if eval_had_error: return -1
+                    val sk_text = val_to_text(sk)
+                    val_struct_set_field(receiver, sk_text, sv)
+                    return receiver
+                return receiver
+
+    # Option/Result built-in methods on enum structs
+    if kind == VAL_STRUCT:
+        val opt_type = val_get_struct_name(receiver)
+        if opt_type.starts_with("Option::"):
+            if method_name == "unwrap":
+                if opt_type == "Option::Some":
+                    # Field 0 is "__tag", field 1 is "__payload" (see
+                    # eval_enum_variant_call in eval_access.spl).
+                    return val_struct_get_field_idx(receiver, 1)
+                eval_set_error("called unwrap on None")
+                return -1
+            if method_name == "unwrap_or":
+                if opt_type == "Option::Some":
+                    return val_struct_get_field_idx(receiver, 1)
+                if arg_eids.len() > 0:
+                    val uod = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    return uod
+                return val_make_nil()
+            if method_name == "is_some":
+                return val_make_bool(opt_type == "Option::Some")
+            if method_name == "is_none":
+                return val_make_bool(opt_type == "Option::None")
+        if opt_type.starts_with("Result::"):
+            if method_name == "unwrap":
+                if opt_type == "Result::Ok":
+                    # Field 0 is "__tag", field 1 is "__payload".
+                    return val_struct_get_field_idx(receiver, 1)
+                eval_set_error("called unwrap on Err")
+                return -1
+            if method_name == "unwrap_err":
+                if opt_type == "Result::Err":
+                    return val_struct_get_field_idx(receiver, 1)
+                eval_set_error("called unwrap_err on Ok")
+                return -1
+            if method_name == "is_ok":
+                return val_make_bool(opt_type == "Result::Ok")
+            if method_name == "is_err":
+                return val_make_bool(opt_type == "Result::Err")
+
+    # Struct methods — look up Type__method in function table
+    if kind == VAL_STRUCT:
+        val type_name = val_get_struct_name(receiver)
+        val full_name = type_name + "__" + method_name
+        val decl_id = func_table_lookup(full_name)
+        if decl_id >= 0:
+            # Evaluate args, then call with receiver prepended
+            var arg_values: [i64] = []
+            arg_values.push(receiver)
+            for aeid in arg_eids:
+                val av = eval_expr(aeid)
+                if eval_had_error: return -1
+                arg_values.push(av)
+            return eval_method_with_args(decl_id, arg_values)
+        # Try deferred (lazy) modules for struct/class methods
+        val forced_mt = try_force_any_deferred_for(full_name)
+        if forced_mt == 1:
+            val decl_id2 = func_table_lookup(full_name)
+            if decl_id2 >= 0:
+                var arg_values2: [i64] = []
+                arg_values2.push(receiver)
+                for aeid2 in arg_eids:
+                    val av2 = eval_expr(aeid2)
+                    if eval_had_error: return -1
+                    arg_values2.push(av2)
+                return eval_method_with_args(decl_id2, arg_values2)
+        # Enum variant method dispatch: struct name "EnumType::Variant" -> try "EnumType__method"
+        var colon_pos: i64 = -1
+        var ci2: i64 = 0
+        for ch in type_name:
+            if ch == ":" and colon_pos == -1:
+                colon_pos = ci2
+            ci2 = ci2 + 1
+        if colon_pos > 0:
+            val enum_type_name = type_name[0:colon_pos]
+            val enum_full_name = enum_type_name + "__" + method_name
+            val enum_decl_id = func_table_lookup(enum_full_name)
+            if enum_decl_id >= 0:
+                var enum_arg_values: [i64] = []
+                enum_arg_values.push(receiver)
+                for aeid in arg_eids:
+                    val av = eval_expr(aeid)
+                    if eval_had_error: return -1
+                    enum_arg_values.push(av)
+                return eval_method_with_args(enum_decl_id, enum_arg_values)
+
+    eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
+    -1
+
+fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
+    val d_node = decl_get(decl_id)
+    val param_names = d_node.param_names
+    val body_stmts = d_node.body_stmts
+
+    env_push_scope()
+    # Always bind 'self' to the receiver (first arg_value)
+    if arg_values.len() > 0:
+        env_define("self", arg_values[0])
+    # Bind declared params: skip 'self' if it appears, map rest to arg_values[1..]
+    var ai: i64 = 1  # Start after receiver
+    for pname in param_names:
+        if pname == "self":
+            # Already bound above, don't advance ai
+            pass_do_nothing
+        else:
+            if ai < arg_values.len():
+                env_define(pname, arg_values[ai])
+            else:
+                env_define(pname, val_make_nil())
+            ai = ai + 1
+
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+
+    env_pop_scope()
+    last_val
+
+# ===== Array Methods =====
+
+fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val elements = val_get_array(receiver)
+
+    if method_name == "len":
+        return val_make_int(elements.len())
+
+    if method_name == "push":
+        if arg_eids.len() > 0:
+            val new_elem = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            # In-place append: arrays are reference-like at the value-id level
+            # (val_arrays[vid] is the shared backing store). Mutating it directly
+            # avoids copying the whole array + allocating a fresh value on every
+            # push, which made append-only arenas (parser AST node pools) O(n^2).
+            # Returning the same receiver id preserves the prior persistence
+            # behavior (array method calls have no lvalue writeback).
+            val_arrays[receiver].push(new_elem)
+            return receiver
+        return receiver
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            for e in elements:
+                if val_equals(e, target): return val_make_bool(true)
+            return val_make_bool(false)
+        return val_make_bool(false)
+
+    eval_set_error("no method '" + method_name + "' on array")
+    -1
+
+# ===== Text Methods =====
+
+fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val s = val_get_text(receiver)
+
+    if method_name == "len":
+        return val_make_int(s.len())
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val t = val_get_text(target)
+            return val_make_bool(s.contains(t))
+        return val_make_bool(false)
+
+    if method_name == "char_code_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            if idx >= 0 and idx < s.len():
+                val ch = s[idx:idx + 1]
+                return val_make_int(ch.char_code_at(0))
+            return val_make_int(0)
+        if s.len() > 0:
+            val first_ch = s[0:1]
+            return val_make_int(first_ch.char_code_at(0))
+        return val_make_int(0)
+
+    if method_name == "substring":
+        if arg_eids.len() >= 2:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val end_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            val end = val_get_int(end_val)
+            var s_start = start
+            var s_end = end
+            if s_start < 0: s_start = 0
+            if s_end > s.len(): s_end = s.len()
+            if s_start > s_end: s_start = s_end
+            return val_make_text(s[s_start:s_end])
+        elif arg_eids.len() == 1:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            var s_start = start
+            if s_start < 0: s_start = 0
+            if s_start > s.len(): s_start = s.len()
+            return val_make_text(s[s_start:s.len()])
+        return val_make_text(s)
+
+    if method_name == "slice":
+        if arg_eids.len() >= 2:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val end_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            val end = val_get_int(end_val)
+            var s_start = start
+            var s_end = end
+            if s_start < 0: s_start = 0
+            if s_end > s.len(): s_end = s.len()
+            if s_start > s_end: s_start = s_end
+            return val_make_text(s[s_start:s_end])
+        elif arg_eids.len() == 1:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            var s_start = start
+            if s_start < 0: s_start = 0
+            if s_start > s.len(): s_start = s.len()
+            return val_make_text(s[s_start:s.len()])
+        return val_make_text(s)
+
+    if method_name == "starts_with":
+        if arg_eids.len() > 0:
+            val prefix_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val prefix = val_get_text(prefix_val)
+            return val_make_bool(s.starts_with(prefix))
+        return val_make_bool(false)
+
+    if method_name == "ends_with":
+        if arg_eids.len() > 0:
+            val suffix_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val suffix = val_get_text(suffix_val)
+            return val_make_bool(s.ends_with(suffix))
+        return val_make_bool(false)
+
+    if method_name == "replace":
+        if arg_eids.len() >= 2:
+            val old_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val new_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val old_t = val_get_text(old_val)
+            val new_t = val_get_text(new_val)
+            return val_make_text(s.replace(old_t, new_t))
+        return val_make_text(s)
+
+    if method_name == "split":
+        if arg_eids.len() > 0:
+            val sep_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val sep = val_get_text(sep_val)
+            val parts = s.split(sep)
+            var result: [i64] = []
+            for p in parts:
+                result.push(val_make_text(p))
+            return val_make_array(result)
+        return val_make_array([val_make_text(s)])
+
+    if method_name == "split_lines" or method_name == "lines":
+        # Bug (pure_simple_text_split_lines_missing, 2026-07-16): canonical
+        # implementation shared in spirit with the MIR-lowering fix in
+        # method_calls_literals.spl's lower_text_split_lines -- same formula
+        # (replace CRLF->LF, drop exactly one trailing "\n" if present, then
+        # split on "\n") so interpreter and compiled pure-Simple execution
+        # agree on CRLF/trailing-empty-line behavior (matches Rust's
+        # str::lines()). `lines` is the canonical short alias.
+        if s == "":
+            return val_make_array([])
+        val normalized = s.replace("\r\n", "\n")
+        val ends_nl = normalized.ends_with("\n")
+        val body = if ends_nl: normalized[0:normalized.len() - 1] else: normalized
+        val parts = body.split("\n")
+        var result: [i64] = []
+        for p in parts:
+            result.push(val_make_text(p))
+        return val_make_array(result)
+
+    if method_name == "trim":
+        return val_make_text(s.trim())
+
+    if method_name == "index_of" or method_name == "find" or method_name == "find_str":
+        if arg_eids.len() > 0:
+            val needle_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val needle = val_get_text(needle_val)
+            # Host binary returns Option<i64>; unwrap to raw i64 (-1 for not found)
+            return val_make_int(s.index_of(needle) ?? -1)
+        return val_make_int(-1)
+
+    if method_name == "last_index_of" or method_name == "rfind":
+        if arg_eids.len() > 0:
+            val needle_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val needle = val_get_text(needle_val)
+            return val_make_int(s.last_index_of(needle) ?? -1)
+        return val_make_int(-1)
+
+    if method_name == "char_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            if idx >= 0 and idx < s.len():
+                return val_make_text(s[idx:idx + 1])
+            return val_make_text("")
+        return val_make_text("")
+
+    if method_name == "parse_int":
+        val parsed = s.parse_int()
+        if parsed.?:
+            val int_val = parsed ?? 0
+            # Return as enum-like struct so ?? works on the result
+            var field_names: [text] = []
+            field_names.push("__tag")
+            field_names.push("__payload")
+            var field_values: [i64] = []
+            field_values.push(val_make_text("Some"))
+            field_values.push(val_make_int(int_val))
+            return val_make_struct("Option", field_names, field_values)
+        # Return None variant
+        var none_names: [text] = []
+        none_names.push("__tag")
+        none_names.push("__payload")
+        var none_values: [i64] = []
+        none_values.push(val_make_text("None"))
+        none_values.push(val_make_nil())
+        return val_make_struct("Option", none_names, none_values)
+
+    if method_name == "to_upper":
+        return val_make_text(s.to_upper())
+
+    if method_name == "to_lower":
+        return val_make_text(s.to_lower())
+
+    if method_name == "to_string":
+        return val_make_text(s)
+
+    eval_set_error("no method '" + method_name + "' on text")
+    -1

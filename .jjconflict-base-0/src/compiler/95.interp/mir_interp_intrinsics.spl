@@ -1,0 +1,307 @@
+# MIR Interpreter — Intrinsics & Runtime Support
+#
+# Split from mir_interpreter.spl. Contains:
+# - Built-in intrinsic execution (_execute_intrinsic)
+# - Async runtime function dispatch (_call_runtime_fn)
+
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.mir.mir_data.*
+
+# Async runtime SFFI bindings
+extern fn rt_actor_spawn(handler: i64) -> i64
+extern fn rt_actor_send(target: i64, message: i64) -> i64
+extern fn rt_actor_recv(timeout: i64) -> i64
+extern fn rt_thread_yield() -> i64
+
+impl MirInterpreter:
+    me _execute_intrinsic(name: text, args: [MirOperand]) -> i64:
+        """Execute a built-in intrinsic by name and return result."""
+        match name:
+            case "print":
+                if args.len() > 0:
+                    val v = self.get_operand(args[0])
+                    val s = self._get_string(v)
+                    if s.?:
+                        print "{s.unwrap()}"
+                    else:
+                        print "{v}"
+                0
+            case "println":
+                if args.len() > 0:
+                    val v = self.get_operand(args[0])
+                    val s = self._get_string(v)
+                    if s.?:
+                        print "{s.unwrap()}"
+                    else:
+                        print "{v}"
+                else:
+                    print ""
+                0
+            case "len":
+                if args.len() > 0:
+                    val v = self.get_operand(args[0])
+                    # Check if it's an aggregate with known size
+                    if self.aggregate_sizes.contains(v):
+                        self.aggregate_sizes[v]
+                    else:
+                        # Check if it's a string
+                        val s = self._get_string(v)
+                        if s.?:
+                            s.unwrap().len()
+                        else:
+                            v
+                else:
+                    0
+            case "sizeof":
+                if args.len() > 0:
+                    8  # Default word size
+                else:
+                    0
+            case "typeof":
+                0  # Type info not available at interpreter level
+            case "abort":
+                0  # Abort is handled as error elsewhere
+            case "min":
+                if args.len() >= 2:
+                    val a = self.get_operand(args[0])
+                    val b = self.get_operand(args[1])
+                    if a < b: a else: b
+                else:
+                    0
+            case "max":
+                if args.len() >= 2:
+                    val a = self.get_operand(args[0])
+                    val b = self.get_operand(args[1])
+                    if a > b: a else: b
+                else:
+                    0
+            case "abs":
+                if args.len() > 0:
+                    val v = self.get_operand(args[0])
+                    if v < 0: -v else: v
+                else:
+                    0
+
+            # ---- String intrinsics ----
+            case "str_len":
+                if args.len() > 0:
+                    val id = self.get_operand(args[0])
+                    val s = self._get_string(id)
+                    if s.?: s.unwrap().len() else: 0
+                else:
+                    0
+            case "str_concat":
+                if args.len() >= 2:
+                    val id_a = self.get_operand(args[0])
+                    val id_b = self.get_operand(args[1])
+                    val sa = self._get_string(id_a)
+                    val sb = self._get_string(id_b)
+                    if sa.? and sb.?:
+                        val a_str = sa.unwrap()
+                        val b_str = sb.unwrap()
+                        self._store_string("{a_str}{b_str}")
+                    else:
+                        0
+                else:
+                    0
+            case "str_eq":
+                if args.len() >= 2:
+                    val id_a = self.get_operand(args[0])
+                    val id_b = self.get_operand(args[1])
+                    val sa = self._get_string(id_a)
+                    val sb = self._get_string(id_b)
+                    if sa.? and sb.?:
+                        if sa.unwrap() == sb.unwrap(): 1 else: 0
+                    else:
+                        0
+                else:
+                    0
+            case "str_contains":
+                if args.len() >= 2:
+                    val id_s = self.get_operand(args[0])
+                    val id_sub = self.get_operand(args[1])
+                    val s = self._get_string(id_s)
+                    val sub = self._get_string(id_sub)
+                    if s.? and sub.?:
+                        if s.unwrap().contains(sub.unwrap()): 1 else: 0
+                    else:
+                        0
+                else:
+                    0
+            case "str_starts_with":
+                if args.len() >= 2:
+                    val id_s = self.get_operand(args[0])
+                    val id_pre = self.get_operand(args[1])
+                    val s = self._get_string(id_s)
+                    val pre = self._get_string(id_pre)
+                    if s.? and pre.?:
+                        if s.unwrap().starts_with(pre.unwrap()): 1 else: 0
+                    else:
+                        0
+                else:
+                    0
+            case "str_ends_with":
+                if args.len() >= 2:
+                    val id_s = self.get_operand(args[0])
+                    val id_suf = self.get_operand(args[1])
+                    val s = self._get_string(id_s)
+                    val suf = self._get_string(id_suf)
+                    if s.? and suf.?:
+                        if s.unwrap().ends_with(suf.unwrap()): 1 else: 0
+                    else:
+                        0
+                else:
+                    0
+            case "str_index_of":
+                if args.len() >= 2:
+                    val id_s = self.get_operand(args[0])
+                    val id_sub = self.get_operand(args[1])
+                    val s = self._get_string(id_s)
+                    val sub = self._get_string(id_sub)
+                    if s.? and sub.?:
+                        val idx = s.unwrap().index_of(sub.unwrap())
+                        idx ?? -1
+                    else:
+                        -1
+                else:
+                    -1
+            case "str_replace":
+                if args.len() >= 3:
+                    val id_s = self.get_operand(args[0])
+                    val id_from = self.get_operand(args[1])
+                    val id_to = self.get_operand(args[2])
+                    val s = self._get_string(id_s)
+                    val from = self._get_string(id_from)
+                    val to = self._get_string(id_to)
+                    if s.? and from.? and to.?:
+                        # Hoisted receiver (like str_slice below): the deployed
+                        # stage-4 interpreter's NESTED-call dispatcher predates the
+                        # 2026-07-07 seed fix (050209d9b3) adding 'replace' to the
+                        # chained-call str method table, so
+                        # `s.unwrap().replace(...)` in val-binding position dies
+                        # with "method 'replace' not found on value of type str in
+                        # nested call context" (bootstrap Stage-1 wall, 2026-07-10).
+                        val src = s.unwrap()
+                        val result = src.replace(from.unwrap(), to.unwrap())
+                        self._store_string(result)
+                    else:
+                        0
+                else:
+                    0
+            case "str_slice":
+                if args.len() >= 3:
+                    val id_s = self.get_operand(args[0])
+                    val start = self.get_operand(args[1])
+                    val end = self.get_operand(args[2])
+                    val s = self._get_string(id_s)
+                    if s.?:
+                        val src = s.unwrap()
+                        val result = src.substring(start, end)
+                        self._store_string(result)
+                    else:
+                        0
+                else:
+                    0
+            case "str_split":
+                if args.len() >= 2:
+                    val id_s = self.get_operand(args[0])
+                    val id_delim = self.get_operand(args[1])
+                    val s = self._get_string(id_s)
+                    val delim = self._get_string(id_delim)
+                    if s.? and delim.?:
+                        val parts = s.unwrap().split(delim.unwrap())
+                        val base_addr = self.next_aggregate_id
+                        val count = parts.len()
+                        self.next_aggregate_id = self.next_aggregate_id + (count * 8) + 8
+                        var i = 0
+                        for part in parts:
+                            val part_id = self._store_string(part)
+                            val slot = LocalId(id: base_addr + (i * 8))
+                            self.set_local(slot, part_id)
+                            i = i + 1
+                        self.aggregate_sizes[base_addr] = count
+                        base_addr
+                    else:
+                        0
+                else:
+                    0
+            case "to_string":
+                if args.len() > 0:
+                    val v = self.get_operand(args[0])
+                    # Check if already a string
+                    val existing = self._get_string(v)
+                    if existing.?:
+                        v
+                    else:
+                        self._store_string("{v}")
+                else:
+                    0
+            case "to_int":
+                if args.len() > 0:
+                    val id = self.get_operand(args[0])
+                    val s = self._get_string(id)
+                    if s.?:
+                        s.unwrap().to_int() ?? 0
+                    else:
+                        id
+                else:
+                    0
+
+            # ---- Collection intrinsics ----
+            case "arr_len":
+                if args.len() > 0:
+                    val base = self.get_operand(args[0])
+                    self.aggregate_sizes[base] ?? 0
+                else:
+                    0
+            case "arr_get":
+                if args.len() >= 2:
+                    val base = self.get_operand(args[0])
+                    val idx = self.get_operand(args[1])
+                    val slot = LocalId(id: base + (idx * 8))
+                    self.get_local(slot)
+                else:
+                    0
+            case "arr_set":
+                if args.len() >= 3:
+                    val base = self.get_operand(args[0])
+                    val idx = self.get_operand(args[1])
+                    val value = self.get_operand(args[2])
+                    val slot = LocalId(id: base + (idx * 8))
+                    self.set_local(slot, value)
+                0
+            case "arr_push":
+                if args.len() >= 2:
+                    val base = self.get_operand(args[0])
+                    val value = self.get_operand(args[1])
+                    val size = self.aggregate_sizes[base] ?? 0
+                    val slot = LocalId(id: base + (size * 8))
+                    self.set_local(slot, value)
+                    self.aggregate_sizes[base] = size + 1
+                0
+
+            case _:
+                # Unknown intrinsic - return 0
+                0
+
+    # ========================================================================
+    # Async Runtime Support
+    # ========================================================================
+
+    fn _call_runtime_fn(name: text, args: [i64]) -> i64:
+        """Call a runtime function by name, mirroring LLVM backend."""
+        match name:
+            case "__simple_runtime_create_promise":
+                if args.len() > 0: args[0] else: 0
+            case "__simple_runtime_await":
+                if args.len() > 0: args[0] else: 0
+            case "__simple_runtime_spawn":
+                if args.len() > 0: rt_actor_spawn(args[0]) else: 0
+            case "__simple_runtime_send":
+                if args.len() >= 2: rt_actor_send(args[0], args[1]) else: 0
+            case "__simple_runtime_receive":
+                if args.len() > 0: rt_actor_recv(args[0]) else: rt_actor_recv(-1)
+            case "__simple_runtime_yield":
+                rt_thread_yield()
+            case _:
+                0

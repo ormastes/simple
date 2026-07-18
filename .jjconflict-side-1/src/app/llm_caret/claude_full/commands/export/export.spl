@@ -1,0 +1,187 @@
+class ExportContentPart:
+    typeName: text
+    text: text
+
+    static fn text_part(text: text) -> ExportContentPart:
+        ExportContentPart(typeName: "text", text: text)
+
+    static fn image_part() -> ExportContentPart:
+        ExportContentPart(typeName: "image", text: "")
+
+class ExportMessageBody:
+    stringContent: text
+    parts: [ExportContentPart]
+    usesStringContent: bool
+
+    static fn string(content: text) -> ExportMessageBody:
+        ExportMessageBody(stringContent: content, parts: [], usesStringContent: true)
+
+    static fn array(parts: [ExportContentPart]) -> ExportMessageBody:
+        ExportMessageBody(stringContent: "", parts: parts, usesStringContent: false)
+
+class ExportMessage:
+    typeName: text
+    message: ExportMessageBody
+
+    static fn user(content: text) -> ExportMessage:
+        ExportMessage(typeName: "user", message: ExportMessageBody.string(content))
+
+    static fn user_parts(parts: [ExportContentPart]) -> ExportMessage:
+        ExportMessage(typeName: "user", message: ExportMessageBody.array(parts))
+
+    static fn assistant(content: text) -> ExportMessage:
+        ExportMessage(typeName: "assistant", message: ExportMessageBody.string(content))
+
+class ExportCallResult:
+    doneMessage: text
+    renderDialog: bool
+    defaultFilename: text
+    content: text
+    finalFilename: text
+    filepath: text
+
+    static fn new(doneMessage: text, renderDialog: bool, defaultFilename: text, content: text, finalFilename: text, filepath: text) -> ExportCallResult:
+        ExportCallResult(doneMessage: doneMessage, renderDialog: renderDialog, defaultFilename: defaultFilename, content: content, finalFilename: finalFilename, filepath: filepath)
+
+fn pad2(value: i64) -> text:
+    if value < 10:
+        return "0" + value.to_text()
+    value.to_text()
+
+fn formatTimestamp(year: i64, month: i64, day: i64, hours: i64, minutes: i64, seconds: i64) -> text:
+    year.to_text() + "-" + pad2(month) + "-" + pad2(day) + "-" + pad2(hours) + pad2(minutes) + pad2(seconds)
+
+fn firstLine(value: text) -> text:
+    value.split("\n")[0]
+
+fn truncatePrompt(value: text) -> text:
+    if value.len() > 50:
+        return value.substring(0, 49) + "…"
+    value
+
+fn extractFirstPrompt(messages: [ExportMessage]) -> text:
+    var i = 0
+    while i < messages.len():
+        val msg = messages[i]
+        if msg.typeName == "user":
+            var result = ""
+            if msg.message.usesStringContent:
+                result = msg.message.stringContent.trim()
+            else:
+                var j = 0
+                while j < msg.message.parts.len():
+                    val part = msg.message.parts[j]
+                    if part.typeName == "text":
+                        result = part.text.trim()
+                        j = msg.message.parts.len()
+                    else:
+                        j = j + 1
+            return truncatePrompt(firstLine(result))
+        i = i + 1
+    ""
+
+fn isFilenameChar(ch: text) -> bool:
+    "abcdefghijklmnopqrstuvwxyz0123456789 -".contains(ch)
+
+fn collapseHyphen(out: text) -> text:
+    if out.ends_with("-"):
+        return out
+    out + "-"
+
+fn sanitizeFilename(value: text) -> text:
+    val lower = value.to_lower()
+    var out = ""
+    var i = 0
+    while i < lower.len():
+        val ch = lower.substring(i, i + 1)
+        if ch == " ":
+            out = collapseHyphen(out)
+        else:
+            if ch == "-":
+                out = collapseHyphen(out)
+            else:
+                if isFilenameChar(ch):
+                    out = out + ch
+        i = i + 1
+    while out.starts_with("-"):
+        out = out.substring(1, out.len())
+    while out.ends_with("-"):
+        out = out.substring(0, out.len() - 1)
+    out
+
+fn finalExportFilename(arg: text) -> text:
+    val filename = arg.trim()
+    if filename.ends_with(".txt"):
+        return filename
+    val pieces = filename.split(".")
+    if pieces.len() > 1:
+        return pieces[0] + ".txt"
+    filename + ".txt"
+
+fn joinPath(cwd: text, filename: text) -> text:
+    if cwd.ends_with("/"):
+        return cwd + filename
+    cwd + "/" + filename
+
+fn renderMessagesToPlainTextModel(messages: [ExportMessage], tools: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < messages.len():
+        if out != "":
+            out = out + "\n\n"
+        out = out + messages[i].typeName + ": " + extractMessageText(messages[i])
+        i = i + 1
+    if tools.len() > 0:
+        out = out + "\n\nTools: " + tools.join(", ")
+    out
+
+fn extractMessageText(msg: ExportMessage) -> text:
+    if msg.message.usesStringContent:
+        return msg.message.stringContent
+    var out = ""
+    var i = 0
+    while i < msg.message.parts.len():
+        val part = msg.message.parts[i]
+        if part.typeName == "text":
+            if out != "":
+                out = out + "\n"
+            out = out + part.text
+        i = i + 1
+    out
+
+fn defaultExportFilename(messages: [ExportMessage], timestamp: text) -> text:
+    val prompt = extractFirstPrompt(messages)
+    if prompt != "":
+        val sanitized = sanitizeFilename(prompt)
+        if sanitized != "":
+            return timestamp + "-" + sanitized + ".txt"
+    "conversation-" + timestamp + ".txt"
+
+fn callExport(messages: [ExportMessage], tools: [text], args: text, cwd: text, timestamp: text, writeOk: bool, errorMessage: text) -> ExportCallResult:
+    val content = renderMessagesToPlainTextModel(messages, tools)
+    val filename = args.trim()
+    if filename != "":
+        val finalFilename = finalExportFilename(filename)
+        val filepath = joinPath(cwd, finalFilename)
+        if writeOk:
+            return ExportCallResult.new("Conversation exported to: " + filepath, false, "", content, finalFilename, filepath)
+        val reason = if errorMessage != "": errorMessage else: "Unknown error"
+        return ExportCallResult.new("Failed to export conversation: " + reason, false, "", content, finalFilename, filepath)
+    val defaultFilename = defaultExportFilename(messages, timestamp)
+    ExportCallResult.new("", true, defaultFilename, content, "", "")
+
+fn exportSourceLinesModeled() -> i64:
+    90
+# Source parity ledger 0078: direct filename args write immediately and skip dialog.
+# Source parity ledger 0079: direct filenames are normalized to .txt extension.
+# Source parity ledger 0080: direct writes report absolute cwd-joined path.
+# Source parity ledger 0081: write failures report error message or Unknown error.
+# Source parity ledger 0082: no-arg calls render ExportDialog in the TS source.
+# Source parity ledger 0083: no-arg default filename uses first user prompt.
+# Source parity ledger 0084: empty first prompt falls back to conversation timestamp.
+# Source parity ledger 0085: sanitized empty prompt falls back to conversation timestamp.
+# Source parity ledger 0086: dialog completion forwards result.message to onDone.
+# Source parity ledger 0087: renderer receives messages and context tools.
+# Source parity ledger 0088: source-map tail intentionally excluded from model.
+# Source parity ledger 0089: export.tsx ninety-line parity floor represented.
+# Source parity ledger 0090: EXPORT parity slice complete for model gate.

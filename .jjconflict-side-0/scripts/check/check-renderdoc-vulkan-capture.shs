@@ -1,0 +1,107 @@
+#!/usr/bin/env sh
+# RenderDoc capture test of the Vulkan-backed GUI rendering.
+#
+# Runs src/app/test/renderdoc_vulkan_capture.spl under `renderdoccmd capture`.
+# The program marks a frame with the RenderDoc in-application API
+# (rt_renderdoc_start_capture / rt_renderdoc_end_capture, implemented in the
+# interpreter via librenderdoc) around a real Vulkan-backed Engine2D frame, so a
+# headless compute workload still produces a persisted .rdc capture file. The
+# capture is then replay-opened to XML and checked for Vulkan actions,
+# resources, pipelines, and shaders. `RDOC` magic is only a precondition.
+#
+# Requires: build/tools/renderdoc (renderdoccmd + librenderdoc.so), a
+# Vulkan-capable host, and the interpreter binary built WITH the rt_renderdoc_*
+# externs. Exits 0 on a valid capture; skips cleanly if RenderDoc is absent.
+set -e
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+RDDIR=${RENDERDOC_DIR:-"$ROOT/build/tools/renderdoc"}
+if [ ! -x "$RDDIR/bin/renderdoccmd" ] && [ -x "$ROOT/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd" ]; then
+  RDDIR="$ROOT/build/tools/renderdoc-linux-vulkan-only"
+fi
+RDC="$RDDIR/bin/renderdoccmd"
+FRESH="$ROOT/src/compiler_rust/target/release/simple"
+PROG="$ROOT/src/app/test/renderdoc_vulkan_capture.spl"
+OUT=${RDVC_OUT:-/tmp/renderdoc_vulkan_capture}
+
+if [ ! -x "$RDC" ]; then
+  echo "FAIL: renderdoccmd not present at $RDC"
+  exit 1
+fi
+
+# This binary is used only for RenderDoc injection and does NOT replace the
+# self-hosted runner. Rebuild only when explicitly requested: a dirty unrelated
+# Rust workspace must not hide already-available capture evidence.
+echo "[1/4] Resolving interpreter binary with rt_renderdoc_* externs..."
+if [ "${RDVC_REBUILD:-0}" = "1" ]; then
+  if ! ( cd "$ROOT/src/compiler_rust" \
+    && unset MAKEFLAGS CARGO_MAKEFLAGS MFLAGS \
+    && cargo build --release --bin simple ); then
+    echo "FAIL: unable to build the RenderDoc-capable capture runner"
+    exit 1
+  fi
+fi
+if [ ! -x "$FRESH" ]; then
+  echo "FAIL: interpreter binary not built at $FRESH"
+  exit 1
+fi
+echo "      runner=$FRESH rebuild=${RDVC_REBUILD:-0}"
+
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+echo "[2/4] Capturing a Vulkan-backed GUI frame through RenderDoc..."
+CAPTURE_LOG="$OUT/capture.log"
+if ! LD_LIBRARY_PATH="$RDDIR/lib" SIMPLE_EXECUTION_MODE=interpret \
+  "$RDC" capture -d "$ROOT" -c "$OUT/simple_gui" -w \
+  "$FRESH" run "$PROG" >"$CAPTURE_LOG" 2>&1; then
+  cat "$CAPTURE_LOG"
+  echo "FAIL: RenderDoc capture command failed"
+  exit 1
+fi
+grep -aiE 'renderdoc_|requested_backend=|backend=|VULKAN_UNAVAILABLE' "$CAPTURE_LOG" || true
+if ! grep -q '^renderdoc_record_valid=1 ' "$CAPTURE_LOG"; then
+  echo "FAIL: capture program did not emit a valid observed-frame record"
+  exit 1
+fi
+
+RDC_FILE=$(find "$OUT" -name '*.rdc' 2>/dev/null | head -1)
+echo "[3/4] Validating capture magic..."
+if [ -z "$RDC_FILE" ]; then
+  echo "FAIL: no .rdc capture file was produced"
+  exit 1
+fi
+
+MAGIC=$(dd if="$RDC_FILE" bs=4 count=1 2>/dev/null)
+SIZE=$(wc -c < "$RDC_FILE")
+if [ "$MAGIC" != "RDOC" ]; then
+  echo "FAIL: $RDC_FILE is not a valid RenderDoc capture (magic='$MAGIC')"
+  exit 1
+fi
+
+XML="$OUT/simple_gui.xml"
+echo "[4/4] Replay-opening and inspecting capture content..."
+"$RDC" convert -f "$RDC_FILE" -o "$XML" -i rdc -c xml >/dev/null
+if ! grep -q '>Vulkan</driver>' "$XML"; then
+  echo "FAIL: replay XML does not identify a Vulkan driver"
+  exit 1
+fi
+if ! grep -Eq 'name="vkCmd(Dispatch|Draw)' "$XML"; then
+  echo "FAIL: replay XML has no Vulkan draw or dispatch action"
+  exit 1
+fi
+if ! grep -Eq 'vkCreate(Compute|Graphics)Pipelines' "$XML"; then
+  echo "FAIL: replay XML has no Vulkan pipeline creation"
+  exit 1
+fi
+if ! grep -q 'vkCreateShaderModule' "$XML"; then
+  echo "FAIL: replay XML has no Vulkan shader module"
+  exit 1
+fi
+if ! grep -Eq 'vkCreate(Buffer|Image)' "$XML"; then
+  echo "FAIL: replay XML has no Vulkan resource"
+  exit 1
+fi
+echo "PASS: replay-inspected RenderDoc Vulkan capture"
+echo "      file=$RDC_FILE size=${SIZE}B magic=RDOC xml=$XML"

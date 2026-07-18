@@ -1,0 +1,124 @@
+use std.gpu.engine2d.engine.{Engine2D}
+use common.ui.draw_ir.{DrawIrComposition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_with_images
+}
+use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+
+extern fn rt_env_get(key: text) -> text?
+
+var _engine2d_compositor_next_id: i32 = 1
+var _engine2d_compositor_override_enabled: bool = false
+var _engine2d_compositor_override_id: i32 = 0
+var _engine2d_compositor_override_width: i32 = 0
+var _engine2d_compositor_override_height: i32 = 0
+var _engine2d_compositor_override_pixels: [u32] = []
+
+# WM raster backend key. SIMPLE_GUI_BACKEND selects the Engine2D backend for
+# the compositor raster lane (e.g. "metal"); default "software" keeps the
+# historical CPU behavior. CPU stays the default until GPU parity + perf are
+# proven — see test/02_integration/rendering/engine2d_gpu_offload_evidence.spl.
+fn host_wm_render_backend_key() -> text:
+    val raw = (rt_env_get("SIMPLE_GUI_BACKEND") ?? "").trim()
+    if raw == "":
+        return "software"
+    raw
+
+class Engine2dCompositorBackend:
+    id: i32
+    engine: Engine2D
+    w: i32
+    h: i32
+
+    static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
+        val id = _engine2d_compositor_next_id
+        _engine2d_compositor_next_id = _engine2d_compositor_next_id + 1
+        Engine2dCompositorBackend(id: id, engine: engine, w: engine.width(), h: engine.height())
+
+    # Backend-by-name factory — the WM "gpu process" fix: ONE persistent
+    # Engine2D session (device/queue/framebuffer created once, reused across
+    # every composed frame; call shutdown() on exit — never a per-frame
+    # create). "metal" uses the GPU-only fast session (1x1 CPU mirror, device
+    # framebuffer is the source of truth, single-hop readback); every other
+    # name falls through create_with_backend_fast() to the regular
+    # create_with_backend() path unchanged.
+    static fn create_named(width: i32, height: i32, backend_name: text) -> Engine2dCompositorBackend:
+        val engine = Engine2D.create_with_backend_fast(width, height, backend_name)
+        Engine2dCompositorBackend.create(engine)
+
+    static fn create_from_env(width: i32, height: i32) -> Engine2dCompositorBackend:
+        Engine2dCompositorBackend.create_named(width, height, host_wm_render_backend_key())
+
+    fn get_pixel_buffer() -> [u32]:
+        if _engine2d_compositor_override_enabled and _engine2d_compositor_override_id == self.id and _engine2d_compositor_override_width == self.w and _engine2d_compositor_override_height == self.h:
+            return _engine2d_compositor_override_pixels
+        self.engine.read_pixels()
+
+    fn set_pixel_buffer_override(pixels: [u32]):
+        _engine2d_compositor_override_id = self.id
+        _engine2d_compositor_override_width = self.w
+        _engine2d_compositor_override_height = self.h
+        _engine2d_compositor_override_pixels = pixels
+        _engine2d_compositor_override_enabled = true
+
+    me render_draw_ir_composition(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+        """Execute one canonical Draw IR frame on this persistent session and
+        return its validated readback candidate to the hosted presenter."""
+        _engine2d_compositor_override_enabled = false
+        val selected = self.engine.backend_name()
+        val gpu_available = selected != "software" and selected != "cpu" and selected != "cpu_simd"
+        engine2d_draw_ir_adv_composition_with_images(self.engine, composition, gpu_available, images)
+
+    # Honest frame provenance (greppable): for the metal lane this must say
+    # source=device_readback — a cpu_mirror source means the GPU lane silently
+    # fell back and must never be presented as GPU rendering.
+    fn frame_provenance() -> text:
+        val rb = self.engine.read_pixels_with_source()
+        "backend={self.engine.backend_name()};source={rb.source};checksum={rb.checksum}"
+
+    me shutdown():
+        self.engine.shutdown()
+
+impl CompositorBackend for Engine2dCompositorBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _engine2d_compositor_override_enabled = false
+        self.engine.clear(color)
+        self.engine.present()
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        _engine2d_compositor_override_enabled = false
+        self.engine.draw_rect_filled(x, y, w, h, color)
+        self.engine.present()
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        _engine2d_compositor_override_enabled = false
+        self.engine.draw_text_bg(x, y, text_str, fg, bg, 16)
+        self.engine.present()
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.draw_text(x, y, "{ch}", fg, bg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.fill_rect(x, y, 1, 1, color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        _engine2d_compositor_override_enabled = false
+        self.engine.draw_image(x, y, w, h, pixels)
+        self.engine.present()
+
+    me present():
+        self.engine.present()
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.engine.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil

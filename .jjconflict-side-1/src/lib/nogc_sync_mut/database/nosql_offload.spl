@@ -1,0 +1,517 @@
+# codex-impl
+# NoSQL/document batch adapter for reusable GPU web/db offload accounting.
+
+use std.web_db_offload.contract.{
+    GpuWdbWorkKind,
+    GpuWdbBudget,
+    GpuWdbCoarseBatchProfile,
+    GpuWdbExecutionPlan,
+    GpuWdbBatchPlan,
+    gpu_wdb_default_budget,
+    gpu_wdb_nosql_db_profile,
+    gpu_wdb_profile_allows_gpu,
+    gpu_wdb_nosql_mode_admits
+}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    gpu_wdb_complete_submission
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_submit_registered_batch_for_generation
+}
+use std.web_db_offload.device_backend.{
+    GpuWdbDeviceBackend,
+    GpuWdbDeviceRunResult,
+    gpu_wdb_device_backend_registry,
+    gpu_wdb_run_device_batch
+}
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn nosql_document_file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn nosql_document_file_write(path: text, content: text) -> bool:
+    rt_file_delete(path)
+    rt_file_write_text_at(path, 0, content) >= 0
+
+fn nosql_document_file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+struct NoSqlDocumentOffloadExecution:
+    document_count: i64
+    estimated_batch_bytes: i64
+    profile: GpuWdbCoarseBatchProfile
+    metadata_filter_cpu_owned: bool
+    submission: GpuWdbQueueSubmission
+    state_after: GpuWdbQueueState
+    result_ids: [text]
+    gpu_dispatched: bool
+    cpu_authoritative: bool
+
+struct NoSqlDocumentDeviceOffloadExecution:
+    execution: NoSqlDocumentOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct NoSqlDocumentRecord:
+    id: text
+    encoded_bytes: i64
+    metadata: Dict<text, text>
+
+fn nosql_document_encode_metadata(metadata: Dict<text, text>) -> text:
+    var parts: [text] = []
+    for (key, value) in metadata:
+        parts.push("{key}={value}")
+    parts.join(";")
+
+fn nosql_document_decode_metadata(encoded: text) -> Dict<text, text>:
+    var metadata: Dict<text, text> = {}
+    if encoded == "":
+        return metadata
+    val pairs = encoded.split(";")
+    for pair in pairs:
+        val split_at = pair.index_of("=")
+        if split_at > 0:
+            val key = pair.slice(0, split_at)
+            val value = pair.slice(split_at + 1, pair.len())
+            metadata[key] = value
+    metadata
+
+fn nosql_document_record_to_line(record: NoSqlDocumentRecord) -> text:
+    "{record.id}\t{record.encoded_bytes}\t{nosql_document_encode_metadata(record.metadata)}"
+
+fn nosql_document_record_from_line(line: text) -> NoSqlDocumentRecord?:
+    val parts = line.split("\t")
+    if parts.len() < 3:
+        return nil
+    Some(NoSqlDocumentRecord(
+        id: parts[0],
+        encoded_bytes: parts[1].parse_int() ?? 0,
+        metadata: nosql_document_decode_metadata(parts[2])
+    ))
+
+class NoSqlDocumentCollection:
+    records: [NoSqlDocumentRecord]
+    generation_current: bool
+
+    static fn empty() -> NoSqlDocumentCollection:
+        NoSqlDocumentCollection(records: [], generation_current: true)
+
+    static fn from_text(content: text) -> NoSqlDocumentCollection:
+        var collection = NoSqlDocumentCollection.empty()
+        val lines = content.split("\n")
+        var idx = 0
+        for line in lines:
+            val trimmed = line.trim()
+            if idx == 0:
+                idx = idx + 1
+                continue
+            if trimmed != "":
+                if val Some(record) = nosql_document_record_from_line(trimmed):
+                    collection.records.push(record)
+            idx = idx + 1
+        collection.generation_current = true
+        collection
+
+    static fn load(path: text) -> NoSqlDocumentCollection:
+        if not nosql_document_file_exists(path):
+            return NoSqlDocumentCollection.empty()
+        NoSqlDocumentCollection.from_text(nosql_document_file_read(path))
+
+    me insert(id: text, encoded_bytes: i64, metadata: Dict<text, text>):
+        self.records.push(NoSqlDocumentRecord(
+            id: id,
+            encoded_bytes: encoded_bytes,
+            metadata: metadata
+        ))
+        self.generation_current = true
+
+    me mark_generation_stale():
+        self.generation_current = false
+
+    fn to_text() -> text:
+        var lines: [text] = ["simple-nosql-documents-v1"]
+        for record in self.records:
+            lines.push(nosql_document_record_to_line(record))
+        lines.join("\n") + "\n"
+
+    fn save(path: text) -> bool:
+        nosql_document_file_write(path, self.to_text())
+
+    fn document_count() -> i64:
+        self.records.len()
+
+    fn average_encoded_bytes() -> i64:
+        if self.records.len() == 0:
+            return 0
+        var total = 0
+        for record in self.records:
+            total = total + record.encoded_bytes
+        total / self.records.len()
+
+    fn filter_metadata_ids(key: text, value: text) -> [text]:
+        nosql_document_filter_metadata_ids(self.records, key, value)
+
+    fn filter_metadata_with_offload(key: text, value: text,
+                                    state: GpuWdbQueueState,
+                                    registry: GpuWdbLibraryRegistry,
+                                    gpu_available: bool,
+                                    cpu_fallback_available: bool,
+                                    budget: GpuWdbBudget) -> NoSqlDocumentOffloadExecution:
+        nosql_document_offload_execute(
+            self.records.len(),
+            self.average_encoded_bytes(),
+            true,
+            state,
+            registry,
+            gpu_available,
+            self.generation_current,
+            cpu_fallback_available,
+            budget,
+            self.filter_metadata_ids(key, value)
+        )
+
+class NoSqlSsdDocumentCollection:
+    path: text
+    collection: NoSqlDocumentCollection
+    durable_generation_current: bool
+
+    static fn create(path: text) -> NoSqlSsdDocumentCollection:
+        NoSqlSsdDocumentCollection(
+            path: path,
+            collection: NoSqlDocumentCollection.empty(),
+            durable_generation_current: false
+        )
+
+    static fn open(path: text) -> NoSqlSsdDocumentCollection:
+        NoSqlSsdDocumentCollection(
+            path: path,
+            collection: NoSqlDocumentCollection.load(path),
+            durable_generation_current: nosql_document_file_exists(path)
+        )
+
+    me insert(id: text, encoded_bytes: i64, metadata: Dict<text, text>):
+        self.collection.insert(id, encoded_bytes, metadata)
+        self.durable_generation_current = false
+
+    me save() -> bool:
+        val ok = self.collection.save(self.path)
+        if ok:
+            self.durable_generation_current = true
+            self.collection.generation_current = true
+        ok
+
+    me mark_durable_generation_stale():
+        self.durable_generation_current = false
+
+    fn document_count() -> i64:
+        self.collection.document_count()
+
+    fn average_encoded_bytes() -> i64:
+        self.collection.average_encoded_bytes()
+
+    fn filter_metadata_ids(key: text, value: text) -> [text]:
+        self.collection.filter_metadata_ids(key, value)
+
+    fn filter_metadata_with_offload(key: text, value: text,
+                                    state: GpuWdbQueueState,
+                                    registry: GpuWdbLibraryRegistry,
+                                    gpu_available: bool,
+                                    cpu_fallback_available: bool,
+                                    budget: GpuWdbBudget) -> NoSqlDocumentOffloadExecution:
+        nosql_document_offload_execute(
+            self.collection.records.len(),
+            self.collection.average_encoded_bytes(),
+            true,
+            state,
+            registry,
+            gpu_available,
+            self.collection.generation_current and self.durable_generation_current,
+            cpu_fallback_available,
+            budget,
+            self.collection.filter_metadata_ids(key, value)
+        )
+
+fn nosql_document_record(id: text, encoded_bytes: i64,
+                         metadata: Dict<text, text>) -> NoSqlDocumentRecord:
+    NoSqlDocumentRecord(id: id, encoded_bytes: encoded_bytes, metadata: metadata)
+
+fn nosql_document_filter_metadata_ids(records: [NoSqlDocumentRecord],
+                                      key: text, value: text) -> [text]:
+    var ids: [text] = []
+    for record in records:
+        if record.metadata.contains_key(key):
+            if record.metadata[key] == value:
+                ids.push(record.id)
+    ids
+
+fn nosql_document_text_ids_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn nosql_document_submission_with_reason(submission: GpuWdbQueueSubmission,
+                                         dispatch_target: text,
+                                         reason: text,
+                                         accepted: bool) -> GpuWdbQueueSubmission:
+    GpuWdbQueueSubmission(
+        accepted: accepted,
+        state: submission.state,
+        execution: submission.execution,
+        queue_depth_after: submission.queue_depth_after,
+        dispatch_target: dispatch_target,
+        pinned_host_bytes: if accepted: submission.pinned_host_bytes else: 0,
+        stream_id: if accepted: submission.stream_id else: -1,
+        reason: reason
+    )
+
+fn nosql_document_offload_with_authority(execution: NoSqlDocumentOffloadExecution,
+                                         dispatch_target: text,
+                                         reason: text,
+                                         gpu_dispatched: bool,
+                                         cpu_authoritative: bool,
+                                         result_ids: [text]) -> NoSqlDocumentOffloadExecution:
+    NoSqlDocumentOffloadExecution(
+        document_count: execution.document_count,
+        estimated_batch_bytes: execution.estimated_batch_bytes,
+        profile: execution.profile,
+        metadata_filter_cpu_owned: execution.metadata_filter_cpu_owned,
+        submission: nosql_document_submission_with_reason(
+            execution.submission,
+            dispatch_target,
+            reason,
+            gpu_dispatched
+        ),
+        state_after: execution.state_after,
+        result_ids: result_ids,
+        gpu_dispatched: gpu_dispatched,
+        cpu_authoritative: cpu_authoritative
+    )
+
+fn nosql_document_estimated_batch_bytes(document_count: i64, bytes_per_document: i64) -> i64:
+    if document_count <= 0:
+        return 0
+    if bytes_per_document <= 0:
+        return 0
+    document_count * bytes_per_document
+
+fn nosql_document_offload_execute(document_count: i64, bytes_per_document: i64,
+                                  metadata_filter_cpu_owned: bool,
+                                  state: GpuWdbQueueState,
+                                  registry: GpuWdbLibraryRegistry,
+                                  gpu_available: bool,
+                                  generation_current: bool,
+                                  cpu_fallback_available: bool,
+                                  budget: GpuWdbBudget,
+                                  cpu_result_ids: [text]) -> NoSqlDocumentOffloadExecution:
+    nosql_document_offload_execute_for_generation(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        registry.generation,
+        cpu_fallback_available,
+        budget,
+        cpu_result_ids
+    )
+
+fn nosql_document_offload_execute_for_generation(document_count: i64, bytes_per_document: i64,
+                                                 metadata_filter_cpu_owned: bool,
+                                                 state: GpuWdbQueueState,
+                                                 registry: GpuWdbLibraryRegistry,
+                                                 gpu_available: bool,
+                                                 generation_current: bool,
+                                                 expected_registry_generation: i64,
+                                                 cpu_fallback_available: bool,
+                                                 budget: GpuWdbBudget,
+                                                 cpu_result_ids: [text]) -> NoSqlDocumentOffloadExecution:
+    val batch_bytes = nosql_document_estimated_batch_bytes(document_count, bytes_per_document)
+    if not metadata_filter_cpu_owned:
+        val decision = gpu_wdb_nosql_mode_admits(batch_bytes, false, budget)
+        val execution = GpuWdbExecutionPlan(
+            kind: GpuWdbWorkKind.DbDocumentFilter,
+            target: "cpu_fallback",
+            decision: decision
+        )
+        val batch = GpuWdbBatchPlan(
+            execution: execution,
+            item_count: document_count,
+            average_item_bytes: if document_count > 0: batch_bytes / document_count else: 0,
+            queue_depth_after: state.queue_depth
+        )
+        val submission = GpuWdbQueueSubmission(
+            accepted: false,
+            state: state,
+            execution: batch.execution,
+            queue_depth_after: state.queue_depth,
+            dispatch_target: "cpu_fallback",
+            pinned_host_bytes: 0,
+            stream_id: -1,
+            reason: decision.reason
+        )
+        return NoSqlDocumentOffloadExecution(
+            document_count: document_count,
+            estimated_batch_bytes: batch_bytes,
+            profile: gpu_wdb_nosql_db_profile(),
+            metadata_filter_cpu_owned: metadata_filter_cpu_owned,
+            submission: submission,
+            state_after: state,
+            result_ids: cpu_result_ids,
+            gpu_dispatched: false,
+            cpu_authoritative: true
+        )
+
+    val effective_expected_generation =
+        if generation_current:
+            expected_registry_generation
+        else:
+            -1
+    val submission = gpu_wdb_submit_registered_batch_for_generation(
+        state,
+        registry,
+        GpuWdbWorkKind.DbDocumentFilter,
+        batch_bytes,
+        document_count,
+        gpu_available,
+        effective_expected_generation,
+        cpu_fallback_available,
+        budget
+    )
+    val state_after =
+        if submission.accepted:
+            gpu_wdb_complete_submission(submission.state, submission)
+        else:
+            submission.state
+    NoSqlDocumentOffloadExecution(
+        document_count: document_count,
+        estimated_batch_bytes: batch_bytes,
+        profile: gpu_wdb_nosql_db_profile(),
+        metadata_filter_cpu_owned: metadata_filter_cpu_owned,
+        submission: submission,
+        state_after: state_after,
+        result_ids: cpu_result_ids,
+        gpu_dispatched: submission.accepted,
+        cpu_authoritative: true
+    )
+
+fn nosql_document_offload_execute_device_validated(document_count: i64,
+                                                   bytes_per_document: i64,
+                                                   metadata_filter_cpu_owned: bool,
+                                                   state: GpuWdbQueueState,
+                                                   backend: GpuWdbDeviceBackend,
+                                                   generation_current: bool,
+                                                   expected_backend_generation: i64,
+                                                   cpu_fallback_available: bool,
+                                                   budget: GpuWdbBudget,
+                                                   cpu_result_ids: [text],
+                                                   gpu_candidate_document_ids: [text],
+                                                   started_us: i64,
+                                                   finished_us: i64,
+                                                   measured_device_time_us: i64,
+                                                   timing_source: text) -> NoSqlDocumentDeviceOffloadExecution:
+    val base = nosql_document_offload_execute_for_generation(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        state,
+        gpu_wdb_device_backend_registry(backend),
+        backend.native_device_execution,
+        generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_result_ids
+    )
+    val effective_generation =
+        if generation_current:
+            expected_backend_generation
+        else:
+            -1
+    val device_result = gpu_wdb_run_device_batch(
+        state,
+        backend,
+        GpuWdbWorkKind.DbDocumentFilter,
+        nosql_document_estimated_batch_bytes(document_count, bytes_per_document),
+        document_count,
+        effective_generation,
+        cpu_fallback_available,
+        budget,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    if not device_result.production_device_claim:
+        return NoSqlDocumentDeviceOffloadExecution(
+            execution: nosql_document_offload_with_authority(
+                base,
+                "cpu_fallback",
+                "production-device-not-measured",
+                false,
+                true,
+                cpu_result_ids
+            ),
+            device_result: device_result
+        )
+    if nosql_document_text_ids_equal(cpu_result_ids, gpu_candidate_document_ids):
+        return NoSqlDocumentDeviceOffloadExecution(
+            execution: nosql_document_offload_with_authority(
+                base,
+                base.submission.dispatch_target,
+                "production-gpu-document-match",
+                true,
+                false,
+                gpu_candidate_document_ids
+            ),
+            device_result: device_result
+        )
+    NoSqlDocumentDeviceOffloadExecution(
+        execution: nosql_document_offload_with_authority(
+            base,
+            "cpu_fallback",
+            "production-gpu-document-mismatch",
+            false,
+            true,
+            cpu_result_ids
+        ),
+        device_result: device_result
+    )
+
+fn nosql_document_offload_execute_default(document_count: i64, bytes_per_document: i64,
+                                          metadata_filter_cpu_owned: bool,
+                                          state: GpuWdbQueueState,
+                                          registry: GpuWdbLibraryRegistry,
+                                          gpu_available: bool,
+                                          generation_current: bool,
+                                          cpu_fallback_available: bool,
+                                          cpu_result_ids: [text]) -> NoSqlDocumentOffloadExecution:
+    nosql_document_offload_execute(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        gpu_wdb_default_budget(),
+        cpu_result_ids
+    )
+
+fn nosql_document_offload_used_gpu(execution: NoSqlDocumentOffloadExecution) -> bool:
+    execution.gpu_dispatched and nosql_document_profile_allows_gpu(execution)
+
+fn nosql_document_profile_allows_gpu(execution: NoSqlDocumentOffloadExecution) -> bool:
+    gpu_wdb_profile_allows_gpu(execution.profile, execution.submission.execution.decision)

@@ -1,0 +1,111 @@
+fn sg_double(x: i64) -> i64: x * 2
+fn sg_add1(x: i64) -> i64: x + 1
+fn sg_len_plus(value: text, extra: i64) -> i64:
+    value.len() + extra
+fn sg_apply(value: i64, transform: fn(i64) -> i64) -> i64:
+    transform(value)
+fn sg_apply_optional(value: i64, transform: fn(i64) -> Option<i64>) -> Option<i64>:
+    transform(value)
+fn sg_apply_text_items(items: [text], transform: fn([text]) -> text) -> text:
+    transform(items)
+
+struct SgRow:
+    name: text
+    count: i64
+
+describe "Short grammar interpreter":
+    it "combines placeholder lambda with map":
+        val result = [1, 2, 3].map(_ * 3)
+        expect(result).to_equal([3, 6, 9])
+
+    it "combines numbered placeholder with filter":
+        val result = [1, 2, 3, 4, 5].filter(_1 > 2)
+        expect(result).to_equal([3, 4, 5])
+
+    it "keeps placeholder lambdas around nested calls":
+        val result = ["2", "5"].map(int(_1))
+        expect(result).to_equal([2, 5])
+
+    it "keeps numbered placeholders inside string interpolation":
+        val result = ["a", "b"].map("item:{_1}")
+        expect(result).to_equal(["item:a", "item:b"])
+
+    it "keeps numbered placeholders inside indexed string interpolation":
+        val result = [[1, 2], [3, 4]].map("first:{_1[0]}")
+        expect(result).to_equal(["first:1", "first:3"])
+
+    it "keeps numbered placeholders inside formatted string interpolation":
+        val result = [7].map("count:{_1:05d}")
+        expect(result).to_equal(["count:00007"])
+
+    it "uses numbered placeholders in string interpolation callback arguments":
+        val result = sg_apply_text_items(["World"], "Hello, {_1[0]}!")
+        expect(result).to_equal("Hello, World!")
+
+    it "uses method calls inside interpolated placeholder callbacks":
+        val result = sg_apply_text_items(["a", "b"], "got {_1.len()} items")
+        expect(result).to_equal("got 2 items")
+
+    it "uses tuple fields inside interpolated placeholder callbacks":
+        expect(["i64", "bool"].enumerate().map("{_1.0}:{_1.1}")).to_equal(["0:i64", "1:bool"])
+
+    it "keeps placeholder lambdas around multi-argument calls":
+        val result = [1, 2, 3].map(sg_len_plus("abcd", _1))
+        expect(result).to_equal([5, 6, 7])
+
+    it "combines method reference with placeholder":
+        val lengths = ["a", "abcd", "xy"].map(&:len)
+        val result = lengths.filter(_ > 1)
+        expect(result).to_equal([4, 2])
+
+    it "uses placeholder field predicates":
+        val rows = [
+            SgRow(name: "old", count: 1),
+            SgRow(name: "new", count: 3)
+        ]
+        val result = rows.filter(_1.name == "new" and _1.count > 2)
+        expect(result.len()).to_equal(1)
+        expect(result[0].name).to_equal("new")
+
+    it "uses placeholders inside inline if expressions":
+        val result = [1, 2, 3, 4].map(if _1 % 2 == 0: _1 * 10 else: 0)
+        expect(result).to_equal([0, 20, 0, 40])
+
+    it "uses inline if placeholder expressions as function arguments":
+        val result = sg_apply(4, if _1 % 2 == 0: _1 * 10 else: 0)
+        expect(result).to_equal(40)
+
+    it "uses inline if placeholder expressions that return nil":
+        val result = sg_apply_optional(4, if _1 % 2 == 0: _1 * 10 else: nil)
+        expect(result).to_equal(40)
+
+    it "pipes through composed function":
+        val transform = sg_double >> sg_add1
+        expect(4 |> transform).to_equal(9)
+
+    it "pipes comprehension result into lambda":
+        val result = [for x in 0..4 if x % 2 == 0: x * x] |> &:len
+        expect(result).to_equal(2)
+
+    it "uses nil coalescing after option value":
+        val maybe: Option<i64> = nil
+        expect(maybe ?? 17).to_equal(17)
+
+    it "uses match expression as placeholder scrutinee in map":
+        val result = [1, 2, 3].map(match _1:
+            case 1: 10
+            case 2: 20
+            case _: 30
+        )
+        expect(result).to_equal([10, 20, 30])
+
+    it "uses match expression as placeholder scrutinee with wildcard default":
+        val result = [4, 1, 2].map(match _1:
+            case 1: "one"
+            case _: "other"
+        )
+        expect(result).to_equal(["other", "one", "other"])
+
+    it "keeps explicit lambda readable for multiple arguments":
+        val result = sg_len_plus("abcd", 3)
+        expect(result).to_equal(7)

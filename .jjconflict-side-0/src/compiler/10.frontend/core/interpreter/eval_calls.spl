@@ -1,0 +1,496 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Core Interpreter — Call Expression Evaluators
+#
+# Split from eval_ops.spl. Contains:
+# - Float parsing utilities (parse_float_text, char_digit)
+# - Call evaluation (eval_call, eval_function_call, eval_struct_constructor)
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
+use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
+
+var _yield_cache: {} = {}
+
+# ===== Float Parsing Utilities =====
+
+fn parse_float_text(s: text) -> f64:
+    """Parse a float from text representation (e.g. '3.14', '-2.5', '1e3')."""
+    var result: f64 = 0.0
+    var negative = false
+    var i = 0
+    # Handle sign
+    if s.len() > 0 and s[0] == "-":
+        negative = true
+        i = 1
+    elif s.len() > 0 and s[0] == "+":
+        i = 1
+    # Parse integer part
+    while i < s.len():
+        val c = s[i]
+        if c == ".": break
+        if c == "e" or c == "E": break
+        if c != "_":
+            val d = char_digit(c)
+            if d >= 0.0:
+                result = result * 10.0 + d
+        i = i + 1
+    # Parse fractional part
+    if i < s.len() and s[i] == ".":
+        i = i + 1
+        var frac: f64 = 0.0
+        var frac_div: f64 = 1.0
+        while i < s.len():
+            val c = s[i]
+            if c == "e" or c == "E": break
+            if c != "_":
+                val d = char_digit(c)
+                if d >= 0.0:
+                    frac = frac * 10.0 + d
+                    frac_div = frac_div * 10.0
+            i = i + 1
+        result = result + frac / frac_div
+    # Parse exponent
+    if i < s.len() and (s[i] == "e" or s[i] == "E"):
+        i = i + 1
+        var exp_neg = false
+        if i < s.len() and s[i] == "-":
+            exp_neg = true
+            i = i + 1
+        elif i < s.len() and s[i] == "+":
+            i = i + 1
+        var exp_val: f64 = 0.0
+        while i < s.len():
+            val c = s[i]
+            if c != "_":
+                val d = char_digit(c)
+                if d >= 0.0:
+                    exp_val = exp_val * 10.0 + d
+            i = i + 1
+        var power: f64 = 1.0
+        var ei = 0
+        while ei < int(exp_val):
+            power = power * 10.0
+            ei = ei + 1
+        if exp_neg:
+            result = result / power
+        else:
+            result = result * power
+    if negative:
+        0.0 - result
+    else:
+        result
+
+fn char_digit(c: text) -> f64:
+    """Convert single-char text to digit value, or -1.0 if not a digit."""
+    if c == "0": 0.0
+    elif c == "1": 1.0
+    elif c == "2": 2.0
+    elif c == "3": 3.0
+    elif c == "4": 4.0
+    elif c == "5": 5.0
+    elif c == "6": 6.0
+    elif c == "7": 7.0
+    elif c == "8": 8.0
+    elif c == "9": 9.0
+    else: -1.0
+
+# ===== Call Expression =====
+
+fn eval_call(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val callee_eid = e_node.left
+    val arg_eids = e_node.args
+    val arg_names = expr_get_arg_names(eid)
+
+    # Evaluate callee
+    val callee_node = expr_get(callee_eid)
+    val callee_tag = callee_node.tag
+
+    # Direct function call by name
+    if callee_tag == EXPR_IDENT:
+        val name = callee_node.s_val
+
+        # Check for struct constructor (only uppercase names)
+        val first_ch = name[0]
+        if first_ch >= "A" and first_ch <= "Z":
+            val struct_decl = struct_table_lookup(name)
+            if struct_decl >= 0:
+                return eval_struct_constructor(name, struct_decl, arg_eids, arg_names)
+
+        # Check for builtin
+        val builtin_result = eval_builtin_call(name, arg_eids)
+        if builtin_result >= -1:
+            return builtin_result
+
+        # Check function table
+        val decl_id = func_table_lookup(name)
+        if decl_id >= 0:
+            return eval_function_call(decl_id, arg_eids, arg_names)
+
+        # Check environment for function value
+        val fn_vid = env_lookup(name)
+        if fn_vid >= 0:
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                return eval_function_call(fn_decl, arg_eids, arg_names)
+
+        # Try deferred (lazy) modules before giving up
+        val forced_ok = try_force_any_deferred_for(name)
+        if forced_ok == 1:
+            val decl_id2 = func_table_lookup(name)
+            if decl_id2 >= 0:
+                return eval_function_call(decl_id2, arg_eids, arg_names)
+            # Maybe it's a struct constructor after forcing
+            val first_ch2 = name[0]
+            if first_ch2 >= "A" and first_ch2 <= "Z":
+                val struct_decl2 = struct_table_lookup(name)
+                if struct_decl2 >= 0:
+                    return eval_struct_constructor(name, struct_decl2, arg_eids, arg_names)
+
+        eval_set_error("undefined function: " + name)
+        return -1
+
+    # Path call: Type.method(args) or Enum.Variant(args)
+    if callee_tag == EXPR_FIELD_ACCESS:
+        val base_eid = callee_node.left
+        val member_name = callee_node.s_val
+        val base_node = expr_get(base_eid)
+        val base_tag = base_node.tag
+        if base_tag == EXPR_IDENT:
+            val type_name = base_node.s_val
+            # Check enum variant constructor: Enum.Variant(payload)
+            val enum_variants = enum_table_lookup(type_name)
+            if enum_variants != "":
+                # Only treat as variant if member_name is a known variant
+                val variant_list = enum_variants.split(",")
+                var is_variant = false
+                for vn in variant_list:
+                    if vn == member_name:
+                        is_variant = true
+                        break
+                if is_variant:
+                    return eval_enum_variant_call(type_name, member_name, arg_eids)
+            # Check static method: Type.method() → Type__method in func table
+            val static_fn_name = type_name + "__" + member_name
+            val static_decl = func_table_lookup(static_fn_name)
+            if static_decl >= 0:
+                return eval_function_call(static_decl, arg_eids, arg_names)
+            # Check struct constructor with module prefix: Module.Struct(args)
+            val struct_decl2 = struct_table_lookup(member_name)
+            if struct_decl2 >= 0:
+                return eval_struct_constructor(member_name, struct_decl2, arg_eids, arg_names)
+
+            # Try deferred (lazy) modules for Type.method or Enum.Variant
+            val forced_path = try_force_any_deferred_for(type_name)
+            if forced_path == 1:
+                # Retry enum variant
+                val enum_variants2 = enum_table_lookup(type_name)
+                if enum_variants2 != "":
+                    val variant_list2 = enum_variants2.split(",")
+                    var is_variant2 = false
+                    for vn2 in variant_list2:
+                        if vn2 == member_name:
+                            is_variant2 = true
+                            break
+                    if is_variant2:
+                        return eval_enum_variant_call(type_name, member_name, arg_eids)
+                # Retry static method
+                val static_fn2 = type_name + "__" + member_name
+                val static_decl2 = func_table_lookup(static_fn2)
+                if static_decl2 >= 0:
+                    return eval_function_call(static_decl2, arg_eids, arg_names)
+                # Retry struct constructor
+                val struct_decl3 = struct_table_lookup(member_name)
+                if struct_decl3 >= 0:
+                    return eval_struct_constructor(member_name, struct_decl3, arg_eids, arg_names)
+
+    # Indirect call (call on expression result)
+    val callee_val = eval_expr(callee_eid)
+    if eval_had_error: return -1
+    if val_is_function(callee_val):
+        val fn_decl = val_get_func_decl(callee_val)
+        return eval_function_call(fn_decl, arg_eids, arg_names)
+
+    eval_set_error("value is not callable")
+    -1
+
+fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
+    val d_node = decl_get(decl_id)
+    val fn_name = d_node.name
+    val param_names = d_node.param_names
+    val param_types = d_node.param_types
+    val type_params = d_node.type_params
+    val body_stmts = d_node.body_stmts
+
+    # Record call for JIT threshold tracking
+    jit_record_call(fn_name)
+
+    # Evaluate arguments
+    var arg_values: [i64] = []
+    for aeid in arg_eids:
+        val av = eval_expr(aeid)
+        if eval_had_error: return -1
+        arg_values.push(av)
+
+    var has_named_args = false
+    for arg_name in arg_names:
+        if arg_name != "":
+            has_named_args = true
+            break
+    if has_named_args:
+        if arg_values.len() > param_names.len():
+            eval_set_error("too many arguments for function '" + fn_name + "'")
+            return -1
+        var ordered_values: [i64] = []
+        for pname in param_names:
+            ordered_values.push(-1)
+        var next_pos: i64 = 0
+        var ai: i64 = 0
+        while ai < arg_values.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var pi: i64 = 0
+                while pi < param_names.len():
+                    if param_names[pi] == arg_name:
+                        target = pi
+                        break
+                    pi = pi + 1
+                if target < 0:
+                    eval_set_error("unknown argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+                if ordered_values[target] >= 0:
+                    eval_set_error("duplicate argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+            else:
+                while next_pos < ordered_values.len() and ordered_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= ordered_values.len():
+                    eval_set_error("too many arguments for function '" + fn_name + "'")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            ordered_values[target] = arg_values[ai]
+            ai = ai + 1
+        var pi: i64 = 0
+        while pi < ordered_values.len():
+            if ordered_values[pi] < 0:
+                ordered_values[pi] = val_make_nil()
+            pi = pi + 1
+        arg_values = ordered_values
+
+    # Check if function is generic (has type parameters)
+    # If so, look up or create monomorphic instance
+    var actual_decl_id = decl_id
+    if type_params.len() > 0:
+        val type_args_str = infer_type_args_from_values(arg_values)
+        val cache_key = fn_name + "__" + type_args_str
+        val cached_decl = mono_cache_lookup(cache_key)
+        if cached_decl >= 0:
+            actual_decl_id = cached_decl
+        else:
+            val type_tags = infer_type_tags_from_values(arg_values)
+            val specialized_decl = mono_specialize(decl_id, type_params, type_tags)
+            mono_cache_register(cache_key, specialized_decl)
+            actual_decl_id = specialized_decl
+
+    # Type check arguments if parameter types are specified
+    if param_types.len() > 0:
+        var pi: i64 = 0
+        for av in arg_values:
+            if pi < param_types.len():
+                val expected_type = param_types[pi]
+                if expected_type != 0:  # 0 = TYPE_VOID means no type annotation
+                    val type_matches = type_check_value(av, expected_type)
+                    if not type_matches:
+                        val param_name = param_names[pi]
+                        eval_set_error("type error: argument '" + param_name + "' in function '" + fn_name + "' type mismatch")
+                        return -1
+            pi = pi + 1
+
+    # Try JIT execution if function is compiled
+    if jit_is_compiled(fn_name):
+        # Convert value_ids to raw i64s for JIT calling convention
+        var raw_args: [i64] = []
+        for av in arg_values:
+            if val_is_int(av):
+                raw_args.push(val_get_int(av))
+            else:
+                raw_args.push(av)
+        val jit_result = jit_try_execute(fn_name, raw_args)
+        if jit_result != -1:
+            return val_make_int(jit_result)
+
+    # Fall back to tree-walking
+    val local_count = resolve_cached_local_count(actual_decl_id)
+    val prev_decl_id = eval_current_decl_id
+    eval_current_decl_id = actual_decl_id
+    if local_count > 0:
+        env_push_frame(local_count)
+    env_push_scope()
+    var pi: i64 = 0
+    for pname in param_names:
+        var pval = val_make_nil()
+        if pi < arg_values.len():
+            pval = arg_values[pi]
+            # Value-type (struct) params are copied on bind so callee field
+            # mutations never leak back to the caller's argument. Reference
+            # types (class/actor) keep sharing the same value_id — mutations
+            # through them are meant to be visible to the caller. See
+            # decl_set_is_value_type / interp_struct_is_value_type (#108).
+            if val_is_struct(pval) and interp_struct_is_value_type(pval):
+                pval = val_struct_deep_copy(pval)
+        env_define(pname, pval)
+        # LOAD_FAST: set fast local for non-shadowed params
+        if local_count > 0:
+            val is_shadowed = resolve_is_slot_shadowed(actual_decl_id, pi)
+            if is_shadowed == false:
+                env_set_local(pi, pval)
+        pi = pi + 1
+
+    # Generator detection: push yield accumulator if body contains yield
+    val yield_key = "{actual_decl_id}"
+    var is_gen = false
+    val cached_yield = _yield_cache[yield_key]
+    if cached_yield.?:
+        is_gen = cached_yield == "y"
+    else:
+        is_gen = stmts_contain_yield(body_stmts)
+        _yield_cache[yield_key] = if is_gen: "y" else: "n"
+    if is_gen:
+        eval_yield_stack.push([])
+
+    # Execute body
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    # Handle return
+    var had_explicit_return = false
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+        had_explicit_return = true
+
+    # Generator: pop accumulator and return collected array
+    if is_gen:
+        val ys_ref = eval_yield_stack
+        val ys_len = ys_ref.len()
+        val yielded = ys_ref[ys_len - 1]
+        eval_yield_stack = ys_ref[0:ys_len - 1]
+        if had_explicit_return == false:
+            last_val = val_make_array(yielded)
+
+    env_pop_scope()
+    if local_count > 0:
+        env_pop_frame()
+    eval_current_decl_id = prev_decl_id
+    last_val
+
+# ===== Struct (value type) vs Class (reference type) param-copy support (#108) =====
+#
+# The interpreter has one runtime value kind (VAL_STRUCT) for both `struct`
+# and `class` instances. The discriminator lives on the DECLARATION: parsing
+# tags class-origin struct decls via decl_set_is_value_type(id, 0) (see
+# parse_struct_decl in _ParserDecls/fn_struct_decls.spl), defaulting to 1
+# (value type) for plain `struct` decls. Lookup failures (builtin pseudo
+# structs like Option/File/Class that never went through struct_table_register)
+# default to "not a value type" so their existing shared-reference behavior is
+# unchanged — only confirmed user `struct` decls get copied.
+fn interp_struct_is_value_type(vid: i64) -> bool:
+    val name = val_get_struct_name(vid)
+    val decl_id = struct_table_lookup(name)
+    if decl_id < 0:
+        return false
+    decl_get(decl_id).is_value_type
+
+fn val_struct_deep_copy(vid: i64) -> i64:
+    """Deep-copy a struct value for value-type param binding. Nested fields
+    that are themselves value-type structs are copied recursively (struct-in-
+    struct). Class-typed (reference) fields and all other value kinds keep
+    the same value_id, so a class field embedded in a struct still shares its
+    identity with the caller after the struct itself is copied."""
+    val name = val_get_struct_name(vid)
+    val fields = val_get_struct_fields(vid)
+    val values = val_get_struct_values(vid)
+    var new_values: [i64] = []
+    for fv in values:
+        if val_is_struct(fv) and interp_struct_is_value_type(fv):
+            new_values.push(val_struct_deep_copy(fv))
+        else:
+            new_values.push(fv)
+    val_make_struct(name, fields, new_values)
+
+fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
+    val d_node = decl_get(decl_id)
+    val field_names = d_node.field_names
+    val field_defaults = d_node.field_defaults
+    var field_values: [i64] = []
+    for fname in field_names:
+        field_values.push(-1)
+
+    var base_struct: i64 = -1
+    var arg_index: i64 = 0
+    var next_pos: i64 = 0
+    for aeid in arg_eids:
+        val etag = expr_get_tag(aeid)
+        if etag == EXPR_SPREAD:
+            val inner_eid = expr_get_left(aeid)
+            base_struct = eval_expr(inner_eid)
+            if eval_had_error: return -1
+        else:
+            val av = eval_expr(aeid)
+            if eval_had_error: return -1
+            val arg_name = if arg_index < arg_names.len(): arg_names[arg_index] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var fi: i64 = 0
+                while fi < field_names.len():
+                    if field_names[fi] == arg_name:
+                        target = fi
+                        break
+                    fi = fi + 1
+                if target < 0:
+                    eval_set_error("unknown field '" + arg_name + "' in " + name + " constructor")
+                    return -1
+                if field_values[target] >= 0:
+                    eval_set_error("duplicate field '" + arg_name + "' in " + name + " constructor")
+                    return -1
+            else:
+                while next_pos < field_values.len() and field_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= field_values.len():
+                    eval_set_error("too many arguments for " + name + " constructor")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            field_values[target] = av
+        arg_index = arg_index + 1
+
+    # Fill remaining fields: use base struct then defaults then nil
+    var i: i64 = 0
+    for fname in field_names:
+        if field_values[i] < 0:
+            var fv: i64 = -1
+            # Try base struct field
+            if base_struct >= 0:
+                val bfv = val_struct_get_field(base_struct, fname)
+                if bfv >= 0:
+                    fv = bfv
+            # Try declared default
+            if fv < 0:
+                if i < field_defaults.len():
+                    val def_eid = field_defaults[i]
+                    if def_eid >= 0:
+                        fv = eval_expr(def_eid)
+                        if eval_had_error: return -1
+            if fv < 0:
+                fv = val_make_nil()
+            field_values[i] = fv
+        i = i + 1
+
+    val_make_struct(name, field_names, field_values)

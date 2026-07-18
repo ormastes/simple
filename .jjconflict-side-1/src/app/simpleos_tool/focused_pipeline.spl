@@ -1,0 +1,106 @@
+# Standalone SimpleOS source pipeline. Keep this facade concrete: importing the
+# generic CompilerDriver retains every optional backend in the guest binary.
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.desugar.desugar_async.{desugar_module}
+use compiler.frontend.desugar.collection_desugar.{desugar_collections_static}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_release_options}
+use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct_compiled, llvm_translate_module_direct_ir}
+use compiler.backend.backend.llvm_native_link.{link_simpleos_x86_64_external}
+
+extern fn rt_file_read_text_rv(path: text) -> text
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn simpleos_current_cs() -> u64
+
+fn require_user_cpl(phase: text) -> bool:
+    val cs = simpleos_current_cs()
+    if cs != 0x2b or (cs & 3) != 3:
+        print "[simpleos-cpl] FAIL phase={phase} cs={cs} cpl={cs & 3}"
+        return false
+    print "[simpleos-cpl] phase={phase} cs=0x2b cpl=3"
+    simpleos_current_cs() == 0x2b
+
+fn lower_standalone_file(path: text) -> Result<HirModule, text>:
+    val source = rt_file_read_text_rv(path)
+    if not require_user_cpl("post-read"):
+        return Err("filesystem syscall did not return to CPL3")
+    if source == "":
+        return Err("cannot read source or source is empty: {path}")
+    var parsed = parse_and_build_module(_pp_preprocess_conditionals(source), path)
+    parsed = desugar_module(parsed)
+    desugar_collections_static(0, 0)
+    var lowering: HirLowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(parsed)
+    if lowering.errors.len() > 0:
+        return Err(lowering.errors[0].message)
+    Ok(hir)
+
+pub fn simpleos_interpret_file(path: text) -> i64:
+    val lowered = lower_standalone_file(path)
+    if lowered.is_err():
+        print "error: {lowered.unwrap_err()}"
+        return 1
+    val interpreted = InterpreterBackendImpl.new().interpret_hir_module(lowered.unwrap())
+    match interpreted:
+        case Ok(_): 0
+        case Err(error):
+            print "error: {error.message}"
+            1
+
+pub fn simpleos_compile_native_file(path: text, output: text, emit_object: bool, emit_llvm: bool) -> i64:
+    val lowered = lower_standalone_file(path)
+    if lowered.is_err():
+        print "[simpleos-compile] phase=hir-error"
+        print "error: {lowered.unwrap_err()}"
+        return 1
+    val hir: HirModule = lowered.unwrap()
+    print "[simpleos-compile] phase=hir-ok"
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    if mir_lowering.errors.len() > 0:
+        print "[simpleos-compile] phase=mir-error"
+        print "error: {mir_lowering.errors[0].message}"
+        return 1
+    if mir.functions.len() == 0:
+        print "error: source produced no functions"
+        return 1
+
+    var options = compileoptions_release_options()
+    options.target = CodegenTarget.SimpleOS_X86_64
+    if emit_llvm:
+        print "[simpleos-compile] phase=mir-ok"
+        val llvm_ir = llvm_translate_module_direct_ir(options, mir)
+        print "[simpleos-compile] phase=ir-ready bytes={llvm_ir.len()}"
+        if not rt_file_write_text(output, llvm_ir):
+            print "error: cannot write LLVM IR: {output}"
+            return 1
+        if not require_user_cpl("post-write"):
+            return 1
+        return 0
+    val compiled = llvm_compile_module_direct_compiled(options, mir)
+    if compiled.is_err():
+        print "error: {compiled.unwrap_err().message}"
+        return 1
+
+    val object_path = if emit_object: output else: "/tmp/SIMPLEUSR.O"
+    if not rt_file_write_bytes(object_path, compiled.unwrap().object_code):
+        print "error: cannot write object: {object_path}"
+        return 1
+    if not require_user_cpl("post-write"):
+        return 1
+    if emit_object:
+        return 0
+    val linked = link_simpleos_x86_64_external([object_path], output)
+    rt_file_delete(object_path)
+    match linked:
+        case Ok(_): 0
+        case Err(error):
+            print "error: {error}"
+            1

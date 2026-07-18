@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_dir="${BUILD_DIR:-$ROOT/build/check/local-gpu-perf-summary}.self_test"
+    rm -rf "$self_dir"
+    mkdir -p "$self_dir"
+    cat >"$self_dir/simple_pass.shs" <<'SH'
+#!/bin/sh
+echo "gpu_perf_summary_self_test=pass"
+echo "gpu_perf_summary_contract=verdict-timing-overhead"
+echo "gpu_perf_summary_case_faster=pass"
+echo "gpu_perf_summary_case_near_cpu=pass"
+echo "gpu_perf_summary_case_slower_overhead=pass"
+echo "gpu_perf_summary_case_metal_output=pass"
+echo "gpu_perf_summary_case_unclassified=pass"
+echo "gpu_perf_summary_case_timing_line=pass"
+echo "gpu_perf_summary_case_fail_precedence=pass"
+SH
+    cat >"$self_dir/simple_fail_second.shs" <<'SH'
+#!/bin/sh
+case "$*" in
+    *test/05_perf/local_gpu_check/run_gpu_check.spl*) echo "gpu_perf_summary_self_test=pass"; echo "gpu_perf_summary_contract=verdict-timing-overhead"; echo "gpu_perf_summary_case_faster=pass"; echo "gpu_perf_summary_case_near_cpu=pass"; echo "gpu_perf_summary_case_slower_overhead=pass"; echo "gpu_perf_summary_case_metal_output=pass"; echo "gpu_perf_summary_case_unclassified=pass"; echo "gpu_perf_summary_case_timing_line=pass"; echo "gpu_perf_summary_case_fail_precedence=pass" ;;
+    *) echo "gpu_perf_summary_self_test=fail reason=injected" ;;
+esac
+SH
+    cat >"$self_dir/simple_missing_contract.shs" <<'SH'
+#!/bin/sh
+echo "gpu_perf_summary_self_test=pass"
+SH
+    cat >"$self_dir/simple_missing_case.shs" <<'SH'
+#!/bin/sh
+echo "gpu_perf_summary_self_test=pass"
+echo "gpu_perf_summary_contract=verdict-timing-overhead"
+SH
+    chmod +x "$self_dir"/*.shs
+    SIMPLE_BIN="$self_dir/simple_pass.shs" sh "$0" >"$self_dir/pass.log"
+    grep -q '^local_gpu_perf_summary_status=pass$' "$self_dir/pass.log"
+    set +e
+    SIMPLE_BIN="$self_dir/simple_missing_contract.shs" sh "$0" >"$self_dir/missing_contract.log" 2>&1
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "local_gpu_perf_summary_self_test=fail reason=missing-contract-accepted"
+        exit 1
+    fi
+    set +e
+    SIMPLE_BIN="$self_dir/simple_missing_case.shs" sh "$0" >"$self_dir/missing_case.log" 2>&1
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "local_gpu_perf_summary_self_test=fail reason=missing-case-marker-accepted"
+        exit 1
+    fi
+    set +e
+    SIMPLE_BIN="$self_dir/simple_fail_second.shs" sh "$0" >"$self_dir/fail.log" 2>&1
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "local_gpu_perf_summary_self_test=fail reason=injected-failure-accepted"
+        exit 1
+    fi
+    echo "local_gpu_perf_summary_self_test=pass"
+    exit 0
+fi
+
+run_self_test() {
+    runner="$1"
+    out="$("$SIMPLE_BIN" run "$ROOT/$runner" --self-test)"
+    printf '%s\n' "$out"
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_self_test=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_contract=verdict-timing-overhead$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_faster=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_near_cpu=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_slower_overhead=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_metal_output=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_unclassified=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_timing_line=pass$'
+    printf '%s\n' "$out" | grep -q '^gpu_perf_summary_case_fail_precedence=pass$'
+}
+
+run_self_test test/05_perf/local_gpu_check/run_gpu_check.spl
+run_self_test test/perf/local_gpu_check/run_gpu_check.spl
+
+echo "local_gpu_perf_summary_status=pass"

@@ -1,0 +1,64 @@
+"""
+# Simple Web Flex-Grow Weighted Distribution Specification
+
+## Overview
+
+Proves that the pure-Simple HTML/CSS layout renderer distributes a flex row's
+leftover main-axis space in proportion to each child's `flex-grow` weight
+(not in equal shares), and that `flex-wrap: wrap-reverse` places the first
+flex line at the bottom with wrapped lines stacking upward.
+
+These are regression guards for the historically deferred defect where the
+renderer split leftover space equally among auto children instead of honoring
+`flex-grow` ratios.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
+
+fn _layout_field(html: text, id: text, field: text) -> i32:
+    val raw = simple_web_layout_debug_layout_by_id(html, 480, 240, id, field)
+    parse_int(raw)
+
+fn _grow_1_2_1_html() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;\"><div id=\"row\" style=\"width:400px; display:flex; flex-direction:row;\"><div id=\"a\" style=\"flex-grow:1; height:20px;\"></div><div id=\"b\" style=\"flex-grow:2; height:20px;\"></div><div id=\"c\" style=\"flex-grow:1; height:20px;\"></div></div></body></html>"
+
+fn _grow_fixed_1_2_html() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;\"><div id=\"row\" style=\"width:240px; display:flex; flex-direction:row;\"><div id=\"f\" style=\"width:40px; height:20px;\"></div><div id=\"a\" style=\"flex:1; height:20px;\"></div><div id=\"b\" style=\"flex:2; height:20px;\"></div></div></body></html>"
+
+fn _wrap_reverse_html() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;\"><div id=\"row\" style=\"margin:16px; width:140px; display:flex; flex-direction:row; flex-wrap:wrap-reverse;\"><div id=\"a\" style=\"width:60px; height:24px;\"></div><div id=\"b\" style=\"width:60px; height:24px;\"></div><div id=\"c\" style=\"width:60px; height:24px;\"></div></div></body></html>"
+
+describe "Simple Web flex-grow weighted distribution":
+
+    it "distributes leftover space by flex-grow ratio 1:2:1 in a 400px row":
+        step("Render three flex-grow children (1/2/1) with no explicit width in a 400px container")
+        val html = _grow_1_2_1_html()
+        # Leftover main space = 400 (no fixed children). 1:2:1 of 400 => 100/200/100.
+        expect(_layout_field(html, "a", "w")).to_equal(100)
+        expect(_layout_field(html, "b", "w")).to_equal(200)
+        expect(_layout_field(html, "c", "w")).to_equal(100)
+        step("Confirm the widths are weighted, not equal thirds (would be ~133 each)")
+        expect(_layout_field(html, "b", "w")).to_be_greater_than(_layout_field(html, "a", "w"))
+        expect(_layout_field(html, "c", "x")).to_equal(300)
+
+    it "weights leftover against a fixed sibling (fixed 40px + flex 1/2 in 240px)":
+        step("Render a 40px fixed child plus flex:1 and flex:2 children in a 240px container")
+        val html = _grow_fixed_1_2_html()
+        # Leftover after the 40px fixed child = 200; 1:2 => 67/133 (integer rounding).
+        expect(_layout_field(html, "f", "w")).to_equal(40)
+        expect(_layout_field(html, "a", "w")).to_equal(67)
+        expect(_layout_field(html, "b", "w")).to_equal(133)
+
+    it "places wrap-reverse first line at the bottom and wrapped line on top":
+        step("Render three 60px children in a 140px wrap-reverse row (16px body-ish margin)")
+        val html = _wrap_reverse_html()
+        # a+b fill the first line (60+60=120 <= 140); c wraps. wrap-reverse puts the
+        # first line at the bottom (y=40) and the wrapped line on top (y=16).
+        expect(_layout_field(html, "a", "y")).to_equal(40)
+        expect(_layout_field(html, "b", "y")).to_equal(40)
+        expect(_layout_field(html, "c", "y")).to_equal(16)
+        expect(_layout_field(html, "a", "x")).to_equal(16)
+        expect(_layout_field(html, "c", "x")).to_equal(16)

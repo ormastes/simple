@@ -1,0 +1,302 @@
+# VHDL ABI — Type-to-signal mapping, port ABI, and data width resolution.
+#
+# Pure free functions that map MIR types to VHDL port/signal representations.
+# Defines its own lightweight structs to avoid import cycles with vhdl_backend.
+#
+# Spec: VHDL-PARITY-020 (ABI layer)
+
+use compiler.mir.mir_data.*
+use compiler.backend.backend.vhdl_type_mapper.{VhdlTypeMapper, vhdl_type_mapper_create}
+use compiler.common.attributes.{VhdlReturnFieldMetadata}
+
+# ============================================================================
+# ABI Port / Return Types
+# ============================================================================
+
+struct VhdlAbiPort:
+    """A single VHDL entity port derived from MIR function signature."""
+    name: text
+    direction: text   # "in" | "out" | "inout" | "buffer"
+    type_name: text   # e.g. "signed(31 downto 0)", "std_logic"
+
+struct VhdlAbiReturnField:
+    """One output port produced from a labeled tuple or scalar return."""
+    name: text        # sanitised port name
+    type_name: text   # VHDL type text
+    index: i64        # position in the tuple (0 for scalar)
+
+struct VhdlAbiReturn:
+    """Resolved return ABI for a hardware function."""
+    is_tuple: bool
+    fields: [VhdlAbiReturnField]
+
+struct VhdlAbiDiagnostic:
+    """Diagnostic message from ABI resolution."""
+    message: text
+
+# ============================================================================
+# Data Width Resolution
+# ============================================================================
+
+fn vhdl_data_width_bits(ty: MirType) -> i64?:
+    """Return the data width in bits for a MIR type, or nil if unsynthesizable.
+
+    Scalar integers and fixed-width Bits types have known widths.
+    Compound types (tuples, arrays, structs) and floats return nil.
+    """
+    match ty.kind:
+        case I8 | U8: Some(8)
+        case I16 | U16: Some(16)
+        case I32 | U32: Some(32)
+        case I64 | U64: Some(64)
+        case Bool: Some(1)
+        case Bits(width, _): Some(width)
+        case Array(elem, size):
+            # NOTE: explicit match, not `if elem_w.?:` -- element width is a
+            # bit-count that could in principle be 0 for a degenerate Bits(0,_)
+            # element; keep consistent with the Some(0)-falsy fix elsewhere.
+            match vhdl_data_width_bits(elem):
+                case Some(w): Some(w * size)
+                case nil: nil
+        case _: nil
+
+# ============================================================================
+# Type-to-Signal Mapping
+# ============================================================================
+
+fn vhdl_signal_type_for(ty: MirType, mapper: VhdlTypeMapper) -> text?:
+    """Map a MIR type to a VHDL signal type string, or nil if unsynthesizable.
+
+    Uses the VhdlTypeMapper for primitive mapping and extends it with
+    Bits and Array support.
+    """
+    match ty.kind:
+        case I8: Some(mapper.map_signed(8))
+        case I16: Some(mapper.map_signed(16))
+        case I32: Some(mapper.map_signed(32))
+        case I64: Some(mapper.map_signed(64))
+        case U8: Some(mapper.map_unsigned(8))
+        case U16: Some(mapper.map_unsigned(16))
+        case U32: Some(mapper.map_unsigned(32))
+        case U64: Some(mapper.map_unsigned(64))
+        case Bool: Some(mapper.bit_type())
+        case Bits(width, signed): Some(mapper.map_fixed_bits(width, signed))
+        case _: nil
+
+fn vhdl_signal_type_for_or_error(ty: MirType, mapper: VhdlTypeMapper, context: text) -> text:
+    """Map a MIR type to a VHDL signal type, returning an error comment for unsynthesizable types."""
+    val result = vhdl_signal_type_for(ty, mapper)
+    if result.?:
+        result.unwrap()
+    else:
+        "-- ERROR: unsynthesizable type in {context}"
+
+# ============================================================================
+# Port Name Sanitization
+# ============================================================================
+
+fn vhdl_abi_sanitize_port_name(name: text) -> text:
+    """Sanitize a port name for VHDL compliance.
+
+    Replaces non-alphanumeric characters with underscores,
+    collapses consecutive underscores, and strips leading/trailing underscores.
+    """
+    var result = name.trim()
+    if result.len() == 0:
+        return "port"
+    result = result.replace(" ", "_")
+    result = result.replace("-", "_")
+    result = result.replace(".", "_")
+    result = result.replace(":", "_")
+    result = result.replace("/", "_")
+    result = result.replace("\\", "_")
+    result = result.replace("(", "_")
+    result = result.replace(")", "_")
+    result = result.replace("[", "_")
+    result = result.replace("]", "_")
+    # Collapse consecutive underscores
+    while result.contains("__"):
+        result = result.replace("__", "_")
+    # Strip leading/trailing underscores
+    while result.starts_with("_"):
+        result = result.slice(1, result.len())
+    while result.ends_with("_"):
+        result = result.slice(0, result.len() - 1)
+    if result.len() == 0:
+        result = "port"
+    result
+
+# ============================================================================
+# Return ABI Resolution
+# ============================================================================
+
+fn vhdl_resolve_return_abi(func: MirFunction, mapper: VhdlTypeMapper) -> VhdlAbiReturn:
+    """Resolve the return ABI for a hardware function.
+
+    - Unit returns produce no output ports (empty fields).
+    - Scalar returns produce a single `result_out` port.
+    - Labeled tuple returns produce one output port per labeled field
+      (labels come from VhdlReturnFieldMetadata on the function).
+    - Anonymous tuple returns produce numbered `out_0`, `out_1`, ... ports.
+    """
+    val ret_ty = func.signature.return_type
+    match ret_ty.kind:
+        case Unit:
+            return VhdlAbiReturn(is_tuple: false, fields: [])
+        case Tuple(elements):
+            var fields: [VhdlAbiReturnField] = []
+            var has_labels = false
+            if func.has_vhdl_metadata:
+                has_labels = func.vhdl_metadata.return_fields.len() == elements.len()
+            var idx = 0
+            for elem in elements:
+                val type_name = vhdl_signal_type_for_or_error(elem, mapper, "return field")
+                var port_name = "out_{idx}"
+                if has_labels:
+                    val label = func.vhdl_metadata.return_fields[idx].label
+                    port_name = vhdl_abi_sanitize_port_name(label)
+                fields = fields.push(VhdlAbiReturnField(
+                    name: port_name,
+                    type_name: type_name,
+                    index: idx
+                ))
+                idx = idx + 1
+            return VhdlAbiReturn(is_tuple: true, fields: fields)
+        case _:
+            val type_name = vhdl_signal_type_for_or_error(ret_ty, mapper, "return")
+            return VhdlAbiReturn(
+                is_tuple: false,
+                fields: [VhdlAbiReturnField(
+                    name: "result_out",
+                    type_name: type_name,
+                    index: 0
+                )]
+            )
+
+# ============================================================================
+# Input Port Resolution
+# ============================================================================
+
+fn vhdl_resolve_input_ports(func: MirFunction, mapper: VhdlTypeMapper) -> [VhdlAbiPort]:
+    """Resolve input ports from function parameters.
+
+    Each parameter produces one input port named `arg0`, `arg1`, etc.
+    If the corresponding MirLocal has a name, that name is used instead
+    (after sanitization).
+    """
+    var ports: [VhdlAbiPort] = []
+    var idx = 0
+    for param_ty in func.signature.params:
+        val type_name = vhdl_signal_type_for_or_error(param_ty, mapper, "input port")
+        # Try to find a named local for this argument
+        var port_name = "arg{idx}"
+        for local in func.locals:
+            match local.kind:
+                case Arg(arg_idx):
+                    if arg_idx == idx:
+                        if local.name.?:
+                            port_name = vhdl_abi_sanitize_port_name(local.name.unwrap())
+                case _: pass_dn
+        ports = ports.push(VhdlAbiPort(
+            name: port_name,
+            direction: "in",
+            type_name: type_name
+        ))
+        idx = idx + 1
+    ports
+
+# ============================================================================
+# Full Port List Resolution
+# ============================================================================
+
+fn vhdl_resolve_all_ports(func: MirFunction, mapper: VhdlTypeMapper) -> [VhdlAbiPort]:
+    """Resolve all ports (inputs + outputs) for a hardware function.
+
+    Combines input ports from parameters with output ports from the return ABI.
+    """
+    var ports = vhdl_resolve_input_ports(func, mapper)
+    val ret_abi = vhdl_resolve_return_abi(func, mapper)
+    for field in ret_abi.fields:
+        ports = ports.push(VhdlAbiPort(
+            name: field.name,
+            direction: "out",
+            type_name: field.type_name
+        ))
+    ports
+
+# ============================================================================
+# Port Collision Detection
+# ============================================================================
+
+fn vhdl_abi_check_port_collisions(ports: [VhdlAbiPort]) -> [text]:
+    """Check for duplicate port names in a resolved port list.
+
+    Returns a list of diagnostic messages for each collision found.
+    """
+    var diagnostics: [text] = []
+    var i = 0
+    while i < ports.len():
+        var j = i + 1
+        while j < ports.len():
+            if ports[i].name == ports[j].name:
+                diagnostics = diagnostics.push(
+                    "Duplicate VHDL port name `{ports[i].name}` ({ports[i].direction}) collides with `{ports[j].name}` ({ports[j].direction})"
+                )
+            j = j + 1
+        i = i + 1
+    diagnostics
+
+# ============================================================================
+# ABI Validation
+# ============================================================================
+
+fn vhdl_abi_validate_output(func: MirFunction) -> [text]:
+    """Validate that a hardware function's return type is ABI-compatible.
+
+    Returns diagnostic messages for unsupported patterns:
+    - Anonymous tuple without labeled return fields
+    - Unsynthesizable return types (float, pointer, etc.)
+    """
+    var diagnostics: [text] = []
+    val ret_ty = func.signature.return_type
+    match ret_ty.kind:
+        case Unit:
+            pass_dn
+        case Tuple(elements):
+            if func.has_vhdl_metadata:
+                val rf_len = func.vhdl_metadata.return_fields.len()
+                if rf_len != elements.len():
+                    diagnostics = diagnostics.push(
+                        "Hardware function `{func.name}` returns a {elements.len()}-element tuple but has {rf_len} labeled return fields; label every output"
+                    )
+            else:
+                diagnostics = diagnostics.push(
+                    "Hardware function `{func.name}` returns a tuple but has no VHDL metadata; add @hardware with labeled returns"
+                )
+            # Check each element is synthesizable
+            var idx = 0
+            for elem in elements:
+                if not vhdl_signal_type_for(elem, vhdl_type_mapper_create()).?:
+                    diagnostics = diagnostics.push(
+                        "Hardware function `{func.name}` return field {idx} is not synthesizable"
+                    )
+                idx = idx + 1
+        case F32:
+            diagnostics = diagnostics.push(
+                "Hardware function `{func.name}` returns f32 which is not directly synthesizable"
+            )
+        case F64:
+            diagnostics = diagnostics.push(
+                "Hardware function `{func.name}` returns f64 which is not directly synthesizable"
+            )
+        case Ptr(_, _):
+            diagnostics = diagnostics.push(
+                "Hardware function `{func.name}` returns a pointer which is not synthesizable"
+            )
+        case Ref(_, _):
+            diagnostics = diagnostics.push(
+                "Hardware function `{func.name}` returns a reference which is not synthesizable"
+            )
+        case _:
+            pass_dn
+    diagnostics

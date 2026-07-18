@@ -1,0 +1,295 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirCallArg}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolId, SymbolKind, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_instructions.{MirInstKind, MirModule, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
+use compiler.semantics.resolve.{MethodResolver, resolve_methods}
+
+fn mir_call_names(mir: MirModule) -> [text]:
+    var names: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(value, _):
+                                match value:
+                                    case MirConstValue.Str(name): names = names.push(name)
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+    names
+
+fn mir_call_has_text_return(mir: MirModule, wanted_name: text) -> bool:
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(value, type_):
+                                match value:
+                                    case MirConstValue.Str(name):
+                                        if name == wanted_name:
+                                            match type_.kind:
+                                                case MirTypeKind.FuncPtr(signature):
+                                                    match signature.return_type.kind:
+                                                        case MirTypeKind.Tuple(parts):
+                                                            if parts.len() == 2:
+                                                                match parts[0].kind:
+                                                                    case MirTypeKind.Ptr(pointee, _):
+                                                                        match pointee.kind:
+                                                                            case MirTypeKind.U8:
+                                                                                match parts[1].kind:
+                                                                                    case MirTypeKind.U64:
+                                                                                        return true
+                                                                                    case _:
+                                                                                        ()
+                                                                            case _:
+                                                                                ()
+                                                                    case _:
+                                                                        ()
+                                                        case _:
+                                                            ()
+                                                case _:
+                                                    ()
+                                    case _:
+                                        ()
+                            case _:
+                                ()
+                    case _:
+                        ()
+    false
+
+fn symbol_is_text_callable(symbols: SymbolTable, id: SymbolId, param_count: i64, receiver_id: i64) -> bool:
+    val symbol = symbols.get_symbol(id)
+    if symbol == nil or symbol.type_ == nil:
+        return false
+    match symbol.type_.unwrap().kind:
+        case HirTypeKind.Function(params, ret, _):
+            if params.len() != param_count:
+                return false
+            if receiver_id >= 0:
+                match params[0].kind:
+                    case HirTypeKind.Named(receiver, _):
+                        if receiver.id != receiver_id:
+                            return false
+                    case _:
+                        return false
+            match ret.kind:
+                case HirTypeKind.Str: true
+                case _: false
+        case _:
+            false
+
+describe "MethodResolver nil guards":
+    it "keeps module resolution methods owned by MethodResolver":
+        val source = file_read("src/compiler/35.semantics/resolve.spl")
+        val owner = source.find("impl MethodResolver:")
+        val method = source.find("    me resolve_module(module: HirModule) -> HirModule:")
+
+        expect(owner >= 0).to_equal(true)
+        expect(method > owner).to_equal(true)
+
+    it "keeps UFCS working when current_fn_sym is Some(nil)":
+        var symbols = SymbolTable.new()
+        val i64_type = HirType.named("i64")
+        val ping_type = HirType(
+            kind: HirTypeKind.Function([i64_type], i64_type, []),
+            span: Span.empty()
+        )
+        symbols.define(
+            "ping",
+            SymbolKind.Function,
+            Some(ping_type),
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+
+        var resolver = MethodResolver.new(symbols)
+        resolver.current_fn_sym = Some(nil)
+
+        val args: [HirCallArg] = []
+        val result = resolver.try_ufcs(i64_type, "ping", args)
+
+        expect(result.?).to_equal(true)
+
+    it "keeps UFCS optional bindings visible to HIR lowering":
+        val source = file_read("src/compiler/35.semantics/resolve_strategies.spl")
+
+        expect(source.contains("if val resolved_lookup_id = func_sym_id")).to_equal(false)
+        expect(source).to_contain("val resolved_lookup_id = func_sym_id")
+        expect(source.contains("if val type_id = type_sym_id")).to_equal(false)
+        expect(source).to_contain("val type_id = type_sym_id")
+
+    it "selects the receiver owner when unrelated types share a method name":
+        val source = "struct CodegenCompiledModule:\n    handle: i64\n" +
+            "impl CodegenCompiledModule:\n    fn cleanup(self) -> i64: 17\n    static fn code() -> i64: 18\n" +
+            "struct TieredJitManager:\n    handle: i64\n" +
+            "impl TieredJitManager:\n    fn cleanup(self) -> i64: 99\n    static fn code() -> i64: 100\n" +
+            "fn call_codegen(value: CodegenCompiledModule) -> i64: value.cleanup()\n" +
+            "fn call_jit(value: TieredJitManager) -> i64: value.cleanup()\n" +
+            "fn static_codegen() -> i64: CodegenCompiledModule.code()\n" +
+            "fn static_jit() -> i64: TieredJitManager.code()\n" +
+            "trait DefaultCleanup:\n    fn cleanup(self) -> i64: 55\n" +
+            "struct DefaultCleanupA:\n    handle: i64\n" +
+            "struct DefaultCleanupB:\n    handle: i64\n" +
+            "impl DefaultCleanup for DefaultCleanupA:\n    pass_dn\n" +
+            "impl DefaultCleanup for DefaultCleanupB:\n    pass_dn\n" +
+            "fn call_default_a(value: DefaultCleanupA) -> i64: value.cleanup()\n" +
+            "fn call_default_b(value: DefaultCleanupB) -> i64: value.cleanup()\n"
+        val parsed = parse_full_frontend(source, "method_owner", "method_owner", Logger(level: 0))
+        var lowering = HirLowering.with_filename("method_owner.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val codegen_owner = hir.symbols.lookup("CodegenCompiledModule").unwrap()
+        val jit_owner = hir.symbols.lookup("TieredJitManager").unwrap()
+        val codegen_cleanup = hir.symbols.lookup("method_owner.CodegenCompiledModule::cleanup").unwrap()
+        val jit_cleanup = hir.symbols.lookup("method_owner.TieredJitManager::cleanup").unwrap()
+        val codegen_type = HirType(
+            kind: HirTypeKind.Named(codegen_owner, []),
+            span: Span.empty()
+        )
+        var resolver = MethodResolver.new(hir.symbols)
+
+        val resolved = resolver.try_instance_method(codegen_type, "cleanup")
+        expect(resolved.?).to_equal(true)
+        if resolved.?:
+            match resolved.unwrap():
+                case MethodResolution.InstanceMethod(owner, method):
+                    expect(owner.id).to_equal(codegen_owner.id)
+                    expect(method.id).to_equal(codegen_cleanup.id)
+                    assert_not_equal(method.id, jit_cleanup.id)
+                    assert_not_equal(owner.id, jit_owner.id)
+                case _:
+                    expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+        val (resolved_hir, resolve_errors) = resolve_methods(hir)
+        expect(resolve_errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(resolved_hir.symbols)
+        val mir = mir_lowering.lower_module(resolved_hir)
+        var mir_names: [text] = []
+        for function in mir.functions.values():
+            mir_names = mir_names.push(function.name)
+        val call_names = mir_call_names(mir)
+        expect(mir_names).to_contain("method_owner.CodegenCompiledModule.cleanup")
+        expect(mir_names).to_contain("method_owner.TieredJitManager.cleanup")
+        expect(mir_names).to_contain("method_owner.DefaultCleanupA.cleanup")
+        expect(mir_names).to_contain("method_owner.DefaultCleanupB.cleanup")
+        expect(call_names).to_contain("method_owner.CodegenCompiledModule.cleanup")
+        expect(call_names).to_contain("method_owner.TieredJitManager.cleanup")
+        expect(call_names).to_contain("method_owner.DefaultCleanupA.cleanup")
+        expect(call_names).to_contain("method_owner.DefaultCleanupB.cleanup")
+        expect(call_names).to_contain("method_owner.CodegenCompiledModule.code")
+        expect(call_names).to_contain("method_owner.TieredJitManager.code")
+
+    it "predeclares local instance and static text method signatures":
+        val source = "trait DefaultDescribe:\n    fn inherited(self) -> text: \"default\"\n" +
+            "struct Widget:\n    name: text\n" +
+            "impl Widget:\n    fn describe() -> text: \"widget:\"\n    static fn category() -> text: \"static\"\n" +
+            "impl DefaultDescribe for Widget:\n    pass_dn\n" +
+            "fn call_describe(value: Widget) -> text: value.describe()\n" +
+            "fn call_category() -> text: Widget.category()\n" +
+            "fn call_inherited(value: Widget) -> text: value.inherited()\n"
+        val parsed = parse_full_frontend(source, "method_text", "method_text", Logger(level: 0))
+        var lowering = HirLowering.with_filename("method_text.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val owner = hir.symbols.lookup("Widget").unwrap()
+        val instance_id = hir.symbols.lookup("method_text.Widget::describe").unwrap()
+        val static_id = hir.symbols.lookup("method_text.Widget::category").unwrap()
+        val inherited_id = hir.symbols.lookup("method_text.Widget::inherited").unwrap()
+        expect(symbol_is_text_callable(hir.symbols, instance_id, 1, owner.id)).to_equal(true)
+        expect(symbol_is_text_callable(hir.symbols, static_id, 0, -1)).to_equal(true)
+        expect(symbol_is_text_callable(hir.symbols, inherited_id, 1, owner.id)).to_equal(true)
+
+        val (resolved_hir, resolve_errors) = resolve_methods(hir)
+        expect(resolve_errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(resolved_hir.symbols)
+        val mir = mir_lowering.lower_module(resolved_hir)
+        expect(mir_call_has_text_return(mir, "method_text.Widget.describe")).to_equal(true)
+        expect(mir_call_has_text_return(mir, "method_text.Widget.category")).to_equal(true)
+        expect(mir_call_has_text_return(mir, "method_text.Widget.inherited")).to_equal(true)
+
+    it "keeps imported same-named method owners module-qualified":
+        val owner_source = "struct Shared:\n    handle: i64\n" +
+            "impl Shared:\n    fn cleanup(self) -> i64: 17\n"
+        val owner_a = parse_full_frontend(owner_source, "owner_a", "owner_a", Logger(level: 0))
+        val owner_b = parse_full_frontend(owner_source.replace("17", "99"), "owner_b", "owner_b", Logger(level: 0))
+        val consumer_source = "use owner_a.{Shared as CodegenOwner}\n" +
+            "use owner_b.{Shared as JitOwner}\n" +
+            "fn call_a(value: CodegenOwner) -> i64: value.cleanup()\n" +
+            "fn call_b(value: JitOwner) -> i64: value.cleanup()\n"
+        val consumer = parse_full_frontend(consumer_source, "consumer", "consumer", Logger(level: 0))
+        var modules: Dict<text, any> = {}
+        modules["owner_a"] = owner_a
+        modules["owner_b"] = owner_b
+        var consumer_lowering = HirLowering.with_filename("consumer.spl")
+        consumer_lowering.modules_by_name = modules
+        val consumer_hir = consumer_lowering.lower_module(consumer)
+        expect(consumer_lowering.errors.len()).to_equal(0)
+        val (resolved_consumer, consumer_errors) = resolve_methods(consumer_hir)
+        expect(consumer_errors.len()).to_equal(0)
+        var consumer_mir_lowering = MirLowering.new(resolved_consumer.symbols)
+        val consumer_mir = consumer_mir_lowering.lower_module(resolved_consumer)
+        val imported_calls = mir_call_names(consumer_mir)
+        expect(imported_calls).to_contain("owner_a.Shared.cleanup")
+        expect(imported_calls).to_contain("owner_b.Shared.cleanup")
+
+    it "predeclares imported aliased instance and static text method signatures":
+        val owner_source = "trait DefaultDescribe:\n    fn inherited(self) -> text: \"default\"\n" +
+            "struct Shared:\n    handle: i64\n" +
+            "impl Shared:\n    fn describe(self) -> text: \"owner\"\n    static fn category() -> text: \"static\"\n" +
+            "impl DefaultDescribe for Shared:\n    pass_dn\n"
+        val owner_module = parse_full_frontend(owner_source, "owner_text", "owner_text", Logger(level: 0))
+        val consumer_source = "use owner_text.{Shared as Alias}\n" +
+            "fn call_instance(value: Alias) -> text: value.describe()\n" +
+            "fn call_static() -> text: Alias.category()\n" +
+            "fn call_inherited(value: Alias) -> text: value.inherited()\n"
+        val consumer = parse_full_frontend(consumer_source, "consumer_text", "consumer_text", Logger(level: 0))
+        var modules: Dict<text, any> = {}
+        modules["owner_text"] = owner_module
+        var lowering = HirLowering.with_filename("consumer_text.spl")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        val alias_owner = hir.symbols.lookup("Alias").unwrap()
+        val instance_id = hir.symbols.lookup("owner_text.Shared::describe").unwrap()
+        val static_id = hir.symbols.lookup("owner_text.Shared::category").unwrap()
+        val inherited_id = hir.symbols.lookup("owner_text.Shared::inherited").unwrap()
+        expect(symbol_is_text_callable(hir.symbols, instance_id, 1, alias_owner.id)).to_equal(true)
+        expect(symbol_is_text_callable(hir.symbols, static_id, 0, -1)).to_equal(true)
+        expect(symbol_is_text_callable(hir.symbols, inherited_id, 1, alias_owner.id)).to_equal(true)
+
+        val (resolved_hir, resolve_errors) = resolve_methods(hir)
+        expect(resolve_errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(resolved_hir.symbols)
+        val mir = mir_lowering.lower_module(resolved_hir)
+        expect(mir_call_has_text_return(mir, "owner_text.Shared.describe")).to_equal(true)
+        expect(mir_call_has_text_return(mir, "owner_text.Shared.category")).to_equal(true)
+        expect(mir_call_has_text_return(mir, "owner_text.Shared.inherited")).to_equal(true)
+
+    it "runs module method resolution against owned symbols":
+        val source = file_read("src/compiler/35.semantics/resolve.spl")
+        val lowering_source = file_read("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl")
+        val module_source = file_read("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val bootstrap_mir_source = file_read("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl")
+        expect(source).to_contain("create_method_resolver(module.symbols)")
+        expect(source.contains("val symbols = SymbolTable.new()\n    val resolver = create_method_resolver(symbols)")).to_equal(false)
+        expect(lowering_source).to_contain("== \"1\" and not fn_.is_method")
+        expect(module_source).to_contain("impls: impls")
+        expect(bootstrap_mir_source).to_contain("bootstrap_hir_function_symbol_name")

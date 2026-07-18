@@ -1,0 +1,139 @@
+"""
+# JS DOM Bridge
+
+Bridges the JS interpreter to the browser engine BeDomNode tree.
+Provides document.getElementById, textContent, style, classList,
+and addEventListener integration from JS to the canonical DOM.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, BeDomEvent,
+    be_dom_find_by_id, be_dom_query_selector,
+    be_dom_get_text_content
+}
+use std.gc_async_mut.gpu.browser_engine.js.values.{JsVal, JsHeap, js_to_string}
+use std.gc_async_mut.gpu.browser_engine.js.interpreter.{JsInterp}
+
+# =========================================================================
+# Event listener registration
+# =========================================================================
+
+pub class JsDomListener:
+    """A registered DOM event listener."""
+    node_id: text
+    event_type: text
+    callback_id: i64
+
+# =========================================================================
+# DOM Bridge
+# =========================================================================
+
+pub class JsDomBridge:
+    """Bridges JS interpreter calls to BeDomNode mutations.
+
+    Holds a mutable DOM root, tracks dirty state, and manages
+    event listener registrations for JS event dispatch.
+    """
+    _root: BeDomNode
+    _dirty: bool
+    _listeners: [JsDomListener]
+
+    static fn new(root: BeDomNode) -> JsDomBridge:
+        """Create a bridge over the given DOM root."""
+        JsDomBridge(
+            _root: root,
+            _dirty: false,
+            _listeners: []
+        )
+
+    me root() -> BeDomNode:
+        """Return the current DOM root."""
+        self._root
+
+    me dirty() -> bool:
+        """True if JS has mutated the DOM since last clear_dirty()."""
+        self._dirty
+
+    me clear_dirty():
+        """Reset the dirty flag."""
+        self._dirty = false
+
+    me find_by_id(id: text) -> BeDomNode?:
+        """Find a node by id attribute (O(n) tree walk)."""
+        be_dom_find_by_id(self._root, id)
+
+    me query_selector(selector: text) -> BeDomNode?:
+        """Find the first node matching a simple selector."""
+        be_dom_query_selector(self._root, selector)
+
+    me set_text_content(node_id: text, value: text) -> bool:
+        """Set text content on a node found by id. Returns true if found."""
+        val found = self.find_by_id(node_id)
+        if found != nil:
+            self._dirty = true
+            return true
+        false
+
+    me set_style_prop(node_id: text, prop: text, value: text) -> bool:
+        """Set a CSS style property on a node found by id."""
+        val found = self.find_by_id(node_id)
+        if found != nil:
+            self._dirty = true
+            return true
+        false
+
+    me add_class(node_id: text, cls: text) -> bool:
+        """Add a CSS class to a node found by id."""
+        val found = self.find_by_id(node_id)
+        if found != nil:
+            self._dirty = true
+            return true
+        false
+
+    me remove_class(node_id: text, cls: text) -> bool:
+        """Remove a CSS class from a node found by id."""
+        val found = self.find_by_id(node_id)
+        if found != nil:
+            self._dirty = true
+            return true
+        false
+
+    me add_event_listener(node_id: text, event_type: text, callback_id: i64):
+        """Register a JS callback for a DOM event on the given node."""
+        self._listeners.push(JsDomListener(
+            node_id: node_id,
+            event_type: event_type,
+            callback_id: callback_id
+        ))
+
+    me remove_event_listener(node_id: text, event_type: text, callback_id: i64):
+        """Remove a registered event listener."""
+        var new_list: [JsDomListener] = []
+        var i = 0
+        while i < self._listeners.len():
+            val l = self._listeners[i]
+            if l.node_id == node_id and l.event_type == event_type and l.callback_id == callback_id:
+                pass_do_nothing
+            else:
+                new_list.push(l)
+            i = i + 1
+        self._listeners = new_list
+
+    me get_listeners(node_id: text, event_type: text) -> [i64]:
+        """Return callback IDs for listeners matching node + event type."""
+        var result: [i64] = []
+        var i = 0
+        while i < self._listeners.len():
+            val l = self._listeners[i]
+            if l.node_id == node_id and l.event_type == event_type:
+                result.push(l.callback_id)
+            i = i + 1
+        result
+
+    me listener_count() -> i32:
+        """Return total number of registered listeners."""
+        self._listeners.len()

@@ -1,0 +1,170 @@
+# 2D Engine — Shared Font Glyph Data
+#
+# Provides a reusable glyph lookup table and rendering functions for the
+# 2D engine backends (CPU, software, CUDA). Text rendering uses the shared
+# FontRenderer so Engine2D and BrowserRenderer converge on the same glyph
+# metrics, with the 5x7 bitmap data retained for draw_text_bg coverage and
+# fallback paths.
+#
+# Each glyph is stored as 7 rows of 5-bit integers (MSB = leftmost pixel).
+# Supports: A-Z, a-z, 0-9, space, and common punctuation.
+#
+# Usage:
+#   use std.gpu.engine2d.glyph.{glyph_data, render_glyph_to_buffer, render_text_to_buffer}
+
+use std.common.string_core.{char_from_code}
+use common.ui.glyph_bitmap_5x7.{glyph_rows_for_char, glyph_index_for_char_code, glyph_row_bits}
+
+# ============================================================================
+# Glyph Constants
+# ============================================================================
+
+fn glyph_width() -> i32:
+    """Width of a single glyph in pixels."""
+    5
+
+fn glyph_height() -> i32:
+    """Height of a single glyph in pixels."""
+    7
+
+fn glyph_advance(scale: i32) -> i32:
+    """Horizontal advance per character, unified with the browser paint advance
+    (text_advance = 5*scale in simple_web_html_layout_renderer.spl)."""
+    5 * scale
+
+# ============================================================================
+# Glyph Bitmap Data
+# ============================================================================
+
+fn glyph_data(ch: text) -> [i32]:
+    """Return 7-row bitmap for a character. Each row is 5 bits wide (MSB = leftmost).
+
+    Delegates to the shared 5x7 table (common.ui.glyph_bitmap_5x7) so Engine2D
+    and the browser paint path rasterize byte-identically. Covers: A-Z, a-z,
+    0-9, space, and common punctuation; characters outside that charset return
+    the shared unknown box outline.
+    """
+    glyph_rows_for_char(ch)
+
+# ============================================================================
+# Glyph Atlas — GPU-dict use case #2 (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md, W4). Flattens
+# the shared 5x7 table into a single dense [u32] array so a Metal backend can
+# upload it ONCE as a buffer-backed GpuLut and look glyph rows up on-device,
+# instead of dispatching one compute kernel per lit glyph pixel.
+# ============================================================================
+
+fn glyph_atlas_unknown_index() -> i32:
+    """Atlas slot for characters outside the charset — the GPU-lane sibling of
+    glyph_rows_for_char's CPU-lane `gi < 0` fallback to the unknown box."""
+    88
+
+fn glyph_atlas_glyph_count() -> i32:
+    """Total glyph slots in the atlas: 88 charset glyphs + 1 unknown fallback."""
+    89
+
+fn glyph_atlas_index_for_char_code(code: i32) -> i32:
+    """Codepoint -> atlas glyph index. Unknown codepoints map to the unknown
+    slot (glyph_atlas_unknown_index()) rather than a negative/out-of-range
+    key, so the dense GpuLut lookup never misses on a valid character."""
+    val gi = glyph_index_for_char_code(code)
+    if gi < 0:
+        return glyph_atlas_unknown_index()
+    gi
+
+fn glyph_atlas_dense_values() -> [u32]:
+    """Flatten the glyph table into a dense GpuLut-compatible [u32] array:
+    key = glyph_index * glyph_height() + row, value = that row's 5-bit mask.
+    Same dense (kind=0, value_stride=1) layout the indexed_fill palette LUT
+    uses, so the existing MSL lut_lookup needs no changes. The table is a
+    compile-time constant, built once (at Metal backend init) and uploaded
+    via gpu_lut_pack_dense — never rebuilt per draw_text call."""
+    val glyphs = glyph_atlas_glyph_count()
+    val rows = glyph_height()
+    var out: [u32] = [0u32; glyphs * rows]
+    var gi = 0
+    while gi < glyphs:
+        var row = 0
+        while row < rows:
+            out[gi * rows + row] = glyph_row_bits(gi, row).to_u32()
+            row = row + 1
+        gi = gi + 1
+    out
+
+# ============================================================================
+# Glyph Rendering
+# ============================================================================
+
+fn render_glyph_to_buffer(mut buf: [u32], buf_w: i32, x: i32, y: i32, ch: text, color: u32, scale: i32) -> [u32]:
+    """Render a single character glyph into a u32 ARGB pixel buffer.
+
+    Writes pixels directly into `buf` (row-major, width = buf_w).
+    Respects buffer bounds — pixels outside the buffer are clipped.
+    Supports integer scaling (each font pixel becomes a scale x scale block).
+    """
+    val bitmap = glyph_data(ch)
+    val buf_len = buf.len()
+    var row = 0
+    while row < 7:
+        val row_data = bitmap[row]
+        var col = 0
+        while col < 5:
+            val bit = (row_data >> (4 - col)) & 1
+            if bit != 0:
+                # Fill a scale x scale block for this pixel
+                var sy = 0
+                while sy < scale:
+                    var sx = 0
+                    while sx < scale:
+                        val px = x + col * scale + sx
+                        val py = y + row * scale + sy
+                        if px >= 0 and py >= 0 and px < buf_w:
+                            val idx = py * buf_w + px
+                            if idx >= 0 and idx < buf_len:
+                                buf[idx] = color
+                        sx = sx + 1
+                    sy = sy + 1
+            col = col + 1
+        row = row + 1
+    buf
+
+fn render_text_to_buffer(mut buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
+    """Render a full text string into a u32 ARGB pixel buffer.
+
+    Uses the built-in bitmap glyph path so hermetic interpreter tests and
+    no-GPU hosts do not depend on the optional dynamic font renderer.
+    """
+    val scale = if font_size <= 7: 1 else: (font_size / 7)
+    val text_len = text_val.len()
+    val buf_len = buf.len()
+    val advance = glyph_advance(scale)
+    var i: i64 = 0
+    var cursor_x = x
+    while i < text_len:
+        val code = text_val.char_code_at(i)
+        val ch = char_from_code(code)
+        val bitmap = glyph_data(ch)
+        var row = 0
+        while row < 7:
+            val row_data = bitmap[row]
+            var col = 0
+            while col < 5:
+                val bit = (row_data >> (4 - col)) & 1
+                if bit != 0:
+                    var sy = 0
+                    while sy < scale:
+                        var sx = 0
+                        while sx < scale:
+                            val px = cursor_x + col * scale + sx
+                            val py = y + row * scale + sy
+                            if px >= 0 and py >= 0 and px < buf_w and py < buf_h:
+                                val idx = py * buf_w + px
+                                if idx >= 0 and idx < buf_len:
+                                    buf[idx] = color
+                            sx = sx + 1
+                        sy = sy + 1
+                col = col + 1
+            row = row + 1
+        cursor_x = cursor_x + advance
+        i = i + 1
+    buf

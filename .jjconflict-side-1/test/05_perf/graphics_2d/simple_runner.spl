@@ -1,0 +1,446 @@
+# test/perf/graphics_2d/simple_runner.spl
+#
+# Simple 2D CPU scalar benchmark runner — no Engine2D import.
+# Scene definitions inlined (no cross-file import in script mode).
+# Mirrors bench_2d.c for scene logic and FNV-1a 32-bit hash.
+#
+# Pixel format: RGBA8888, byte order R,G,B,A (matches bench_2d.c).
+# The pure Simple runner stores one packed pixel per element and expands bytes
+# only for the final hash. This keeps rendering real while avoiding four hot
+# array stores per pixel in the draw loops.
+#
+# MODES (edit vals below):
+#   smoke — 16x16 framebuffer, 3 frames (interpreter-safe default)
+#   full  — 1920x1080, 100 frames (compiled/native mode only)
+#
+# Output per scene:
+#   SCENE_RESULT scene=<name> backend=simple_cpu_scalar
+#     frame_count=<n> p50_ms=<ms> p95_ms=<ms>
+#     pixels_per_sec=<n> draws_per_sec=<n>
+#     rss_kb=<n> pixel_hash=<h> p50_ns=<ns> mode=<smoke|full>
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_cli_get_args() -> [text]
+
+fn rt_time_now_nanos() -> i64:
+    rt_time_now_unix_micros() * 1000
+
+val RUNNER_SMOKE_FW: i64     = 16
+val RUNNER_SMOKE_FH: i64     = 16
+val RUNNER_SMOKE_WARMUP: i64 = 1
+val RUNNER_SMOKE_FRAMES: i64 = 3
+
+val RUNNER_FULL_FW: i64     = 1920
+val RUNNER_FULL_FH: i64     = 1080
+val RUNNER_FULL_WARMUP: i64 = 10
+val RUNNER_FULL_FRAMES: i64 = 100
+
+val BYTES_PER_PX: i64 = 4
+val SPRITE_W: i64 = 64
+val SPRITE_H: i64 = 64
+
+fn runner_full_enabled() -> bool:
+    val mode: text = rt_env_get("SIMPLE_ENGINE2D_RUNNER_MODE") ?? ""
+    val full: text = rt_env_get("SIMPLE_ENGINE2D_FULL_MODE") ?? ""
+    if mode == "full" or full == "1":
+        return true
+    val args = rt_cli_get_args()
+    var i: i64 = 0
+    while i < args.len() as i64:
+        val arg = args[i as i32]
+        if arg == "--full" or arg == "full":
+            return true
+        i = i + 1
+    false
+
+fn runner_mode_text() -> text:
+    if runner_full_enabled(): "full" else: "smoke"
+
+fn runner_debug_pixels_enabled() -> bool:
+    val args = rt_cli_get_args()
+    var i: i64 = 0
+    while i < args.len() as i64:
+        val arg = args[i as i32]
+        if arg == "--debug-pixels":
+            return true
+        i = i + 1
+    false
+
+fn runner_frame_width() -> i64:
+    if runner_full_enabled(): 1920 else: 16
+
+fn runner_frame_height() -> i64:
+    if runner_full_enabled(): 1080 else: 16
+
+fn runner_warmup_frames() -> i64:
+    if runner_full_enabled(): 10 else: 1
+
+fn runner_timed_frames() -> i64:
+    if runner_full_enabled(): 100 else: 3
+
+struct Framebuffer:
+    data:   [i64]
+    width:  i32
+    height: i32
+    stride: i32
+
+fn fb_alloc(w: i64, h: i64) -> Framebuffer:
+    val stride: i32 = w as i32
+    val total: i64 = w * h
+    var data: [i64] = []
+    var i: i64 = 0
+    while i < total:
+        data.push(0)
+        i = i + 1
+    Framebuffer(data: data, width: w as i32, height: h as i32, stride: stride)
+
+fn c_r(col: i64) -> u8: (col & 0xFF) as u8
+fn c_g(col: i64) -> u8: ((col >> 8) & 0xFF) as u8
+fn c_b(col: i64) -> u8: ((col >> 16) & 0xFF) as u8
+fn c_a(col: i64) -> u8: ((col >> 24) & 0xFF) as u8
+
+struct ClipRect:
+    active: bool
+    x:  i64
+    y:  i64
+    x2: i64
+    y2: i64
+
+fn clip_none() -> ClipRect:
+    ClipRect(active: false, x: 0, y: 0, x2: 0, y2: 0)
+
+fn sprite_pixel(id: i64) -> i64:
+    if id == 0: 0xFF0000FF
+    else if id == 1: 0xFF00FF00
+    else if id == 2: 0xFFFF0000
+    else: 0xFF00FFFF
+
+fn fill_color(id: i64) -> i64:
+    if id == 0: 0xFF0000FF
+    else if id == 1: 0xFF00FF00
+    else if id == 2: 0xFFFF0000
+    else if id == 3: 0xFF808080
+    else: 0xFF00FFFF
+
+fn expected_fill_pixel(px: i64, py: i64, fw: i64, fh: i64) -> i64:
+    var color: i64 = 0xFF000000
+    val max_x: i64 = fw - 1
+    val max_y: i64 = fh - 1
+    var i: i64 = 0
+    while i < 100:
+        val col: i64 = (i * 37) % 5
+        val rx: i64 = if max_x > 0: (i * 19) % max_x else: 0
+        val ry: i64 = if max_y > 0: (i * 11) % max_y else: 0
+        val rw: i64 = 1 + (i * 7) % (max_x + 1)
+        val rh: i64 = 1 + (i * 13) % (max_y + 1)
+        if px >= rx and px < rx + rw and py >= ry and py < ry + rh:
+            color = fill_color(col)
+        i = i + 1
+    color
+
+fn expected_blit_pixel(px: i64, py: i64) -> i64:
+    sprite_pixel(((px / 64) + (py / 64)) % 4)
+
+fn expected_scroll_pixel(px: i64, py: i64, fw: i64, fh: i64) -> i64:
+    var color: i64 = 0xFF808080
+    val cx: i64 = fw / 8
+    val cy: i64 = fh / 8
+    val cw: i64 = fw - cx * 2
+    val ch: i64 = fh - cy * 2
+    val cr_x2: i64 = cx + cw
+    val cr_y2: i64 = cy + ch
+    val scroll_offset: i64 = 1
+    val row_h: i64 = if fh > 8: 2 else: 1
+    val n_rows: i64 = if fh > 4: 4 else: 2
+    var row: i64 = 0
+    while row < n_rows:
+        val ry: i64 = cy + row * (row_h + 1) - scroll_offset
+        if px >= cx and px < cr_x2 and py >= cy and py < cr_y2 and py >= ry and py < ry + row_h:
+            color = scroll_row_color(row % 2)
+        if px >= cx + cw - 2 and px < cx + cw and py >= cy and py < cr_y2 and py >= ry and py < ry + row_h:
+            color = scroll_indicator_color(row % 3)
+        row = row + 1
+    color
+
+fn expected_scene_pixel(scene_id: i64, px: i64, py: i64, fw: i64, fh: i64) -> i64:
+    if scene_id == 0:
+        return expected_fill_pixel(px, py, fw, fh)
+    if scene_id == 1:
+        return expected_blit_pixel(px, py)
+    expected_scroll_pixel(px, py, fw, fh)
+
+fn scroll_row_color(id: i64) -> i64:
+    if id == 0: 0xFFFFFFFF
+    else: 0xFF000000
+
+fn scroll_indicator_color(id: i64) -> i64:
+    if id == 0: 0xFF0000FF
+    else if id == 1: 0xFFFF0000
+    else: 0xFF00FF00
+
+fn do_clear(mut fb: Framebuffer, color: i64):
+    val total: i32 = fb.width * fb.height
+    var i: i32 = 0
+    val limit4: i32 = total - (total % 4)
+    while i < limit4:
+        fb.data[i] = color
+        fb.data[i + 1] = color
+        fb.data[i + 2] = color
+        fb.data[i + 3] = color
+        i = i + 4
+    while i < total:
+        fb.data[i] = color
+        i = i + 1
+
+fn do_rect(mut fb: Framebuffer, cr: ClipRect, bx: i64, by: i64, bw: i64, bh: i64, color: i64):
+    var x0: i32 = bx as i32
+    var y0: i32 = by as i32
+    var x1: i32 = (bx + bw) as i32
+    var y1: i32 = (by + bh) as i32
+    if cr.active:
+        if x0 < cr.x as i32:  x0 = cr.x as i32
+        if y0 < cr.y as i32:  y0 = cr.y as i32
+        if x1 > cr.x2 as i32: x1 = cr.x2 as i32
+        if y1 > cr.y2 as i32: y1 = cr.y2 as i32
+    if x0 < 0: x0 = 0
+    if y0 < 0: y0 = 0
+    if x1 > fb.width:  x1 = fb.width
+    if y1 > fb.height: y1 = fb.height
+    if x0 >= x1 or y0 >= y1:
+        return
+    var row: i32 = y0
+    while row < y1:
+        var col: i32 = x0
+        var off: i32 = row * fb.stride + x0
+        val row_limit4: i32 = x1 - ((x1 - col) % 4)
+        while col < row_limit4:
+            fb.data[off] = color
+            fb.data[off + 1] = color
+            fb.data[off + 2] = color
+            fb.data[off + 3] = color
+            off = off + 4
+            col = col + 4
+        while col < x1:
+            fb.data[off] = color
+            off = off + 1
+            col = col + 1
+        row = row + 1
+
+fn do_blit(mut fb: Framebuffer, cr: ClipRect, src_id: i64, dst_x: i64, dst_y: i64):
+    val pix: i64 = sprite_pixel(src_id)
+    do_rect(fb, cr, dst_x, dst_y, 64, 64, pix)
+
+fn run_fill(mut fb: Framebuffer) -> i64:
+    val cr: ClipRect = clip_none()
+    do_clear(fb, 0xFF000000)
+    val max_x: i64 = fb.width - 1
+    val max_y: i64 = fb.height - 1
+    var i: i64 = 0
+    while i < 100:
+        val col: i64 = (i * 37) % 5
+        val color: i64 = fill_color(col)
+        val rx: i64 = if max_x > 0: (i * 19) % max_x else: 0
+        val ry: i64 = if max_y > 0: (i * 11) % max_y else: 0
+        val rw: i64 = 1 + (i * 7) % (max_x + 1)
+        val rh: i64 = 1 + (i * 13) % (max_y + 1)
+        do_rect(fb, cr, rx, ry, rw, rh, color)
+        i = i + 1
+    101
+
+fn run_blit(mut fb: Framebuffer) -> i64:
+    val cr: ClipRect = clip_none()
+    do_clear(fb, 0xFF000000)
+    var count: i64 = 1
+    var ty: i64 = 0
+    while ty < fb.height:
+        var tx: i64 = 0
+        while tx < fb.width:
+            val sid: i64 = ((tx / 64) + (ty / 64)) % 4
+            do_blit(fb, cr, sid, tx, ty)
+            count = count + 1
+            tx = tx + 64
+        ty = ty + 64
+    count
+
+fn run_scroll(mut fb: Framebuffer) -> i64:
+    do_clear(fb, 0xFF808080)
+    val cx: i64 = fb.width / 8
+    val cy: i64 = fb.height / 8
+    val cw: i64 = fb.width - cx * 2
+    val ch: i64 = fb.height - cy * 2
+    val cr: ClipRect = ClipRect(active: true, x: cx, y: cy, x2: cx + cw, y2: cy + ch)
+    val scroll_offset: i64 = 1
+    var count: i64 = 2
+    val row_h: i64 = if fb.height > 8: 2 else: 1
+    val n_rows: i64 = if fb.height > 4: 4 else: 2
+    var row: i64 = 0
+    while row < n_rows:
+        val ry: i64 = cy + row * (row_h + 1) - scroll_offset
+        do_rect(fb, cr, cx, ry, cw, row_h, scroll_row_color(row % 2))
+        do_rect(fb, cr, cx + cw - 2, ry, 2, row_h, scroll_indicator_color(row % 3))
+        count = count + 2
+        row = row + 1
+    count + 1
+
+fn sort_i64(s: [i64]) -> [i64]:
+    var arr: [i64] = s
+    val n: i64 = arr.len() as i64
+    var i: i64 = 1
+    while i < n:
+        val key: i64 = arr[i as i32]
+        var j: i64 = i - 1
+        while j >= 0 and arr[j as i32] > key:
+            arr[(j + 1) as i32] = arr[j as i32]
+            j = j - 1
+        arr[(j + 1) as i32] = key
+        i = i + 1
+    arr
+
+fn pct(sorted: [i64], num: i64, den: i64) -> i64:
+    val n: i64 = sorted.len() as i64
+    if n == 0: return 0
+    var idx: i64 = n * num / den
+    if idx >= n: idx = n - 1
+    sorted[idx as i32]
+
+fn fnv1a_fb(fb: Framebuffer, pixel_count: i64) -> i64:
+    var h: i64 = 2166136261
+    val len: i64 = pixel_count
+    var i: i64 = 0
+    while i < len:
+        val pix: i64 = fb.data[i as i32]
+        val low_byte: i64 = h & 0xFF
+        h = h - low_byte + (low_byte xor (pix & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        val low_byte_g: i64 = h & 0xFF
+        h = h - low_byte_g + (low_byte_g xor ((pix >> 8) & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        val low_byte_b: i64 = h & 0xFF
+        h = h - low_byte_b + (low_byte_b xor ((pix >> 16) & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        val low_byte_a: i64 = h & 0xFF
+        h = h - low_byte_a + (low_byte_a xor ((pix >> 24) & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        i = i + 1
+    h
+
+fn fnv1a_pixel_range(fb: Framebuffer, start_pixel: i64, pixel_count: i64) -> i64:
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < pixel_count:
+        val pix: i64 = fb.data[(start_pixel + i) as i32]
+        val low_byte: i64 = h & 0xFF
+        h = h - low_byte + (low_byte xor (pix & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        val low_byte_g: i64 = h & 0xFF
+        h = h - low_byte_g + (low_byte_g xor ((pix >> 8) & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        val low_byte_b: i64 = h & 0xFF
+        h = h - low_byte_b + (low_byte_b xor ((pix >> 16) & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        val low_byte_a: i64 = h & 0xFF
+        h = h - low_byte_a + (low_byte_a xor ((pix >> 24) & 0xFF))
+        h = (h * 16777619) & 0xFFFFFFFF
+        i = i + 1
+    h
+
+fn debug_sample_mismatches(scene_id: i64, fb: Framebuffer, fw: i64, fh: i64) -> i64:
+    var mismatches: i64 = 0
+    var first_idx: i64 = -1
+    var first_actual: i64 = 0
+    var first_expected: i64 = 0
+    var sy: i64 = 0
+    while sy < 9:
+        val py: i64 = if sy == 8: fh - 1 else: (sy * fh) / 8
+        var sx: i64 = 0
+        while sx < 9:
+            val px: i64 = if sx == 8: fw - 1 else: (sx * fw) / 8
+            val idx: i64 = py * fw + px
+            val actual: i64 = fb.data[idx as i32]
+            val expected: i64 = expected_scene_pixel(scene_id, px, py, fw, fh)
+            if actual != expected:
+                mismatches = mismatches + 1
+                if first_idx < 0:
+                    first_idx = idx
+                    first_actual = actual
+                    first_expected = expected
+            sx = sx + 1
+        sy = sy + 1
+    print "SCENE_SAMPLE_CHECK scene_id={scene_id} mismatches={mismatches} first_idx={first_idx} first_actual={first_actual} first_expected={first_expected}"
+    mismatches
+
+fn read_rss_kb() -> i64:
+    val status: text = rt_file_read_text("/proc/self/status")
+    if status.len() == 0:
+        return 0
+    var pos: i32 = 0
+    while pos < status.len() as i32 - 6:
+        if (status[pos] == 'V' and status[pos + 1] == 'm' and
+            status[pos + 2] == 'R' and status[pos + 3] == 'S' and
+            status[pos + 4] == 'S' and status[pos + 5] == ':'):
+            pos = pos + 6
+            while pos < status.len() as i32 and status[pos] == ' ':
+                pos = pos + 1
+            var result: i64 = 0
+            while pos < status.len() as i32 and status[pos] >= '0' and status[pos] <= '9':
+                result = result * 10 + (status[pos] as i64 - '0' as i64)
+                pos = pos + 1
+            return result
+        pos = pos + 1
+    0
+
+fn bench_scene(scene_id: i64, scene_name: text):
+    val fw: i64 = runner_frame_width()
+    val fh: i64 = runner_frame_height()
+    val warmup_frames: i64 = runner_warmup_frames()
+    val timed_frames: i64 = runner_timed_frames()
+    val fb: Framebuffer = fb_alloc(fw, fh)
+    var w: i64 = 0
+    while w < warmup_frames:
+        if scene_id == 0: run_fill(fb)
+        else if scene_id == 1: run_blit(fb)
+        else: run_scroll(fb)
+        w = w + 1
+    var samples: [i64] = []
+    var total_draws: i64 = 0
+    var f: i64 = 0
+    while f < timed_frames:
+        val t0: i64 = rt_time_now_nanos()
+        val draws: i64 = if scene_id == 0: run_fill(fb)
+                         else if scene_id == 1: run_blit(fb)
+                         else: run_scroll(fb)
+        val t1: i64 = rt_time_now_nanos()
+        samples.push(t1 - t0)
+        total_draws = total_draws + draws
+        f = f + 1
+    val sorted: [i64] = sort_i64(samples)
+    val p50_ns: i64 = pct(sorted, 50, 100)
+    val p95_ns: i64 = pct(sorted, 95, 100)
+    val ppf: i64 = fw * fh
+    val pps: i64 = if p50_ns > 0: (ppf * 1000000000) / p50_ns else: 0
+    val avg_draws: i64 = total_draws / timed_frames
+    val dps: i64 = if p50_ns > 0: (avg_draws * 1000000000) / p50_ns else: 0
+    val rss: i64 = read_rss_kb()
+    val phash: i64 = fnv1a_fb(fb, fw * fh)
+    if runner_debug_pixels_enabled():
+        val total_pixels: i64 = fw * fh
+        val mid: i64 = total_pixels / 2
+        val last: i64 = total_pixels - 1
+        print "SCENE_PIXELS scene={scene_name} p0={fb.data[0]} pmid={fb.data[mid as i32]} plast={fb.data[last as i32]}"
+        val row0_hash = fnv1a_pixel_range(fb, 0, fw)
+        val row_mid_hash = fnv1a_pixel_range(fb, mid - (mid % fw), fw)
+        val row_last_hash = fnv1a_pixel_range(fb, total_pixels - fw, fw)
+        val first_4096_hash = fnv1a_pixel_range(fb, 0, 4096)
+        val mid_4096_hash = fnv1a_pixel_range(fb, mid - 2048, 4096)
+        val last_4096_hash = fnv1a_pixel_range(fb, total_pixels - 4096, 4096)
+        print "SCENE_REGION_HASHES scene={scene_name} row0={row0_hash} rowmid={row_mid_hash} rowlast={row_last_hash} first4096={first_4096_hash} mid4096={mid_4096_hash} last4096={last_4096_hash}"
+        debug_sample_mismatches(scene_id, fb, fw, fh)
+    print "SCENE_RESULT scene={scene_name} backend=simple_cpu_scalar frame_count={timed_frames} p50_ms={p50_ns / 1000000} p95_ms={p95_ns / 1000000} pixels_per_sec={pps} draws_per_sec={dps} rss_kb={rss} pixel_hash={phash} p50_ns={p50_ns} mode={runner_mode_text()}"
+
+fn main():
+    print "# simple_runner mode={runner_mode_text()} frame={runner_frame_width()}x{runner_frame_height()} warmup={runner_warmup_frames()} frames={runner_timed_frames()}"
+    bench_scene(0, "fill_1080p")
+    bench_scene(1, "blit_tiles")
+    bench_scene(2, "clipped_scroll")

@@ -1,0 +1,103 @@
+# Hardening specs: frontmatter and tilde-fence robustness.
+# Covers: frontmatter at line 0, unterminated frontmatter, frontmatter not at line 0,
+# empty frontmatter, tilde-fence blocks, tilde-fence unterminated.
+
+use std.spec
+use std.editor.render.md_renderer.*
+use std.editor.render.block_model.*
+
+# ──────────────────────────────────────────────
+# Frontmatter --- block detection
+# ──────────────────────────────────────────────
+describe "frontmatter block parsing":
+
+    it "well-formed frontmatter at line 0 produces frontmatter block":
+        val model = BlockModel.from_markdown("---\ntitle: Hello\nauthor: test\n---\n\n# Heading")
+        expect(model.block_count()).to_equal(2)
+        expect(model.block_at(0).kind).to_equal("frontmatter")
+        expect(model.block_at(1).kind).to_equal("heading")
+
+    it "frontmatter block renders as empty lines (hidden)":
+        val model = BlockModel.from_markdown("---\ntitle: Hi\n---\n\n# Title")
+        val fm = model.block_at(0)
+        val rendered = md_render_block(fm)
+        expect(rendered.len()).to_equal(0)
+
+    it "unterminated frontmatter is not frontmatter (Obsidian rule: needs closing ---)":
+        val model = BlockModel.from_markdown("---\ntitle: no close\nkey: value")
+        expect(model.block_count() >= 1).to_equal(true)
+        expect(model.block_at(0).kind).to_equal("horizontal_rule")
+
+    it "empty frontmatter --- --- produces frontmatter block":
+        val model = BlockModel.from_markdown("---\n---\n\nparagraph")
+        expect(model.block_count()).to_equal(2)
+        expect(model.block_at(0).kind).to_equal("frontmatter")
+
+    it "--- not at line 0 is treated as horizontal rule not frontmatter":
+        val model = BlockModel.from_markdown("# Title\n\n---\n\nparagraph")
+        var has_frontmatter = false
+        var has_hr = false
+        var idx = 0
+        while idx < model.block_count():
+            val k = model.block_at(idx).kind
+            if k == "frontmatter":
+                has_frontmatter = true
+            if k == "horizontal_rule":
+                has_hr = true
+            idx = idx + 1
+        expect(has_frontmatter).to_equal(false)
+        expect(has_hr).to_equal(true)
+
+    it "frontmatter with multi-byte utf8 values does not crash":
+        val model = BlockModel.from_markdown("---\ntitle: 日本語タイトル\n---\n\n# Body")
+        expect(model.block_count()).to_equal(2)
+        expect(model.block_at(0).kind).to_equal("frontmatter")
+
+    it "document of only frontmatter produces one block":
+        val model = BlockModel.from_markdown("---\ntitle: only\n---")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("frontmatter")
+
+    it "frontmatter followed immediately by content with no blank line":
+        val model = BlockModel.from_markdown("---\ntitle: t\n---\n# Heading")
+        expect(model.block_count()).to_equal(2)
+        expect(model.block_at(0).kind).to_equal("frontmatter")
+        expect(model.block_at(1).kind).to_equal("heading")
+
+# ──────────────────────────────────────────────
+# Tilde fence blocks
+# ──────────────────────────────────────────────
+describe "tilde fence code block parsing":
+
+    it "tilde fence is parsed as code block":
+        val model = BlockModel.from_markdown("~~~python\nprint('hi')\n~~~")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("code")
+
+    it "unterminated tilde fence at EOF does not crash":
+        val model = BlockModel.from_markdown("~~~\nhello world")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("code")
+
+    it "tilde fence renders with info string as header":
+        val model = BlockModel.from_markdown("~~~ruby\nputs 'hi'\n~~~")
+        val rendered = md_render_block(model.block_at(0))
+        expect(rendered.len() >= 1).to_equal(true)
+        expect(rendered[0].contains("ruby")).to_equal(true)
+
+    it "tilde fence without info string renders without crash":
+        val model = BlockModel.from_markdown("~~~\nhello\n~~~")
+        val rendered = md_render_block(model.block_at(0))
+        expect(rendered.len() >= 1).to_equal(true)
+
+    it "tilde fence does not consume backtick code fence as its closer":
+        val src = "~~~\n```not-a-closer```\n~~~\nafter"
+        val model = BlockModel.from_markdown(src)
+        expect(model.block_count()).to_equal(2)
+        expect(model.block_at(0).kind).to_equal("code")
+
+    it "backtick fence does not consume tilde fence as its closer":
+        val src = "```\n~~~not-a-closer~~~\n```\nafter"
+        val model = BlockModel.from_markdown(src)
+        expect(model.block_count()).to_equal(2)
+        expect(model.block_at(0).kind).to_equal("code")

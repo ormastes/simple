@@ -1,0 +1,347 @@
+"""Calc SUBTOTAL/AGGREGATE aggregation + dated-financial tail spec.
+
+Ground truths (all probe-verified against external references BEFORE writing):
+  * SUBTOTAL(9,{1,2,3}) = 6 ; SUBTOTAL(1,{2,4,6}) = 4 ; SUBTOTAL(4,...) = max
+    (Excel semantics; 101-111 behave like 1-11 — no hidden-rows model).
+  * AGGREGATE(9, 6, {1,#N/A,3}) = 4 — option 6 skips error cells; option 0
+    propagates them; other options are unmodeled and #ERR.
+  * XNPV(0.09, {-10000,2750,4250,3250,2750}, {2008-01-01,2008-03-01,
+    2008-10-30,2009-02-15,2009-04-01}) = 2086.647602 (Excel doc example,
+    published rounded as 2086.65; day offsets 0/60/303/411/456 over 365).
+  * XIRR(same values/dates) = 0.37336253 (Excel doc: 0.373363).
+  * VDB(2400,300,120,0,1) = 40 and VDB(2400,300,10,0,1) = 480 (Excel doc);
+    VDB(2400,300,120,6,18) = 396.3049 (Excel doc: 396.31);
+    VDB(10000,0,5,0,5) = 10000 — the straight-line switch fully depreciates
+    (per-year 4000/2400/1440/1080/1080, switch in year 4);
+    VDB(10000,0,5,0,5,2,1) = 9222.4 — no_switch leaves 10000*0.6^5 = 777.6.
+  * FREQUENCY({79,85,78,85,50,81,95,88,97},{70,79,89}) spills 1/2/4/2
+    (Excel doc example).
+  * ERROR.TYPE: one generic error kind here -> 2; #N/A stays distinguishable
+    -> 7; ERROR.TYPE of a non-error is #ERR (Excel returns #N/A).
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _eval(formula: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _disp(sh: Sheet, ref_str: text) -> text:
+    cell_display_text(sh.get_cell(ref_str))
+
+fn _eval123(formula: text) -> text:
+    """Evaluate against a sheet with A1:A3 = 2,4,6."""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "2")
+    sh.set_value("A2", "4")
+    sh.set_value("A3", "6")
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _eval_err_range(formula: text) -> text:
+    """Evaluate against a sheet with A1:A3 = 1, #N/A error, 3."""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "1")
+    sh.set_value("A2", "=NA()")
+    sh.set_value("A3", "3")
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _eval_kform(formula: text) -> text:
+    """Evaluate against a sheet with A1:A5 = 3,5,7,10,12 (n=5)."""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "3")
+    sh.set_value("A2", "5")
+    sh.set_value("A3", "7")
+    sh.set_value("A4", "10")
+    sh.set_value("A5", "12")
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _xfin_sheet() -> Sheet:
+    """Excel-doc XNPV/XIRR fixture: flows in A1:A5, dates in B1:B5."""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "-10000")
+    sh.set_value("A2", "2750")
+    sh.set_value("A3", "4250")
+    sh.set_value("A4", "3250")
+    sh.set_value("A5", "2750")
+    sh.set_value("B1", "=DATE(2008,1,1)")
+    sh.set_value("B2", "=DATE(2008,3,1)")
+    sh.set_value("B3", "=DATE(2008,10,30)")
+    sh.set_value("B4", "=DATE(2009,2,15)")
+    sh.set_value("B5", "=DATE(2009,4,1)")
+    sh
+
+describe "Calc SUBTOTAL":
+    it "SUBTOTAL(9, range) sums the range":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.set_value("Z1", "=SUBTOTAL(9,A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("6")
+
+    it "SUBTOTAL(1, range) averages the range":
+        expect(_eval123("=SUBTOTAL(1,A1:A3)")).to_equal("4")
+
+    it "SUBTOTAL(4, range) is the maximum":
+        expect(_eval123("=SUBTOTAL(4,A1:A3)")).to_equal("6")
+
+    it "SUBTOTAL(104, range) behaves like 4 when no rows are hidden":
+        expect(_eval123("=SUBTOTAL(104,A1:A3)")).to_equal("6")
+
+    it "SUBTOTAL(7, range) is the sample standard deviation":
+        expect(_eval123("=SUBTOTAL(7,A1:A3)")).to_equal("2")
+
+    it "SUBTOTAL rejects function_num outside 1-11/101-111":
+        expect(_eval123("=SUBTOTAL(12,A1:A3)")).to_contain("#ERR")
+        expect(_eval123("=SUBTOTAL(0,A1:A3)")).to_contain("#ERR")
+
+describe "Calc SUBTOTAL: 101-111 honor Sheet row visibility":
+    """A1:A5 = 1,2,3,4,5. Hide rows 2 and 4 (values 2 and 4) — visible
+    values are 1,3,5 (sum 9, average 3). 1-11 still include hidden rows
+    (sum 15); 101-111 skip them (sum 9). Ground truth is hand computation
+    over the stated visible set, matching Excel's documented AutoFilter +
+    SUBTOTAL(109,...) behavior."""
+
+    it "SUBTOTAL(9,...) includes hidden rows: sum = 15":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.set_value("A4", "4")
+        sh.set_value("A5", "5")
+        sh.hide_row(2)
+        sh.hide_row(4)
+        sh.set_value("Z1", "=SUBTOTAL(9,A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("15")
+
+    it "SUBTOTAL(109,...) skips hidden rows: sum = 9":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.set_value("A4", "4")
+        sh.set_value("A5", "5")
+        sh.hide_row(2)
+        sh.hide_row(4)
+        sh.set_value("Z1", "=SUBTOTAL(109,A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("9")
+
+    it "SUBTOTAL(101,...) averages only the visible values: (1+3+5)/3 = 3":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.set_value("A4", "4")
+        sh.set_value("A5", "5")
+        sh.hide_row(2)
+        sh.hide_row(4)
+        sh.set_value("Z1", "=SUBTOTAL(101,A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("3")
+
+describe "Calc AGGREGATE":
+    it "AGGREGATE option 6 ignores error cells (SUM over 1,#N/A,3 = 4)":
+        expect(_eval_err_range("=AGGREGATE(9,6,A1:A3)")).to_equal("4")
+
+    it "AGGREGATE option 0 propagates errors in the range":
+        expect(_eval_err_range("=AGGREGATE(9,0,A1:A3)")).to_contain("#ERR")
+
+    it "AGGREGATE option 6 average skips the error cell":
+        expect(_eval_err_range("=AGGREGATE(1,6,A1:A3)")).to_equal("2")
+
+    it "AGGREGATE rejects unmodeled options and function_nums":
+        expect(_eval_err_range("=AGGREGATE(9,3,A1:A3)")).to_contain("#ERR")
+        expect(_eval_err_range("=AGGREGATE(14,6,A1:A3)")).to_contain("#ERR")
+
+describe "Calc AGGREGATE: options 5/7 honor Sheet row visibility":
+    """Same A1:A5 = 1,2,3,4,5 with rows 2 and 4 hidden as the SUBTOTAL
+    hidden-rows block above. Option 5 ignores hidden rows only; option 7
+    ignores hidden rows AND errors."""
+
+    it "AGGREGATE(9,5,...) sums only the visible rows: 1+3+5 = 9":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.set_value("A4", "4")
+        sh.set_value("A5", "5")
+        sh.hide_row(2)
+        sh.hide_row(4)
+        sh.set_value("Z1", "=AGGREGATE(9,5,A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("9")
+
+    it "AGGREGATE(1,5,...) averages only the visible rows: (1+3+5)/3 = 3":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.set_value("A4", "4")
+        sh.set_value("A5", "5")
+        sh.hide_row(2)
+        sh.hide_row(4)
+        sh.set_value("Z1", "=AGGREGATE(1,5,A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("3")
+
+    it "AGGREGATE(9,7,...) ignores both a hidden row and an error cell":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "=NA()")
+        sh.set_value("A3", "3")
+        sh.set_value("A4", "4")
+        sh.set_value("A5", "5")
+        sh.hide_row(4)
+        sh.set_value("Z1", "=AGGREGATE(9,7,A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        # Visible, non-error cells: 1, 3, 5 -> sum 9 (row 4's "4" is hidden,
+        # row 2's #N/A is ignored by option 7's error-skip).
+        expect(_disp(sh, "Z1")).to_equal("9")
+
+    it "AGGREGATE(9,0,...) with a hidden row still includes it (option 0 = default)":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "1")
+        sh.set_value("A2", "2")
+        sh.set_value("A3", "3")
+        sh.hide_row(2)
+        sh.set_value("Z1", "=AGGREGATE(9,0,A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("6")
+
+describe "Calc AGGREGATE k-forms 12-19 (data 3,5,7,10,12; n=5)":
+    it "12 MEDIAN({3,5,7,10,12}) = 7":
+        expect(_eval_kform("=AGGREGATE(12,0,A1:A5)")).to_equal("7")
+
+    it "13 MODE.SNGL({3,5,7,10,12}) = 3 (all-unique tie-break: first element)":
+        expect(_eval_kform("=AGGREGATE(13,0,A1:A5)")).to_equal("3")
+
+    it "14 LARGE({3,5,7,10,12}, 2) = 10 (2nd largest)":
+        expect(_eval_kform("=AGGREGATE(14,0,A1:A5,2)")).to_equal("10")
+
+    it "15 SMALL({3,5,7,10,12}, 2) = 5 (2nd smallest)":
+        expect(_eval_kform("=AGGREGATE(15,0,A1:A5,2)")).to_equal("5")
+
+    it "16 PERCENTILE.INC({3,5,7,10,12}, 0.25) = 5":
+        expect(_eval_kform("=AGGREGATE(16,0,A1:A5,0.25)")).to_equal("5")
+
+    it "17 QUARTILE.INC({3,5,7,10,12}, 1) = 5 (Q1 matches PERCENTILE.INC 0.25)":
+        expect(_eval_kform("=AGGREGATE(17,0,A1:A5,1)")).to_equal("5")
+
+    it "18 PERCENTILE.EXC({3,5,7,10,12}, 0.25) = 4 (rank=0.25*6=1.5 -> 3+0.5*(5-3))":
+        expect(_eval_kform("=AGGREGATE(18,0,A1:A5,0.25)")).to_equal("4")
+
+    it "19 QUARTILE.EXC({3,5,7,10,12}, 1) = 4 (k=1/4=0.25, same rank as above)":
+        expect(_eval_kform("=AGGREGATE(19,0,A1:A5,1)")).to_equal("4")
+
+    it "18 PERCENTILE.EXC #ERRs when k is outside (1/(n+1), n/(n+1)) = (0.1667, 0.8333)":
+        expect(_eval_kform("=AGGREGATE(18,0,A1:A5,0.9)")).to_contain("#ERR")
+        expect(_eval_kform("=AGGREGATE(18,0,A1:A5,0.05)")).to_contain("#ERR")
+
+    it "19 QUARTILE.EXC #ERRs for quart=4 (k=1.0, out of open interval)":
+        expect(_eval_kform("=AGGREGATE(19,0,A1:A5,4)")).to_contain("#ERR")
+
+    it "14 LARGE #ERRs when k is out of range (0 or > n)":
+        expect(_eval_kform("=AGGREGATE(14,0,A1:A5,0)")).to_contain("#ERR")
+        expect(_eval_kform("=AGGREGATE(14,0,A1:A5,6)")).to_contain("#ERR")
+
+describe "Calc XNPV / XIRR":
+    it "XNPV matches the Excel documentation example":
+        var sh = _xfin_sheet()
+        sh.set_value("Z1", "=XNPV(0.09,A1:A5,B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_start_with("2086.647")
+
+    it "XNPV rejects incongruent ranges":
+        var sh = _xfin_sheet()
+        sh.set_value("Z1", "=XNPV(0.09,A1:A5,B1:B4)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_contain("#ERR")
+
+    it "XIRR matches the Excel documentation example":
+        var sh = _xfin_sheet()
+        sh.set_value("Z1", "=XIRR(A1:A5,B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_start_with("0.373362")
+
+    it "XIRR accepts (and ignores) a guess argument":
+        var sh = _xfin_sheet()
+        sh.set_value("Z1", "=XIRR(A1:A5,B1:B5,0.1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_start_with("0.373362")
+
+    it "XIRR errors when the cashflows never change sign":
+        var sh = _xfin_sheet()
+        sh.set_value("A1", "10000")
+        sh.set_value("Z1", "=XIRR(A1:A5,B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_contain("#ERR")
+
+describe "Calc VDB":
+    it "VDB first month of the Excel doc example is 40":
+        expect(_eval("=VDB(2400,300,120,0,1)")).to_equal("40")
+
+    it "VDB first year of the Excel doc example is 480":
+        expect(_eval("=VDB(2400,300,10,0,1)")).to_equal("480")
+
+    it "VDB months 6-18 of the Excel doc example is 396.31":
+        expect(_eval("=VDB(2400,300,120,6,18)")).to_start_with("396.30")
+
+    it "VDB straight-line switch fully depreciates to a zero salvage":
+        expect(_eval("=VDB(10000,0,5,0,5)")).to_equal("10000")
+        expect(_eval("=VDB(10000,0,5,3,5)")).to_equal("2160")
+
+    it "VDB no_switch keeps pure declining balance (residual remains)":
+        expect(_eval("=VDB(10000,0,5,0,5,2,1)")).to_start_with("9222.4")
+
+    it "VDB rejects an end period before the start period":
+        expect(_eval("=VDB(2400,300,10,4,2)")).to_contain("#ERR")
+
+describe "Calc FREQUENCY (array spill)":
+    it "FREQUENCY spills bins+1 counts down a column (Excel doc example)":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "79")
+        sh.set_value("A2", "85")
+        sh.set_value("A3", "78")
+        sh.set_value("A4", "85")
+        sh.set_value("A5", "50")
+        sh.set_value("A6", "81")
+        sh.set_value("A7", "95")
+        sh.set_value("A8", "88")
+        sh.set_value("A9", "97")
+        sh.set_value("C1", "70")
+        sh.set_value("C2", "79")
+        sh.set_value("C3", "89")
+        sh.set_value("E1", "=FREQUENCY(A1:A9,C1:C3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "E1")).to_equal("1")
+        expect(_disp(sh, "E2")).to_equal("2")
+        expect(_disp(sh, "E3")).to_equal("4")
+        expect(_disp(sh, "E4")).to_equal("2")
+
+describe "Calc ERROR.TYPE":
+    it "ERROR.TYPE of #N/A is 7":
+        expect(_eval("=ERROR.TYPE(NA())")).to_equal("7")
+
+    it "ERROR.TYPE of a generic error cell is 2 (single error kind)":
+        var sh = Sheet.new("f")
+        sh.set_value("B1", "=LOG(0)")
+        sh.set_value("Z1", "=ERROR.TYPE(B1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "Z1")).to_equal("2")
+
+    it "ERROR.TYPE of a non-error is an error":
+        expect(_eval("=ERROR.TYPE(5)")).to_contain("#ERR")

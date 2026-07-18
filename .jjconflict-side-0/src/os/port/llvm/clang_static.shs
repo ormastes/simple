@@ -1,0 +1,157 @@
+#!/bin/sh
+# Produce a GUEST-NATIVE static clang for SimpleOS: build/os/clang_static/bin/clang_static
+#
+# ============================================================================
+# DEPRECATED (desktop SimpleOS). This static self-contained relink stands in for
+# a real loader. The proper path is the general FS-exec loader launching an
+# ordinary on-disk x86_64-unknown-simpleos ELF from /usr/bin/clang (or a
+# SIMPLEOS_TOOLCHAIN_DIR env path) — no special static-relink step. This script
+# is kept ONLY as a legacy fallback until the FS-exec lane (FR-SOS-020+) is
+# complete. Do NOT build new desktop work on it. Policy + migration:
+# doc/07_guide/os/simpleos_llvm_toolchain.md § "Desktop SimpleOS launch policy".
+# ============================================================================
+#
+# WHAT THIS DOES
+#   The stage-2 cross build (src/os/port/llvm/build.shs 'cross') compiles all of
+#   clang/LLVM as x86_64-unknown-simpleos *objects* but its final `bin/clang-20`
+#   comes out a *Linux dynamic* ELF (interpreter /lib64/ld-linux-x86-64.so.2) — it
+#   cannot run on SimpleOS. This script re-links those already-compiled simpleos
+#   objects + archives into a genuine *statically linked* SimpleOS executable using
+#   the Phase-3 C++ runtime sysroot (libc++ / libc++abi / libunwind / compiler-rt /
+#   libsimpleos_c) and the SimpleOS userspace linker script. No recompile of clang
+#   is needed — only a link.
+#
+#   Result: an ELF with NO PT_INTERP, entry at the simpleos.ld base (0x10000000),
+#   statically linked — i.e. a clang that is meant to run ON SimpleOS.
+#
+# ABI-NAMESPACE WORKAROUND (see NOTE at 'litns' below)
+#   The cross clang objects were compiled *before* Phase-3 pinned the sysroot
+#   libc++ __config_site to `_LIBCPP_ABI_VERSION 1` / `_LIBCPP_ABI_NAMESPACE __1`.
+#   With those macros undefined, libc++'s inline namespace is spelled literally
+#   `_LIBCPP_ABI_NAMESPACE` in every mangled name. So the stock sysroot libc++.a
+#   (namespace `__1`) does NOT satisfy the objects' explicit-instantiation refs.
+#   To link *without* a 30-60 min clang recompile, we rebuild libc++ with a shadow
+#   __config_site that reproduces the objects' exact config (same -fno-exceptions
+#   ne200000 ABI tag, same ABI-version layout, same literal namespace). The result
+#   is ABI-self-consistent and functionally a normal clang; the odd inline-namespace
+#   *name* has zero effect on a self-contained static executable.
+#
+#   PROPER LONG-TERM FIX (do this when there is build budget): rebuild the cross
+#   clang objects against the fixed __1 sysroot, e.g.
+#       ninja -C build/os/llvm/cross-<triple> -t clean && sh build.shs cross
+#   then this script auto-detects `__1` objects and links straight against the
+#   stock sysroot libc++.a (the 'litns' rebuild is skipped).
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
+TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+TOOL="${SIMPLEOS_LLVM_TOOL:-clang}"
+
+SYSROOT="$REPO_ROOT/build/os/sysroot"
+CROSS_DIR="$REPO_ROOT/build/os/llvm/cross-$TRIPLE"
+case "$TOOL" in
+    clang) NINJA_BIN="bin/clang-20"; OUT_NAME="clang_static" ;;
+    llc)   NINJA_BIN="bin/llc";      OUT_NAME="llc_static" ;;
+    lld)   NINJA_BIN="bin/lld";      OUT_NAME="lld_static" ;;
+    *) echo "[clang_static] ERROR: unsupported tool: $TOOL"; exit 1 ;;
+esac
+OUT_DIR="$REPO_ROOT/build/os/${TOOL}_static"
+OUT_BIN="$OUT_DIR/bin/$OUT_NAME"
+WORK="$REPO_ROOT/build/os/clang_static/work"
+
+CXX="${CXX:-clang++-20}"
+NM="${NM:-llvm-nm-20}"
+AR="${AR:-llvm-ar-20}"
+
+case "$TRIPLE" in
+    x86_64-*) ARCH=x86_64 ;;
+    *) echo "[clang_static] ERROR: only x86_64-*-simpleos wired here (got $TRIPLE)"; exit 1 ;;
+esac
+BUILTINS="$SYSROOT/lib/clang/20/lib/$TRIPLE/libclang_rt.builtins-$ARCH.a"
+LDSCRIPT="$SYSROOT/share/simpleos/simpleos.ld"
+
+# --- Prerequisites -----------------------------------------------------------
+for f in "$CROSS_DIR/build.ninja" "$SYSROOT/lib/crt0.o" "$LDSCRIPT" "$BUILTINS" \
+         "$SYSROOT/lib/libc++abi.a" "$SYSROOT/lib/libunwind.a" \
+         "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimple_runtime.a" "$SYSROOT/lib/libm.a"; do
+    if [ ! -e "$f" ]; then
+        echo "[clang_static] ERROR: missing prerequisite: $f"
+        echo "[clang_static] Run: sh $SCRIPT_DIR/build.shs cross   (and sysroot.shs)"
+        exit 1
+    fi
+done
+
+mkdir -p "$OUT_DIR/bin" "$WORK"
+
+# --- Extract the clang driver objects + archive list from the cross build ----
+# The ninja rule for bin/clang-20 lists: <5 driver .o> | <~110 LLVM/clang .a> || ...
+LINE="$(grep -E "^build ${NINJA_BIN}:" "$CROSS_DIR/build.ninja" | head -1)"
+REST="${LINE#*CXX_EXECUTABLE_LINKER__clang_Release }"
+OBJS_STR="${REST%% | *}"
+MID="${REST#* | }"
+ARCS_STR="${MID%% || *}"
+
+OBJS=""
+for o in $OBJS_STR; do
+    case "$o" in *.o) OBJS="$OBJS $CROSS_DIR/$o" ;; esac
+done
+ARCS=""
+for a in $ARCS_STR; do
+    case "$a" in *.a) ARCS="$ARCS $CROSS_DIR/$a" ;; esac
+done
+[ -n "$OBJS" ] || { echo "[clang_static] ERROR: no $TOOL objects parsed from build.ninja"; exit 1; }
+
+# --- Pick the libc++ that matches the objects' ABI namespace -----------------
+SAMPLE_OBJ="$(printf '%s\n' $OBJS | head -1)"
+if $NM "$SAMPLE_OBJ" 2>/dev/null | grep -q '21_LIBCPP_ABI_NAMESPACE'; then
+    echo "[clang_static] cross objects use the literal _LIBCPP_ABI_NAMESPACE (pre-__1)."
+    LIBCXX_A="$WORK/libc++_litns.a"
+    if [ ! -f "$LIBCXX_A" ]; then
+    echo "[clang_static] Building a namespace-matched libc++ (litns) ..."
+    SHADOW="$WORK/shadow_include"
+    mkdir -p "$SHADOW" "$WORK/litns_obj"
+    # Reproduce the objects' config: drop the ABI version/namespace defines so the
+    # inline namespace stays the literal token, matching the objects exactly.
+    sed '/^#define _LIBCPP_ABI_VERSION 1$/d; /^#define _LIBCPP_ABI_NAMESPACE __1$/d' \
+        "$SYSROOT/include/c++/v1/__config_site" > "$SHADOW/__config_site"
+    LIBCXX_FLAGS="--target=$TRIPLE --sysroot=$SYSROOT -std=c++23 -ffreestanding -nostdlib -nostdinc++ -fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden -fsized-deallocation -D__simpleos__=1 -DLIBC_NAMESPACE=__llvm_libc -D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_BUILDING_HAS_NO_ABI_LIBRARY -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS= -D_LIBCPP_PSTL_BACKEND_SERIAL=1 -D_LIBCPP_HAS_CLOCK_GETTIME=1 -I$LLVM_SRC/libcxx/src -I$LLVM_SRC/libc -isystem $SYSROOT/include/c++/v1 -isystem $SYSROOT/include"
+    LIBCXX_SRCS="algorithm.cpp any.cpp bind.cpp call_once.cpp charconv.cpp chrono.cpp error_category.cpp exception.cpp expected.cpp filesystem/filesystem_clock.cpp filesystem/filesystem_error.cpp filesystem/path.cpp functional.cpp hash.cpp memory.cpp memory_resource.cpp new_handler.cpp new_helpers.cpp optional.cpp print.cpp random.cpp random_shuffle.cpp ryu/d2fixed.cpp ryu/d2s.cpp ryu/f2s.cpp stdexcept.cpp string.cpp system_error.cpp typeinfo.cpp valarray.cpp variant.cpp vector.cpp verbose_abort.cpp atomic.cpp barrier.cpp condition_variable_destructor.cpp condition_variable.cpp future.cpp mutex_destructor.cpp mutex.cpp shared_mutex.cpp thread.cpp"
+    for src in $LIBCXX_SRCS; do
+        flat="$(printf '%s' "$src" | tr '/' '_')"
+        $CXX -isystem "$SHADOW" $LIBCXX_FLAGS -c "$LLVM_SRC/libcxx/src/$src" -o "$WORK/litns_obj/$flat.o"
+    done
+    rm -f "$LIBCXX_A"
+    $AR rcs "$LIBCXX_A" "$WORK"/litns_obj/*.o
+    fi
+    echo "[clang_static] litns libc++ built: $LIBCXX_A"
+else
+    echo "[clang_static] cross objects use __1; linking against stock sysroot libc++.a"
+    LIBCXX_A="$SYSROOT/lib/libc++.a"
+fi
+
+# --- Final static link -------------------------------------------------------
+echo "[clang_static] Linking static SimpleOS $TOOL ..."
+$CXX --target="$TRIPLE" --sysroot="$SYSROOT" \
+    -static -nostdlib -no-pie -fuse-ld=lld \
+    -Wl,-T,"$LDSCRIPT" \
+    -Wl,--eh-frame-hdr -Wl,--no-dependent-libraries -Wl,--allow-multiple-definition \
+    "$SYSROOT/lib/crt0.o" $OBJS \
+    -Wl,--start-group $ARCS "$LIBCXX_A" "$SYSROOT/lib/libc++abi.a" "$SYSROOT/lib/libunwind.a" \
+        "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimple_runtime.a" "$SYSROOT/lib/libm.a" "$BUILTINS" -Wl,--end-group \
+    -o "$OUT_BIN"
+
+# --- Verify ------------------------------------------------------------------
+echo "[clang_static] ---- verification ----"
+file "$OUT_BIN"
+if file "$OUT_BIN" | grep -q 'dynamically linked'; then
+    echo "[clang_static] ERROR: output is dynamically linked (expected static SimpleOS ELF)"; exit 1
+fi
+UNDEF="$($NM "$OUT_BIN" 2>/dev/null | grep -c ' U ' || true)"
+ENTRY="$($NM "$OUT_BIN" 2>/dev/null | grep -E ' T _start$' | head -1)"
+echo "[clang_static] undefined symbols: $UNDEF"
+echo "[clang_static] entry: $ENTRY"
+[ "$UNDEF" = "0" ] || { echo "[clang_static] ERROR: unresolved symbols remain"; exit 1; }
+echo "[clang_static] OK -> $OUT_BIN"

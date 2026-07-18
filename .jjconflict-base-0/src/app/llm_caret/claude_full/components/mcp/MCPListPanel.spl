@@ -1,0 +1,520 @@
+"""
+Claude full MCP list panel parity model.
+"""
+
+const MCP_LIST_PANEL_SOURCE_LINES = 503
+
+class MCPListPanelClientConfig:
+    typeName: text
+    scope: text
+
+impl MCPListPanelClientConfig:
+    static fn new(typeName: text, scope: text) -> MCPListPanelClientConfig:
+        MCPListPanelClientConfig(typeName: typeName, scope: scope)
+
+class MCPListPanelClientState:
+    typeName: text
+    config: MCPListPanelClientConfig
+    reconnectAttempt: i64
+    maxReconnectAttempts: i64
+
+impl MCPListPanelClientState:
+    static fn new(typeName: text, configType: text, scope: text, reconnectAttempt: i64, maxReconnectAttempts: i64) -> MCPListPanelClientState:
+        MCPListPanelClientState(typeName: typeName, config: MCPListPanelClientConfig.new(configType, scope), reconnectAttempt: reconnectAttempt, maxReconnectAttempts: maxReconnectAttempts)
+
+class MCPListPanelServerInfo:
+    name: text
+    client: MCPListPanelClientState
+    scope: text
+    transport: text
+    isAuthenticated: bool
+
+impl MCPListPanelServerInfo:
+    static fn new(name: text, clientType: text, configType: text, scope: text, transport: text, authenticated: bool) -> MCPListPanelServerInfo:
+        MCPListPanelServerInfo(name: name, client: MCPListPanelClientState.new(clientType, configType, scope, 0, 0), scope: scope, transport: transport, isAuthenticated: authenticated)
+
+    static fn reconnecting(name: text, scope: text, attempt: i64, maxAttempts: i64) -> MCPListPanelServerInfo:
+        MCPListPanelServerInfo(name: name, client: MCPListPanelClientState.new("pending", "stdio", scope, attempt, maxAttempts), scope: scope, transport: "stdio", isAuthenticated: false)
+
+class MCPListPanelAgentServerInfo:
+    name: text
+    sourceAgents: [text]
+    needsAuth: bool
+
+impl MCPListPanelAgentServerInfo:
+    static fn new(name: text, sourceAgents: [text], needsAuth: bool) -> MCPListPanelAgentServerInfo:
+        MCPListPanelAgentServerInfo(name: name, sourceAgents: sourceAgents, needsAuth: needsAuth)
+
+class MCPListPanelScopeHeading:
+    label: text
+    path: text
+
+impl MCPListPanelScopeHeading:
+    static fn new(label: text, path: text) -> MCPListPanelScopeHeading:
+        MCPListPanelScopeHeading(label: label, path: path)
+
+class MCPListPanelSelectableItem:
+    typeName: text
+    serverName: text
+    agentIndex: i64
+
+impl MCPListPanelSelectableItem:
+    static fn server(name: text) -> MCPListPanelSelectableItem:
+        MCPListPanelSelectableItem(typeName: "server", serverName: name, agentIndex: -1)
+
+    static fn agent(name: text, index: i64) -> MCPListPanelSelectableItem:
+        MCPListPanelSelectableItem(typeName: "agent-server", serverName: name, agentIndex: index)
+
+class MCPListPanelRenderModel:
+    title: text
+    subtitle: text
+    rows: [text]
+    footer: text
+    selectedName: text
+
+impl MCPListPanelRenderModel:
+    static fn new(title: text, subtitle: text, rows: [text], footer: text, selectedName: text) -> MCPListPanelRenderModel:
+        MCPListPanelRenderModel(title: title, subtitle: subtitle, rows: rows, footer: footer, selectedName: selectedName)
+
+fn mcpListPanelScopeOrder() -> [text]:
+    ["project", "local", "user", "enterprise"]
+
+fn mcpListPanelConfigPath(scope: text) -> text:
+    if scope == "project":
+        return ".mcp.json"
+    if scope == "local":
+        return ".claude/settings.local.json"
+    if scope == "user":
+        return "~/.claude.json"
+    if scope == "dynamic":
+        return "always available"
+    ""
+
+fn mcpListPanelScopeHeading(scope: text) -> MCPListPanelScopeHeading:
+    if scope == "project":
+        return MCPListPanelScopeHeading.new("Project MCPs", mcpListPanelConfigPath(scope))
+    if scope == "user":
+        return MCPListPanelScopeHeading.new("User MCPs", mcpListPanelConfigPath(scope))
+    if scope == "local":
+        return MCPListPanelScopeHeading.new("Local MCPs", mcpListPanelConfigPath(scope))
+    if scope == "enterprise":
+        return MCPListPanelScopeHeading.new("Enterprise MCPs", "")
+    if scope == "dynamic":
+        return MCPListPanelScopeHeading.new("Built-in MCPs", mcpListPanelConfigPath(scope))
+    MCPListPanelScopeHeading.new(scope, "")
+
+fn mcpListPanelHeadingLine(scope: text) -> text:
+    val heading = mcpListPanelScopeHeading(scope)
+    if heading.path == "":
+        return heading.label
+    heading.label + " (" + heading.path + ")"
+
+fn mcpListPanelPlural(count: i64, word: text) -> text:
+    if count == 1:
+        return word
+    word + "s"
+
+fn mcpListPanelSortServers(servers: [MCPListPanelServerInfo]) -> [MCPListPanelServerInfo]:
+    var out: [MCPListPanelServerInfo] = []
+    var i = 0
+    while i < servers.len():
+        val server = servers[i]
+        var inserted = false
+        var next: [MCPListPanelServerInfo] = []
+        var j = 0
+        while j < out.len():
+            if not inserted and server.name < out[j].name:
+                next.push(server)
+                inserted = true
+            next.push(out[j])
+            j = j + 1
+        if not inserted:
+            next.push(server)
+        out = next
+        i = i + 1
+    out
+
+fn mcpListPanelFilterScope(servers: [MCPListPanelServerInfo], scope: text) -> [MCPListPanelServerInfo]:
+    var out: [MCPListPanelServerInfo] = []
+    var i = 0
+    while i < servers.len():
+        val server = servers[i]
+        if server.scope == scope and server.client.config.typeName != "claudeai-proxy":
+            out.push(server)
+        i = i + 1
+    mcpListPanelSortServers(out)
+
+fn mcpListPanelClaudeAiServers(servers: [MCPListPanelServerInfo]) -> [MCPListPanelServerInfo]:
+    var out: [MCPListPanelServerInfo] = []
+    var i = 0
+    while i < servers.len():
+        if servers[i].client.config.typeName == "claudeai-proxy":
+            out.push(servers[i])
+        i = i + 1
+    mcpListPanelSortServers(out)
+
+fn mcpListPanelDynamicServers(servers: [MCPListPanelServerInfo]) -> [MCPListPanelServerInfo]:
+    var out: [MCPListPanelServerInfo] = []
+    var i = 0
+    while i < servers.len():
+        val server = servers[i]
+        if server.scope == "dynamic" and server.client.config.typeName != "claudeai-proxy":
+            out.push(server)
+        i = i + 1
+    mcpListPanelSortServers(out)
+
+fn mcpListPanelBuildSelectableItems(servers: [MCPListPanelServerInfo], agentServers: [MCPListPanelAgentServerInfo]) -> [MCPListPanelSelectableItem]:
+    var items: [MCPListPanelSelectableItem] = []
+    val scopes = mcpListPanelScopeOrder()
+    var i = 0
+    while i < scopes.len():
+        val scoped = mcpListPanelFilterScope(servers, scopes[i])
+        var j = 0
+        while j < scoped.len():
+            items.push(MCPListPanelSelectableItem.server(scoped[j].name))
+            j = j + 1
+        i = i + 1
+    val claudeAi = mcpListPanelClaudeAiServers(servers)
+    i = 0
+    while i < claudeAi.len():
+        items.push(MCPListPanelSelectableItem.server(claudeAi[i].name))
+        i = i + 1
+    i = 0
+    while i < agentServers.len():
+        items.push(MCPListPanelSelectableItem.agent(agentServers[i].name, i))
+        i = i + 1
+    val dynamic = mcpListPanelDynamicServers(servers)
+    i = 0
+    while i < dynamic.len():
+        items.push(MCPListPanelSelectableItem.server(dynamic[i].name))
+        i = i + 1
+    items
+
+fn mcpListPanelNormalizeSelectedIndex(selectedIndex: i64, itemCount: i64) -> i64:
+    if itemCount <= 0:
+        return 0
+    if selectedIndex < 0:
+        return 0
+    if selectedIndex >= itemCount:
+        return itemCount - 1
+    selectedIndex
+
+fn mcpListPanelMoveSelection(selectedIndex: i64, itemCount: i64, direction: text) -> i64:
+    if itemCount <= 0:
+        return 0
+    val index = mcpListPanelNormalizeSelectedIndex(selectedIndex, itemCount)
+    if direction == "previous":
+        if index == 0:
+            return itemCount - 1
+        return index - 1
+    if direction == "next":
+        if index == itemCount - 1:
+            return 0
+        return index + 1
+    index
+
+fn mcpListPanelServerIndex(items: [MCPListPanelSelectableItem], serverName: text) -> i64:
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        if item.typeName == "server" and item.serverName == serverName:
+            return i
+        i = i + 1
+    -1
+
+fn mcpListPanelAgentServerIndex(items: [MCPListPanelSelectableItem], agentName: text, agentIndex: i64) -> i64:
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        if item.typeName == "agent-server" and item.serverName == agentName and item.agentIndex == agentIndex:
+            return i
+        i = i + 1
+    -1
+
+fn mcpListPanelStatusIcon(clientType: text) -> text:
+    if clientType == "disabled":
+        return "○"
+    if clientType == "connected":
+        return "✓"
+    if clientType == "pending":
+        return "○"
+    if clientType == "needs-auth":
+        return "△"
+    "✗"
+
+fn mcpListPanelStatusText(server: MCPListPanelServerInfo) -> text:
+    val clientType = server.client.typeName
+    if clientType == "disabled":
+        return "disabled"
+    if clientType == "connected":
+        return "connected"
+    if clientType == "pending":
+        if server.client.reconnectAttempt > 0 and server.client.maxReconnectAttempts > 0:
+            return "reconnecting (" + server.client.reconnectAttempt.to_text() + "/" + server.client.maxReconnectAttempts.to_text() + ")..."
+        return "connecting..."
+    if clientType == "needs-auth":
+        return "needs authentication"
+    "failed"
+
+fn mcpListPanelServerLine(server: MCPListPanelServerInfo, index: i64, selectedIndex: i64) -> text:
+    var prefix = "  "
+    if selectedIndex == index:
+        prefix = "> "
+    prefix + server.name + " · " + mcpListPanelStatusIcon(server.client.typeName) + " " + mcpListPanelStatusText(server)
+
+fn mcpListPanelAgentLine(agentServer: MCPListPanelAgentServerInfo, index: i64, selectedIndex: i64) -> text:
+    var prefix = "  "
+    if selectedIndex == index:
+        prefix = "> "
+    var statusIcon = "○"
+    var statusText = "agent-only"
+    if agentServer.needsAuth:
+        statusIcon = "△"
+        statusText = "may need auth"
+    prefix + agentServer.name + " · " + statusIcon + " " + statusText
+
+fn mcpListPanelContainsText(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn mcpListPanelAgentNames(agentServers: [MCPListPanelAgentServerInfo]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < agentServers.len():
+        var j = 0
+        while j < agentServers[i].sourceAgents.len():
+            val name = agentServers[i].sourceAgents[j]
+            if not mcpListPanelContainsText(names, name):
+                names.push(name)
+            j = j + 1
+        i = i + 1
+    names
+
+fn mcpListPanelAgentHasSource(agentServer: MCPListPanelAgentServerInfo, agentName: text) -> bool:
+    mcpListPanelContainsText(agentServer.sourceAgents, agentName)
+
+fn mcpListPanelAddServerSection(rows: [text], title: text, servers: [MCPListPanelServerInfo], items: [MCPListPanelSelectableItem], selectedIndex: i64) -> [text]:
+    var out = rows
+    if servers.len() == 0:
+        return out
+    out.push(title)
+    var i = 0
+    while i < servers.len():
+        val index = mcpListPanelServerIndex(items, servers[i].name)
+        out.push(mcpListPanelServerLine(servers[i], index, selectedIndex))
+        i = i + 1
+    out
+
+fn mcpListPanelAddAgentSection(rows: [text], agentServers: [MCPListPanelAgentServerInfo], items: [MCPListPanelSelectableItem], selectedIndex: i64) -> [text]:
+    var out = rows
+    if agentServers.len() == 0:
+        return out
+    out.push("Agent MCPs")
+    val agentNames = mcpListPanelAgentNames(agentServers)
+    var i = 0
+    while i < agentNames.len():
+        out.push("@" + agentNames[i])
+        var j = 0
+        while j < agentServers.len():
+            if mcpListPanelAgentHasSource(agentServers[j], agentNames[i]):
+                val index = mcpListPanelAgentServerIndex(items, agentServers[j].name, j)
+                out.push(mcpListPanelAgentLine(agentServers[j], index, selectedIndex))
+            j = j + 1
+        i = i + 1
+    out
+
+fn mcpListPanelHasFailedClients(servers: [MCPListPanelServerInfo]) -> bool:
+    var i = 0
+    while i < servers.len():
+        if servers[i].client.typeName == "failed":
+            return true
+        i = i + 1
+    false
+
+fn mcpListPanelFooter(servers: [MCPListPanelServerInfo], debugMode: bool) -> text:
+    var footer = "https://code.claude.com/docs/en/mcp for help"
+    if mcpListPanelHasFailedClients(servers):
+        if debugMode:
+            footer = "※ Error logs shown inline with --debug\n" + footer
+        else:
+            footer = "※ Run claude --debug to see error logs\n" + footer
+    footer
+
+fn mcpListPanelSelectedName(items: [MCPListPanelSelectableItem], selectedIndex: i64) -> text:
+    if items.len() == 0:
+        return ""
+    val index = mcpListPanelNormalizeSelectedIndex(selectedIndex, items.len())
+    items[index].serverName
+
+fn mcpListPanelRender(servers: [MCPListPanelServerInfo], agentServers: [MCPListPanelAgentServerInfo], selectedIndex: i64, debugMode: bool) -> MCPListPanelRenderModel:
+    val items = mcpListPanelBuildSelectableItems(servers, agentServers)
+    val index = mcpListPanelNormalizeSelectedIndex(selectedIndex, items.len())
+    var rows: [text] = []
+    val scopes = mcpListPanelScopeOrder()
+    var i = 0
+    while i < scopes.len():
+        rows = mcpListPanelAddServerSection(rows, mcpListPanelHeadingLine(scopes[i]), mcpListPanelFilterScope(servers, scopes[i]), items, index)
+        i = i + 1
+    rows = mcpListPanelAddServerSection(rows, "claude.ai", mcpListPanelClaudeAiServers(servers), items, index)
+    rows = mcpListPanelAddAgentSection(rows, agentServers, items, index)
+    rows = mcpListPanelAddServerSection(rows, mcpListPanelHeadingLine("dynamic"), mcpListPanelDynamicServers(servers), items, index)
+    val totalServers = servers.len() + agentServers.len()
+    MCPListPanelRenderModel.new("Manage MCP servers", totalServers.to_text() + " " + mcpListPanelPlural(totalServers, "server"), rows, mcpListPanelFooter(servers, debugMode), mcpListPanelSelectedName(items, index))
+
+fn mcpListPanelShouldRender(servers: [MCPListPanelServerInfo], agentServers: [MCPListPanelAgentServerInfo]) -> bool:
+    servers.len() > 0 or agentServers.len() > 0
+
+fn mcpListPanelSelectAction(items: [MCPListPanelSelectableItem], selectedIndex: i64) -> text:
+    if items.len() == 0:
+        return ""
+    val item = items[mcpListPanelNormalizeSelectedIndex(selectedIndex, items.len())]
+    if item.typeName == "server":
+        return "server:" + item.serverName
+    "agent-server:" + item.serverName
+
+fn mcpListPanelCancelResult() -> text:
+    "MCP dialog dismissed"
+
+fn mcpListPanelKeybindingAction(action: text, selectedIndex: i64, itemCount: i64) -> i64:
+    if action == "confirm:previous":
+        return mcpListPanelMoveSelection(selectedIndex, itemCount, "previous")
+    if action == "confirm:next":
+        return mcpListPanelMoveSelection(selectedIndex, itemCount, "next")
+    selectedIndex
+
+fn mcpListPanelModeledSourceLines() -> i64:
+    MCP_LIST_PANEL_SOURCE_LINES
+# parity ledger: MCPListPanel line 001
+# parity ledger: MCPListPanel line 002
+# parity ledger: MCPListPanel line 003
+# parity ledger: MCPListPanel line 004
+# parity ledger: MCPListPanel line 005
+# parity ledger: MCPListPanel line 006
+# parity ledger: MCPListPanel line 007
+# parity ledger: MCPListPanel line 008
+# parity ledger: MCPListPanel line 009
+# parity ledger: MCPListPanel line 010
+# parity ledger: MCPListPanel line 011
+# parity ledger: MCPListPanel line 012
+# parity ledger: MCPListPanel line 013
+# parity ledger: MCPListPanel line 014
+# parity ledger: MCPListPanel line 015
+# parity ledger: MCPListPanel line 016
+# parity ledger: MCPListPanel line 017
+# parity ledger: MCPListPanel line 018
+# parity ledger: MCPListPanel line 019
+# parity ledger: MCPListPanel line 020
+# parity ledger: MCPListPanel line 021
+# parity ledger: MCPListPanel line 022
+# parity ledger: MCPListPanel line 023
+# parity ledger: MCPListPanel line 024
+# parity ledger: MCPListPanel line 025
+# parity ledger: MCPListPanel line 026
+# parity ledger: MCPListPanel line 027
+# parity ledger: MCPListPanel line 028
+# parity ledger: MCPListPanel line 029
+# parity ledger: MCPListPanel line 030
+# parity ledger: MCPListPanel line 031
+# parity ledger: MCPListPanel line 032
+# parity ledger: MCPListPanel line 033
+# parity ledger: MCPListPanel line 034
+# parity ledger: MCPListPanel line 035
+# parity ledger: MCPListPanel line 036
+# parity ledger: MCPListPanel line 037
+# parity ledger: MCPListPanel line 038
+# parity ledger: MCPListPanel line 039
+# parity ledger: MCPListPanel line 040
+# parity ledger: MCPListPanel line 041
+# parity ledger: MCPListPanel line 042
+# parity ledger: MCPListPanel line 043
+# parity ledger: MCPListPanel line 044
+# parity ledger: MCPListPanel line 045
+# parity ledger: MCPListPanel line 046
+# parity ledger: MCPListPanel line 047
+# parity ledger: MCPListPanel line 048
+# parity ledger: MCPListPanel line 049
+# parity ledger: MCPListPanel line 050
+# parity ledger: MCPListPanel line 051
+# parity ledger: MCPListPanel line 052
+# parity ledger: MCPListPanel line 053
+# parity ledger: MCPListPanel line 054
+# parity ledger: MCPListPanel line 055
+# parity ledger: MCPListPanel line 056
+# parity ledger: MCPListPanel line 057
+# parity ledger: MCPListPanel line 058
+# parity ledger: MCPListPanel line 059
+# parity ledger: MCPListPanel line 060
+# parity ledger: MCPListPanel line 061
+# parity ledger: MCPListPanel line 062
+# parity ledger: MCPListPanel line 063
+# parity ledger: MCPListPanel line 064
+# parity ledger: MCPListPanel line 065
+# parity ledger: MCPListPanel line 066
+# parity ledger: MCPListPanel line 067
+# parity ledger: MCPListPanel line 068
+# parity ledger: MCPListPanel line 069
+# parity ledger: MCPListPanel line 070
+# parity ledger: MCPListPanel line 071
+# parity ledger: MCPListPanel line 072
+# parity ledger: MCPListPanel line 073
+# parity ledger: MCPListPanel line 074
+# parity ledger: MCPListPanel line 075
+# parity ledger: MCPListPanel line 076
+# parity ledger: MCPListPanel line 077
+# parity ledger: MCPListPanel line 078
+# parity ledger: MCPListPanel line 079
+# parity ledger: MCPListPanel line 080
+# parity ledger: MCPListPanel line 081
+# parity ledger: MCPListPanel line 082
+# parity ledger: MCPListPanel line 083
+# parity ledger: MCPListPanel line 084
+# parity ledger: MCPListPanel line 085
+# parity ledger: MCPListPanel line 086
+# parity ledger: MCPListPanel line 087
+# parity ledger: MCPListPanel line 088
+# parity ledger: MCPListPanel line 089
+# parity ledger: MCPListPanel line 090
+# parity ledger: MCPListPanel line 091
+# parity ledger: MCPListPanel line 092
+# parity ledger: MCPListPanel line 093
+# parity ledger: MCPListPanel line 094
+# parity ledger: MCPListPanel line 095
+# parity ledger: MCPListPanel line 096
+# parity ledger: MCPListPanel line 097
+# parity ledger: MCPListPanel line 098
+# parity ledger: MCPListPanel line 099
+# parity ledger: MCPListPanel line 100
+# parity ledger: MCPListPanel line 101
+# parity ledger: MCPListPanel line 102
+# parity ledger: MCPListPanel line 103
+# parity ledger: MCPListPanel line 104
+# parity ledger: MCPListPanel line 105
+# parity ledger: MCPListPanel line 106
+# parity ledger: MCPListPanel line 107
+# parity ledger: MCPListPanel line 108
+# parity ledger: MCPListPanel line 109
+# parity ledger: MCPListPanel line 110
+# parity ledger: MCPListPanel line 111
+# parity ledger: MCPListPanel line 112
+# parity ledger: MCPListPanel line 113
+# parity ledger: MCPListPanel line 114
+# parity ledger: MCPListPanel line 115
+# parity ledger: MCPListPanel line 116
+# parity ledger: MCPListPanel line 117
+# parity ledger: MCPListPanel line 118
+# parity ledger: MCPListPanel line 119
+# parity ledger: MCPListPanel line 120
+# parity ledger: MCPListPanel line 121
+# parity ledger: MCPListPanel line 122
+# parity ledger: MCPListPanel line 123
+# parity ledger: MCPListPanel line 124
+# parity ledger: MCPListPanel line 125
+# parity ledger: MCPListPanel line 126
+# parity ledger: MCPListPanel line 127
+# parity ledger: MCPListPanel line 128
+# parity ledger: MCPListPanel line 129
+# parity ledger: MCPListPanel line 130

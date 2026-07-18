@@ -1,0 +1,312 @@
+# @cover src/lib/common/ui/window_scene_draw_ir.spl 70%
+# @tag: integration, ui, wm, nested, lane-c
+
+"""
+Lane C of "rendering-inside-rendering": nested content frames in the WM/GUI
+layer. A content frame (WmContentFrame) can now be embedded inside ANOTHER
+content frame — a GUI panel embedded in a GUI panel, or a web-render panel
+embedded in a GUI window — expressed purely at the content-frame layer via
+WmContentFrame.parent_window_id/offset_x/offset_y (common.ui.window_scene)
+and rendered by the recursive executor in common.ui.window_scene_draw_ir.
+
+This spec pins:
+  (a) a child GUI frame renders at the parent's content rect + offset;
+  (b) a child extending past its parent's content rect is clipped, not drawn
+      out of bounds;
+  (c) an invalid (zero-checksum) child fails closed to a magenta rect over
+      just the child's own area, leaving the parent's own pixels intact;
+  (d) grandchild offsets accumulate through two levels of nesting;
+  (e) origin "gui" is accepted like "simple_web"; an unrecognized origin is
+      rejected (fail-closed, same as an invalid checksum);
+  (f) a scene with no nested content frames renders byte-identical to the
+      pre-nesting executor behavior (regression).
+"""
+
+use std.spec.{describe, it, expect, step, assert_not_equal}
+use common.ui.window_scene.{
+    SharedWmScene,
+    SharedWmWindow,
+    WM_CHROME_KIND_BORDERLESS,
+    WmContentFrame,
+    WmSceneRevision,
+    WmRenderMetrics,
+    SharedWmRenderInput,
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WM_CONTENT_ORIGIN_GUI,
+    wm_content_frame_checksum,
+    simple_gui_internal_window_with_chrome_kind,
+    simple_gui_internal_window_scene
+}
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE}
+use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_scene_render_context_to_backend, shared_wm_scene_draw_ir_composition_with_content}
+use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+
+# Minimal in-memory CompositorBackend test double (same shape as the one in
+# window_scene_render_executor_spec.spl) — a fake in-memory backend that
+# records blits/fills into a flat [u32] canvas, no host/QEMU wiring.
+class TestPixelBackend:
+    w: i32
+    h: i32
+    pixels: [u32]
+
+    static fn create(width: i32, height: i32, fill: u32) -> TestPixelBackend:
+        val total = if width > 0 and height > 0: width * height else: 0
+        var pixels: [u32] = []
+        var i = 0
+        while i < total:
+            pixels.push(fill)
+            i = i + 1
+        TestPixelBackend(w: width, h: height, pixels: pixels)
+
+impl CompositorBackend for TestPixelBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        var x0 = if x < 0: 0 else: x
+        var y0 = if y < 0: 0 else: y
+        var x1 = x + w
+        var y1 = y + h
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        var yy = y0
+        while yy < y1:
+            var idx = yy * self.w + x0
+            var xx = x0
+            while xx < x1:
+                self.pixels[idx] = color
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        pass_do_nothing
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        pass_do_nothing
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        val idx = y * self.w + x
+        if idx >= 0 and idx < self.pixels.len():
+            self.pixels[idx] = color
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var yy = 0
+        while yy < h:
+            var xx = 0
+            while xx < w:
+                val source_index = yy * w + xx
+                self.put_pixel(x + xx, y + yy, pixels[source_index])
+                xx = xx + 1
+            yy = yy + 1
+
+    me present():
+        pass_do_nothing
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        pass_do_nothing
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+val MAGENTA: u32 = 0xFFFF00FFu32
+
+fn _borderless_window(window_id: text, x: i32, y: i32, w: i32, h: i32) -> SharedWmWindow:
+    simple_gui_internal_window_with_chrome_kind(
+        "surf-{window_id}", window_id, 1u64, "app.{window_id}", "",
+        x, y, w, h, "", false, false, 0, WM_CHROME_KIND_BORDERLESS
+    )
+
+fn _metrics() -> WmRenderMetrics:
+    WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
+
+fn _solid_pixels(count: i32, color: u32) -> [u32]:
+    [color; count]
+
+fn _top_level_web_frame(window_id: text, scene_revision: i64, w: i32, h: i32, color: u32) -> WmContentFrame:
+    val pixels = _solid_pixels(w * h, color)
+    WmContentFrame(
+        window_id: window_id,
+        scene_revision: scene_revision,
+        content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: w,
+        height: h,
+        pixels: pixels,
+        checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0
+    )
+
+describe "Nested content frames (Lane C: rendering inside rendering)":
+
+    it "renders a valid GUI child frame at the parent content rect plus offset":
+        step("Build a parent window with a top-level Simple Web frame and a nested GUI child frame")
+        val window = _borderless_window("win-parent", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(140, 140, "nested-a", [window])
+        val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
+        val child_pixels = _solid_pixels(20 * 15, 0xFF222222u32)
+        val child_frame = wm_gui_content_frame_from_pixels("win-child", "win-parent", 10, 10, 20, 15, child_pixels, 7, 1)
+        expect(child_frame.checksum).to_be_greater_than(0u64)
+        val revision = WmSceneRevision(scene_revision: 7, input_revision: 1, taskbar_revision: 1)
+        val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [parent_frame, child_frame], metrics: _metrics(), t_micros: 0)
+        val backend = TestPixelBackend.create(140, 140, 0u32)
+        step("Render through the shared executor")
+        val stats = shared_wm_scene_render_context_to_backend(backend, input)
+        step("The child's pixels appear at (window.x + offset_x, window.y + offset_y)")
+        expect(backend.pixels[25 * 140 + 25]).to_equal(0xFF222222u32)
+        step("A pixel outside the child rect but inside the parent rect keeps the parent's own color")
+        expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)
+        expect(stats.content_pixel_count).to_be_greater_than(7000)
+
+    it "clips a child frame that extends past its parent's content rect":
+        step("Child offset + width overflows the parent's 100px-wide content rect")
+        val window = _borderless_window("win-parent", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(160, 140, "nested-b", [window])
+        val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
+        val child_pixels = _solid_pixels(80 * 10, 0xFF333333u32)
+        val child_frame = wm_gui_content_frame_from_pixels("win-child", "win-parent", 50, 10, 80, 10, child_pixels, 7, 1)
+        val revision = WmSceneRevision(scene_revision: 7, input_revision: 1, taskbar_revision: 1)
+        val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [parent_frame, child_frame], metrics: _metrics(), t_micros: 0)
+        val backend = TestPixelBackend.create(160, 140, 0u32)
+        shared_wm_scene_render_context_to_backend(backend, input)
+        step("Inside the clipped visible region (x in [60,110)) the child color is drawn")
+        expect(backend.pixels[25 * 160 + 65]).to_equal(0xFF333333u32)
+        step("Left of the child's offset, inside the parent rect, the parent's own color is untouched")
+        expect(backend.pixels[25 * 160 + 15]).to_equal(0xFF111111u32)
+        step("Past the parent's right edge (content rect ends at x=110, outside the window entirely) the child color never bleeds through")
+        assert_not_equal(backend.pixels[25 * 160 + 120], 0xFF333333u32)
+
+    it "fails closed with a magenta rect over just the child's area on an invalid checksum, parent intact":
+        val window = _borderless_window("win-parent", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(140, 140, "nested-c", [window])
+        val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
+        val bad_pixels = _solid_pixels(20 * 15, 0xFF222222u32)
+        val bad_child = WmContentFrame(window_id: "win-child", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 20, height: 15, pixels: bad_pixels, checksum: 0u64, parent_window_id: "win-parent", offset_x: 10, offset_y: 10)
+        val revision = WmSceneRevision(scene_revision: 7, input_revision: 1, taskbar_revision: 1)
+        val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [parent_frame, bad_child], metrics: _metrics(), t_micros: 0)
+        val backend = TestPixelBackend.create(140, 140, 0u32)
+        shared_wm_scene_render_context_to_backend(backend, input)
+        step("The child's declared rect is magenta-filled instead of drawing the (unvalidated) pixels")
+        expect(backend.pixels[25 * 140 + 25]).to_equal(MAGENTA)
+        assert_not_equal(backend.pixels[25 * 140 + 25], 0xFF222222u32)
+        step("A parent-only pixel outside the child rect is untouched by the failure")
+        expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)
+
+    it "accumulates offsets through a grandchild (two levels of nesting)":
+        val window = _borderless_window("win-parent", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(140, 140, "nested-d", [window])
+        val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
+        val child_pixels = _solid_pixels(50 * 40, 0xFF222222u32)
+        val child_frame = wm_gui_content_frame_from_pixels("win-child", "win-parent", 5, 5, 50, 40, child_pixels, 7, 1)
+        val grandchild_pixels = _solid_pixels(10 * 8, 0xFF333333u32)
+        val grandchild_frame = wm_gui_content_frame_from_pixels("win-grandchild", "win-child", 3, 3, 10, 8, grandchild_pixels, 7, 1)
+        val revision = WmSceneRevision(scene_revision: 7, input_revision: 1, taskbar_revision: 1)
+        val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [parent_frame, child_frame, grandchild_frame], metrics: _metrics(), t_micros: 0)
+        val backend = TestPixelBackend.create(140, 140, 0u32)
+        shared_wm_scene_render_context_to_backend(backend, input)
+        step("Grandchild pixel position = window.xy + child.offset + grandchild.offset")
+        expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF333333u32)
+        step("Just outside the grandchild (still inside the child) is the child's own color")
+        expect(backend.pixels[20 * 140 + 30]).to_equal(0xFF222222u32)
+
+    it "accepts origin 'gui' like 'simple_web' and rejects an unrecognized origin":
+        step("A top-level frame with origin_kind=gui renders normally")
+        val gui_window = _borderless_window("win-gui", 10, 10, 20, 20)
+        val gui_pixels = _solid_pixels(20 * 20, 0xFF444444u32)
+        val gui_frame = wm_gui_content_frame_from_pixels("win-gui", "", 0, 0, 20, 20, gui_pixels, 5, 1)
+        val gui_scene = simple_gui_internal_window_scene(100, 100, "nested-e1", [gui_window])
+        val gui_revision = WmSceneRevision(scene_revision: 5, input_revision: 1, taskbar_revision: 1)
+        val gui_input = SharedWmRenderInput(scene: gui_scene, revision: gui_revision, content_frames: [gui_frame], metrics: _metrics(), t_micros: 0)
+        val gui_backend = TestPixelBackend.create(100, 100, 0u32)
+        shared_wm_scene_render_context_to_backend(gui_backend, gui_input)
+        expect(gui_backend.pixels[15 * 100 + 15]).to_equal(0xFF444444u32)
+
+        step("A top-level frame with an unrecognized origin fails closed to magenta")
+        val bad_window = _borderless_window("win-bad-origin", 10, 10, 20, 20)
+        val bad_pixels = _solid_pixels(20 * 20, 0xFF555555u32)
+        val bad_frame = WmContentFrame(window_id: "win-bad-origin", scene_revision: 5, content_revision: 1, origin_kind: "mystery_origin", width: 20, height: 20, pixels: bad_pixels, checksum: wm_content_frame_checksum(bad_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val bad_scene = simple_gui_internal_window_scene(100, 100, "nested-e2", [bad_window])
+        val bad_revision = WmSceneRevision(scene_revision: 5, input_revision: 1, taskbar_revision: 1)
+        val bad_input = SharedWmRenderInput(scene: bad_scene, revision: bad_revision, content_frames: [bad_frame], metrics: _metrics(), t_micros: 0)
+        val bad_backend = TestPixelBackend.create(100, 100, 0u32)
+        shared_wm_scene_render_context_to_backend(bad_backend, bad_input)
+        expect(bad_backend.pixels[15 * 100 + 15]).to_equal(MAGENTA)
+
+    it "renders a top-level frame with no children byte-identical to the pre-nesting executor (regression)":
+        step("Same scene/frame shape as the existing window_scene_render_executor_spec top-level content-frame test")
+        val window = _borderless_window("win-probe", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(140, 140, "nested-f", [window])
+        val pixels: [u32] = [0xFF123456u32; 100 * 70]
+        val frame = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val revision = WmSceneRevision(scene_revision: 7, input_revision: 11, taskbar_revision: 3)
+        val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: _metrics(), t_micros: 0)
+        val backend = TestPixelBackend.create(140, 140, 0u32)
+        val stats = shared_wm_scene_render_context_to_backend(backend, input)
+        expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF123456u32)
+        expect(stats.content_pixel_count).to_equal(7000)
+
+    it "threads parent/child linkage into the Draw IR projection for a nested content frame":
+        step("Build a scene whose window has a nested GUI content frame")
+        val window = _borderless_window("win-parent", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(140, 140, "nested-g", [window])
+        val child_pixels = _solid_pixels(20 * 15, 0xFF222222u32)
+        val child_frame = wm_gui_content_frame_from_pixels("win-child", "win-parent", 10, 10, 20, 15, child_pixels, 7, 1)
+        val taskbar = TaskbarModel(pinned: [], running: [], tray: [])
+        step("The content-aware composition emits a batch for the child surface with parent_id pointing at the parent window")
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [child_frame], "test-backend", 1000, "", 0)
+        var found_surface = false
+        var found_parent_id = false
+        for batch in composition.batches:
+            if batch.embedding.surface_id == "win-child":
+                found_surface = true
+                for command in batch.commands:
+                    if command.parent_id == "win-parent":
+                        found_parent_id = true
+        expect(found_surface).to_equal(true)
+        expect(found_parent_id).to_equal(true)
+
+    it "projects an authoritative top-level content frame as a resolved Draw IR image":
+        val window = _borderless_window("win-image", 10, 10, 20, 20)
+        val scene = simple_gui_internal_window_scene(80, 80, "image-projection", [window])
+        val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
+        val frame = WmContentFrame(window_id: "win-image", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 20, height: 20, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [frame], "cpu", 1000, "", 0)
+        var found = false
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.kind == DRAW_IR_COMMAND_IMAGE and command.image_uri == shared_wm_content_frame_image_uri(frame):
+                    found = true
+        expect(found).to_be(true)
+
+    it "rejects a top-level Draw IR image whose nonzero checksum is incorrect":
+        val window = _borderless_window("win-bad-image", 10, 10, 20, 20)
+        val scene = simple_gui_internal_window_scene(80, 80, "bad-image-projection", [window])
+        val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
+        val frame = WmContentFrame(window_id: "win-bad-image", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 20, height: 20, pixels: pixels, checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [frame], "cpu", 1000, "", 0)
+        var found = false
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.kind == DRAW_IR_COMMAND_IMAGE:
+                    found = true
+        expect(found).to_be(false)

@@ -1,0 +1,901 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_fullscreen_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_fullscreen_evidence_$(date -u +%F).md}"
+WRAPPER="scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+WRAPPER_SHA256=""
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=unchecked
+SIMPLE_BIN_RESOLVED=""
+SIMPLE_BIN_VERSION=""
+SIMPLE_BIN_SHA256=""
+KERNEL_OUTPUT=""
+KERNEL_SHA256=""
+LAUNCH_OUT="$BUILD_DIR/qemu.out"
+SERIAL_LOG="$BUILD_DIR/serial.log"
+QMP_SOCKET="$BUILD_DIR/qmp.sock"
+CAPTURE_OUT="$BUILD_DIR/capture.out"
+FULLSCREEN_PPM="$BUILD_DIR/fullscreen.ppm"
+RESTORED_PPM="$BUILD_DIR/restored.ppm"
+FULLSCREEN_RAW="$FULLSCREEN_PPM.raw"
+RESTORED_RAW="$RESTORED_PPM.raw"
+BASELINE_PPM="$BUILD_DIR/baseline.ppm"
+BASELINE_RAW="$BASELINE_PPM.raw"
+FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
+FONT_ASSET="${SIMPLEOS_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
+FONT_ASSET_EXPECTED_BYTES=1708408
+FONT_ASSET_EXPECTED_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
+FONT_REGION_EXPECTED_BYTES=8064
+# Filled only after a retained QEMU pmemsave proves the canonical taskbar clock.
+# Pinned 2026-07-18 with TASKBAR_CLOCK_REGION_RGB_SHA256 (gui_entry_desktop.spl)
+# from cross-verified guest + host pmemsave extraction of the same region.
+FONT_REGION_EXPECTED_SHA256=ffbd5f7690557565c42853ffd4fd4a6c6049203eaa0d8cc5f8cb981a409287c4
+FONT_ASSET_BYTES=0
+FONT_ASSET_SHA256=""
+DISK_IMAGE=""
+DISK_IMAGE_SHA256=""
+disk_image_status=not-staged
+QEMU_PID=""
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
+    "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
+    "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
+    "$FONT_REGION_RGB" "$BUILD_DIR/evidence.env"
+
+resolve_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1" 2>/dev/null || true
+    elif command -v readlink >/dev/null 2>&1; then
+        readlink -f "$1" 2>/dev/null || true
+    else
+        return 0
+    fi
+}
+
+is_rust_seed_path() {
+    case "$1" in
+        *"/src/compiler_rust/"*|*"/compiler_rust/target/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "${SIMPLE_BIN:-}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-cached-pure-simple
+    for candidate in \
+        "$ROOT_DIR"/build/bootstrap/stage3/*/simple \
+        "$ROOT_DIR"/build/bootstrap/stage2/*/simple \
+        "$ROOT_DIR"/bin/release/*/simple \
+        "$ROOT_DIR"/release/*/simple \
+        "$ROOT_DIR"/bin/simple
+    do
+        if [ -x "$candidate" ]; then
+            resolved="$(resolve_path "$candidate")"
+            if [ -n "$resolved" ] && ! is_rust_seed_path "$resolved"; then
+                SIMPLE_BIN="$candidate"
+                break
+            fi
+        fi
+    done
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS SIMPLE_BIN_RESOLVED SIMPLE_BIN_VERSION SIMPLE_BIN_SHA256
+
+cleanup() {
+    if [ -n "$QEMU_PID" ]; then
+        kill "$QEMU_PID" >/dev/null 2>&1 || true
+        wait "$QEMU_PID" >/dev/null 2>&1 || true
+    fi
+    pkill -f "qemu-system.*$QMP_SOCKET" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+file_byte_count() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+file_sha256() {
+    if [ ! -f "$1" ]; then
+        echo ""
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+is_sha256() {
+    [ "${#1}" -eq 64 ] && case "$1" in
+        *[!0-9a-f]*) false ;;
+        *) true ;;
+    esac
+}
+
+regular_file_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing-path"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ ! -f "$path" ]; then
+        echo "missing"
+    elif [ ! -s "$path" ]; then
+        echo "empty"
+    else
+        echo "pass"
+    fi
+}
+
+serial_has_production_fault() {
+    grep -Eq '^\[fault\] \*\*\* EXCEPTION FRAME|page[- ]fault|nil receiver|invalid Simple Web frame|\[simple2d-frame-failed\]' "$SERIAL_LOG" 2>/dev/null
+}
+
+ppm_magic_status() {
+    path="$1"
+    if [ "$(regular_file_status "$path")" != "pass" ]; then
+        regular_file_status "$path"
+    elif head -c 2 "$path" 2>/dev/null | grep -q '^P6$'; then
+        echo "pass"
+    else
+        echo "invalid-magic"
+    fi
+}
+
+marker_line() {
+    # First line in $1 containing literal marker text $2. Guest serial output
+    # is CRLF (and sometimes CRCRLF) terminated; strip \r so trailing-anchor
+    # (`$`) sed/field extraction on the result works.
+    grep -a -m 1 -F "$2" "$1" 2>/dev/null | tr -d '\r' || true
+}
+
+marker_field() {
+    # Extract key=value field named $2 from line $1.
+    printf '%s\n' "$1" | sed -n "s/.*$2=\\([^ ]*\\).*/\\1/p"
+}
+
+emit_failure() {
+    reason="$1"
+    {
+        echo "simpleos_wm_fullscreen_status=fail"
+        echo "simpleos_wm_fullscreen_reason=$reason"
+        echo "simpleos_wm_fullscreen_wrapper=$WRAPPER"
+        echo "simpleos_wm_fullscreen_wrapper_sha256=$WRAPPER_SHA256"
+        echo "simpleos_wm_fullscreen_simple_bin=$SIMPLE_BIN"
+        echo "simpleos_wm_fullscreen_simple_bin_resolved=$SIMPLE_BIN_RESOLVED"
+        echo "simpleos_wm_fullscreen_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "simpleos_wm_fullscreen_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "simpleos_wm_fullscreen_simple_bin_version=$SIMPLE_BIN_VERSION"
+        echo "simpleos_wm_fullscreen_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
+        echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
+        echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
+        echo "simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT"
+        echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
+        echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
+        echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+        echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
+        echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
+        echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
+        echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
+        echo "simpleos_wm_fullscreen_font_region_rgb=$FONT_REGION_RGB"
+        echo "simpleos_wm_fullscreen_font_region_rgb_bytes=$(file_byte_count "$FONT_REGION_RGB")"
+        echo "simpleos_wm_fullscreen_font_region_rgb_sha256=$(file_sha256 "$FONT_REGION_RGB")"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# SimpleOS WM Fullscreen Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- wrapper: $WRAPPER (sha256=$WRAPPER_SHA256)"
+        echo "- simple bin: $SIMPLE_BIN"
+        echo "- resolved binary: $SIMPLE_BIN_RESOLVED"
+        echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+        echo "- simple bin status: $SIMPLE_BIN_STATUS"
+        echo "- simple bin version: $SIMPLE_BIN_VERSION"
+        echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
+        echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
+        echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+WRAPPER_SHA256="$(file_sha256 "$WRAPPER")"
+if ! is_sha256 "$WRAPPER_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+
+SIMPLE_BIN_RESOLVED="$(resolve_path "${SIMPLE_BIN:-missing}")"
+if is_rust_seed_path "${SIMPLE_BIN:-}" || is_rust_seed_path "$SIMPLE_BIN_RESOLVED"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+    emit_failure "simple-bin-forbidden"
+    exit 1
+fi
+
+if [ -z "${SIMPLE_BIN:-}" ] || [ ! -x "$SIMPLE_BIN" ] || [ -z "$SIMPLE_BIN_RESOLVED" ]; then
+    SIMPLE_BIN_STATUS=missing
+    emit_failure "simple-bin-missing"
+    exit 1
+fi
+
+if ! SIMPLE_BIN_VERSION_RAW="$("$SIMPLE_BIN" --version 2>&1)"; then
+    SIMPLE_BIN_STATUS=unverified
+    emit_failure "simple-bin-provenance-unverified"
+    exit 1
+fi
+SIMPLE_BIN_VERSION="$(printf '%s' "$SIMPLE_BIN_VERSION_RAW" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/ $//')"
+SIMPLE_BIN_SHA256="$(file_sha256 "$SIMPLE_BIN_RESOLVED")"
+case "$(printf '%s' "$SIMPLE_BIN_VERSION" | tr '[:upper:]' '[:lower:]')" in
+    *rust-built*|*rust*seed*|*bootstrap*seed*)
+        SIMPLE_BIN_STATUS=forbidden
+        SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-provenance-forbidden"
+        emit_failure "simple-bin-forbidden"
+        exit 1
+        ;;
+esac
+if [ -z "$SIMPLE_BIN_VERSION" ] || ! is_sha256 "$SIMPLE_BIN_SHA256"; then
+    SIMPLE_BIN_STATUS=unverified
+    emit_failure "simple-bin-provenance-unverified"
+    exit 1
+fi
+SIMPLE_BIN_STATUS=pass
+
+FONT_ASSET_BYTES="$(file_byte_count "$FONT_ASSET")"
+FONT_ASSET_SHA256="$(file_sha256 "$FONT_ASSET")"
+if [ "$FONT_ASSET_BYTES" != "$FONT_ASSET_EXPECTED_BYTES" ] || \
+   [ "$FONT_ASSET_SHA256" != "$FONT_ASSET_EXPECTED_SHA256" ]; then
+    emit_failure "pinned-font-asset-invalid"
+    exit 1
+fi
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    emit_failure "qemu-system-x86_64-not-found"
+    exit 1
+fi
+
+if ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    emit_failure "grub-mkstandalone-not-found"
+    exit 1
+fi
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+if [ ! -f "$OVMF_CODE" ]; then
+    emit_failure "ovmf-code-not-found:$OVMF_CODE"
+    exit 1
+fi
+if [ ! -f "$OVMF_VARS_SRC" ]; then
+    emit_failure "ovmf-vars-not-found:$OVMF_VARS_SRC"
+    exit 1
+fi
+
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-$BUILD_DIR/simpleos_wm_production_desktop.elf}"
+
+if [ ! -f "$ENTRY" ]; then
+    emit_failure "wm-simple-web-source-missing"
+    exit 1
+fi
+
+# Build the kernel (same flow as os.qemu_runner.build_os for the
+# wm-simple-web check target) unless a fresh artifact already exists.
+kernel_stale=false
+if [ -n "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
+    if [ ! -f "$KERNEL_OUTPUT" ] || [ ! -s "$KERNEL_OUTPUT" ]; then
+        emit_failure "explicit-wm-kernel-artifact-missing"
+        exit 1
+    fi
+elif [ ! -f "$KERNEL_OUTPUT" ]; then
+    kernel_stale=true
+elif find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
+    -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
+    -newer "$KERNEL_OUTPUT" -print -quit | grep -q .; then
+    kernel_stale=true
+fi
+if [ "$kernel_stale" = true ]; then
+    mkdir -p build/os/generated/generated
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    # gui_entry_desktop.spl is the production baremetal desktop target
+    # (os.qemu_runner._needs_freestanding_stub_env /
+    # _uses_baremetal_wrapper_profile): it needs freestanding stub linking
+    # plus an llvm-objcopy on PATH for the ELF32 wrap step.
+    OBJCOPY_PREFIX=""
+    for candidate_dir in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/lib/llvm-17/bin; do
+        if [ -f "$candidate_dir/llvm-objcopy" ]; then
+            OBJCOPY_PREFIX="$candidate_dir"
+            break
+        fi
+    done
+    set +e
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SIMPLE_BIN" native-build \
+        --source build/os/generated --source "$ENTRY" \
+        --timeout 300 \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" \
+        >"$BUILD_DIR/native-build.out" 2>&1
+    build_code=$?
+    set -e
+    if [ "$build_code" -ne 0 ] || [ ! -f "$KERNEL_OUTPUT" ]; then
+        emit_failure "wm-simple-web-build-failed"
+        exit 1
+    fi
+fi
+
+KERNEL_SHA256="$(file_sha256 "$KERNEL_OUTPUT")"
+if ! is_sha256 "$KERNEL_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+
+rm -f "$QMP_SOCKET" "$SERIAL_LOG"
+
+DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
+if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    set +e
+    SIMPLEOS_FONT_ASSET="$FONT_ASSET" scripts/os/make_os_disk.shs \
+        26 "$DISK_IMAGE" "$KERNEL_OUTPUT" x86_64 \
+        >"$BUILD_DIR/make-os-disk.out" 2>&1
+    disk_build_code=$?
+    set -e
+    if [ "$disk_build_code" -ne 0 ]; then
+        disk_image_status=build-failed
+        emit_failure "pinned-font-disk-staging-failed"
+        exit 1
+    fi
+fi
+disk_image_status="$(regular_file_status "$DISK_IMAGE")"
+if [ "$disk_image_status" != pass ]; then
+    emit_failure "production-fat32-disk-missing"
+    exit 1
+fi
+DISK_IMAGE_SHA256="$(file_sha256 "$DISK_IMAGE")"
+if ! is_sha256 "$DISK_IMAGE_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+
+# --- Package the kernel as a self-contained UEFI boot app (OVMF pflash) -----
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path semantics. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84).
+UEFI_BUILD="$BUILD_DIR/uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM fullscreen (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+set +e
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_OUTPUT"
+grub_mkstandalone_code=$?
+set -e
+if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+    emit_failure "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+    exit 1
+fi
+
+# Launch QEMU directly with the exact wm-simple-web QMP-capture flags used by
+# os.qemu_runner._wm_simple_web_qmp_capture_target(): q35/max/2G, serial
+# routed to a file, no display, BGA std VGA, QMP over a unix socket.
+# vgamem_mb=64 raises the BGA/std-vga linear-framebuffer VRAM aperture past
+# QEMU's 16MB default (only 16MB won't fit a 3840x2160x32bpp = ~33.2MB
+# framebuffer -- BGA would silently reject/clamp the mode).
+qemu-system-x86_64 \
+    -no-user-config -monitor none -net none \
+    -machine q35 -cpu max -m 2G \
+    -serial "file:$SERIAL_LOG" \
+    -display none \
+    -no-reboot \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -vga std -global VGA.vgamem_mb=64 \
+    -drive "file=$DISK_IMAGE,if=none,id=nvm,format=raw,snapshot=on" \
+    -device "nvme,serial=deadbeef,drive=nvm" \
+    -qmp "unix:$QMP_SOCKET,server,nowait" \
+    >"$LAUNCH_OUT" 2>&1 &
+QEMU_PID=$!
+
+status=fail
+reason=not-run
+scanout_marker=""
+scanout_address=""
+scanout_width=0
+scanout_height=0
+scanout_stride=0
+scanout_pixel_format=""
+scanout_generation=0
+scanout_size=0
+font_marker=""
+font_unavailable_marker=""
+font_marker_valid=false
+font_oracle_pending=false
+font_region_line=""
+font_region_bytes=0
+font_region_sha256=""
+input_nonce="simpleos-wm-$(date +%s)-$$"
+input_submit_marker=""
+input_irq_marker=""
+input_state_marker=""
+input_frame_marker=""
+restore_irq_marker=""
+restore_state_marker=""
+restore_frame_marker=""
+baseline_seq=0
+maximize_seq=0
+restore_seq=0
+changed_bytes=0
+before_sha256=
+after_sha256=
+restored_sha256=
+
+# Wait for the QMP socket.
+waited=0
+while [ "$waited" -le 60000 ]; do
+    if [ -S "$QMP_SOCKET" ]; then
+        break
+    fi
+    sleep 0.1
+    waited=$((waited + 100))
+done
+
+if [ ! -S "$QMP_SOCKET" ]; then
+    reason="qmp-socket-missing"
+elif ! kill -0 "$QEMU_PID" 2>/dev/null; then
+    reason="qemu-exited-early"
+else
+    # --- Migration-correctness ladder (isolates OVMF boot-path success from
+    # kernel render correctness, which is tracked separately) ---
+    rung() { grep -qa "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+    echo "===== UEFI boot ladder ====="
+    rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+    rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
+
+    # The guest marker is the only source of scanout metadata. No BGA address,
+    # dimensions, pitch, format, or generation defaults are accepted here.
+    waited=0
+    while [ "$waited" -le 60000 ]; do
+        serial_bytes="$(wc -c <"$SERIAL_LOG" 2>/dev/null || echo 0)"
+        if serial_has_production_fault; then
+            reason="guest-render-fault"
+            break
+        elif [ "$serial_bytes" -gt 1048576 ]; then
+            reason="guest-serial-fault-storm"
+            break
+        fi
+        scanout_marker="$(marker_line "$SERIAL_LOG" "[scanout-evidence]")"
+        ready_marker="$(marker_line "$SERIAL_LOG" "[production-readiness]")"
+        font_marker="$(marker_line "$SERIAL_LOG" "[font-evidence]")"
+        font_unavailable_marker="$(marker_line "$SERIAL_LOG" "[font-evidence-unavailable]")"
+        if [ -n "$scanout_marker" ] && [ -n "$ready_marker" ] && \
+           { [ -n "$font_marker" ] || [ -n "$font_unavailable_marker" ]; }; then
+            break
+        fi
+        if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 100))
+    done
+
+    scanout_address="$(marker_field "$scanout_marker" address)"
+    scanout_width="$(marker_field "$scanout_marker" width)"
+    scanout_height="$(marker_field "$scanout_marker" height)"
+    scanout_stride="$(marker_field "$scanout_marker" stride)"
+    scanout_pixel_format="$(marker_field "$scanout_marker" pixel_format)"
+    scanout_generation="$(marker_field "$scanout_marker" generation)"
+    case "$font_marker" in
+        *"[font-evidence] family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
+            font_marker_valid=true
+            ;;
+    esac
+    case "$font_unavailable_marker" in
+        *"[font-evidence-unavailable] reason=canonical-taskbar-clock-oracle-pending route=shared-wm-draw-ir component_id=taskbar-clock region=right56,bottom48 region_rgb_sha256="*)
+            font_oracle_pending=true
+            ;;
+    esac
+
+    case "$scanout_address:$scanout_width:$scanout_height:$scanout_stride:$scanout_generation" in
+        *[!0-9:]*|:*|*::*|*:) metadata_valid=false ;;
+        *) metadata_valid=true ;;
+    esac
+    if [ "$reason" = "guest-serial-fault-storm" ] || [ "$reason" = "guest-render-fault" ]; then
+        :
+    elif [ -z "$scanout_marker" ] || [ -z "${ready_marker:-}" ]; then
+        reason="dynamic-scanout-or-desktop-readiness-missing"
+    elif [ -n "$font_unavailable_marker" ] && \
+         { [ "$font_oracle_pending" != true ] || [ -n "$FONT_REGION_EXPECTED_SHA256" ]; }; then
+        reason="guest-pinned-font-evidence-unavailable"
+    elif [ "$font_marker_valid" != true ] && \
+         { [ "$font_oracle_pending" != true ] || [ -n "$FONT_REGION_EXPECTED_SHA256" ]; }; then
+        reason="guest-pinned-font-evidence-invalid"
+    elif [ "$metadata_valid" != true ] || [ "$scanout_address" -le 0 ] || \
+         [ "$scanout_width" -le 0 ] || [ "$scanout_height" -le 0 ] || \
+         [ "$scanout_stride" -le 0 ] || [ "$scanout_generation" -le 0 ] || \
+         [ -z "$scanout_pixel_format" ]; then
+        reason="dynamic-scanout-metadata-invalid"
+    elif [ "$scanout_width" -gt 16384 ] || [ "$scanout_height" -gt 16384 ] || \
+         [ "$scanout_stride" -lt $((scanout_width * 4)) ] || \
+         [ $((scanout_stride % 4)) -ne 0 ]; then
+        reason="dynamic-scanout-bounds-or-byte-pitch-invalid"
+    else
+        scanout_size=$((scanout_stride * scanout_height))
+        scanout_end=$((scanout_address + scanout_size))
+        if [ "$scanout_size" -le 0 ] || [ "$scanout_end" -le "$scanout_address" ] || \
+           [ "$scanout_end" -gt 68719476736 ]; then
+            reason="dynamic-scanout-address-range-invalid"
+        else
+        # Capture baseline, inject two F11 make/break pairs, and map the host
+        # nonce to the guest's newly observed monotonic input sequences.
+        set +e
+        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$FONT_REGION_RGB" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
+import hashlib
+import json
+import os
+import re
+import socket
+import sys
+import time
+
+sock_path, serial_path = sys.argv[1], sys.argv[2]
+baseline_ppm, fullscreen_ppm, restored_ppm = sys.argv[3], sys.argv[4], sys.argv[5]
+font_region_path = sys.argv[6]
+address, width, height, pitch = map(int, sys.argv[7:11])
+pixel_format, size, nonce = sys.argv[11], int(sys.argv[12]), sys.argv[13]
+
+qmp_id = [0]
+
+def write_qmp(f, obj):
+    qmp_id[0] += 1
+    request_id = qmp_id[0]
+    obj["id"] = request_id
+    f.write(json.dumps(obj).encode() + b"\n")
+    f.flush()
+    while True:
+        line = f.readline()
+        if not line:
+            raise RuntimeError("qmp-connection-closed")
+        reply = json.loads(line)
+        if reply.get("id") != request_id:
+            continue
+        if "error" in reply:
+            raise RuntimeError(str(reply["error"]))
+        if "return" not in reply:
+            raise RuntimeError("qmp-command-unacknowledged")
+        return reply
+
+def hmp(f, cmd):
+    return write_qmp(f, {"execute": "human-monitor-command", "arguments": {"command-line": cmd}})
+
+def wait_raw(path):
+    for _ in range(100):
+        if os.path.exists(path) and os.path.getsize(path) == size:
+            return True
+        time.sleep(0.1)
+    return False
+
+def pmem(f, ppm_path):
+    raw_path = ppm_path + ".raw"
+    try:
+        os.unlink(raw_path)
+    except FileNotFoundError:
+        pass
+    reply = hmp(f, 'pmemsave %d %d "%s"' % (address, size, raw_path))
+    if reply.get("return", "") != "":
+        raise RuntimeError("pmemsave rejected: %r" % reply)
+    ok = wait_raw(raw_path)
+    data = open(raw_path, "rb").read() if ok else b""
+    if len(data) == size:
+        pix = bytearray()
+        if pixel_format != "argb8888":
+            raise RuntimeError("unsupported pixel format: " + pixel_format)
+        for y in range(height):
+            row = y * pitch
+            for x in range(width):
+                i = row + x * 4
+                pix.extend([data[i + 2], data[i + 1], data[i]])
+        with open(ppm_path, "wb") as out:
+            out.write(("P6\n%d %d\n255\n" % (width, height)).encode() + bytes(pix))
+    return data
+
+def serial_text():
+    try:
+        return open(serial_path, "r", errors="replace").read()
+    except OSError:
+        return ""
+
+def max_input_seq():
+    values = [int(v) for v in re.findall(r"\[wm-frame\] input_seq=(\d+) generation=\d+", serial_text())]
+    return max(values) if values else 0
+
+def wait_correlation(after_seq, action, expected_window=None):
+    # 300s (was 90s): the maximize re-render now includes pure-Simple sfnt
+    # glyf rasterization of the maximized window's text at 4K under TCG
+    # x86_64-on-arm64 (fonts were bitmap-fallback when 90s last sufficed;
+    # per-pixel coverage sampling dominates — perf gap recorded in
+    # doc/08_tracking/bug/native_chr_builtin_no_lowering_2026-07-18.md).
+    # Correlation strictness is unchanged: only sequences NEWER than
+    # after_seq with a complete irq -> state -> frame chain are accepted.
+    deadline = time.monotonic() + 300.0
+    while time.monotonic() < deadline:
+        text = serial_text()
+        seqs = sorted({int(v) for v in re.findall(r"\[wm-input-irq\] input_seq=(\d+) scancode=87(?:\r?$)", text, re.M) if int(v) > after_seq})
+        for seq in seqs:
+            irq = re.search(r"^\[wm-input-irq\] input_seq=%d scancode=87\r?$" % seq, text, re.M)
+            state = re.search(r"^\[wm-state\] input_seq=%d action=%s window=(\d+) maximized=(?:true|false)\r?$" % (seq, action), text, re.M)
+            frame = re.search(r"^\[wm-frame\] input_seq=%d generation=(\d+)\r?$" % seq, text, re.M)
+            if irq and state and frame and int(frame.group(1)) > 0:
+                window_id = int(state.group(1))
+                if window_id <= 0 or (expected_window is not None and window_id != expected_window):
+                    continue
+                return seq, window_id, irq.group(0), state.group(0), frame.group(0)
+        time.sleep(0.05)
+    raise RuntimeError("guest-input-irq-state-frame-correlation-missing action=" + action)
+
+def send_f11(f):
+    events = [{"type":"key","data":{"down":down,"key":{"type":"qcode","data":"f11"}}} for down in (True, False)]
+    write_qmp(f, {"execute":"input-send-event", "arguments":{"events":events}})
+
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock_path)
+f = s.makefile("rwb", buffering=0)
+f.readline()
+write_qmp(f, {"execute": "qmp_capabilities"})
+baseline_seq = max_input_seq()
+baseline = pmem(f, baseline_ppm)
+if width < 56 or height < 48 or len(baseline) != size:
+    raise RuntimeError("font-region-out-of-bounds")
+font_region = bytearray()
+for y in range(height - 48, height):
+    for x in range(width - 56, width):
+        i = y * pitch + x * 4
+        font_region.extend([baseline[i + 2], baseline[i + 1], baseline[i]])
+with open(font_region_path, "wb") as out:
+    out.write(font_region)
+font_region_hash = hashlib.sha256(font_region).hexdigest()
+send_f11(f)
+max_seq, target_window, max_irq, max_state, max_frame = wait_correlation(baseline_seq, "maximize")
+fullscreen = pmem(f, fullscreen_ppm)
+send_f11(f)
+restore_seq, restored_window, restore_irq, restore_state, restore_frame = wait_correlation(max_seq, "restore", target_window)
+restored = pmem(f, restored_ppm)
+
+base_hash = hashlib.sha256(baseline).hexdigest()
+full_hash = hashlib.sha256(fullscreen).hexdigest()
+restored_hash = hashlib.sha256(restored).hexdigest()
+changed = sum(1 for a, b in zip(baseline, fullscreen) if a != b)
+if not (len(baseline) == len(fullscreen) == len(restored) == size):
+    raise RuntimeError("capture-size-mismatch")
+if full_hash == base_hash or changed <= 4096:
+    raise RuntimeError("maximize-semantic-hash-not-distinct")
+if restored_hash != base_hash:
+    raise RuntimeError("restore-semantic-hash-mismatch")
+print("simpleos_wm_input_submitted host_nonce=%s baseline_seq=%d maximize_seq=%d restore_seq=%d qcode=f11" % (nonce, baseline_seq, max_seq, restore_seq))
+print("simpleos_wm_maximize_irq_marker=" + max_irq)
+print("simpleos_wm_maximize_state_marker=" + max_state)
+print("simpleos_wm_maximize_frame_marker=" + max_frame)
+print("simpleos_wm_restore_irq_marker=" + restore_irq)
+print("simpleos_wm_restore_state_marker=" + restore_state)
+print("simpleos_wm_restore_frame_marker=" + restore_frame)
+print("font_region=right56,bottom48 font_region_rgb_bytes=%d font_region_rgb_sha256=%s" % (len(font_region), font_region_hash))
+print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s restored_sha256=%s" % (changed, base_hash, full_hash, restored_hash))
+PY
+        capture1_code=$?
+        set -e
+
+        if [ "$capture1_code" -ne 0 ]; then
+            reason="capture-input-or-guest-correlation-failed"
+        else
+            input_submit_marker="$(sed -n '/^simpleos_wm_input_submitted /p' "$CAPTURE_OUT" | tail -n 1)"
+            baseline_seq="$(marker_field "$input_submit_marker" baseline_seq)"
+            maximize_seq="$(marker_field "$input_submit_marker" maximize_seq)"
+            restore_seq="$(marker_field "$input_submit_marker" restore_seq)"
+            input_irq_marker="$(sed -n 's/^simpleos_wm_maximize_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            input_state_marker="$(sed -n 's/^simpleos_wm_maximize_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            input_frame_marker="$(sed -n 's/^simpleos_wm_maximize_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_irq_marker="$(sed -n 's/^simpleos_wm_restore_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_state_marker="$(sed -n 's/^simpleos_wm_restore_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_frame_marker="$(sed -n 's/^simpleos_wm_restore_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            delta_line="$(sed -n '/^simpleos_wm_fullscreen_delta /p' "$CAPTURE_OUT" | tail -n 1)"
+            changed_bytes="$(marker_field "$delta_line" changed_bytes)"
+            before_sha256="$(marker_field "$delta_line" before_sha256)"
+            after_sha256="$(marker_field "$delta_line" after_sha256)"
+            restored_sha256="$(marker_field "$delta_line" restored_sha256)"
+            font_region_line="$(sed -n '/^font_region=right56,bottom48 /p' "$CAPTURE_OUT" | tail -n 1)"
+            font_region_bytes="$(marker_field "$font_region_line" font_region_rgb_bytes)"
+            font_region_sha256="$(marker_field "$font_region_line" font_region_rgb_sha256)"
+            if serial_has_production_fault; then
+                status=fail
+                reason=guest-render-fault
+            elif [ -z "$FONT_REGION_EXPECTED_SHA256" ]; then
+                status=fail
+                reason=canonical-taskbar-clock-oracle-pending
+            elif [ "$font_region_bytes" != "$FONT_REGION_EXPECTED_BYTES" ] || \
+                 [ "$font_region_sha256" != "$FONT_REGION_EXPECTED_SHA256" ] || \
+                 [ "$(file_byte_count "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_BYTES" ] || \
+                 [ "$(file_sha256 "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_SHA256" ]; then
+                status=fail
+                reason=pinned-font-region-oracle-mismatch
+            else
+                status=pass
+                reason=pass
+            fi
+        fi
+        fi
+    fi
+fi
+
+if [ "$status" = pass ]; then
+    wrapper_sha256_now="$(file_sha256 "$WRAPPER")"
+    kernel_sha256_now="$(file_sha256 "$KERNEL_OUTPUT")"
+    disk_image_sha256_now="$(file_sha256 "$DISK_IMAGE")"
+    if ! is_sha256 "$wrapper_sha256_now" || \
+       ! is_sha256 "$kernel_sha256_now" || \
+       ! is_sha256 "$disk_image_sha256_now"; then
+        status=fail
+        reason=artifact-sha256-invalid
+    elif [ "$wrapper_sha256_now" != "$WRAPPER_SHA256" ] || \
+         [ "$kernel_sha256_now" != "$KERNEL_SHA256" ] || \
+         [ "$disk_image_sha256_now" != "$DISK_IMAGE_SHA256" ]; then
+        status=fail
+        reason=artifact-sha256-mismatch
+    fi
+fi
+
+{
+    echo "simpleos_wm_fullscreen_status=$status"
+    echo "simpleos_wm_fullscreen_reason=$reason"
+    echo "simpleos_wm_fullscreen_wrapper=$WRAPPER"
+    echo "simpleos_wm_fullscreen_wrapper_sha256=$WRAPPER_SHA256"
+    echo "simpleos_wm_fullscreen_simple_bin=$SIMPLE_BIN"
+    echo "simpleos_wm_fullscreen_simple_bin_resolved=$SIMPLE_BIN_RESOLVED"
+    echo "simpleos_wm_fullscreen_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "simpleos_wm_fullscreen_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "simpleos_wm_fullscreen_simple_bin_version=$SIMPLE_BIN_VERSION"
+    echo "simpleos_wm_fullscreen_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+    echo "simpleos_wm_fullscreen_qmp_socket=$QMP_SOCKET"
+    echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
+    echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
+    echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
+    echo "simpleos_wm_fullscreen_capture_out=$CAPTURE_OUT"
+    echo "simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT"
+    echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
+    echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
+    echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+    echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
+    echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
+    echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
+    echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
+    echo "simpleos_wm_fullscreen_font_marker=$font_marker"
+    echo "simpleos_wm_fullscreen_font_unavailable_marker=$font_unavailable_marker"
+    echo "simpleos_wm_fullscreen_font_region_rgb=$FONT_REGION_RGB"
+    echo "simpleos_wm_fullscreen_font_region_rgb_bytes=$font_region_bytes"
+    echo "simpleos_wm_fullscreen_font_region_rgb_sha256=$font_region_sha256"
+    echo "simpleos_wm_fullscreen_font_region_device_origin=qemu-pmemsave"
+    echo "simpleos_wm_fullscreen_scanout_marker=$scanout_marker"
+    echo "simpleos_wm_fullscreen_scanout_address=$scanout_address"
+    echo "simpleos_wm_fullscreen_scanout_width=$scanout_width"
+    echo "simpleos_wm_fullscreen_scanout_height=$scanout_height"
+    echo "simpleos_wm_fullscreen_scanout_byte_pitch=$scanout_stride"
+    echo "simpleos_wm_fullscreen_scanout_pixel_format=$scanout_pixel_format"
+    echo "simpleos_wm_fullscreen_scanout_generation=$scanout_generation"
+    echo "simpleos_wm_fullscreen_scanout_capture_size=$scanout_size"
+    echo "simpleos_wm_fullscreen_input_nonce=$input_nonce"
+    echo "simpleos_wm_fullscreen_baseline_input_seq=$baseline_seq"
+    echo "simpleos_wm_fullscreen_maximize_input_seq=$maximize_seq"
+    echo "simpleos_wm_fullscreen_restore_input_seq=$restore_seq"
+    echo "simpleos_wm_fullscreen_input_submit_marker=$input_submit_marker"
+    echo "simpleos_wm_fullscreen_input_irq_marker=$input_irq_marker"
+    echo "simpleos_wm_fullscreen_input_state_marker=$input_state_marker"
+    echo "simpleos_wm_fullscreen_input_frame_marker=$input_frame_marker"
+    echo "simpleos_wm_fullscreen_restore_irq_marker=$restore_irq_marker"
+    echo "simpleos_wm_fullscreen_restore_state_marker=$restore_state_marker"
+    echo "simpleos_wm_fullscreen_restore_frame_marker=$restore_frame_marker"
+    echo "simpleos_wm_fullscreen_baseline_ppm=$BASELINE_PPM"
+    echo "simpleos_wm_fullscreen_baseline_ppm_file_status=$(regular_file_status "$BASELINE_PPM")"
+    echo "simpleos_wm_fullscreen_baseline_ppm_magic_status=$(ppm_magic_status "$BASELINE_PPM")"
+    echo "simpleos_wm_fullscreen_baseline_ppm_bytes=$(file_byte_count "$BASELINE_PPM")"
+    echo "simpleos_wm_fullscreen_changed_bytes=${changed_bytes:-0}"
+    echo "simpleos_wm_fullscreen_baseline_sha256=$before_sha256"
+    echo "simpleos_wm_fullscreen_maximized_sha256=$after_sha256"
+    echo "simpleos_wm_fullscreen_restored_sha256=$restored_sha256"
+    echo "simpleos_wm_fullscreen_maximized_ppm=$FULLSCREEN_PPM"
+    echo "simpleos_wm_fullscreen_maximized_ppm_file_status=$(regular_file_status "$FULLSCREEN_PPM")"
+    echo "simpleos_wm_fullscreen_maximized_ppm_magic_status=$(ppm_magic_status "$FULLSCREEN_PPM")"
+    echo "simpleos_wm_fullscreen_maximized_ppm_bytes=$(file_byte_count "$FULLSCREEN_PPM")"
+    echo "simpleos_wm_fullscreen_restored_ppm=$RESTORED_PPM"
+    echo "simpleos_wm_fullscreen_restored_ppm_file_status=$(regular_file_status "$RESTORED_PPM")"
+    echo "simpleos_wm_fullscreen_restored_ppm_magic_status=$(ppm_magic_status "$RESTORED_PPM")"
+    echo "simpleos_wm_fullscreen_restored_ppm_bytes=$(file_byte_count "$RESTORED_PPM")"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# SimpleOS WM Fullscreen Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- wrapper: $WRAPPER (sha256=$WRAPPER_SHA256)"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- resolved binary: $SIMPLE_BIN_RESOLVED"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    echo "- simple bin version: $SIMPLE_BIN_VERSION"
+    echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
+    echo "- qmp socket: $QMP_SOCKET"
+    echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
+    echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
+    echo "- pinned font asset: $FONT_ASSET ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
+    echo "- guest font marker: ${font_marker:--}"
+    echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"
+    echo "- scanout: address=${scanout_address:--} width=${scanout_width:-0} height=${scanout_height:-0} byte-pitch=${scanout_stride:-0} format=${scanout_pixel_format:--} generation=${scanout_generation:-0}"
+    echo "- host nonce: $input_nonce"
+    echo "- input sequences: baseline=$baseline_seq maximize=$maximize_seq restore=$restore_seq"
+    echo "- maximize IRQ/state/frame: ${input_irq_marker:--} | ${input_state_marker:--} | ${input_frame_marker:--}"
+    echo "- restore IRQ/state/frame: ${restore_irq_marker:--} | ${restore_state_marker:--} | ${restore_frame_marker:--}"
+    echo "- changed bytes (baseline vs maximized): ${changed_bytes:-0}"
+    echo "- baseline sha256: ${before_sha256:--}"
+    echo "- maximized sha256: ${after_sha256:--}"
+    echo "- restored sha256: ${restored_sha256:--}"
+    echo "- baseline ppm: $BASELINE_PPM ($(file_byte_count "$BASELINE_PPM") bytes)"
+    echo "- maximized ppm: $FULLSCREEN_PPM ($(file_byte_count "$FULLSCREEN_PPM") bytes)"
+    echo "- restored ppm: $RESTORED_PPM ($(file_byte_count "$RESTORED_PPM") bytes)"
+    echo "- serial log: $SERIAL_LOG ($(file_byte_count "$SERIAL_LOG") bytes)"
+    echo
+    echo "This wrapper boots the wm-simple-web SimpleOS QEMU target directly"
+    echo "(same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),"
+    echo "derives QMP \`pmemsave\` address and size from the guest's validated"
+    echo "scanout marker, converts visible pixels using its byte pitch, injects"
+    echo "F11 through QEMU input, maps its host nonce to newly observed guest"
+    echo "input sequences, and requires sequence-correlated IRQ, WM state, and"
+    echo "frame-generation markers. Boot-time choreography is never"
+    echo "accepted as interaction evidence; missing correlation fails closed."
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

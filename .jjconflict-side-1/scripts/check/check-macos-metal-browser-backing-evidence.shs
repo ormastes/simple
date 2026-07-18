@@ -1,0 +1,313 @@
+#!/bin/sh
+# Produce macOS Metal browser-backing and pairwise ARGB evidence for the
+# normalized macOS Metal render-log compare gate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/macos-metal-browser-backing}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+HTML_FIXTURE="${MACOS_METAL_BROWSER_BACKING_HTML:-test/fixtures/pixel_compare/css_boxes.html}"
+WIDTH="${MACOS_METAL_BROWSER_BACKING_WIDTH:-320}"
+HEIGHT="${MACOS_METAL_BROWSER_BACKING_HEIGHT:-240}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+ELECTRON_BIN="${ELECTRON_BIN:-tools/electron-shell/node_modules/.bin/electron}"
+CHROME_CAPTURE_SCRIPT="${CHROME_CAPTURE_SCRIPT:-tools/chrome-live-bitmap/capture_html_argb.js}"
+ELECTRON_CAPTURE_SCRIPT="${ELECTRON_CAPTURE_SCRIPT:-tools/electron-live-bitmap/capture_html_argb.js}"
+SIMPLE_RENDER_SCRIPT="${SIMPLE_RENDER_SCRIPT:-tools/pixel_compare/render_simple_html.spl}"
+DRAW_IR_FIXTURE="${MACOS_METAL_DRAW_IR_FIXTURE:-test/fixtures/native_web_draw_ir_provenance/main.spl}"
+DRAW_IR_BIN="$BUILD_DIR/native-web-draw-ir-provenance"
+DRAW_IR_STDOUT="$BUILD_DIR/native-web-draw-ir-provenance.stdout"
+DRAW_IR_STDERR="$BUILD_DIR/native-web-draw-ir-provenance.stderr"
+DRAW_IR_EXPECTED_STDOUT="$BUILD_DIR/native-web-draw-ir-provenance.expected.stdout"
+DRAW_IR_BUILD_LOG="$BUILD_DIR/native-web-draw-ir-provenance.build.log"
+TIMEOUT_SECS="${MACOS_METAL_NATIVE_TIMEOUT_SECS:-300}"
+SIMPLE_LIB="${SIMPLE_LIB:-src}"
+export SIMPLE_LIB
+
+ENV_PATH="$BUILD_DIR/evidence.env"
+SIMPLE_ARGB="$BUILD_DIR/simple.argb.json"
+CHROME_ARGB="$BUILD_DIR/chrome.argb.json"
+ELECTRON_ARGB="$BUILD_DIR/electron.argb.json"
+CHROME_PROOF="$BUILD_DIR/chrome-proof.json"
+ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
+CHROME_GEOMETRY="$BUILD_DIR/chrome-geometry.json"
+CHROME_SOURCE="$BUILD_DIR/chrome-source.env"
+ELECTRON_SOURCE="$BUILD_DIR/electron-source.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$REPORT_PATH" "$SIMPLE_ARGB" "$CHROME_ARGB" "$ELECTRON_ARGB" \
+    "$CHROME_PROOF" "$ELECTRON_PROOF" "$CHROME_GEOMETRY" "$CHROME_SOURCE" "$ELECTRON_SOURCE" \
+    "$DRAW_IR_BIN" "$DRAW_IR_STDOUT" "$DRAW_IR_STDERR" "$DRAW_IR_EXPECTED_STDOUT" "$DRAW_IR_BUILD_LOG"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout() {
+    if have timeout; then timeout "$TIMEOUT_SECS" "$@"; else "$@"; fi
+}
+
+simple_status=unavailable
+simple_reason=not-run
+chrome_status=unavailable
+chrome_reason=not-run
+electron_status=unavailable
+electron_reason=not-run
+draw_ir_status=unavailable
+draw_ir_reason=not-run
+draw_ir_exit=not-run
+draw_ir_stderr_empty=false
+
+printf '%s\n' \
+    'producer=4 rects=4 embedding=0,0,320,240,1000 rendered=4 skipped=0 source=device_readback' \
+    >"$DRAW_IR_EXPECTED_STDOUT"
+
+if [ "$(uname -s 2>/dev/null || echo unknown)" != "Darwin" ]; then
+    draw_ir_reason=macos-required
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    draw_ir_reason=missing-simple-bin
+elif run_with_timeout "$SIMPLE_BIN" native-build \
+    --backend llvm --source src/lib --source test/fixtures --entry-closure \
+    --entry "$DRAW_IR_FIXTURE" --output "$DRAW_IR_BIN" >"$DRAW_IR_BUILD_LOG" 2>&1; then
+    set +e
+    run_with_timeout "$DRAW_IR_BIN" >"$DRAW_IR_STDOUT" 2>"$DRAW_IR_STDERR"
+    draw_ir_exit=$?
+    set -e
+    if [ ! -s "$DRAW_IR_STDERR" ]; then
+        draw_ir_stderr_empty=true
+    fi
+    if [ "$draw_ir_exit" -eq 0 ] && cmp "$DRAW_IR_EXPECTED_STDOUT" "$DRAW_IR_STDOUT" >/dev/null 2>&1 \
+        && [ "$draw_ir_stderr_empty" = true ]; then
+        draw_ir_status=pass
+        draw_ir_reason=pass
+    else
+        draw_ir_status=fail
+        draw_ir_reason=native-web-draw-ir-provenance-mismatch
+    fi
+else
+    draw_ir_status=fail
+    draw_ir_reason=native-web-draw-ir-provenance-build-failed
+fi
+
+if [ "$(uname -s 2>/dev/null || echo unknown)" != "Darwin" ]; then
+    simple_reason=macos-required
+    chrome_reason=macos-required
+    electron_reason=macos-required
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    simple_reason=missing-simple-bin
+else
+    if PIXEL_HTML="$HTML_FIXTURE" PIXEL_W="$WIDTH" PIXEL_H="$HEIGHT" PIXEL_BACKEND=metal \
+        PIXEL_OUT="$SIMPLE_ARGB" SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+        "$SIMPLE_BIN" run "$SIMPLE_RENDER_SCRIPT" --mode=interpreter \
+        >"$BUILD_DIR/simple-render.log" 2>&1; then
+        simple_status=pass
+        simple_reason=pass
+    else
+        simple_status=fail
+        simple_reason=simple-metal-capture-failed
+    fi
+fi
+
+if [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ]; then
+    if CHROME_CAPTURE_HTML="$HTML_FIXTURE" CHROME_CAPTURE_WIDTH="$WIDTH" CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+        CHROME_CAPTURE_DISABLE_GPU=false CHROME_CAPTURE_OUTPUT="$CHROME_ARGB" \
+        CHROME_CAPTURE_PROOF_PATH="$CHROME_PROOF" CHROME_CAPTURE_GEOMETRY_OUTPUT="$CHROME_GEOMETRY" \
+        node "$CHROME_CAPTURE_SCRIPT" >"$BUILD_DIR/chrome-capture.log" 2>&1; then
+        chrome_status=pass
+        chrome_reason=pass
+    else
+        chrome_status=fail
+        chrome_reason=chrome-capture-failed
+    fi
+fi
+
+if [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ]; then
+    if [ ! -x "$ELECTRON_BIN" ]; then
+        electron_reason=missing-electron-bin
+    elif ELECTRON_CAPTURE_HTML="$HTML_FIXTURE" ELECTRON_CAPTURE_WIDTH="$WIDTH" ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+        ELECTRON_CAPTURE_OUTPUT="$ELECTRON_ARGB" ELECTRON_CAPTURE_PROOF_PATH="$ELECTRON_PROOF" \
+        ELECTRON_CAPTURE_OFFSCREEN_PAINT=1 \
+        ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT="${MACOS_METAL_ELECTRON_DEBUG_PORT:-9341}" \
+        "$ELECTRON_BIN" --no-sandbox "$ELECTRON_CAPTURE_SCRIPT" \
+        >"$BUILD_DIR/electron-capture.log" 2>&1; then
+        electron_status=pass
+        electron_reason=pass
+    else
+        electron_status=fail
+        electron_reason=electron-capture-failed
+    fi
+fi
+
+node - "$BUILD_DIR" "$HTML_FIXTURE" "$WIDTH" "$HEIGHT" "$simple_status" "$simple_reason" "$chrome_status" "$chrome_reason" "$electron_status" "$electron_reason" <<'NODE' >"$ENV_PATH"
+const fs = require("fs");
+const path = require("path");
+
+const [buildDir, htmlFixture, widthRaw, heightRaw, simpleStatus, simpleReason, chromeStatus, chromeReason, electronStatus, electronReason] = process.argv.slice(2);
+const width = Number(widthRaw);
+const height = Number(heightRaw);
+
+function emit(key, value) {
+  const clean = value === undefined || value === null ? "" : String(value).replace(/[\r\n]/g, " ");
+  console.log(`${key}=${clean}`);
+}
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (_err) { return null; }
+}
+
+function rel(file) {
+  return path.basename(file);
+}
+
+function checksum(pixels) {
+  if (!Array.isArray(pixels)) return "";
+  let sum = 0n;
+  for (const p of pixels) sum += BigInt(p >>> 0);
+  return sum.toString();
+}
+
+function nonblank(pixels) {
+  if (!Array.isArray(pixels)) return 0;
+  let count = 0;
+  for (const p of pixels) if ((p >>> 0) !== 0) count += 1;
+  return count;
+}
+
+function diffStatus(a, b) {
+  if (!a || !b || a.width !== b.width || a.height !== b.height) return "fail";
+  const ap = Array.isArray(a.pixels) ? a.pixels : [];
+  const bp = Array.isArray(b.pixels) ? b.pixels : [];
+  if (ap.length !== bp.length) return "fail";
+  for (let i = 0; i < ap.length; i += 1) {
+    if ((ap[i] >>> 0) !== (bp[i] >>> 0)) return "fail";
+  }
+  return "pass";
+}
+
+function gpuInfoFor(source, proof) {
+  const info = source === "chrome" ? proof?.gpu_info : (proof?.browser_target_gpu_info || proof?.gpu_info);
+  const gpu = info?.gpu || info || {};
+  const features = gpu.featureStatus || proof?.gpu_feature_status || proof?.gpuFeatureStatus || {};
+  const aux = gpu.auxAttributes || info?.auxAttributes || {};
+  const device = Array.isArray(gpu.devices) && gpu.devices.length > 0 ? gpu.devices[0] : {};
+  const renderer = device.deviceString || aux.glRenderer || "";
+  const display = aux.displayType || (renderer.match(/metal/i) ? "ANGLE_METAL" : "");
+  const glParts = aux.glImplementationParts || display || "";
+  const skia = /metal|apple/i.test(`${display} ${glParts} ${renderer}`) ? "Metal" : "";
+  const gpuCompositing = features.gpu_compositing || features.gpuCompositing || "";
+  const metalBacked = /enabled/i.test(gpuCompositing) && /metal|apple m[0-9]|agx/i.test(`${display} ${glParts} ${skia} ${renderer}`);
+  return { gpuCompositing, display, glParts, skia, renderer, metalBacked };
+}
+
+function writeSource(source, gpu) {
+  const sourcePath = path.join(buildDir, `${source}-source.env`);
+  const prefix = `macos_metal_${source}_browser_backing`;
+  fs.writeFileSync(sourcePath, [
+    `${prefix}_gpu_compositing=${gpu.gpuCompositing}`,
+    `${prefix}_display_type=${gpu.display}`,
+    `${prefix}_gl_implementation_parts=${gpu.glParts}`,
+    `${prefix}_skia_backend_type=${gpu.skia}`,
+    `${prefix}_gl_renderer=${gpu.renderer}`,
+    "",
+  ].join("\n"));
+  return sourcePath;
+}
+
+const simpleArgbPath = path.join(buildDir, "simple.argb.json");
+const chromeArgbPath = path.join(buildDir, "chrome.argb.json");
+const electronArgbPath = path.join(buildDir, "electron.argb.json");
+const chromeProofPath = path.join(buildDir, "chrome-proof.json");
+const electronProofPath = path.join(buildDir, "electron-proof.json");
+const simple = readJson(simpleArgbPath);
+const chrome = readJson(chromeArgbPath);
+const electron = readJson(electronArgbPath);
+const chromeProof = readJson(chromeProofPath);
+const electronProof = readJson(electronProofPath);
+const chromeGpu = gpuInfoFor("chrome", chromeProof);
+const electronGpu = gpuInfoFor("electron", electronProof);
+const chromeSourcePath = writeSource("chrome", chromeGpu);
+const electronSourcePath = writeSource("electron", electronGpu);
+
+const simpleChecksum = checksum(simple?.pixels);
+const chromeChecksum = checksum(chrome?.pixels);
+const electronChecksum = checksum(electron?.pixels);
+const ec = diffStatus(electron, chrome);
+const es = diffStatus(electron, simple);
+const cs = diffStatus(chrome, simple);
+const allDiffsPass = ec === "pass" && es === "pass" && cs === "pass";
+const allCapturesPass = simpleStatus === "pass" && chromeStatus === "pass" && electronStatus === "pass";
+const browserBackingPass = chromeGpu.metalBacked && electronGpu.metalBacked;
+const pixelStatus = allCapturesPass && allDiffsPass ? "pass" : "fail";
+
+emit("macos_metal_browser_backing_status", browserBackingPass ? "pass" : "fail");
+emit("macos_metal_browser_backing_reason", browserBackingPass ? "pass" : "browser-metal-metadata-missing");
+emit("macos_metal_electron_browser_backing_status", electronGpu.metalBacked ? "pass" : "fail");
+emit("macos_metal_electron_browser_backing_reason", electronGpu.metalBacked ? "electron-metal-backed" : electronReason);
+emit("macos_metal_electron_browser_backing_gpu_compositing", electronGpu.gpuCompositing);
+emit("macos_metal_electron_browser_backing_display_type", electronGpu.display);
+emit("macos_metal_electron_browser_backing_gl_implementation_parts", electronGpu.glParts);
+emit("macos_metal_electron_browser_backing_skia_backend_type", electronGpu.skia);
+emit("macos_metal_electron_browser_backing_gl_renderer", electronGpu.renderer);
+emit("macos_metal_electron_browser_backing_source", electronSourcePath);
+emit("macos_metal_chrome_browser_backing_status", chromeGpu.metalBacked ? "pass" : "fail");
+emit("macos_metal_chrome_browser_backing_reason", chromeGpu.metalBacked ? "chrome-metal-backed" : chromeReason);
+emit("macos_metal_chrome_browser_backing_gpu_compositing", chromeGpu.gpuCompositing);
+emit("macos_metal_chrome_browser_backing_display_type", chromeGpu.display);
+emit("macos_metal_chrome_browser_backing_gl_implementation_parts", chromeGpu.glParts);
+emit("macos_metal_chrome_browser_backing_skia_backend_type", chromeGpu.skia);
+emit("macos_metal_chrome_browser_backing_gl_renderer", chromeGpu.renderer);
+emit("macos_metal_chrome_browser_backing_source", chromeSourcePath);
+emit("macos_metal_pixel_comparison_status", pixelStatus);
+emit("macos_metal_pixel_comparison_mode", "pairwise-argb-diff");
+emit("macos_metal_electron_chrome_pairwise_diff_status", ec);
+emit("macos_metal_electron_simple_pairwise_diff_status", es);
+emit("macos_metal_chrome_simple_pairwise_diff_status", cs);
+for (const [name, argb, argbPath, sum] of [
+  ["simple", simple, simpleArgbPath, simpleChecksum],
+  ["chrome", chrome, chromeArgbPath, chromeChecksum],
+  ["electron", electron, electronArgbPath, electronChecksum],
+]) {
+  emit(`macos_metal_${name}_argb_width`, argb?.width || "");
+  emit(`macos_metal_${name}_argb_height`, argb?.height || "");
+  emit(`macos_metal_${name}_argb_nonblank_pixel_count`, nonblank(argb?.pixels));
+  emit(`macos_metal_${name}_argb_checksum`, sum);
+  emit(`macos_metal_${name}_argb_artifact`, rel(argbPath));
+}
+emit("macos_metal_simple_argb_backend", "metal");
+emit("macos_metal_capture_fixture", htmlFixture);
+emit("macos_metal_capture_width", width);
+emit("macos_metal_capture_height", height);
+emit("macos_metal_simple_capture_status", simpleStatus);
+emit("macos_metal_simple_capture_reason", simpleReason);
+emit("macos_metal_chrome_capture_status", chromeStatus);
+emit("macos_metal_chrome_capture_reason", chromeReason);
+emit("macos_metal_electron_capture_status", electronStatus);
+emit("macos_metal_electron_capture_reason", electronReason);
+emit("macos_metal_electron_capture_compositor_mode", electronProof?.capture_compositor_mode || "");
+emit("macos_metal_electron_capture_offscreen_paint", electronProof?.offscreen_paint ? "true" : "false");
+NODE
+
+{
+    echo "macos_metal_native_web_draw_ir_provenance_status=$draw_ir_status"
+    echo "macos_metal_native_web_draw_ir_provenance_reason=$draw_ir_reason"
+    echo "macos_metal_native_web_draw_ir_provenance_fixture=$DRAW_IR_FIXTURE"
+    echo "macos_metal_native_web_draw_ir_provenance_exit_code=$draw_ir_exit"
+    echo "macos_metal_native_web_draw_ir_provenance_stderr_empty=$draw_ir_stderr_empty"
+    echo "macos_metal_native_web_draw_ir_provenance_stdout_artifact=$DRAW_IR_STDOUT"
+    echo "macos_metal_native_web_draw_ir_provenance_stderr_artifact=$DRAW_IR_STDERR"
+} >>"$ENV_PATH"
+
+status="$(sed -n 's/^macos_metal_browser_backing_status=//p' "$ENV_PATH" | tail -1)"
+pixel_status="$(sed -n 's/^macos_metal_pixel_comparison_status=//p' "$ENV_PATH" | tail -1)"
+{
+    echo "# macOS Metal Browser Backing Evidence"
+    echo
+    echo "- fixture: $HTML_FIXTURE"
+    echo "- size: ${WIDTH}x${HEIGHT}"
+    echo "- browser_backing_status: $status"
+    echo "- pixel_comparison_status: $pixel_status"
+    echo "- native_web_draw_ir_provenance_status: $draw_ir_status"
+    echo "- evidence: $ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+[ "$status" = "pass" ] && [ "$pixel_status" = "pass" ] && [ "$draw_ir_status" = "pass" ]

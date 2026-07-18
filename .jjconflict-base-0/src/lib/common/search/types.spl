@@ -1,0 +1,416 @@
+# ============================================================================
+# common/search/types.spl — behavior-carrying search custom types (AC-1, AC-7)
+#
+# The type barrier the Phase-1 search algorithms build on. Every type carries
+# behavior (methods, `me` self-mutation, named comparison/merge ops) so domain
+# files (exact/multi/prefilter/simd_scan) never juggle bare [u8]/i64 primitives.
+#
+# Foundation: src/lib/common/bytes/ (ByteSpan, ByteBuffer).
+# Plan: doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md
+#
+# Receiver convention (mirrors common/bytes/span.spl):
+#   static fn new(...)   constructors
+#   fn  ...              read-only methods
+#   me  ...              self-mutating methods
+#
+# KNOWN BUG designed around: `for x in <custom struct>` silently iterates zero
+# times (doc/08_tracking/bug/for_in_custom_struct_no_iterator_protocol_2026-06-15.md).
+# Iterable types expose `.to_bytes()` / index accessors; callers use index loops
+# or `for b in span.to_bytes()`, never for-in over a custom struct.
+# ============================================================================
+
+use std.common.bytes.span.{ByteSpan, ByteBuffer}
+
+# ----------------------------------------------------------------------------
+# Haystack -- the searched text, a behavior-carrying view over ByteSpan
+# ----------------------------------------------------------------------------
+struct Haystack:
+    """The text being searched. Wraps a ByteSpan and adds a `find_from`
+    cursor hook the scan algorithms drive. Fail-closed like ByteSpan."""
+    span: ByteSpan
+
+impl Haystack:
+    static fn new(data: [u8]) -> Haystack:
+        Haystack(span: ByteSpan.new(data))
+
+    static fn of_span(span: ByteSpan) -> Haystack:
+        Haystack(span: span)
+
+    fn len() -> i64:
+        self.span.len()
+
+    fn is_empty() -> bool:
+        self.span.is_empty()
+
+    fn get(i: i64) -> u8:
+        """Bounds-checked byte access (out-of-range returns 0)."""
+        self.span.get(i)
+
+    fn slice(start: i64, length: i64) -> Haystack:
+        Haystack(span: self.span.slice(start, length))
+
+    fn to_bytes() -> [u8]:
+        """Materialize for `for b in haystack.to_bytes()` iteration."""
+        self.span.to_bytes()
+
+    fn find_from(cursor: i64, target: u8) -> i64:
+        """Scan hook: index of the first byte == target at or after `cursor`,
+        or -1 if none. The first-byte seam the SIMD/memchr path overrides."""
+        var i = cursor
+        if i < 0:
+            i = 0
+        while i < self.span.len():
+            if self.span.get(i) == target:
+                return i
+            i = i + 1
+        0 - 1
+
+    fn matches_at(pos: i64, pat: Pattern) -> bool:
+        """True if the pattern occurs starting at `pos` in the haystack."""
+        val plen = pat.len()
+        if pos < 0:
+            return false
+        if pos + plen > self.span.len():
+            return false
+        var j = 0
+        while j < plen:
+            if self.span.get(pos + j) != pat.get(j):
+                return false
+            j = j + 1
+        true
+
+# ----------------------------------------------------------------------------
+# Pattern -- the needle, with a precomputed skip-table hook
+# ----------------------------------------------------------------------------
+struct Pattern:
+    """A search needle. Carries the bytes plus a precomputed bad-character
+    skip table (256 entries) used by Boyer-Moore-Horspool-style scanners.
+    The table is a behavior hook: built once at construction, read via
+    `skip_for(byte)`."""
+    bytes: [u8]
+    skip_tbl: [i64]
+
+impl Pattern:
+    static fn new(bytes: [u8]) -> Pattern:
+        """Build a pattern and its bad-character skip table.
+
+        skip[c] = distance to shift when mismatching on byte c, i.e.
+        (plen - 1 - last_index_of(c)) clamped to >= 1; default plen."""
+        val plen = bytes.len()
+        var tbl: [i64] = []
+        var c = 0
+        while c < 256:
+            tbl.push(plen)
+            c = c + 1
+        # Last occurrence of each byte (excluding the final position) sets shift.
+        var i = 0
+        while i < plen - 1:
+            val b = bytes[i].to_i64()
+            tbl[b] = plen - 1 - i
+            i = i + 1
+        Pattern(bytes: bytes, skip_tbl: tbl)
+
+    fn len() -> i64:
+        self.bytes.len()
+
+    fn is_empty() -> bool:
+        self.bytes.len() == 0
+
+    fn get(i: i64) -> u8:
+        if i < 0:
+            return 0u8
+        if i >= self.bytes.len():
+            return 0u8
+        self.bytes[i]
+
+    fn skip_for(b: u8) -> i64:
+        """Bad-character shift for mismatch byte `b` (>= 1)."""
+        val s = self.skip_tbl[b.to_i64()]
+        if s < 1:
+            return 1
+        s
+
+    fn to_bytes() -> [u8]:
+        self.bytes
+
+# ----------------------------------------------------------------------------
+# MatchPos / MatchSpan -- typed match locations (no bare-int leakage)
+# ----------------------------------------------------------------------------
+struct MatchPos:
+    """A typed single position of a match start. Replaces a bare i64 so call
+    sites can't confuse a position with a length or a count."""
+    index: i64
+
+impl MatchPos:
+    static fn at(index: i64) -> MatchPos:
+        MatchPos(index: index)
+
+    fn value() -> i64:
+        self.index
+
+    fn equals(other: MatchPos) -> bool:
+        self.index == other.index
+
+struct MatchSpan:
+    """A typed [start, end) match region. `start`/`end` are typed accessors;
+    `length()` is derived, never stored, so the two can't drift."""
+    start_idx: i64
+    end_idx: i64
+
+impl MatchSpan:
+    static fn of(start_idx: i64, end_idx: i64) -> MatchSpan:
+        MatchSpan(start_idx: start_idx, end_idx: end_idx)
+
+    static fn at_len(start_idx: i64, length: i64) -> MatchSpan:
+        """Build from a start and a match length."""
+        MatchSpan(start_idx: start_idx, end_idx: start_idx + length)
+
+    fn start() -> i64:
+        self.start_idx
+
+    fn end() -> i64:
+        self.end_idx
+
+    fn length() -> i64:
+        """Derived width; never stored so start/end cannot disagree."""
+        self.end_idx - self.start_idx
+
+    fn is_empty() -> bool:
+        self.end_idx <= self.start_idx
+
+    fn equals(other: MatchSpan) -> bool:
+        self.start_idx == other.start_idx and self.end_idx == other.end_idx
+
+    fn contains(pos: i64) -> bool:
+        pos >= self.start_idx and pos < self.end_idx
+
+# ----------------------------------------------------------------------------
+# Score -- an ordered relevance value for top-k ranking
+# ----------------------------------------------------------------------------
+# Stored as a fixed-point i64 (value scaled by FIXED_ONE) because f64 is
+# unreliable across this repo's backends (see MEMORY: f64 Unreliable All
+# Backends). Named comparison methods are used instead of operator overloads,
+# which this repo has no idiom for (grep found none).
+struct Score:
+    """An ordered relevance score for top-k ranking. Higher is better.
+
+    Carried as a fixed-point i64 (raw = value * 1000) to stay off the
+    unreliable f64 path while remaining totally ordered."""
+    raw: i64
+
+impl Score:
+    static fn zero() -> Score:
+        Score(raw: 0)
+
+    static fn from_raw(raw: i64) -> Score:
+        """Construct directly from a fixed-point raw value."""
+        Score(raw: raw)
+
+    static fn from_milli(milli: i64) -> Score:
+        """Construct from thousandths (e.g. 1500 == 1.5)."""
+        Score(raw: milli)
+
+    static fn from_count(count: i64) -> Score:
+        """Whole-number score (count * FIXED_ONE)."""
+        Score(raw: count * 1000)
+
+    fn raw_value() -> i64:
+        self.raw
+
+    fn is_greater_than(other: Score) -> bool:
+        self.raw > other.raw
+
+    fn is_less_than(other: Score) -> bool:
+        self.raw < other.raw
+
+    fn equals(other: Score) -> bool:
+        self.raw == other.raw
+
+    fn cmp(other: Score) -> i64:
+        """-1 if self < other, 0 if equal, +1 if self > other (top-k sort key)."""
+        if self.raw < other.raw:
+            return 0 - 1
+        if self.raw > other.raw:
+            return 1
+        0
+
+    fn max(other: Score) -> Score:
+        if self.raw >= other.raw:
+            return self
+        other
+
+    fn add(other: Score) -> Score:
+        Score(raw: self.raw + other.raw)
+
+# ----------------------------------------------------------------------------
+# PostingList<Id> -- a generic sorted id set with sorted-merge intersect/union
+# ----------------------------------------------------------------------------
+# GENERIC `<>` probe. Sorted-merge needs `<` on two Id values. There is no
+# visible trait-bound mechanism, so the comparison is dynamic in interpreter
+# mode. Specs instantiate PostingList<i64> concretely to prove correctness.
+struct PostingList<Id>:
+    """A sorted list of document ids supporting sorted-merge set algebra.
+
+    `push` appends in caller-sorted order (asserted via `is_sorted`);
+    `intersect`/`union` are classic two-cursor merges; `advance_to` is the
+    skip-cursor hook used internally to leap a cursor to the first id >= target."""
+    ids: [Id]
+
+impl PostingList<Id>:
+    static fn new() -> PostingList<Id>:
+        PostingList(ids: [])
+
+    static fn of(ids: [Id]) -> PostingList<Id>:
+        """Wrap a caller-sorted id list."""
+        PostingList(ids: ids)
+
+    me push(id: Id):
+        """Append the next (sorted, strictly-increasing) id."""
+        self.ids.push(id)
+
+    fn len() -> i64:
+        self.ids.len()
+
+    fn is_empty() -> bool:
+        self.ids.len() == 0
+
+    fn at(i: i64) -> Id:
+        self.ids[i]
+
+    fn to_list() -> [Id]:
+        self.ids
+
+    fn advance_to(cursor: i64, target: Id) -> i64:
+        """Skip-cursor: index of the first id at or after `cursor` whose value
+        is >= target. Returns len() if none. Pure (no stored cursor state)."""
+        var i = cursor
+        if i < 0:
+            i = 0
+        while i < self.ids.len():
+            if self.ids[i] >= target:
+                return i
+            i = i + 1
+        self.ids.len()
+
+    fn intersect(other: PostingList<Id>) -> PostingList<Id>:
+        """Sorted-merge intersection. Both lists must be ascending."""
+        var out: [Id] = []
+        var i = 0
+        var j = 0
+        val na = self.ids.len()
+        val nb = other.ids.len()
+        while i < na and j < nb:
+            val a = self.ids[i]
+            val b = other.ids[j]
+            if a < b:
+                i = i + 1
+            else:
+                if b < a:
+                    j = j + 1
+                else:
+                    out.push(a)
+                    i = i + 1
+                    j = j + 1
+        PostingList(ids: out)
+
+    fn union(other: PostingList<Id>) -> PostingList<Id>:
+        """Sorted-merge union (deduplicated). Both lists must be ascending."""
+        var out: [Id] = []
+        var i = 0
+        var j = 0
+        val na = self.ids.len()
+        val nb = other.ids.len()
+        while i < na and j < nb:
+            val a = self.ids[i]
+            val b = other.ids[j]
+            if a < b:
+                out.push(a)
+                i = i + 1
+            else:
+                if b < a:
+                    out.push(b)
+                    j = j + 1
+                else:
+                    out.push(a)
+                    i = i + 1
+                    j = j + 1
+        while i < na:
+            out.push(self.ids[i])
+            i = i + 1
+        while j < nb:
+            out.push(other.ids[j])
+            j = j + 1
+        PostingList(ids: out)
+
+# ----------------------------------------------------------------------------
+# Embedding<D> -- a typed-dimension vector for ANN-style similarity
+# ----------------------------------------------------------------------------
+# NOTE (language friction): `D` is intended as a *dimension* (a number), i.e. a
+# const-generic. Simple has no const-generic support (no precedent found in
+# src/lib/), so `D` is a PHANTOM type tag only — the real dimension is the i64
+# field `dim`. Filed: doc/02_requirements/feature/search_const_generic_dimension_2026-06-15.md
+#
+# f64 is unreliable across backends (MEMORY: f64 Unreliable All Backends), so
+# the trustworthy path is fixed-point i64 (`dot_fixed`/`l2_sq_fixed`). The f64
+# methods (`dot`/`l2_sq`) are provided for completeness but should NOT be relied
+# on for correctness until the f64 backend bugs are resolved.
+struct Embedding<D>:
+    """A dense vector of dimension `dim`. `D` is a phantom dimension tag (Simple
+    lacks const-generics). Prefer the fixed-point i64 path; f64 is unreliable."""
+    dim: i64
+    fixed: [i64]
+    floats: [f64]
+
+impl Embedding<D>:
+    static fn from_fixed(values: [i64]) -> Embedding<D>:
+        """Construct from fixed-point i64 components (the reliable path)."""
+        Embedding(dim: values.len(), fixed: values, floats: [])
+
+    static fn from_floats(values: [f64]) -> Embedding<D>:
+        """Construct from f64 components (UNRELIABLE — see file header note)."""
+        Embedding(dim: values.len(), fixed: [], floats: values)
+
+    fn dimension() -> i64:
+        self.dim
+
+    fn dot_fixed(other: Embedding<D>) -> i64:
+        """Integer dot product over fixed-point components (reliable path)."""
+        var acc = 0
+        var n = self.fixed.len()
+        if other.fixed.len() < n:
+            n = other.fixed.len()
+        var i = 0
+        while i < n:
+            acc = acc + self.fixed[i] * other.fixed[i]
+            i = i + 1
+        acc
+
+    fn l2_sq_fixed() -> i64:
+        """Squared L2 norm over fixed-point components (reliable; avoids sqrt)."""
+        var acc = 0
+        var i = 0
+        while i < self.fixed.len():
+            acc = acc + self.fixed[i] * self.fixed[i]
+            i = i + 1
+        acc
+
+    fn dot(other: Embedding<D>) -> f64:
+        """f64 dot product. UNRELIABLE on this repo's backends — see header."""
+        var acc = 0.0
+        var n = self.floats.len()
+        if other.floats.len() < n:
+            n = other.floats.len()
+        var i = 0
+        while i < n:
+            acc = acc + self.floats[i] * other.floats[i]
+            i = i + 1
+        acc
+
+    fn l2_sq() -> f64:
+        """f64 squared L2 norm. UNRELIABLE — prefer l2_sq_fixed()."""
+        var acc = 0.0
+        var i = 0
+        while i < self.floats.len():
+            acc = acc + self.floats[i] * self.floats[i]
+            i = i + 1
+        acc

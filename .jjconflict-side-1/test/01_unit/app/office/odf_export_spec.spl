@@ -1,0 +1,36 @@
+"""Flat ODF export spec.
+
+Writer documents export as .fodt and Calc sheets as .fods — flat OpenDocument
+XML that LibreOffice opens directly (no zip container needed). Numbers are
+typed, formulas use ODF `of:=` syntax, and content is XML-escaped.
+"""
+
+use std.spec
+use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.file_formats.{parse_markdown_document, parse_csv_sheet}
+
+describe "flat ODF: Writer .fodt":
+    it "wraps blocks in a valid flat ODF text document":
+        val doc = parse_markdown_document("# Title\n\nHello.\n\n- item", "d")
+        val xml = document_to_fodt(doc)
+        expect(xml).to_start_with("<?xml version=\"1.0\"")
+        expect(xml).to_contain("office:mimetype=\"application/vnd.oasis.opendocument.text\"")
+        expect(xml).to_contain("<text:h text:outline-level=\"1\">Title</text:h>")
+        expect(xml).to_contain("<text:p>Hello.</text:p>")
+        expect(xml).to_contain("<text:list><text:list-item>")
+        expect(xml).to_end_with("</office:document>")
+
+    it "XML-escapes document content":
+        val doc = parse_markdown_document("a < b & \"c\"", "d")
+        val xml = document_to_fodt(doc)
+        expect(xml).to_contain("a &lt; b &amp; &quot;c&quot;")
+
+describe "flat ODF: Calc .fods":
+    it "types numbers and preserves formulas in ODF syntax":
+        val sheet = parse_csv_sheet("Item,Q1\nRevenue,1200\nProfit,=B1-100", "s")
+        val xml = sheet_to_fods(sheet)
+        expect(xml).to_contain("office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\"")
+        expect(xml).to_contain("office:value-type=\"float\" office:value=\"1200\"")
+        expect(xml).to_contain("table:formula=\"of:=B1-100\"")
+        expect(xml).to_contain("office:value-type=\"string\"")
+        expect(xml).to_contain("table:name=\"s\"")

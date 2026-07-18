@@ -1,0 +1,177 @@
+# @cover src/os/services/devfs_filesystem.spl 80%
+# @cover src/os/services/procfs_filesystem.spl 80%
+"""
+# Pseudo-Filesystem VFS Mount Specification (H4)
+
+**Feature IDs:** #H4
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Verifies that the /dev and /proc pseudo-filesystems compose through the shared
+VFS `Filesystem` trait exactly like FAT32/DBFS: readdir/read/write/stat behave
+per POSIX device semantics, unsupported/mutating ops fail closed, and both
+mount cleanly through `VfsManager.mount`.
+"""
+
+use std.spec
+use os.services.vfs.vfs.{VfsManager}
+use os.services.devfs_filesystem.{DevFs}
+use os.services.procfs_filesystem.{ProcFs}
+use os.services.vfs.pseudofs_mount.{register_devfs, register_procfs}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+
+fn _entry_names(entries: [DirEntry]) -> [text]:
+    var out: [text] = []
+    for e in entries:
+        out = out + [e.name]
+    out
+
+fn _write_flags() -> FileFlags:
+    FileFlags(read: false, write: true, append: false, create: false, truncate: false, directory: false)
+
+describe "DevFs trait adapter":
+    """
+    ## /dev pseudo-filesystem
+
+    Exercises the `Filesystem` trait directly on a `DevFs` instance.
+    """
+
+    it "readdir /dev lists null, zero and urandom":
+        """readdir on the /dev root must enumerate the well-known devices."""
+        var fs = DevFs.new()
+        val r = fs.readdir("/dev")
+        assert_true(r.is_ok())
+        val names = _entry_names(r.unwrap())
+        expect(names).to_contain("null")
+        expect(names).to_contain("zero")
+        expect(names).to_contain("urandom")
+
+    it "read /dev/zero returns all zero bytes":
+        """Reading /dev/zero yields exactly `size` zero bytes."""
+        var fs = DevFs.new()
+        val h = fs.open("/dev/zero", FileFlags.read_only()).unwrap()
+        val data = fs.read(h, 8 as u64).unwrap()
+        expect(data.len()).to_equal(8)
+        var all_zero = true
+        var i = 0
+        while i < data.len():
+            if data[i] != (0 as u8):
+                all_zero = false
+            i = i + 1
+        assert_true(all_zero)
+
+    it "write /dev/null succeeds and discards":
+        """Writing to /dev/null accepts all bytes; a subsequent read is EOF."""
+        var fs = DevFs.new()
+        val h = fs.open("/dev/null", _write_flags()).unwrap()
+        val payload = "hello".bytes()
+        val w = fs.write(h, payload)
+        assert_true(w.is_ok())
+        expect(w.unwrap() as i64).to_equal(5)
+        val rd = fs.read(h, 16 as u64).unwrap()
+        expect(rd.len()).to_equal(0)
+
+    it "read /dev/urandom returns non-constant bytes":
+        """/dev/urandom must not return a constant stream (unlike /dev/zero)."""
+        var fs = DevFs.new()
+        val h = fs.open("/dev/urandom", FileFlags.read_only()).unwrap()
+        val data = fs.read(h, 16 as u64).unwrap()
+        expect(data.len()).to_equal(16)
+        var all_same = true
+        var i = 1
+        while i < data.len():
+            if data[i] != data[0]:
+                all_same = false
+            i = i + 1
+        assert_false(all_same)
+
+    it "open of unknown device fails closed":
+        """An unregistered /dev entry returns an error."""
+        var fs = DevFs.new()
+        val r = fs.open("/dev/nosuch", FileFlags.read_only())
+        assert_true(r.is_err())
+
+    it "mkdir under /dev fails closed":
+        """/dev is not a general writable directory."""
+        var fs = DevFs.new()
+        val r = fs.mkdir("/dev/foo")
+        assert_true(r.is_err())
+
+describe "ProcFs trait adapter":
+    """
+    ## /proc pseudo-filesystem (read-only)
+    """
+
+    it "readdir /proc lists a seeded pid":
+        """The seeded PID 1 appears as a directory under /proc."""
+        var fs = ProcFs.new()
+        val r = fs.readdir("/proc")
+        assert_true(r.is_ok())
+        val names = _entry_names(r.unwrap())
+        expect(names).to_contain("1")
+
+    it "stat /proc/1/status succeeds":
+        """A live task's status node stats as a file."""
+        var fs = ProcFs.new()
+        val r = fs.stat("/proc/1/status")
+        assert_true(r.is_ok())
+        val node = r.unwrap()
+        assert_true(node.kind == FsNodeKind.File)
+
+    it "read /proc/1/status returns content":
+        """Reading the status node yields a non-empty text view."""
+        var fs = ProcFs.new()
+        val h = fs.open("/proc/1/status", FileFlags.read_only()).unwrap()
+        val data = fs.read(h, 256 as u64).unwrap()
+        assert_true(data.len() > 0)
+
+    it "write to /proc fails closed (read-only)":
+        """Any write into /proc must be rejected."""
+        var fs = ProcFs.new()
+        val h = fs.open("/proc/1/status", FileFlags.read_only()).unwrap()
+        val w = fs.write(h, "x".bytes())
+        assert_true(w.is_err())
+
+describe "VfsManager pseudo-fs mount":
+    """
+    ## Mount registration
+
+    Both pseudo-filesystems mount through the SAME `VfsManager.mount` call as
+    block-backed filesystems and route path ops correctly.
+    """
+
+    it "mounts /dev and /proc":
+        """register_devfs / register_procfs both report their mount path."""
+        var mgr = VfsManager.new()
+        val d = register_devfs(mgr)
+        val p = register_procfs(mgr)
+        assert_true(d.ok)
+        assert_true(p.ok)
+        expect(d.value).to_equal("/dev")
+        expect(p.value).to_equal("/proc")
+
+    it "readdir /dev routes through the manager":
+        """VfsManager.readdir resolves the /dev mount and strips the prefix.
+
+        Mounts via the same `VfsManager.mount` call `register_devfs` uses; the
+        mount is issued directly here because the seed interpreter drops
+        by-reference mutation of a class instance passed to a free function
+        inside spec closures (see manifest note; production/compiled path is
+        verified via the standalone probe)."""
+        var mgr = VfsManager.new()
+        val _m = mgr.mount("/dev", "devfs", "", false, DevFs.new())
+        val r = mgr.readdir("/dev")
+        assert_true(r.is_ok())
+        val names = _entry_names(r.unwrap())
+        expect(names).to_contain("zero")
+
+    it "stat /proc/<pid>/status routes through the manager":
+        """VfsManager.stat resolves the /proc mount by longest-prefix match."""
+        var mgr = VfsManager.new()
+        val _md = mgr.mount("/dev", "devfs", "", false, DevFs.new())
+        val _mp = mgr.mount("/proc", "procfs", "", true, ProcFs.new())
+        val r = mgr.stat("/proc/1/status")
+        assert_true(r.is_ok())

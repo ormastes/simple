@@ -1,0 +1,270 @@
+use std.spec.{describe, it, expect}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_candidate_for_path, _selected_font_asset_candidate_for_path_with_root, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, _selected_font_asset_physical_path_from_root, validate_selected_font_asset, load_selected_font_file, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell, selected_font_simple_tuple_accepted}
+use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+val FONT_ASSET_ROOT = "assets/fonts/google-fonts/"
+
+describe "selected font asset manifest":
+    it "validates selected runtime assets in deterministic fail-fast order":
+        val unmanaged = validate_selected_font_asset("tmp/unmanaged.ttf", [])
+        expect(unmanaged.selected).to_be(false)
+        expect(unmanaged.valid).to_be(true)
+        expect(unmanaged.family).to_equal("")
+        expect(unmanaged.reason).to_equal("unmanaged")
+
+        val assets = selected_font_asset_candidates()
+        var asset_index: i64 = 0
+        while asset_index < assets.len():
+            val asset = assets[asset_index]
+            val result = load_selected_font_file(asset.local_path).1
+            expect(result.selected).to_be(true)
+            expect(result.valid).to_be(true)
+            expect(result.family).to_equal(asset.family)
+            expect(result.reason).to_equal("valid")
+            asset_index = asset_index + 1
+        val static_asset = assets[13]
+        val static_blob = file_read_bytes(static_asset.local_path)
+        expect(selected_font_asset_candidate_for_path(static_asset.local_path).?.family).to_equal(static_asset.family)
+        val installed_path = "/opt/simple/share/simple/" + static_asset.local_path
+        expect(_selected_font_asset_candidate_for_path_with_root(installed_path, "/opt/simple/share/simple").?.family).to_equal(static_asset.family)
+        expect(_selected_font_asset_candidate_for_path_with_root(installed_path, "/opt/other/share/simple")).to_be_nil()
+        expect(_selected_font_asset_candidate_for_path_with_root("/opt/unmanaged/" + static_asset.local_path, "/opt/simple/share/simple")).to_be_nil()
+        expect(selected_font_asset_candidate_for_path("tmp/unmanaged.ttf")).to_be_nil()
+        val identity = selected_font_asset_identity(static_asset)
+        expect(selected_font_asset_candidate_for_identity(identity).?.local_path).to_equal(static_asset.local_path)
+        expect(selected_font_asset_candidate_for_identity("sha256=unknown;axes=static")).to_be_nil()
+        expect(validate_selected_font_asset(static_asset.local_path, []).reason).to_equal("byte-length")
+
+        var malformed = static_blob
+        malformed[malformed.len() - 1] = (malformed[malformed.len() - 1].to_i64() ^ 1).to_u8()
+        expect(validate_selected_font_asset(static_asset.local_path, malformed).reason).to_equal("sha256")
+
+        val valid = validate_selected_font_asset(static_asset.local_path, static_blob)
+        expect(valid.selected).to_be(true)
+        expect(valid.valid).to_be(true)
+        expect(valid.family).to_equal("UnifrakturCook")
+        expect(valid.reason).to_equal("valid")
+
+    it "should resolve selected assets beneath share, portable, and Windows roots":
+        val path = selected_font_asset_candidates()[15].local_path
+        expect(_selected_font_asset_physical_path_from_root(path, "/opt/simple/share/simple")).to_equal(
+            "/opt/simple/share/simple/" + path)
+        expect(_selected_font_asset_physical_path_from_root(path, "/opt/simple/share/simple/")).to_equal(
+            "/opt/simple/share/simple/" + path)
+        expect(_selected_font_asset_physical_path_from_root(path, "/opt/simple-package/")).to_equal(
+            "/opt/simple-package/" + path)
+        expect(_selected_font_asset_physical_path_from_root(path, "C:\\Simple\\")).to_equal(
+            "C:/Simple/" + path)
+        expect(_selected_font_asset_candidate_for_path_with_root(
+            "C:\\Simple\\" + path.replace("/", "\\"), "C:\\Simple\\").?.local_path).to_equal(path)
+        expect(_selected_font_asset_candidate_for_path_with_root(path, "C:\\Simple\\").?.local_path).to_equal(path)
+        expect(_selected_font_asset_physical_path_from_root(path, "")).to_equal(path)
+        expect(_selected_font_asset_physical_path_from_root("tmp/unmanaged.ttf", "/opt/simple/share/simple")).to_equal(
+            "tmp/unmanaged.ttf")
+
+    it "pins the deterministic CLDR top ten and eleventh-place boundary":
+        val source = selected_font_language_ranking_source()
+        val selected = selected_font_language_ranks()
+        val evidence = font_language_ranking_evidence()
+        expect(source.release).to_equal("release-48-2")
+        expect(source.source_commit).to_equal("11299982335beb974c1c63c45265184e759c0f41")
+        expect(source.supplemental_data_sha256.len()).to_equal(64)
+        expect(selected.len()).to_equal(10)
+        expect(evidence.len()).to_equal(11)
+        expect(selected[0].language).to_equal("en")
+        expect(selected[8].language).to_equal("ur")
+        expect(selected[9].language).to_equal("id")
+        expect(evidence[10].language).to_equal("bn")
+        expect(selected[9].literate_functional_total).to_be_greater_than(evidence[10].literate_functional_total)
+
+    it "pins sixteen unchanged candidates with immutable acquisition metadata":
+        val assets = selected_font_asset_candidates()
+        expect(assets.len()).to_equal(16)
+        var total_bytes: i64 = 0
+        var paths = "|"
+        var hashes = "|"
+        var i: i64 = 0
+        while i < assets.len():
+            val asset = assets[i]
+            expect(asset.upstream_repository).to_equal("https://github.com/google/fonts")
+            expect(asset.upstream_revision).to_equal("ec0464b978de222073645d6d3366f3fdf03376d8")
+            expect(asset.sha256.len()).to_equal(64)
+            expect(asset.byte_len).to_be_greater_than(0)
+            expect(asset.upstream_path).to_end_with(".ttf")
+            expect(asset.local_path).to_start_with("assets/fonts/google-fonts/")
+            expect(file_exists(asset.local_path)).to_be(true)
+            expect(asset.metadata_path).to_end_with("/METADATA.pb")
+            expect(asset.metadata_sha256.len()).to_equal(64)
+            expect(sha256_u8_hex(file_read_bytes(FONT_ASSET_ROOT + asset.metadata_path))).to_equal(asset.metadata_sha256)
+            expect(file_exists(FONT_ASSET_ROOT + asset.license_path)).to_be(true)
+            expect(asset.license_sha256.len()).to_equal(64)
+            expect(sha256_u8_hex(file_read_bytes(FONT_ASSET_ROOT + asset.license_path))).to_equal(asset.license_sha256)
+            if asset.notice_path != "":
+                expect(asset.notice_sha256.len()).to_equal(64)
+                expect(sha256_u8_hex(file_read_bytes(FONT_ASSET_ROOT + asset.notice_path))).to_equal(asset.notice_sha256)
+            else:
+                expect(asset.notice_sha256).to_equal("")
+            expect(asset.modification_state).to_equal("unchanged")
+            expect(asset.coverage_state.len()).to_be_greater_than(0)
+            expect(asset.embedded_style.len()).to_be_greater_than(0)
+            expect(asset.embedded_full_name.len()).to_be_greater_than(0)
+            expect(asset.embedded_postscript_name.len()).to_be_greater_than(0)
+            expect(asset.embedded_version).to_start_with("Version ")
+            expect(asset.default_axes.len()).to_be_greater_than(0)
+            expect(asset.coverage_corpus_ref).to_contain("CORPUS.sdn#sha256:")
+            expect(asset.fallback_role.len()).to_be_greater_than(0)
+            expect(paths.contains("|" + asset.upstream_path + "|")).to_be(false)
+            expect(hashes.contains("|" + asset.sha256 + "|")).to_be(false)
+            paths = paths + asset.upstream_path + "|"
+            hashes = hashes + asset.sha256 + "|"
+            total_bytes = total_bytes + asset.byte_len
+            i = i + 1
+        expect(total_bytes).to_equal(51764704)
+        expect(total_bytes).to_be_less_than(80 * 1024 * 1024 + 1)
+        expect(assets[0].embedded_full_name).to_equal("Noto Sans SC Thin")
+        expect(assets[0].embedded_postscript_name).to_equal("NotoSansSC-Thin")
+        expect(assets[0].default_axes).to_equal("wght=100")
+        expect(assets[2].default_axes).to_equal("wght=400,wdth=100")
+        expect(assets[13].embedded_full_name).to_equal("UnifrakturCook")
+        expect(assets[13].embedded_version).to_equal("Version 2011-09-01 ")
+        expect(assets[15].fallback_role).to_equal("common-emoji-fallback")
+
+        var accepted_simple: i64 = 0
+        var candidate: i64 = 0
+        for asset in assets:
+            if asset.coverage_state.starts_with("accepted-simple:"): accepted_simple = accepted_simple + 1
+            elif asset.coverage_state.starts_with("candidate:"): candidate = candidate + 1
+            else: fail("unknown coverage state: " + asset.coverage_state)
+        expect(accepted_simple).to_equal(12)
+        expect(candidate).to_equal(4)
+
+    it "covers every selected sparse category exactly once or more":
+        val assets = selected_font_asset_candidates()
+        val categories = "|sans|serif|mono|display|rounded|handwriting|slab|blackletter|pixel|emoji|"
+        var seen = "|"
+        var i: i64 = 0
+        while i < assets.len():
+            val marker = "|" + assets[i].category + "|"
+            expect(categories).to_contain(marker)
+            if not seen.contains(marker):
+                seen = seen + assets[i].category + "|"
+            i = i + 1
+        expect(seen).to_equal(categories)
+
+    it "provides exactly one valid status for every selected language-category cell":
+        val languages = selected_font_coverage_languages()
+        val categories = selected_font_coverage_categories()
+        val cells = selected_font_coverage_matrix()
+        expect(languages.len()).to_equal(10)
+        expect(categories.len()).to_equal(10)
+        expect(languages).to_equal(["en", "zh", "es", "hi", "ar", "fr", "pt", "ru", "ur", "id"])
+        expect(categories).to_equal(["sans", "serif", "mono", "display", "rounded", "handwriting", "slab", "blackletter", "pixel", "emoji"])
+        expect(cells.len()).to_equal(100)
+        var seen = "|"
+        var native_count: i64 = 0
+        var fallback_count: i64 = 0
+        var not_designed_count: i64 = 0
+        var unavailable_count: i64 = 0
+        var i: i64 = 0
+        while i < cells.len():
+            val cell = cells[i]
+            val key = "|" + cell.language + ":" + cell.category + "|"
+            val allowed = "|native|fallback|not-designed-for-script|unavailable|"
+            expect(seen.contains(key)).to_be(false)
+            expect(allowed).to_contain("|" + cell.status + "|")
+            seen = seen + cell.language + ":" + cell.category + "|"
+            if cell.status == "native": native_count = native_count + 1
+            elif cell.status == "fallback": fallback_count = fallback_count + 1
+            elif cell.status == "not-designed-for-script": not_designed_count = not_designed_count + 1
+            elif cell.status == "unavailable": unavailable_count = unavailable_count + 1
+            i = i + 1
+        expect(native_count).to_equal(67)
+        expect(fallback_count).to_equal(4)
+        expect(not_designed_count).to_equal(26)
+        expect(unavailable_count).to_equal(3)
+        expect(cells[10].status).to_equal("native")
+        expect(cells[12].status).to_equal("fallback")
+        expect(cells[12].witness_family).to_equal("Noto Sans SC")
+        expect(cells[31].status).to_equal("unavailable")
+        expect(cells[32].status).to_equal("fallback")
+        expect(cells[32].witness_family).to_equal("Noto Sans Devanagari")
+        expect(cells[40].status).to_equal("native")
+        expect(cells[40].witness_family).to_equal("Noto Sans Arabic")
+        expect(cells[41].status).to_equal("unavailable")
+        expect(cells[42].status).to_equal("fallback")
+        expect(cells[42].witness_family).to_equal("Noto Sans Arabic")
+        expect(cells[73].status).to_equal("not-designed-for-script")
+        expect(cells[80].status).to_equal("native")
+        expect(cells[80].witness_family).to_equal("Noto Sans Arabic")
+        expect(cells[81].status).to_equal("unavailable")
+        expect(cells[82].status).to_equal("fallback")
+        expect(cells[82].witness_family).to_equal("Noto Sans Arabic")
+        expect(cells[9].status).to_equal("native")
+        expect(cells[9].witness_family).to_equal("Noto Emoji")
+
+    it "resolves selected coverage policy and rejects unknown axes":
+        val native = selected_font_coverage_cell("en", "sans")
+        val not_designed = selected_font_coverage_cell("zh", "display")
+
+        expect(native != nil).to_be(true)
+        expect(native.?.status).to_equal("native")
+        expect(not_designed != nil).to_be(true)
+        expect(not_designed.?.status).to_equal("not-designed-for-script")
+        expect(selected_font_coverage_cell("xx", "sans")).to_be_nil()
+        expect(selected_font_coverage_cell("en", "unknown")).to_be_nil()
+
+    it "resolves only accepted bundled faces through the sparse fallback policy":
+        expect(selected_font_asset_for_language_category("zh", "mono").?.family).to_equal("Noto Sans SC")
+        expect(selected_font_asset_for_language_category("hi", "sans").?.family).to_equal("Noto Sans Devanagari")
+        expect(selected_font_asset_for_language_category("ar", "sans").?.family).to_equal("Noto Sans Arabic")
+        expect(selected_font_asset_for_language_category("ur", "sans").?.family).to_equal("Noto Sans Arabic")
+        expect(selected_font_asset_for_language_category("hi", "serif")).to_be_nil()
+        expect(selected_font_asset_for_language_category("hi", "mono").?.family).to_equal("Noto Sans Devanagari")
+        expect(selected_font_asset_for_language_category("ar", "serif")).to_be_nil()
+        expect(selected_font_asset_for_language_category("ar", "mono").?.family).to_equal("Noto Sans Arabic")
+        expect(selected_font_asset_for_language_category("ur", "serif")).to_be_nil()
+        expect(selected_font_asset_for_language_category("ur", "mono").?.family).to_equal("Noto Sans Arabic")
+        expect(selected_font_asset_for_language_category("en", "emoji").?.family).to_equal("Noto Emoji")
+
+    it "resolves every promoted witness to one accepted Simple tuple":
+        val assets = selected_font_asset_candidates()
+        val languages = selected_font_coverage_languages()
+        val cells = selected_font_coverage_matrix()
+        var promoted: i64 = 0
+        for cell in cells:
+            if cell.status == "native" or cell.status == "fallback":
+                promoted = promoted + 1
+                expect(cell.witness_family.len()).to_be_greater_than(0)
+                expect(selected_font_simple_tuple_accepted(cell.witness_family, cell.language)).to_be(true)
+                var matches: i64 = 0
+                for asset in assets:
+                    if asset.family == cell.witness_family:
+                        matches = matches + 1
+                        expect(asset.coverage_state).to_start_with("accepted-simple:")
+                expect(matches).to_equal(1)
+            else:
+                expect(cell.witness_family).to_equal("")
+        expect(promoted).to_equal(71)
+
+        for asset in assets:
+            if asset.coverage_state.starts_with("accepted-simple:"):
+                var accepted_languages: i64 = 0
+                var accepted_language_list = ""
+                for language in languages:
+                    if selected_font_simple_tuple_accepted(asset.family, language):
+                        accepted_languages = accepted_languages + 1
+                        if accepted_language_list != "": accepted_language_list = accepted_language_list + ","
+                        accepted_language_list = accepted_language_list + language
+                        var witnessed = false
+                        for cell in cells:
+                            if (cell.language == language and cell.witness_family == asset.family and
+                                (cell.status == "native" or cell.status == "fallback")):
+                                witnessed = true
+                        expect(witnessed).to_be(true)
+                expect(accepted_languages).to_be_greater_than(0)
+                val prefix = if asset.family == "Noto Sans Devanagari" or asset.family == "Noto Sans Arabic":
+                    "accepted-simple: exact Pure Simple selected shaping accepted for "
+                else:
+                    "accepted-simple: exact Pure Simple identity shaping accepted for "
+                expect(asset.coverage_state).to_equal(prefix + accepted_language_list)

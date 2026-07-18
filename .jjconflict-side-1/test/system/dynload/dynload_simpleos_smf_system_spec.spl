@@ -1,0 +1,114 @@
+"""SimpleOS SMF Dynamic Loading System Test.
+
+Exercises the dylib_registry pipeline with SMF-wrapped ELF64 fixtures.
+Verifies that SMF containers correctly unwrap to ELF stubs for symbol
+resolution. Uses dylib_registry directly (not dylib_async) because
+fixed-size arrays [u8;64] fail in interpreter mode.
+
+# TODO(dynload-system-tests): switch to gcc -shared + file_read_bytes
+# once interpreter FFI [u8] wrapping bug is fixed (see D-1 in state.md).
+# TODO(dynload-system-tests): add dylib_async pipeline test once
+# interpreter [u8;N] fixed-size array support is stable (see D-2).
+
+**Feature IDs:** #DYNLOAD-SYS-007 to #DYNLOAD-SYS-010
+**Category:** Infrastructure / System Test
+"""
+
+# @cover src/os/kernel/loader/dylib_registry.spl 80%
+
+use std.spec
+use os.posix.errno.{ENOEXEC}
+use os.kernel.loader.dylib_registry.{
+    dylib_registry_reset_for_test,
+    dylib_registry_register,
+    dylib_registry_close,
+    dylib_registry_symbol
+}
+use std.env.platform.{is_linux}
+use test.system.dynload.dynload_fixture_helpers.{
+    make_elf64_exec,
+    make_smf_wrapped_elf64_exec,
+    push_u64_le,
+    push_u32_le
+}
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Dynload SimpleOS SMF System":
+    describe "SMF library loading":
+        it "registers SMF library and resolves entry via ELF stub":
+            if is_linux():
+                dylib_registry_reset_for_test()
+                val smf = make_smf_wrapped_elf64_exec()
+                val handle = dylib_registry_register("/sys/apps/demo.smf", smf)
+                expect(handle).to_be_greater_than(0)
+                expect(dylib_registry_symbol(handle, "_start")).to_equal(0x400000)
+                expect(dylib_registry_symbol(handle, "main")).to_equal(0x400000)
+                dylib_registry_reset_for_test()
+            else:
+                print("SKIP: dynload_simpleos_smf requires Linux")
+
+        it "registers multiple SMF libraries independently":
+            if is_linux():
+                dylib_registry_reset_for_test()
+                val smf = make_smf_wrapped_elf64_exec()
+                val h1 = dylib_registry_register("/sys/apps/lib_a.smf", smf)
+                val h2 = dylib_registry_register("/sys/apps/lib_b.smf", smf)
+                expect(h1).to_be_greater_than(0)
+                expect(h2).to_be_greater_than(0)
+                expect(h1).to_not_equal(h2)
+                expect(dylib_registry_symbol(h1, "_start")).to_equal(0x400000)
+                expect(dylib_registry_symbol(h2, "main")).to_equal(0x400000)
+                expect(dylib_registry_close(h1)).to_equal(0)
+                expect(dylib_registry_close(h2)).to_equal(0)
+                dylib_registry_reset_for_test()
+            else:
+                print("SKIP: dynload_simpleos_smf requires Linux")
+
+    describe "error handling":
+        it "rejects SMF with invalid ELF stub":
+            if is_linux():
+                dylib_registry_reset_for_test()
+                # Build an SMF trailer with garbage as the "ELF stub"
+                var bad_smf: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8()]
+                # SMF magic "SMF\0"
+                bad_smf.push(83.to_u8())
+                bad_smf.push(77.to_u8())
+                bad_smf.push(70.to_u8())
+                bad_smf.push(0.to_u8())
+                # Pad to offset 44 within trailer
+                var j = 4
+                while j < 44:
+                    bad_smf.push(0.to_u8())
+                    j = j + 1
+                # Entry point
+                bad_smf = push_u64_le(bad_smf, 0x400000)
+                # stub_offset and stub_size
+                bad_smf = push_u32_le(bad_smf, 4)
+                bad_smf = push_u32_le(bad_smf, 4)
+                # Pad to 128-byte trailer
+                while bad_smf.len() < 132:
+                    bad_smf.push(0.to_u8())
+                expect(dylib_registry_register("/sys/bad.smf", bad_smf)).to_equal(0 - ENOEXEC as i64)
+                dylib_registry_reset_for_test()
+            else:
+                print("SKIP: dynload_simpleos_smf requires Linux")
+
+    describe "mixed format registry":
+        it "handles mixed ELF and SMF in the same registry":
+            if is_linux():
+                dylib_registry_reset_for_test()
+                val h_elf = dylib_registry_register("/lib/native.so", make_elf64_exec())
+                val h_smf = dylib_registry_register("/sys/apps/app.smf", make_smf_wrapped_elf64_exec())
+                expect(h_elf).to_be_greater_than(0)
+                expect(h_smf).to_be_greater_than(0)
+                expect(h_elf).to_not_equal(h_smf)
+                expect(dylib_registry_symbol(h_elf, "_start")).to_equal(0x400000)
+                expect(dylib_registry_symbol(h_smf, "_start")).to_equal(0x400000)
+                expect(dylib_registry_close(h_elf)).to_equal(0)
+                expect(dylib_registry_close(h_smf)).to_equal(0)
+                dylib_registry_reset_for_test()
+            else:
+                print("SKIP: dynload_simpleos_smf requires Linux")

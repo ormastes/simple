@@ -1,0 +1,114 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SRC="scripts/os/make_os_disk.c"
+BIN="build/os/make_os_disk"
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: make_os_disk.shs SIZE_BITS IMAGE [KERNEL] [PLATFORM]" >&2
+    exit 2
+fi
+
+mkdir -p "$(dirname -- "$BIN")"
+if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+    cc -O2 -std=c99 -Wall -Wextra "$SRC" -o "$BIN"
+fi
+
+size_bits="$1"
+image_path="$2"
+kernel_path="${3:-}"
+platform="${4:-x86_64}"
+
+SIMPLEOS_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-build/os/clang_static/bin/clang_static}"
+SIMPLEOS_LLC_BINARY="${SIMPLEOS_LLC_BINARY:-build/os/llc_static/bin/llc_static}"
+SIMPLEOS_LLD_BINARY="${SIMPLEOS_LLD_BINARY:-build/os/lld_static/bin/lld_static}"
+SIMPLEOS_CRT0_OBJECT="${SIMPLEOS_CRT0_OBJECT:-build/os/sysroot/lib/crt0.o}"
+SIMPLEOS_RUNTIME_ARCHIVE="${SIMPLEOS_RUNTIME_ARCHIVE:-build/os/sysroot/lib/libsimple_runtime_compat.a}"
+SIMPLEOS_LIBC_ARCHIVE="${SIMPLEOS_LIBC_ARCHIVE:-build/os/sysroot/lib/libsimpleos_c.a}"
+SIMPLEOS_LINKER_SCRIPT="${SIMPLEOS_LINKER_SCRIPT:-build/os/sysroot/share/simpleos/simpleos.ld}"
+SIMPLEOS_SIMPLE_ENTRY_OBJECT="${SIMPLEOS_SIMPLE_ENTRY_OBJECT:-build/os/sysroot/lib/simple_entry.o}"
+SIMPLEOS_HELLO_OBJECT="${SIMPLEOS_HELLO_OBJECT:-}"
+SIMPLEOS_HELLO_IR="${SIMPLEOS_HELLO_IR:-}"
+SIMPLEOS_FSEXEC_BINARY="${SIMPLEOS_FSEXEC_BINARY:-}"
+SIMPLEOS_FONT_ASSET_NSANSSC="assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"
+SIMPLEOS_FONT_ASSET_NSANSDEV="assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
+SIMPLEOS_FONT_ASSET_NSANSARB="assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
+SIMPLEOS_FONT_ASSET_NSANSBEN="assets/fonts/google-fonts/ofl/notosansbengali/NotoSansBengali[wdth,wght].ttf"
+SIMPLEOS_FONT_ASSET_NSERIFSC="assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf"
+SIMPLEOS_FONT_ASSET_NSERFDEV="assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf"
+SIMPLEOS_FONT_ASSET_NNASKHAR="assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf"
+SIMPLEOS_FONT_ASSET_NSERFBEN="assets/fonts/google-fonts/ofl/notoserifbengali/NotoSerifBengali[wdth,wght].ttf"
+# Preserve the evidence wrapper's historical override for the default mono face.
+SIMPLEOS_FONT_ASSET_NOTOSANS="${SIMPLEOS_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
+SIMPLEOS_FONT_ASSET_BUNGEE="assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+SIMPLEOS_FONT_ASSET_NUNITO="assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+SIMPLEOS_FONT_ASSET_CAVEAT="assets/fonts/google-fonts/ofl/caveat/Caveat[wght].ttf"
+SIMPLEOS_FONT_ASSET_ROBOSLAB="assets/fonts/google-fonts/apache/robotoslab/RobotoSlab[wght].ttf"
+SIMPLEOS_FONT_ASSET_UNIFRAKT="assets/fonts/google-fonts/ofl/unifrakturcook/UnifrakturCook-Bold.ttf"
+SIMPLEOS_FONT_ASSET_PIXELIFY="assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf"
+SIMPLEOS_FONT_ASSET_NOTOEMOJ="assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
+
+validate_font_asset() {
+    font_path="$1"
+    expected_bytes="$2"
+    expected_sha256="$3"
+    if [ ! -f "$font_path" ]; then
+        echo "missing pinned SimpleOS font: $font_path" >&2
+        exit 1
+    fi
+    font_bytes="$(wc -c < "$font_path" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        font_sha256="$(sha256sum "$font_path" | awk '{print $1}')"
+    else
+        font_sha256="$(shasum -a 256 "$font_path" | awk '{print $1}')"
+    fi
+    if [ "$font_bytes" != "$expected_bytes" ] || [ "$font_sha256" != "$expected_sha256" ]; then
+        echo "invalid pinned SimpleOS font: $font_path" >&2
+        exit 1
+    fi
+}
+
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSANSSC" 17772300 a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSANSDEV" 647144 9ce7b04f60e363d8870e5997744cf85cf69d38a4d7d129d364d92a3b14b461d7
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSANSARB" 844676 63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSANSBEN" 463668 dcd42978094e584a849c84a51450eeac40c8826057d566ea6d4b9627a403a05a
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSERIFSC" 25125512 050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSERFDEV" 757692 1191e07bfeb062d80e252eb85b0eafdfbda1e350707a2a60628668e8f677dbbb
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NNASKHAR" 307592 67b5a525a661b607971fbd3f96a81b89d3a768e74534fca84f18ac97e6fab72f
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NSERFBEN" 981812 083180a7b47cf3b101ed55a8724aa1b38869daa9baf23b7cf198f9d225365aba
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NOTOSANS" 1708408 2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
+validate_font_asset "$SIMPLEOS_FONT_ASSET_BUNGEE" 118996 c4f5361ce120af3e6b9156d0bf379fa19cda2ea0cd18ac01fd99596c6bf66e3f
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NUNITO" 276932 bb55a5ca5c2042335b3991af27c4d0705d0ef41cac6164ac737fd8f2a1e85207
+validate_font_asset "$SIMPLEOS_FONT_ASSET_CAVEAT" 403648 0bdb6b660482d31531b3945849fba5916b3ef8695da7024a9e6b9ee3c4157988
+validate_font_asset "$SIMPLEOS_FONT_ASSET_ROBOSLAB" 251880 786ae192477447d33c6672c3055fba7cbfe45184c9a79e77a14f15716ca05b16
+validate_font_asset "$SIMPLEOS_FONT_ASSET_UNIFRAKT" 42688 ea002fa9c65f1a612af100e00d87ab65f16381f450020ec3d021f3dbf79a6dcd
+validate_font_asset "$SIMPLEOS_FONT_ASSET_PIXELIFY" 79160 9ba86cd010a4de309d263ceff8e8044092c9db7efda869620cb9ff1c4389e8a5
+validate_font_asset "$SIMPLEOS_FONT_ASSET_NOTOEMOJ" 1982596 de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551
+
+font_companion_manifest="scripts/os/simpleos_font_bundle_companion.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum --check "$font_companion_manifest"
+else
+    shasum -a 256 --check "$font_companion_manifest"
+fi
+
+# The C writer derives the 34 adjacent Google companion files plus CORPUS,
+# CLDR/root licenses, and THIRD_PARTY_NOTICES from these validated 16 paths.
+# The closed SimpleOS font/legal projection is 53 files / 51,932,523 bytes.
+if [ "$size_bits" -lt 128 ]; then
+    size_bits=128
+fi
+export SIMPLEOS_CLANG_BINARY SIMPLEOS_LLC_BINARY SIMPLEOS_LLD_BINARY
+export SIMPLEOS_CRT0_OBJECT SIMPLEOS_RUNTIME_ARCHIVE SIMPLEOS_LIBC_ARCHIVE SIMPLEOS_LINKER_SCRIPT
+export SIMPLEOS_SIMPLE_ENTRY_OBJECT SIMPLEOS_HELLO_OBJECT SIMPLEOS_HELLO_IR SIMPLEOS_FSEXEC_BINARY
+export SIMPLEOS_FONT_ASSET_NSANSSC SIMPLEOS_FONT_ASSET_NSANSDEV SIMPLEOS_FONT_ASSET_NSANSARB
+export SIMPLEOS_FONT_ASSET_NSANSBEN SIMPLEOS_FONT_ASSET_NSERIFSC SIMPLEOS_FONT_ASSET_NSERFDEV
+export SIMPLEOS_FONT_ASSET_NNASKHAR SIMPLEOS_FONT_ASSET_NSERFBEN SIMPLEOS_FONT_ASSET_NOTOSANS
+export SIMPLEOS_FONT_ASSET_BUNGEE SIMPLEOS_FONT_ASSET_NUNITO SIMPLEOS_FONT_ASSET_CAVEAT
+export SIMPLEOS_FONT_ASSET_ROBOSLAB SIMPLEOS_FONT_ASSET_UNIFRAKT SIMPLEOS_FONT_ASSET_PIXELIFY
+export SIMPLEOS_FONT_ASSET_NOTOEMOJ
+
+exec "$BIN" "$image_path" "$platform" "$size_bits" "$kernel_path"

@@ -1,0 +1,212 @@
+# Module-Level Non-Literal Initializer Lint
+#
+# On `native-build --entry`, a module-level `val`/`var` whose initializer is
+# NOT a bare literal gets no runtime init code today: `lower_const_expr` only
+# const-folds Int/Float/Bool/String literals, and no backend yet emits
+# `__module_init_*` bodies to run the rest. The global silently reads its
+# zero-initialized default (0 / "" / nil) instead of the intended value.
+#
+# MODINIT001: module-level val/var initializer is not a literal    WARNING
+#
+# Literal forms that are safe (do NOT flag):
+#   - int / float / bool / string / nil literals
+#   - a negated numeric literal (e.g. `-1`, `-0.5`)
+#
+# Everything else at module scope (function calls, struct/collection
+# construction, identifier references, binary expressions, ...) is flagged,
+# including `[]` / `{}` — those still require runtime allocation and are not
+# bare literals for this lint's purposes.
+#
+# This file uses text-heuristic analysis (no AST dependency), reusing the
+# shared `iter_code_lines` docstring-tracking walker so it can run in
+# interpreter-mode specs ahead of full HIR/MIR lowering.
+
+use compiler.semantics.lint.lint_text.{iter_code_lines}
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct ModuleInitLiteralWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+# ============================================================================
+# Declaration Prefix Detection
+# ============================================================================
+
+fn _mil_decl_prefix_len(raw: text) -> i64:
+    """Return the length of the `val `/`var `/`pub val `/`pub var ` prefix if
+    `raw` is a column-0 (module-level, non-fn-local) declaration; else -1.
+
+    Column 0 (no leading whitespace) is what distinguishes a module-level
+    declaration from one nested inside a fn/class/impl body in this
+    indentation-based grammar."""
+    if raw.starts_with("pub val "):
+        return 8
+    if raw.starts_with("pub var "):
+        return 8
+    if raw.starts_with("val "):
+        return 4
+    if raw.starts_with("var "):
+        return 4
+    -1
+
+# ============================================================================
+# Assignment Split
+# ============================================================================
+
+fn _mil_find_assign_eq(s: text) -> i64:
+    """Find the index of the standalone `=` that separates the declared name
+    (and optional type annotation) from its initializer expression. Skips
+    `==`, `!=`, `<=`, `>=` so comparison-shaped text in a type annotation
+    does not get mistaken for the assignment operator."""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if ch == "=":
+            val prev = if i > 0: s.substring(i - 1, i) else: ""
+            val next = if i + 1 < n: s.substring(i + 1, i + 2) else: ""
+            if prev != "=" and prev != "!" and prev != "<" and prev != ">" and next != "=":
+                return i
+        i = i + 1
+    -1
+
+fn _mil_strip_trailing_comment(s: text) -> text:
+    """Cut a trailing `# ...` comment, respecting string-literal boundaries
+    so a `#` inside a string initializer is not mistaken for a comment."""
+    var in_str = false
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if ch == "\"":
+            in_str = not in_str
+        elif ch == "#" and not in_str:
+            return s.substring(0, i).trim()
+        i = i + 1
+    s.trim()
+
+# ============================================================================
+# Literal Classification
+# ============================================================================
+
+fn _mil_is_string_literal(s: text) -> bool:
+    """A bare string literal only: no unescaped inner `"` (rules out
+    concatenation like `"a" + "b"`, which reads as start/end quotes too) and
+    no unescaped `{` (rules out `"{x}"` interpolation, which needs runtime
+    formatting and is not folded by lower_const_expr either)."""
+    if s.len() < 2:
+        return false
+    if not s.starts_with("\"") or not s.ends_with("\""):
+        return false
+    var i = 1
+    val end = s.len() - 1
+    while i < end:
+        val ch = s.substring(i, i + 1)
+        if ch == "\\":
+            i = i + 2
+            continue
+        if ch == "\"" or ch == "{":
+            return false
+        i = i + 1
+    true
+
+fn _mil_numeric_suffixes() -> [text]:
+    ["i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "f64", "f32"]
+
+fn _mil_strip_numeric_suffix(s: text) -> text:
+    val suffixes = _mil_numeric_suffixes()
+    var i = 0
+    while i < suffixes.len():
+        val suffix = suffixes[i]
+        if s.ends_with(suffix) and s.len() > suffix.len():
+            return s.substring(0, s.len() - suffix.len())
+        i = i + 1
+    s
+
+fn _mil_is_numeric_literal(s: text) -> bool:
+    """Int/float literal, optionally negated, optionally suffixed
+    (`-1`, `0.5`, `255u8`, `-3.0f64`), with `_` digit separators allowed."""
+    var t = s
+    if t.starts_with("-"):
+        t = t.substring(1, t.len())
+    if t == "":
+        return false
+    t = _mil_strip_numeric_suffix(t)
+    if t == "":
+        return false
+    var seen_digit = false
+    var seen_dot = false
+    var i = 0
+    while i < t.len():
+        val ch = t.substring(i, i + 1)
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_digit:
+            seen_digit = true
+        elif ch == "." and not seen_dot:
+            seen_dot = true
+        elif ch == "_":
+            pass
+        else:
+            return false
+        i = i + 1
+    seen_digit
+
+fn _mil_is_literal_rhs(rhs: text) -> bool:
+    """True when `rhs` is a bare int/float/bool/string/nil literal (a
+    negated numeric literal counts as literal). Empty RHS (declaration
+    without an initializer) is not this lint's concern."""
+    val trimmed = rhs.trim()
+    if trimmed == "":
+        return true
+    if trimmed == "nil":
+        return true
+    if trimmed == "true" or trimmed == "false":
+        return true
+    if _mil_is_string_literal(trimmed):
+        return true
+    if _mil_is_numeric_literal(trimmed):
+        return true
+    false
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+pub fn check_module_init_literal(source: text, path: text) -> [ModuleInitLiteralWarning]:
+    """Flag module-level (top-level, non-fn-local) `val`/`var` declarations
+    whose initializer is not a literal. On `native-build --entry`, such
+    globals silently read a zero/nil default instead of running their
+    initializer."""
+    var warnings: [ModuleInitLiteralWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val prefix_len = _mil_decl_prefix_len(cl.raw)
+        if prefix_len >= 0:
+            val eq_idx = _mil_find_assign_eq(cl.trimmed)
+            if eq_idx >= 0:
+                val rhs = _mil_strip_trailing_comment(cl.trimmed.substring(eq_idx + 1, cl.trimmed.len()))
+                if not _mil_is_literal_rhs(rhs):
+                    warnings.push(ModuleInitLiteralWarning(
+                        code: "MODINIT001",
+                        severity: "WARNING",
+                        message: "module-level initializer is not a literal — native-build --entry does not run non-literal module initializers, so this global silently reads a zero/nil default",
+                        hint: "move the computation into a lazy-init function and call it explicitly (or an accessor that initializes on first use)",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+        li = li + 1
+
+    warnings

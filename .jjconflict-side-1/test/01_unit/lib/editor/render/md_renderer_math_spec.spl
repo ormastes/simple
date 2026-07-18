@@ -1,0 +1,60 @@
+# Math block ($$ ... $$) parsing and rendering specs.
+# Verbatim rendering: dim delimiters, styled body, no formula layout.
+
+use std.spec
+use std.editor.render.md_renderer.*
+use std.editor.render.block_model.*
+
+describe "math block parsing":
+
+    it "multi-line $$ block parses as math kind":
+        val model = BlockModel.from_markdown("$$\nE = mc^2\n$$")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("math")
+
+    it "single-line $$...$$ parses as math kind":
+        val model = BlockModel.from_markdown("$$E = mc^2$$")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("math")
+
+    it "math block separates from surrounding paragraphs":
+        val model = BlockModel.from_markdown("before\n$$\nx\n$$\nafter")
+        expect(model.block_count()).to_equal(3)
+        expect(model.block_at(0).kind).to_equal("paragraph")
+        expect(model.block_at(1).kind).to_equal("math")
+        expect(model.block_at(2).kind).to_equal("paragraph")
+
+    it "unterminated $$ runs to end of document like unterminated code fence":
+        val model = BlockModel.from_markdown("$$\nx = 1\ny = 2")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("math")
+
+    it "bare $$ alone is an unterminated math block, not a paragraph":
+        val model = BlockModel.from_markdown("$$")
+        expect(model.block_count()).to_equal(1)
+        expect(model.block_at(0).kind).to_equal("math")
+
+describe "math block rendering":
+
+    it "renders dim math delimiters around styled body":
+        val model = BlockModel.from_markdown("$$\nE = mc^2\n$$")
+        val lines = md_render_block(model.block_at(0))
+        expect(lines.len()).to_equal(3)
+        expect(lines[0].index_of("math") >= 0).to_equal(true)
+        expect(lines[1].index_of("E = mc^2") >= 0).to_equal(true)
+        expect(lines[2].index_of("math") >= 0).to_equal(true)
+
+    it "single-line math renders as one line with body preserved":
+        val model = BlockModel.from_markdown("$$a + b$$")
+        val lines = md_render_block(model.block_at(0))
+        expect(lines.len()).to_equal(1)
+        expect(lines[0].index_of("a + b") >= 0).to_equal(true)
+
+    it "multi-line body lines pass through verbatim":
+        # No braces in the LaTeX sample: {x} in a string literal is parsed
+        # as interpolation by the Simple lexer.
+        val model = BlockModel.from_markdown("$$\n\\sum_i x_i\n\\alpha + \\beta\n$$")
+        val lines = md_render_block(model.block_at(0))
+        expect(lines.len()).to_equal(4)
+        expect(lines[1].index_of("\\sum_i x_i") >= 0).to_equal(true)
+        expect(lines[2].index_of("\\alpha + \\beta") >= 0).to_equal(true)

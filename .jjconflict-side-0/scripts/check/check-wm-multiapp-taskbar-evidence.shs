@@ -1,0 +1,380 @@
+#!/bin/sh
+# check-wm-multiapp-taskbar-evidence.shs
+#
+# Proves the Simple WM (hosted compositor) can LAUNCH MULTIPLE GUI apps as
+# internal windows through Simple GUI, that the TASKBAR reflects them and WORKS
+# (clicking a taskbar item focuses/restores its window), in a real on-screen
+# GuiRenderer window, and captures binding evidence.
+#
+# Launches examples/06_io/ui/wm_multiapp_taskbar_gui.spl for real via a throwaway
+# .app bundle (LaunchServices registers the process with the macOS window server
+# so the window composites), captures stdout, and validates:
+#   MARKERS (hard gate, on the REAL compositor state):
+#     - 4x `[wm-multiapp] launched app=.. windows=N taskbar_items=N` with N 1..4
+#     - `[wm-multiapp] taskbar_count=4`
+#     - `[wm-multiapp] taskbar_focus .. before=<id> after=<id>` with before!=after
+#       (a taskbar click focused a background window)
+#     - `[wm-multiapp] minimized id=.. minimized=true`
+#     - `[wm-multiapp] taskbar_restore .. after=<id> minimized_now=false`
+#       (a minimized window's taskbar entry restored + focused it)
+#     - `[wm-multiapp] final_state_ready .. all_visible=true`
+#   CAPTURES: the SimpleGui content window per state (launched-all / minimized /
+#     final), captured DIRECTLY by its CGWindowID via `screencapture -l<id>`
+#     (Space/foreground-independent — a background host window is otherwise not
+#     capturable by `-x`, which only shows the current Space). The id is resolved
+#     by window title via CGWindowListCopyWindowInfo (JXA).
+#   PIXEL CHECKS (binding, on the final capture; via
+#     scripts/check/measure_wm_multiapp_taskbar.spl which validates the real
+#     captured WM frame and self-calibrates the logical->physical scale):
+#     - each internal window's titlebar band differs from the desktop backdrop,
+#     - the bottom taskbar shows >= 4 colored item segments,
+#     - per-window crops written to app_<name>.png.
+#
+# Without Screen Recording permission the window capture / window names are
+# unavailable; the pixel checks then fail closed.
+#
+# Writes build/wm_multiapp_taskbar/report.md (key=value lines).
+# Exit 0 = PASS (or non-macOS skip), non-zero = FAIL.
+#
+# `set -u` (nounset) only, NOT `set -e`: this gate deliberately continues past
+# non-fatal command failures (a missing capture, a validator that finds no
+# capture/validation errors) and classifies them into a fail-closed REASON via
+# classify()/write_report — an errexit abort would instead leave NO report.
+# All fatal preconditions are checked explicitly with fail().
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm_multiapp_taskbar}"
+APP_SPL="${WM_MULTIAPP_APP:-examples/06_io/ui/wm_multiapp_taskbar_gui.spl}"
+VALIDATOR="scripts/check/measure_wm_multiapp_taskbar.spl"
+TIMEOUT_SECS="${WM_MULTIAPP_TIMEOUT_SECS:-720}"
+LOGICAL_W="${WM_MULTIAPP_LOGICAL_W:-512}"
+LOGICAL_H="${WM_MULTIAPP_LOGICAL_H:-384}"
+EXPECT_APPS=4
+REPORT="$BUILD_DIR/report.md"
+ENV_PATH="$BUILD_DIR/evidence.env"
+APP_LOG="$BUILD_DIR/app.log"
+APP_ERR="$BUILD_DIR/app.err"
+APP_DIR="$BUILD_DIR/SimpleGui.app"
+
+mkdir -p "$BUILD_DIR"
+rm -f "$REPORT" "$ENV_PATH" "$APP_LOG" "$APP_ERR" "$BUILD_DIR"/*.png "$BUILD_DIR"/*.bmp "$BUILD_DIR"/*.ppm 2>/dev/null || true
+
+HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+STATUS=fail
+REASON=unknown
+GUI_BIN="${SIMPLE_BIN:-}"
+SFFI_LIB=""
+CAPTURE_METHOD="cgwindowid-screencapture-l"
+LAUNCH_COUNT=0
+TASKBAR_COUNT=0
+FOCUS_BEFORE=""
+FOCUS_AFTER=""
+FOCUS_CHANGED=false
+MINIMIZED=false
+RESTORE_AFTER=""
+RESTORE_MIN_NOW=""
+RESTORED=false
+FINAL_READY=false
+CAP_LAUNCHED=missing
+CAP_MINIMIZED=missing
+CAP_FINAL=missing
+CALIB=""
+TASKBAR_LIT=0
+WINDOWS_OK=0
+TITLE_TEXT_OK=0
+CLOSE_BUTTONS_OK=0
+CROPS=""
+
+FINAL_PNG="$BUILD_DIR/state_final.png"
+FINAL_BMP="$BUILD_DIR/state_final.bmp"
+LAUNCHED_PNG="$BUILD_DIR/state_launched.png"
+MIN_PNG="$BUILD_DIR/state_minimized.png"
+
+write_report() {
+    {
+        echo "wm_multiapp_taskbar_status=$STATUS"
+        echo "wm_multiapp_taskbar_reason=$REASON"
+        echo "wm_multiapp_taskbar_host_os=$HOST_OS"
+        echo "wm_multiapp_taskbar_gui_bin=$GUI_BIN"
+        echo "wm_multiapp_taskbar_app=$APP_SPL"
+        echo "wm_multiapp_taskbar_logical=${LOGICAL_W}x${LOGICAL_H}"
+        echo "wm_multiapp_taskbar_capture_method=$CAPTURE_METHOD"
+        echo "wm_multiapp_taskbar_launch_count=$LAUNCH_COUNT"
+        echo "wm_multiapp_taskbar_taskbar_count=$TASKBAR_COUNT"
+        echo "wm_multiapp_taskbar_focus_before=$FOCUS_BEFORE"
+        echo "wm_multiapp_taskbar_focus_after=$FOCUS_AFTER"
+        echo "wm_multiapp_taskbar_focus_changed=$FOCUS_CHANGED"
+        echo "wm_multiapp_taskbar_minimized=$MINIMIZED"
+        echo "wm_multiapp_taskbar_restore_after=$RESTORE_AFTER"
+        echo "wm_multiapp_taskbar_restore_minimized_now=$RESTORE_MIN_NOW"
+        echo "wm_multiapp_taskbar_restored=$RESTORED"
+        echo "wm_multiapp_taskbar_final_ready=$FINAL_READY"
+        echo "wm_multiapp_taskbar_capture_launched=$CAP_LAUNCHED"
+        echo "wm_multiapp_taskbar_capture_minimized=$CAP_MINIMIZED"
+        echo "wm_multiapp_taskbar_capture_final=$CAP_FINAL"
+        echo "wm_multiapp_taskbar_calibration=$CALIB"
+        echo "wm_multiapp_taskbar_lit_segments=$TASKBAR_LIT"
+        echo "wm_multiapp_taskbar_windows_titlebar_ok=$WINDOWS_OK"
+        echo "wm_multiapp_taskbar_title_text_ok=$TITLE_TEXT_OK"
+        echo "wm_multiapp_taskbar_close_buttons_ok=$CLOSE_BUTTONS_OK"
+        echo "wm_multiapp_taskbar_crops=$CROPS"
+        echo "wm_multiapp_taskbar_final_png=$FINAL_PNG"
+        echo "wm_multiapp_taskbar_launched_png=$LAUNCHED_PNG"
+        echo "wm_multiapp_taskbar_minimized_png=$MIN_PNG"
+        echo "wm_multiapp_taskbar_app_log=$APP_LOG"
+    } >"$ENV_PATH"
+    cp "$ENV_PATH" "$REPORT"
+}
+
+cleanup_app() {
+    pkill -x SimpleGui >/dev/null 2>&1 || true
+}
+
+fail() {
+    STATUS=fail
+    REASON="$1"
+    write_report
+    echo "FAIL: $REASON"
+    [ -f "$APP_LOG" ] && { echo "--- app log tail ---"; tail -25 "$APP_LOG"; } || true
+    cleanup_app
+    exit 1
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --- locate self-hosted Simple and the GuiRenderer SFFI sibling library ---
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$GUI_BIN" ]; then
+    for _c in "bin/simple" "./bin/simple" "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple"; do
+        if [ -x "$_c" ]; then
+            GUI_BIN="$_c"
+            break
+        fi
+    done
+fi
+[ -z "$GUI_BIN" ] && fail "self-hosted-simple-missing"
+is_rust_seed_simple "$GUI_BIN" && fail "rust-seed-simple-bin-forbidden"
+
+case "$(uname -s)" in
+    Darwin) SFFI_LIB="$ROOT_DIR/build/sffi/libspl_winit.dylib" ;;
+    Linux) SFFI_LIB="$ROOT_DIR/build/sffi/libspl_winit.so" ;;
+    *) SFFI_LIB="$ROOT_DIR/build/sffi/libspl_winit.dll" ;;
+esac
+if [ ! -s "$SFFI_LIB" ]; then
+    sh scripts/build/build_spl_winit.shs >/dev/null 2>"$BUILD_DIR/build_spl_winit.err" || fail "spl-winit-sffi-build-failed"
+fi
+[ -s "$SFFI_LIB" ] || fail "spl-winit-sffi-missing"
+[ -f "$APP_SPL" ] || fail "missing-app-spl"
+[ -f "$VALIDATOR" ] || fail "missing-validator"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    STATUS=skip
+    REASON="requires-macos"
+    write_report
+    echo "SKIP: requires-macos ($HOST_OS)"
+    cat "$ENV_PATH"
+    exit 0
+fi
+
+have sips || fail "missing-command:sips"
+trap cleanup_app EXIT
+
+# --- throwaway .app bundle; LSEnvironment carries the GUI/interpret env ---
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS"
+cp "$GUI_BIN" "$APP_DIR/Contents/MacOS/SimpleGui"
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>SimpleGui</string>
+  <key>CFBundleIdentifier</key><string>com.simple.wm.multiapp.$$</string>
+  <key>CFBundleName</key><string>SimpleGui</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>SIMPLE_GUI</key><string>1</string>
+    <key>SIMPLE_EXECUTION_MODE</key><string>interpret</string>
+    <key>SIMPLE_LIB</key><string>${SIMPLE_LIB:-$ROOT_DIR/src}</string>
+    <key>SIMPLE_TIMEOUT_SECONDS</key><string>0</string>
+    <key>SIMPLE_EXECUTION_LIMIT</key><string>0</string>
+    <key>SIMPLE_ONE_CALL_READBACK</key><string>1</string>
+    <key>SIMPLE_SPL_WINIT_PATH</key><string>${SFFI_LIB}</string>
+    <key>OSTYPE</key><string>${OSTYPE:-darwin}</string>
+  </dict>
+</dict></plist>
+PLIST
+
+ABS_SPL="$ROOT_DIR/$APP_SPL"
+: >"$APP_LOG"
+: >"$APP_ERR"
+
+echo "launching $APP_SPL via $APP_DIR (driver: $GUI_BIN) ..."
+open -n --stdout "$APP_LOG" --stderr "$APP_ERR" "$APP_DIR" --args run "$ABS_SPL"
+
+# We capture the window DIRECTLY by its CGWindowID with
+# `screencapture -l<id>`, which is Space-independent and needs no activation.
+# The window id is found via CGWindowListCopyWindowInfo (JXA/ObjC bridge). The
+# host runtime can own several windows for the process (the content window, a
+# full-width menu-bar window, and blank metal/helper layers) whose sizes are not reliable
+# discriminators, so we select by the content window's TITLE — the exact string
+# passed to GuiRenderer.create ("Simple WM — Multi-App"). Window names require
+# Screen Recording permission, which the driving Terminal already holds.
+JXA_WID="$BUILD_DIR/_getwid.js"
+cat > "$JXA_WID" <<'JXA'
+function run() {
+  ObjC.import('CoreGraphics');
+  var info = $.CGWindowListCopyWindowInfo(0, 0);
+  var n = $.CFArrayGetCount(info);
+  for (var i = 0; i < n; i++) {
+    var dict = ObjC.castRefToObject($.CFArrayGetValueAtIndex(info, i));
+    var owner = dict.objectForKey('kCGWindowOwnerName');
+    if (!owner || ObjC.unwrap(owner) !== 'SimpleGui') continue;
+    var nm = dict.objectForKey('kCGWindowName');
+    var name = nm ? ObjC.unwrap(nm) : '';
+    if (name && name.indexOf('Multi-App') >= 0) {
+      return '' + ObjC.unwrap(dict.objectForKey('kCGWindowNumber'));
+    }
+  }
+  return '';
+}
+JXA
+
+simplegui_window_id() {
+    osascript -l JavaScript "$JXA_WID" 2>/dev/null | tr -d '\r\n '
+}
+
+capture_state() {
+    _png="$1"
+    _wid="$(simplegui_window_id)"
+    if [ -n "$_wid" ]; then
+        screencapture -x -o -l"$_wid" "$_png" >/dev/null 2>&1 || true
+    fi
+    if [ -s "$_png" ]; then echo "captured"; else echo "missing"; fi
+}
+
+# --- capture per state as its marker appears, then wait for done/timeout ---
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+cap_launched=0
+cap_min=0
+cap_final=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ "$cap_launched" -eq 0 ] && grep -q "\[wm-multiapp\] state_ready=launched-all" "$APP_LOG" 2>/dev/null; then
+        CAP_LAUNCHED="$(capture_state "$LAUNCHED_PNG")"; cap_launched=1
+    fi
+    if [ "$cap_min" -eq 0 ] && grep -q "\[wm-multiapp\] state_ready=minimized" "$APP_LOG" 2>/dev/null; then
+        CAP_MINIMIZED="$(capture_state "$MIN_PNG")"; cap_min=1
+    fi
+    if [ "$cap_final" -eq 0 ] && grep -q "\[wm-multiapp\] final_state_ready" "$APP_LOG" 2>/dev/null; then
+        # Recapture the final state a few times over its long hold, keep the last.
+        CAP_FINAL="$(capture_state "$FINAL_PNG")"; cap_final=1
+    fi
+    if grep -q "\[wm-multiapp\] done\|\[wm-multiapp\] error=" "$APP_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+# One more final capture near the end of the long hold for a clean frontmost shot.
+if grep -q "\[wm-multiapp\] final_state_ready" "$APP_LOG" 2>/dev/null; then
+    CAP_FINAL="$(capture_state "$FINAL_PNG")"
+fi
+sleep 1
+cleanup_app
+
+# --- parse markers ---
+LAUNCH_COUNT="$(grep -c "\[wm-multiapp\] launched app=" "$APP_LOG" 2>/dev/null)"
+if [ -z "$LAUNCH_COUNT" ]; then LAUNCH_COUNT=0; fi
+TASKBAR_COUNT="$(grep "\[wm-multiapp\] taskbar_count=" "$APP_LOG" 2>/dev/null | tail -1 | sed -n 's/.*taskbar_count=\([0-9]*\).*/\1/p')"
+FOCUS_LINE="$(grep "\[wm-multiapp\] taskbar_focus " "$APP_LOG" 2>/dev/null | tail -1)"
+FOCUS_BEFORE="$(printf '%s' "$FOCUS_LINE" | sed -n 's/.* before=\([0-9-]*\).*/\1/p')"
+FOCUS_AFTER="$(printf '%s' "$FOCUS_LINE" | sed -n 's/.* after=\([0-9-]*\).*/\1/p')"
+if [ -n "$FOCUS_BEFORE" ] && [ -n "$FOCUS_AFTER" ] && [ "$FOCUS_BEFORE" != "$FOCUS_AFTER" ]; then FOCUS_CHANGED=true; fi
+if grep -q "\[wm-multiapp\] minimized id=.* minimized=true" "$APP_LOG" 2>/dev/null; then MINIMIZED=true; fi
+RESTORE_LINE="$(grep "\[wm-multiapp\] taskbar_restore " "$APP_LOG" 2>/dev/null | tail -1)"
+RESTORE_AFTER="$(printf '%s' "$RESTORE_LINE" | sed -n 's/.* after=\([0-9-]*\).*/\1/p')"
+RESTORE_MIN_NOW="$(printf '%s' "$RESTORE_LINE" | sed -n 's/.*minimized_now=\([a-z]*\).*/\1/p')"
+if [ "$RESTORE_MIN_NOW" = "false" ]; then RESTORED=true; fi
+if grep -q "\[wm-multiapp\] final_state_ready" "$APP_LOG" 2>/dev/null; then FINAL_READY=true; fi
+
+# Build the geoms env from the final_geom markers (app spaces -> _).
+GEOMS="$(grep "\[wm-multiapp\] final_geom " "$APP_LOG" 2>/dev/null | \
+    sed -n 's/.*id=\([0-9]*\) app=\(.*\) x=\([0-9-]*\) y=\([0-9-]*\) w=\([0-9-]*\) h=\([0-9-]*\).*/\1|\2|\3|\4|\5|\6/p' | \
+    while IFS='|' read -r id app x y w h; do
+        app_tok="$(printf '%s' "$app" | tr ' ' '_')"
+        printf '%s,%s,%s,%s,%s,%s;' "$id" "$app_tok" "$x" "$y" "$w" "$h"
+    done)"
+
+# --- pixel validation on the final capture (fail-closed) ---
+if [ -s "$FINAL_PNG" ]; then
+    if sips -s format bmp "$FINAL_PNG" --out "$FINAL_BMP" >/dev/null 2>&1; then
+        VAL_OUT="$(WM_MULTIAPP_BMP="$FINAL_BMP" WM_MULTIAPP_OUT_DIR="$BUILD_DIR" \
+            WM_MULTIAPP_GEOMS="$GEOMS" WM_MULTIAPP_LOGICAL_W="$LOGICAL_W" \
+            WM_MULTIAPP_LOGICAL_H="$LOGICAL_H" WM_MULTIAPP_TASKBAR_COUNT="$EXPECT_APPS" \
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+            SIMPLE_EXECUTION_LIMIT=0 OSTYPE=darwin \
+            "$GUI_BIN" run "$VALIDATOR" --mode=interpreter 2>/dev/null)"
+        echo "$VAL_OUT" | grep -E '^(capture_dims|calib|bg_ref|window |window_crop |taskbar_item |taskbar_lit_segments|windows_ok|title_text_ok|close_buttons_ok|measure_error)' || true
+        CALIB="$(printf '%s' "$VAL_OUT" | sed -n 's/^calib //p' | head -1)"
+        TASKBAR_LIT="$(printf '%s' "$VAL_OUT" | sed -n 's/^taskbar_lit_segments=\([0-9]*\).*/\1/p' | tail -1)"
+        WINDOWS_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^windows_ok=\([0-9]*\).*/\1/p' | tail -1)"
+        TITLE_TEXT_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^title_text_ok=\([0-9]*\).*/\1/p' | tail -1)"
+        CLOSE_BUTTONS_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^close_buttons_ok=\([0-9]*\).*/\1/p' | tail -1)"
+        # Convert per-window crop PPMs to PNG.
+        for ppm in "$BUILD_DIR"/app_*.ppm; do
+            [ -e "$ppm" ] || continue
+            png="${ppm%.ppm}.png"
+            if sips -s format png "$ppm" --out "$png" >/dev/null 2>&1; then
+                CROPS="$CROPS $(basename "$png")"
+            fi
+        done
+        CROPS="${CROPS# }"
+    else
+        REASON="final-bmp-convert-failed"
+    fi
+fi
+
+# --- classify (fail-closed) ---
+if [ -z "$TASKBAR_COUNT" ]; then TASKBAR_COUNT=0; fi
+if [ -z "$TASKBAR_LIT" ]; then TASKBAR_LIT=0; fi
+if [ -z "$WINDOWS_OK" ]; then WINDOWS_OK=0; fi
+if [ -z "$TITLE_TEXT_OK" ]; then TITLE_TEXT_OK=0; fi
+if [ -z "$CLOSE_BUTTONS_OK" ]; then CLOSE_BUTTONS_OK=0; fi
+
+classify() {
+    if grep -q "\[wm-multiapp\] error=" "$APP_LOG" 2>/dev/null; then
+        REASON="app-error:$(grep '\[wm-multiapp\] error=' "$APP_LOG" | tail -1 | sed -n 's/.*error=\([^ ]*\).*/\1/p')"; return
+    fi
+    [ "$LAUNCH_COUNT" -ge "$EXPECT_APPS" ] || { REASON="expected-$EXPECT_APPS-launches-got-$LAUNCH_COUNT"; return; }
+    [ "$TASKBAR_COUNT" -ge "$EXPECT_APPS" ] || { REASON="taskbar-count-$TASKBAR_COUNT-lt-$EXPECT_APPS"; return; }
+    [ "$FOCUS_CHANGED" = "true" ] || { REASON="taskbar-focus-did-not-change(before=$FOCUS_BEFORE after=$FOCUS_AFTER)"; return; }
+    [ "$MINIMIZED" = "true" ] || { REASON="minimize-not-observed"; return; }
+    [ "$RESTORED" = "true" ] || { REASON="taskbar-restore-not-observed(min_now=$RESTORE_MIN_NOW)"; return; }
+    [ "$FINAL_READY" = "true" ] || { REASON="final-state-not-reached"; return; }
+    [ "$CAP_FINAL" = "captured" ] || { REASON="final-capture-missing"; return; }
+    [ -n "$CALIB" ] || { REASON="pixel-calibration-failed(screen-recording-permission?)"; return; }
+    [ "$WINDOWS_OK" -ge "$EXPECT_APPS" ] || { REASON="window-titlebars-differ-from-bg-only-$WINDOWS_OK-of-$EXPECT_APPS"; return; }
+    [ "$TITLE_TEXT_OK" -ge "$EXPECT_APPS" ] || { REASON="window-title-text-visible-only-$TITLE_TEXT_OK-of-$EXPECT_APPS"; return; }
+    [ "$CLOSE_BUTTONS_OK" -ge "$EXPECT_APPS" ] || { REASON="close-buttons-recognizable-only-$CLOSE_BUTTONS_OK-of-$EXPECT_APPS"; return; }
+    [ "$TASKBAR_LIT" -ge "$EXPECT_APPS" ] || { REASON="taskbar-lit-segments-$TASKBAR_LIT-lt-$EXPECT_APPS"; return; }
+    STATUS=pass
+    REASON=pass
+}
+classify
+
+write_report
+echo "----- evidence -----"
+cat "$ENV_PATH"
+[ "$STATUS" = "pass" ] && echo "PASS" || echo "FAIL: $REASON"
+[ "$STATUS" = "pass" ]

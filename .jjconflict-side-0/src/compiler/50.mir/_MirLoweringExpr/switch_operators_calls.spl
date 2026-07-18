@@ -1,0 +1,2512 @@
+# Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
+use compiler.mir.mir_lowering_expr.*
+# MIR Lowering - Expression Lowering
+#
+# Expression lowering from HIR to MIR:
+# - Literal lowering (int, float, bool, string, nil, unit)
+# - Variable references
+# - Binary/unary operators (including special pipeline/compose/parallel)
+# - Function calls (direct and indirect)
+# - Method calls (instance, trait, static, free function / UFCS)
+# - Array, tuple, set, and constant expression lowering
+# - Field access
+
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.blocks.value.BlockValue
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+# Monotonic counter for lambda-lift synthesized top-level function names. A
+# non-capturing `Lambda` used as a first-class VALUE (passed to a HOF) is lifted
+# to a synthesized top-level MIR function `__lambda_lift_<n>`; this counter keeps
+# each lift's name (and thus each fnptr constant) unique so two different lambdas
+# in one program do not collide onto the same address.
+var _mir_lambda_lift_counter: i64 = 0
+
+# print(x.contains(y)) etc.: method-call results are untyped on this path
+# (MIR method lowering does not thread return types), so
+# lower_bootstrap_print_call's explicit-numeric/bool coercion misses them and
+# a bool-returning text/dict/array method printed its raw 1/0 instead of
+# true/false (parity case process_run_timeout expects
+# print(err.contains("problem")) -> "true"). Detect the well-known
+# bool-returning method NAMES on the print argument's own HIR expr.
+# Isolated single-arm match with return-per-arm (the reliable seed idiom).
+fn print_arg_is_bool_method_call(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.MethodCall(_, pb_method, _, _):
+            return pb_method == "contains" or pb_method == "starts_with" or pb_method == "ends_with" or pb_method == "contains_key"
+        case _:
+            return false
+
+fn int_list_contains(xs: [i64], v: i64) -> bool:
+    var i = 0
+    while i < xs.len():
+        if xs[i] == v:
+            return true
+        i = i + 1
+    false
+
+fn enum_variant_disc(names: [text], variant: text) -> i64:
+    """Discriminant = index of `variant` in the enum's declared variant order."""
+    var i = 0
+    while i < names.len():
+        if names[i] == variant:
+            return i
+        i = i + 1
+    -1
+
+fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
+    """The single payload-binding symbol of `case Circle(r):` (Tuple([Binding(r)])),
+    or nil for Unit variants / unsupported multi-field payloads."""
+    if payload.?:
+        match payload.unwrap():
+            case Tuple(patterns):
+                if patterns.len() == 1:
+                    match patterns[0].kind:
+                        case Binding(sym, _):
+                            return Some(sym)
+                        case _:
+                            ()
+            case _:
+                ()
+    nil
+
+fn enum_text_payload_marker() -> text:
+    """Sentinel stored in enum_payload_struct_names (which normally holds a
+    STRUCT name) to record, at the enum-construction site, "this single-field
+    payload's lowered value was TEXT" -- keyed the same way
+    ("{enum_name}::{variant}") but a reserved value no real struct name can
+    ever equal. lower_enum_match's single-payload bind arm reads this back to
+    tell "retype the bound local as text" apart from "register a struct
+    name", without adding a new field to the shared MirLowering struct (that
+    struct is built in mir_lowering_types.spl/module_lowering.spl, owned by a
+    different lane this round)."""
+    "$__enum_text_payload__$"
+
+fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
+    """#164: all payload-binding symbols of `case Pair(a, b, ...):`, in
+    declared field order (empty for Unit variants; non-Binding sub-patterns,
+    e.g. wildcards, are skipped and simply left unbound)."""
+    var out: [SymbolId] = []
+    if payload.?:
+        match payload.unwrap():
+            case Tuple(patterns):
+                var i = 0
+                while i < patterns.len():
+                    match patterns[i].kind:
+                        case Binding(sym, _):
+                            out.push(sym)
+                        case _:
+                            ()
+                    i = i + 1
+            case _:
+                ()
+    out
+
+# ============================================================================
+# Expression Lowering
+# ============================================================================
+
+impl MirLowering:
+    me emit_resolved_direct_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
+        var b = self.builder
+        if return_type.kind != MirTypeKind.Unit:
+            val dest = b.new_temp(return_type)
+            b.emit(MirInst(kind: MirInstKind.Call(Some(dest), func, args), span: nil))
+            self.builder = b
+            match return_type.kind:
+                case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                    self.runtime_array_locals[dest.id] = true
+                    self.runtime_value_locals[dest.id] = true
+                case MirTypeKind.Struct(struct_symbol):
+                    # A direct call whose declared return type is a Named
+                    # struct (`fn make() -> P: ...`) yields a struct value
+                    # with no HIR type annotation on the Call expr itself (this
+                    # pipeline runs no expression type-inference pass -- see
+                    # struct_value_syms's own field comment). Without this,
+                    # `make(5).y` / `val p = make(5); p.y` fell through
+                    # resolve_field_index's lookup chain and silently
+                    # defaulted to field index 0, reading `x` instead of `y`.
+                    # Record the call result local -> struct NAME here,
+                    # mirroring how lower_struct_construct/function params
+                    # already register direct constructions and typed
+                    # parameters into the same map.
+                    val struct_sym = self.symbols.get_symbol(struct_symbol)
+                    if struct_sym.?:
+                        self.struct_value_syms[dest.id] = struct_sym.name
+                case _: ()
+            return dest
+        b.emit(MirInst(kind: MirInstKind.Call(nil, func, args), span: nil))
+        val temp = b.new_temp(MirType.unit())
+        self.builder = b
+        temp
+
+    me should_emit_switch(int_cases: [(i64, HirBlock)]) -> bool:
+        """Heuristic: dense int matches go to Switch (jump table), sparse
+        / small matches stay as If chains. Mirrors the Rust-seed B5
+        constants SWITCH_MIN_ARMS=4 and SWITCH_MAX_SPAN=1024."""
+        if int_cases.len() < 4:
+            return false
+        var lo = int_cases[0].0
+        var hi = int_cases[0].0
+        var i = 1
+        while i < int_cases.len():
+            val k = int_cases[i].0
+            if k < lo:
+                lo = k
+            if k > hi:
+                hi = k
+            i = i + 1
+        val span = hi - lo
+        span >= 0 and span <= 1024
+
+    me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?) -> LocalId:
+        """Emit a MirTerminator.Switch for a dense int match. Each arm
+        lowers into its own block, stores its result into a shared temp,
+        and jumps to a merge block. Mirrors lower_if's
+        temp-then-merge pattern."""
+        var b = self.builder
+        val result = b.new_temp(MirType.i64())
+        val merge_block = b.new_block(Some("match_merge"))
+        val default_block = b.new_block(Some("match_default"))
+
+        # Allocate one block per arm and build SwitchCase entries.
+        var case_blocks: [(BlockId, HirBlock)] = []
+        var sw_cases: [SwitchCase] = []
+        var i = 0
+        while i < int_cases.len():
+            val key = int_cases[i].0
+            val body = int_cases[i].1
+            val arm_block = b.new_block(Some("match_arm"))
+            case_blocks = case_blocks.push((arm_block, body))
+            sw_cases = sw_cases.push(SwitchCase(value: key, target: arm_block))
+            i = i + 1
+
+        # Seal the current block with the Switch terminator.
+        b.terminate_switch(mir_operand_copy(scrut_local), sw_cases, default_block)
+        self.builder = b
+
+        # Lower each arm body into its block.
+        var result_defined = false
+        var ci = 0
+        while ci < case_blocks.len():
+            val arm_block = case_blocks[ci].0
+            val arm_body = case_blocks[ci].1
+            var b_arm = self.builder
+            b_arm.switch_to_block(arm_block)
+            self.builder = b_arm
+            val arm_result = self.lower_block(arm_body)
+            var b_arm2 = self.builder
+            # Guard: if the arm body already terminated (e.g. `return r`), emit
+            # NOTHING more into this block. set_terminator would clobber the
+            # terminator, and emitting a post-terminator copy is worse: the
+            # buffered copy gets flushed by the NEXT switch_to_block, and
+            # finalize_block REPLACES block.instructions -- wiping every
+            # instruction the arm body emitted (the `return 100` const
+            # vanished this way, leaving a Goto to merge that read an
+            # undefined `result` local). Mirrors lower_enum_match's guard.
+            if not b_arm2.current_block_has_explicit_terminator():
+                if val arm_result_local = arm_result:
+                    b_arm2.emit_copy(result, arm_result_local)
+                    result_defined = true
+                b_arm2.terminate_goto(merge_block)
+            self.builder = b_arm2
+            ci = ci + 1
+
+        # Default arm. If the default arm came from a Binding pattern,
+        # map the binding's symbol to the scrutinee local before lowering
+        # the body so references inside the arm body resolve.
+        var b_d = self.builder
+        b_d.switch_to_block(default_block)
+        self.builder = b_d
+        if val default_symbol = default_binding:
+            if default_symbol == nil:
+                self.error("match default binding has no resolved symbol", nil)
+            else:
+                self.local_map[default_symbol.id] = scrut_local
+        val def_result = self.lower_block(default_body)
+        var b_d2 = self.builder
+        # Same post-terminator guard as the arm loop above.
+        if not b_d2.current_block_has_explicit_terminator():
+            if val def_result_local = def_result:
+                b_d2.emit_copy(result, def_result_local)
+                result_defined = true
+            b_d2.terminate_goto(merge_block)
+        self.builder = b_d2
+
+        # Merge block.
+        var b_m = self.builder
+        b_m.switch_to_block(merge_block)
+        # Mirrors lower_if's merge-placeholder fix: every arm/default that
+        # falls through to merge without producing a value (e.g. a void
+        # statement as the arm's last expression) leaves `result` undefined
+        # on that path -- a NULL llvm::Value* read downstream (ICmp/binop
+        # SIGSEGV in llvm-lib). Define it here if no arm ever did.
+        if not result_defined:
+            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        self.builder = b_m
+
+        result
+
+    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?) -> LocalId:
+        """Emit a nested If chain for sparse / small int matches.
+        Cheaper than a jump table when arms < 4 or key span > 1024."""
+        var b = self.builder
+        val result = b.new_temp(MirType.i64())
+        val merge_block = b.new_block(Some("match_merge"))
+        self.builder = b
+
+        var result_defined = false
+        var i = 0
+        while i < int_cases.len():
+            val key = int_cases[i].0
+            val body = int_cases[i].1
+
+            # Build `scrut == key` into a bool local.
+            var b_cmp = self.builder
+            val key_local = b_cmp.emit_const_int(key)
+            val cmp_local = b_cmp.emit_binop(
+                MirBinOp.Eq,
+                mir_operand_copy(scrut_local),
+                mir_operand_copy(key_local),
+                MirType.bool()
+            )
+            val arm_block = b_cmp.new_block(Some("match_arm"))
+            val next_block = b_cmp.new_block(Some("match_next"))
+            b_cmp.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
+            self.builder = b_cmp
+
+            # Arm body block.
+            var b_arm = self.builder
+            b_arm.switch_to_block(arm_block)
+            self.builder = b_arm
+            val arm_result = self.lower_block(body)
+            var b_arm2 = self.builder
+            # Guard: if the arm body already terminated (e.g. `return r`), emit
+            # NOTHING more into this block. set_terminator would clobber the
+            # terminator, and emitting a post-terminator copy is worse: the
+            # buffered copy gets flushed by the NEXT switch_to_block, and
+            # finalize_block REPLACES block.instructions -- wiping every
+            # instruction the arm body emitted (the `return 100` const
+            # vanished this way, leaving a Goto to merge that read an
+            # undefined `result` local). Mirrors lower_enum_match's guard.
+            if not b_arm2.current_block_has_explicit_terminator():
+                if val arm_result_local = arm_result:
+                    b_arm2.emit_copy(result, arm_result_local)
+                    result_defined = true
+                b_arm2.terminate_goto(merge_block)
+            self.builder = b_arm2
+
+            # Continue cascading into next_block.
+            var b_n = self.builder
+            b_n.switch_to_block(next_block)
+            self.builder = b_n
+
+            i = i + 1
+
+        # After all cases, current block is the cascade tail = default.
+        # If the default arm came from a Binding pattern, map the
+        # binding's symbol to the scrutinee local before lowering.
+        if val default_symbol = default_binding:
+            if default_symbol == nil:
+                self.error("match default binding has no resolved symbol", nil)
+            else:
+                self.local_map[default_symbol.id] = scrut_local
+        val def_result = self.lower_block(default_body)
+        var b_def = self.builder
+        # Same post-terminator guard as the arm loop above.
+        if not b_def.current_block_has_explicit_terminator():
+            if val def_result_local = def_result:
+                b_def.emit_copy(result, def_result_local)
+                result_defined = true
+            b_def.terminate_goto(merge_block)
+        self.builder = b_def
+
+        # Merge block.
+        var b_m = self.builder
+        b_m.switch_to_block(merge_block)
+        # Mirrors lower_if's merge-placeholder fix: every arm/default that
+        # falls through to merge without producing a value leaves `result`
+        # undefined on that path -- a NULL llvm::Value* read downstream
+        # (ICmp/binop SIGSEGV in llvm-lib). Define it here if no arm ever did.
+        if not result_defined:
+            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        self.builder = b_m
+
+        result
+
+    me try_lower_bitfield_construct(callee: HirExpr, args: [HirCallArg]) -> LocalId?:
+        """Lower `BitfieldType(raw)` construction before generic Call lowering.
+
+        A bitfield construction is an identity pass-through at the value
+        level: the constructed value IS the raw backing value (same bit
+        pattern, same width), so no MIR Call is emitted -- the generic Call
+        path is not synthesizable and the callee has no real function
+        definition to call.
+        """
+        if args.len() != 1:
+            return nil
+        val fallback_symbol = SymbolId(id: -1)
+        val callee_disc = rt_enum_discriminant(callee.kind)
+        if callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+            match callee.kind:
+                case HirExprKind.NamedVar(_, callee_name):
+                    val resolved_symbol = self.symbols.lookup(callee_name)
+                    if resolved_symbol != nil:
+                        return self.try_lower_bitfield_construct_for_symbol(resolved_symbol, args)
+                    return nil
+                case _:
+                    return nil
+        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+            match callee.kind:
+                case HirExprKind.Var(symbol):
+                    return self.try_lower_bitfield_construct_for_symbol(symbol, args)
+                case _:
+                    return nil
+        nil
+
+    me try_lower_bitfield_construct_for_symbol(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:
+        val sym_id = mir_expr_symbol_id_value(symbol)
+        if sym_id < 0:
+            return nil
+        if not self.bitfield_map.has(sym_id):
+            return nil
+        val raw_local = self.lower_expr(args[0].value)
+        # Remember this local carries a bitfield-typed value so later
+        # `x.field` reads/writes resolve without HIR type annotations
+        # (this pipeline has no expression type-inference pass).
+        self.bitfield_value_syms[raw_local.id] = sym_id
+        Some(raw_local)
+
+    me bitfield_type_sym_for(base: HirExpr, base_local: LocalId) -> i64:
+        """Resolve the bitfield type symbol id for a field-access base, or -1.
+
+        Prefers the HIR type annotation (expr_type_symbol); falls back to
+        the construction-tracking map keyed by the already-lowered local.
+        """
+        val type_sym = self.expr_type_symbol(base)
+        if type_sym.?:
+            val unwrapped_sym = type_sym.unwrap()
+            if unwrapped_sym != nil:
+                val sym_id = unwrapped_sym.id
+                if self.bitfield_map.has(sym_id):
+                    return sym_id
+        if base_local == nil:
+            return -1
+        val tracked = self.bitfield_value_syms.get(base_local.id)
+        if tracked != nil:
+            return tracked
+        -1
+
+    me try_lower_bitfield_get(base: HirExpr, base_local: LocalId, field_name: text) -> LocalId?:
+        """Lower bitfield field reads before generic struct field access."""
+        val sym_id = self.bitfield_type_sym_for(base, base_local)
+        if sym_id < 0:
+            return nil
+        if not self.bitfield_map.has(sym_id):
+            return nil
+
+        val fields = self.bitfield_map[sym_id]
+        var idx = 0
+        while idx < fields.len():
+            match fields[idx]:
+                case HirBitfieldField(_, name, _, _, bit_width, bit_offset, is_reserved, _):
+                    if name != field_name or is_reserved:
+                        idx = idx + 1
+                        continue
+                    val field = fields[idx]
+                    var b = self.builder
+                    val result = if self.current_has_vhdl_metadata:
+                        val slice_dest = b.new_temp(self.bitfield_field_result_type(field))
+                        val hi = bit_offset + bit_width - 1
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlSlice(
+                                slice_dest,
+                                mir_operand_copy(base_local),
+                                hi,
+                                bit_offset
+                            ),
+                            span: nil
+                        ))
+                        slice_dest
+                    else:
+                        val mask = self.bitfield_field_mask(bit_width)
+                        val shifted = if bit_offset == 0:
+                            base_local
+                        else:
+                            val offset_const = b.emit_const_int(bit_offset)
+                            b.emit_binop(
+                                MirBinOp.Shr,
+                                mir_operand_copy(base_local),
+                                mir_operand_copy(offset_const),
+                                MirType.i64()
+                            )
+                        val mask_const = b.emit_const_int(mask)
+                        b.emit_binop(
+                            MirBinOp.BitAnd,
+                            mir_operand_copy(shifted),
+                            mir_operand_copy(mask_const),
+                            MirType.i64()
+                        )
+                    self.builder = b
+                    return Some(result)
+            idx = idx + 1
+
+        nil
+
+    me lower_binop_special(op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId?:
+        """Check if this is a special binary op needing non-BinOp lowering."""
+        match op:
+            case PipeForward:
+                # x |> f  ->  PipeForward(x, f)
+                val value_local = self.lower_expr(left)
+                val func_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInst(kind: MirInstKind.PipeForward(dest, mir_operand_copy(value_local), mir_operand_copy(func_local)), span: nil))
+                Some(dest)
+
+            case Compose:
+                # f >> g  ->  Compose(f, g, true)
+                val f_local = self.lower_expr(left)
+                val g_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInst(kind: MirInstKind.Compose(dest, mir_operand_copy(f_local), mir_operand_copy(g_local), true), span: nil))
+                Some(dest)
+
+            case ComposeBack:
+                # f << g  ->  Compose(f, g, false)
+                val f_local = self.lower_expr(left)
+                val g_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInst(kind: MirInstKind.Compose(dest, mir_operand_copy(f_local), mir_operand_copy(g_local), false), span: nil))
+                Some(dest)
+
+            case Parallel:
+                # f // g  ->  Parallel([f, g])
+                val f_local = self.lower_expr(left)
+                val g_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInst(kind: MirInstKind.Parallel(dest, [mir_operand_copy(f_local), mir_operand_copy(g_local)]), span: nil))
+                Some(dest)
+
+            case LayerConnect:
+                # layer1 ~> layer2  ->  LayerConnect(layer1, layer2)
+                val l1_local = self.lower_expr(left)
+                val l2_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInst(kind: MirInstKind.LayerConnect(dest, mir_operand_copy(l1_local), mir_operand_copy(l2_local)), span: nil))
+                Some(dest)
+
+            case _:
+                nil  # Not a special op, use normal BinOp
+
+    me lower_binop(op: HirBinOp) -> MirBinOp:
+        """Convert HIR binary op to MIR binary op."""
+        match op:
+            case Add: MirBinOp.Add
+            case Sub: MirBinOp.Sub
+            case Mul: MirBinOp.Mul
+            case Div: MirBinOp.Div
+            case Mod: MirBinOp.Rem
+            case Pow: MirBinOp.Pow
+            case MatMul: MirBinOp.MatMul
+            case BitAnd: MirBinOp.BitAnd
+            case BitOr: MirBinOp.BitOr
+            case BitXor: MirBinOp.BitXor
+            case Shl: MirBinOp.Shl
+            case Shr: MirBinOp.Shr
+            case Eq: MirBinOp.Eq
+            case NotEq: MirBinOp.Ne
+            case Lt: MirBinOp.Lt
+            case LtEq: MirBinOp.Le
+            case Gt: MirBinOp.Gt
+            case GtEq: MirBinOp.Ge
+            case BroadcastAdd: MirBinOp.BroadcastAdd
+            case BroadcastSub: MirBinOp.BroadcastSub
+            case BroadcastMul: MirBinOp.BroadcastMul
+            case BroadcastDiv: MirBinOp.BroadcastDiv
+            case BroadcastPow: MirBinOp.BroadcastPow
+            case _: MirBinOp.Add
+
+    me lower_unaryop(op: HirUnaryOp) -> MirUnaryOp:
+        """Convert HIR unary op to MIR unary op."""
+        val disc = rt_enum_discriminant(op)
+        if disc == rt_enum_discriminant(HirUnaryOp.Not): return MirUnaryOp.Not
+        if disc == rt_enum_discriminant(HirUnaryOp.BitNot): return MirUnaryOp.BitNot
+        if disc == rt_enum_discriminant(HirUnaryOp.Transpose): return MirUnaryOp.Transpose
+        MirUnaryOp.Neg
+
+    me infer_binop_type(op: HirBinOp) -> MirType:
+        """Infer result type of binary operation."""
+        match op:
+            case Eq | NotEq | Lt | LtEq | Gt | GtEq:
+                MirType.bool()
+            case _:
+                MirType.i64()  # Default to i64
+
+    me bootstrap_text_type() -> MirType:
+        MirType(kind: MirTypeKind.Opaque("str"))
+
+    me bootstrap_text_array_type() -> MirType:
+        MirType(kind: MirTypeKind.Array(self.bootstrap_text_type(), 0))
+
+    me bootstrap_call_return_type(name: text) -> MirType:
+        if name == "get_args" or name == "get_cli_args":
+            return MirType.ptr(self.bootstrap_text_array_type(), false)
+        if name == "bootstrap_version":
+            return self.bootstrap_text_type()
+        if name == "bootstrap_output_from_args":
+            return MirType.ptr(self.bootstrap_text_type(), false)
+        if name == "eprint":
+            return MirType.unit()
+        MirType.i64()
+
+    me bootstrap_resolved_call_name(symbol: SymbolId) -> text:
+        val sym = self.symbols.get_symbol(symbol)
+        if val found_sym = sym:
+            if found_sym != nil:
+                return found_sym.name
+        self.bootstrap_symbol_name(symbol)
+
+    me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:
+        if name == "engine2d_simd_fill_row_u32" or name == "engine2d_simd_fill_rows_u32" or name == "engine2d_simd_copy_row_u32" or name == "engine2d_simd_blend_row_u32" or name == "rt_engine2d_simd_fill_row_u32" or name == "rt_engine2d_simd_fill_rows_u32" or name == "rt_engine2d_simd_copy_row_u32" or name == "rt_engine2d_simd_blend_row_u32":
+            return MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U32), 0))
+        if name == "rt_array_len" or name == "rt_array_get":
+            return MirType.i64()
+        if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
+            return MirType.i64()
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return self.resolved_call_return_type(symbol)
+        # Preserve declared user-function returns before applying the small
+        # bootstrap builtin fallback table. Replacing a declared Array return
+        # with i64 made a direct `Box(items: make_items())` aggregate consume
+        # pointer-typed call bits as an integer; a named local only hid this by
+        # inserting a type-recovering Copy.
+        val resolved_symbol = self.symbols.get_symbol(symbol)
+        if val found_symbol = resolved_symbol:
+            if val found_type = found_symbol.type_:
+                match found_type.kind:
+                    case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
+                    case _: ()
+        var call_name = name
+        if call_name == "":
+            call_name = self.bootstrap_resolved_call_name(symbol)
+        if call_name != "":
+            return self.bootstrap_call_return_type(call_name)
+        self.resolved_call_return_type(symbol)
+
+    me try_lower_bootstrap_cli_arg_index(base: HirExpr, index_local: LocalId) -> LocalId?:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return nil
+        match base.kind:
+            case Call(callee, args, _):
+                if args.len() != 0:
+                    return nil
+                match callee.kind:
+                    case Var(symbol):
+                        val call_name = self.bootstrap_resolved_call_name(symbol)
+                        if call_name == "get_cli_args" or call_name == "get_args":
+                            val func_operand = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("spl_get_arg"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
+                            ))
+                            var b = self.builder
+                            val result = b.emit_call(func_operand, [mir_operand_copy(index_local)], self.bootstrap_text_type())
+                            self.builder = b
+                            if val result_local = result:
+                                return Some(result_local)
+                    case NamedVar(_, callee_name):
+                        if callee_name == "get_cli_args" or callee_name == "get_args":
+                            val func_operand = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("spl_get_arg"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
+                            ))
+                            var b = self.builder
+                            val result = b.emit_call(func_operand, [mir_operand_copy(index_local)], self.bootstrap_text_type())
+                            self.builder = b
+                            if val result_local = result:
+                                return Some(result_local)
+                    case _:
+                        ()
+            case _:
+                ()
+        nil
+
+    me lower_bootstrap_print_call(args: [HirCallArg], rt_name: text) -> LocalId:
+        var arg_local = LocalId(id: 0)
+        if args.len() > 0:
+            arg_local = self.lower_expr(args[0].value)
+        else:
+            var b_empty = self.builder
+            arg_local = b_empty.new_temp(self.bootstrap_text_type())
+            b_empty.emit_const(arg_local, MirConstValue.Str(""), self.bootstrap_text_type())
+            self.builder = b_empty
+        # rt_print/rt_println take `const char*` and deref it directly (no type
+        # tag check) -- passing a raw non-str value (e.g. an i64) SIGSEGVs at
+        # that address. Mirrors bug #136's string-interpolation fix
+        # (expr_dispatch.spl lower_string_interpolation): rendered to a
+        # decimal string via rt_raw_i64_to_string (a tagged heap string),
+        # then unwrapped to its raw char* buffer via rt_interp_cstr.
+        #
+        # IMPORTANT: default is pass-through, coerce only on an *explicitly*
+        # numeric/bool local type. A "coerce unless proven str" default was
+        # tried and reverted: `local_mir_type_of` does not reliably resolve
+        # `Opaque("str")` for text arriving via a function parameter (only
+        # literal/`val x = <literal>` bindings thread the type per #136's own
+        # comment), so that default silently turned every param-passed string
+        # print (the majority of real prints: error messages, paths, names)
+        # into a decimal-pointer number. Coercing only on a known-numeric
+        # type keeps the old (correct) pass-through behavior for text whose
+        # type isn't tracked, while still catching the confirmed SIGSEGV
+        # case (int literals/vars/exprs, which reliably get an explicit
+        # I64 local type). Float now has a raw-render runtime fn
+        # (rt_raw_f64_to_string, see native_print_float_segv bug) and is
+        # covered below, mirroring the bool split.
+        var print_arg = mir_operand_copy(arg_local)
+        var arg_is_numeric = false
+        # bool is rendered through its own raw-render fn (rt_raw_bool_to_string
+        # -> "true"/"false") -- routing it through the plain int/uint branch
+        # below (rt_raw_i64_to_string) would print the raw 0/1 decimal instead,
+        # diverging from the oracle's print(bool) -> "true"/"false" (see
+        # native_bool_print_repr bug).
+        var arg_is_bool = false
+        # float (F32/F64) is rendered through its own raw-render fn
+        # (rt_raw_f64_to_string -> Python-repr shortest round-trip decimal,
+        # with a ".0" suffix on integral values: 2.0 -> "2.0", 0.1 -> "0.1")
+        # -- routing it through rt_raw_i64_to_string would reinterpret the
+        # double's raw bit pattern as a decimal integer (garbage), and simply
+        # passing it through unchanged (old behavior) SIGSEGVs rt_print's bare
+        # char* deref on a float bit pattern (see native_print_float_segv bug).
+        var arg_is_float = false
+        var arg_is_f32 = false
+        if val arg_ty = self.local_mir_type_of(arg_local):
+            match arg_ty.kind:
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64:
+                    arg_is_numeric = true
+                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                    arg_is_numeric = true
+                case MirTypeKind.Bool:
+                    arg_is_bool = true
+                case MirTypeKind.F32:
+                    arg_is_float = true
+                    arg_is_f32 = true
+                case MirTypeKind.F64:
+                    arg_is_float = true
+                case _:
+                    ()
+        # Method-call bool results (see print_arg_is_bool_method_call above):
+        # overrides the numeric default too -- the temp holding e.g. a
+        # `.contains(...)` result is tracked as plain I64 by the method
+        # lowering, so without this it printed 1/0 instead of true/false.
+        if not arg_is_bool and not arg_is_float and args.len() > 0:
+            if print_arg_is_bool_method_call(args[0].value):
+                arg_is_bool = true
+                arg_is_numeric = false
+        if arg_is_numeric or arg_is_bool or arg_is_float:
+            val raw_render_fn = if arg_is_bool: "rt_raw_bool_to_string" elif arg_is_float: "rt_raw_f64_to_string" else: "rt_raw_i64_to_string"
+            val num_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str(raw_render_fn),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            # rt_raw_f64_to_string takes a real `double` (see runtime_native.c
+            # comment on it) -- an F32 operand must be widened to F64 first
+            # (emit_cast -> LLVM fpext), NOT passed raw: the call site's LLVM
+            # arg type is taken from the operand's own MIR type, so a bare F32
+            # arg would pass a 32-bit float in the ABI slot rt_raw_f64_to_string
+            # reads as a full 64-bit double, corrupting the value.
+            var render_src = mir_operand_copy(arg_local)
+            if arg_is_f32:
+                var b_widen = self.builder
+                val widened = b_widen.emit_cast(mir_operand_copy(arg_local), MirType.f64())
+                self.builder = b_widen
+                render_src = mir_operand_copy(widened)
+            var b_num = self.builder
+            val num_res = b_num.emit_call(num_op, [render_src], MirType.i64())
+            self.builder = b_num
+            var num_src = mir_operand_copy(arg_local)
+            if val num_local = num_res:
+                num_src = mir_operand_copy(num_local)
+            val cstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            var b_cstr = self.builder
+            val cstr_res = b_cstr.emit_call(cstr_op, [num_src], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_cstr
+            if val cstr_local = cstr_res:
+                print_arg = mir_operand_copy(cstr_local)
+        # Concat-drop fix (follow-up, reconciled w/ the numeric-coercion path
+        # above): rt_print/rt_println read their operand as a raw
+        # null-terminated char* with no tag check -- fine as long as every
+        # "str"-typed local really is a raw char* (the pre-existing
+        # assumption). Since the `+` binop now emits rt_strcat_tagged (a
+        # PROPERLY TAGGED RtCoreString, see expr_dispatch.spl bin_is_str_concat)
+        # a concat result printed directly here would feed a tagged pointer
+        # (address | RT_VALUE_TAG_HEAP) straight into fputs, which reads the
+        # RtCoreString header 1 byte in instead of the string bytes (observed:
+        # a 3-char magic-number fragment instead of the real content). Coerce
+        # through rt_interp_cstr -- the same tagged-or-raw autodetection
+        # already used for string-interpolation operands (bug #136): a tagged
+        # heap string unwraps to its buffer, an already-raw char* (a plain
+        # string literal, or the decimal cstr just produced above for a
+        # numeric arg) passes through unchanged, so this is a no-op for every
+        # case that worked before.
+        val concat_cstr_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))
+        ))
+        var b_concat_cstr = self.builder
+        val concat_cstr_res = b_concat_cstr.emit_call(concat_cstr_op, [print_arg], self.bootstrap_text_type())
+        self.builder = b_concat_cstr
+        if val concat_cstr_local = concat_cstr_res:
+            print_arg = mir_operand_copy(concat_cstr_local)
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(rt_name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+        ))
+        var b = self.builder
+        b.emit_call(func_operand, [print_arg], MirType.unit())
+        val boot_temp = b.new_temp(MirType.unit())
+        self.builder = b
+        boot_temp
+
+    me enum_match_expr_type(expr: HirExpr) -> HirType?:
+        """Recover a match scrutinee type without depending on lowering order."""
+        if expr.type_ != nil:
+            val explicit_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+            match explicit_type.kind:
+                case HirTypeKind.Infer(_, _): ()
+                case HirTypeKind.Error: ()
+                case _: return Some(explicit_type)
+        match expr.kind:
+            case Var(symbol):
+                val sym = self.symbols.get_symbol(symbol)
+                if val found = sym:
+                    if found.type_ != nil:
+                        val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                        match found_type.kind:
+                            case HirTypeKind.Infer(_, _): ()
+                            case HirTypeKind.Error: ()
+                            case _: return Some(found_type)
+                if self.local_map.has(symbol.id):
+                    val local = self.local_map[symbol.id]
+                    if self.local_hir_types.has(local.id):
+                        return Some(self.local_hir_types[local.id])
+            case NamedVar(symbol, _):
+                val sym = self.symbols.get_symbol(symbol)
+                if val found = sym:
+                    if found.type_ != nil:
+                        val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                        match found_type.kind:
+                            case HirTypeKind.Infer(_, _): ()
+                            case HirTypeKind.Error: ()
+                            case _: return Some(found_type)
+                if self.local_map.has(symbol.id):
+                    val local = self.local_map[symbol.id]
+                    if self.local_hir_types.has(local.id):
+                        return Some(self.local_hir_types[local.id])
+            case Call(callee, _, _):
+                val callee_type = self.enum_match_expr_type(callee)
+                if callee_type != nil:
+                    val found_callee_type = callee_type ?? HirType(kind: HirTypeKind.Error, span: callee.span)
+                    match found_callee_type.kind:
+                        case HirTypeKind.Function(_, ret, _): return Some(ret)
+                        case _: ()
+            case _: ()
+        nil
+
+    me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
+        """Recover the selected payload from an instantiated Result type."""
+        val scrutinee_type = self.enum_match_expr_type(scrutinee)
+        if scrutinee_type != nil:
+            val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+            match found_type.kind:
+                case HirTypeKind.Result(ok_type, err_type):
+                    if variant == "Ok":
+                        return Some(ok_type)
+                    if variant == "Err":
+                        return Some(err_type)
+                case _: ()
+        nil
+
+    me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
+        """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
+        rt_enum_discriminant(e) compared to each variant's index; binds a single
+        i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
+        val scrut_local = self.lower_expr(scrutinee)
+        var bd = self.builder
+        val disc_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_discriminant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val disc_res = bd.emit_call(disc_func, [mir_operand_copy(scrut_local)], MirType.i64())
+        self.builder = bd
+        var disc_local = LocalId(id: 0)
+        if val dl = disc_res:
+            disc_local = dl
+
+        # Collect enum arms (disc, payload-binding symbols, body) + one default.
+        var enum_discs: [i64] = []
+        var enum_binds: [[SymbolId]] = []
+        var enum_bodies: [HirBlock] = []
+        # Parallel to enum_discs: the arm's own variant NAME, so the
+        # single-payload bind below can look up "{enum_name}::{variant}" in
+        # enum_payload_struct_names (see that map's own field comment).
+        var enum_variants: [text] = []
+        var has_default = false
+        var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
+        var enum_name = ""
+        var ai = 0
+        while ai < arms.len():
+            val arm = arms[ai]
+            match arm.pattern.kind:
+                case Enum(etype, variant, epayload):
+                    if enum_name == "":
+                        enum_name = match etype.kind:
+                            case Named(esym, _):
+                                val s = self.symbols.get_symbol(esym)
+                                if s.?: s.name else: ""
+                            case _: ""
+                    var d: i64 = -1
+                    if self.enum_variant_index.has(enum_name):
+                        d = enum_variant_disc(self.enum_variant_index[enum_name], variant)
+                    if d < 0:
+                        # Bare pattern (`case Circle(r)` — no qualifier survived
+                        # to HIR) or variant missing from the presumed enum:
+                        # resolve the variant name against every registered
+                        # enum. Exactly one owner -> use it; otherwise emit a
+                        # LOUD error instead of silently falling through.
+                        var owner = ""
+                        var owner_count = 0
+                        for ename in self.enum_variant_index.keys():
+                            if enum_variant_disc(self.enum_variant_index[ename], variant) >= 0:
+                                owner = ename
+                                owner_count = owner_count + 1
+                        if owner_count == 1:
+                            d = enum_variant_disc(self.enum_variant_index[owner], variant)
+                            if enum_name == "":
+                                enum_name = owner
+                        elif owner_count > 1:
+                            self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(arm.pattern.span))
+                        else:
+                            self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
+                    enum_discs = enum_discs.push(d)
+                    enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
+                    enum_bodies = enum_bodies.push(arm.body)
+                    enum_variants = enum_variants.push(variant)
+                case Wildcard:
+                    has_default = true
+                    default_body = arm.body
+                case Binding(_, _):
+                    has_default = true
+                    default_body = arm.body
+                case _:
+                    self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
+            ai = ai + 1
+
+        var b = self.builder
+        val result = b.new_temp(MirType.i64())
+        val merge_block = b.new_block(Some("ematch_merge"))
+        self.builder = b
+        var result_defined = false
+        var ci = 0
+        while ci < enum_discs.len():
+            var b_cmp = self.builder
+            val key_local = b_cmp.emit_const_int(enum_discs[ci])
+            val cmp_local = b_cmp.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(key_local), MirType.bool())
+            val arm_block = b_cmp.new_block(Some("ematch_arm"))
+            val next_block = b_cmp.new_block(Some("ematch_next"))
+            b_cmp.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
+            self.builder = b_cmp
+            var b_arm = self.builder
+            b_arm.switch_to_block(arm_block)
+            self.builder = b_arm
+            val bind_syms = enum_binds[ci]
+            if bind_syms.len() == 1:
+                # Single-field payload: byte-stable fast path, unchanged from
+                # before #164 -- the raw i64 payload IS the field value.
+                var bp = self.builder
+                val pf = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_enum_payload"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
+                self.builder = bp
+                if val pl = pr:
+                    self.local_map[bind_syms[0].id] = pl
+                    # Struct-value chain fix: if this variant's payload was
+                    # constructed from a known struct VALUE (recorded in
+                    # enum_payload_struct_names at the construction site),
+                    # register it here too so `case Ok(p): print(p.y)` resolves
+                    # `p`'s real field index instead of resolve_field_index's
+                    # silent default-to-0 fallback (see that map's own field
+                    # comment for the full landmine this closes).
+                    val payload_key = "{enum_name}::{enum_variants[ci]}"
+                    val payload_struct = self.enum_payload_struct_names.get(payload_key)
+                    val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci])
+                    var result_payload_is_text = false
+                    if result_payload_type != nil:
+                        val payload_type = result_payload_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+                        match payload_type.kind:
+                            case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                                # Result payloads are stored as erased i64 words,
+                                # but an array word remains the same tagged runtime
+                                # handle. Keep that provenance across the pattern
+                                # bind so indexing uses rt_array_get.
+                                self.runtime_array_locals[pl.id] = true
+                            case HirTypeKind.Str:
+                                result_payload_is_text = true
+                            case _: ()
+                    if result_payload_is_text or (result_payload_type == nil and payload_struct != nil and payload_struct == enum_text_payload_marker()):
+                        # Enum-text bug: this variant's single-field payload
+                        # was observed to be TEXT at the construction site
+                        # (see lower_enum_lit/lower_enum_construct_named).
+                        # `pl` is the raw i64 payload word straight off
+                        # rt_enum_payload -- simply relabeling its STATIC
+                        # type to Opaque("str") in place (tried first) breaks
+                        # the LLVM call typing: rt_enum_payload's real C
+                        # return type is int64_t, so its call-site SSA value
+                        # is genuinely defined as i64, and later text-method
+                        # codegen (e.g. `.len()`'s rt_interp_cstr argument)
+                        # would then see a mismatched "already ptr" static
+                        # type on an actually-i64 SSA value ('%lN defined
+                        # with type i64 but expected ptr'). Instead, mirror
+                        # decode_runtime_value's identical Opaque("") case
+                        # (expr_dispatch.spl): call rt_interp_cstr(pl) to
+                        # produce a GENUINELY new, properly Opaque("str")-typed
+                        # local (rt_interp_cstr's real C signature returns
+                        # `const char*`) -- it auto-detects tagged-vs-raw, so
+                        # this is correct whether the original literal was a
+                        # raw string constant or an already-tagged handle.
+                        var bp_text = self.builder
+                        val text_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_interp_cstr"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                        ))
+                        val text_res = bp_text.emit_call(text_op, [mir_operand_copy(pl)], MirType(kind: MirTypeKind.Opaque("str")))
+                        self.builder = bp_text
+                        if val text_local = text_res:
+                            self.local_map[bind_syms[0].id] = text_local
+                    elif payload_struct != nil and payload_struct != "":
+                        self.struct_value_syms[pl.id] = payload_struct ?? ""
+            elif bind_syms.len() > 1:
+                # #164 multi-field payload: the scalar payload slot holds a
+                # boxed rt_tuple (see box_tuple_payload); unbox each field by
+                # index via rt_tuple_get.
+                var bp = self.builder
+                val pf = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_enum_payload"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
+                self.builder = bp
+                var tuple_local = LocalId(id: 0)
+                if val pl = pr:
+                    tuple_local = pl
+                var fi = 0
+                while fi < bind_syms.len():
+                    var bg = self.builder
+                    val idx_local = bg.emit_const_int(fi)
+                    self.builder = bg
+                    var bget = self.builder
+                    val gf = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_tuple_get"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    val gr = bget.emit_call(gf, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local)], MirType.i64())
+                    self.builder = bget
+                    if val gl = gr:
+                        self.local_map[bind_syms[fi].id] = gl
+                    fi = fi + 1
+            val arm_result = self.lower_block(enum_bodies[ci])
+            var b_arm2 = self.builder
+            # Guard: if the arm body already terminated (e.g. `return r`), emit
+            # NOTHING more into this block. set_terminator would clobber the
+            # terminator, and emitting a post-terminator copy is worse: the
+            # buffered copy gets flushed by the NEXT switch_to_block, and
+            # finalize_block REPLACES block.instructions — wiping every
+            # instruction the arm body emitted (the `return 17` const vanished
+            # this way, leaving rets of undefined locals).
+            if not b_arm2.current_block_has_explicit_terminator():
+                if val arm_result_local = arm_result:
+                    b_arm2.emit_copy(result, arm_result_local)
+                    result_defined = true
+                b_arm2.terminate_goto(merge_block)
+            self.builder = b_arm2
+            var b_n = self.builder
+            b_n.switch_to_block(next_block)
+            self.builder = b_n
+            ci = ci + 1
+
+        if has_default:
+            val dres = self.lower_block(default_body)
+            var b_d2 = self.builder
+            # Same post-terminator guard as the arm loop above.
+            if not b_d2.current_block_has_explicit_terminator():
+                if val drl = dres:
+                    b_d2.emit_copy(result, drl)
+                    result_defined = true
+            self.builder = b_d2
+        var b_end = self.builder
+        if not b_end.current_block_has_explicit_terminator():
+            b_end.terminate_goto(merge_block)
+        self.builder = b_end
+
+        var b_m = self.builder
+        b_m.switch_to_block(merge_block)
+        if not result_defined:
+            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        self.builder = b_m
+        result
+
+    me lower_try_expr(base: HirExpr) -> LocalId:
+        """Lower `expr?` (Try) on a Result or flat-nullable Option value.
+
+        Result: if the runtime discriminant is Err (=1), propagate: return
+        the whole Result from the enclosing function (which must itself
+        return Result). Otherwise yield the Ok payload via rt_enum_payload.
+        Without this arm, Try fell to the default `unsupported MIR
+        expression` path and emitted a use of an undefined SSA value (llc:
+        use of undefined value).
+
+        Option: presence is tested via rt_is_some, mirroring `.unwrap()`'s
+        mechanics in method_calls_literals.spl. On absence, propagate None
+        upward by returning the SAME reserved nil sentinel (bit pattern 3)
+        that a bare `nil` tail expression in an Optional-returning function
+        already emits (see NilLit in expr_dispatch.spl) -- an early
+        `terminate_return` instead of `.unwrap()`'s panic.
+
+        Payload extraction must handle BOTH physical Option representations
+        this codebase has: the flat-nullable ABI (`val x: i64? = 3`), whose
+        raw i64 word IS its own payload with no boxed discriminant/payload
+        pair to decode, AND the explicitly-constructed boxed enum ABI
+        (`Some(v)`/`None`, lowered via lower_enum_construct_named ->
+        rt_enum_new, the SAME mechanism Result's Ok/Err use). rt_is_some
+        already recognizes both forms (see rt_is_none's C comment), but a
+        naive raw-passthrough payload (correct for the flat form) would
+        silently return the boxed ENUM HANDLE itself for `Some(v)` --
+        verified empirically as a silent wrong answer before this branch was
+        added. Disambiguate at runtime via rt_enum_discriminant, which
+        returns -1 for any value that is not a registered boxed-enum handle
+        (rt_core_as_enum's registry-membership check in runtime_native.c) --
+        a flat raw payload (even one that aliases the heap-tag bits) is
+        never registered, so this correctly routes flat payloads through
+        raw-passthrough and boxed Some(v) through rt_enum_payload. This
+        inherits, unchanged, the same already-accepted flat-ABI trade-off
+        every other flat Option operation has (is_some/unwrap/unwrap_or/??/
+        .? -- see NilLit's comment): a literal flat payload of exactly `3`
+        is indistinguishable from None. That is a pre-existing ABI
+        limitation, not a new gap introduced by this lowering."""
+        if val base_type = self.enum_match_expr_type(base):
+            match base_type.kind:
+                case HirTypeKind.Optional(inner):
+                    val base_local = self.lower_expr(base)
+
+                    # Determine the physical lane FIRST via rt_enum_discriminant
+                    # (-1 = not a registered boxed enum = flat raw payload; see
+                    # this method's docstring). Deciding presence from the
+                    # discriminant directly (rather than delegating to
+                    # rt_is_none/rt_is_some for the boxed lane) sidesteps a
+                    # separate, pre-existing landmine: rt_is_none's boxed-enum
+                    # check tests the discriminant against a legacy HASHED
+                    # constant, not the plain positional index
+                    # lower_enum_construct_named actually assigns (Some=0,
+                    # None=1 via enum_variant_disc) -- confirmed empirically
+                    # (`None.unwrap_or(777)` on this codebase's existing
+                    # `.unwrap_or()` prints a garbage payload instead of 777,
+                    # i.e. is_some() already misreports a boxed None as
+                    # present, upstream of and unrelated to this method).
+                    # Comparing the discriminant against the SAME index
+                    # enum_variant_disc computed at construction time (the
+                    # same style Result's own `?` below already uses for its
+                    # Err key) is exact for the boxed lane and never touches
+                    # that shared helper's hash mismatch.
+                    var b_disc = self.builder
+                    val disc_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_enum_discriminant"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false
+                        )))
+                    ))
+                    val disc_res = b_disc.emit_call(disc_op, [mir_operand_copy(base_local)], MirType.i64())
+                    self.builder = b_disc
+                    var disc_local = LocalId(id: 0)
+                    if val dl = disc_res:
+                        disc_local = dl
+
+                    var b_lane = self.builder
+                    val not_enum_key = b_lane.emit_const_int(-1)
+                    val is_boxed_local = b_lane.emit_binop(MirBinOp.Ne, mir_operand_copy(disc_local), mir_operand_copy(not_enum_key), MirType.bool())
+                    self.builder = b_lane
+
+                    val boxed_block = b_lane.new_block(Some("try_opt_boxed"))
+                    val flat_block = b_lane.new_block(Some("try_opt_flat"))
+                    val none_block = b_lane.new_block(Some("try_opt_none"))
+                    val payload_merge_block = b_lane.new_block(Some("try_opt_payload_merge"))
+                    val raw_payload_local = b_lane.new_temp(MirType.i64())
+                    b_lane.terminate_if(mir_operand_copy(is_boxed_local), boxed_block, flat_block)
+                    self.builder = b_lane
+
+                    # Boxed lane: compare the discriminant directly against
+                    # Option's registered None index (default 1 = the
+                    # reserved Some=0/None=1 order if this module never
+                    # constructed Some/None itself, so this dead branch still
+                    # compiles).
+                    var b_boxed = self.builder
+                    b_boxed.switch_to_block(boxed_block)
+                    var none_disc = 1
+                    if self.enum_variant_index.has("Option"):
+                        none_disc = enum_variant_disc(self.enum_variant_index["Option"], "None")
+                    val none_key = b_boxed.emit_const_int(none_disc)
+                    val is_boxed_none = b_boxed.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(none_key), MirType.bool())
+                    val boxed_some_block = b_boxed.new_block(Some("try_opt_boxed_some"))
+                    b_boxed.terminate_if(mir_operand_copy(is_boxed_none), none_block, boxed_some_block)
+                    self.builder = b_boxed
+
+                    var b_boxed_some = self.builder
+                    b_boxed_some.switch_to_block(boxed_some_block)
+                    val payload_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_enum_payload"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false
+                        )))
+                    ))
+                    val boxed_payload_res = b_boxed_some.emit_call(payload_op, [mir_operand_copy(base_local)], MirType.i64())
+                    self.builder = b_boxed_some
+                    var b_boxed_some2 = self.builder
+                    if val bpl = boxed_payload_res:
+                        b_boxed_some2.emit_copy(raw_payload_local, bpl)
+                    b_boxed_some2.terminate_goto(payload_merge_block)
+                    self.builder = b_boxed_some2
+
+                    # Flat lane: rt_is_some's sentinel-based check is exact
+                    # here (no boxed-enum hash involved), matching
+                    # `.unwrap()`'s own mechanics.
+                    var b_flat = self.builder
+                    b_flat.switch_to_block(flat_block)
+                    val is_some_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_is_some"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                        )))
+                    ))
+                    val is_some_res = b_flat.emit_call(is_some_op, [mir_operand_copy(base_local)], MirType.bool())
+                    self.builder = b_flat
+                    var is_some_local = LocalId(id: 0)
+                    if val isl = is_some_res:
+                        is_some_local = isl
+                    var b_flat2 = self.builder
+                    val flat_some_block = b_flat2.new_block(Some("try_opt_flat_some"))
+                    b_flat2.terminate_if(mir_operand_copy(is_some_local), flat_some_block, none_block)
+                    self.builder = b_flat2
+
+                    var b_flat_some = self.builder
+                    b_flat_some.switch_to_block(flat_some_block)
+                    b_flat_some.emit_copy(raw_payload_local, base_local)
+                    b_flat_some.terminate_goto(payload_merge_block)
+                    self.builder = b_flat_some
+
+                    # Absent (either lane): propagate None upward via the
+                    # SAME reserved nil sentinel a bare `nil` tail expression
+                    # already emits.
+                    var b_none = self.builder
+                    b_none.switch_to_block(none_block)
+                    val nil_result = b_none.new_temp(MirType.i64())
+                    b_none.emit_const(nil_result, MirConstValue.Int(3), MirType.i64())
+                    self.nil_locals[nil_result.id] = true
+                    b_none.terminate_return(Some(mir_operand_copy(nil_result)))
+                    self.builder = b_none
+
+                    var b_pm = self.builder
+                    b_pm.switch_to_block(payload_merge_block)
+                    self.builder = b_pm
+
+                    var payload_local = raw_payload_local
+                    match inner.kind:
+                        case HirTypeKind.Str:
+                            payload_local = self.option_text_value(raw_payload_local, self.bootstrap_text_type())
+                        case _:
+                            if self.runtime_value_locals.has(raw_payload_local.id):
+                                payload_local = self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
+                    return payload_local
+                case _: ()
+        val res_local = self.lower_expr(base)
+        var b = self.builder
+        val disc_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_discriminant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val disc_res = b.emit_call(disc_func, [mir_operand_copy(res_local)], MirType.i64())
+        var disc_local = LocalId(id: 0)
+        if val dl = disc_res:
+            disc_local = dl
+        val err_key = b.emit_const_int(1)
+        val cmp_local = b.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(err_key), MirType.bool())
+        val err_block = b.new_block(Some("try_err"))
+        val ok_block = b.new_block(Some("try_ok"))
+        b.terminate_if(mir_operand_copy(cmp_local), err_block, ok_block)
+        self.builder = b
+        var b_err = self.builder
+        b_err.switch_to_block(err_block)
+        b_err.terminate_return(Some(mir_operand_copy(res_local)))
+        self.builder = b_err
+        var b_ok = self.builder
+        b_ok.switch_to_block(ok_block)
+        val pf = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_payload"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val pr = b_ok.emit_call(pf, [mir_operand_copy(res_local)], MirType.i64())
+        self.builder = b_ok
+        if val pl = pr:
+            return pl
+        res_local
+
+    me box_tuple_payload(values: [HirExpr]) -> LocalId:
+        """#164: box 2+ enum-constructor args into a heap tuple (rt_tuple_new
+        + rt_tuple_set per field) so the single scalar payload slot of
+        rt_enum_new can still carry them as one i64. The matching unbox
+        (rt_tuple_get per field) lives in lower_enum_match. 1-field payloads
+        never call this -- they keep the original raw-i64 fast path."""
+        var lowered: [LocalId] = []
+        var vi = 0
+        while vi < values.len():
+            lowered.push(self.lower_expr(values[vi]))
+            vi = vi + 1
+        var bn = self.builder
+        val n_local = bn.emit_const_int(lowered.len())
+        self.builder = bn
+        val new_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_tuple_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var bt = self.builder
+        val tuple_res = bt.emit_call(new_func, [mir_operand_copy(n_local)], MirType.i64())
+        self.builder = bt
+        var tuple_local = LocalId(id: 0)
+        if val tl = tuple_res:
+            tuple_local = tl
+        val set_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_tuple_set"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
+        ))
+        var si = 0
+        while si < lowered.len():
+            var bs = self.builder
+            val idx_local = bs.emit_const_int(si)
+            self.builder = bs
+            var bset = self.builder
+            bset.emit_call(set_func, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local), mir_operand_copy(lowered[si])], MirType(kind: MirTypeKind.I8))
+            self.builder = bset
+            si = si + 1
+        tuple_local
+
+    me lower_enum_lit(type_: HirType, variant: text, payload: HirEnumPayload?) -> LocalId:
+        """Lower `Shape.Circle(7)` to `rt_enum_new(enum_id, discriminant, payload)`.
+        Discriminant = variant index (declared order). Payload = single i64 tuple
+        value or 0 for Unit variants. Only registered (module.enums) enums are
+        handled here — Option/Result use a separate path and fall through."""
+        val enum_name = match type_.kind:
+            case Named(symbol, _):
+                val s = self.symbols.get_symbol(symbol)
+                if s.?: s.name else: ""
+            case _: ""
+        if not self.enum_variant_index.has(enum_name):
+            self.error("enum construction: unregistered enum '{enum_name}'", nil)
+            var be = self.builder
+            val te = be.new_temp(MirType.i64())
+            self.builder = be
+            return te
+        val variant_names = self.enum_variant_index[enum_name]
+        val disc = enum_variant_disc(variant_names, variant)
+        var b = self.builder
+        val enum_id_local = b.emit_const_int(0)
+        val disc_local = b.emit_const_int(disc)
+        self.builder = b
+        var payload_local = LocalId(id: 0)
+        var has_payload = false
+        if payload.?:
+            match payload.unwrap():
+                case Tuple(values):
+                    if values.len() == 1:
+                        payload_local = self.lower_expr(values[0])
+                        has_payload = true
+                        # Same struct-value chain fix as lower_enum_construct_named
+                        # -- see enum_payload_struct_names' own field comment.
+                        val lit_payload_struct_name = self.struct_value_syms.get(payload_local.id)
+                        if lit_payload_struct_name != nil and lit_payload_struct_name != "":
+                            self.enum_payload_struct_names["{enum_name}::{variant}"] = lit_payload_struct_name ?? ""
+                        elif self.local_is_str(payload_local):
+                            # Enum-text bug: record that this variant's payload
+                            # is TEXT so lower_enum_match's single-payload bind
+                            # arm retypes the bound local instead of leaving it
+                            # (wrongly) i64. See enum_text_payload_marker.
+                            self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
+                    elif values.len() > 1:
+                        payload_local = self.box_tuple_payload(values)
+                        has_payload = true
+                case _:
+                    ()
+        if not has_payload:
+            var bz = self.builder
+            payload_local = bz.emit_const_int(0)
+            self.builder = bz
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b2 = self.builder
+        val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
+        self.builder = b2
+        if val r = result:
+            return self.tag_enum_construct_result(r)
+        payload_local
+
+    me tag_enum_construct_result(r: LocalId) -> LocalId:
+        """Bug #189 (enum-valued Dict/Array SIGSEGV or silent no-match):
+        `rt_enum_new` already returns a properly TAG_HEAP-tagged RuntimeValue
+        (see rt_enum_new in compiler_rust/runtime/src/value/objects.rs --
+        `RuntimeValue::from_heap_ptr`), but `emit_call` above declares its
+        MIR return type as a bare `MirType.i64()` like any other runtime
+        call, with nothing distinguishing it from a genuine raw integer.
+        Left as plain I64 this local caused two independent bugs downstream:
+        (1) box_runtime_value (expr_dispatch.spl), used whenever this value
+        is stored as a Dict/Array element, sees `local_mir_type_of == I64`
+        and takes the plain-integer boxing branch (`shl 3`), corrupting the
+        already-tagged handle; (2) lower_array_lit's element-type inference
+        (`local_mir_type_of(first_element)`) records the array's element
+        type as I64 too, so a later read decodes it via `decode_runtime_value`'s
+        integer branch (`shr 3`) instead of passing it through raw. For a
+        DICT this was previously masked by an unrelated read-side bug (empty
+        `{}` dict-literal bindings defaulted their value type to i64,
+        forcing the same compensating `shr 3` on every read) that happened
+        to cancel the extra `shl 3` out; for an ARRAY the same shl-then-shr
+        round trip already canceled out with no read-side bug involved at
+        all. Fixing the dict read-side type (mir_lowering_stmts.spl's
+        Let-binding `effective_type`) exposed bug (1) on its own. Retagging
+        the result to a dedicated non-numeric Opaque("enum") MIR type here
+        (mirroring the Opaque("str") tag already used for raw string
+        handles) fixes both at the root: box_runtime_value's numeric-type
+        match no longer fires (falls to its raw-passthrough default, exactly
+        like Struct(symbol) values), and any element/value-type inference
+        that reads this local's own registered type now sees a real,
+        distinct, non-integer type instead of a bare I64 that happens to be
+        an enum handle in disguise."""
+        var b = self.builder
+        val typed = b.new_temp(MirType(kind: MirTypeKind.Opaque("enum")))
+        b.emit_copy(typed, r)
+        self.builder = b
+        self.runtime_value_locals[typed.id] = true
+        typed
+
+    me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
+        """Same as lower_enum_lit but entered from the MethodCall path, where
+        `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
+        is known by NAME (registered in enum_variant_index); the single tuple
+        payload is args[0] (0 for Unit variants)."""
+        val variant_names = self.enum_variant_index[enum_name]
+        val disc = enum_variant_disc(variant_names, variant)
+        var b = self.builder
+        val enum_id_local = b.emit_const_int(0)
+        val disc_local = b.emit_const_int(disc)
+        self.builder = b
+        var payload_local = LocalId(id: 0)
+        if args.len() == 1:
+            payload_local = self.lower_expr(args[0].value)
+            # Struct-value chain fix: a single-field payload (`Ok(make(3))`,
+            # `Circle(make_point())`) may itself be a struct VALUE. Record
+            # "{enum_name}::{variant}" -> that struct's NAME here, at the
+            # construction site, where struct_value_syms still has it for the
+            # just-lowered payload local. `case Ok(p): print(p.y)` binds `p`
+            # to a raw, untyped i64 payload word (see enum_payload_struct_names'
+            # own field comment) -- without this, resolve_field_index had no
+            # way to recover which struct `p` holds and silently defaulted
+            # `p.y` to field 0.
+            val payload_struct_name = self.struct_value_syms.get(payload_local.id)
+            if payload_struct_name != nil and payload_struct_name != "":
+                self.enum_payload_struct_names["{enum_name}::{variant}"] = payload_struct_name ?? ""
+            elif self.local_is_str(payload_local):
+                # Enum-text bug: same marker as lower_enum_lit above, for the
+                # MethodCall-style construction path (`Shape.Circle(7)` via
+                # receiver=Shape/method=Circle).
+                self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
+        elif args.len() > 1:
+            # #164: 2+ constructor args -- box them into a heap tuple so the
+            # single scalar payload slot can still carry all of them.
+            var values: [HirExpr] = []
+            var ai = 0
+            while ai < args.len():
+                values.push(args[ai].value)
+                ai = ai + 1
+            payload_local = self.box_tuple_payload(values)
+        else:
+            var bz = self.builder
+            payload_local = bz.emit_const_int(0)
+            self.builder = bz
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b2 = self.builder
+        val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
+        self.builder = b2
+        if val r = result:
+            # Bug #189: see tag_enum_construct_result's docstring (used by
+            # lower_enum_lit just above) -- same fix for the MethodCall-style
+            # construction path (`Shape.Circle(7)` via receiver=Shape,
+            # method=Circle).
+            return self.tag_enum_construct_result(r)
+        payload_local
+
+    me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
+        """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
+        word per field, in declared field order. Named args are matched by name;
+        otherwise falls back to positional order. Yields a pointer to the
+        constructed storage (see backend translate_aggregate Struct branch)."""
+        val field_names = self.struct_field_order[struct_name]
+        # ROOT FIX (mirrors seed bug
+        # simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16,
+        # Symptom A -- "lower struct-init fields by declared order with nil
+        # default fill"): the field-selection loop below used to default
+        # every declared field to `args[fi]` (or, once `fi` ran past the end
+        # of `args`, a repeated `args[0]`) and only override that guess when
+        # some LATER arg's NAME happened to match the field being visited.
+        # A field with no matching named arg -- e.g. `Point(y: 2)` omitting
+        # `x` -- silently inherited an unrelated arg's value (`y: 2`'s own
+        # value here) instead of a nil/zero fill, shifting every subsequent
+        # field's stored value out of its slot (and OOB'd reading `args[0]`
+        # when `args` was empty). Separate named args (matched by declared
+        # field name) from positional args (consumed in declared-field
+        # order for whichever fields no name claims); a field neither
+        # claims gets a zero/nil fill below instead.
+        var named_args: Dict<text, HirExpr> = {}
+        var positional_args: [HirExpr] = []
+        for a in args:
+            if a.has_name:
+                named_args[a.name] = a.value
+            else:
+                positional_args.push(a.value)
+        var ops: [MirOperand] = []
+        # Bug #166: learn this struct's per-field TYPE names from the argument
+        # values. Struct field types are `Infer` in the native/bootstrap path
+        # (both parser- and HIR-level), so they cannot be read from struct
+        # declarations. But a nested struct argument's own construction has
+        # already registered its result local in struct_value_syms with its
+        # struct name, so we can recover "field fi of struct_name holds a P"
+        # here. All instances of a struct share layout, so this name-keyed
+        # field-type map is globally valid and lets chained field access
+        # (`r.origin.y`) resolve the inner field against the right struct
+        # instead of silently defaulting to index 0.
+        var field_type_names: [text] = []
+        var fi = 0
+        var pos_i = 0
+        while fi < field_names.len():
+            val want = field_names[fi]
+            val has_named = named_args.has(want)
+            if not has_named and pos_i >= positional_args.len():
+                # Declared field omitted at the call site (no named arg, no
+                # positional arg left to consume): zero/nil-fill instead of
+                # bleeding an unrelated arg's value into this slot (matches
+                # the "unsupported initializer" fallback just below).
+                ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+                field_type_names.push("")
+                fi = fi + 1
+                continue
+            val chosen = if has_named: named_args[want] else: positional_args[pos_i]
+            if not has_named:
+                pos_i = pos_i + 1
+
+            # A Lambda literal in field-initializer position (`Holder(f: \x:
+            # x+1)`) is a first-class function VALUE -- `self.lower_expr` has no
+            # generic Lambda case and returns nil, which then crashed on `v.id`
+            # below (an internal "undefined field 'id' on nil" instead of a
+            # clean diagnostic). NOTE: lifting it to a fnptr via #165's
+            # `lower_lambda_value` was tried here too; the one reachable
+            # end-to-end probe (construct-then-call `h.f(9)`) happens to fail at
+            # build time regardless (struct-field indirect-call is a separate,
+            # unimplemented gap: "unresolved method call: f"), so it wasn't
+            # possible to confirm the fnptr round-trips correctly through a
+            # struct field before something reads it back -- and the sibling
+            # array-literal case demonstrated a silent-successful build that
+            # then SIGSEGVs at runtime for the exact same box/unbox concern.
+            # Staying guard-only here for the same reason: a clean loud build
+            # failure, never a crash, is the only difference this fix makes.
+            val v = self.lower_expr(chosen)
+            if v == nil:
+                self.error("unsupported struct field initializer (cannot lower to a value)", nil)
+                ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+                field_type_names.push("")
+            else:
+                ops = ops.push(mir_operand_copy(v))
+                val arg_struct = self.struct_value_syms.get(v.id)
+                field_type_names.push(arg_struct ?? "")
+            fi = fi + 1
+        # Only record a non-trivial map (at least one nested struct field), and
+        # only when a prior construction has not already recorded richer info.
+        if not self.struct_field_type_name.has(struct_name):
+            self.struct_field_type_name[struct_name] = field_type_names
+        else:
+            # Merge: keep any previously-known non-empty field type name.
+            val prev = self.struct_field_type_name[struct_name]
+            var merged: [text] = []
+            var mi = 0
+            while mi < field_type_names.len():
+                var name_i = field_type_names[mi]
+                if name_i == "" and mi < prev.len():
+                    name_i = prev[mi]
+                merged.push(name_i)
+                mi = mi + 1
+            self.struct_field_type_name[struct_name] = merged
+        val struct_ty = MirType(kind: MirTypeKind.Struct(symbol))
+        var b = self.builder
+        val dest = b.emit_aggregate(AggregateKind.Struct(symbol), ops, struct_ty)
+        self.builder = b
+        # Track dest local -> struct NAME so a later `p.x` field read can recover
+        # the field ordering (the pipeline has no expr type-inference).
+        self.struct_value_syms[dest.id] = struct_name
+        dest
+
+    me lookup_local_type(local: LocalId) -> MirType:
+        """Find `local`'s declared MirType by scanning the current builder's
+        locals (mirrors the linear scan `set_local_name` already does in
+        mir_data.spl). Defaults to i64 -- every local this pipeline currently
+        snapshots for capture-by-value is an i64-ABI value or fnptr word."""
+        var i = 0
+        val locs = self.builder.locals
+        while i < locs.len():
+            if locs[i].id.id == local.id:
+                return locs[i].type_
+            i = i + 1
+        MirType.i64()
+
+    me collect_free_var_syms(body: HirExpr, param_syms: [i64], acc: [i64]) -> [i64]:
+        """Collect free-variable symbol ids referenced by a lambda body that
+        needs a by-value capture snapshot at bind time (see
+        `snapshot_lambda_capture`). Mirrors the exact expression shapes
+        `lambda_body_captures` already recognizes; unrecognized shapes are
+        conservatively left untouched (no new free vars reported) rather than
+        guessed at -- an uncollected free var just keeps today's (pre-existing,
+        already-documented) live-read behavior for that one uncommon shape,
+        never something worse.
+        """
+        match body.kind:
+            case Var(symbol):
+                val sid = mir_expr_symbol_id_value(symbol)
+                if sid >= 0 and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
+                    acc.push(sid)
+                else:
+                    acc
+            case NamedVar(symbol, name):
+                val sid = mir_expr_symbol_id_value(symbol)
+                if sid >= 0 and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name) and not int_list_contains(acc, sid):
+                    acc.push(sid)
+                else:
+                    acc
+            case Binary(_, left, right):
+                val acc1 = self.collect_free_var_syms(left, param_syms, acc)
+                self.collect_free_var_syms(right, param_syms, acc1)
+            case Unary(_, operand):
+                self.collect_free_var_syms(operand, param_syms, acc)
+            case Field(base, _, _):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case Index(base, index):
+                val acc1 = self.collect_free_var_syms(base, param_syms, acc)
+                self.collect_free_var_syms(index, param_syms, acc1)
+            case TupleIndex(base, _):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case Cast(expr, _):
+                self.collect_free_var_syms(expr, param_syms, acc)
+            case As(expr, _):
+                self.collect_free_var_syms(expr, param_syms, acc)
+            case Call(callee, call_args, _):
+                var acc1 = self.collect_free_var_syms(callee, param_syms, acc)
+                var i = 0
+                while i < call_args.len():
+                    acc1 = self.collect_free_var_syms(call_args[i].value, param_syms, acc1)
+                    i = i + 1
+                acc1
+            case MethodCall(receiver, _, call_args, _):
+                var acc1 = self.collect_free_var_syms(receiver, param_syms, acc)
+                var i = 0
+                while i < call_args.len():
+                    acc1 = self.collect_free_var_syms(call_args[i].value, param_syms, acc1)
+                    i = i + 1
+                acc1
+            case Block(block):
+                # `bound` widens param_syms with every `Let` name introduced
+                # anywhere in the block (see hir_block_bound_syms), so a
+                # body-local name is never reported as a free/captured
+                # variable. Statement forms (Expr/Let/Assign/nested Block) are
+                # walked by hir_block_stmts_free_syms -- an Assign statement's
+                # TARGET is scanned exactly like its value, so a body that only
+                # ever REASSIGNS an outer variable (never reads it) still gets
+                # that variable registered for the bind-time capture snapshot.
+                val bound = self.hir_block_bound_syms(block.stmts, param_syms)
+                val acc1 = self.hir_block_stmts_free_syms(block.stmts, bound, acc)
+                if block.has:
+                    self.collect_free_var_syms(block.value, bound, acc1)
+                else:
+                    acc1
+            case Lambda(nested_params, nested_body, _):
+                var combined = param_syms
+                var nlpi = 0
+                while nlpi < nested_params.len():
+                    val nsid = mir_expr_symbol_id_value(nested_params[nlpi].symbol)
+                    if nsid >= 0 and not int_list_contains(combined, nsid):
+                        combined = combined.push(nsid)
+                    nlpi = nlpi + 1
+                self.collect_free_var_syms(nested_body, combined, acc)
+            case StringLit(_, interps):
+                if val its = interps:
+                    self.string_interps_free_syms(its, param_syms, acc)
+                else:
+                    acc
+            case _:
+                acc
+
+    me string_interps_free_syms(interps: [HirInterpolation], param_syms: [i64], acc: [i64]) -> [i64]:
+        var acc1 = acc
+        var i = 0
+        while i < interps.len():
+            acc1 = self.collect_free_var_syms(interps[i].expr, param_syms, acc1)
+            i = i + 1
+        acc1
+
+    me hir_block_stmts_free_syms(stmts: [HirStmt], bound: [i64], acc: [i64]) -> [i64]:
+        """Accumulate free-variable symbol ids referenced anywhere in a lambda
+        block body's statements (mirrors `collect_free_var_syms`'s coverage,
+        extended to statement forms). An `Assign` statement contributes BOTH
+        its target and its value -- a target-only reference (`count = count +
+        1` where `count` is a free outer variable) must still be captured, not
+        just a target that is also read."""
+        var acc1 = acc
+        var i = 0
+        while i < stmts.len():
+            match stmts[i].kind:
+                case Expr(e):
+                    acc1 = self.collect_free_var_syms(e, bound, acc1)
+                case Let(_, _, init):
+                    acc1 = self.collect_free_var_syms(init, bound, acc1)
+                case Assign(target, _, value):
+                    acc1 = self.collect_free_var_syms(target, bound, acc1)
+                    acc1 = self.collect_free_var_syms(value, bound, acc1)
+                case Block(inner):
+                    val inner_bound = self.hir_block_bound_syms(inner.stmts, bound)
+                    acc1 = self.hir_block_stmts_free_syms(inner.stmts, inner_bound, acc1)
+                    if inner.has:
+                        acc1 = self.collect_free_var_syms(inner.value, inner_bound, acc1)
+                case _:
+                    pass
+            i = i + 1
+        acc1
+
+    me snapshot_lambda_capture(lam: HirExpr) -> Dict<i64, LocalId>:
+        """Bind-time by-value capture snapshot for `val f = \\x: ...`.
+
+        For every free variable the body actually references, copies its
+        CURRENT value (not just its symbol->LocalId mapping -- `var` locals
+        are mutable slots in this pipeline, so a later reassignment mutates
+        the existing LocalId's storage in place, not just local_map) into a
+        brand-new frozen temp local. Later calls to this lambda
+        (try_inline_lambda_call) read the frozen temp instead of the live,
+        possibly-since-mutated slot, matching the oracle's by-value capture
+        semantics for `var n = 5; val f = \\x: x+n; n = 100; f(3)` -> 8, not 103.
+        """
+        match lam.kind:
+            case Lambda(params, body, _captures):
+                var param_syms: [i64] = []
+                var pi = 0
+                while pi < params.len():
+                    param_syms = param_syms.push(mir_expr_symbol_id_value(params[pi].symbol))
+                    pi = pi + 1
+                val free_syms: [i64] = self.collect_free_var_syms(body, param_syms, [])
+                var snap: Dict<i64, LocalId> = {}
+                var fi = 0
+                while fi < free_syms.len():
+                    val fsid = free_syms[fi]
+                    if self.local_map.has(fsid):
+                        val live_local = self.local_map[fsid]
+                        val ty = self.lookup_local_type(live_local)
+                        var b = self.builder
+                        val frozen = b.new_temp(ty)
+                        b.emit_copy(frozen, live_local)
+                        self.builder = b
+                        snap[fsid] = frozen
+                    fi = fi + 1
+                snap
+            case _:
+                {}
+
+    me try_inline_lambda_call(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:
+        """Inline a direct call to a val-bound lambda by beta-reduction.
+
+        `val f = \x: x + 1` records the Lambda in lambda_bindings; a later
+        `f(6)` binds each parameter symbol to its lowered argument local and
+        lowers the lambda body in the current scope. Non-capturing lambdas work
+        directly; capture-by-read works incidentally (outer locals remain in
+        local_map). Lambdas used as first-class values are not handled here.
+        """
+        val sid = mir_expr_symbol_id_value(symbol)
+        if sid < 0:
+            return nil
+        if not self.lambda_bindings.has(sid):
+            return nil
+        val lam = self.lambda_bindings[sid]
+        match lam.kind:
+            case Lambda(params, body, _):
+                # Lower each argument expression FIRST, in the caller's live
+                # (current) scope -- an argument like `f(outer_var)` must
+                # resolve `outer_var` against the call site, never the
+                # lambda's bind-time snapshot.
+                var arg_locals: [LocalId] = []
+                var ai = 0
+                while ai < params.len():
+                    if ai < args.len():
+                        arg_locals = arg_locals.push(self.lower_expr(args[ai].value))
+                    ai = ai + 1
+                # By-value capture: swap in the local_map snapshot taken at
+                # `val f = \x: ...` bind time so free-variable references in
+                # `body` resolve to their bind-time LocalId, matching the
+                # oracle's by-value semantics, instead of the live (possibly
+                # SSA-reassigned-since-bind) ambient map. The live map is
+                # restored after the body is lowered so the rest of the
+                # enclosing scope keeps seeing current values.
+                val live_map = self.local_map
+                if self.lambda_capture_snapshot.has(sid):
+                    # Dict has REFERENCE semantics here: aliasing
+                    # `self.local_map` directly to the stored snapshot would let
+                    # the param-binding writes below (and any body-local `val`s)
+                    # mutate the shared master snapshot in place. Copy it into a
+                    # fresh per-call dict instead.
+                    val snap = self.lambda_capture_snapshot[sid]
+                    var call_map: Dict<i64, LocalId> = {}
+                    for snap_key in snap.keys():
+                        call_map[snap_key] = snap[snap_key]
+                    self.local_map = call_map
+                var pi = 0
+                while pi < params.len():
+                    if pi < arg_locals.len():
+                        val pid = mir_expr_symbol_id_value(params[pi].symbol)
+                        if pid >= 0:
+                            self.local_map[pid] = arg_locals[pi]
+                    pi = pi + 1
+                val result = self.lower_expr(body)
+                self.local_map = live_map
+                Some(result)
+            case _:
+                nil
+
+    me lower_inline_lambda_with_locals(params: [HirParam], body: HirExpr, arg_locals: [LocalId]) -> LocalId:
+        """Lower a lambda body at its call site with already-lowered args."""
+        val live_map = self.local_map
+        var call_map: Dict<i64, LocalId> = {}
+        for k in live_map.keys():
+            call_map[k] = live_map[k]
+        self.local_map = call_map
+        var pi = 0
+        while pi < params.len():
+            if pi < arg_locals.len():
+                val pid = mir_expr_symbol_id_value(params[pi].symbol)
+                if pid >= 0:
+                    self.local_map[pid] = arg_locals[pi]
+            pi = pi + 1
+        val result = self.lower_expr(body)
+        self.local_map = live_map
+        result
+
+    me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
+        """Lower an Immediately-Invoked Function Expression: a raw lambda
+        literal used directly as a call callee, `(\x: x + 1)(5)`.
+
+        Unlike `try_inline_lambda_call` (which replays a `val f = \x: ...`
+        binding's bind-time by-value snapshot), there is no bound name and no
+        snapshot to replay here -- the lambda is defined and invoked at the
+        exact same point, so free variables in `body` should simply resolve
+        against the CURRENT live scope. This mirrors `try_inline_lambda_call`'s
+        param-binding step (copy local_map, bind params to lowered arg locals,
+        lower the body, restore local_map) minus the capture-snapshot swap.
+        """
+        var arg_locals: [LocalId] = []
+        var ai = 0
+        while ai < params.len():
+            if ai < args.len():
+                arg_locals = arg_locals.push(self.lower_expr(args[ai].value))
+            ai = ai + 1
+        self.lower_inline_lambda_with_locals(params, body, arg_locals)
+
+    me lambda_body_captures(body: HirExpr, param_syms: [i64]) -> bool:
+        """Conservative free-variable scan for a lambda body being lifted to a
+        top-level function.
+
+        Returns true if the body references anything that would need to be
+        CAPTURED from the enclosing scope (a free variable) -- i.e. any
+        `Var`/`NamedVar` whose symbol is neither one of the lambda's own
+        parameters nor a known top-level function. Non-capturing lambdas lift
+        cleanly to a plain function pointer; capturing ones need a heap
+        environment (Phase C, out of scope) and MUST loud-fail rather than lift
+        to a function that reads garbage for the captured value.
+
+        The scan is deliberately CONSERVATIVE: any expression form it does not
+        explicitly know how to fully traverse returns true (treated as
+        capturing), so an unrecognized body fails the build loudly instead of
+        silently lifting an incompletely-analyzed lambda. This upholds the
+        no-silent-wrong invariant for first-class function values.
+        """
+        match body.kind:
+            case IntLit(_, _): false
+            case FloatLit(_, _): false
+            case BoolLit(_): false
+            case CharLit(_): false
+            case UnitLit: false
+            case NilLit: false
+            case StringLit(_, interps):
+                # Interpolations embed arbitrary sub-expressions; only a plain
+                # (non-interpolated) string literal is capture-free for sure.
+                if interps.?: true else: false
+            case Var(symbol):
+                val sid = mir_expr_symbol_id_value(symbol)
+                not int_list_contains(param_syms, sid)
+            case NamedVar(symbol, name):
+                val sid = mir_expr_symbol_id_value(symbol)
+                if int_list_contains(param_syms, sid):
+                    false
+                elif self.is_known_top_level_function(name):
+                    false
+                else:
+                    true
+            case Binary(_, left, right):
+                self.lambda_body_captures(left, param_syms) or self.lambda_body_captures(right, param_syms)
+            case Unary(_, operand):
+                self.lambda_body_captures(operand, param_syms)
+            case Field(base, _, _):
+                self.lambda_body_captures(base, param_syms)
+            case Index(base, index):
+                self.lambda_body_captures(base, param_syms) or self.lambda_body_captures(index, param_syms)
+            case TupleIndex(base, _):
+                self.lambda_body_captures(base, param_syms)
+            case Cast(expr, _):
+                self.lambda_body_captures(expr, param_syms)
+            case As(expr, _):
+                self.lambda_body_captures(expr, param_syms)
+            case Call(callee, call_args, _):
+                if self.lambda_body_captures(callee, param_syms):
+                    true
+                else:
+                    self.call_args_capture(call_args, param_syms)
+            case MethodCall(receiver, _, call_args, _):
+                if self.lambda_body_captures(receiver, param_syms):
+                    true
+                else:
+                    self.call_args_capture(call_args, param_syms)
+            case Block(block):
+                # Block-bodied lambda (`\v:` + indented statements). Let-bound
+                # names introduced anywhere in the block are treated as bound
+                # for the WHOLE block (a real program never references a
+                # `val`/`var` before its own declaration, so this is a safe,
+                # conservative over-approximation -- it can only avoid a FALSE
+                # capture report for a body-local name, never hide a genuine
+                # outer capture).
+                val bound = self.hir_block_bound_syms(block.stmts, param_syms)
+                if self.hir_block_stmts_capture(block.stmts, bound):
+                    true
+                elif block.has:
+                    self.lambda_body_captures(block.value, bound)
+                else:
+                    false
+            case Lambda(nested_params, nested_body, _):
+                # A lambda literal nested inside another lambda's body (e.g. an
+                # inline lambda arg passed to a call made from within the outer
+                # lambda). The nested lambda's own parameters are bound within
+                # ITS body; anything else it references is a free variable of
+                # the OUTER lambda too, so union the two parameter sets rather
+                # than failing closed on the mere presence of a nested Lambda
+                # node (Call/MethodCall args already recurse here).
+                var combined = param_syms
+                var nlpi = 0
+                while nlpi < nested_params.len():
+                    val nsid = mir_expr_symbol_id_value(nested_params[nlpi].symbol)
+                    if nsid >= 0 and not int_list_contains(combined, nsid):
+                        combined = combined.push(nsid)
+                    nlpi = nlpi + 1
+                self.lambda_body_captures(nested_body, combined)
+            case _:
+                # Unknown / unsupported body form -- fail closed.
+                true
+
+    me hir_block_bound_syms(stmts: [HirStmt], base: [i64]) -> [i64]:
+        """Collect every `Let`-introduced symbol id anywhere in a statement
+        list, added to `base`. Used to widen the lambda-capture "bound" set
+        for a block body so a body-local `val`/`var` is never mistaken for a
+        free (captured) outer variable."""
+        var bound = base
+        var i = 0
+        while i < stmts.len():
+            match stmts[i].kind:
+                case Let(symbol, _, _):
+                    val sid = mir_expr_symbol_id_value(symbol)
+                    if sid >= 0 and not int_list_contains(bound, sid):
+                        bound = bound.push(sid)
+                case Block(inner):
+                    bound = self.hir_block_bound_syms(inner.stmts, bound)
+                case _:
+                    pass
+            i = i + 1
+        bound
+
+    me hir_block_stmts_capture(stmts: [HirStmt], bound: [i64]) -> bool:
+        """Scan every statement in a lambda block body for a capture of a
+        variable outside `bound` (mirrors `lambda_body_captures`'s coverage,
+        extended to statement forms: `Expr`, `Let`, `Assign`, nested `Block`).
+        An assignment TARGET is scanned exactly like a read (via the same
+        `lambda_body_captures` dispatch, which already recognizes `Var`/
+        `NamedVar`/`Field`/`Index`/`TupleIndex` base forms) so a body that
+        REASSIGNS a captured outer variable is correctly flagged as capturing,
+        not just one that reads it."""
+        var i = 0
+        while i < stmts.len():
+            val stmt_captures = match stmts[i].kind:
+                case Expr(e):
+                    self.lambda_body_captures(e, bound)
+                case Let(_, _, init):
+                    self.lambda_body_captures(init, bound)
+                case Assign(target, _, value):
+                    if self.lambda_body_captures(target, bound):
+                        true
+                    else:
+                        self.lambda_body_captures(value, bound)
+                case Block(inner):
+                    val inner_bound = self.hir_block_bound_syms(inner.stmts, bound)
+                    if self.hir_block_stmts_capture(inner.stmts, inner_bound):
+                        true
+                    elif inner.has:
+                        self.lambda_body_captures(inner.value, inner_bound)
+                    else:
+                        false
+                case _:
+                    # AsmAssert or unknown statement form -- fail closed.
+                    true
+            if stmt_captures:
+                return true
+            i = i + 1
+        false
+
+    me call_args_capture(call_args: [HirCallArg], param_syms: [i64]) -> bool:
+        var i = 0
+        while i < call_args.len():
+            if self.lambda_body_captures(call_args[i].value, param_syms):
+                return true
+            i = i + 1
+        false
+
+    me lambda_capture_scan_supported(body: HirExpr) -> bool:
+        """True when collect_free_var_syms traverses the whole expression."""
+        match body.kind:
+            case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Var(_) | NamedVar(_, _): true
+            case StringLit(_, interps):
+                if val its = interps:
+                    self.string_interps_capture_scan_supported(its)
+                else:
+                    true
+            case Binary(_, left, right):
+                self.lambda_capture_scan_supported(left) and self.lambda_capture_scan_supported(right)
+            case Unary(_, operand): self.lambda_capture_scan_supported(operand)
+            case Field(base, _, _): self.lambda_capture_scan_supported(base)
+            case Index(base, index):
+                self.lambda_capture_scan_supported(base) and self.lambda_capture_scan_supported(index)
+            case TupleIndex(base, _): self.lambda_capture_scan_supported(base)
+            case Cast(expr, _) | As(expr, _): self.lambda_capture_scan_supported(expr)
+            case Call(callee, call_args, _):
+                self.lambda_capture_scan_supported(callee) and self.call_args_capture_scan_supported(call_args)
+            case MethodCall(receiver, _, call_args, _):
+                self.lambda_capture_scan_supported(receiver) and self.call_args_capture_scan_supported(call_args)
+            case Block(block):
+                self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
+            case Lambda(_, nested_body, _):
+                self.lambda_capture_scan_supported(nested_body)
+            case _: false
+
+    me hir_block_stmts_scan_supported(stmts: [HirStmt]) -> bool:
+        """Mirrors `lambda_capture_scan_supported`'s coverage for the
+        statement forms a lambda block body can contain."""
+        var i = 0
+        while i < stmts.len():
+            val ok = match stmts[i].kind:
+                case Expr(e): self.lambda_capture_scan_supported(e)
+                case Let(_, _, init): self.lambda_capture_scan_supported(init)
+                case Assign(target, _, value):
+                    self.lambda_capture_scan_supported(target) and self.lambda_capture_scan_supported(value)
+                case Block(inner):
+                    self.hir_block_stmts_scan_supported(inner.stmts) and (not inner.has or self.lambda_capture_scan_supported(inner.value))
+                case _:
+                    false
+            if not ok:
+                return false
+            i = i + 1
+        true
+
+    me call_args_capture_scan_supported(call_args: [HirCallArg]) -> bool:
+        var i = 0
+        while i < call_args.len():
+            if not self.lambda_capture_scan_supported(call_args[i].value):
+                return false
+            i = i + 1
+        true
+
+    me string_interps_capture_scan_supported(interps: [HirInterpolation]) -> bool:
+        var i = 0
+        while i < interps.len():
+            if not self.lambda_capture_scan_supported(interps[i].expr):
+                return false
+            i = i + 1
+        true
+
+    me is_known_top_level_function(name: text) -> bool:
+        for fn_name in self.current_function_names:
+            if fn_name == name:
+                return true
+        false
+
+    me lower_lambda_value(lam: HirExpr) -> MirOperand?:
+        """Materialize a `Lambda` used as a first-class value.
+
+        Lifts the lambda to a synthesized top-level MIR function
+        `__lambda_lift_<n>` (appended to the bootstrap MIR function accumulator
+        so the object emitter emits a real `define`) and returns a function
+        pointer constant referencing it by name -- the exact same
+        `Const(Str(name), FuncPtr(..))` shape `named_function_operand` uses for a
+        named function passed as a value, which the backend already lowers to
+        `@name` + an indirect `call`.
+
+        Capturing lambdas use the runtime closure handle as a heap environment;
+        the lifted function receives that handle as a hidden first argument.
+        Unsupported expression/capture shapes return nil and retain the existing
+        loud failure instead of creating a partial environment.
+        """
+        match lam.kind:
+            case Lambda(params, body, _captures):
+                var param_syms: [i64] = []
+                var pi = 0
+                while pi < params.len():
+                    param_syms = param_syms.push(mir_expr_symbol_id_value(params[pi].symbol))
+                    pi = pi + 1
+                val captures = self.lambda_body_captures(body, param_syms)
+                if captures and not self.lambda_capture_scan_supported(body):
+                    return nil
+                val free_syms = self.collect_free_var_syms(body, param_syms, [])
+                var capture_syms: [i64] = []
+                var ci = 0
+                while ci < free_syms.len():
+                    val fsid = free_syms[ci]
+                    if self.local_map.has(fsid):
+                        val capture_ty = self.lookup_local_type(self.local_map[fsid])
+                        match capture_ty.kind:
+                            case MirTypeKind.F32 | MirTypeKind.F64:
+                                # Closure slots are raw native words. Float
+                                # captures need a bitcast ABI, not numeric cast.
+                                return nil
+                            case _:
+                                capture_syms = capture_syms.push(fsid)
+                    elif not self.global_symbol_ids.has(fsid):
+                        return nil
+                    ci = ci + 1
+                val arity = params.len()
+                # Force the flat i64 runtime ABI on params/return: lambda params
+                # are `Infer` and the whole native call path passes i64 operands.
+                var mir_params: [MirType] = []
+                if capture_syms.len() > 0:
+                    mir_params = mir_params.push(MirType.i64())
+                var mpi = 0
+                while mpi < arity:
+                    mir_params = mir_params.push(MirType.i64())
+                    mpi = mpi + 1
+                val sig = MirSignature(params: mir_params, return_type: MirType.i64(), is_variadic: false)
+                val lift_n = _mir_lambda_lift_counter
+                val gen_name = "__lambda_lift_{lift_n}"
+                _mir_lambda_lift_counter = _mir_lambda_lift_counter + 1
+                # Unique synthesized symbol id, high enough to never collide with
+                # a real program symbol or another lift (module.functions is
+                # keyed by symbol; a shared id would drop all but one lift).
+                val gen_symbol = SymbolId(id: 1073741824 + lift_n)
+                # Lift the body in a FRESH lowering so the in-progress function's
+                # builder/local_map are untouched.
+                var lw = MirLowering.new_for_target(self.symbols, self.target_context)
+                lw.current_function_names = self.current_function_names
+                lw.current_function_symbols = self.current_function_symbols
+                lw.field_map = self.field_map
+                lw.bitfield_map = self.bitfield_map
+                lw.struct_field_order = self.struct_field_order
+                lw.struct_field_type_name = self.struct_field_type_name
+                lw.struct_field_repr_name = self.struct_field_repr_name
+                lw.struct_field_array_element_type_name = self.struct_field_array_element_type_name
+                lw.struct_field_array_elem_type = self.struct_field_array_elem_type
+                lw.struct_method_syms = self.struct_method_syms
+                lw.struct_method_return_names = self.struct_method_return_names
+                lw.struct_method_return_is_array = self.struct_method_return_is_array
+                lw.enum_payload_struct_names = self.enum_payload_struct_names
+                lw.enum_variant_index = self.enum_variant_index
+                lw.global_symbol_ids = self.global_symbol_ids
+                var b = lw.builder
+                b.begin_function(gen_symbol, gen_name, sig, lam.span)
+                lw.builder = b
+                # Map each lambda parameter symbol to its Arg local. begin_function
+                # lays out [ _return?, Arg0..Arg(n-1) ]; the argument-local offset
+                # is (locals.len() - arity), matching function_lowering.spl.
+                val offset = lw.builder.locals.len() - arity
+                var qi = 0
+                while qi < arity:
+                    val psym = param_syms[qi]
+                    if psym >= 0:
+                        lw.local_map[psym] = LocalId(id: qi + offset)
+                    qi = qi + 1
+                if capture_syms.len() > 0:
+                    val env_local = LocalId(id: offset - 1)
+                    var cap_i = 0
+                    while cap_i < capture_syms.len():
+                        val get_capture = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_closure_get_capture"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var lb = lw.builder
+                        val index_local = lb.emit_const_int(cap_i)
+                        val loaded = lb.emit_call(get_capture, [mir_operand_copy(env_local), mir_operand_copy(index_local)], MirType.i64())
+                        lw.builder = lb
+                        if loaded == nil:
+                            return nil
+                        val loaded_local = loaded.unwrap()
+                        val capture_sid = capture_syms[cap_i]
+                        lw.local_map[capture_sid] = loaded_local
+                        val source_local = self.local_map[capture_sid]
+                        val capture_struct = self.struct_value_syms.get(source_local.id)
+                        if capture_struct != nil:
+                            lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
+                        cap_i = cap_i + 1
+                val result = lw.lower_expr(body)
+                var b2 = lw.builder
+                if not b2.current_block_has_explicit_terminator():
+                    b2.terminate_return(Some(mir_operand_copy(result)))
+                lw.builder = b2
+                var b3 = lw.builder
+                var mir_fn = b3.end_function()
+                lw.builder = b3
+                mir_fn.name = gen_name
+                mir_fn.symbol = gen_symbol
+                # Register the lifted function in the entry MirModule.functions
+                # dict, which `native-build --entry` emits via
+                # bootstrap_emit_real_llvm_module_object. self.builder.module is
+                # the SAME entry module being accumulated across function
+                # lowerings and returned to the emitter, so adding here emits a
+                # real `define @<gen>`.
+                var host_b = self.builder
+                var host_mod = host_b.module
+                var host_fns = host_mod.functions
+                host_fns[gen_symbol] = mir_fn
+                host_mod.functions = host_fns
+                host_b.module = host_mod
+                self.builder = host_b
+                val lifted_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(gen_name),
+                    MirType(kind: MirTypeKind.FuncPtr(sig))
+                ))
+                if capture_syms.len() == 0:
+                    return Some(lifted_operand)
+
+                val closure_new = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_closure_new"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var host_closure_b = self.builder
+                val capture_count = host_closure_b.emit_const_int(capture_syms.len())
+                val closure_result = host_closure_b.emit_call(
+                    closure_new,
+                    [lifted_operand, mir_operand_copy(capture_count)],
+                    MirType.i64()
+                )
+                self.builder = host_closure_b
+                if closure_result == nil:
+                    return nil
+                val closure_local = closure_result.unwrap()
+                var set_i = 0
+                while set_i < capture_syms.len():
+                    val closure_set = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_closure_set_capture"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var set_b = self.builder
+                    val index_local = set_b.emit_const_int(set_i)
+                    set_b.emit_call(
+                        closure_set,
+                        [mir_operand_copy(closure_local), mir_operand_copy(index_local), mir_operand_copy(self.local_map[capture_syms[set_i]])],
+                        MirType.i64()
+                    )
+                    self.builder = set_b
+                    set_i = set_i + 1
+                Some(mir_operand_copy(closure_local))
+            case _:
+                nil
+
+    me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
+        """Lower function call.
+
+        Handles both direct calls (Var) and indirect calls (closures, function pointers).
+        Intercepts GPU intrinsic calls (gpu_global_id, etc.) and emits MIR GPU instructions.
+        """
+        val bitfield_construct = self.try_lower_bitfield_construct(callee, args)
+        if val bf_local = bitfield_construct:
+            return bf_local
+
+        val callee_disc = rt_enum_discriminant(callee.kind)
+        val fallback_symbol = SymbolId(id: -1)
+        var direct_symbol = fallback_symbol
+        var direct_name = ""
+        var is_direct = false
+        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+            match callee.kind:
+                case HirExprKind.Var(symbol):
+                    direct_symbol = symbol
+                    val sym = self.symbols.get_symbol(symbol)
+                    direct_name = if sym.?: sym.name else: ""
+                    is_direct = true
+                case _:
+                    pass
+        elif callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+            match callee.kind:
+                case HirExprKind.NamedVar(symbol, name):
+                    # `name` already carries a --entry-closure cross-module
+                    # imported function's qualified `module.function` name
+                    # when applicable -- baked into this HIR node's payload
+                    # at HIR-lowering time (expressions.spl's `ExprKind.Ident`
+                    # case), NOT looked up here via `self.symbols` a second
+                    # time: a symbol-table rename applied during HIR lowering
+                    # does not survive the trip through the bootstrap
+                    # entry-HIR-module global into this later, separate MIR
+                    # lowering pass (the interpreter's known "mutating a
+                    # class held inside a value-type struct across a pass
+                    # boundary" landmine), even though the SAME rename is
+                    # visible to a same-pass HIR-time lookup. See
+                    # module_lowering.spl's `qualify_imported_function_symbol`
+                    # and its Ident-lowering call site (bug
+                    # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B).
+                    direct_symbol = symbol
+                    direct_name = name
+                    is_direct = true
+                case _:
+                    pass
+        elif callee_disc == rt_enum_discriminant(HirExprKind.Lambda([], callee, [])):
+            # IIFE: a raw lambda literal used directly as the call callee,
+            # `(\x: x + 1)(5)`. try_inline_lambda_call below only fires for a
+            # `Var`/`NamedVar` callee resolved through `lambda_bindings` (a
+            # `val f = \x: ...` binding); a bare literal callee never reaches
+            # it, so this was previously falling through to the generic
+            # `self.lower_expr(callee)` path and hitting the loud
+            # `unsupported MIR expression: Lambda` failure. Beta-reduce it
+            # directly here instead -- no bind-time snapshot is needed since
+            # the lambda is defined and invoked at the same point, so free
+            # variables should simply see the current live scope.
+            match callee.kind:
+                case HirExprKind.Lambda(params, body, _captures):
+                    return self.lower_iife_call(params, body, args)
+                case _:
+                    pass
+
+        if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
+            is_direct = false
+
+        if is_direct:
+            # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
+            val inl = self.try_inline_lambda_call(direct_symbol, args)
+            if inl.?:
+                return inl.unwrap()
+            # Built-in Result construction: `Ok(v)` / `Err(e)` -> rt_enum_new with
+            # Result's discriminants (Ok=0, Err=1, registered in enum_variant_index).
+            if (direct_name == "Ok" or direct_name == "Err") and self.enum_variant_index.has("Result"):
+                return self.lower_enum_construct_named("Result", direct_name, args)
+            if direct_name == "Some" or direct_name == "None":
+                if not self.enum_variant_index.has("Option"):
+                    self.enum_variant_index["Option"] = ["Some", "None"]
+                return self.lower_enum_construct_named("Option", direct_name, args)
+
+        if is_direct:
+            if direct_name == "print" or direct_name == "_cli_eprint":
+                return self.lower_bootstrap_print_call(args, "rt_print")
+            if direct_name == "println":
+                return self.lower_bootstrap_print_call(args, "rt_println")
+            # Task #178 (text3 lane): `int("42")` -- the global value-parsing
+            # builtin call form, distinct from `i64(x)`-style fixed-width
+            # numeric casts (see primitive_cast_type_kind's comment: "int/
+            # float/bool remain calls"). Previously had NO MIR intercept at
+            # all: is_interp_builtin_fn (expressions.spl) didn't list "int"
+            # either, so HIR lowering hard-errored "unresolved name: int"
+            # before MIR lowering was ever reached. Both gaps are now closed
+            # together (that HIR-side allowlist addition is this same
+            # change). rt_string_to_int_any (runtime_native.c) normalizes a
+            # tagged-or-raw text argument via rt_interp_cstr before parsing,
+            # so this is correct whether the argument is a literal (raw) or a
+            # runtime-produced string (tagged).
+            if direct_name == "int" and args.len() == 1:
+                val int_arg_local = self.lower_expr(args[0].value)
+                val int_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_to_int_any"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_int = self.builder
+                val int_res = b_int.emit_call(int_op, [mir_operand_copy(int_arg_local)], MirType.i64())
+                self.builder = b_int
+                if val int_local = int_res:
+                    return int_local
+                return int_arg_local
+            if is_gpu_intrinsic(direct_name):
+                return self.lower_gpu_intrinsic_call(direct_name, args)
+            if self.struct_field_order.has(direct_name):
+                return self.lower_struct_construct(direct_symbol, direct_name, args)
+
+        var arg_operands: [MirOperand] = []
+        for arg in args:
+            val arg_value: HirExpr = arg.value
+            val arg_kind: HirExprKind = arg_value.kind
+            val fallback_arg_symbol = SymbolId(id: -1)
+            val named_var_disc = rt_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
+            var emitted_function = false
+            if rt_enum_discriminant(arg_kind) == named_var_disc:
+                match arg_kind:
+                    case HirExprKind.NamedVar(symbol, name):
+                        if not self.local_map.has(mir_expr_symbol_id_value(symbol)):
+                            val function_operand = self.named_function_operand(name)
+                            if function_operand != nil:
+                                arg_operands = arg_operands.push(function_operand.unwrap())
+                                emitted_function = true
+                    case _:
+                        pass
+            if emitted_function:
+                continue
+            # A lambda passed as a first-class VALUE (`apply(\x: x+1, 5)`):
+            # materialize a raw lifted fnptr or a closure handle.
+            val lambda_disc = rt_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
+            if rt_enum_discriminant(arg_kind) == lambda_disc:
+                val lambda_operand = self.lower_lambda_value(arg_value)
+                if lambda_operand != nil:
+                    arg_operands = arg_operands.push(lambda_operand.unwrap())
+                    continue
+            val arg_local = self.lower_expr(arg_value)
+            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+
+        if is_direct:
+            val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
+            val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
+            val func_operand = if resolved_name != "":
+                MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(resolved_name),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: return_type, is_variadic: false)))
+                ))
+            else:
+                self.symbol_to_operand(direct_symbol)
+            val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
+            self.remember_call_hir_return(result, direct_symbol)
+            return result
+
+        val callee_local = self.lower_expr(callee)
+        var param_types: [MirType] = []
+        for arg_op in arg_operands:
+            param_types.push(MirType.i64())
+        var ret_type = MirType.i64()
+        if callee.has_type_:
+            ret_type = self.lower_type(callee.type_)
+        val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
+        # A function-typed value can be either the existing raw function
+        # pointer or a capturing closure handle. Keep raw ABI compatibility,
+        # but call a closure's lifted target with its environment first.
+        val closure_target_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_closure_func_ptr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val closure_target_result = b.emit_call(closure_target_fn, [mir_operand_copy(callee_local)], MirType.i64())
+        if closure_target_result == nil:
+            val fallback = b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
+            self.builder = b
+            if fallback != nil:
+                return fallback.unwrap()
+            val unit_local = b.new_temp(MirType.unit())
+            self.builder = b
+            return unit_local
+        val closure_target = closure_target_result.unwrap()
+        val zero = b.emit_const_int(0)
+        val is_closure = b.emit_binop(MirBinOp.Ne, mir_operand_copy(closure_target), mir_operand_copy(zero), MirType.bool())
+        val closure_block = b.new_block(Some("closure_call"))
+        val raw_block = b.new_block(Some("raw_fn_call"))
+        val merge_block = b.new_block(Some("indirect_call_merge"))
+        val result_slot: LocalId? = if ret_type.kind != MirTypeKind.Unit: Some(b.new_temp(ret_type)) else: nil
+        b.terminate_if(mir_operand_copy(is_closure), closure_block, raw_block)
+        self.builder = b
+
+        var closure_b = self.builder
+        closure_b.switch_to_block(closure_block)
+        var closure_params: [MirType] = [MirType.i64()]
+        var closure_args: [MirOperand] = [mir_operand_copy(callee_local)]
+        for arg_op in arg_operands:
+            closure_params = closure_params.push(MirType.i64())
+            closure_args = closure_args.push(arg_op)
+        val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false)
+        val closure_call_result = closure_b.emit_call_indirect(mir_operand_copy(closure_target), closure_args, closure_sig, ret_type)
+        if closure_call_result != nil and result_slot != nil:
+            closure_b.emit_copy(result_slot.unwrap(), closure_call_result.unwrap())
+        closure_b.terminate_goto(merge_block)
+        self.builder = closure_b
+
+        var raw_b = self.builder
+        raw_b.switch_to_block(raw_block)
+        val raw_call_result = raw_b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
+        if raw_call_result != nil and result_slot != nil:
+            raw_b.emit_copy(result_slot.unwrap(), raw_call_result.unwrap())
+        raw_b.terminate_goto(merge_block)
+        self.builder = raw_b
+
+        var merge_b = self.builder
+        merge_b.switch_to_block(merge_block)
+        if result_slot != nil:
+            self.builder = merge_b
+            return result_slot.unwrap()
+        val unit_local = merge_b.new_temp(MirType.unit())
+        self.builder = merge_b
+        unit_local
+
+    me is_mutating_method(name: text) -> bool:
+        """Allow-list of methods that mutate `self`.
+
+        Used by `lower_method_call` to trigger a post-call write-back when the
+        receiver is an indexed slot (`stack[i]`) or a field (`obj.child`). For
+        reference-semantics receivers the write-back is an idempotent re-store
+        of the same pointer; for value-semantics receivers it is the fix for
+        the lost mutation. See Rust seed bug #28.
+        """
+        match name:
+            case "push": true
+            case "pop": true
+            case "insert": true
+            case "remove": true
+            case "clear": true
+            case "extend": true
+            case "sort": true
+            case "reverse": true
+            case "set": true
+            case "delete": true
+            case "append": true
+            case "prepend": true
+            case "splice": true
+            case "drain": true
+            case "truncate": true
+            case "resize": true
+            case "fill": true
+            case "swap": true
+            case "update": true
+            case "replace": true
+            case "init": true
+            case "reset": true
+            case "inc": true
+            case "dec": true
+            case _: false

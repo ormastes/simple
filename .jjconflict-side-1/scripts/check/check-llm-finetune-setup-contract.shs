@@ -1,0 +1,168 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_finetune_setup_contract}"
+GUARD_BUILD_DIR="$BUILD_DIR/guard"
+ACCEPTANCE_BUILD_DIR="$BUILD_DIR/acceptance"
+GUARD_REPORT="$BUILD_DIR/llm_finetune_setup_contract_guard_report.md"
+ACCEPTANCE_REPORT="$BUILD_DIR/llm_finetune_setup_contract_acceptance_report.md"
+OUT_ENV="$BUILD_DIR/evidence.env"
+GUARD_ENV="$GUARD_BUILD_DIR/evidence.env"
+ACCEPTANCE_ENV="$ACCEPTANCE_BUILD_DIR/evidence.env"
+GUARD_STDOUT="$BUILD_DIR/guard_stdout.log"
+ACCEPTANCE_STDOUT="$BUILD_DIR/acceptance_stdout.log"
+mkdir -p "$BUILD_DIR"
+rm -f "$OUT_ENV" "$GUARD_REPORT" "$ACCEPTANCE_REPORT" "$GUARD_STDOUT" "$ACCEPTANCE_STDOUT"
+
+failures=""
+checked_count=0
+
+add_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures|$1"
+    fi
+}
+
+env_value() {
+    file="$1"
+    key="$2"
+    if [ -f "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+require_env_key() {
+    file="$1"
+    key="$2"
+    checked_count=$((checked_count + 1))
+    value="$(env_value "$file" "$key")"
+    if [ -z "$value" ]; then
+        add_failure "missing_env:$key"
+    fi
+}
+
+require_report_key() {
+    file="$1"
+    key="$2"
+    checked_count=$((checked_count + 1))
+    if ! rg -q "^- ${key}: \`.+" "$file"; then
+        add_failure "missing_report:$key"
+    fi
+}
+
+if BUILD_DIR="$ACCEPTANCE_BUILD_DIR" REPORT_PATH="$ACCEPTANCE_REPORT" sh scripts/check/check-llm-finetune-acceptance-evidence.shs >"$ACCEPTANCE_STDOUT" 2>&1; then
+    acceptance_exit=0
+else
+    acceptance_exit=$?
+fi
+
+if BUILD_DIR="$GUARD_BUILD_DIR" REPORT_PATH="$GUARD_REPORT" FINETUNE_ACCEPTANCE_EVIDENCE_ENV="$ACCEPTANCE_ENV" sh scripts/check/check-llm-finetune-guard-evidence.shs >"$GUARD_STDOUT" 2>&1; then
+    guard_exit=0
+else
+    guard_exit=$?
+fi
+
+if [ ! -s "$GUARD_ENV" ]; then
+    add_failure "missing_guard_env"
+else
+    for key in \
+        llm_finetune_guard_evidence_status \
+        llm_finetune_guard_required_gates \
+        llm_finetune_guard_blocked_gates \
+        llm_finetune_guard_primary_blocked_gate \
+        llm_finetune_guard_next_action \
+        llm_finetune_guard_retry5_cache_manifest_artifact_status \
+        llm_finetune_guard_retry5_cache_license_review \
+        llm_finetune_guard_retry5_cache_data_access \
+        llm_finetune_guard_retry5_cache_training_allowed \
+        llm_finetune_guard_retry6_direct_result_status \
+        llm_finetune_guard_retry7_direct_result_status \
+        llm_finetune_guard_surface_manifest_sha256
+    do
+        require_env_key "$GUARD_ENV" "$key"
+    done
+fi
+
+if [ ! -s "$ACCEPTANCE_ENV" ]; then
+    add_failure "missing_acceptance_env"
+else
+    for key in \
+        llm_finetune_acceptance_status \
+        llm_finetune_acceptance_reason \
+        llm_finetune_acceptance_required_gates \
+        llm_finetune_acceptance_blocked_gates \
+        llm_finetune_acceptance_primary_blocked_gate \
+        llm_finetune_acceptance_next_action \
+        llm_finetune_acceptance_attempt_record_artifact_status \
+        llm_finetune_acceptance_model_manifest_artifact_status \
+        llm_finetune_acceptance_eval_result_artifact_status \
+        llm_finetune_acceptance_handoff_doc_artifact_status \
+        llm_finetune_acceptance_surface_manifest_sha256
+    do
+        require_env_key "$ACCEPTANCE_ENV" "$key"
+    done
+fi
+
+if [ ! -s "$GUARD_REPORT" ]; then
+    add_failure "missing_guard_report"
+else
+    for key in \
+        next_action \
+        blocked_gates \
+        retry5_cache_license_review \
+        retry5_cache_training_allowed \
+        surface_manifest_sha256
+    do
+        require_report_key "$GUARD_REPORT" "$key"
+    done
+fi
+
+if [ ! -s "$ACCEPTANCE_REPORT" ]; then
+    add_failure "missing_acceptance_report"
+else
+    for key in \
+        status \
+        reason \
+        blocked_gates \
+        primary_blocked_gate \
+        next_action \
+        surface_manifest_sha256
+    do
+        require_report_key "$ACCEPTANCE_REPORT" "$key"
+    done
+fi
+
+if [ -z "$failures" ]; then
+    status="pass"
+    reason="finetune_setup_diagnostics_present"
+else
+    status="fail"
+    reason="$failures"
+fi
+
+{
+    printf '%s\n' "llm_finetune_setup_contract_status=$status"
+    printf '%s\n' "llm_finetune_setup_contract_reason=$reason"
+    printf '%s\n' "llm_finetune_setup_contract_checked_count=$checked_count"
+    printf '%s\n' "llm_finetune_setup_contract_guard_exit=$guard_exit"
+    printf '%s\n' "llm_finetune_setup_contract_acceptance_exit=$acceptance_exit"
+    printf '%s\n' "llm_finetune_setup_contract_guard_env=$GUARD_ENV"
+    printf '%s\n' "llm_finetune_setup_contract_acceptance_env=$ACCEPTANCE_ENV"
+    printf '%s\n' "llm_finetune_setup_contract_guard_report=$GUARD_REPORT"
+    printf '%s\n' "llm_finetune_setup_contract_acceptance_report=$ACCEPTANCE_REPORT"
+    printf '%s\n' "llm_finetune_setup_contract_guard_stdout=$GUARD_STDOUT"
+    printf '%s\n' "llm_finetune_setup_contract_acceptance_stdout=$ACCEPTANCE_STDOUT"
+} >"$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    printf '%s\n' "STATUS: PASS llm-finetune-setup-contract checked_count=$checked_count"
+    exit 0
+fi
+
+printf '%s\n' "STATUS: FAIL llm-finetune-setup-contract reason=$reason"
+exit 1

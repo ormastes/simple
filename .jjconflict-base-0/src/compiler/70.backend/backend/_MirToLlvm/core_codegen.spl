@@ -1,0 +1,1545 @@
+# Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
+use compiler.backend.backend.mir_to_llvm.*
+# MIR to LLVM IR Translation
+#
+# MirToLlvm class that translates MIR to LLVM IR.
+# Implements MirTextCodegen trait for shared instruction dispatch.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
+use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
+use compiler.backend.backend_api.*
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_type_mapper.LlvmTypeMapper
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
+    llvm_ir_builder_build}
+use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+
+extern fn rt_env_get(key: text) -> text
+
+fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
+    # A single-block function is NOT skippable: a straight-line reassignment
+    # (e.g. a fixed-width `c = c + 1` twice, #171) lowers to multiple defs of
+    # one local inside ONE block, which the textual `%lN` emitter would emit as
+    # a duplicate SSA def -> llc "multiple definition of local value". The
+    # alloca transform below slots such single-block multi-def locals (its own
+    # `slotted.len() == 0` check keeps a single-def single-block function a
+    # byte-for-byte no-op), so only a truly empty function is skipped here.
+    if fn_.blocks.len() == 0:
+        return fn_
+    # SIMPLE_BOOTSTRAP-only: replace the hand-built SSA-phi mechanism (which
+    # cannot correctly resolve each phi's incoming-value-per-predecessor for
+    # real control flow -- short-circuit `and`, nested if-EXPRESSIONS) with
+    # an alloca-per-reassigned-local transform. An entry-block alloca
+    # dominates every use by construction, so this cannot produce the
+    # `undef` phi operands the join-predecessor phi materialization could.
+    # Gated on the same SIMPLE_BOOTSTRAP condition the rest of this LLVM
+    # text-codegen path uses -- the normal (non-bootstrap) build never sets
+    # this env var, so it is byte-for-byte unchanged.
+    # Replace the hand-built SSA-phi mechanism (which cannot correctly resolve
+    # each phi's incoming-value-per-predecessor for real control flow -- short-
+    # circuit `and`, nested if-EXPRESSIONS, and especially loop back-edges,
+    # where a multi-def loop-carried local like `i = i + 1` otherwise produces
+    # an llc "multiple definition of local value" SSA violation) with an
+    # alloca-per-reassigned-local transform. An entry-block alloca dominates
+    # every use by construction, so it cannot produce the `undef`/wrong phi
+    # operands the join-predecessor phi materialization could. Applied on BOTH
+    # the normal and SIMPLE_BOOTSTRAP paths; ssa_var_transform_blocks remains
+    # the fallback only when the alloca transform reports it did not apply
+    # (single-def functions -- byte-for-byte unchanged there).
+    val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
+    if alloca_rewritten.applied:
+        return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        return fn_
+    val rewritten = ssa_var_transform_blocks(fn_.blocks)
+    if rewritten.applied:
+        return MirFunction.with_blocks(fn_, rewritten.blocks)
+    fn_
+
+fn llvm_module_name_from_entry_path(path: text) -> text:
+    # MUST stay byte-identical to _driver_module_name_from_path
+    # (80.driver/driver_source_loading.spl) — module.name is derived there,
+    # and this function re-derives the entry module's name from the
+    # SIMPLE_NATIVE_BUILD_ENTRY path for the entry_main_symbol comparison.
+    # When the two drift, main is never renamed to __simple_main and EVERY
+    # out-of-tree entry (e.g. /tmp probes with '-' in the path) fails to
+    # link (70a29867bc2 added /src/-stripping + '-'/' '→'_' only on the
+    # driver side; that broke the whole native-smoke-matrix 0/19).
+    var mod_path = path.replace("\\", "/")
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    val absolute_src = mod_path.find("/src/") ?? -1
+    if absolute_src >= 0:
+        mod_path = mod_path.substring(absolute_src + 5)
+    else:
+        val absolute_examples = mod_path.find("/examples/") ?? -1
+        if absolute_examples >= 0:
+            mod_path = mod_path.substring(absolute_examples + 1)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path = mod_path.replace("-", "_")
+    mod_path = mod_path.replace(" ", "_")
+    mod_path.replace("/", ".")
+
+fn llvm_module_is_native_entry(module_name: text) -> bool:
+    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if native_entry == "":
+        return true
+    module_name == llvm_module_name_from_entry_path(native_entry)
+
+# ============================================================================
+# MIR to LLVM IR Translation
+# ============================================================================
+
+impl MirTextCodegen for MirToLlvm:
+
+    # === Required: top-level translation ===
+
+    me translate_module(module: MirModule) -> text:
+        """Translate MIR module to LLVM IR."""
+        self.entry_main_symbol = llvm_module_is_native_entry(module.name)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            llvm_bootstrap_string_globals_reset()
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[llvm-translate] header"
+        self.builder.emit_module_header()
+        if bootstrap_debug:
+            print "[llvm-translate] runtime"
+        self.emit_runtime_declarations()
+
+        # Origin discriminator (see mir_call_ownership.spl): record which
+        # runtime-owned names this module ALSO defines a local function
+        # for, BEFORE any function is emitted. llvm_function_symbol_name
+        # consults this to mangle only a colliding local definition's own
+        # symbol -- ordinary named calls to any other function are
+        # unaffected.
+        for fn_owner in module.functions.values():
+            if mir_runtime_owned_call_name(fn_owner.name):
+                self.owned_name_has_local[fn_owner.name] = true
+
+        # mutglobal lane (module-level `var` mutation storage, see
+        # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
+        # storage for every MirModule.statics entry (module-level mutable
+        # bindings) BEFORE any function body is translated, so
+        # LoadGlobal/StoreGlobal instructions in those bodies can resolve
+        # global_static_names/global_static_types. `module.statics` has no
+        # producer yet on the normal HIR/MIR frontend path (see the
+        # gap-analysis doc) other than this lane's own
+        # `_MirLowering/module_lowering.spl:lower_static` addition, so this
+        # loop is a no-op (empty dict) for every existing native-build
+        # program today -- purely additive, cannot regress anything that
+        # currently compiles.
+        if module.statics.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; Module-level mutable globals")
+            for static_ in module.statics.values():
+                val g_ty = self.valid_llvm_type(self.llvm_type_text(static_.type_))
+                val g_name = "@g_{static_.name}"
+                self.global_static_names[static_.symbol.id] = g_name
+                self.global_static_types[static_.symbol.id] = g_ty
+                var g_init = "zeroinitializer"
+                if static_.init.?:
+                    val init_const: MirConstant = static_.init.unwrap()
+                    g_init = self.translate_const_value(init_const.value)
+                self.builder.emit("{g_name} = global {g_ty} {g_init}")
+
+        if bootstrap_debug:
+            print "[llvm-translate] keys"
+        if bootstrap_debug:
+            print "[llvm-translate] loop"
+        if bootstrap_debug:
+            val real_bootstrap = (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1"
+            val bootstrap_function_count = bootstrap_mir_function_count()
+            if real_bootstrap:
+                var bootstrap_return_i = 0
+                while bootstrap_return_i < bootstrap_function_count:
+                    val name = bootstrap_mir_function_name_at(bootstrap_return_i)
+                    val fn_name = self.llvm_function_symbol_name(name)
+                    val bootstrap_fn = bootstrap_mir_function_at(bootstrap_return_i)
+                    val body = MirBody.from_function(bootstrap_fn)
+                    val ret_ty = self.llvm_type_text(body.return_ty)
+                    self.remember_function_return_type(name, ret_ty)
+                    self.remember_function_return_type(fn_name, ret_ty)
+                    val ret_unsigned = self.is_unsigned_mir_kind(body.return_ty.kind)
+                    self.remember_function_return_unsigned(name, ret_unsigned)
+                    self.remember_function_return_unsigned(fn_name, ret_unsigned)
+                    self.remember_function_param_types_from_signature(name, bootstrap_fn.signature)
+                    self.remember_function_param_types_from_signature(fn_name, bootstrap_fn.signature)
+                    bootstrap_return_i = bootstrap_return_i + 1
+            var bootstrap_fni = 0
+            while bootstrap_fni < bootstrap_function_count:
+                print "[llvm-translate] body"
+                val name = bootstrap_mir_function_name_at(bootstrap_fni)
+                print "[llvm-translate] function"
+                if real_bootstrap:
+                    val bootstrap_fn = bootstrap_mir_function_at(bootstrap_fni)
+                    val body = MirBody.from_function(bootstrap_fn)
+                    self.translate_function(self.llvm_function_symbol_name(name), body)
+                else:
+                    val fn_name = self.llvm_function_symbol_name(name)
+                    self.builder.emit("define i64 @{fn_name}() {")
+                    self.builder.emit("entry:")
+                    self.builder.emit("  ret i64 0")
+                    self.builder.emit("}")
+                print "[llvm-translate] function-done"
+                bootstrap_fni = bootstrap_fni + 1
+        else:
+            for fn_ in module.functions.values():
+                val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
+                val fn_name = self.llvm_function_symbol_name(fn_.name)
+                val ret_ty = self.llvm_type_text(body.return_ty)
+                self.remember_function_return_type(fn_.name, ret_ty)
+                self.remember_function_return_type(fn_name, ret_ty)
+                val ret_unsigned = self.is_unsigned_mir_kind(body.return_ty.kind)
+                self.remember_function_return_unsigned(fn_.name, ret_unsigned)
+                self.remember_function_return_unsigned(fn_name, ret_unsigned)
+                self.remember_function_param_types_from_signature(fn_.name, fn_.signature)
+                self.remember_function_param_types_from_signature(fn_name, fn_.signature)
+            for fn_ in module.functions.values():
+                val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
+                val fn_name = self.llvm_function_symbol_name(fn_.name)
+                self.translate_function(fn_name, body)
+
+        if self.unknown_func_decls.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; External call declarations")
+            for unknown_name in self.unknown_func_decls.keys():
+                # rt_* runtime builtins covered by the static runtime-declares
+                # block are registered in defined_func_names; skip those so we
+                # never emit a wrong-signature llc redefinition. Any other
+                # extern (including user-declared rt_* names missing from the
+                # static block) gets the normal auto-declare.
+                if not self.defined_func_names.has(unknown_name):
+                    self.builder.emit("declare i64 @{unknown_name}(...)")
+
+        val bootstrap_string_globals = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            llvm_bootstrap_string_globals_text()
+        else:
+            ""
+        if bootstrap_string_globals != "":
+            self.builder.emit("")
+            self.builder.emit("; String constants")
+            self.builder.emit(bootstrap_string_globals)
+        elif self.string_global_text.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; String constants")
+            self.builder.emit(self.string_global_text)
+        elif self.string_globals.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; String constants")
+            for global_decl in self.string_globals:
+                self.builder.emit(global_decl)
+
+        if not bootstrap_debug:
+            self.builder.emit_tbaa_hierarchy()
+        return llvm_ir_builder_build(self.builder)
+
+    me translate_function(name: text, body: MirBody):
+        """Translate a MIR function with optimization attributes.
+
+        Renames 'main' to '__simple_main' so the entry point wrapper
+        (entry_point.spl) can call it with proper runtime init/shutdown.
+        """
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:start {name}"
+        self.current_function_name = name
+        self.defined_func_names[name] = true
+        self.local_types = {}
+        self.value_types = {}
+        self.defined_locals = {}
+        self.return_locals = {}
+        self.bool_locals = {}
+        self.ptr_locals = {}
+        # Local ids are reused across functions (see the resets above), so
+        # unsigned_locals/alloca_elem_unsigned must reset per-function too --
+        # otherwise a u8 local id N in one function could leak its unsigned
+        # flag onto an unrelated i32 local id N in the next function.
+        self.unsigned_locals = {}
+        self.alloca_elem_unsigned = {}
+        var local_i = 0
+        while local_i < body.locals.len():
+            val local: MirLocal = body.locals[local_i]
+            val llvm_ty: text = self.llvm_type_text(local.type_)
+            val local_id = self.local_id_value(local.id)
+            self.local_types[local_id] = llvm_ty
+            # Prime every local's unsigned bit upfront from its MIR-declared
+            # type (U8/U16/U32/U64) -- this is what makes an unsigned
+            # function PARAMETER (an Arg-kind local, never Alloc'd) visible
+            # to get_operand_unsigned; without it, print(some_u8_param)
+            # sign-extends the param instead of zero-extending it.
+            self.unsigned_locals[local_id] = self.is_unsigned_mir_kind(local.type_.kind)
+            match local.type_.kind:
+                case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_):
+                    self.ptr_locals[local_id] = true
+                case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_):
+                    self.ptr_locals[local_id] = true
+                case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_):
+                    self.ptr_locals[local_id] = true
+                case MirTypeKind.Bool:
+                    self.bool_locals[local_id] = true
+                case _:
+                    ()
+            match local.kind:
+                case Return:
+                    self.return_locals[local_id] = true
+                case _:
+                    ()
+            local_i = local_i + 1
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:locals {name}"
+
+        var params: [text] = []
+        var param_types: [text] = []
+        var arg_i = 0
+        while arg_i < body.arg_count:
+            var param_local_i = 0
+            while param_local_i < body.locals.len():
+                val local: MirLocal = body.locals[param_local_i]
+                match local.kind:
+                    case Arg(index):
+                        if index == arg_i:
+                            val local_id = self.local_id_value(local.id)
+                            val maybe_param_ty = self.get_local_type(local_id)
+                            val param_ty = self.valid_llvm_type(maybe_param_ty)
+                            self.defined_locals[local_id] = true
+                            param_types = param_types.push(param_ty)
+                            params = params.push("{param_ty} {self.get_local(local_id)}")
+                    case _:
+                        ()
+                param_local_i = param_local_i + 1
+            arg_i = arg_i + 1
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:params {name}"
+
+        val ret_ty: text = self.llvm_type_text(body.return_ty)
+        self.current_return_type = ret_ty
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:return {name}"
+
+        var has_store = false
+        var has_call = false
+        var inst_count = 0
+        var scan_block_i = 0
+        while scan_block_i < body.blocks.len():
+            val block = body.blocks[scan_block_i]
+            var scan_inst_i = 0
+            while scan_inst_i < block.instructions.len():
+                val inst = block.instructions[scan_inst_i]
+                inst_count = inst_count + 1
+                match inst.kind:
+                    case Store(_, _): has_store = true
+                    case SetField(_, _, _): has_store = true
+                    case Call(_, _, _): has_call = true
+                    case CallIndirect(_, _, _, _): has_call = true
+                    case Intrinsic(_, _, _): has_call = true
+                    case Send(_, _): has_store = true
+                    case _: ()
+                scan_inst_i = scan_inst_i + 1
+            scan_block_i = scan_block_i + 1
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:scan {name}"
+
+        val is_readonly = not has_store and not has_call
+        val is_small = inst_count < 10
+
+        # Rename only the requested entry module's main to __simple_main.
+        val fn_name = self.llvm_function_symbol_name(name)
+        self.defined_func_names[fn_name] = true
+
+        # entry_point.spl hardcodes `declare i64 @__simple_main()` and reads
+        # the i64 result as the process exit code. A user `fn main():` with
+        # no declared return type lowers body.return_ty to void here, which
+        # would emit `define void @__simple_main()` / `ret void` against that
+        # i64-typed caller -- the call site then truncates whatever garbage
+        # happened to be sitting in the return register as the exit code
+        # (nondeterministic). Force the true entry symbol's LLVM return type
+        # to i64 so a bare `return` / fall-off-the-end emits `ret i64 0`
+        # instead, matching the documented "no return type => exit 0"
+        # contract. Only the exact global entry symbol is affected --
+        # per-module mains (`__simple_main_<mod>`, not called by
+        # entry_point.spl) keep their real signature.
+        val effective_ret_ty = if fn_name == "__simple_main" and ret_ty == "void":
+            "i64"
+        else:
+            ret_ty
+        self.current_return_type = effective_ret_ty
+
+        self.remember_function_return_type(name, effective_ret_ty)
+        self.remember_function_return_type(fn_name, effective_ret_ty)
+        self.remember_function_param_types(name, param_types)
+        self.remember_function_param_types(fn_name, param_types)
+
+        self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small)
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:started {name}"
+
+        var block_i = 0
+        while block_i < body.blocks.len():
+            val block = body.blocks[block_i]
+            self.translate_block(block)
+            block_i = block_i + 1
+
+        self.builder.end_function()
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:done {name}"
+
+    me translate_block(block: MirBlock):
+        """Translate a MIR basic block."""
+        self.builder.emit_label("bb{self.block_id_value(block.id)}")
+        for inst in block.instructions:
+            self.translate_instruction(inst)
+        self.translate_terminator(block.terminator)
+
+    me translate_instruction(inst: MirInst):
+        match inst.kind:
+            case MirInstKind.Const(dest, value, ty): self.translate_const(dest, value, ty)
+            case Copy(dest, src): self.translate_copy_move(dest, src, false)
+            case Move(dest, src): self.translate_copy_move(dest, src, true)
+            case BinOp(dest, op, left, right): self.translate_binop(dest, op, left, right)
+            case CheckedBinOp(dest, op, left, right): self.translate_binop(dest, op, left, right)
+            case UnaryOp(dest, op, operand): self.translate_unaryop(dest, op, operand)
+            case Alloc(dest, ty): self.translate_alloc(dest, ty)
+            case Load(dest, ptr): self.translate_load(dest, ptr)
+            case Store(ptr, value): self.translate_store(ptr, value)
+            case LoadGlobal(dest, symbol): self.translate_load_global(dest, symbol)
+            case StoreGlobal(symbol, value): self.translate_store_global(symbol, value)
+            case GetElementPtr(dest, base, indices): self.translate_gep(dest, base, indices)
+            case Aggregate(dest, kind, operands): self.translate_aggregate(dest, kind, operands)
+            case GetField(dest, base, field): self.translate_get_field(dest, base, field)
+            case SetField(base, field, value): self.translate_set_field(base, field, value)
+            case Cast(dest, operand, target): self.translate_cast_dispatch(dest, operand, target)
+            case Bitcast(dest, operand, target): self.translate_bitcast(dest, operand, target)
+            case Call(dest, func, args): self.translate_call(dest, func, args)
+            case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
+            case Intrinsic(dest, name, args): self.translate_intrinsic(dest, name, args)
+            case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
+                self.translate_inline_asm(asm_template, is_volatile, inputs, outputs, clobbers)
+            case PipeForward(dest, value, func): self.translate_pipe_forward(dest, value, func)
+            case Compose(dest, f, g, forward): self.translate_compose(dest, f, g, forward)
+            case Parallel(dest, funcs): self.translate_parallel(dest, funcs)
+            case LayerConnect(dest, l1, l2): self.translate_layer_connect(dest, l1, l2)
+            case Ref(dest, kind, place): self.translate_ref(dest, kind, place)
+            case CreatePromise(dest, body, result_type): self.translate_create_promise(dest, body, result_type)
+            case Await(dest, promise): self.translate_await(dest, promise)
+            case Yield(value): self.translate_yield(value)
+            case Spawn(dest, handler, args): self.translate_spawn(dest, handler, args)
+            case Send(target, message): self.translate_send(target, message)
+            case Receive(dest, timeout): self.translate_receive(dest, timeout)
+            case GpuKernelDef(name): self.translate_gpu_kernel_def(name)
+            case GpuLaunch(args): self.translate_gpu_launch(args)
+            case GpuGlobalId(dest, dim): self.translate_gpu_global_id(dest, dim)
+            case GpuLocalId(dest, dim): self.translate_gpu_local_id(dest, dim)
+            case GpuBlockId(dest, dim): self.translate_gpu_block_id(dest, dim)
+            case GpuBlockDim(dest, dim): self.translate_gpu_block_dim(dest, dim)
+            case GpuGridDim(dest, dim): self.translate_gpu_grid_dim(dest, dim)
+            case GpuBarrier(scope): self.translate_gpu_barrier(scope)
+            case GpuMemFence(scope): self.translate_gpu_mem_fence(scope)
+            case GpuSharedAlloc(dest, type_, size): self.translate_gpu_shared_alloc(dest, type_, size)
+            case GpuAtomicOp(dest, op, ptr, value): self.translate_gpu_atomic_op(dest, op, ptr, value)
+            case GpuAtomicCas(dest, ptr, expected, desired): self.translate_gpu_atomic_cas(dest, ptr, expected, desired)
+            case VhdlProcess(kind, body_block): self.translate_vhdl_process(kind, body_block)
+            case VhdlSignalAssign(target, value, delay_ns): self.translate_vhdl_signal_assign(target, value, delay_ns)
+            case VhdlVarAssign(target, value): self.translate_vhdl_var_assign(target, value)
+            case VhdlPortMap(entity, instance, connections): self.translate_vhdl_port_map(entity, instance, connections)
+            case VhdlResize(dest, operand, new_width, signed): self.translate_vhdl_resize(dest, operand, new_width, signed)
+            case VhdlSlice(dest, signal, hi, lo): self.translate_vhdl_slice(dest, signal, hi, lo)
+            case VhdlConcat(dest, parts): self.translate_vhdl_concat(dest, parts)
+            case SimdAddF32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "add_f32x4")
+            case SimdSubF32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "sub_f32x4")
+            case SimdMulF32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "mul_f32x4")
+            case SimdDivF32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "div_f32x4")
+            case SimdFmaF32x4(dest, a, b, c): self.translate_simd_fma(dest, a, b, c, "fma_f32x4")
+            case SimdAddF32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "add_f32x8")
+            case SimdSubF32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "sub_f32x8")
+            case SimdMulF32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "mul_f32x8")
+            case SimdDivF32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "div_f32x8")
+            case SimdFmaF32x8(dest, a, b, c): self.translate_simd_fma(dest, a, b, c, "fma_f32x8")
+            case SimdAddF64x4(dest, a, b): self.translate_simd_binop(dest, a, b, "add_f64x4")
+            case SimdSubF64x4(dest, a, b): self.translate_simd_binop(dest, a, b, "sub_f64x4")
+            case SimdMulF64x4(dest, a, b): self.translate_simd_binop(dest, a, b, "mul_f64x4")
+            case SimdDivF64x4(dest, a, b): self.translate_simd_binop(dest, a, b, "div_f64x4")
+            case SimdFmaF64x4(dest, a, b, c): self.translate_simd_fma(dest, a, b, c, "fma_f64x4")
+            case SimdAddI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "add_i32x4")
+            case SimdSubI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "sub_i32x4")
+            case SimdMulI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "mul_i32x4")
+            case SimdXorI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "xor_i32x4")
+            case SimdAndI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "and_i32x4")
+            case SimdOrI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "or_i32x4")
+            case SimdShlI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "shl_i32x4")
+            case SimdShrI32x4(dest, a, b): self.translate_simd_binop(dest, a, b, "shr_i32x4")
+            case SimdAddI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "add_i32x8")
+            case SimdSubI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "sub_i32x8")
+            case SimdMulI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "mul_i32x8")
+            case SimdXorI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "xor_i32x8")
+            case SimdAndI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "and_i32x8")
+            case SimdOrI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "or_i32x8")
+            case SimdShlI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "shl_i32x8")
+            case SimdShrI32x8(dest, a, b): self.translate_simd_binop(dest, a, b, "shr_i32x8")
+            case SimdHaddF32x4(dest, a): self.translate_simd_horizontal(dest, a, "hadd_f32x4")
+            case SimdHmaxF32x4(dest, a): self.translate_simd_horizontal(dest, a, "hmax_f32x4")
+            case SimdHminF32x4(dest, a): self.translate_simd_horizontal(dest, a, "hmin_f32x4")
+            case DebugValue(_, _): ()
+            case Nop: ()
+            case _: self.translate_unsupported(inst)
+        self.mark_instruction_dest_defined(inst)
+
+    me mark_instruction_dest_defined(inst: MirInst):
+        match inst.kind:
+            case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | LoadGlobal(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
+                self.defined_locals[self.local_id_value(dest)] = true
+            case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
+                if dest.?:
+                    val dest_local: LocalId = dest.unwrap()
+                    self.defined_locals[self.local_id_value(dest_local)] = true
+            case _:
+                ()
+
+    fn ret_value_for_type(ret_ty: text, value: text) -> text:
+        if ret_ty.len() == 3 and ret_ty.starts_with("ptr") and value.len() == 1 and value.starts_with("0"):
+            return "null"
+        value
+
+    fn normalize_call_callee(callee: text) -> text:
+        if callee == "0":
+            return "null"
+        if callee.starts_with("@") or callee.starts_with("%") or callee == "undef" or callee == "null":
+            return callee
+        "@{callee}"
+
+    me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool) -> text:
+        """Same as value_as_type, but widening picks zext when src_unsigned
+        is set (MIR-level U8/U16/U32 source) instead of always sext'ing.
+        See select_widen_instruction / is_unsigned_mir_kind."""
+        var src_ty = self.valid_llvm_type(from_ty)
+        val maybe_actual_ty = self.value_types.get(value)
+        if maybe_actual_ty.?:
+            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        val dst_ty = self.valid_llvm_type(to_ty)
+        if src_ty == dst_ty:
+            return self.ret_value_for_type(dst_ty, value)
+        if value == "0":
+            return self.ret_value_for_type(dst_ty, "0")
+        # Unsigned MIR-level sources (U8/U16/U32) widening to a bigger int
+        # must zext, not sext -- select_cast_instruction has no signedness
+        # input and always sext's i8/i16/i32 widening (only correct for
+        # signed sources). See is_unsigned_mir_kind.
+        var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
+        if src_unsigned and cast_inst == "sext":
+            cast_inst = "zext"
+        if src_unsigned and cast_inst == "sitofp":
+            cast_inst = "uitofp"
+        val tmp = self.builder.fresh_local()
+        self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
+        tmp
+
+    fn get_operand_unsigned(operand: MirOperand) -> bool:
+        """Best-effort MIR-level signedness for an operand: true for a Const
+        of an unsigned MirType, or a Copy/Move of a local whose declared
+        type was recorded as unsigned (see translate_alloc/translate_load).
+        Defaults to false (signed) when unknown -- matches the prior
+        behavior of always-sext widening, so this is only ever additive."""
+        match operand.kind:
+            case Copy(local):
+                self.unsigned_locals.get(self.local_id_value(local)) ?? false
+            case Move(local):
+                self.unsigned_locals.get(self.local_id_value(local)) ?? false
+            case Const(value, type_):
+                self.is_unsigned_mir_kind(type_.kind)
+            case _:
+                false
+
+    me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
+        var src_ty = self.valid_llvm_type(from_ty)
+        # POSITIVE `.?` form only (see get_local_type): Option-match on
+        # Dict.get mis-dispatches under the seed interpreter.
+        val maybe_actual_ty = self.value_types.get(value)
+        if maybe_actual_ty.?:
+            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        val dst_ty = self.valid_llvm_type(to_ty)
+        if src_ty == dst_ty:
+            return self.ret_value_for_type(dst_ty, value)
+        if value == "0":
+            return self.ret_value_for_type(dst_ty, "0")
+        val cast_inst = self.select_cast_instruction(src_ty, dst_ty)
+        val tmp = self.builder.fresh_local()
+        self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
+        tmp
+
+    # floatedge lane (-0.0 sign-loss fix): translate_cast's shared body
+    # (aggregate_intrinsics.spl -- out of scope for this lane, see
+    # CONFLICT-FLAG below) finalizes EVERY Cast MIR instruction's result
+    # with a value-defining identity op: `fadd target_ty, 0.0` for a float
+    # target. That is IEEE754 value-preserving for any finite/nonzero
+    # operand, but NOT for a genuine `-0.0` -- `-0.0 + 0.0 == +0.0` under
+    # the default round-to-nearest rule for opposite-signed zero addition
+    # -- so it silently flips the sign of any negative-zero float that
+    # passes through an `as`-cast, or through the redundant same-type Cast
+    # MIR lowering inserts for a type-annotated `val a: f64 = -0.0`
+    # declaration (confirmed via SIMPLE_KEEP_LLVM_IR=1 dump: the `fneg`
+    # correctly produces -0.0, then the very next `; cast` fadd flips it
+    # back to +0.0 before it ever reaches rt_raw_f64_to_string in
+    # runtime_native.c -- the runtime cannot recover a sign the codegen
+    # already destroyed). `x + (-0.0) == x` for every finite x AND for
+    # both zero signs (same-sign zero addition keeps its sign), so ending
+    # with `-0.0` instead of `0.0` is a strictly safer, universally
+    # correct identity -- not a special case carved out for the literal
+    # -0.0 probe. Only the float-targeted case is intercepted here; every
+    # other Cast (int/ptr) is unaffected and still routes to the existing
+    # translate_cast.
+    #
+    # CONFLICT-FLAG: this duplicates (with one changed constant) the tail
+    # of aggregate_intrinsics.spl's translate_cast, which is out of scope
+    # for this lane's ownership boundary. The canonical fix belongs there
+    # (swap both `fadd {target_ty} {casted}, 0.0  ; cast` occurrences to
+    # `-0.0`) -- once that file is back in scope this shim + the dispatch
+    # override above should be deleted and Cast routed straight back to
+    # self.translate_cast.
+    me translate_cast_dispatch(dest: LocalId, operand: MirOperand, target: MirType):
+        val cast_target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        if is_float_type(cast_target_ty):
+            self.translate_cast_float_signsafe(dest, operand, target)
+        else:
+            self.translate_cast(dest, operand, target)
+
+    me translate_cast_float_signsafe(dest: LocalId, operand: MirOperand, target: MirType):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val operand_val = self.translate_operand(operand)
+        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        self.local_types[dest_id] = target_ty
+        self.value_types[dest_name] = target_ty
+        self.unsigned_locals[dest_id] = self.is_unsigned_mir_kind(target.kind)
+        val casted = self.value_as_type_signed(operand_val, src_ty, target_ty, self.get_operand_unsigned(operand))
+        self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, -0.0  ; cast (sign-safe)")
+
+    me remember_function_return_type(name: text, ret_ty: text):
+        self.function_return_types[name] = ret_ty
+
+    me remember_function_return_unsigned(name: text, unsigned: bool):
+        self.function_return_unsigned[name] = unsigned
+
+    fn lookup_function_return_unsigned(func_name: text) -> bool:
+        """Same lookup pattern as lookup_function_return_type (direct name,
+        then bare name with the leading '@' stripped)."""
+        val direct = self.function_return_unsigned.get(func_name)
+        if direct.?:
+            return direct.unwrap()
+        if not func_name.starts_with("@"):
+            return false
+        val bare = func_name[1:]
+        self.function_return_unsigned.get(bare) ?? false
+
+    me remember_function_param_types(name: text, param_tys: [text]):
+        if name == "":
+            return
+        self.function_param_types[name] = param_tys
+
+    me remember_function_param_types_from_signature(name: text, sig: MirSignature):
+        var param_tys: [text] = []
+        for param in sig.params:
+            param_tys = param_tys.push(self.valid_llvm_type(self.llvm_type_text(param)))
+        self.remember_function_param_types(name, param_tys)
+
+    me translate_terminator(term: MirTerminator):
+        """Translate a block terminator."""
+        match term:
+            case Ret(value):
+                if value.is_some():
+                    val ret_operand: MirOperand = value.unwrap()
+                    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                        match ret_operand.kind:
+                            case Const(const_value, const_type):
+                                match const_value:
+                                    case Int(v):
+                                        val const_ret_ty = self.valid_llvm_type(self.current_return_type)
+                                        self.builder.emit_ret(const_ret_ty, self.ret_value_for_type(const_ret_ty, "{v}"))
+                                        return
+                            case _:
+                                ()
+                    match ret_operand.kind:
+                        case Copy(local) | Move(local):
+                            val return_local_id = self.local_id_value(local)
+                            if self.current_function_name == "_start":
+                                self.builder.emit("  unreachable")
+                                return
+                            if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id):
+                                self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
+                                return
+                        case _:
+                            ()
+                    val val_str = self.translate_operand(ret_operand)
+                    val src_ret_ty: text = self.get_operand_type(ret_operand)
+                    val ret_ty = self.valid_llvm_type(self.current_return_type)
+                    val ret_val = self.value_as_type(val_str, src_ret_ty, ret_ty)
+                    self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, ret_val))
+                else:
+                    if self.current_return_type == "void":
+                        self.builder.emit_ret_void()
+                    else:
+                        self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
+
+            case Goto(target):
+                self.builder.emit_br("bb{self.block_id_value(target)}")
+
+            case If(cond, then_, else_):
+                val cond_val = self.translate_operand(cond)
+                val cond_ty = self.valid_llvm_type(self.get_operand_type(cond))
+                if cond_ty == "i1":
+                    # Already boolean, use directly
+                    self.builder.emit_cond_br(cond_val, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+                elif cond_ty == "ptr":
+                    val i1_cond = self.builder.fresh_local()
+                    self.builder.emit("  {i1_cond} = icmp ne ptr {cond_val}, null")
+                    self.builder.emit_cond_br(i1_cond, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+                else:
+                    val i1_cond = self.builder.fresh_local()
+                    self.builder.emit("  {i1_cond} = icmp ne {cond_ty} {cond_val}, 0")
+                    self.builder.emit_cond_br(i1_cond, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+
+            case Switch(value, targets, default):
+                val discr_val = self.translate_operand(value)
+                val nit = self.native_int()
+                var cases: [(text, text)] = []
+                for switch_case_raw in targets:
+                    val switch_case: SwitchCase = switch_case_raw
+                    val case_value = "{switch_case.value}"
+                    val case_label = "bb{self.block_id_value(switch_case.target)}"
+                    cases = cases.push((case_value, case_label))
+                self.builder.emit_switch(discr_val, nit, "bb{self.block_id_value(default)}", cases)
+
+            case Unreachable:
+                self.builder.emit("  unreachable")
+
+            case Abort(message):
+                self.emit_unsupported_panic(message)
+
+            case CallTerminator(dest, func, args, normal, unwind):
+                var func_val = self.translate_operand(func)
+                match func.kind:
+                    case Copy(local) | Move(local):
+                        func_val = self.value_as_type(func_val, self.get_operand_type(func), "ptr")
+                    case _:
+                        ()
+                val call_func_val = self.normalize_call_callee(func_val)
+                var arg_vals: [text] = []
+                var arg_i = 0
+                for arg in args:
+                    var arg_val = self.translate_operand(arg)
+                    var arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
+                    val param_ty = self.lookup_function_param_type(call_func_val, arg_i)
+                    if param_ty != "" and param_ty != nil:
+                        # See translate_call: print()'s raw-format runtime
+                        # helpers need signedness-aware widening.
+                        val is_print_raw_fmt = call_func_val == "@rt_raw_i64_to_string" or call_func_val == "@rt_raw_u64_to_string" or call_func_val == "@rt_raw_bool_to_string"
+                        if is_print_raw_fmt:
+                            arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned(arg))
+                        else:
+                            arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
+                        arg_ty = self.valid_llvm_type(param_ty)
+                    elif arg_val == "0":
+                        arg_val = self.ret_value_for_type(arg_ty, "0")
+                    arg_vals = arg_vals.push("{arg_ty} {arg_val}")
+                    arg_i = arg_i + 1
+                val args_str = arg_vals.join(", ")
+                match dest:
+                    Some(dest_local):
+                        val dest_id = self.local_id_value(dest_local)
+                        val dest_name = self.get_local(dest_id)
+                        val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+                        match unwind:
+                            Some(unwind_block):
+                                self.builder.emit("  {dest_name} = invoke {ret_ty} {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
+                            nil:
+                                self.builder.emit("  {dest_name} = call {ret_ty} {call_func_val}({args_str})")
+                                self.builder.emit_br("bb{self.block_id_value(normal)}")
+                    nil:
+                        match unwind:
+                            Some(unwind_block):
+                                self.builder.emit("  invoke void {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
+                            nil:
+                                self.builder.emit("  call void {call_func_val}({args_str})")
+                                self.builder.emit_br("bb{self.block_id_value(normal)}")
+
+    # === Required: per-category instruction methods ===
+
+    me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        # SSA rewrites create fresh destinations that have no MirLocal entry.
+        # For those, get_local_type falls back to native int and can poison a
+        # pointer constant before its Store into an alloca slot.  The Const
+        # instruction's own type is authoritative until a local is registered.
+        val llvm_ty = if self.local_types.has(dest_id):
+            self.valid_llvm_type(self.get_local_type(dest_id))
+        else:
+            self.valid_llvm_type(self.llvm_type_text(ty))
+        self.local_types[dest_id] = llvm_ty
+        self.value_types[dest_name] = llvm_ty
+        self.defined_locals[dest_id] = true
+
+        match value:
+            case Int(v):
+                self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+            case Float(v):
+                # -0.0 sign fix: `fadd fv, 0.0` flips a literal -0.0 to
+                # +0.0 (opposite-signed zero addition rounds to +0.0);
+                # `fadd fv, -0.0` is value-identical for every other float
+                # (nonzero finite/inf/nan unaffected by adding either
+                # signed zero) and additionally preserves -0.0's sign.
+                val fv = ensure_float_literal("{v}")
+                self.builder.emit("  {dest_name} = fadd {llvm_ty} {fv}, -0.0  ; const float")
+            case Bool(v):
+                val bval = if v: "1" else: "0"
+                self.bool_locals[dest_id] = true
+                self.builder.emit("  {dest_name} = add {llvm_ty} {bval}, 0  ; const bool")
+            case Str(v):
+                val global_name = self.add_string_global(v)
+                val str_len = escaped_string_byte_len(v) + 1
+                val nit = self.native_int()
+                self.mark_ptr_local(dest_id)
+                self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
+            case Zero:
+                if is_float_type(llvm_ty):
+                    self.builder.emit("  {dest_name} = fadd {llvm_ty} 0.0, 0.0  ; const zero")
+                elif llvm_ty == "ptr":
+                    self.mark_ptr_local(dest_id)
+                    val nit = self.native_int()
+                    self.builder.emit("  {dest_name} = inttoptr {nit} 0 to ptr  ; const null")
+                elif llvm_ty == "void":
+                    ()
+                else:
+                    self.builder.emit("  {dest_name} = add {llvm_ty} 0, 0  ; const zero")
+            case Array(elements):
+                val tmp = self.builder.fresh_local()
+                self.builder.emit_alloca(tmp, llvm_ty)
+                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load(dest_name, llvm_ty, tmp)
+            case Tuple(elements):
+                val tmp = self.builder.fresh_local()
+                self.builder.emit_alloca(tmp, llvm_ty)
+                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load(dest_name, llvm_ty, tmp)
+            case Struct(fields):
+                val tmp = self.builder.fresh_local()
+                self.builder.emit_alloca(tmp, llvm_ty)
+                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load(dest_name, llvm_ty, tmp)
+
+    me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
+        val dest_id = self.local_id_value(dest)
+        val src_id = self.local_id_value(src)
+        val dest_name = self.get_local(dest_id)
+        val src_name = self.local_value_text(src_id)
+        # Bug #149: `get_local_type` checks the STICKY `ptr_locals`/
+        # `bool_locals` flags before `local_types`. Those flags are set once,
+        # upfront, from every local's MIR-DECLARED type (translate_function's
+        # priming loop) and are never cleared -- but `translate_call` can
+        # later overwrite `local_types[id]` alone (without clearing a stale
+        # ptr_locals[id]) when the callee's REGISTERED return type disagrees
+        # with the priming guess. This happens for `rt_array_repeat`
+        # (`[value; count]` fill literals): its MIR-declared destination type
+        # is Array (-> "ptr" priming), but the function itself has no static
+        # extern override and falls back to the generic `i64 @name(...)`
+        # auto-declare, so the actual call is emitted as `i64` -- leaving
+        # ptr_locals[id]=true while local_types[id]=="i64". Re-deriving `ty`
+        # via `get_local_type` here then trusted the stale "ptr" flag and
+        # emitted `getelementptr i8, ptr %lN, ...` against an i64-defined
+        # %lN -- invalid IR, llc rejection ("defined with type 'i64' but
+        # expected 'ptr'") on any `[""; N]` / `[0; N]` fill-literal use.
+        #
+        # `local_types[src_id]` is the freshest type actually assigned at
+        # the source's definition site (every value-defining instruction,
+        # including translate_call's override, writes it), so prefer it when
+        # present; only fall back to the sticky flags via `get_local_type`
+        # when local_types has no entry to consult.
+        val recorded_src_ty = self.local_types.get(src_id)
+        var ty = if recorded_src_ty.? and recorded_src_ty.unwrap() != nil and recorded_src_ty.unwrap() != "nil" and recorded_src_ty.unwrap() != "":
+            self.valid_llvm_type(recorded_src_ty.unwrap())
+        else:
+            self.valid_llvm_type(self.get_local_type(src_id))
+        # Bug (nested-array/dict handle unbox): a destination local PRIMED
+        # ptr-classified at function entry (its MIR-declared type is an
+        # aggregate -- Array/Dict/Struct/etc -- e.g. decode_runtime_value's
+        # `b.new_temp(result_type)` for a nested array/dict element read off
+        # an ANY-boxed outer array, `m[i]` where `m` is `[[i64]]`) can receive
+        # a Copy whose SOURCE is a raw i64 (the untyped tagged-handle return
+        # of rt_array_get/rt_dict_get). The scalar-copy path below emits a
+        # plain `add i64 src, 0`, defining the destination as i64 in the LLVM
+        # text -- but `get_local_type` (below) trusts the STICKY `ptr_locals`
+        # priming flag (never cleared here) and reports "ptr" to every OTHER
+        # consumer, e.g. a later `rt_array_len(m[i])` bounds-check callsite.
+        # That produced an invalid "%lN defined with type 'i64' but expected
+        # 'ptr'" llc rejection on any nested array-of-arrays/dict-of-arrays
+        # read or write (`m[0][1]`, 2D array literals). Since the destination
+        # IS semantically a pointer (an array/dict/struct handle unboxed from
+        # its i64 ANY slot), bridge with a genuine `inttoptr` reinterpretation
+        # instead of i64 arithmetic, so the SSA definition's real LLVM type
+        # matches what ptr_locals promises downstream.
+        if ty != "ptr" and is_integer_type(ty) and self.ptr_locals.has(dest_id):
+            self.local_types[dest_id] = "ptr"
+            self.value_types[dest_name] = "ptr"
+            self.builder.emit("  {dest_name} = inttoptr {ty} {src_name} to ptr  ; {if is_move: \"move\" else: \"copy\"} (handle unbox)")
+            return
+        if ty == "ptr":
+            self.local_types[dest_id] = "ptr"
+            self.ptr_locals[dest_id] = true
+        if ty == "i1":
+            self.local_types[dest_id] = "i1"
+            self.bool_locals[dest_id] = true
+        val comment = if is_move: "move" else: "copy"
+        self.value_types[dest_name] = ty
+        # Register by id too: copy dests created by the var_reassign_ssa pass
+        # have no MirLocal entry, so a later get_local_type/get_operand_type on
+        # them would fall back to i64 (e.g. typing an f64 Store as i64).
+        self.local_types[dest_id] = ty
+        # Propagate the unsigned bit too (see is_unsigned_mir_kind /
+        # get_operand_unsigned): `val x: u32 = <cast/binop>` lowers to the
+        # producing instruction writing a temp, then a Copy/Move of that
+        # temp into x's named local. Without this, x's own unsigned_locals
+        # entry stays unset (default false/signed) even though its source
+        # temp was correctly marked unsigned, and a later print(x) would
+        # sign-extend a high-bit-set unsigned value incorrectly.
+        self.unsigned_locals[dest_id] = self.unsigned_locals.get(src_id) ?? false
+
+        if is_float_type(ty):
+            # -0.0 sign fix: see translate_cast_float_signsafe above for
+            # the full rationale -- `fadd x, -0.0` is the bit-preserving
+            # identity for every float value including negative zero,
+            # whereas `fadd x, 0.0` silently rounds -0.0 to +0.0.
+            self.builder.emit("  {dest_name} = fadd {ty} {src_name}, -0.0  ; {comment}")
+        elif ty == "ptr":
+            val nit = self.native_int()
+            self.builder.emit("  {dest_name} = getelementptr i8, ptr {src_name}, {nit} 0  ; {comment}")
+        elif ty == "void":
+            ()
+        elif is_integer_type(ty) or ty == "i1":
+            self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; {comment}")
+        else:
+            # Aggregate types: alloca + store + load
+            val tmp = self.builder.fresh_local()
+            self.builder.emit_alloca(tmp, ty)
+            self.builder.emit_store(ty, src_name, tmp)
+            self.builder.emit_load(dest_name, ty, tmp)
+
+    me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
+        """Translate binary operation. Uses nsw for signed int arithmetic."""
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val left_raw = self.translate_operand(left)
+        val right_raw = self.translate_operand(right)
+        val ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        self.value_types[dest_name] = ty
+        # When `ty` (the result's tracked width, e.g. i64 for an untyped
+        # temp) is wider than an unsigned narrow operand's own width
+        # (U8/U16/U32), the operand must zext into `ty`, not sext -- e.g.
+        # 4294967289u32 (bit pattern of i32 -7) sign-extended to i64 gives
+        # -7, and an unsigned 64-bit div by 2 of THAT then produces a huge
+        # ~2^63 garbage result instead of the correct 2147483644. See
+        # value_as_type_signed / is_unsigned_mir_kind.
+        val bin_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+
+        match op:
+            case Add:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                if is_float_type(ty):
+                    self.builder.emit_fadd(dest_name, ty, left_val, right_val)
+                elif is_signed_int_type(ty):
+                    self.builder.emit_add_nsw(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_add(dest_name, ty, left_val, right_val)
+            case Sub:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                if is_float_type(ty):
+                    self.builder.emit_fsub(dest_name, ty, left_val, right_val)
+                elif is_signed_int_type(ty):
+                    self.builder.emit_sub_nsw(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_sub(dest_name, ty, left_val, right_val)
+            case Mul:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                if is_float_type(ty):
+                    self.builder.emit_fmul(dest_name, ty, left_val, right_val)
+                elif is_signed_int_type(ty):
+                    self.builder.emit_mul_nsw(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_mul(dest_name, ty, left_val, right_val)
+            case Div:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                if is_float_type(ty):
+                    self.builder.emit_fdiv(dest_name, ty, left_val, right_val)
+                elif self.get_operand_unsigned(left) or self.get_operand_unsigned(right):
+                    # MIR-level U8/U16/U32/U64 operand: unsigned division
+                    # (udiv), not sdiv -- e.g. 4294967289u32 / 2u32 must give
+                    # 2147483644, not the sdiv result of treating the bit
+                    # pattern as the negative i32 -7 (-7/2 == -3).
+                    self.builder.emit_udiv(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_div(dest_name, ty, left_val, right_val)
+            case Rem:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                if is_float_type(ty):
+                    self.builder.emit_frem(dest_name, ty, left_val, right_val)
+                elif self.get_operand_unsigned(left) or self.get_operand_unsigned(right):
+                    self.builder.emit_urem(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_rem(dest_name, ty, left_val, right_val)
+            case Pow:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                if is_float_type(ty):
+                    val fsuffix = if ty == "double": "f64" else: "f32"
+                    self.builder.emit("  {dest_name} = call {ty} @llvm.pow.{fsuffix}({ty} {left_val}, {ty} {right_val})")
+                else:
+                    val nit = self.native_int()
+                    self.builder.emit("  {dest_name} = call {nit} @__simple_pow({nit} {left_val}, {nit} {right_val})")
+            case BitAnd:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                self.builder.emit_and(dest_name, ty, left_val, right_val)
+            case BitOr:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                self.builder.emit_or(dest_name, ty, left_val, right_val)
+            case BitXor:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                self.builder.emit_xor(dest_name, ty, left_val, right_val)
+            case Shl:
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
+                self.builder.emit_shl(dest_name, ty, left_val, right_val)
+            case Shr:
+                val left_unsigned = self.get_operand_unsigned(left)
+                val right_unsigned = self.get_operand_unsigned(right)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, left_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, right_unsigned)
+                if left_unsigned:
+                    self.builder.emit_lshr(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_ashr(dest_name, ty, left_val, right_val)
+            case Eq:
+                val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
+                val eq_left = self.value_as_type(left_raw, self.get_operand_type(left), eq_cmp_ty)
+                val eq_right = self.value_as_type(right_raw, self.get_operand_type(right), eq_cmp_ty)
+                self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, eq_left, eq_right)
+            case Ne:
+                val ne_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
+                val ne_left = self.value_as_type(left_raw, self.get_operand_type(left), ne_cmp_ty)
+                val ne_right = self.value_as_type(right_raw, self.get_operand_type(right), ne_cmp_ty)
+                self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
+            case Lt:
+                val lt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val lt_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val lt_pred = if is_float_type(lt_cmp_ty): "olt" elif lt_unsigned: "ult" else: "slt"
+                val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
+                val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
+                self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
+            case Le:
+                val le_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val le_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val le_pred = if is_float_type(le_cmp_ty): "ole" elif le_unsigned: "ule" else: "sle"
+                val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
+                val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
+                self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
+            case Gt:
+                val gt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val gt_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val gt_pred = if is_float_type(gt_cmp_ty): "ogt" elif gt_unsigned: "ugt" else: "sgt"
+                val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
+                val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
+                self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
+            case Ge:
+                val ge_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val ge_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val ge_pred = if is_float_type(ge_cmp_ty): "oge" elif ge_unsigned: "uge" else: "sge"
+                val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
+                val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
+                self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
+            case MatMul:
+                self.emit_unsupported_panic("LLVM backend does not support MatMul lowering")
+            case BroadcastAdd:
+                self.emit_unsupported_panic("LLVM backend does not support BroadcastAdd lowering")
+            case BroadcastSub:
+                self.emit_unsupported_panic("LLVM backend does not support BroadcastSub lowering")
+            case BroadcastMul:
+                self.emit_unsupported_panic("LLVM backend does not support BroadcastMul lowering")
+            case BroadcastDiv:
+                self.emit_unsupported_panic("LLVM backend does not support BroadcastDiv lowering")
+            case BroadcastPow:
+                self.emit_unsupported_panic("LLVM backend does not support BroadcastPow lowering")
+            case Offset:
+                val nit = self.native_int()
+                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), "ptr")
+                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), nit)
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
+
+    me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
+        """Translate unary operation."""
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val operand_val = self.translate_operand(operand)
+        val ty = self.valid_llvm_type(self.get_local_type(dest_id))
+
+        match op:
+            case Neg:
+                val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
+                if is_float_type(ty):
+                    self.builder.emit_fneg(dest_name, ty, cast_operand)
+                else:
+                    self.builder.emit_neg(dest_name, ty, cast_operand)
+            case Not:
+                # #148: emit_icmp_eq alone always produces an i1 SSA value
+                # (LLVM `icmp` results are always i1), but `dest` here was
+                # requested with MIR type i64 (expr_dispatch's Unary lowering
+                # always asks for MirType.i64()) and nothing downstream
+                # widened it -- so a later consumer referencing dest_name as
+                # i64 (e.g. the `and`/`or` combiner, or an `if` condition's
+                # `!= 0` check) hit a genuine LLVM type mismatch ("defined
+                # with type 'i1' but expected 'i64'"). Route through
+                # emit_comparison (same helper translate_binop's Eq/Ne cases
+                # use) so the i1 compare result is zext'd up to `ty` whenever
+                # dest isn't itself i1.
+                val cmp_ty = self.valid_llvm_type(self.get_operand_type(operand))
+                val cmp_operand = self.value_as_type(operand_val, self.get_operand_type(operand), cmp_ty)
+                val rhs = if cmp_ty == "ptr": "null" else: "0"
+                self.emit_comparison(dest_name, ty, "eq", cmp_ty, cmp_operand, rhs)
+            case BitNot:
+                val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
+                self.builder.emit_not(dest_name, ty, cast_operand)
+            case Transpose:
+                self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
+
+    me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand]):
+        val dest_id = match dest:
+            case Some(dest_local): self.local_id_value(dest_local)
+            case nil: 0
+        val dest_name: text? = match dest:
+            case Some(_): Some(self.get_local(dest_id))
+            case nil: nil
+        var func_name = self.translate_operand(func)
+        match func.kind:
+            case Copy(local) | Move(local):
+                func_name = self.value_as_type(func_name, self.get_operand_type(func), "ptr")
+            case _:
+                ()
+        val bare_name_for_call = if func_name.starts_with("@"): func_name[1:] else: func_name
+        # Process-run externs: the .spl extern shape
+        # (cmd as one text value, tuple-of-3 result) does not match the C
+        # owners' seed ABI (cmd as ptr+len, SplArray* result with a tagged
+        # int in slot 2) -- calling the seed symbol directly from generated
+        # code misaligns every arg after cmd and misreads the result
+        # (parity case process_run_timeout: SIGSEGV). Route to the
+        # runtime_native.c *_tuple facades, which accept the tagged-or-raw
+        # cmd text value and return the rt_alloc'd 3-word tuple block the
+        # Tuple destructure loads expect (declares registered in
+        # emit_runtime_declarations, asm_constraints_helpers.spl).
+        var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args": "@rt_get_args" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "eprint": "@rt_eprint" elif bare_name_for_call == "rt_process_run": "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded": "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_inherit": "@rt_process_run_inherit_value" elif bare_name_for_call == "rt_process_run_timeout": "@rt_process_run_timeout_tuple" else: func_name
+        call_func_name = self.normalize_call_callee(call_func_name)
+        var arg_parts: [text] = []
+        var arg_tys: [text] = []
+        var arg_i = 0
+        while arg_i < args.len():
+            val arg = args[arg_i]
+            var arg_val = self.translate_operand(arg)
+            val maybe_arg_ty = self.get_operand_type(arg)
+            var arg_ty = self.valid_llvm_type(maybe_arg_ty)
+            match arg.kind:
+                case Copy(local) | Move(local):
+                    if self.bool_locals.has(self.local_id_value(local)):
+                        arg_ty = "i1"
+                    if self.ptr_locals.has(self.local_id_value(local)):
+                        arg_ty = "ptr"
+                case _:
+                    ()
+            val param_ty = self.lookup_function_param_type(call_func_name, arg_i)
+            if param_ty != "" and param_ty != nil:
+                # print()'s raw-format runtime helpers (lower_bootstrap_print_call
+                # in switch_operators_calls.spl) route every numeric type --
+                # signed AND unsigned -- through the same i64-formatting
+                # callee. A narrower-than-i64 arg must widen with the
+                # *source's* signedness (sext for i8/i16/i32, zext for
+                # u8/u16/u32), not the callee's, or a negative signed value
+                # prints as its unsigned bit pattern (i32 -5 -> 4294967291).
+                val is_print_raw_fmt = call_func_name == "@rt_raw_i64_to_string" or call_func_name == "@rt_raw_u64_to_string" or call_func_name == "@rt_raw_bool_to_string"
+                if is_print_raw_fmt:
+                    arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned(arg))
+                else:
+                    arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
+                arg_ty = self.valid_llvm_type(param_ty)
+            elif arg_val == "0":
+                arg_val = self.ret_value_for_type(arg_ty, "0")
+            arg_parts = arg_parts.push("{arg_ty} {arg_val}")
+            arg_tys = arg_tys.push(arg_ty)
+            arg_i = arg_i + 1
+        val args_str = arg_parts.join(", ")
+        # Reconcile arg count with the callee's declared parameter count. If a
+        # method/short-form call reaches the backend with an argument count that
+        # differs from the callee's `declare`d params, a bare `call @f(args)` is
+        # rejected by llc ("Incorrect number of arguments passed to called
+        # function"). Emitting an EXPLICIT function-type signature —
+        # `call RET (argtys) @f(args)` — keeps the call well-formed regardless
+        # (the callee is treated as a typed pointer): the IR-text equivalent of
+        # the seed backend's indirect-call reconciliation. Only engages on a
+        # KNOWN mismatch, so every matching call is emitted exactly as before.
+        var call_sig = ""
+        val declared_param_count = self.lookup_function_param_count(call_func_name)
+        if declared_param_count >= 0 and declared_param_count != args.len():
+            call_sig = "({arg_tys.join(\", \")}) "
+        match dest_name:
+            Some(name):
+                var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+                var known_ret_ty = self.lookup_function_return_type(call_func_name)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    val bare_func_name = if call_func_name.starts_with("@"): call_func_name[1:] else: call_func_name
+                    if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
+                        known_ret_ty = "ptr"
+                    elif bare_func_name == "rt_get_args":
+                        known_ret_ty = "ptr"
+                    elif bare_func_name == "rt_array_get":
+                        # Bootstrap array element accessor returns a tagged handle
+                        # (ptr), matching `declare ptr @rt_array_get(ptr, i64)`.
+                        known_ret_ty = "ptr"
+                    elif bare_func_name == "env_get" or bare_func_name == "rt_env_get":
+                        known_ret_ty = "ptr"
+                    elif bare_func_name == "eprint":
+                        known_ret_ty = "void"
+                if known_ret_ty != "" and known_ret_ty != "nil" and known_ret_ty != "void":
+                    ret_ty = known_ret_ty
+                    self.local_types[dest_id] = ret_ty
+                    if ret_ty == "ptr":
+                        self.ptr_locals[dest_id] = true
+                    if ret_ty == "i1":
+                        self.bool_locals[dest_id] = true
+                ret_ty = self.valid_llvm_type(ret_ty)
+                self.value_types[name] = ret_ty
+                # A narrower-than-i64 unsigned return (e.g. `fn f() -> u8`)
+                # must be tracked so a later print(f()) zext's instead of
+                # sext's. See is_unsigned_mir_kind / lookup_function_return_unsigned.
+                self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
+                self.builder.emit("  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})")
+            nil:
+                val ret_ty = "void"
+                self.builder.emit("  call {ret_ty} {call_sig}{call_func_name}({args_str})")
+
+    # === Required: helpers ===
+
+    me translate_operand(operand: MirOperand) -> text:
+        """Translate MIR operand to LLVM value."""
+        match operand.kind:
+            case Copy(local):
+                val local_id = self.local_id_value(local)
+                self.local_value_text(local_id)
+            case Move(local):
+                val local_id = self.local_id_value(local)
+                self.local_value_text(local_id)
+            case Const(value, type_):
+                # For function references, return @name directly. An
+                # ordinary named call (this path) must resolve to a
+                # colliding LOCAL definition's mangled symbol, not the bare
+                # runtime name a compiler-generated hardcoded call owns --
+                # see mir_call_ownership.spl / llvm_function_symbol_name.
+                match type_.kind:
+                    case FuncPtr(signature):
+                        match value:
+                            case Str(name):
+                                val resolved = self.llvm_function_symbol_name(name)
+                                if signature.return_type != nil:
+                                    self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
+                                self.unknown_func_decls[resolved] = true
+                                "@{resolved}"
+                            case _: self.translate_const_value(value)
+                    case Function(_, ret):
+                        match value:
+                            case Str(name):
+                                val resolved = self.llvm_function_symbol_name(name)
+                                if ret != nil:
+                                    self.remember_function_return_type(resolved, self.llvm_type_text(ret))
+                                self.unknown_func_decls[resolved] = true
+                                "@{resolved}"
+                            case _: self.translate_const_value(value)
+                    case _:
+                        self.translate_const_value(value)
+
+    me translate_const_value(value: MirConstValue) -> text:
+        """Translate MIR constant value to LLVM constant."""
+        match value:
+            case Int(v): "{v}"
+            case Float(v): "{v}"
+            case Bool(v): if v: "1" else: "0"
+            case Str(v):
+                val global_name = self.add_string_global(v)
+                val str_len = v.len() + 1
+                val nit = self.native_int()
+                "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
+            case Zero: "0"
+            case Array(elements):
+                val count = elements.len()
+                "zeroinitializer  ; array ({count} elements)"
+            case Tuple(elements):
+                val count = elements.len()
+                "zeroinitializer  ; tuple ({count} elements)"
+            case Struct(fields):
+                "zeroinitializer  ; struct"
+
+    fn get_local(id: i64) -> text:
+        """Get LLVM local name for MIR local."""
+        "%l{id}"
+
+    fn local_value_text(id: i64) -> text:
+        """Return a (possibly forward-referenced) LLVM local name, or `undef`
+        only for locals that were never declared at all.
+
+        `self.local_types`/`ptr_locals`/`bool_locals` are populated up-front
+        from `body.locals` in `translate_function`, independent of the order
+        blocks are textually emitted in. A local can therefore be a real,
+        typed MIR local that simply hasn't been *textually* emitted yet
+        (e.g. it's defined in a block that comes later in `body.blocks` but
+        is a CFG predecessor of the block using it, as happens with
+        SSA-phi-materialized merge values). LLVM's .ll parser resolves such
+        forward references by CFG dominance, not textual order, so emitting
+        the real `%lN` name here is valid -- unlike emitting `undef`, which
+        silently produces wrong branch/arithmetic results (bug #135).
+        Only a local with NO declared type at all (truly malformed MIR)
+        still falls back to `undef` so LLVM stays valid.
+        """
+        if self.defined_locals.get(id).?:
+            return self.get_local(id)
+        if self.ptr_locals.get(id).? or self.bool_locals.get(id).? or self.local_types.get(id).?:
+            return self.get_local(id)
+        # ponytail: malformed MIR (no declared local at all) lowers to
+        # `undef` so LLVM stays valid.
+        "undef"
+
+    fn get_local_type(id: i64) -> text:
+        """Get LLVM type for a local variable, falling back to native int type."""
+        val maybe_ptr = self.ptr_locals.get(id)
+        if maybe_ptr.?:
+            return "ptr"
+        val maybe_bool = self.bool_locals.get(id)
+        if maybe_bool.?:
+            return "i1"
+        # POSITIVE `.?` form only: `match dict.get(): case Some(ty)/nil`
+        # mis-dispatches under the seed interpreter (same struct-boxed-optional
+        # quirk documented in var_reassign_ssa.spl), returning literal nil for
+        # locals whose type IS tracked -- every caller then fell back to
+        # native_int, which is the root of the "backend does not track local
+        # types" #135 symptom family (typed copies emitted as `add i64`,
+        # double operands fed to `mul nsw i64`, call args typed nil).
+        val maybe_ty = self.local_types.get(id)
+        if maybe_ty.?:
+            val ty = maybe_ty.unwrap()
+            if ty == nil or ty == "nil":
+                self.native_int()
+            else:
+                ty
+        else:
+            self.native_int()
+
+    fn lookup_function_return_type(func_name: text) -> text:
+        # ponytail: flattened (no nested match-as-expression) -- a nested
+        # `match X.get(y):` inside an outer match arm was observed to silently
+        # skip its `case Some(...)` body under the bootstrap seed's codegen
+        # even when `.has(y)` was true, which fed a raw `nil` into emitted
+        # LLVM IR text (bug #134). Explicit early-returns avoid the nested
+        # match-value-propagation path entirely.
+        val direct = self.function_return_types.get(func_name)
+        if direct.?:
+            val ty = direct.unwrap()
+            if ty == nil or ty == "nil":
+                return ""
+            return ty
+        if not func_name.starts_with("@"):
+            return ""
+        val bare = func_name[1:]
+        val bare_hit = self.function_return_types.get(bare)
+        if bare_hit.?:
+            val bare_ty = bare_hit.unwrap()
+            if bare_ty == nil or bare_ty == "nil":
+                return ""
+            return bare_ty
+        ""
+
+    fn lookup_function_param_type(func_name: text, index: i64) -> text:
+        # ponytail: flattened for the same reason as lookup_function_return_type.
+        val direct = self.function_param_types.get(func_name)
+        if direct.?:
+            val param_tys = direct.unwrap()
+            if index < param_tys.len():
+                return param_tys[index]
+            return ""
+        if not func_name.starts_with("@"):
+            return ""
+        val bare = func_name[1:]
+        val bare_hit = self.function_param_types.get(bare)
+        if bare_hit.?:
+            val bare_param_tys = bare_hit.unwrap()
+            if index < bare_param_tys.len():
+                return bare_param_tys[index]
+            return ""
+        ""
+
+    fn lookup_function_param_count(func_name: text) -> i64:
+        """Declared parameter count for `func_name`, or -1 when unknown (extern,
+        indirect callee, or a signature not yet remembered). Mirrors
+        lookup_function_param_type's name resolution: direct key first, then the
+        bare `@`-stripped key."""
+        val direct = self.function_param_types.get(func_name)
+        if direct.?:
+            return direct.unwrap().len()
+        if not func_name.starts_with("@"):
+            return -1
+        val bare = func_name[1:]
+        val bare_hit = self.function_param_types.get(bare)
+        if bare_hit.?:
+            return bare_hit.unwrap().len()
+        -1
+
+    me mark_ptr_local(id: i64):
+        self.local_types[id] = "ptr"
+        self.ptr_locals[id] = true
+
+    fn valid_llvm_type(ty: text) -> text:
+        if ty == "" or ty == "nil":
+            self.native_int()
+        else:
+            ty
+
+    fn get_operand_type(operand: MirOperand) -> text:
+        """Get the LLVM type string for an operand."""
+        match operand.kind:
+            case Copy(local):
+                self.get_local_type(self.local_id_value(local))
+            case Move(local):
+                self.get_local_type(self.local_id_value(local))
+            case Const(value, type_):
+                self.llvm_type_text(type_)
+            case _:
+                self.native_int()
+
+    fn local_id_value(local: LocalId) -> i64:
+        local.id
+
+    fn block_id_value(block: BlockId) -> i64:
+        block.id
+
+    # === Overrides: memory ===
+
+    me translate_alloc(dest: LocalId, ty: MirType):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val raw_ty = self.valid_llvm_type(self.llvm_type_text(ty))
+        # A void-typed spill slot is emitted by the var_reassign_ssa alloca
+        # transform when it slots a local whose value is unit -- e.g. the
+        # discarded result temp of a `match`/`if` used as a statement. `alloca
+        # void`/`load void` are rejected by llc ("void type only allowed for
+        # function results"). The slot is dead (never stored, its load result
+        # unused), so back it with the universal i64 word: valid IR, and the
+        # garbage load value is never observed.
+        val llvm_ty = if raw_ty == "void": "i64" else: raw_ty
+        self.mark_ptr_local(dest_id)
+        # Record the slot's element type so Load/Store through this slot use
+        # it. The var_reassign_ssa spill temps have no MirLocal entry, so
+        # typing loads/stores off those temps falls back to i64 and an f64
+        # slot value round-trips through fptosi (10.0 -> 10, data loss).
+        self.alloca_elem_types[dest_id] = llvm_ty
+        self.alloca_elem_unsigned[dest_id] = self.is_unsigned_mir_kind(ty.kind)
+        self.builder.emit_alloca(dest_name, llvm_ty)
+
+    fn operand_alloca_elem_type(ptr: MirOperand) -> text:
+        """Element type of the alloca slot behind `ptr`, or "" if unknown."""
+        match ptr.kind:
+            case Copy(local) | Move(local):
+                self.alloca_elem_types.get(self.local_id_value(local)) ?? ""
+            case _:
+                ""
+
+    fn operand_alloca_elem_unsigned(ptr: MirOperand) -> bool:
+        """Unsigned bit of the alloca slot behind `ptr` (see translate_alloc).
+        Defaults to false (signed) when the slot is unknown."""
+        match ptr.kind:
+            case Copy(local) | Move(local):
+                self.alloca_elem_unsigned.get(self.local_id_value(local)) ?? false
+            case _:
+                false
+
+    me translate_load(dest: LocalId, ptr: MirOperand):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val raw_ptr_val = self.translate_operand(ptr)
+        val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
+        # Prefer the alloca slot's element type: the dest is often an SSA-pass
+        # temp with no tracked type (defaults i64), which would read an f64
+        # slot's bits as an integer.
+        val slot_elem = self.operand_alloca_elem_type(ptr)
+        val load_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_local_type(dest_id))
+        # See translate_alloc: void spill slots are materialized as i64.
+        val load_ty = if load_ty_raw == "void": "i64" else: load_ty_raw
+        if load_ty == "ptr":
+            self.mark_ptr_local(dest_id)
+        # Register the load result's type. Locals materialized after the
+        # up-front local_types population (e.g. the alloca transform's
+        # load-before-use temps) are otherwise untracked, which makes the Ret
+        # path treat `return <loaded local>` as untyped and zero it
+        # (`ret i64 0`). Mirrors translate_const's dest-type registration.
+        self.local_types[dest_id] = load_ty
+        self.value_types[dest_name] = load_ty
+        self.unsigned_locals[dest_id] = self.operand_alloca_elem_unsigned(ptr)
+        self.builder.emit_load(dest_name, load_ty, ptr_val)
+
+    me translate_store(ptr: MirOperand, value: MirOperand):
+        val raw_ptr_val = self.translate_operand(ptr)
+        val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
+        val raw_value_val = self.translate_operand(value)
+        # Prefer the alloca slot's element type (see translate_load).
+        val slot_elem = self.operand_alloca_elem_type(ptr)
+        val store_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
+        # See translate_alloc: void spill slots are materialized as i64.
+        val store_ty = if store_ty_raw == "void": "i64" else: store_ty_raw
+        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), store_ty)
+        self.builder.emit_store(store_ty, value_val, ptr_val)
+
+    # mutglobal lane (module-level `var` mutation storage, see
+    # scratchpad/mutglobal_plan.md): LoadGlobal/StoreGlobal reference a
+    # MirModule.statics slot directly by SymbolId rather than through a
+    # pointer-value MirOperand (there is no "address of a global" operand
+    # kind, so unlike Load/Store there is no alloca/GEP producing the
+    # address first) -- translate_module's static-declaration pass records
+    # the real `@name` LLVM global text and its element type per SymbolId in
+    # global_static_names/global_static_types before any function body is
+    # translated, so these two lookups always resolve for any symbol that
+    # module.statics actually carries.
+    me translate_load_global(dest: LocalId, symbol: SymbolId):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val g_name = self.global_static_names.get(symbol.id) ?? "@g_undeclared_{symbol.id}"
+        val g_ty = self.global_static_types.get(symbol.id) ?? self.native_int_type
+        self.local_types[dest_id] = g_ty
+        self.value_types[dest_name] = g_ty
+        if g_ty == "ptr":
+            self.mark_ptr_local(dest_id)
+        self.builder.emit_load(dest_name, g_ty, g_name)
+
+    me translate_store_global(symbol: SymbolId, value: MirOperand):
+        val g_name = self.global_static_names.get(symbol.id) ?? "@g_undeclared_{symbol.id}"
+        val g_ty = self.global_static_types.get(symbol.id) ?? self.native_int_type
+        val raw_value_val = self.translate_operand(value)
+        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
+        self.builder.emit_store(g_ty, value_val, g_name)

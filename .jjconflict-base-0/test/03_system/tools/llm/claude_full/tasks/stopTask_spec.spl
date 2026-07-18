@@ -1,0 +1,66 @@
+"""
+# Claude Full Stop Task
+
+Checks stopTask validation, kill, local shell notification suppression, and errors.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.tasks.stopTask.*
+
+describe "Claude full stopTask":
+    it "should report not found errors":
+        step("Stop missing task")
+        val context = StopTaskContext.new([], ["bash"])
+        val result = stopTask("missing", context)
+        expect(result.error.name).to_equal("StopTaskError")
+        expect(result.error.code).to_equal("not_found")
+        expect(result.error.message).to_contain("No task found")
+
+    it "should report not running errors":
+        step("Stop completed task")
+        val context = StopTaskContext.new([TaskState.new("t1", "bash", "completed", "echo hi", "desc")], ["bash"])
+        val result = stopTask("t1", context)
+        expect(result.error.code).to_equal("not_running")
+        expect(result.error.message).to_contain("status: completed")
+
+    it "should report unsupported task types":
+        step("Stop unsupported task")
+        val context = StopTaskContext.new([TaskState.new("t1", "agent", "running", "", "agent work")], ["bash"])
+        val result = stopTask("t1", context)
+        expect(result.error.code).to_equal("unsupported_type")
+        expect(result.error.message).to_contain("agent")
+
+    it "should kill local shell task and emit sdk termination":
+        step("Stop running bash task")
+        val task = TaskState.new("t1", "bash", "running", "npm test", "run tests")
+        val context = StopTaskContext.new([task], ["bash"])
+        val result = stopTask("t1", context)
+        expect(result.taskId).to_equal("t1")
+        expect(result.taskType).to_equal("bash")
+        expect(result.command).to_equal("npm test")
+        expect(result.killedTaskIds).to_equal(["t1"])
+        expect(result.notified).to_equal(true)
+        expect(result.sdkEvents[0]).to_contain("terminated:t1:stopped")
+
+    it "should not duplicate sdk event for already notified local shell task":
+        step("Stop notified bash task")
+        var task = TaskState.new("t1", "local_shell", "running", "sleep 1", "sleep")
+        task.notified = true
+        val context = StopTaskContext.new([task], ["local_shell"])
+        val result = stopTask("t1", context)
+        expect(result.command).to_equal("sleep 1")
+        expect(result.sdkEvents.len()).to_equal(0)
+
+    it "should return description for non-shell tasks":
+        step("Stop agent task")
+        val context = StopTaskContext.new([TaskState.new("a1", "agent", "running", "", "summarize")], ["agent"])
+        val result = stopTask("a1", context)
+        expect(result.taskType).to_equal("agent")
+        expect(result.command).to_equal("summarize")
+        expect(result.killedTaskIds).to_equal(["a1"])
+
+    it "should expose source-backed helpers":
+        step("Pin helper behavior")
+        expect(isLocalShellTask(TaskState.new("t", "bash", "running", "c", "d"))).to_equal(true)
+        expect(containsTextStopTask(["a", "b"], "b")).to_equal(true)
+        expect(stopTaskSourceLinesModeled()).to_equal(100)

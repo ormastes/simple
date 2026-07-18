@@ -1,0 +1,262 @@
+# Scheduler Policy Engine — @task annotation parser, time-slice calculator,
+# starvation prevention, and policy coordination for SimpleOS scheduler.
+
+# ============================================================================
+# TaskAnnotation — parsed @task annotation metadata
+# ============================================================================
+
+pub class TaskAnnotation:
+    has_annotation: bool
+    sched_class: text
+    priority: i64
+    affinity_mask: i64
+    deadline_us: i64
+    time_slice_ms: i64
+    isolation: text
+
+    static fn default_task() -> TaskAnnotation:
+        TaskAnnotation(
+            has_annotation: false,
+            sched_class: "normal",
+            priority: 50,
+            affinity_mask: 0,
+            deadline_us: 0,
+            time_slice_ms: 10,
+            isolation: "none"
+        )
+
+    static fn parse(class_str: text, prio: i64, aff: i64, deadline: i64, iso: text) -> TaskAnnotation:
+        TaskAnnotation(
+            has_annotation: true,
+            sched_class: class_str,
+            priority: prio,
+            affinity_mask: aff,
+            deadline_us: deadline,
+            time_slice_ms: 10,
+            isolation: iso
+        )
+
+    me validate() -> text:
+        val cls = self.sched_class
+        val cls_ok = (cls == "realtime" or cls == "normal" or cls == "batch" or cls == "idle")
+        if cls_ok == false:
+            return "invalid sched_class: " + cls
+        if self.priority < 0 or self.priority > 99:
+            return "priority out of range: " + self.priority.to_text()
+        if self.affinity_mask < 0:
+            return "affinity_mask must be >= 0"
+        if self.deadline_us < 0:
+            return "deadline_us must be >= 0"
+        if self.time_slice_ms <= 0:
+            return "time_slice_ms must be > 0"
+        val iso = self.isolation
+        val iso_ok = (iso == "none" or iso == "namespace" or iso == "container" or iso == "sandbox")
+        if iso_ok == false:
+            return "invalid isolation: " + iso
+        ""
+
+    me summary() -> text:
+        "TaskAnnotation(class=" + self.sched_class +
+        " prio=" + self.priority.to_text() +
+        " affinity=" + self.affinity_mask.to_text() +
+        " deadline_us=" + self.deadline_us.to_text() +
+        " slice_ms=" + self.time_slice_ms.to_text() +
+        " isolation=" + self.isolation + ")"
+
+# ============================================================================
+# TaskAnnotationValidator — validates @task annotations and tracks stats
+# ============================================================================
+
+pub class TaskAnnotationValidator:
+    valid_count: i64
+    invalid_count: i64
+    last_error: text
+
+    static fn create() -> TaskAnnotationValidator:
+        TaskAnnotationValidator(
+            valid_count: 0,
+            invalid_count: 0,
+            last_error: ""
+        )
+
+    me validate_class(cls: text) -> text:
+        val ok = (cls == "realtime" or cls == "normal" or cls == "batch" or cls == "idle")
+        if ok == false:
+            return "invalid class: " + cls
+        ""
+
+    me validate_priority(prio: i64) -> text:
+        if prio < 0 or prio > 99:
+            return "priority out of range: " + prio.to_text()
+        ""
+
+    me validate_affinity(mask: i64, max_cpus: i64) -> text:
+        if mask < 0:
+            return "affinity mask must be >= 0"
+        if max_cpus > 0 and mask >= max_cpus:
+            return "affinity exceeds CPU count: mask=" + mask.to_text() + " max_cpus=" + max_cpus.to_text()
+        ""
+
+    me validate_annotation(ann: TaskAnnotation) -> text:
+        val err = ann.validate()
+        if err == "":
+            self.valid_count = self.valid_count + 1
+        else:
+            self.invalid_count = self.invalid_count + 1
+            self.last_error = err
+        err
+
+    me stats() -> text:
+        "TaskAnnotationValidator(valid=" + self.valid_count.to_text() +
+        " invalid=" + self.invalid_count.to_text() +
+        " last_error=" + self.last_error + ")"
+
+# ============================================================================
+# TimeSliceCalculator — computes effective time slices per scheduling class
+# ============================================================================
+
+pub class TimeSliceCalculator:
+    base_slice_ms: i64
+    min_slice_ms: i64
+    max_slice_ms: i64
+
+    static fn create() -> TimeSliceCalculator:
+        TimeSliceCalculator(
+            base_slice_ms: 10,
+            min_slice_ms: 1,
+            max_slice_ms: 200
+        )
+
+    me calculate(cls: text, priority: i64) -> i64:
+        if cls == "realtime":
+            return 1
+        if cls == "batch":
+            val s = self.base_slice_ms * 5
+            if s > self.max_slice_ms:
+                return self.max_slice_ms
+            return s
+        if cls == "idle":
+            val s = self.base_slice_ms * 10
+            if s > self.max_slice_ms:
+                return self.max_slice_ms
+            return s
+        # normal: higher priority = shorter slice (runs more often)
+        val pct = 100 - priority
+        var s = self.base_slice_ms * pct / 100
+        if s < self.min_slice_ms:
+            s = self.min_slice_ms
+        if s > self.max_slice_ms:
+            s = self.max_slice_ms
+        s
+
+    me should_preempt(running_class: text, running_prio: i64, waiting_class: text, waiting_prio: i64) -> bool:
+        # Class rank: realtime(0) > normal(1) > batch(2) > idle(3)
+        var running_rank = 1
+        if running_class == "realtime":
+            running_rank = 0
+        if running_class == "batch":
+            running_rank = 2
+        if running_class == "idle":
+            running_rank = 3
+        var waiting_rank = 1
+        if waiting_class == "realtime":
+            waiting_rank = 0
+        if waiting_class == "batch":
+            waiting_rank = 2
+        if waiting_class == "idle":
+            waiting_rank = 3
+        if waiting_rank < running_rank:
+            return true
+        if waiting_rank == running_rank and waiting_prio < running_prio:
+            return true
+        false
+
+    me summary() -> text:
+        "TimeSliceCalculator(base=" + self.base_slice_ms.to_text() +
+        "ms min=" + self.min_slice_ms.to_text() +
+        "ms max=" + self.max_slice_ms.to_text() + "ms)"
+
+# ============================================================================
+# StarvationPrevention — prevents task starvation via priority boosting
+# ============================================================================
+
+pub class StarvationPrevention:
+    boost_threshold_ms: i64
+    boost_amount: i64
+    boosted_count: i64
+
+    static fn create(threshold: i64, amount: i64) -> StarvationPrevention:
+        StarvationPrevention(
+            boost_threshold_ms: threshold,
+            boost_amount: amount,
+            boosted_count: 0
+        )
+
+    me check_starvation(wait_time_ms: i64, current_prio: i64) -> i64:
+        if wait_time_ms < self.boost_threshold_ms:
+            return current_prio
+        self.boosted_count = self.boosted_count + 1
+        var boosted = current_prio - self.boost_amount
+        if boosted < 0:
+            boosted = 0
+        boosted
+
+    me should_boost(wait_time_ms: i64) -> bool:
+        wait_time_ms >= self.boost_threshold_ms
+
+    me stats() -> text:
+        "StarvationPrevention(threshold=" + self.boost_threshold_ms.to_text() +
+        "ms boost=" + self.boost_amount.to_text() +
+        " boosted_count=" + self.boosted_count.to_text() + ")"
+
+# ============================================================================
+# SchedulerPolicyEngine — ties annotation, slice, and starvation policy together
+# ============================================================================
+
+pub class SchedulerPolicyEngine:
+    slice_calc: TimeSliceCalculator
+    starvation: StarvationPrevention
+    decisions_made: i64
+    preemptions: i64
+    boosts: i64
+
+    static fn create() -> SchedulerPolicyEngine:
+        SchedulerPolicyEngine(
+            slice_calc: TimeSliceCalculator.create(),
+            starvation: StarvationPrevention.create(500, 5),
+            decisions_made: 0,
+            preemptions: 0,
+            boosts: 0
+        )
+
+    static fn default_policy() -> SchedulerPolicyEngine:
+        SchedulerPolicyEngine(
+            slice_calc: TimeSliceCalculator.create(),
+            starvation: StarvationPrevention.create(100, 10),
+            decisions_made: 0,
+            preemptions: 0,
+            boosts: 0
+        )
+
+    me decide_slice(cls: text, prio: i64) -> i64:
+        self.decisions_made = self.decisions_made + 1
+        self.slice_calc.calculate(cls, prio)
+
+    me decide_preempt(running_cls: text, running_prio: i64, waiting_cls: text, waiting_prio: i64) -> bool:
+        val result = self.slice_calc.should_preempt(running_cls, running_prio, waiting_cls, waiting_prio)
+        if result:
+            self.preemptions = self.preemptions + 1
+        result
+
+    me apply_starvation_boost(wait_ms: i64, prio: i64) -> i64:
+        val result = self.starvation.check_starvation(wait_ms, prio)
+        if result < prio:
+            self.boosts = self.boosts + 1
+        result
+
+    me stats() -> text:
+        "SchedulerPolicyEngine(decisions=" + self.decisions_made.to_text() +
+        " preemptions=" + self.preemptions.to_text() +
+        " boosts=" + self.boosts.to_text() + " " +
+        self.slice_calc.summary() + " " +
+        self.starvation.stats() + ")"

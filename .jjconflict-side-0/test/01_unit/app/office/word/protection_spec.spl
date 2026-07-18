@@ -1,0 +1,105 @@
+"""Word document-protection (Restrict Editing) spec.
+
+Ground-truth permission matrix (enforced == true unless noted):
+- none:            can_edit_body true,  can_add_comment true,  requires_password false, xml ""
+- readOnly:        can_edit_body false, can_add_comment false, requires_password (per password)
+- comments:        can_edit_body false, can_add_comment true
+- forms:           can_edit_body false, can_add_comment false
+- trackedChanges:  can_edit_body true (edits allowed, just tracked), can_add_comment true
+- any mode with enforced == false: can_edit_body true, can_add_comment true (no restriction)
+"""
+
+use std.spec
+use app.office.word.protection.{
+    Protection, protection_new, protection_none, protection_read_only,
+    can_edit_body, can_add_comment, requires_password, protection_to_xml,
+    protection_summary
+}
+
+describe "protection_none: no protection at all":
+    it "has mode none, is not enforced, and has no password":
+        val prot = protection_none()
+        expect(prot.mode).to_equal("none")
+        assert_false(prot.enforced)
+        expect(prot.password_hash).to_equal("")
+
+    it "allows body edits and comments":
+        val prot = protection_none()
+        assert_true(can_edit_body(prot))
+        assert_true(can_add_comment(prot))
+
+    it "requires no password":
+        val prot = protection_none()
+        assert_false(requires_password(prot))
+
+    it "renders to the empty XML fragment":
+        val prot = protection_none()
+        expect(protection_to_xml(prot)).to_equal("")
+
+describe "protection_read_only: enforced read-only with a password":
+    it "blocks body edits and comments":
+        val prot = protection_read_only("abc123")
+        assert_false(can_edit_body(prot))
+        assert_false(can_add_comment(prot))
+
+    it "requires a password":
+        val prot = protection_read_only("abc123")
+        assert_true(requires_password(prot))
+
+    it "renders edit mode, enforcement, and password hash in the XML":
+        val prot = protection_read_only("abc123")
+        val xml = protection_to_xml(prot)
+        expect(xml).to_contain("w:edit=\"readOnly\"")
+        expect(xml).to_contain("w:enforcement=\"1\"")
+        expect(xml).to_contain("w:hash=\"abc123\"")
+
+describe "comments mode: enforced comment-only protection":
+    it "blocks body edits but allows adding comments":
+        val prot = protection_new("comments", true, "")
+        assert_false(can_edit_body(prot))
+        assert_true(can_add_comment(prot))
+
+    it "requires no password when password_hash is empty":
+        val prot = protection_new("comments", true, "")
+        assert_false(requires_password(prot))
+
+describe "forms mode: enforced forms-only protection":
+    it "blocks both body edits and comments":
+        val prot = protection_new("forms", true, "")
+        assert_false(can_edit_body(prot))
+        assert_false(can_add_comment(prot))
+
+describe "trackedChanges mode: enforced tracked editing":
+    it "allows body edits (tracked) and allows comments":
+        val prot = protection_new("trackedChanges", true, "")
+        assert_true(can_edit_body(prot))
+        assert_true(can_add_comment(prot))
+
+describe "non-enforced protection: enforcement off means no restriction":
+    it "allows body edits and comments even in readOnly mode":
+        val prot = protection_new("readOnly", false, "")
+        assert_true(can_edit_body(prot))
+        assert_true(can_add_comment(prot))
+
+describe "protection_summary: readable one-line description":
+    it "formats none as just \"none\"":
+        val prot = protection_none()
+        expect(protection_summary(prot)).to_equal("none")
+
+    it "formats enforced readOnly with a password":
+        val prot = protection_read_only("abc123")
+        expect(protection_summary(prot)).to_equal("readOnly (enforced, password)")
+
+    it "formats enforced protection without a password":
+        val prot = protection_new("forms", true, "")
+        expect(protection_summary(prot)).to_equal("forms (enforced)")
+
+    it "formats non-enforced protection":
+        val prot = protection_new("comments", false, "")
+        expect(protection_summary(prot)).to_equal("comments (not enforced)")
+
+    describe "deliberate-fail probe (must be fixed to green before landing)":
+        it "confirms trackedChanges still permits body edits when enforced":
+            val prot = protection_new("trackedChanges", true, "")
+            # ground truth: trackedChanges allows edits (they are tracked, not blocked).
+            assert_true(can_edit_body(prot))

@@ -1,0 +1,224 @@
+# Comment Extraction for Doc Coverage
+# Extracts and associates comments with declarations
+
+use std.string.{NL}
+
+# ============================================================================
+# Comment Extraction
+# ============================================================================
+
+# Extract all comments from source code
+# Returns parallel arrays: line numbers and comment text
+fn extract_comments(source: text) -> ([i64], [text]):
+    var line_nums: [i64] = []
+    var comment_texts: [text] = []
+
+    val lines = source.split(NL)
+    var line_num = 0
+    var in_block_comment = false
+    var block_start_line = 0
+    var block_lines: [text] = []
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Handle block comment start
+        if trimmed.starts_with("\"\"\""):
+            if not in_block_comment:
+                in_block_comment = true
+                block_start_line = line_num
+                block_lines = []
+                # Check if it's a one-line block comment
+                val rest = trimmed[3:]
+                if rest.ends_with("\"\"\""):
+                    val content_len = rest.len() - 3
+                    val content = rest[0:content_len]
+                    line_nums.push(line_num)
+                    comment_texts.push(content.trim())
+                    in_block_comment = false
+                else:
+                    block_lines.push(rest)
+            else:
+                # End of block comment
+                val rest = trimmed[3:]
+                if rest.len() > 0:
+                    block_lines.push(rest)
+                val combined = block_lines.join(" ")
+                line_nums.push(block_start_line)
+                comment_texts.push(combined.trim())
+                in_block_comment = false
+                block_lines = []
+            continue
+
+        # Inside block comment
+        if in_block_comment:
+            # Check for end marker within line
+            val end_idx = line.index_of("\"\"\"") ?? -1
+            if end_idx >= 0:
+                val before_end = line[0:end_idx]
+                block_lines.push(before_end.trim())
+                val combined = block_lines.join(" ")
+                line_nums.push(block_start_line)
+                comment_texts.push(combined.trim())
+                in_block_comment = false
+                block_lines = []
+            else:
+                block_lines.push(trimmed)
+            continue
+
+        # Single-line comments
+        val hash_idx = line.index_of("#") ?? -1
+        if hash_idx >= 0:
+            # Check if it's inside a string literal (simple heuristic)
+            val before_hash = line[0:hash_idx]
+            val quote_count = count_char(before_hash, "\"")
+            val is_in_string = quote_count % 2 == 1
+            if not is_in_string:
+                val after_hash = line[hash_idx + 1:]
+                val comment_text = after_hash.trim()
+                if comment_text.len() > 0:
+                    line_nums.push(line_num)
+                    comment_texts.push(comment_text)
+
+    (line_nums, comment_texts)
+
+# Count occurrences of a character in a string
+fn count_char(s: text, ch: text) -> i64:
+    var count = 0
+    var i = 0
+    for c in s:
+        if c == ch:
+            count = count + 1
+        i = i + 1
+    count
+
+# ============================================================================
+# Comment Association
+# ============================================================================
+
+# Find comment immediately before a declaration
+# Returns (has_comment, comment_text)
+fn associate_comments(comment_lines: [i64], comment_texts: [text], decl_line: i64) -> (bool, text):
+    # Look for comments within 2 lines before declaration
+    var i = 0
+    var best_idx = -1
+    var best_distance = 999
+
+    for line_num in comment_lines:
+        val distance = decl_line - line_num
+        if distance > 0:
+            if distance <= 2:
+                if distance < best_distance:
+                    best_distance = distance
+                    best_idx = i
+        i = i + 1
+
+    if best_idx >= 0:
+        (true, comment_texts[best_idx])
+    else:
+        (false, "")
+
+# ============================================================================
+# Docstring Extraction
+# ============================================================================
+
+# Extract docstring from source starting at a specific line
+# Returns (has_docstring, docstring_text)
+fn extract_docstring(source: text, start_line: i64) -> (bool, text):
+    val lines = source.split(NL)
+
+    # Start_line is 1-indexed, array is 0-indexed
+    var idx = start_line
+    if idx >= lines.len():
+        return (false, "")
+
+    val first_line = lines[idx]
+    val trimmed = first_line.trim()
+
+    # Check for """ on the same line or next line
+    if trimmed.starts_with("\"\"\""):
+        # Found docstring start
+        val rest = trimmed[3:]
+
+        # Check for one-line docstring
+        if rest.ends_with("\"\"\""):
+            val content_len = rest.len() - 3
+            val content = rest[0:content_len]
+            return (true, content.trim())
+
+        # Multi-line docstring
+        var doc_lines: [text] = []
+        doc_lines.push(rest)
+
+        var current = idx + 1
+        for i in 0..100:
+            if current >= lines.len():
+                break
+            val line = lines[current]
+            val end_idx = line.index_of("\"\"\"") ?? -1
+            if end_idx >= 0:
+                # Found end of docstring
+                val before_end = line[0:end_idx]
+                if before_end.trim().len() > 0:
+                    doc_lines.push(before_end.trim())
+                val combined = doc_lines.join(" ")
+                return (true, combined.trim())
+            else:
+                doc_lines.push(line.trim())
+            current = current + 1
+
+        # Docstring not properly closed, return what we have
+        val combined = doc_lines.join(" ")
+        return (true, combined.trim())
+
+    # Try next line
+    idx = idx + 1
+    if idx >= lines.len():
+        return (false, "")
+
+    val next_line = lines[idx]
+    val next_trimmed = next_line.trim()
+
+    if next_trimmed.starts_with("\"\"\""):
+        val rest = next_trimmed[3:]
+
+        # Check for one-line docstring
+        if rest.ends_with("\"\"\""):
+            val content_len = rest.len() - 3
+            val content = rest[0:content_len]
+            return (true, content.trim())
+
+        # Multi-line docstring
+        var doc_lines: [text] = []
+        doc_lines.push(rest)
+
+        var current = idx + 1
+        for i in 0..100:
+            if current >= lines.len():
+                break
+            val line = lines[current]
+            val end_idx = line.index_of("\"\"\"") ?? -1
+            if end_idx >= 0:
+                val before_end = line[0:end_idx]
+                if before_end.trim().len() > 0:
+                    doc_lines.push(before_end.trim())
+                val combined = doc_lines.join(" ")
+                return (true, combined.trim())
+            else:
+                doc_lines.push(line.trim())
+            current = current + 1
+
+        val combined = doc_lines.join(" ")
+        return (true, combined.trim())
+
+    (false, "")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export extract_comments
+export associate_comments
+export extract_docstring
+export count_char

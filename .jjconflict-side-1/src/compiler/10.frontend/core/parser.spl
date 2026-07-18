@@ -1,0 +1,870 @@
+# Core Simple — Recursive Descent Parser
+#
+# Shared core library: parses tokens into an AST stored in the arena.
+# Handles function/struct/enum declarations, val/var bindings, use/export,
+# expressions, statements, and indentation-based blocks.
+#
+# Design: All state in module-level vars. Functions modify state.
+# Works when compiled to C; NOT in the interpreter (closure bug).
+#
+# Split into modules:
+#   parser_preprocessor.spl — conditional compilation (@when/@cfg)
+#   parser_expr.spl         — expression parsing
+#   parser_stmts.spl        — statement parsing
+#   parser_decls.spl        — declaration and module body parsing
+
+use compiler.core.tokens.{tok_kind_name, keyword_lookup}
+use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_FN, TOK_KW_DYN}
+use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA}
+use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
+use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.tokens.{TOK_SEMICOLON}
+use compiler.core.lexer_chars.{is_digit}
+use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_mark_current_token_as_generic_close}
+use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
+use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
+use compiler.core.ast.{module_set_path, module_get_path}
+use compiler.core.ast.{ast_reset}
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_read_text_rv(path: text) -> text
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
+
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
+use compiler.core.types.{TYPE_NIL}
+use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
+use compiler.core.types.{TYPE_UNION}
+use compiler.core.types.{int_to_str}
+use compiler.core.types.{named_type_find}
+use compiler.core.types.{primitive_integer_bit_width_from_name}
+use compiler.core.types.{union_type_register}
+use compiler.core.types.{dict_type_register}
+use compiler.core.types.{tuple_type_register}
+use compiler.core.types.{array_generic_type_register}
+use compiler.core.types.{result_type_register}
+use std.string_core.{char_code}
+
+# Import from split modules
+use compiler.frontend.core.parser_preprocessor (_pp_preprocess_conditionals, preprocess_conditionals)
+use compiler.frontend.core.parser_expr.{parse_expr, parse_assignment, parse_or, parse_and, parse_not}
+use compiler.frontend.core.parser_expr.{parse_comparison, parse_null_coalesce, parse_range}
+use compiler.frontend.core.parser_expr.{parse_addition, parse_multiplication, parse_unary, parse_postfix}
+use compiler.frontend.core.parser_expr.{parse_call_arg, parse_postfix_on, parse_binary_from, parse_int_text}
+use compiler.frontend.core.parser_stmts.{parse_block, parse_statement}
+use compiler.frontend.core.parser_stmts.{parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt}
+use compiler.frontend.core.parser_stmts.{parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt}
+use compiler.frontend.core.parser_stmts.{parse_receive_stmt, parse_bind_stmt}
+use compiler.frontend.core.parser_stmts.{parse_if_expr, parse_for_expr, parse_while_expr}
+use compiler.core.parser_decls.{parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl}
+use compiler.frontend.core.parser_decls_use.{parse_impl_decl, parse_class_body_method}
+use compiler.frontend.core.parser_decls_use.{parse_use_decl, parse_export_decl, parse_ce_decl}
+use compiler.core.parser_decls.{parse_val_decl, parse_lazy_val_decl, parse_var_decl}
+use compiler.core.parser_decls.{parse_module_body}
+
+# ===== Parser State =====
+
+var par_errors: [text] = []
+var par_warnings: [text] = []
+var par_struct_names: [text] = []
+var par_had_error: bool = false
+var par_diagnostics_suppressed: bool = false
+var par_diagnostic_emit_count: i64 = 0
+var par_kind_slot: [i64] = [0]
+var par_text_slot: [text] = [""]
+var par_line_slot: [i64] = [0]
+var par_col_slot: [i64] = [0]
+# Perf: whole-source cache for parser_token_text_from_offsets, keyed on a
+# generation counter bumped at every LEX_SOURCE set-site. Avoids the O(N^2)
+# rt_env_get(LEX_SOURCE) whole-source fetch per token (one per parser_advance).
+var par_src_cache_slot: [text] = [""]
+var par_src_cache_gen_slot: [i64] = [-1]
+# Perf: cache SIMPLE_BOOTSTRAP_PAR_ENV_SAVE env var to avoid per-token getenv() syscall.
+# -1 = uncached, 0 = disabled, 1 = enabled
+var par_env_save_cached: i64 = -1
+
+extern fn rt_is_debug_mode_enabled() -> bool
+
+fn parser_env_i64(key: text) -> i64:
+    val raw = rt_env_get(key) ?? ""
+    var value: i64 = 0
+    var i: i64 = 0
+    var neg: bool = false
+    if raw.len() > 0 and raw[0:1] == "-":
+        neg = true
+        i = 1
+    while i < raw.len():
+        val code = char_code(raw[i:i + 1])
+        if code < 48 or code > 57:
+            break
+        value = value * 10 + (code - 48)
+        i = i + 1
+    if neg:
+        return 0 - value
+    value
+
+fn par_env_save_enabled() -> bool:
+    if par_env_save_cached < 0:
+        par_env_save_cached = if (rt_env_get("SIMPLE_BOOTSTRAP_PAR_ENV_SAVE") ?? "") == "1": 1 else: 0
+    par_env_save_cached == 1
+
+fn parser_lex_source_gen_bump():
+    # Invalidate the whole-source cache: called at every LEX_SOURCE set-site.
+    val cur = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN", "{cur + 1}")
+
+fn parser_lex_source_cached() -> text:
+    # Serve the source from a generation-keyed module-var cache so per-token
+    # callers pay one small-int env read instead of re-fetching the whole O(N)
+    # source via rt_env_get each time (the per-token path was O(N^2)). Module
+    # slots persist across calls in compiled stage4; the interpreter falls back
+    # to a refetch each call (cache slot does not persist) — slow but correct.
+    val gen = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
+    if par_src_cache_slot != nil and par_src_cache_gen_slot != nil:
+        if par_src_cache_gen_slot[0] == gen and par_src_cache_slot[0] != "":
+            return par_src_cache_slot[0]
+    val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    var src = inline_source
+    if src == "":
+        val path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+        if path != "":
+            src = rt_file_read_text_rv(path) ?? ""
+    if par_src_cache_slot == nil:
+        par_src_cache_slot = [""]
+    if par_src_cache_gen_slot == nil:
+        par_src_cache_gen_slot = [-1]
+    par_src_cache_slot[0] = src
+    par_src_cache_gen_slot[0] = gen
+    src
+
+fn parser_current_token_text(kind: i64) -> text:
+    if kind == 180 or kind == 181 or kind == 182 or kind == 190:
+        return ""
+    lex_token_text()
+
+fn par_kind_set(value: i64):
+    par_kind_slot[0] = value
+    if par_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{value}")
+
+fn par_kind_get() -> i64:
+    if par_kind_slot == nil:
+        return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_KIND")
+    par_kind_slot[0]
+
+fn par_text_set(value: text):
+    par_text_slot[0] = value
+    if par_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", value)
+
+fn par_text_get() -> text:
+    if par_text_slot != nil:
+        return par_text_slot[0]
+    if par_env_save_enabled():
+        return rt_env_get("SIMPLE_BOOTSTRAP_PAR_TEXT") ?? ""
+    ""
+
+fn par_line_set(value: i64):
+    par_line_slot[0] = value
+    if par_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{value}")
+
+fn par_line_get() -> i64:
+    if par_line_slot == nil:
+        return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_LINE")
+    par_line_slot[0]
+
+fn par_col_set(value: i64):
+    par_col_slot[0] = value
+    if par_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{value}")
+
+fn par_col_get() -> i64:
+    if par_col_slot == nil:
+        return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_COL")
+    par_col_slot[0]
+
+fn par_had_error_set(value: bool):
+    par_had_error = value
+
+fn par_had_error_get() -> bool:
+    par_had_error
+
+fn parser_diagnostics_suppressed_get() -> bool:
+    par_diagnostics_suppressed
+
+fn parser_diagnostics_suppressed_set(value: bool):
+    par_diagnostics_suppressed = value
+
+fn parser_diagnostic_emit_count_get() -> i64:
+    par_diagnostic_emit_count
+
+# ===== Parser Init =====
+
+fn parser_init(source: text):
+    parser_init_with_path(source, "")
+
+fn parser_init_with_path(source: text, path: text):
+    par_errors = []
+    par_warnings = []
+    par_struct_names = []
+    par_kind_slot = [0]
+    par_text_slot = [""]
+    par_line_slot = [0]
+    par_col_slot = [0]
+    par_src_cache_slot = [""]
+    par_src_cache_gen_slot = [-1]
+    par_had_error = false
+    par_diagnostics_suppressed = false
+    par_diagnostic_emit_count = 0
+    if (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1":
+        print "[parser_init_with_path] resetting for path={path}"
+    ast_reset()
+    if path != "":
+        module_set_path(path)
+    lex_init_with_path(source, path)
+    parser_advance()
+
+fn parser_advance():
+    val kind = lex_next()
+    par_kind_set(kind)
+    par_text_set(parser_current_token_text(kind))
+    par_line_set(lex_token_line())
+    par_col_set(lex_token_col())
+
+# ===== Token Checking =====
+
+fn parser_check(expected: i64) -> bool:
+    par_kind_get() == expected
+
+fn parser_match_tok(expected: i64) -> bool:
+    if par_kind_get() != expected:
+        return false
+    parser_advance()
+    true
+
+fn parser_expect(expected: i64) -> bool:
+    if par_kind_get() == expected:
+        parser_advance()
+        return true
+    # Cross-module attribution: without the path prefix, this message is
+    # indistinguishable from an error raised while parsing a DIFFERENT module
+    # (e.g. in a full multi-module build, log readers wrongly blamed
+    # check_dbs.spl for errors actually raised while parsing an earlier
+    # module — see bootstrap stage4 "check_dbs cross-module desync"). Include
+    # module_get_path() to match parser_error()'s format below.
+    val msg = "path " + module_get_path() + " line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'"
+    if not par_diagnostics_suppressed:
+        print "[parser_error] {msg}"
+        par_diagnostic_emit_count = par_diagnostic_emit_count + 1
+    par_had_error_set(true)
+    false
+
+fn parser_error(msg: text):
+    val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
+    if not par_diagnostics_suppressed:
+        print "[parser_error] {full}"
+        print "[parser_error_ctx] path " + module_get_path() + " kind " + int_to_str(par_kind_get()) + " text '" + par_text_get() + "'"
+        par_diagnostic_emit_count = par_diagnostic_emit_count + 1
+    par_had_error_set(true)
+
+fn parser_guarded_int_text(t: text) -> i64:
+    # Lexer bugs must surface as located parser errors, not location-less
+    # interpreter aborts ("cannot parse '\"' as i64", stage4 2026-07-03).
+    var ok = t.len() > 0
+    var gi = 0
+    while gi < t.len():
+        if not is_digit(t[gi:gi+1]):
+            ok = false
+        gi = gi + 1
+    if not ok:
+        parser_error("malformed integer literal token text '" + t + "'")
+        return 0
+    # Overflow guard: a decimal literal whose magnitude cannot possibly fit in
+    # i64 must be a LOUD parse error, not a silently-wrapped garbage value
+    # (constedge lane numeric-literal sweep 2026-07-14: native-build accepted
+    # `99999999999999999999` and silently produced 7766279631452241919, while
+    # the oracle correctly rejects it as "Invalid integer"). i64::MAX
+    # ("9223372036854775807") has 19 digits, so any 20+-digit literal is
+    # unambiguously out of range. At exactly 19 digits, allow up to
+    # "9223372036854775808" (2**63, one past i64::MAX) inclusive — that exact
+    # magnitude is required by the `-9223372036854775808` (i64::MIN) literal
+    # idiom, which relies on this text wrapping to i64::MIN here and then
+    # wrapping back to i64::MIN under negation. Anything larger is rejected.
+    if t.len() > 19:
+        parser_error("integer literal out of range for i64: '" + t + "'")
+        return 0
+    if t.len() == 19:
+        val max19 = "9223372036854775808"
+        var ci = 0
+        var too_big = false
+        var still_equal = true
+        while ci < 19:
+            val tc = char_code(t[ci:ci + 1])
+            val mc = char_code(max19[ci:ci + 1])
+            if still_equal:
+                if tc > mc:
+                    too_big = true
+                    still_equal = false
+                elif tc < mc:
+                    still_equal = false
+            ci = ci + 1
+        if too_big:
+            parser_error("integer literal out of range for i64: '" + t + "'")
+            return 0
+    # Manual decimal accumulation: the builtin int(text) miscompiles on stage4
+    # (returns the FIRST character's char code: int("1")==49, int("12")==49 —
+    # print(1+1) printed 98; bug doc iteration 18/20 #87). The input is
+    # digit-guarded above, so this is semantically identical to int(t).
+    # (Regressed by bb9aa222509 which reverted the iteration-18 accumulation to
+    # a bare int(t); restored here.)
+    var acc: i64 = 0
+    var di = 0
+    while di < t.len():
+        val code = char_code(t[di:di + 1])
+        acc = acc * 10 + (code - 48)
+        di = di + 1
+    acc
+
+fn parser_warn(msg: text):
+    par_warnings = []
+    val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
+    par_warnings.push(full)
+    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+        print "[parser_warning] {full}"
+
+fn parser_path_is_script(path: text) -> bool:
+    val p = path ?? ""
+    if p == "":
+        return true
+    if p.starts_with("examples/") or p.contains("/examples/"):
+        return true
+    if p.starts_with("scripts/") or p.contains("/scripts/"):
+        return true
+    if p.starts_with("test/") or p.contains("/test/"):
+        return true
+    if p.contains("/fixtures/") or p.contains("/repro/"):
+        return true
+    false
+
+fn parser_warn_print_if_needed():
+    if parser_path_is_script(module_get_path()):
+        return
+    parser_warn("LOG001: use log() instead of print() in non-script code")
+
+fn parser_warnings_get() -> [text]:
+    if par_warnings == nil:
+        return []
+    par_warnings
+
+fn parser_warnings_clear():
+    par_warnings = []
+
+# ===== Skip Newlines =====
+
+fn parser_skip_newlines():
+    for i in 0..10000:
+        val kind = par_kind_get()
+        if kind != 180:
+            break
+        parser_advance()
+
+fn parser_skip_newlines_and_semicolons():
+    for i in 0..10000:
+        val kind = par_kind_get()
+        val is_nl = kind == 180
+        val is_semi = kind == 163
+        val should_skip = is_nl or is_semi
+        if not should_skip:
+            break
+        parser_advance()
+
+# ===== Type Annotation Parsing =====
+
+# Absorb a postfix `?`/`??` optional suffix after a non-named base type so that
+# `[T]?`, `(T, T)?`, `{K: V}?`, `fn(...)?` parse like the named-type `i64?`
+# shorthand (which is inlined in the named branch below). Returns TYPE_OPTION
+# when a suffix is present, else the base type unchanged.
+fn parser_absorb_optional_suffix(base: i64) -> i64:
+    var kind = par_kind_get()
+    if kind != 130 and kind != 132:
+        return base
+    for _qi in 0..12:
+        if kind == 130 or kind == 132:
+            parser_advance()
+            kind = par_kind_get()
+        else:
+            break
+    TYPE_OPTION
+
+fn parser_parse_type() -> i64:
+    parser_parse_type_impl(true)
+
+fn parser_parse_cast_type() -> i64:
+    parser_parse_type_impl(false)
+
+# Tuple labels are ABI/documentation names, not distinct element types in the
+# bootstrap tag registry. Parse `label: T` by discarding the provisional named
+# type for `label` and retaining T; anonymous tuple elements remain unchanged.
+fn parser_parse_tuple_element_type() -> i64:
+    val candidate = parser_parse_type()
+    if par_kind_get() == TOK_COLON:
+        parser_advance()
+        return parser_parse_type()
+    candidate
+
+fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
+    # dyn Trait -- dynamic dispatch type (parsed as named type)
+    var kind = par_kind_get()
+    # Prefix optional shorthand `?T` is not documented/legal syntax (the
+    # supported spelling is the suffix form `T?`, e.g. `i64?`, `[T]?`, or
+    # `Option<T>`). Left unhandled, the leading `?` fell through every type
+    # form below to the catch-all "expected type annotation" error WITHOUT
+    # consuming the token; the caller's subsequent `parser_expect(TOK_COLON)`
+    # then also failed on the still-current `?`, and the block parser's error
+    # recovery re-parsed the leftover `? i64:` as expression statements —
+    # cascading into unrelated "unresolved name: i64" / "unresolved name: n"
+    # HIR errors that looked like param registration was destroyed. Emit one
+    # clear, located diagnostic naming the workaround and resync by consuming
+    # the `?` plus the underlying type so the rest of the declaration (return
+    # type position, param list, function body) parses normally.
+    if kind == TOK_QUESTION:
+        parser_error("prefix optional type '?T' is not supported; use suffix form 'T?' (e.g. i64?) or Option<T> instead")
+        parser_advance()
+        return parser_parse_type()
+    if kind == 199:
+        parser_advance()
+        # Parse the trait name
+        val dyn_name = par_text_get()
+        kind = par_kind_get()
+        if kind == 6:
+            parser_advance()
+        # Return as named type (interpreter uses structural subtyping anyway)
+        val dyn_id = named_type_find(dyn_name)
+        if dyn_id >= 0:
+            return TYPE_NAMED_BASE + dyn_id
+        return TYPE_ANY
+    var type_name = par_text_get()
+    if kind == 6:
+        var type_name_end = lex_token_end_get()
+        parser_advance()
+        # G35: absorb dotted path segments: json.Value  or  json::Value
+        for _gi35 in 0..20:
+            val seg_kind = par_kind_get()
+            if seg_kind != 164 and seg_kind != 162:
+                break
+            parser_advance()
+            var seg_name = par_text_get()
+            val seg_k = par_kind_get()
+            val is_ident = seg_k == 6
+            val seg_kn = tok_kind_name(seg_k)
+            val seg_is_kw = keyword_lookup(seg_kn) == seg_k
+            if not is_ident and not seg_is_kw:
+                break
+            if seg_is_kw and not is_ident:
+                seg_name = seg_kn
+            type_name_end = lex_token_end_get()
+            parser_advance()
+            type_name = type_name + "." + seg_name
+        # Check for generic type: Option<T>, Result<T, E>, Dict<K,V>, etc.
+        kind = par_kind_get()
+        val has_lt: bool = kind == TOK_LT and (allow_spaced_generics or type_name_end == lex_token_start_get())
+        val has_lt_gen: bool = kind == TOK_LT_GENERIC
+        val has_generic: bool = has_lt or has_lt_gen
+        if has_generic:
+            parser_advance()
+            val inner_type = parser_parse_type()
+            # Handle multi-param generics: Dict<K, V>, Result<T, E>
+            var extra_type = inner_type
+            var has_extra_type: bool = false
+            for i in 0..10:
+                if par_kind_get() != 160:
+                    break
+                parser_advance()
+                extra_type = parser_parse_type()
+                has_extra_type = true
+            # The same token represents binary `>` and a generic type close.
+            # Tell the lexer which meaning the parser established before
+            # advancing: otherwise a following newline is treated as a
+            # comparison continuation and its structural dedent is swallowed.
+            lex_mark_current_token_as_generic_close()
+            parser_expect(TOK_GT)
+            # Handle Option<T>
+            if type_name == "Option":
+                if inner_type == TYPE_I64:
+                    return parser_absorb_optional_suffix(TYPE_OPTION_I64)
+                if inner_type == TYPE_F64:
+                    return parser_absorb_optional_suffix(TYPE_OPTION_F64)
+                if inner_type == TYPE_TEXT:
+                    return parser_absorb_optional_suffix(TYPE_OPTION_TEXT)
+                if inner_type == TYPE_BOOL:
+                    return parser_absorb_optional_suffix(TYPE_OPTION_BOOL)
+                return parser_absorb_optional_suffix(TYPE_OPTION)
+            # Preserve Result<T,E> generic args for match payload typing.
+            if type_name == "Result":
+                if has_extra_type:
+                    val result_tag = result_type_register(inner_type, extra_type)
+                    if result_tag < 0:
+                        parser_error("too many distinct Result<T,E> annotations")
+                        return parser_absorb_optional_suffix(TYPE_RESULT)
+                    return parser_absorb_optional_suffix(result_tag)
+                return parser_absorb_optional_suffix(TYPE_RESULT)
+            # Dict<K,V> -> register the key/value tags (bug: dicttype -- this
+            # used to unconditionally return the bare TYPE_DICT sentinel,
+            # silently dropping K/V so every dict-typed param/local arrived at
+            # the AST bridge as Named("Dict", []) with no generic args).
+            if type_name == "Dict":
+                if has_extra_type:
+                    val dict_tag = dict_type_register(inner_type, extra_type)
+                    if dict_tag < 0:
+                        parser_error("too many distinct Dict<K,V> annotations")
+                        return parser_absorb_optional_suffix(TYPE_DICT)
+                    return parser_absorb_optional_suffix(dict_tag)
+                return parser_absorb_optional_suffix(TYPE_DICT)
+            # Unknown generic type - check if base is a named struct
+            val gid = named_type_find(type_name)
+            if gid >= 0:
+                return parser_absorb_optional_suffix(TYPE_NAMED_BASE + gid)
+            return parser_absorb_optional_suffix(TYPE_VOID)
+        # Check for postfix ? for Option shorthand: i64? -> Option<i64>
+        kind = par_kind_get()
+        if kind == 130:
+            parser_advance()
+            kind = par_kind_get()
+            # Check for additional ? marks (i64?? = Option<Option<i64>>)
+            var opt_result = TYPE_OPTION
+            if type_name == "i64":
+                opt_result = TYPE_OPTION_I64
+            elif type_name == "f64":
+                opt_result = TYPE_OPTION_F64
+            elif type_name == "text":
+                opt_result = TYPE_OPTION_TEXT
+            elif type_name == "bool":
+                opt_result = TYPE_OPTION_BOOL
+            # Loop for additional ? marks (i64?? or i64???)
+            for qi in 0..10:
+                if kind == 130:
+                    parser_advance()
+                    kind = par_kind_get()
+                    opt_result = TYPE_OPTION
+                elif kind == 132:
+                    parser_advance()
+                    kind = par_kind_get()
+                    opt_result = TYPE_OPTION
+                else:
+                    break
+            return opt_result
+        # Check for ?? as double optional shorthand: i64?? -> Option<Option<i64>>
+        if kind == 132:
+            parser_advance()
+            kind = par_kind_get()
+            # i64?? = Option<Option<i64>>, treat as TYPE_OPTION (nested)
+            # Check for additional ? marks
+            for qi in 0..10:
+                if kind == 130:
+                    parser_advance()
+                    kind = par_kind_get()
+                elif kind == 132:
+                    parser_advance()
+                    kind = par_kind_get()
+                else:
+                    break
+            return TYPE_OPTION
+        # Simple primitive types
+        if type_name == "i64":
+            return TYPE_I64
+        if type_name == "f64":
+            return TYPE_F64
+        if type_name == "text":
+            return TYPE_TEXT
+        if type_name == "bool":
+            return TYPE_BOOL
+        if type_name == "Option":
+            return TYPE_OPTION
+        if type_name == "Result":
+            return TYPE_RESULT
+        # Check for struct type
+        val sid = named_type_find(type_name)
+        if sid >= 0:
+            return TYPE_NAMED_BASE + sid
+        # Fixed-width integer primitives (u8/u16/u32/u64/i8/i16/i32/...) have
+        # no dedicated type tag and are never registered as named types, so
+        # without this they fell through to TYPE_VOID -- silently producing
+        # Unit-typed locals/casts/fields/params for perfectly ordinary code
+        # like `x as u32`, `fn f(n: u32)`, or a bitfield's uN-typed fields.
+        # Represent them with dedicated fixed-width tags so the bit width and
+        # signedness survive into the AST bridge -> HIR Int(bits, signed) -> MIR
+        # -> backend type mappers (e.g. VHDL unsigned/signed(W-1 downto 0)).
+        if type_name == "u8":
+            return TYPE_U8
+        if type_name == "u16":
+            return TYPE_U16
+        if type_name == "u32":
+            return TYPE_U32
+        if type_name == "u64":
+            return TYPE_U64
+        if type_name == "i8":
+            return TYPE_I8
+        if type_name == "i16":
+            return TYPE_I16
+        if type_name == "i32":
+            return TYPE_I32
+        # Non-standard widths (u7, u3, ...) have no dedicated tag; keep the i64
+        # register lane. Callers needing the exact width re-derive it from the
+        # type name text via primitive_integer_bit_width_from_name.
+        if primitive_integer_bit_width_from_name(type_name) > 0:
+            return TYPE_I64
+        return TYPE_VOID
+    if kind == 144:
+        # Array type: [i64], [text], etc.
+        parser_advance()
+        val elem_type = parser_parse_type()
+        # Sized array type: [T; N] — accept and drop the size expression
+        # (stage4 arrays are dynamic; N is a literal or const ident).
+        kind = par_kind_get()
+        if kind == 163:
+            parser_advance()
+            for _si in 0..50:
+                if par_kind_get() == 145 or par_kind_get() == 190:
+                    break
+                parser_advance()
+        parser_expect(145)
+        # Nested array types [[T]] -> TYPE_ARRAY_ANY
+        val is_nested = elem_type == TYPE_ARRAY_I64
+        val is_nested2 = elem_type == TYPE_ARRAY_TEXT
+        val is_nested3 = elem_type == TYPE_ARRAY_BOOL
+        val is_nested4 = elem_type == TYPE_ARRAY_ANY
+        val any_nested = is_nested or is_nested2
+        val any_nested2 = any_nested or is_nested3
+        val any_nested3 = any_nested2 or is_nested4
+        var arr_type = TYPE_ARRAY_I64
+        if any_nested3:
+            arr_type = TYPE_ARRAY_ANY
+        elif elem_type == TYPE_TEXT:
+            arr_type = TYPE_ARRAY_TEXT
+        elif elem_type == TYPE_BOOL:
+            arr_type = TYPE_ARRAY_BOOL
+        elif elem_type == TYPE_I64 or elem_type == TYPE_VOID:
+            # TYPE_VOID here means parser_parse_type_impl's ident branch could
+            # not resolve the element name at all (e.g. bare `Any`, which has
+            # no dedicated primitive check and no matching named type) --
+            # keep this pre-existing fallback byte-identical to before.
+            arr_type = TYPE_ARRAY_I64
+        elif elem_type >= TYPE_NAMED_BASE:
+            # bug: array-class-param-sigsegv -- a named class/struct/enum
+            # element (e.g. `[Counter]`) previously fell through to the
+            # default below and silently became bare TYPE_ARRAY_I64, so a
+            # `[Counter]` param mis-resolved to a plain i64 array by the time
+            # it reached the AST bridge/HIR -- MIR then integer-decoded (>>3)
+            # class handles read from such arrays into garbage pointers,
+            # SIGSEGVing on field access. Register the real element tag
+            # (mirrors the Dict<K,V>/Result<T,E>/Tuple(...) registries above)
+            # so convert_flat_type can rebuild the true element Type.
+            # Scoped to TYPE_NAMED_BASE+ only (real struct/class/enum/dyn
+            # handles, per the named-type lookups above returning
+            # TYPE_NAMED_BASE + sid): fixed-width ints, Dict/Result/Tuple/
+            # Option-as-element, and other non-handle element types keep the
+            # pre-existing TYPE_ARRAY_I64 default untouched -- they are value
+            # types, not the class-handle SIGSEGV this bug is about, and
+            # narrowing the change here keeps their encoding byte-identical.
+            val arr_generic_tag = array_generic_type_register(elem_type)
+            if arr_generic_tag < 0:
+                arr_type = TYPE_ARRAY_I64
+            else:
+                arr_type = arr_generic_tag
+        # absorb optional suffix: [T]? -> Option
+        return parser_absorb_optional_suffix(arr_type)
+    # Function type: fn(T, T) -> T
+    if par_kind_get() == 20:
+        parser_advance()
+        parser_expect(140)
+        if par_kind_get() != 141:
+            parser_parse_type()
+            for i in 0..100:
+                if par_kind_get() != 160:
+                    break
+                parser_advance()
+                if par_kind_get() == 141:
+                    break
+                parser_parse_type()
+        parser_expect(141)
+        if par_kind_get() == 167:
+            parser_advance()
+            parser_parse_type()
+        return parser_absorb_optional_suffix(TYPE_FN)
+    # Tuple type: (T, T)
+    if par_kind_get() == 140:
+        parser_advance()
+        # Collect the element tags instead of discarding them: a 2+ element
+        # tuple registers them in the tuple type registry (types.spl
+        # TYPE_TUPLE_BASE) so the AST bridge can rebuild TypeKind.Tuple with
+        # real element types. Previously every parenthesized tuple type
+        # collapsed to bare TYPE_ANY, so `-> (text, text, i32)` lost its
+        # element types and a destructure of the call result defaulted every
+        # element to i64 (parity case process_run_timeout).
+        var tuple_elem_tags: [i64] = []
+        if par_kind_get() != 141:
+            tuple_elem_tags.push(parser_parse_tuple_element_type())
+            for i in 0..100:
+                if par_kind_get() != 160:
+                    break
+                parser_advance()
+                if par_kind_get() == 141:
+                    break
+                tuple_elem_tags.push(parser_parse_tuple_element_type())
+        parser_expect(141)
+        # Function type without the `fn` keyword: (T, ...) -> U. When `->`
+        # (kind 167) follows the closing paren, the leading paren-group is the
+        # parameter list of a first-class function type, not a tuple. Parse and
+        # drop the return type and encode as TYPE_FN, exactly like the
+        # `fn(...) -> U` branch above (the bootstrap type-id lane carries only
+        # the fn-ness, not the signature; MIR derives call arity from the call
+        # site). Without this, `g: (i64) -> i64` mis-parsed as a tuple and left
+        # the `-> i64` tokens for the param parser to choke on.
+        if par_kind_get() == 167:
+            parser_advance()
+            parser_parse_type()
+            return parser_absorb_optional_suffix(TYPE_FN)
+        # A real tuple (2+ elements) carries its element tags via the
+        # registry; a 0/1-element paren group keeps the old TYPE_ANY
+        # behavior (a `(T)` paren-grouped single type is not a tuple).
+        if tuple_elem_tags.len() >= 2:
+            return parser_absorb_optional_suffix(tuple_type_register(tuple_elem_tags))
+        return parser_absorb_optional_suffix(TYPE_ANY)
+    # Dict type: {K: V}
+    if par_kind_get() == 142:
+        parser_advance()
+        if par_kind_get() != 143:
+            parser_parse_type()
+            if par_kind_get() == 161:
+                parser_advance()
+                parser_parse_type()
+        parser_expect(143)
+        return parser_absorb_optional_suffix(TYPE_DICT)
+    parser_error("expected type annotation")
+    TYPE_VOID
+
+# Parses a type that may be a union: A | B | C
+fn parser_parse_type_with_union() -> i64:
+    val base = parser_parse_type()
+    var kind = par_kind_get()
+    if kind != 121:
+        return base
+    # Check that the pipe isn't a |> pipe-forward
+    var members: [i64] = []
+    members.push(base)
+    while kind == 121:
+        parser_advance()
+        val next = parser_parse_type()
+        members.push(next)
+        kind = par_kind_get()
+    union_type_register(members)
+
+# ===== Top-Level Module Entry Points =====
+
+fn parse_module(source: text, path: text):
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    val preprocessed = _pp_preprocess_conditionals(source)
+    parser_init_with_path(preprocessed, path)
+    parse_module_body()
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    parser_lex_source_gen_bump()
+
+fn parse_module_file(source: text, path: text):
+    # Parse additional file without resetting AST
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    # Nil-guards: module-level vars may be nil in native binaries
+    if par_errors == nil:
+        par_errors = []
+    if par_warnings == nil:
+        par_warnings = []
+    if par_struct_names == nil:
+        par_struct_names = []
+    par_had_error = false
+    val preprocessed = _pp_preprocess_conditionals(source)
+    module_set_path(path)
+    lex_init_with_path(preprocessed, path)
+    parser_advance()
+    parse_module_body()
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    parser_lex_source_gen_bump()
+
+fn parser_has_errors() -> bool:
+    par_had_error_get()
+
+fn parser_set_had_error(value: bool):
+    par_had_error_set(value)
+
+fn parser_get_errors() -> [text]:
+    []
+
+fn parser_error_count() -> i64:
+    0
+
+# ===== Parser Token Snapshot (for speculative parse / backtrack) =====
+#
+# Saves / restores just the four "current token" fields that parser_advance()
+# writes.  Used together with lex_snapshot_save/lex_snapshot_restore to give a
+# full checkpoint for try_skip_ident_generic_args.
+#
+# Layout of the returned [i64]: [kind, line, col]
+# The text is returned/accepted separately as a plain text value.
+
+fn parser_tok_save() -> ([i64], text):
+    var nums: [i64] = [par_kind_get(), par_line_get(), par_col_get()]
+    (nums, par_text_get())
+
+fn parser_tok_restore(nums: [i64], saved_text: text):
+    par_kind_set(nums[0])
+    par_text_set(saved_text)
+    par_line_set(nums[1])
+    par_col_set(nums[2])
+
+# ===== Exports =====
+
+# Parser state (needed by split modules and external consumers)
+export par_errors, par_warnings, par_struct_names
+export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
+export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
+export parser_tok_save, parser_tok_restore
+export parser_path_is_script, parser_warn_print_if_needed
+export rt_is_debug_mode_enabled
+export parse_module_body
+
+# Core parser functions (defined here)
+
+# Module entry points (defined here)
+export parse_module, parse_module_file
+
+# Re-export from parser_preprocessor
+export _pp_preprocess_conditionals, preprocess_conditionals
+
+# Re-export from parser_expr
+export parse_expr, parse_assignment, parse_or, parse_and, parse_not
+export parse_comparison, parse_null_coalesce, parse_range
+export parse_addition, parse_multiplication, parse_unary, parse_postfix
+export parse_call_arg, parse_postfix_on, parse_binary_from, parse_int_text
+
+# Re-export from parser_stmts
+export parse_block, parse_statement
+export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
+export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_receive_stmt, parse_bind_stmt
+export parse_if_expr, parse_for_expr, parse_while_expr
+
+# Re-export from parser_decls
+export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
+export parse_impl_decl, parse_class_body_method
+export parse_use_decl, parse_export_decl, parse_ce_decl
+export parse_val_decl, parse_lazy_val_decl, parse_var_decl

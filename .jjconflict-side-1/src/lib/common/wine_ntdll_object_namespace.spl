@@ -1,0 +1,79 @@
+"""Bounded NTDLL object namespace bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_ntdll_object_namespace_dispatch_gate}
+
+class WineNtdllObjectDirectory:
+    path: text
+    children: [text]
+
+class WineNtdllObjectNamespace:
+    directories: [WineNtdllObjectDirectory]
+    next_handle: i64
+
+class WineNtdllObjectNamespaceResult:
+    ok: bool
+    error: text
+    object_space: WineNtdllObjectNamespace
+    handle: i64
+    entries: text
+    operations: text
+
+fn _directory(path: text, children: [text]) -> WineNtdllObjectDirectory:
+    WineNtdllObjectDirectory(path: path, children: children)
+
+fn _namespace(directories: [WineNtdllObjectDirectory], next_handle: i64) -> WineNtdllObjectNamespace:
+    WineNtdllObjectNamespace(directories: directories, next_handle: next_handle)
+
+fn _result(ok: bool, error: text, object_space: WineNtdllObjectNamespace, handle: i64, entries: text, operations: text) -> WineNtdllObjectNamespaceResult:
+    WineNtdllObjectNamespaceResult(ok: ok, error: error, object_space: object_space, handle: handle, entries: entries, operations: operations)
+
+pub fn wine_ntdll_object_namespace_default() -> WineNtdllObjectNamespace:
+    _namespace([
+        _directory("\\KnownDlls", ["kernel32.dll", "ntdll.dll", "user32.dll"]),
+        _directory("\\Sessions\\1\\BaseNamedObjects", ["wine-event", "wine-shared-section"])
+    ], 0x500)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_object_namespace_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "ntdll-object-namespace-sequence-count-mismatch"
+    if symbols[0] != "NtOpenDirectoryObject":
+        return "ntdll-object-namespace-sequence-expected:NtOpenDirectoryObject"
+    if symbols[1] != "NtQueryDirectoryObject":
+        return "ntdll-object-namespace-sequence-expected:NtQueryDirectoryObject"
+    if symbols[2] != "NtClose":
+        return "ntdll-object-namespace-sequence-expected:NtClose"
+    "ready"
+
+fn _find_directory(object_space: WineNtdllObjectNamespace, path: text) -> WineNtdllObjectDirectory:
+    for directory in object_space.directories:
+        if directory.path == path:
+            return directory
+    _directory("", [])
+
+fn _join_entries(entries: [text]) -> text:
+    var out = ""
+    var i = 0
+    for entry in entries:
+        if i > 0:
+            out = out + " "
+        out = out + entry
+        i = i + 1
+    out
+
+pub fn wine_ntdll_execute_object_namespace(symbols: [text], object_space: WineNtdllObjectNamespace, path: text) -> WineNtdllObjectNamespaceResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, object_space, 0, "", "")
+    if path == "":
+        return _result(false, "NtOpenDirectoryObject:invalid-path", object_space, 0, "", "")
+    val directory = _find_directory(object_space, path)
+    if directory.path == "":
+        return _result(false, "NtOpenDirectoryObject:directory-not-found", object_space, 0, "", "")
+    if directory.children.len() == 0:
+        return _result(false, "NtQueryDirectoryObject:empty-directory", object_space, object_space.next_handle, "", "NtOpenDirectoryObject")
+    val handle = object_space.next_handle
+    val updated = _namespace(object_space.directories, handle + 1)
+    _result(true, "", updated, handle, _join_entries(directory.children), "NtOpenDirectoryObject NtQueryDirectoryObject NtClose")

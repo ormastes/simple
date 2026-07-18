@@ -1,0 +1,289 @@
+# widget_interact_model.spl — pure interaction state + reducers for the
+# Engine2D Metal GPU interactive widget app (widget_interact_metal_gui.spl).
+#
+# This module is render-free and runtime-free: it holds no GPU/winit handles and
+# performs no I/O. Every reducer is a pure function `(state, event) -> state` so
+# the interaction logic can be driven by synthetic event sequences in a headless
+# spec (test/02_integration/ui/widget_interact_model_spec.spl) AND by the real
+# winit event pump in the GUI app.
+#
+# Coordinates here are FRAMEBUFFER coordinates (origin top-left, pixels). The GUI
+# app is responsible for mapping window pixel coords -> framebuffer coords before
+# calling the reducers; because the window is created at the framebuffer size the
+# mapping is identity (see widget_interact_metal_gui.spl).
+
+# ---------------------------------------------------------------------------
+# Layout constants (framebuffer pixel rectangles for the hit-testable widgets).
+# Kept here so reducers and the renderer agree on geometry by construction.
+# Framebuffer is W=256 x H=192.
+# ---------------------------------------------------------------------------
+
+# Button: increments counter when clicked.
+pub val BTN_X: i32 = 12
+pub val BTN_Y: i32 = 28
+pub val BTN_W: i32 = 70
+pub val BTN_H: i32 = 22
+
+# Text input box: typing appends, backspace deletes.
+pub val INPUT_X: i32 = 12
+pub val INPUT_Y: i32 = 70
+pub val INPUT_W: i32 = 150
+pub val INPUT_H: i32 = 18
+val INPUT_MAX: i32 = 18
+
+# Scrollable list + vertical scrollbar.
+pub val LIST_ITEMS: i32 = 12
+pub val LIST_VISIBLE: i32 = 4
+
+# Animation bounds (bouncing square left edge), in framebuffer x.
+val ANIM_MIN: i32 = 12
+val ANIM_MAX: i32 = 232
+
+# ---------------------------------------------------------------------------
+# Keycodes (winit -> Simple mapping produced by the runtime; see
+# src/compiler_rust/.../winit_sffi/winit_sffi_input.rs). Letters are ASCII
+# uppercase, digits are ASCII, space=32, backspace=8, arrows up=38/down=40.
+# ---------------------------------------------------------------------------
+val KEY_BACKSPACE: i64 = 8
+val KEY_SPACE: i64 = 32
+val KEY_ARROW_UP: i64 = 38
+val KEY_ARROW_DOWN: i64 = 40
+val KEY_ARROW_LEFT: i64 = 37
+val KEY_ARROW_RIGHT: i64 = 39
+val KEY_HOME: i64 = 36
+val KEY_END: i64 = 35
+val KEY_DELETE: i64 = 46
+
+# ---------------------------------------------------------------------------
+# Interaction state
+# ---------------------------------------------------------------------------
+struct InteractState:
+    counter: i32        # button click count
+    text: text          # text-input contents
+    caret: i32          # caret CHARACTER index [0 .. char_count]; insert/delete point
+    sel_anchor: i32     # selection anchor char index; -1 = no selection
+    scroll_offset: i32  # index of first visible list item [0 .. LIST_ITEMS-LIST_VISIBLE]
+    anim_x: i32         # bouncing square left edge
+    anim_dx: i32        # animation velocity (+/- pixels per tick)
+
+fn interact_state_new() -> InteractState:
+    InteractState(counter: 0, text: "", caret: 0, sel_anchor: -1, scroll_offset: 0, anim_x: ANIM_MIN, anim_dx: 3)
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+# True when framebuffer point (px,py) falls inside the button rect.
+fn point_in_button(px: i32, py: i32) -> bool:
+    px >= BTN_X and px < BTN_X + BTN_W and py >= BTN_Y and py < BTN_Y + BTN_H
+
+# Maximum legal scroll offset (clamped so the last LIST_VISIBLE items show).
+fn scroll_max() -> i32:
+    val m = LIST_ITEMS - LIST_VISIBLE
+    if m < 0:
+        0
+    else:
+        m
+
+# Minimal keycode -> lowercase ascii char for a-z, 0-9 and space.
+# Returns "" for keys with no printable mapping.
+fn keycode_to_char(code: i64) -> text:
+    if code >= 65 and code <= 90:
+        # 'A'..'Z' (65..90) -> 'a'..'z' (97..122)
+        val lower = code + 32
+        char_from_code(lower)
+    elif code >= 48 and code <= 57:
+        char_from_code(code)
+    elif code == KEY_SPACE:
+        " "
+    else:
+        ""
+
+# Build a 1-char string from an ascii code (table lookup; no char-as-string FFI).
+fn char_from_code(code: i64) -> text:
+    val letters = "abcdefghijklmnopqrstuvwxyz"
+    val digits = "0123456789"
+    if code >= 97 and code <= 122:
+        letters.substring((code - 97).to_i32(), (code - 96).to_i32())
+    elif code >= 48 and code <= 57:
+        digits.substring((code - 48).to_i32(), (code - 47).to_i32())
+    elif code == 32:
+        " "
+    else:
+        ""
+
+# ---------------------------------------------------------------------------
+# Char-based text helpers (UTF-8 safe: caret indexes CHARACTERS, not bytes).
+# `substring`/`s[i]` in the stdlib are BYTE-indexed, so they cannot split on a
+# caret that counts characters. `char_at` is character-based on every backend
+# this runs on (it returns "" once the index passes the last character), so both
+# helpers below are built purely from it.
+# ---------------------------------------------------------------------------
+
+# Number of Unicode characters in `s`.
+fn text_nchars(s: text) -> i32:
+    var n = 0
+    while s.char_at(n.to_i64()) != "":
+        n = n + 1
+    n
+
+# Characters [a, b) of `s` (character indices), clamped to [0, char_count].
+fn text_char_slice(s: text, a: i32, b: i32) -> text:
+    var lo = a
+    if lo < 0:
+        lo = 0
+    if b <= lo:
+        return ""
+    var out = ""
+    var i = lo
+    while i < b:
+        val ch = s.char_at(i.to_i64())
+        if ch == "":
+            return out
+        out = out + ch
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Reducers: pure (state, event) -> state
+# ---------------------------------------------------------------------------
+
+# Mouse click at framebuffer coords (x,y). Increments the counter if the click
+# landed inside the button; otherwise returns state unchanged.
+fn on_click(state: InteractState, x: i32, y: i32) -> InteractState:
+    if point_in_button(x, y):
+        InteractState(counter: state.counter + 1, text: state.text, caret: state.caret, sel_anchor: state.sel_anchor,
+                      scroll_offset: state.scroll_offset, anim_x: state.anim_x, anim_dx: state.anim_dx)
+    else:
+        state
+
+# Rebuild state with new text-edit fields (text/caret/selection), preserving
+# every other field. Keeps the editing reducers below terse.
+fn _edit_state(state: InteractState, text_val: text, caret: i32, sel_anchor: i32) -> InteractState:
+    InteractState(counter: state.counter, text: text_val, caret: caret, sel_anchor: sel_anchor,
+                  scroll_offset: state.scroll_offset, anim_x: state.anim_x, anim_dx: state.anim_dx)
+
+# True when a non-empty selection is active.
+fn has_selection(state: InteractState) -> bool:
+    state.sel_anchor >= 0 and state.sel_anchor != state.caret
+
+# Ordered selection start bound (lo). lo == caret when there is no selection.
+fn selection_lo(state: InteractState) -> i32:
+    if not has_selection(state):
+        return state.caret
+    if state.sel_anchor < state.caret:
+        state.sel_anchor
+    else:
+        state.caret
+
+# Ordered selection end bound (hi). hi == caret when there is no selection.
+fn selection_hi(state: InteractState) -> i32:
+    if not has_selection(state):
+        return state.caret
+    if state.sel_anchor > state.caret:
+        state.sel_anchor
+    else:
+        state.caret
+
+# Delete the active selection, collapsing the caret to its start. No-op when
+# there is no selection.
+fn _delete_selection(state: InteractState) -> InteractState:
+    val lo = selection_lo(state)
+    val hi = selection_hi(state)
+    val kept = text_char_slice(state.text, 0, lo) + text_char_slice(state.text, hi, text_nchars(state.text))
+    _edit_state(state, kept, lo, -1)
+
+# Clamp a caret character index into [0, n].
+fn _clamp_caret(pos: i32, n: i32) -> i32:
+    if pos < 0:
+        0
+    elif pos > n:
+        n
+    else:
+        pos
+
+# Move the caret to `dest`. With shift, extend the selection (anchoring at the
+# old caret if none was active); without shift, collapse any selection.
+fn _move_caret(state: InteractState, dest: i32, shift: bool) -> InteractState:
+    if shift:
+        var anchor = state.sel_anchor
+        if anchor < 0:
+            anchor = state.caret
+        return _edit_state(state, state.text, dest, anchor)
+    _edit_state(state, state.text, dest, -1)
+
+# Keyboard key. Convenience wrapper: no shift modifier (plain arrows collapse
+# any selection). Use `on_key_mod` to pass shift for selection extension.
+fn on_key(state: InteractState, code: i64) -> InteractState:
+    on_key_mod(state, code, false)
+
+# Keyboard key with an explicit shift modifier. Backspace/delete remove the
+# selection or a single char; left/right/home/end move the caret (shift extends
+# a selection); arrow up/down scroll the list; printable keys insert at the
+# caret, replacing any selection. Caret indices are CHARACTER positions.
+fn on_key_mod(state: InteractState, code: i64, shift: bool) -> InteractState:
+    val n = text_nchars(state.text)
+    if code == KEY_BACKSPACE:
+        if has_selection(state):
+            return _delete_selection(state)
+        if state.caret > 0:
+            val kept = text_char_slice(state.text, 0, state.caret - 1) + text_char_slice(state.text, state.caret, n)
+            return _edit_state(state, kept, state.caret - 1, -1)
+        return state
+    if code == KEY_DELETE:
+        if has_selection(state):
+            return _delete_selection(state)
+        if state.caret < n:
+            val kept = text_char_slice(state.text, 0, state.caret) + text_char_slice(state.text, state.caret + 1, n)
+            return _edit_state(state, kept, state.caret, -1)
+        return state
+    if code == KEY_ARROW_LEFT:
+        return _move_caret(state, _clamp_caret(state.caret - 1, n), shift)
+    if code == KEY_ARROW_RIGHT:
+        return _move_caret(state, _clamp_caret(state.caret + 1, n), shift)
+    if code == KEY_HOME:
+        return _move_caret(state, 0, shift)
+    if code == KEY_END:
+        return _move_caret(state, n, shift)
+    if code == KEY_ARROW_UP:
+        return on_wheel(state, 1)
+    if code == KEY_ARROW_DOWN:
+        return on_wheel(state, -1)
+    val ch = keycode_to_char(code)
+    if ch == "":
+        return state
+    var base = state
+    if has_selection(state):
+        base = _delete_selection(state)
+    if text_nchars(base.text) >= INPUT_MAX:
+        return base
+    val joined = text_char_slice(base.text, 0, base.caret) + ch + text_char_slice(base.text, base.caret, text_nchars(base.text))
+    _edit_state(base, joined, base.caret + 1, -1)
+
+# Mouse wheel / arrow scroll. Positive dy scrolls toward the top of the list
+# (offset decreases), negative dy scrolls down (offset increases). Clamped to
+# [0, scroll_max()].
+fn on_wheel(state: InteractState, dy: i32) -> InteractState:
+    var off = state.scroll_offset - dy
+    if off < 0:
+        off = 0
+    val mx = scroll_max()
+    if off > mx:
+        off = mx
+    InteractState(counter: state.counter, text: state.text, caret: state.caret, sel_anchor: state.sel_anchor,
+                  scroll_offset: off, anim_x: state.anim_x, anim_dx: state.anim_dx)
+
+# Animation tick: advance the bouncing square, reflecting off both walls.
+fn on_tick(state: InteractState) -> InteractState:
+    var nx = state.anim_x + state.anim_dx
+    var ndx = state.anim_dx
+    if nx <= ANIM_MIN:
+        nx = ANIM_MIN
+        ndx = -state.anim_dx
+    elif nx >= ANIM_MAX:
+        nx = ANIM_MAX
+        ndx = -state.anim_dx
+    InteractState(counter: state.counter, text: state.text, caret: state.caret, sel_anchor: state.sel_anchor,
+                  scroll_offset: state.scroll_offset, anim_x: nx, anim_dx: ndx)
+
+export BTN_X, BTN_Y, BTN_W, BTN_H, INPUT_X, INPUT_Y, INPUT_W, INPUT_H, LIST_ITEMS, LIST_VISIBLE

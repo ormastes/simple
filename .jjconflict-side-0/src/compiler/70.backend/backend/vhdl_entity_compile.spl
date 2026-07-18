@@ -1,0 +1,508 @@
+# VHDL Backend - Entity and Function Compilation
+#
+# Compiles MIR functions to VHDL entities with signal declarations,
+# port mappings, and architecture bodies. Extension of VhdlBackend via impl block.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator}
+use compiler.backend.backend_api.*
+use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
+use .vhdl.vhdl_builder.{VhdlBuilder}
+use .vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure}
+use compiler.backend.vhdl.vhdl_memory_templates.{VhdlConstrainedSignalMemoryTemplate, render_constrained_signal_memory_template, VhdlMemoryTemplateDiagnostic}
+use .vhdl.vhdl_memory_templates.{VhdlMemoryTemplateDiagnostic}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use .vhdl_backend.{VhdlBackend, VhdlReturnAbi, VhdlReturnField, VhdlEntity}
+
+impl VhdlBackend:
+    me emit_return_assign(builder: VhdlBuilder, value: MirOperand) -> Result<(), CompileError>:
+        val value_name_result = self.operand_to_vhdl(value)
+        if value_name_result.is_err():
+            return Err(value_name_result.unwrap_err())
+        val value_name = value_name_result.unwrap()
+        self.emit_return_expr(builder, value_name)
+
+    me emit_return_expr(builder: VhdlBuilder, value_name: text) -> Result<(), CompileError>:
+        if self.active_return_abi.is_tuple:
+            for field in self.active_return_abi.fields:
+                builder.emit_signal_assign(field.name, "{value_name}.f{field.index}")
+        else:
+            builder.emit_signal_assign("result_out", value_name)
+        Ok(())
+
+    me compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
+        """Compile a function as a VHDL entity/architecture pair."""
+        val entity_name = func.name
+        self.active_local_names = {}
+        self.active_local_types = {}
+        self.active_local_kinds = {}
+        self.active_blocks = {}
+        self.active_local_memory_type_names = {}
+        val return_abi_result = self.vhdl_return_abi(func)
+        if return_abi_result.is_err():
+            return Err(return_abi_result.unwrap_err())
+        self.active_return_abi = return_abi_result.unwrap()
+
+        for block in func.blocks:
+            self.active_blocks[block.id.id] = block
+
+        for local in func.locals:
+            val resolved_name = self.default_local_name(local)
+            self.active_local_names[local.id.id] = resolved_name
+            self.active_local_types[local.id.id] = local.type_
+            self.active_local_kinds[local.id.id] = local.kind
+
+        # Pick single-use side-effect-free temps to inline into their consumer
+        # (must run after names/types are resolved above).
+        self.compute_inline_exprs(func)
+
+        val ports_result = self.vhdl_ports_for_function(func)
+        if ports_result.is_err():
+            return Err(ports_result.unwrap_err())
+        val ports = ports_result.unwrap()
+
+        # Emit entity
+        builder.emit_entity_begin(entity_name)
+        builder.emit_port_begin()
+        for i in 0..ports.len():
+            val port = ports[i]
+            builder.emit_port(port.name, port.direction, port.type_name, i == ports.len() - 1)
+
+        builder.emit_port_end()
+        builder.emit_entity_end(entity_name)
+
+        # Emit architecture
+        builder.emit_architecture_begin(entity_name, "rtl")
+
+        # Declare internal signals for local variables
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    # Inlined temps have no intermediate signal; their defining
+                    # expression is substituted at each use site.
+                    if not self.active_inline_exprs.has(local.id.id):
+                        val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
+                        if declare_result.is_err():
+                            return Err(declare_result.unwrap_err())
+                case Return:
+                    # Tuple-ABI functions route the return value through an
+                    # internal "return_value" signal (see default_local_name)
+                    # before splitting it across the per-field output ports
+                    # below; that signal needs its own declaration since it
+                    # isn't one of the entity's ports.
+                    if self.active_return_abi.is_tuple:
+                        val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
+                        if declare_result.is_err():
+                            return Err(declare_result.unwrap_err())
+                case _:
+                    ()
+
+        builder.emit_architecture_body_begin()
+
+        if self.needs_control_process(func):
+            val process_result = self.compile_function_control_process(builder, func)
+            if process_result.is_err():
+                return Err(process_result.unwrap_err())
+            builder.emit_architecture_end("rtl")
+            return Ok(VhdlEntity(
+                name: entity_name,
+                port_count: ports.len()
+            ))
+
+        # Compile basic blocks
+        var handled_branch_blocks: Dict<i64, bool> = {}
+        for block in func.blocks:
+            if handled_branch_blocks.get(block.id.id).?:
+                continue
+            builder.emit_comment("Block BB{block.id.id}")
+            for inst in block.instructions:
+                val result = self.compile_instruction(builder, inst)
+                if result.is_err():
+                    return Err(result.unwrap_err())
+                match inst.kind:
+                    case VhdlProcess(_, body_block):
+                        handled_branch_blocks = self.mark_process_body_chain_handled(body_block, handled_branch_blocks)
+                    case _:
+                        ()
+            if block.terminator != nil:
+                match block.terminator:
+                    case If(cond, then_, else_):
+                        val if_result = self.compile_if_return_terminator(builder, cond, then_, else_)
+                        if if_result.is_err():
+                            return Err(if_result.unwrap_err())
+                        handled_branch_blocks = self.mark_return_chain_handled(then_, handled_branch_blocks)
+                        handled_branch_blocks = self.mark_return_chain_handled(else_, handled_branch_blocks)
+                    case Switch(value, targets, default):
+                        val switch_result = self.compile_switch_return_terminator(builder, value, targets, default)
+                        if switch_result.is_err():
+                            return Err(switch_result.unwrap_err())
+                        for target in targets:
+                            handled_branch_blocks = self.mark_return_chain_handled(target.target, handled_branch_blocks)
+                        handled_branch_blocks = self.mark_return_chain_handled(default, handled_branch_blocks)
+                    case Goto(target):
+                        val term_result = self.compile_terminator(builder, block.terminator)
+                        if term_result.is_err():
+                            return Err(term_result.unwrap_err())
+                        handled_branch_blocks = self.mark_return_chain_handled(target, handled_branch_blocks)
+                    case _:
+                        val term_result = self.compile_terminator(builder, block.terminator)
+                        if term_result.is_err():
+                            return Err(term_result.unwrap_err())
+
+        if self.active_return_abi.is_tuple:
+            for local in func.locals:
+                match local.kind:
+                    case Return:
+                        val return_name = match self.local_to_vhdl(local.id):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        for field in self.active_return_abi.fields:
+                            builder.emit_signal_assign(field.name, "{return_name}.f{field.index}")
+                    case _:
+                        ()
+
+        builder.emit_architecture_end("rtl")
+
+        Ok(VhdlEntity(
+            name: entity_name,
+            port_count: ports.len()
+        ))
+
+    fn default_local_name(local: MirLocal) -> text:
+        match local.kind:
+            case Arg(idx):
+                local.name ?? "arg{idx}"
+            case Return:
+                if self.active_return_abi.is_tuple:
+                    "return_value"
+                else:
+                    "result_out"
+            case Var | Temp:
+                local.name ?? "sig_{local.id.id}"
+
+    fn local_memory_type_name(local: MirLocal) -> text:
+        vhdl_sanitize_identifier("{self.default_local_name(local)}_memory_t")
+
+    fn memory_template_error(code: text, message: text) -> CompileError:
+        self.backend_error("{code}: {message}")
+
+    me emit_local_signal_declaration(builder: VhdlBuilder, local: MirLocal, span: Span?) -> Result<(), CompileError>:
+        # Reuse the name already resolved into active_local_names during
+        # compile_function's initial pass instead of recomputing it via
+        # default_local_name() here. Re-invoking default_local_name() (which
+        # runs its own `match local.kind:`) from inside this call site -- itself
+        # reached through an enclosing `match local.kind: case Var | Temp:` in
+        # the caller's loop -- was observed to resolve to the wrong branch
+        # (Temp locals mis-resolving to "result_out"), corrupting the declared
+        # signal name. See doc/08_tracking/bug/ for the related interpreter
+        # nested-match/enum defects found in this same investigation.
+        val name = match self.local_to_vhdl(local.id):
+            case Ok(result): result
+            case Err(_): self.default_local_name(local)
+        match local.type_.kind:
+            case Array(element, size):
+                if size <= 0:
+                    return Err(self.backend_error("VHDL-MEM-UNCONSTRAINED: Local memory `{name}` must have a concrete positive array size before VHDL emission"))
+                match element.kind:
+                    case Array(_, _) | Slice(_) | Ptr(_, _) | Ref(_, _):
+                        return Err(self.backend_error("VHDL-MEM-GENERAL: Local memory `{name}` has nested, slice, pointer, or reference element type; constrained VHDL memory lowering is not implemented"))
+                    case _:
+                        ()
+                val element_type_result = self.mir_type_to_vhdl_at(element, span)
+                if element_type_result.is_err():
+                    return Err(element_type_result.unwrap_err())
+                val type_name = self.local_memory_type_name(local)
+                val template_result = render_constrained_signal_memory_template(VhdlConstrainedSignalMemoryTemplate(
+                    name: name,
+                    type_name: type_name,
+                    data_type: element_type_result.unwrap(),
+                    depth: size,
+                    initial_value: nil
+                ))
+                if template_result.is_err():
+                    val diagnostic: VhdlMemoryTemplateDiagnostic = template_result.unwrap_err()
+                    return Err(self.memory_template_error(diagnostic.code, diagnostic.message))
+                builder.emit_raw(template_result.unwrap().declarations)
+                self.active_local_memory_type_names[local.id.id] = type_name
+            case _:
+                val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, span)
+                if vhdl_type_result.is_err():
+                    return Err(vhdl_type_result.unwrap_err())
+                builder.emit_signal_decl(name, vhdl_type_result.unwrap(), nil)
+        Ok(())
+
+    fn local_object_type_to_vhdl(local: MirLocal, span: Span?) -> Result<text, CompileError>:
+        if self.active_local_memory_type_names.has(local.id.id):
+            Ok(self.active_local_memory_type_names[local.id.id])
+        else:
+            self.mir_type_to_vhdl_at(local.type_, span)
+
+    fn local_to_vhdl(local: LocalId) -> Result<text, CompileError>:
+        if self.active_local_names.has(local.id):
+            Ok(self.active_local_names[local.id])
+        else:
+            Err(self.backend_error("No active VHDL name for local {local.id}"))
+
+    fn local_type(local: LocalId) -> Result<MirType, CompileError>:
+        if self.active_local_types.has(local.id):
+            Ok(self.active_local_types[local.id])
+        else:
+            Err(self.backend_error("No active MIR type for local {local.id}"))
+
+    fn local_operand_expr(local: LocalId) -> Result<text, CompileError>:
+        """Resolve a local reference, substituting the inlined defining
+        expression when the local is a single-use side-effect-free temp that
+        compute_inline_exprs elected to inline instead of materialising."""
+        if self.active_inline_exprs.has(local.id):
+            Ok(self.active_inline_exprs[local.id])
+        else:
+            self.local_to_vhdl(local)
+
+    fn operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        """Convert operand to VHDL signal/variable name."""
+        match operand.kind:
+            case Copy(local): self.local_operand_expr(local)
+            case Move(local): self.local_operand_expr(local)
+            case Const(value, ty):
+                self.const_value_to_vhdl(value, ty)
+
+    fn operand_type(operand: MirOperand) -> Result<MirType, CompileError>:
+        match operand.kind:
+            case Copy(local): self.local_type(local)
+            case Move(local): self.local_type(local)
+            case Const(_, ty): Ok(ty)
+
+    # ========================================================================
+    # Single-use temp expression inlining
+    #
+    # A compiler-generated temp local (unnamed, LocalKind.Temp) that is (a)
+    # assigned exactly once, (b) used exactly once, and (c) defined by a
+    # side-effect-free slice/resize/cast is inlined into its sole consumer's
+    # rendered expression rather than emitted as an intermediate signal. This
+    # turns `sig_4 & sig_5` into `imem_rdata(31 downto 7) & resize(...)`.
+    # No general CSE: only single-def/single-use temps of the specific
+    # side-effect-free kinds below are considered.
+    # ========================================================================
+
+    fn mir_operand_use_id(operand: MirOperand) -> i64:
+        match operand.kind:
+            case Copy(local): local.id
+            case Move(local): local.id
+            case Const(_, _): -1
+
+    fn inst_def_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Const(dest, _, _): dest.id
+            case Copy(dest, _) | Move(dest, _): dest.id
+            case BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _): dest.id
+            case UnaryOp(dest, _, _): dest.id
+            case Cast(dest, _, _) | Bitcast(dest, _, _): dest.id
+            case Aggregate(dest, _, _): dest.id
+            case GetField(dest, _, _): dest.id
+            case Alloc(dest, _): dest.id
+            case Load(dest, _): dest.id
+            case GetElementPtr(dest, _, _): dest.id
+            case VhdlResize(dest, _, _, _): dest.id
+            case VhdlSlice(dest, _, _, _): dest.id
+            case VhdlConcat(dest, _): dest.id
+            case Call(dest, _, _):
+                match dest:
+                    case Some(d): d.id
+                    case None: -1
+            case _: -1
+
+    fn inst_used_ids(inst: MirInst) -> [i64]:
+        var ids: [i64] = []
+        match inst.kind:
+            case Copy(_, src) | Move(_, src):
+                ids = ids.push(src.id)
+            case BinOp(_, _, left, right) | CheckedBinOp(_, _, left, right):
+                ids = ids.push(self.mir_operand_use_id(left))
+                ids = ids.push(self.mir_operand_use_id(right))
+            case UnaryOp(_, _, operand):
+                ids = ids.push(self.mir_operand_use_id(operand))
+            case Cast(_, operand, _) | Bitcast(_, operand, _):
+                ids = ids.push(self.mir_operand_use_id(operand))
+            case Aggregate(_, _, operands):
+                for o in operands:
+                    ids = ids.push(self.mir_operand_use_id(o))
+            case GetField(_, base, _):
+                ids = ids.push(self.mir_operand_use_id(base))
+            case SetField(base, _, value):
+                ids = ids.push(self.mir_operand_use_id(base))
+                ids = ids.push(self.mir_operand_use_id(value))
+            case Load(_, ptr):
+                ids = ids.push(self.mir_operand_use_id(ptr))
+            case Store(ptr, value):
+                ids = ids.push(self.mir_operand_use_id(ptr))
+                ids = ids.push(self.mir_operand_use_id(value))
+            case GetElementPtr(_, base, indices):
+                ids = ids.push(self.mir_operand_use_id(base))
+                for i in indices:
+                    ids = ids.push(self.mir_operand_use_id(i))
+            case VhdlResize(_, operand, _, _):
+                ids = ids.push(self.mir_operand_use_id(operand))
+            case VhdlSlice(_, signal, _, _):
+                ids = ids.push(self.mir_operand_use_id(signal))
+            case VhdlConcat(_, parts):
+                for p in parts:
+                    ids = ids.push(self.mir_operand_use_id(p))
+            case VhdlSignalAssign(target, value, _):
+                ids = ids.push(self.mir_operand_use_id(target))
+                ids = ids.push(self.mir_operand_use_id(value))
+            case VhdlVarAssign(target, value):
+                ids = ids.push(self.mir_operand_use_id(target))
+                ids = ids.push(self.mir_operand_use_id(value))
+            case Call(_, func, args):
+                ids = ids.push(self.mir_operand_use_id(func))
+                for a in args:
+                    ids = ids.push(self.mir_operand_use_id(a))
+            case _:
+                ()
+        ids
+
+    fn terminator_used_ids(terminator: MirTerminator) -> [i64]:
+        var ids: [i64] = []
+        match terminator:
+            case Ret(value):
+                match value:
+                    case Some(op): ids = ids.push(self.mir_operand_use_id(op))
+                    case None: ()
+            case If(cond, _, _):
+                ids = ids.push(self.mir_operand_use_id(cond))
+            case Switch(value, _, _):
+                ids = ids.push(self.mir_operand_use_id(value))
+            case _:
+                ()
+        ids
+
+    fn local_is_unnamed_temp(local: MirLocal) -> bool:
+        match local.kind:
+            case Temp:
+                match local.name:
+                    case Some(_): false
+                    case None: true
+            case _:
+                false
+
+    fn inst_is_inlinable_kind(inst: MirInst) -> bool:
+        match inst.kind:
+            case VhdlSlice(_, _, _, _): true
+            case VhdlResize(_, _, _, _): true
+            case Cast(_, _, _) | Bitcast(_, _, _): true
+            case _: false
+
+    fn concat_parts_to_vhdl(parts: [MirOperand]) -> Result<text, CompileError>:
+        """Render concat operands, parenthesising any part that is a
+        conditional expression so `a & (cond when ... else ...) & b` binds
+        correctly in VHDL."""
+        var rendered: [text] = []
+        for part in parts:
+            val name = match self.operand_to_vhdl(part):
+                case Ok(result): result
+                case Err(err): return Err(err)
+            val wrapped = if name.contains(" when "): "({name})" else: name
+            rendered = rendered.push(wrapped)
+        Ok(rendered.join(" & "))
+
+    fn inlinable_inst_expr(inst: MirInst) -> Result<text, CompileError>:
+        """Render the side-effect-free defining expression of an inlinable
+        instruction. VhdlSlice yields the bare slice (its concat/cast consumer
+        supplies any needed width/sign coercion); Cast/Resize yield their full
+        expression."""
+        match inst.kind:
+            case VhdlSlice(dest, signal, hi, lo):
+                val src_name = match self.operand_to_vhdl(signal):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                Ok("{src_name}({hi} downto {lo})")
+            case VhdlResize(dest, operand, new_width, signed):
+                val src_name = match self.operand_to_vhdl(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.resize_expr_to_vhdl(src_name, signed, new_width)
+            case Cast(dest, operand, target) | Bitcast(dest, operand, target):
+                val src_name = match self.operand_to_vhdl(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val src_type = match self.operand_type(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.cast_to_vhdl(src_name, src_type, target)
+            case _:
+                Err(self.backend_error("VHDL inlining requested for non-inlinable instruction"))
+
+    me compute_inline_exprs(func: MirFunction):
+        """Pre-render analysis: pick single-def/single-use side-effect-free
+        temps to inline into their sole consumer. Runs after active_local_*
+        are populated so operand_to_vhdl resolves param/signal names."""
+        self.active_inline_exprs = {}
+        var def_count: Dict<i64, i64> = {}
+        var use_count: Dict<i64, i64> = {}
+        for block in func.blocks:
+            for inst in block.instructions:
+                val d = self.inst_def_id(inst)
+                if d >= 0:
+                    def_count[d] = (def_count.get(d) ?? 0) + 1
+                for u in self.inst_used_ids(inst):
+                    if u >= 0:
+                        use_count[u] = (use_count.get(u) ?? 0) + 1
+            if block.terminator != nil:
+                for u in self.terminator_used_ids(block.terminator):
+                    if u >= 0:
+                        use_count[u] = (use_count.get(u) ?? 0) + 1
+        var local_by_id: Dict<i64, MirLocal> = {}
+        for local in func.locals:
+            local_by_id[local.id.id] = local
+        # Populate in program order: a def always precedes its use, so any
+        # inlinable operand this expression references is already resolved.
+        for block in func.blocks:
+            for inst in block.instructions:
+                if not self.inst_is_inlinable_kind(inst):
+                    continue
+                val d = self.inst_def_id(inst)
+                if d < 0:
+                    continue
+                if (def_count.get(d) ?? 0) != 1:
+                    continue
+                if (use_count.get(d) ?? 0) != 1:
+                    continue
+                if not local_by_id.has(d):
+                    continue
+                if not self.local_is_unnamed_temp(local_by_id[d]):
+                    continue
+                match self.inlinable_inst_expr(inst):
+                    case Ok(expr):
+                        self.active_inline_exprs[d] = expr
+                    case Err(_):
+                        ()
+
+    fn type_def_by_symbol(symbol: SymbolId) -> Result<MirTypeDef, CompileError>:
+        if self.active_type_defs.has(symbol.id):
+            Ok(self.active_type_defs[symbol.id])
+        else:
+            Err(self.backend_error("No active VHDL type definition for symbol {symbol.id}"))
+
+    fn block_by_id(id: BlockId) -> Result<MirBlock, CompileError>:
+        if self.active_blocks.has(id.id):
+            Ok(self.active_blocks[id.id])
+        else:
+            Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
+
+    fn needs_control_process(func: MirFunction) -> bool:
+        val entry = self.block_by_id(func.entry_block)
+        if entry.is_err():
+            return false
+        match entry.unwrap().terminator:
+            case If(_, then_, else_):
+                self.block_chain_has_instructions(then_, []) or self.block_chain_has_instructions(else_, [])
+            case Switch(_, targets, default):
+                var has_target_instructions = self.block_chain_has_instructions(default, [])
+                for target in targets:
+                    if self.block_chain_has_instructions(target.target, []):
+                        has_target_instructions = true
+                has_target_instructions
+            case _:
+                false

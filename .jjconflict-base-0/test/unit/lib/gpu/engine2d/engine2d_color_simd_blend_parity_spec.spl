@@ -1,0 +1,65 @@
+"""Engine2D Color/SIMD Blend Parity Specification
+
+@tag: rendering, engine2d, color, simd, parity
+@cover src/lib/gc_async_mut/gpu/engine2d/color.spl 10%
+@cover src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl 10%
+
+Regression guard for
+doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md:
+`color.blend()` (the scalar reference formula) and
+`simd_kernels._scalar_blend_row()` (the pure-Simple per-pixel SIMD-fallback
+kernel) independently implement the SAME Porter-Duff straight-alpha src-over
+formula, and were fixed TOGETHER for the transparent-destination case. This
+spec pins that the two stay in sync pixel-for-pixel, so a future edit to only
+one side is caught immediately here rather than only being caught later (if
+at all) by the much larger raster-parity harness
+(test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl, which
+compares emu vs software BACKENDS, not these two blend primitives directly).
+
+Note: `color.blend()` has no `sa==0`-guard before dividing by `out_a`, so a
+fully-transparent src (sa=0) over a fully-transparent dst (da=0) is a
+divide-by-zero in that function; `_scalar_blend_row` sidesteps this with an
+`elif sa>0:` guard that simply skips the pixel when sa==0. This spec's
+zero-alpha-src case therefore uses an OPAQUE dst (da=255) to stay valid input
+for both sides — matching how the existing engine2d_color_spec.spl and
+simd_kernels_spec.spl already exercise the zero-alpha case.
+"""
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.color.{rgba, blend}
+use std.gpu.engine2d.simd_kernels.{_scalar_blend_row}
+
+fn _row_blend(src: u32, dst: u32) -> u32:
+    var row: [u32] = [dst]
+    _scalar_blend_row(row, [src], 0, 1)
+    row[0]
+
+describe "color.blend vs simd_kernels._scalar_blend_row parity":
+
+    it "semi-transparent src over opaque dst matches":
+        val src = rgba(255, 0, 0, 128)
+        val dst = rgba(0, 0, 255, 255)
+        expect(_row_blend(src, dst)).to_equal(blend(src, dst))
+
+    it "semi-transparent src over fully-transparent dst matches (the fixed bug case)":
+        val src = rgba(255, 255, 255, 128)
+        val dst = rgba(0, 0, 0, 0)
+        expect(_row_blend(src, dst)).to_equal(blend(src, dst))
+        # Also pins the documented fixed value directly (not just parity).
+        expect(blend(src, dst)).to_equal(0x80FFFFFFu32)
+
+    it "opaque src over transparent dst matches (src-replaces-dst shortcut)":
+        val src = rgba(10, 20, 30, 255)
+        val dst = rgba(0, 0, 0, 0)
+        expect(_row_blend(src, dst)).to_equal(blend(src, dst))
+
+    it "zero-alpha src over opaque dst matches (dst unchanged on both sides)":
+        val src = rgba(200, 200, 200, 0)
+        val dst = rgba(1, 2, 3, 255)
+        expect(_row_blend(src, dst)).to_equal(blend(src, dst))
+        expect(_row_blend(src, dst)).to_equal(dst)
+
+    it "semi-transparent src over semi-transparent dst matches":
+        val src = rgba(255, 0, 0, 128)
+        val dst = rgba(0, 0, 255, 128)
+        expect(_row_blend(src, dst)).to_equal(blend(src, dst))

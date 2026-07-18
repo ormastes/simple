@@ -1,0 +1,171 @@
+# Publisher-like Page Layout
+#
+# A minimal desktop-publishing (DTP) page model: a page holds positioned
+# text frames, and text flows through a chain of linked frames (each frame
+# may declare a `next_id` naming the frame its overflow text continues
+# into). Capacity per frame is a simple char-budget derived from its pixel
+# box (w*h) and two constants (CHAR_W, LINE_H) — no real typography engine,
+# just enough to prove word-accurate text flow.
+
+# =========================================================================
+# Layout constants
+# =========================================================================
+
+val CHAR_W: i32 = 6
+val LINE_H: i32 = 16
+
+# =========================================================================
+# Core Structs
+# =========================================================================
+
+struct TextFrame:
+    id: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    text: text
+    next_id: text
+
+struct Page:
+    width: i32
+    height: i32
+    frames: [TextFrame]
+
+# =========================================================================
+# Constructors
+# =========================================================================
+
+fn page_new(w: i32, h: i32) -> Page:
+    """Create an empty page of the given width/height (points)."""
+    return Page(width: w, height: h, frames: [])
+
+fn frame_new(id: text, x: i32, y: i32, w: i32, h: i32, next_id: text) -> TextFrame:
+    """Create an empty text frame at (x, y) sized w x h, optionally chained
+    to `next_id` for overflow text. Pass "" for next_id if there is none."""
+    return TextFrame(id: id, x: x, y: y, w: w, h: h, text: "", next_id: next_id)
+
+fn page_add_frame(page: Page, frame: TextFrame) -> Page:
+    """Append a frame to the page. Returns the updated page."""
+    var new_frames: [TextFrame] = []
+    for f in page.frames:
+        new_frames.push(f)
+    new_frames.push(frame)
+    return Page(width: page.width, height: page.height, frames: new_frames)
+
+# =========================================================================
+# Capacity
+# =========================================================================
+
+fn _frame_capacity(frame: TextFrame) -> i32:
+    """Simple char-budget for a frame: (w / CHAR_W) chars per line times
+    (h / LINE_H) lines."""
+    val chars_per_line = frame.w / CHAR_W
+    val lines = frame.h / LINE_H
+    chars_per_line * lines
+
+# =========================================================================
+# Text Flow
+# =========================================================================
+
+fn page_flow_text(page: Page, first_frame_id: text, text: text) -> Page:
+    """Lay space-separated `text` into the frame chain starting at
+    `first_frame_id`. Each frame is filled greedily up to its char capacity
+    (words never split across frames); leftover words overflow into the
+    frame named by `next_id`, and so on down the chain. Returns the updated
+    page with each touched frame's text filled in."""
+    val words = text.split(" ")
+    val word_count = words.len()
+    var word_idx: i32 = 0
+    var touched_ids: [text] = []
+    var touched_texts: [text] = []
+    var current_id = first_frame_id
+    var safety: i32 = 0
+    while current_id != "" and word_idx < word_count and safety < 1000:
+        safety = safety + 1
+        var found = false
+        var cap: i32 = 0
+        var next_id = ""
+        for f in page.frames:
+            if f.id == current_id:
+                found = true
+                cap = _frame_capacity(f)
+                next_id = f.next_id
+        if not found:
+            current_id = ""
+        else:
+            var content = ""
+            var content_len: i32 = 0
+            while word_idx < word_count:
+                val word = words[word_idx]
+                val word_len = word.len()
+                val add_len = if content == "": word_len else: word_len + 1
+                if content_len + add_len <= cap:
+                    if content == "":
+                        content = word
+                    else:
+                        content = content + " " + word
+                    content_len = content_len + add_len
+                    word_idx = word_idx + 1
+                else:
+                    break
+            touched_ids.push(current_id)
+            touched_texts.push(content)
+            current_id = next_id
+    var new_frames: [TextFrame] = []
+    for f in page.frames:
+        var new_text = f.text
+        var i: i32 = 0
+        while i < touched_ids.len():
+            if touched_ids[i] == f.id:
+                new_text = touched_texts[i]
+            i = i + 1
+        new_frames.push(TextFrame(id: f.id, x: f.x, y: f.y, w: f.w, h: f.h, text: new_text, next_id: f.next_id))
+    return Page(width: page.width, height: page.height, frames: new_frames)
+
+# =========================================================================
+# Queries
+# =========================================================================
+
+fn frame_text(page: Page, id: text) -> text:
+    """Return the text content of the frame with the given id, or "" if
+    no such frame exists."""
+    var result = ""
+    for f in page.frames:
+        if f.id == id:
+            result = f.text
+    result
+
+fn page_frame_count(page: Page) -> i32:
+    """Return the number of frames on the page."""
+    var count: i32 = 0
+    for f in page.frames:
+        count = count + 1
+    count
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+fn _frame_html(frame: TextFrame) -> text:
+    """Absolutely-positioned div for one text frame, inline styles only."""
+    val style = "position:absolute;left:" + frame.x.to_text() + "px;top:" + frame.y.to_text() + "px;width:" + frame.w.to_text() + "px;height:" + frame.h.to_text() + "px;"
+    "<div class=\"pub-frame\" id=\"" + frame.id + "\" style=\"" + style + "\">" + _html_escape(frame.text) + "</div>"
+
+fn page_render_html(page: Page) -> text:
+    """Render the page as one self-contained HTML string: a relatively
+    positioned page container holding one absolutely-positioned div per
+    text frame."""
+    val page_style = "position:relative;width:" + page.width.to_text() + "px;height:" + page.height.to_text() + "px;"
+    var body = ""
+    for f in page.frames:
+        body = body + _frame_html(f)
+    "<div class=\"pub-page\" style=\"" + page_style + "\">" + body + "</div>"

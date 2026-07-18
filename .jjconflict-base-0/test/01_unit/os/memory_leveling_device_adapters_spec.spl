@@ -1,0 +1,28 @@
+use std.spec.*
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
+
+describe "memory-leveling GPU and NIC adapters":
+
+    it "keeps a GPU queue pinned through submission and completion":
+        var config = simpleos_memory_leveling_config_default()
+        config.gpu_capacity_bytes = 65536
+        val manager = memory_leveling_manager_new(config)
+        expect(manager.register_gpu_queue(301, 9, 4096, 0x8000).ok).to_equal(true)
+        expect(manager.device_submit(301, 9).state).to_equal("device_owned")
+        expect(manager.release(301, 9).reason).to_equal("protected")
+        expect(manager.device_complete(301, 9).state).to_equal("syncing_for_cpu")
+        expect(manager.device_unmap(301, 9).state).to_equal("cpu_owned")
+        expect(manager.release(301, 9).reason).to_equal("protected")
+
+    it "tracks a temporary NIC buffer and rejects opaque migration":
+        var config = simpleos_memory_leveling_config_default()
+        config.nic_capacity_bytes = 65536
+        config.nic_reserved_bytes = 0
+        val manager = memory_leveling_manager_new(config)
+        expect(manager.register_nic_buffer(401, 10, 2048, 0xA000, true).ok).to_equal(true)
+        expect(manager.device_submit(401, 10).ok).to_equal(true)
+        expect(manager.device_complete(401, 10).ok).to_equal(true)
+        expect(manager.device_unmap(401, 10).ok).to_equal(true)
+        expect(manager.release(401, 10).ok).to_equal(true)
+        expect(memory_leveling_device_migration_unavailable(401).reason).to_equal("migration-unavailable")

@@ -1,0 +1,155 @@
+# UI Form Factor
+#
+# DeviceClass detection and FormFactorProfile computation.
+# Derives phone / tablet / desktop classification from viewport dimensions,
+# touch capability, and platform hint — then wraps it with an adaptive
+# LayoutProfile for layout-structure decisions.
+#
+# Policy constants follow:
+#   - Apple touch platforms (ios/ipados): 44pt minimum touch target
+#   - Other touch platforms (android, etc.): 48dp minimum touch target
+#   - Desktop: 32px dense target
+#   - hover: available on Desktop only
+#
+# Breakpoints: shortest-side >= 600 → Tablet, else Phone (touch-first).
+# Desktop OS (macos/linux/windows) and not touch → Desktop always.
+#
+# See doc/01_research/ui/responsive_layout/responsive_layout_platforms.md
+
+use common.ui.profile.{
+    LayoutProfile, SizeClass, Orientation,
+    default_breakpoints, height_breakpoints, classify, detect_orientation
+}
+use common.ui.viewport.{Viewport}
+
+# =========================================================================
+# DeviceClass
+# =========================================================================
+
+enum DeviceClass:
+    Phone
+    Tablet
+    Desktop
+
+impl DeviceClass:
+    fn to_wire() -> text:
+        """Serialize device class to stable lowercase wire string."""
+        match self:
+            case DeviceClass.Phone:   return "phone"
+            case DeviceClass.Tablet:  return "tablet"
+            case DeviceClass.Desktop: return "desktop"
+
+# =========================================================================
+# FormFactorProfile
+# =========================================================================
+
+struct FormFactorProfile:
+    device:   DeviceClass
+    layout:   LayoutProfile
+    touch:    bool
+    platform: text
+    # DPI/UI scale factor, in integer permille (1000 = 1.0x, identity). An
+    # integer permille (not a float) matches layout.spl, which is all-i32.
+    # Feed this straight into compute_layout(..., scale_permille: ...).
+    scale_permille: i32
+
+# =========================================================================
+# Detection helpers
+# =========================================================================
+
+fn _is_desktop_platform(platform: text) -> bool:
+    """True for known desktop OS identifiers."""
+    return (platform == "macos" or platform == "linux" or platform == "windows")
+
+fn _is_apple_platform(platform: text) -> bool:
+    """True for Apple platforms (touch target 44pt)."""
+    return (platform == "macos" or platform == "ios" or platform == "ipados")
+
+# =========================================================================
+# detect_device_class
+# =========================================================================
+
+fn detect_device_class(platform: text, touch: bool, shortest_side: i32) -> DeviceClass:
+    """Derive DeviceClass from platform hint, touch flag, and shortest side in pixels.
+
+    Rules (in priority order):
+      1. Known desktop OS and NOT touch → Desktop
+      2. Touch and shortest_side >= 600 → Tablet
+      3. Touch → Phone
+      4. Unknown platform + no touch → Desktop (desktop assumption)
+    """
+    if _is_desktop_platform(platform) and not touch:
+        return DeviceClass.Desktop
+    if touch:
+        if shortest_side >= 600:
+            return DeviceClass.Tablet
+        return DeviceClass.Phone
+    # unknown platform, no touch — treat as desktop
+    return DeviceClass.Desktop
+
+# =========================================================================
+# compute_form_factor
+# =========================================================================
+
+fn compute_form_factor(viewport: Viewport, platform: text, touch: bool, scale_permille: i32 = 1000) -> FormFactorProfile:
+    """Compute a FormFactorProfile from viewport, platform hint, and touch flag.
+
+    Shortest side is min(width, height); used for DeviceClass detection so
+    orientation doesn't affect the class boundary.
+    Horizontal axis classified with default_breakpoints() (600/840).
+    Vertical axis classified with height_breakpoints() (480/900).
+
+    `scale_permille` is the DPI/UI scale factor in integer permille (1000 =
+    1.0x, identity default) — pass it through to compute_layout() so computed
+    geometry matches the device's actual pixel density.
+    """
+    val shortest = if viewport.width < viewport.height: viewport.width else: viewport.height
+    val device = detect_device_class(platform, touch, shortest)
+    val h_bp = default_breakpoints()
+    val v_bp = height_breakpoints()
+    val layout = LayoutProfile(
+        horizontal:  classify(viewport.width,  h_bp),
+        vertical:    classify(viewport.height, v_bp),
+        orientation: detect_orientation(viewport.width, viewport.height),
+        width:       viewport.width,
+        height:      viewport.height
+    )
+    return FormFactorProfile(
+        device:   device,
+        layout:   layout,
+        touch:    touch,
+        platform: platform,
+        scale_permille: scale_permille
+    )
+
+# =========================================================================
+# Policy functions
+# =========================================================================
+
+fn min_touch_target(device: DeviceClass, platform: text) -> i32:
+    """Minimum touch-target size in pixels/points.
+
+    44 for Apple touch platforms (HIG), 48 for other touch, 32 for desktop."""
+    match device:
+        case DeviceClass.Desktop:
+            return 32
+        case DeviceClass.Phone | DeviceClass.Tablet:
+            if _is_apple_platform(platform):
+                return 44
+            return 48
+
+fn supports_hover(device: DeviceClass) -> bool:
+    """True when the device reliably supports hover (pointer) interaction."""
+    match device:
+        case DeviceClass.Desktop: return true
+        case DeviceClass.Phone:   return false
+        case DeviceClass.Tablet:  return false
+
+fn density_spacing(device: DeviceClass) -> i32:
+    """Base spacing unit in pixels for density-appropriate layouts.
+
+    Phone: 8, Tablet: 12, Desktop: 8 (dense)."""
+    match device:
+        case DeviceClass.Phone:   return 8
+        case DeviceClass.Tablet:  return 12
+        case DeviceClass.Desktop: return 8

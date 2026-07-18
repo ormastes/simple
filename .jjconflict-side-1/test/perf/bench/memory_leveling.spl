@@ -1,0 +1,110 @@
+# Memory-leveling runtime benchmark.
+#
+# The CSV contains only timing-helper fields. Semantic checks below keep the
+# benchmark from reporting timings for a broken transition.
+
+use test.perf.bench.lib.timing.{BenchResult, bench_csv, bench_csv_header, bench_measure}
+use std.memory_leveling.{memory_leveling_policy_from_intent, simple_memory_iso_cpu_cold, simple_memory_placement_config_from_intent}
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_dma_sync_for_cpu, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_register_cpu_range, memory_leveling_runtime_register_dma, memory_leveling_runtime_reset_for_test, memory_leveling_runtime_unregister_dma}
+use os.kernel.memory.memory_swap.{memory_swap_checksum, memory_swap_store_new}
+
+const BENCH_ITERS: i64 = 16
+const PAGE_BYTES: u64 = 4096
+const OWNER_ID: u64 = 41
+
+fn require(ok: bool, message: text):
+    if not ok:
+        panic(message)
+
+fn allocation_once():
+    memory_leveling_runtime_reset_for_test()
+    val result = memory_leveling_runtime_register_cpu_range(0x100000, PAGE_BYTES, OWNER_ID)
+    require(result.ok, "allocation_register_4096 rejected a valid range")
+    require(result.allocation_ids.len() == 1, "allocation_register_4096 returned the wrong allocation count")
+
+fn pressure_once():
+    val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+    val intent = simple_memory_iso_cpu_cold()
+    val placement = simple_memory_placement_config_from_intent(intent)
+    val policy = memory_leveling_policy_from_intent(intent)
+    var i: u64 = 0
+    while i < 64:
+        val allocation = manager.request(placement, policy, PAGE_BYTES, 1, i + 1)
+        require(allocation.ok, "pressure_batch_64 allocation failed")
+        i = i + 1
+    val report = manager.apply_pressure("critical")
+    require(report.inspected == 64, "pressure_batch_64 inspected an unexpected count")
+    require(report.selected == 64, "pressure_batch_64 selected an unexpected count")
+
+fn make_payload() -> [u8]:
+    var payload: [u8] = []
+    var i: u64 = 0
+    while i < PAGE_BYTES:
+        payload.push((i % 251) as u8)
+        i = i + 1
+    payload
+
+fn swap_once(payload: [u8]):
+    val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+    val store = memory_swap_store_new(true, 1)
+    val intent = simple_memory_iso_cpu_cold()
+    val allocation = manager.request(
+        simple_memory_placement_config_from_intent(intent),
+        memory_leveling_policy_from_intent(intent),
+        PAGE_BYTES,
+        1,
+        OWNER_ID
+    )
+    require(allocation.ok, "swap_roundtrip_4096 allocation failed")
+    require(manager.prepare_swap(allocation.allocation_id, OWNER_ID).ok, "swap_roundtrip_4096 prepare failed")
+    val written = store.write(allocation.allocation_id, 0, payload)
+    require(written.ok, "swap_roundtrip_4096 write failed")
+    require(manager.commit_swap(allocation.allocation_id, OWNER_ID, written.slot_id).ok, "swap_roundtrip_4096 commit failed")
+    require(manager.prepare_restore(allocation.allocation_id, OWNER_ID).ok, "swap_roundtrip_4096 restore prepare failed")
+    val restored = store.read(written.slot_id, allocation.allocation_id, 0)
+    require(restored.ok, "swap_roundtrip_4096 read failed")
+    require(restored.bytes.len() == payload.len(), "swap_roundtrip_4096 changed payload length")
+    require(memory_swap_checksum(restored.bytes) == memory_swap_checksum(payload), "swap_roundtrip_4096 changed payload")
+    require(manager.commit_restore(allocation.allocation_id, OWNER_ID).ok, "swap_roundtrip_4096 restore commit failed")
+    require(store.release(written.slot_id, allocation.allocation_id).ok, "swap_roundtrip_4096 slot release failed")
+
+fn dma_once():
+    memory_leveling_runtime_reset_for_test()
+    val registered = memory_leveling_runtime_register_dma(0, OWNER_ID, 0x200000, 0x300000, PAGE_BYTES, true)
+    require(registered.ok, "dma_transition_cycle registration failed")
+    val allocation_id = registered.allocation_ids[0]
+    require(memory_leveling_runtime_dma_sync_for_device(allocation_id, OWNER_ID).ok, "dma_transition_cycle device transition failed")
+    require(memory_leveling_runtime_dma_sync_for_cpu(allocation_id, OWNER_ID).ok, "dma_transition_cycle CPU transition failed")
+    require(memory_leveling_runtime_unregister_dma(allocation_id, OWNER_ID).ok, "dma_transition_cycle unregister failed")
+
+fn protected_once():
+    val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+    val intent = simple_memory_iso_cpu_cold()
+    val allocation = manager.request(
+        simple_memory_placement_config_from_intent(intent),
+        memory_leveling_policy_from_intent(intent),
+        PAGE_BYTES,
+        1,
+        OWNER_ID
+    )
+    require(allocation.ok, "protected_skip allocation failed")
+    require(manager.pin(allocation.allocation_id, OWNER_ID).ok, "protected_skip pin failed")
+    val report = manager.apply_pressure("critical")
+    require(report.inspected == 1, "protected_skip inspected an unexpected count")
+    require(report.selected == 0 and report.skipped == 1, "protected_skip did not skip the pinned allocation")
+
+fn main():
+    val payload = make_payload()
+    val r1: BenchResult = bench_measure("allocation_register_4096", BENCH_ITERS, \: allocation_once())
+    val r2: BenchResult = bench_measure("pressure_batch_64", BENCH_ITERS, \: pressure_once())
+    val r3: BenchResult = bench_measure("swap_roundtrip_4096", BENCH_ITERS, \: swap_once(payload))
+    val r4: BenchResult = bench_measure("dma_transition_cycle", BENCH_ITERS, \: dma_once())
+    val r5: BenchResult = bench_measure("protected_skip", BENCH_ITERS, \: protected_once())
+
+    print bench_csv_header()
+    print bench_csv(r1)
+    print bench_csv(r2)
+    print bench_csv(r3)
+    print bench_csv(r4)
+    print bench_csv(r5)

@@ -1,0 +1,308 @@
+# graphics_2d_showcase.spl — canonical standalone Engine2D primitive gallery.
+#
+# Headless: bin/simple run examples/06_io/ui/graphics_2d_showcase.spl
+# Window:   bin/simple run examples/06_io/ui/graphics_2d_showcase_gui.spl
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.io.window_winit.{WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use std.io_runtime.{env_get}
+
+# Design-space reference dimensions (scaling denominators). The gallery is
+# authored at 800x600 and scaled up to the resolved render resolution.
+val W: i32 = 800
+val H: i32 = 600
+val BG: u32 = 0xFF101522u32
+val PANEL: u32 = 0xFF1B2435u32
+val WHITE: u32 = 0xFFF3F6FCu32
+val BLUE: u32 = 0xFF3B82F6u32
+val CYAN: u32 = 0xFF22D3EEu32
+val GREEN: u32 = 0xFF22C55Eu32
+val AMBER: u32 = 0xFFF59E0Bu32
+val RED: u32 = 0xFFEF4444u32
+val PURPLE: u32 = 0xFFA855F7u32
+
+# Shared showcase render-defaults convention:
+#   SHOWCASE_RESOLUTION: unset/"4k" => 3840x2160 (DEFAULT); "8k" => 7680x4320;
+#                        "WxH" (e.g. "1920x1080") => that exact size.
+#   SHOWCASE_DPI:        default 300; scales stroke/detail/text vs a 96 baseline.
+# Full 4K/8K rendering is compiled-lane-gated — the interpreter lane is far too
+# slow for millions of software-rasterized pixels. Verify parameterization at a
+# small rung (e.g. SHOWCASE_RESOLUTION=320x240).
+val SHOWCASE_RESOLUTION_ENV: text = "SHOWCASE_RESOLUTION"
+val SHOWCASE_DPI_ENV: text = "SHOWCASE_DPI"
+
+class ShowcaseSize:
+    width: i32
+    height: i32
+
+fn parse_dim_int(s: text, default: i32) -> i32:
+    val trimmed = s.trim()
+    val n = trimmed.len()
+    if n == 0:
+        return default
+    val zero = "0".to_i64()
+    var result: i64 = 0
+    var i = 0
+    while i < n:
+        val digit = trimmed.char_at(i).to_i64() - zero
+        if digit < 0 or digit > 9:
+            return default
+        result = result * 10 + digit
+        i = i + 1
+    return result.to_i32()
+
+fn resolve_showcase_dimensions() -> ShowcaseSize:
+    val raw = (env_get(SHOWCASE_RESOLUTION_ENV) ?? "").trim()
+    if raw == "" or raw == "4k" or raw == "4K":
+        return ShowcaseSize(width: 3840, height: 2160)
+    if raw == "8k" or raw == "8K":
+        return ShowcaseSize(width: 7680, height: 4320)
+    var parts = raw.split("x")
+    if parts.len() != 2:
+        parts = raw.split("X")
+    if parts.len() == 2:
+        val w = parse_dim_int(parts[0], 0)
+        val h = parse_dim_int(parts[1], 0)
+        if w > 0 and h > 0:
+            return ShowcaseSize(width: w, height: h)
+    return ShowcaseSize(width: 3840, height: 2160)
+
+fn resolve_showcase_dpi() -> i32:
+    val raw = (env_get(SHOWCASE_DPI_ENV) ?? "").trim()
+    if raw == "":
+        return 300
+    val d = parse_dim_int(raw, 300)
+    if d < 1:
+        return 300
+    d
+
+# Coordinate/size scaling from 800x600 design space to render_w x render_h.
+fn sx(v: i32, rw: i32) -> i32:
+    v * rw / W
+fn sy(v: i32, rh: i32) -> i32:
+    v * rh / H
+# Stroke / text / detail scale: resolution factor modulated by DPI (96 base).
+fn sd(v: i32, rw: i32, dpi: i32) -> i32:
+    val r = v * rw / W * dpi / 96
+    if r < 1:
+        return 1
+    r
+
+fn gpu_backend_requested(name: text) -> bool:
+    name == "metal" or name == "vulkan" or name == "cuda" or
+        name == "rocm" or name == "directx" or name == "opencl" or
+        name == "opengl" or name == "webgpu" or name == "intel" or
+        name == "qualcomm" or name == "virtio_gpu"
+
+fn checker_pixels() -> [u32]:
+    [RED, AMBER, GREEN, CYAN, BLUE, PURPLE, WHITE, PANEL,
+     CYAN, BLUE, PURPLE, RED, AMBER, GREEN, PANEL, WHITE]
+
+fn showcase_mask(rw: i32, rh: i32) -> [u8]:
+    var mask: [u8] = [0u8; rw * rh]
+    val xlo = sx(610, rw)
+    val xhi = sx(780, rw)
+    val ylo = sy(350, rh)
+    val yhi = sy(430, rh)
+    var y = 0
+    while y < rh:
+        var x = 0
+        while x < rw:
+            if x >= xlo and x < xhi and y >= ylo and y < yhi:
+                mask[y * rw + x] = 255u8
+            x = x + 1
+        y = y + 1
+    mask
+
+fn label(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, x: i32, y: i32, value: text) -> Engine2D:
+    # Return-threaded like draw_showcase below (param-detach class).
+    e.draw_text_bg(sx(x, rw), sy(y, rh), value, WHITE, 0xCC101522u32, sd(12, rw, dpi))
+    e
+
+# Returns the engine: paints made through a class PARAM are lost to the
+# caller on the deployed interpreter lane (param handle detaches; mut alone
+# does not write back) — the showcase read back an unpainted engine and
+# printed nonzero=0 (root-caused via checkpoint bisect 2026-07-18). Thread
+# the engine back explicitly.
+fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.clear(BG)
+    e.draw_text(sx(20, rw), sy(12, rh), "Simple Engine2D — complete primitive showcase", WHITE, sd(18, rw, dpi))
+
+    # Rectangles, outlines, rounded geometry, and line families.
+    e.draw_rect_filled(sx(18, rw), sy(48, rh), sx(245, rw), sy(150, rh), PANEL)
+    e = label(e, rw, rh, dpi, 28, 55, "RECT / LINE")
+    e.draw_rect(sx(30, rw), sy(80, rh), sx(55, rw), sy(38, rh), BLUE)
+    e.draw_rect_filled(sx(94, rw), sy(80, rh), sx(55, rw), sy(38, rh), CYAN)
+    e.draw_rect_thick(sx(158, rw), sy(80, rh), sx(55, rw), sy(38, rh), GREEN, sd(4, rw, dpi))
+    e.draw_rounded_rect(sx(30, rw), sy(130, rh), sx(80, rw), sy(45, rh), sx(12, rw), PURPLE)
+    e.draw_rounded_rect_outline(sx(122, rw), sy(130, rh), sx(92, rw), sy(45, rh), sx(12, rw), AMBER, sd(3, rw, dpi))
+    e.draw_line(sx(30, rw), sy(185, rh), sx(215, rw), sy(185, rh), RED, sd(3, rw, dpi))
+    e.draw_polyline([sx(30, rw), sx(65, rw), sx(100, rw), sx(140, rw), sx(180, rw), sx(215, rw)], [sy(190, rh), sy(178, rh), sy(194, rh), sy(176, rh), sy(193, rh), sy(180, rh)], 6, CYAN, sd(2, rw, dpi))
+
+    # Circles, ellipses, arcs, triangles, polygon, and cubic bezier.
+    e.draw_rect_filled(sx(276, rw), sy(48, rh), sx(250, rw), sy(245, rh), PANEL)
+    e = label(e, rw, rh, dpi, 286, 55, "CURVES / SHAPES")
+    e.draw_circle(sx(310, rw), sy(105, rh), sx(25, rw), BLUE)
+    e.draw_circle_filled(sx(375, rw), sy(105, rh), sx(25, rw), GREEN)
+    e.draw_circle_thick(sx(440, rw), sy(105, rh), sx(25, rw), AMBER, sd(5, rw, dpi))
+    e.draw_ellipse(sx(320, rw), sy(165, rh), sx(35, rw), sy(20, rh), CYAN)
+    e.draw_ellipse_filled(sx(405, rw), sy(165, rh), sx(35, rw), sy(20, rh), PURPLE)
+    e.draw_arc(sx(480, rw), sy(165, rh), sx(30, rw), 30, 300, RED, sd(4, rw, dpi))
+    e.draw_triangle_filled(sx(295, rw), sy(225, rh), sx(345, rw), sy(190, rh), sx(365, rw), sy(245, rh), BLUE)
+    e.draw_triangle_outline(sx(375, rw), sy(245, rh), sx(410, rw), sy(195, rh), sx(450, rw), sy(245, rh), WHITE, sd(3, rw, dpi))
+    e.draw_polygon_filled([sx(465, rw), sx(495, rw), sx(520, rw), sx(505, rw), sx(475, rw)], [sy(205, rh), sy(190, rh), sy(215, rh), sy(248, rh), sy(245, rh)], 5, GREEN)
+    e.draw_bezier(sx(290, rw), sy(275, rh), sx(345, rw), sy(235, rh), sx(430, rw), sy(315, rh), sx(510, rw), sy(270, rh), AMBER, sd(3, rw, dpi))
+
+    # Vertical, horizontal, and radial gradients.
+    e.draw_rect_filled(sx(539, rw), sy(48, rh), sx(243, rw), sy(245, rh), PANEL)
+    e = label(e, rw, rh, dpi, 549, 55, "GRADIENT / EFFECT")
+    e.draw_gradient_rect(sx(551, rw), sy(82, rh), sx(65, rw), sy(70, rh), BLUE, PURPLE)
+    e.draw_gradient_rect_h(sx(626, rw), sy(82, rh), sx(65, rw), sy(70, rh), GREEN, CYAN)
+    e.draw_radial_gradient(sx(739, rw), sy(117, rh), sx(38, rw), WHITE, RED)
+    e.draw_shadow_rect(sx(558, rw), sy(180, rh), sx(85, rw), sy(55, rh), sx(8, rw), sy(8, rh), sd(8, rw, dpi), 0xAA000000u32)
+    e.draw_rect_filled(sx(558, rw), sy(180, rh), sx(85, rw), sy(55, rh), BLUE)
+    e.draw_gradient_rect(sx(660, rw), sy(177, rh), sx(105, rw), sy(62, rh), CYAN, PURPLE)
+    e.draw_blur_rect(sx(680, rw), sy(192, rh), sx(65, rw), sy(32, rh), sd(5, rw, dpi))
+    e.draw_rect_blend(sx(558, rw), sy(252, rh), sx(65, rw), sy(25, rh), 0x887C3AEDu32)
+    e.draw_rect_blend_mode(sx(635, rw), sy(252, rh), sx(65, rw), sy(25, rh), 0xAA22C55Eu32, 1)
+
+    # Generated image operations and text backgrounds. draw_image/draw_image_blend
+    # take the source dimensions (4x4) as w/h — those stay unscaled; only the
+    # destination position scales. draw_image_scaled scales its dst_w/dst_h.
+    e.draw_rect_filled(sx(18, rw), sy(307, rh), sx(365, rw), sy(130, rh), PANEL)
+    e = label(e, rw, rh, dpi, 28, 315, "IMAGE / TEXT")
+    val image = checker_pixels()
+    e.draw_image(sx(30, rw), sy(345, rh), 4, 4, image)
+    e.draw_image_blend(sx(65, rw), sy(345, rh), 4, 4, image)
+    e.draw_image_scaled(sx(105, rw), sy(345, rh), sx(64, rw), sy(64, rh), 4, 4, image)
+    e.draw_image_transform(sx(185, rw), sy(345, rh), 4, 4, 256, 64, 0, 256, 0, 0, image)
+    e.draw_text(sx(235, rw), sy(350, rh), "glyph text", GREEN, sd(14, rw, dpi))
+    e.draw_text_bg(sx(235, rw), sy(380, rh), "text background", WHITE, BLUE, sd(14, rw, dpi))
+
+    # Clip is visibly confined to the cyan frame.
+    e.draw_rect_filled(sx(397, rw), sy(307, rh), sx(180, rw), sy(130, rh), PANEL)
+    e = label(e, rw, rh, dpi, 407, 315, "CLIP")
+    e.draw_rect(sx(414, rw), sy(346, rh), sx(142, rw), sy(70, rh), CYAN)
+    e.set_clip(sx(416, rw), sy(348, rh), sx(138, rw), sy(66, rh))
+    e.draw_circle_filled(sx(416, rw), sy(380, rh), sx(55, rw), RED)
+    e.draw_rect_filled(sx(480, rw), sy(340, rh), sx(100, rw), sy(85, rh), PURPLE)
+    e.clear_clip()
+
+    # Full-frame alpha mask confines this draw to the lower-right mask region.
+    e.draw_rect_filled(sx(591, rw), sy(307, rh), sx(191, rw), sy(130, rh), PANEL)
+    e = label(e, rw, rh, dpi, 601, 315, "MASK")
+    val mask = showcase_mask(rw, rh)
+    e.set_mask(mask, rw, rh)
+    e.draw_gradient_rect_h(sx(600, rw), sy(350, rh), sx(180, rw), sy(80, rh), AMBER, RED)
+    e.clear_mask()
+
+    # Engine-to-engine composition. The child keeps its native 80x60 size (its
+    # internal draws are child-local); only its placement scales.
+    var child = Engine2D.create_with_backend_fast(80, 60, "software")
+    child.clear(0x00000000u32)
+    child.draw_rounded_rect(5, 5, 70, 50, 10, BLUE)
+    child.draw_circle_filled(40, 30, 16, AMBER)
+    child.present()
+    e.draw_rect_filled(sx(18, rw), sy(452, rh), sx(570, rw), sy(125, rh), PANEL)
+    e = label(e, rw, rh, dpi, 28, 460, "ENGINE COMPOSITION / OPACITY")
+    e.draw_engine(sx(38, rw), sy(495, rh), child)
+    e.draw_engine_opacity(sx(138, rw), sy(495, rh), child, 450)
+    child.shutdown()
+    e
+
+fn pack_rgb(pixels: [u32]) -> [i64]:
+    var packed: [i64] = [0i64; pixels.len()]
+    var i = 0
+    while i < pixels.len():
+        packed[i] = pixels[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    packed
+
+fn should_close(input: WinitInput) -> bool:
+    if input.close:
+        return true
+    for key in input.keys:
+        if key == 27 or key == 81 or key == 113:
+            return true
+    false
+
+fn semantic_sample_differences(pixels: [u32], rw: i32, rh: i32) -> i32:
+    # Exact interiors of five independently rendered primitives, scaled from
+    # design space to the render resolution (stride = rw). Adjacent samples
+    # must differ, preventing a uniform/background-only frame from satisfying
+    # the showcase evidence contract.
+    val samples = [pixels[sy(90, rh) * rw + sx(100, rw)], pixels[sy(105, rh) * rw + sx(375, rw)],
+                   pixels[sy(200, rh) * rw + sx(570, rw)], pixels[sy(165, rh) * rw + sx(405, rw)],
+                   pixels[sy(590, rh) * rw + sx(790, rw)]]
+    var differences = 0
+    var i = 1
+    while i < samples.len():
+        if samples[i] != samples[i - 1]:
+            differences = differences + 1
+        i = i + 1
+    differences
+
+fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
+    val size = resolve_showcase_dimensions()
+    val render_w = size.width
+    val render_h = size.height
+    val dpi = resolve_showcase_dpi()
+    var engine = if backend == "software": Engine2D.create_offscreen(render_w, render_h) else: Engine2D.create_with_backend_fast(render_w, render_h, backend)
+    val actual = engine.backend_name()
+    engine = draw_showcase(engine, render_w, render_h, dpi)
+    engine.present()
+    val readback = engine.read_pixels_with_source()
+    var nonzero = 0
+    for pixel in readback.pixels:
+        if pixel != 0u32:
+            nonzero = nonzero + 1
+    val semantic_differences = semantic_sample_differences(readback.pixels, render_w, render_h)
+    val gpu_requested = gpu_backend_requested(backend)
+    print "graphics_2d_requested_backend={backend}"
+    print "graphics_2d_backend={actual}"
+    print "graphics_2d_source={readback.source}"
+    print "graphics_2d_backend_handle={readback.backend_handle}"
+    print "graphics_2d_checksum={readback.checksum}"
+    print "graphics_2d_nonzero={nonzero}"
+    print "graphics_2d_semantic_differences={semantic_differences}"
+    print "graphics_2d_dimensions={render_w}x{render_h}"
+    print "graphics_2d_dpi={dpi}"
+    print "graphics_2d_pixels={readback.pixel_count}"
+    if (actual != backend or readback.pixel_count != (render_w * render_h).to_i64() or
+            readback.checksum == 0 or nonzero == 0 or semantic_differences < 4):
+        engine.shutdown()
+        return 1
+    if gpu_requested and (readback.source != "device_readback" or readback.backend_handle <= 0):
+        engine.shutdown()
+        return 1
+
+    if not gui:
+        engine.shutdown()
+        return 0
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        engine.shutdown()
+        return 1
+    val win = winit_window_new(lp, render_w.to_i64(), render_h.to_i64(), "Simple Engine2D Showcase")
+    if not win.is_valid:
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 1
+    val packed = pack_rgb(readback.pixels)
+    winit_present_rgba(win, render_w.to_i64(), render_h.to_i64(), packed)
+    var running = true
+    while running:
+        val input = winit_poll_input(lp)
+        running = not should_close(input)
+        thread_sleep(16)
+    winit_window_free(win)
+    winit_loop_free(lp)
+    engine.shutdown()
+    0
+
+fn main() -> i64:
+    run_graphics_2d_showcase(false, "software")
+
+export run_graphics_2d_showcase

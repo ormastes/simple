@@ -1,0 +1,170 @@
+# codex-system-test
+use compiler.backend.backend.stage4_symbol_closure.{stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_exports, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_resolve_requested_archive_owners}
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn legacy_localized_symbols() -> [text]:
+    [
+        "rt_crc32_text", "rt_dir_walk", "rt_file_append", "rt_file_create_excl",
+        "rt_file_sync", "rt_file_write", "rt_str_hash", "rt_term_enable_ansi",
+        "rt_thread_available_parallelism", "spl_array_get", "spl_array_len",
+        "spl_array_new", "spl_array_new_cap", "spl_array_pop", "spl_array_push",
+        "spl_array_push_i64", "spl_as_str", "spl_dict_contains", "spl_dict_get",
+        "spl_dict_len", "spl_dict_new", "spl_dict_set", "spl_int", "spl_str",
+        "spl_str_hash", "spl_str_split", "spl_thread_cpu_count"
+    ]
+
+fn legacy_raw_symbol(symbol: text, object_format: text) -> text:
+    if object_format == "macho" or object_format == "coff-mingw":
+        return "_" + symbol
+    symbol
+
+fn legacy_nm(definitions: [text], object_format: text, include_rt_value_bool: bool) -> text:
+    var output = ""
+    for symbol in definitions:
+        output = output + "00000000 T " + legacy_raw_symbol(symbol, object_format) + "\n"
+    if object_format == "coff-msvc" or object_format == "coff-mingw":
+        output = output + "00000000 A @feat.00\n"
+    if include_rt_value_bool:
+        output = output + "         U " + legacy_raw_symbol("rt_value_bool", object_format) + "\n"
+    output + "         U " + legacy_raw_symbol("malloc", object_format) + "\n"
+
+fn legacy_raw_nm(object_format: text) -> text:
+    var definitions = stage4_runtime_legacy_compat_exports()
+    for symbol in legacy_localized_symbols():
+        definitions = definitions.push(symbol)
+    legacy_nm(definitions, object_format, true)
+
+describe "Stage4 localized runtime legacy compatibility provider":
+    it "names the exact compatibility archive for every hosted object ABI":
+        expect(stage4_runtime_legacy_compat_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_runtime_legacy_compat.a")
+        expect(stage4_runtime_legacy_compat_archive_file("macos", false).unwrap()).to_equal("libsimple_stage4_runtime_legacy_compat.a")
+        expect(stage4_runtime_legacy_compat_archive_file("freebsd", false).unwrap()).to_equal("libsimple_stage4_runtime_legacy_compat.a")
+        expect(stage4_runtime_legacy_compat_archive_file("windows", false).unwrap()).to_equal("libsimple_stage4_runtime_legacy_compat.a")
+        expect(stage4_runtime_legacy_compat_archive_file("windows", true).unwrap()).to_equal("simple_stage4_runtime_legacy_compat.lib")
+        expect(stage4_runtime_legacy_compat_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_runtime_legacy_compat_archive_file("plan9", false).is_err()).to_be(true)
+
+    it "maps each hosted ABI to its exact portable symbol format":
+        expect(stage4_runtime_legacy_compat_object_format("linux", false).unwrap()).to_equal("elf")
+        expect(stage4_runtime_legacy_compat_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_runtime_legacy_compat_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_runtime_legacy_compat_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_runtime_legacy_compat_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+        expect(stage4_runtime_legacy_compat_object_format("linux", true).is_err()).to_be(true)
+        expect(stage4_runtime_legacy_compat_object_format("plan9", false).is_err()).to_be(true)
+
+    it "exposes only the audited safe 18-symbol compatibility ABI":
+        val exports = stage4_runtime_legacy_compat_exports()
+        expect(exports.len()).to_equal(18)
+        for symbol in [
+            "spl_strdup", "spl_str_new", "spl_str_len", "spl_str_cmp",
+            "spl_str_concat", "spl_str_slice", "spl_str_index_of", "spl_str_replace",
+            "spl_print", "spl_println", "spl_panic", "spl_file_read", "rt_is_dir",
+            "rt_dir_remove_all", "rt_getcwd", "spl_env_get", "rt_sleep_ms_native",
+            "rt_process_spawn_async"
+        ]:
+            expect(exports).to_contain(symbol)
+        for symbol in legacy_localized_symbols():
+            expect(exports.contains(symbol)).to_be(false)
+
+    it "accepts the exact safe ABI after localization on ELF Mach-O and both COFF ABIs":
+        for object_format in ["elf", "macho", "coff-msvc", "coff-mingw"]:
+            val localized = legacy_nm(stage4_runtime_legacy_compat_exports(), object_format, true)
+            expect(stage4_validate_runtime_legacy_compat_symbol_contract(localized, object_format).is_ok()).to_be(true)
+        expect(stage4_validate_runtime_legacy_compat_symbol_contract(legacy_nm(stage4_runtime_legacy_compat_exports(), "elf", true), "wasm").is_err()).to_be(true)
+
+    it "accepts the supported undecorated MinGW x64 symbol shape":
+        val localized = legacy_nm(stage4_runtime_legacy_compat_exports(), "coff-msvc", true)
+        expect(stage4_validate_runtime_legacy_compat_symbol_contract(localized, "coff-mingw").is_ok()).to_be(true)
+        val raw = legacy_raw_nm("coff-msvc")
+        val localize = stage4_runtime_legacy_compat_localization_symbols(raw, "coff-mingw").unwrap()
+        expect(localize).to_contain("spl_array_new")
+        expect(localize.contains("_spl_array_new")).to_be(false)
+
+    it "localizes every known non-export definition on each hosted ABI":
+        for object_format in ["elf", "macho", "coff-msvc", "coff-mingw"]:
+            val localized = stage4_runtime_legacy_compat_localization_symbols(legacy_raw_nm(object_format), object_format).unwrap()
+            expect(localized.len()).to_equal(27)
+            for symbol in legacy_localized_symbols():
+                expect(localized).to_contain(legacy_raw_symbol(symbol, object_format))
+            for symbol in stage4_runtime_legacy_compat_exports():
+                expect(localized.contains(legacy_raw_symbol(symbol, object_format))).to_be(false)
+
+    it "rejects missing or duplicate exports and localizes unknown definitions":
+        for object_format in ["elf", "macho", "coff-msvc", "coff-mingw"]:
+            val raw = legacy_raw_nm(object_format)
+            val missing_row = "00000000 T " + legacy_raw_symbol("spl_str_new", object_format) + "\n"
+            val duplicate_row = "00000000 T " + legacy_raw_symbol("spl_str_new", object_format) + "\n"
+            val unknown_runtime_row = "00000000 T " + legacy_raw_symbol("spl_hidden", object_format) + "\n"
+            val unknown_foreign_row = "00000000 T " + legacy_raw_symbol("foreign_helper", object_format) + "\n"
+            expect(stage4_runtime_legacy_compat_localization_symbols(raw.replace(missing_row, ""), object_format).is_err()).to_be(true)
+            expect(stage4_runtime_legacy_compat_localization_symbols(raw + duplicate_row, object_format).is_err()).to_be(true)
+            val runtime_localize = stage4_runtime_legacy_compat_localization_symbols(raw + unknown_runtime_row, object_format).unwrap()
+            val foreign_localize = stage4_runtime_legacy_compat_localization_symbols(raw + unknown_foreign_row, object_format).unwrap()
+            expect(runtime_localize).to_contain(legacy_raw_symbol("spl_hidden", object_format))
+            expect(foreign_localize).to_contain(legacy_raw_symbol("foreign_helper", object_format))
+
+    it "rejects array dict split and thread globals after localization":
+        for object_format in ["elf", "macho", "coff-msvc", "coff-mingw"]:
+            val exact = legacy_nm(stage4_runtime_legacy_compat_exports(), object_format, true)
+            for forbidden in ["spl_array_new", "spl_dict_set", "spl_str_split", "spl_thread_cpu_count"]:
+                val row = "00000000 T " + legacy_raw_symbol(forbidden, object_format) + "\n"
+                expect(stage4_validate_runtime_legacy_compat_symbol_contract(exact + row, object_format).is_err()).to_be(true)
+
+    it "requires rt_value_bool as the sole runtime dependency before and after localization":
+        for object_format in ["elf", "macho", "coff-msvc", "coff-mingw"]:
+            val raw = legacy_raw_nm(object_format)
+            val exact = legacy_nm(stage4_runtime_legacy_compat_exports(), object_format, true)
+            val value_bool_row = "         U " + legacy_raw_symbol("rt_value_bool", object_format) + "\n"
+            val hidden_row = "         U " + legacy_raw_symbol("spl_hidden", object_format) + "\n"
+            expect(stage4_runtime_legacy_compat_localization_symbols(raw, object_format).is_ok()).to_be(true)
+            expect(stage4_validate_runtime_legacy_compat_symbol_contract(exact, object_format).is_ok()).to_be(true)
+            expect(stage4_runtime_legacy_compat_localization_symbols(raw.replace(value_bool_row, ""), object_format).is_err()).to_be(true)
+            expect(stage4_runtime_legacy_compat_localization_symbols(raw + hidden_row, object_format).is_err()).to_be(true)
+            expect(stage4_validate_runtime_legacy_compat_symbol_contract(exact.replace(value_bool_row, ""), object_format).is_err()).to_be(true)
+            expect(stage4_validate_runtime_legacy_compat_symbol_contract(exact + hidden_row, object_format).is_err()).to_be(true)
+
+    it "resolves both emitted compatibility roots and the transitive runtime cycle":
+        val labels = ["runtime_native", "runtime_legacy_compat"]
+        val scans = [
+            "00000000 T rt_http_get\n00000010 T rt_value_bool\n         U spl_str_len",
+            "00000000 T spl_str_len\n         U rt_value_bool"
+        ]
+        val (selected, owners) = stage4_resolve_requested_archive_owners(["rt_http_get"], labels, scans, false).unwrap()
+        expect(selected).to_equal([0, 1])
+        expect(owners).to_contain("rt_http_get=runtime_native")
+        expect(owners).to_contain("spl_str_len=runtime_legacy_compat")
+        expect(owners).to_contain("rt_value_bool=runtime_native")
+        val (direct_selected, direct_owners) = stage4_resolve_requested_archive_owners(["spl_str_len"], labels, scans, false).unwrap()
+        expect(direct_selected).to_equal([0, 1])
+        expect(direct_owners).to_contain("spl_str_len=runtime_legacy_compat")
+
+    it "builds localizes admits and cleans only the dedicated compatibility archive":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val strict_start = source.find("if stage4_requested:") ?? -1
+        val strict_end = source.find("# Step 3: Combine all objects and link") ?? -1
+        val strict_source = if strict_start >= 0 and strict_end > strict_start: source.substring(strict_start, strict_end) else: ""
+        val build_pos = strict_source.find("llvm_stage4_build_runtime_legacy_compat_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val labels_pos = strict_source.find("\"runtime_native\", \"runtime_legacy_compat\"") ?? -1
+        val paths_pos = strict_source.find("runtime_native_archive, runtime_legacy_compat_archive") ?? -1
+        val owner_pos = strict_source.find("stage4_resolve_requested_archive_owners(stage4_requested_symbols, candidate_labels, candidate_scans, hosted_os == \"macos\")") ?? -1
+        expect(source).to_contain("fn llvm_stage4_build_runtime_legacy_compat_archive")
+        expect(source).to_contain("stage4_runtime_legacy_compat_localization_symbols")
+        expect(source).to_contain("stage4_validate_runtime_legacy_compat_symbol_contract")
+        expect(build_pos).to_be_greater_than(-1)
+        expect(labels_pos).to_be_greater_than(build_pos)
+        expect(paths_pos).to_be_greater_than(build_pos)
+        expect(owner_pos).to_be_greater_than(paths_pos)
+        expect(strict_source.split("file_delete(runtime_legacy_compat_archive)").len() - 1).to_be_greater_than(4)
+        expect(strict_source.contains("candidate_paths = candidate_paths.push(runtime_legacy_core")).to_be(false)
+        expect(source.contains("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_legacy_core\"")).to_be(false)
+
+    it "compiles a fresh legacy object but never admits its raw archive":
+        val compile_source = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val link_source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        expect(compile_source).to_contain("if include_stage4_legacy_compat:\n        sources = sources.push(\"runtime_legacy_core\")\n        objects = objects.push(\"{object_prefix}runtime_legacy_core{ext}\")")
+        expect(link_source).to_contain("stage4_runtime_provider_object_matches(object, \"runtime_legacy_core\"")
+        expect(link_source.contains("candidate_labels = candidate_labels.push(\"runtime_legacy_core\")")).to_be(false)
+        expect(link_source.contains("candidate_paths = candidate_paths.push(runtime_legacy_core_archive)")).to_be(false)

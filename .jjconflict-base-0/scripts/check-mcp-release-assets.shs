@@ -1,0 +1,77 @@
+#!/bin/sh
+# Verify native-first MCP package metadata and matching GitHub release assets.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+PACKAGE_ROOT=${SIMPLE_MCP_PACKAGE_ROOT:-$REPO_ROOT}
+RELEASE_REPO=${SIMPLE_RELEASE_REPO:-${GITHUB_REPOSITORY:-ormastes/simple}}
+TMP=""
+
+fail() {
+    echo "[FAIL] $*" >&2
+    exit 1
+}
+
+[ "$#" -eq 1 ] || fail "usage: $0 tools/{mcp-registry|lsp-mcp-registry}"
+PACKAGE_DIR=$1
+case "$PACKAGE_DIR" in
+    tools/mcp-registry)
+        EXPECTED_NAME=@simple-lang/mcp-server
+        EXPECTED_BIN=native/simple_mcp_server
+        NATIVE_NAME=simple_mcp_server
+        ;;
+    tools/lsp-mcp-registry)
+        EXPECTED_NAME=@simple-lang/lsp-mcp-server
+        EXPECTED_BIN=native/simple_lsp_mcp_server
+        NATIVE_NAME=simple_lsp_mcp_server
+        ;;
+    *) fail "unsupported MCP package directory: $PACKAGE_DIR" ;;
+esac
+
+command -v node >/dev/null 2>&1 || fail "node is required"
+METADATA=$(node - "$PACKAGE_ROOT/$PACKAGE_DIR" "$EXPECTED_NAME" "$EXPECTED_BIN" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[2];
+const expectedName = process.argv[3];
+const expectedBin = process.argv[4];
+const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+const server = JSON.parse(fs.readFileSync(path.join(dir, 'server.json'), 'utf8'));
+const version = pkg.runtimeVersion || pkg.version;
+if (pkg.name !== expectedName) throw new Error(`package name mismatch: ${pkg.name}`);
+if (!version || server.version !== pkg.version) throw new Error('package/server version mismatch');
+if (JSON.stringify(pkg.os) !== JSON.stringify(['linux']) || JSON.stringify(pkg.cpu) !== JSON.stringify(['x64'])) throw new Error('package platform must be linux/x64');
+if (!pkg.files || !pkg.files.includes('native/')) throw new Error('native/ missing from package files');
+const bins = Object.values(pkg.bin || {});
+if (bins.length === 0 || bins.some(value => value !== expectedBin)) throw new Error('package bin target mismatch');
+const identifiers = (server.packages || []).map(item => item.identifier);
+if (!identifiers.includes(expectedName)) throw new Error('server package identifier mismatch');
+if ((server.packages || []).some(item => item.identifier === expectedName && item.version !== pkg.version)) throw new Error('server package version mismatch');
+process.stdout.write(version);
+NODE
+) || fail "invalid package metadata: $PACKAGE_DIR"
+
+VERSION=$METADATA
+ASSET="simple-bootstrap-$VERSION-linux-x86_64.spk"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/simple-mcp-release.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+if [ -n "${SIMPLE_MCP_RELEASE_ASSET_DIR:-}" ]; then
+    [ -f "$SIMPLE_MCP_RELEASE_ASSET_DIR/$ASSET" ] || fail "asset fixture missing: $ASSET"
+    [ -f "$SIMPLE_MCP_RELEASE_ASSET_DIR/$ASSET.sha256" ] || fail "asset fixture missing: $ASSET.sha256"
+    cp "$SIMPLE_MCP_RELEASE_ASSET_DIR/$ASSET" "$SIMPLE_MCP_RELEASE_ASSET_DIR/$ASSET.sha256" "$TMP/"
+else
+    command -v gh >/dev/null 2>&1 || fail "gh is required for release lookup"
+    gh release download "v$VERSION" --repo "$RELEASE_REPO" --pattern "$ASSET" --pattern "$ASSET.sha256" --dir "$TMP" || fail "release download failed: $RELEASE_REPO v$VERSION"
+fi
+
+(cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null) || fail "release checksum failed: v$VERSION/$ASSET"
+mkdir "$TMP/unpack"
+tar -xzf "$TMP/$ASSET" -C "$TMP/unpack"
+NATIVE=$(find "$TMP/unpack" -type f -path "*/bin/$NATIVE_NAME" -print -quit)
+[ -n "$NATIVE" ] || fail "release runtime missing bin/$NATIVE_NAME: v$VERSION/$ASSET"
+mkdir -p "$PACKAGE_ROOT/$PACKAGE_DIR/native"
+cp "$NATIVE" "$PACKAGE_ROOT/$PACKAGE_DIR/$EXPECTED_BIN"
+chmod 755 "$PACKAGE_ROOT/$PACKAGE_DIR/$EXPECTED_BIN"
+echo "[OK] $EXPECTED_NAME staged from verified v$VERSION/$ASSET"

@@ -1,0 +1,180 @@
+## Task #35 track B: interpreter struct/class value-vs-reference semantics on
+## parameter passing.
+##
+## Settled semantics:
+##  - STRUCTS are VALUE types: callee mutations must NOT leak to the caller.
+##  - CLASSES are REFERENCE types: callee mutations MUST leak to the caller.
+##  - ARRAYS are VALUE types: copied on pass/assign.
+##
+## Types are named uniquely (B35 suffix) to dodge the interpreter's global
+## type-registry same-name collision hazard (two modules defining the same
+## struct name corrupt each other's runtime type registry).
+##
+## STATUS: all cases pass. The former KNOWN BUG (direct field mutation of a
+## struct PARAMETER leaking to the caller) was fixed in task #91: the seed
+## interpreter tags struct-derived ClassDefs with `is_value_type` and excludes
+## value-type struct params from the Bug #19 mutable-param write-back.
+
+struct SemPointB35:
+    x: i32
+    y: i32
+
+struct SemBoxB35:
+    inner: SemPointB35
+    tag: i32
+
+class SemCellB35:
+    x: i32
+
+impl SemCellB35:
+    me set_x(v: i32):
+        self.x = v
+
+class SemHolderB35:
+    p: SemPointB35
+    n: i32
+
+impl SemHolderB35:
+    me bump_inner(v: i32):
+        self.p.x = v
+
+# --- struct: mutate the mut param DIRECTLY; caller must NOT see it ---
+fn struct_mut_param_direct_b35(mut s: SemPointB35) -> i32:
+    s.x = 999
+    return s.x
+
+# --- struct: mutate a local copy inside callee; original must be untouched ---
+fn struct_local_copy_mutate_b35(s: SemPointB35) -> i32:
+    var local = s
+    local.x = 999
+    return local.x
+
+# --- struct: attempt to mutate a copy of the param, return nothing ---
+fn struct_try_mutate_field_b35(s: SemPointB35):
+    var local = s
+    local.x = 12345
+
+# --- struct whole-value reassignment inside callee (never leaks) ---
+fn struct_reassign_whole_b35(s: SemPointB35) -> i32:
+    var local = s
+    local = SemPointB35(x: 77, y: 88)
+    return local.x + local.y
+
+# --- class: mutate through the reference; caller MUST see it ---
+fn class_mutate_b35(c: SemCellB35):
+    c.set_x(777)
+
+# --- struct in array: copy element, mutate copy; array element untouched ---
+fn array_struct_mutate_copy_b35(arr: [SemPointB35]) -> i32:
+    var elem = arr[0]
+    elem.x = 555
+    return elem.x
+
+# --- nested struct inside a class: class-ref mutation leaks the nested field ---
+fn holder_mutate_nested_b35(h: SemHolderB35):
+    h.bump_inner(321)
+
+# --- class-in-array (task #112): read an element out of an array param into a
+# local var, then mutate through it. Classes are reference types, so this MUST
+# be visible to the caller through the array slot too. ---
+class SemArrCellB35:
+    v: i32
+
+impl SemArrCellB35:
+    me set_v(x: i32):
+        self.v = x
+
+fn array_class_mutate_b35(arr: [SemArrCellB35]):
+    var elem = arr[0]
+    elem.set_v(777)
+
+# --- array itself (task #112): arrays are value types, copied on param bind.
+# Appending inside the callee must NOT be visible to the caller's array. ---
+fn array_append_b35(arr: [i32]):
+    arr.push(999)
+
+describe "Task 35B - struct value semantics on parameter passing":
+    it "struct: mut-param direct field mutation does NOT leak to caller":
+        # The callee's OWN view is correct: it observes 999.
+        var orig = SemPointB35(x: 1, y: 2)
+        val r = struct_mut_param_direct_b35(orig)
+        expect(r).to_equal(999)
+        #
+        # Fixed (task #91): structs are VALUE types, so a direct field mutation
+        # of a struct PARAMETER must NOT leak back to the caller. The seed
+        # interpreter now tags struct-derived ClassDefs with `is_value_type` and
+        # excludes value-type struct params from the Bug #19 mutable-param
+        # write-back (exec_function_inner). Classes keep reference semantics.
+        expect(orig.x).to_equal(1)
+        expect(orig.y).to_equal(2)
+
+    it "struct: mutating a local copy does not leak to the caller":
+        var orig = SemPointB35(x: 1, y: 2)
+        val r = struct_local_copy_mutate_b35(orig)
+        expect(r).to_equal(999)
+        expect(orig.x).to_equal(1)
+
+    it "struct: callee field mutation of a copy leaves caller unchanged":
+        var orig = SemPointB35(x: 1, y: 2)
+        struct_try_mutate_field_b35(orig)
+        expect(orig.x).to_equal(1)
+
+    it "struct: whole-value reassignment inside callee does not leak":
+        var orig = SemPointB35(x: 1, y: 2)
+        val r = struct_reassign_whole_b35(orig)
+        expect(r).to_equal(165)
+        expect(orig.x).to_equal(1)
+        expect(orig.y).to_equal(2)
+
+describe "Task 35B - struct value semantics on local assignment":
+    it "struct: `var b = a` then mutating b does not change a":
+        var a = SemPointB35(x: 10, y: 20)
+        var b = a
+        b.x = 99
+        expect(b.x).to_equal(99)
+        expect(a.x).to_equal(10)
+
+    it "struct-in-array: mutating a copied element leaves the array untouched":
+        var arr = [SemPointB35(x: 3, y: 4)]
+        val r = array_struct_mutate_copy_b35(arr)
+        expect(r).to_equal(555)
+        expect(arr[0].x).to_equal(3)
+
+    it "nested struct field copy: mutating a lifted struct field is local":
+        var box = SemBoxB35(inner: SemPointB35(x: 5, y: 6), tag: 1)
+        var lifted = box.inner
+        lifted.x = 42
+        expect(lifted.x).to_equal(42)
+        expect(box.inner.x).to_equal(5)
+
+describe "Task 35B - class reference semantics on parameter passing":
+    it "class: callee mutation through the reference leaks to the caller":
+        var c = SemCellB35(x: 1)
+        class_mutate_b35(c)
+        expect(c.x).to_equal(777)
+
+    it "class: me-method mutation is visible after the call":
+        var c = SemCellB35(x: 5)
+        c.set_x(9)
+        expect(c.x).to_equal(9)
+
+    it "nested struct in class: reference mutation leaks the nested field":
+        var h = SemHolderB35(p: SemPointB35(x: 0, y: 0), n: 1)
+        holder_mutate_nested_b35(h)
+        expect(h.p.x).to_equal(321)
+
+describe "Task 112 - class-in-array reference semantics":
+    it "class-in-array: mutating a locally-read element leaks to the caller through the array slot":
+        # Classes are reference types (see class_mutate_b35 above): reading a
+        # class element out of an array param into a local var and mutating
+        # through it must be visible via the ORIGINAL array too, since both
+        # the local var and the array slot alias the same instance.
+        var arr = [SemArrCellB35(v: 42)]
+        array_class_mutate_b35(arr)
+        expect(arr[0].v).to_equal(777)
+
+describe "Task 112 - array value semantics on parameter passing":
+    it "array: append inside the callee does not leak to the caller (arrays are value types)":
+        var arr: [i32] = [1, 2, 3]
+        array_append_b35(arr)
+        expect(arr.len()).to_equal(3)

@@ -1,0 +1,240 @@
+# Interpreter AOP Weaving (task #31)
+#
+# The compiled path weaves declarative `on pc{...} use handler form priority`
+# advice into MIR (see src/compiler/80.driver/driver_pipeline.spl +
+# src/compiler/10.frontend/core/aop.spl). The tree-walking HIR interpreter
+# (InterpreterBackendImpl, interpreter_calls.spl) never ran a MIR pass, so it
+# silently ignored every declared aspect: functions matching a pointcut just
+# executed unwoven. This module adds the interpreter-side equivalent: a
+# self-contained pointcut matcher plus two InterpreterBackendImpl methods
+# invoked from a single narrow hook in `call_hir_function`.
+#
+# `HirModule.aop_advices: [HirAopAdvice]` is populated by HIR lowering
+# (src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl) regardless of
+# execution path, so it is already available on `ctx.module` here — no
+# frontend/HIR/driver changes were needed, only consuming what already exists.
+#
+# Scope (core, per task escape hatch — see follow-ups below):
+#   - `execution(RET NAME(ARGS))` selector: NAME matched as a glob against the
+#     callee's HIR function name. RET/ARGS are accepted but not filtered.
+#   - `&`, `|`, `!`, `( )` combinators (precedence: ! > & > |).
+#   - before / after_success / after_error advice forms. after_success fires
+#     unless the returned Value is a Result with an Err payload;
+#     after_error fires only when it is.
+#
+# Follow-ups (not implemented — matches the task's documented escape hatch):
+#   - `attr(name)` always evaluates false: HirFunction carries no generic
+#     custom-attribute list (only @entry/@naked/@section/@interrupt via
+#     func_attr). Needs a HIR field before attr()-based pointcuts can match
+#     in the interpreter (or the compiled path, which has the same gap via
+#     matches_predicate/glob_match in 10.frontend/core/aop.spl).
+#   - `within(...)` always evaluates false (module-path selector; only used
+#     by forbid/allow architecture rules today, not by advice weaving specs).
+#   - `around` advice is not woven automatically (no proceed-callback wiring
+#     at this hook); use the existing manual `wrap_call`/`AroundAdvice` API
+#     in std.aop for around advice under the interpreter.
+#   - Advice denial (before-advice skipping the join point) is not
+#     implemented; advice return values are discarded.
+
+use compiler.hir.hir.{HirFunction, HirAopAdvice}
+use compiler.backend.backend.env.{EvalContext}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend_types.{Value}
+
+# Reentrancy guard: while invoking an advice function we must not re-weave
+# (an advice function accidentally matching a pointcut would otherwise loop).
+var _interp_aop_running: bool = false
+
+# ============================================================================
+# Pointcut matcher — operates on the raw, already space-tokenized
+# predicate_text produced by parse_pointcut_text (bitfield_aop_arch_decls.spl),
+# e.g. "execution ( * returns* ( .. ) )" or "attr ( critical ) & attr ( logged )".
+# ============================================================================
+
+fn interp_aop_tokenize(text_in: text) -> [text]:
+    var out: [text] = []
+    for tok in text_in.split(" "):
+        if tok.len() > 0:
+            out = out.push(tok)
+    out
+
+fn interp_aop_glob(pattern: text, target: text) -> bool:
+    if pattern == "*":
+        return true
+    if pattern == target:
+        return true
+    if pattern.ends_with("*"):
+        # NOTE: `pattern[:expr]` is parsed as a symbol literal `:expr` under
+        # the interpreter (grammar hazard) — use an explicit 0 start index.
+        val prefix_end = pattern.len() - 1
+        return target.starts_with(pattern[0:prefix_end])
+    if pattern.starts_with("*"):
+        return target.ends_with(pattern[1:])
+    false
+
+struct InterpAopBoolResult:
+    pos: i64
+    matched: bool
+
+fn interp_aop_skip_balanced(tokens: [text], open_idx: i64) -> i64:
+    """tokens[open_idx] == '(' ; returns the index just past the matching ')'."""
+    var depth = 0
+    var i = open_idx
+    while i < tokens.len():
+        if tokens[i] == "(":
+            depth = depth + 1
+        elif tokens[i] == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i + 1
+        i = i + 1
+    i
+
+fn interp_aop_eval_selector(tokens: [text], pos: i64, fn_name: text) -> InterpAopBoolResult:
+    val name = tokens[pos]
+    val p = pos + 1
+    if p >= tokens.len() or tokens[p] != "(":
+        return InterpAopBoolResult(pos: p, matched: false)
+    val open_idx = p
+    val close_idx = interp_aop_skip_balanced(tokens, open_idx)
+    if name == "execution" or name == "call":
+        # inner tokens: [RET, QNAME, "(", ...args..., ")"] — only QNAME (the
+        # function-name glob) is matched; return type and arg patterns are
+        # accepted but not filtered (core scope).
+        if open_idx + 2 < close_idx:
+            val qname = tokens[open_idx + 2]
+            return InterpAopBoolResult(pos: close_idx, matched: interp_aop_glob(qname, fn_name))
+        return InterpAopBoolResult(pos: close_idx, matched: false)
+    # attr(...) / within(...) / other selectors: parsed (so combinators still
+    # work) but never match — see follow-ups above.
+    InterpAopBoolResult(pos: close_idx, matched: false)
+
+fn interp_aop_eval_or(tokens: [text], pos: i64, fn_name: text) -> InterpAopBoolResult:
+    var r = interp_aop_eval_and(tokens, pos, fn_name)
+    var result = r.matched
+    var p = r.pos
+    while p < tokens.len() and tokens[p] == "|":
+        val r2 = interp_aop_eval_and(tokens, p + 1, fn_name)
+        result = result or r2.matched
+        p = r2.pos
+    InterpAopBoolResult(pos: p, matched: result)
+
+fn interp_aop_eval_and(tokens: [text], pos: i64, fn_name: text) -> InterpAopBoolResult:
+    var r = interp_aop_eval_not(tokens, pos, fn_name)
+    var result = r.matched
+    var p = r.pos
+    while p < tokens.len() and tokens[p] == "&":
+        val r2 = interp_aop_eval_not(tokens, p + 1, fn_name)
+        result = result and r2.matched
+        p = r2.pos
+    InterpAopBoolResult(pos: p, matched: result)
+
+fn interp_aop_eval_not(tokens: [text], pos: i64, fn_name: text) -> InterpAopBoolResult:
+    if pos < tokens.len() and tokens[pos] == "!":
+        val r = interp_aop_eval_not(tokens, pos + 1, fn_name)
+        return InterpAopBoolResult(pos: r.pos, matched: not r.matched)
+    interp_aop_eval_primary(tokens, pos, fn_name)
+
+fn interp_aop_eval_primary(tokens: [text], pos: i64, fn_name: text) -> InterpAopBoolResult:
+    if pos >= tokens.len():
+        return InterpAopBoolResult(pos: pos, matched: false)
+    if tokens[pos] == "(":
+        val r = interp_aop_eval_or(tokens, pos + 1, fn_name)
+        var p = r.pos
+        if p < tokens.len() and tokens[p] == ")":
+            p = p + 1
+        return InterpAopBoolResult(pos: p, matched: r.matched)
+    interp_aop_eval_selector(tokens, pos, fn_name)
+
+fn interp_aop_predicate_matches(predicate_text: text, fn_name: text) -> bool:
+    val tokens = interp_aop_tokenize(predicate_text)
+    if tokens.len() == 0:
+        return false
+    val r = interp_aop_eval_or(tokens, 0, fn_name)
+    r.matched
+
+# ============================================================================
+# Advice selection — filter ctx.module.aop_advices by form + pointcut match,
+# then order by priority (before: highest first; after_*: highest last, per
+# the documented "higher priority executes later for after_* advice" rule).
+# ============================================================================
+
+fn interp_aop_collect(advices: [HirAopAdvice], form: text, fn_name: text) -> [HirAopAdvice]:
+    var out: [HirAopAdvice] = []
+    for adv in advices:
+        if adv.form == form and interp_aop_predicate_matches(adv.predicate_text, fn_name):
+            out = out.push(adv)
+    out
+
+fn interp_aop_sort_by_priority(advices: [HirAopAdvice], highest_first: bool) -> [HirAopAdvice]:
+    """Stable selection sort — the advice lists here are tiny (few rules per join point)."""
+    var remaining = advices
+    var sorted: [HirAopAdvice] = []
+    while remaining.len() > 0:
+        var best = 0
+        var i = 1
+        while i < remaining.len():
+            val better = if highest_first:
+                remaining[i].priority > remaining[best].priority
+            else:
+                remaining[i].priority < remaining[best].priority
+            if better:
+                best = i
+            i = i + 1
+        sorted = sorted.push(remaining[best])
+        var next_rem: [HirAopAdvice] = []
+        var j = 0
+        while j < remaining.len():
+            if j != best:
+                next_rem = next_rem.push(remaining[j])
+            j = j + 1
+        remaining = next_rem
+    sorted
+
+# ============================================================================
+# InterpreterBackendImpl hook methods — called from call_hir_function.
+# ============================================================================
+
+impl InterpreterBackendImpl:
+    fn interp_aop_invoke(advice_fn_name: text, ctx: EvalContext):
+        """Invoke a zero-arg advice function by name, if present. Result and
+        errors are intentionally discarded (core scope has no denial path)."""
+        val candidates = ctx.module.functions.values()
+        var target_index = -1
+        var i = 0
+        while i < candidates.len():
+            val c: HirFunction = candidates[i]
+            if c.name == advice_fn_name:
+                target_index = i
+            i = i + 1
+        if target_index >= 0:
+            val target = candidates[target_index]
+            _interp_aop_running = true
+            match self.call_hir_function(target, [], ctx):
+                case Ok(_): pass_do_nothing
+                case Err(_): pass_do_nothing
+            _interp_aop_running = false
+
+    fn interp_aop_run_before(fn_: HirFunction, ctx: EvalContext):
+        if _interp_aop_running or ctx.module.aop_advices.len() == 0:
+            return
+        val matched = interp_aop_collect(ctx.module.aop_advices, "before", fn_.name)
+        if matched.len() == 0:
+            return
+        val ordered = interp_aop_sort_by_priority(matched, true)
+        for adv in ordered:
+            self.interp_aop_invoke(adv.advice_function, ctx)
+
+    fn interp_aop_run_after(fn_: HirFunction, ctx: EvalContext, result: Value):
+        if _interp_aop_running or ctx.module.aop_advices.len() == 0:
+            return
+        val is_err = match result:
+            case Value.Result(ok, err): err.?
+            case _: false
+        val form = if is_err: "after_error" else: "after_success"
+        val matched = interp_aop_collect(ctx.module.aop_advices, form, fn_.name)
+        if matched.len() == 0:
+            return
+        val ordered = interp_aop_sort_by_priority(matched, false)
+        for adv in ordered:
+            self.interp_aop_invoke(adv.advice_function, ctx)

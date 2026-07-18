@@ -1,0 +1,59 @@
+"""SimpleOS host link plan — first-class host parity contract.
+
+AC-12 (simpleos-alpine-harden-musl-busybox): the compiler must treat
+"simpleos" as a first-class unix-like host, exactly like linux/freebsd —
+NOT fall through to the empty "unknown OS" plan.
+
+The proof: for os="simpleos" the per-host link data (libraries, crt search
+dirs, dynamic-loader candidates, lib dirs) is POPULATED, while a genuinely
+unknown OS ("plan9") still returns empty. That difference is what "simple
+works on simpleos like other host" means concretely.
+
+REGRESSION GUARD: linux and freebsd plans must be unchanged (additive only).
+"""
+
+use compiler.backend.linker.platform_defaults.{platform_defaults, default_libraries, default_crt_search_dirs, default_dynamic_linker_candidates, default_library_dirs}
+use testing.{describe, it, expect}
+
+describe "SimpleOS host link plan":
+    context "simpleos is a populated first-class host (not the empty fallback)":
+        it "links libc (c) like other unix hosts":
+            expect(default_libraries("simpleos").contains("c")).to_equal(true)
+
+        it "links pthread":
+            expect(default_libraries("simpleos").contains("pthread")).to_equal(true)
+
+        it "has a non-empty crt search path":
+            expect(default_crt_search_dirs("simpleos", "x86_64").len() > 0).to_equal(true)
+
+        it "has a dynamic loader candidate":
+            expect(default_dynamic_linker_candidates("simpleos", "x86_64").len() > 0).to_equal(true)
+
+        it "uses the unix lib dirs (not the windows empty set)":
+            expect(default_library_dirs("simpleos").len() > 0).to_equal(true)
+
+        it "platform_defaults yields a populated plan":
+            val p = platform_defaults("simpleos", "x86_64")
+            expect(p.libraries.len() > 0).to_equal(true)
+
+    context "an unknown OS stays empty — proves simpleos genuinely crossed into host status":
+        it "unknown OS has no libraries":
+            expect(default_libraries("plan9").len()).to_equal(0)
+
+        it "unknown OS has no loader candidates":
+            expect(default_dynamic_linker_candidates("plan9", "x86_64").len()).to_equal(0)
+
+    context "regression guard — linux unchanged":
+        it "linux still links c/pthread/dl/m":
+            val libs = default_libraries("linux")
+            expect(libs.contains("c") and libs.contains("dl")).to_equal(true)
+
+        it "linux x86_64 loader unchanged":
+            expect(default_dynamic_linker_candidates("linux", "x86_64").contains("/lib64/ld-linux-x86-64.so.2")).to_equal(true)
+
+    context "regression guard — freebsd unchanged":
+        it "freebsd still uses ld-elf.so.1":
+            expect(default_dynamic_linker_candidates("freebsd", "x86_64").contains("/libexec/ld-elf.so.1")).to_equal(true)
+
+        it "freebsd links c/pthread/m":
+            expect(default_libraries("freebsd").contains("pthread")).to_equal(true)

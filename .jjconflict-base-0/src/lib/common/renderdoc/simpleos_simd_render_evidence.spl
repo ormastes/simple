@@ -1,0 +1,100 @@
+# codex-impl
+# Honest target-native SIMD execution evidence shared by hosted and SimpleOS lanes.
+
+struct CpuSimdKernelEvidence:
+    operation: text
+    dispatch_calls: i64
+    vector_chunks: i64
+    vector_lanes: i64
+    scalar_tail_pixels: i64
+    scalar_fallback_calls: i64
+    output_hash: text
+    fallback_reason: text
+
+struct SimpleOsSimdRenderEvidence:
+    requested_arch: text
+    actual_arch: text
+    requested_isa: text
+    detected_isa: text
+    execution_host: text
+    feature_detection_source: text
+    qemu_machine: text
+    qemu_cpu: text
+    guest_image_hash: text
+    boot_id: text
+    frame_id: text
+    surface_handle: i64
+    kernels: [CpuSimdKernelEvidence]
+    scalar_oracle_hash: text
+    simd_output_hash: text
+    qmp_capture_hash: text
+    mismatch_count: i64
+
+struct SimpleOsSimdRenderValidation:
+    valid: bool
+    code: text
+    operation: text
+
+fn _simd_invalid(code: text, operation: text) -> SimpleOsSimdRenderValidation:
+    SimpleOsSimdRenderValidation(valid: false, code: code, operation: operation)
+
+fn _simd_isa_matches_arch(arch: text, isa: text) -> bool:
+    if arch == "x86_64": return isa == "sse2" or isa == "avx2"
+    if arch == "aarch64": return isa == "neon"
+    if arch == "rv64": return isa == "rvv"
+    false
+
+fn _required_simd_operation(operation: text) -> bool:
+    operation == "fill" or operation == "copy" or operation == "alpha" or operation == "scroll"
+
+fn _simd_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    true
+
+fn validate_simpleos_simd_render_evidence(evidence: SimpleOsSimdRenderEvidence) -> SimpleOsSimdRenderValidation:
+    if evidence.requested_arch != evidence.actual_arch:
+        return _simd_invalid("architecture-mismatch", "")
+    if evidence.requested_isa != evidence.detected_isa or not _simd_isa_matches_arch(evidence.actual_arch, evidence.detected_isa):
+        return _simd_invalid("isa-mismatch", "")
+    if evidence.execution_host != "native-host" and evidence.execution_host != "simpleos-qemu-tcg" and evidence.execution_host != "simpleos-qemu-kvm":
+        return _simd_invalid("invalid-execution-host", "")
+    if not _simd_sha256(evidence.guest_image_hash) or evidence.boot_id == "" or evidence.frame_id == "" or evidence.surface_handle <= 0:
+        return _simd_invalid("missing-guest-identity", "")
+    var fill_seen = false
+    var copy_seen = false
+    var alpha_seen = false
+    var scroll_seen = false
+    for kernel_evidence in evidence.kernels:
+        if _required_simd_operation(kernel_evidence.operation):
+            if kernel_evidence.operation == "fill":
+                if fill_seen: return _simd_invalid("duplicate-required-operation", "fill")
+                fill_seen = true
+            elif kernel_evidence.operation == "copy":
+                if copy_seen: return _simd_invalid("duplicate-required-operation", "copy")
+                copy_seen = true
+            elif kernel_evidence.operation == "alpha":
+                if alpha_seen: return _simd_invalid("duplicate-required-operation", "alpha")
+                alpha_seen = true
+            else:
+                if scroll_seen: return _simd_invalid("duplicate-required-operation", "scroll")
+                scroll_seen = true
+            if kernel_evidence.dispatch_calls <= 0 or kernel_evidence.vector_chunks <= 0 or kernel_evidence.vector_lanes <= 0:
+                return _simd_invalid("zero-vector-chunks", kernel_evidence.operation)
+            if kernel_evidence.scalar_fallback_calls != 0 or kernel_evidence.fallback_reason != "":
+                return _simd_invalid("required-operation-scalar-fallback", kernel_evidence.operation)
+            if not _simd_sha256(kernel_evidence.output_hash):
+                return _simd_invalid("invalid-output-hash", kernel_evidence.operation)
+    if not fill_seen or not copy_seen or not alpha_seen or not scroll_seen:
+        return _simd_invalid("missing-required-operation", "")
+    if not _simd_sha256(evidence.scalar_oracle_hash) or not _simd_sha256(evidence.simd_output_hash) or not _simd_sha256(evidence.qmp_capture_hash):
+        return _simd_invalid("invalid-output-hash", "")
+    if evidence.scalar_oracle_hash != evidence.simd_output_hash or evidence.simd_output_hash != evidence.qmp_capture_hash or evidence.mismatch_count != 0:
+        return _simd_invalid("simd-oracle-mismatch", "")
+    SimpleOsSimdRenderValidation(valid: true, code: "pass", operation: "")

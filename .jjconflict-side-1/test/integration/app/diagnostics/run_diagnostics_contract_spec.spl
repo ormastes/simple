@@ -1,0 +1,67 @@
+"""
+# `simple run` diagnostic contract
+
+Exercises the real interpreted run path for runtime-facing diagnostics so stable
+codes and help text are not lost in process-level error rendering.
+"""
+
+use std.spec
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val UNDEFINED_FUNCTION_FIXTURE_PATH = "/tmp/simple_run_diagnostics_contract_undefined_function.spl"
+val DIVISION_BY_ZERO_FIXTURE_PATH = "/tmp/simple_run_diagnostics_contract_division_by_zero.spl"
+val MISSING_RUN_FIXTURE_PATH = "/tmp/simple_run_diagnostics_contract_missing.spl"
+val SIMPLE_BIN = "bin/release/x86_64-unknown-linux-gnu/simple"
+
+fn seed_undefined_function_source():
+    val source = "fn main():\n    missing_function()\n"
+    expect(rt_file_write_text(UNDEFINED_FUNCTION_FIXTURE_PATH, source)).to_equal(true)
+
+fn seed_division_by_zero_source():
+    val source = "fn main():\n    val x = 1 / 0\n    print(x)\n"
+    expect(rt_file_write_text(DIVISION_BY_ZERO_FIXTURE_PATH, source)).to_equal(true)
+
+fn remove_missing_run_fixture():
+    if rt_file_exists(MISSING_RUN_FIXTURE_PATH):
+        rt_file_delete(MISSING_RUN_FIXTURE_PATH)
+    expect(rt_file_exists(MISSING_RUN_FIXTURE_PATH)).to_equal(false)
+
+describe "`simple run` diagnostics":
+    it "prints stable undefined function code and help":
+        seed_undefined_function_source()
+
+        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["run", UNDEFINED_FUNCTION_FIXTURE_PATH])
+        val combined = stdout + stderr
+
+        expect(code).to_equal(1)
+        expect(combined).to_contain("error[E1002]")
+        expect(combined).to_contain("function `missing_function` not found")
+        expect(combined).to_contain("= help: check the function name or import the module that defines it")
+        expect(combined.contains("semantic:")).to_equal(false)
+
+    it "prints stable division by zero code and help":
+        seed_division_by_zero_source()
+
+        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["run", DIVISION_BY_ZERO_FIXTURE_PATH])
+        val combined = stdout + stderr
+
+        expect(code).to_equal(1)
+        expect(combined).to_contain("error[E2001]")
+        expect(combined).to_contain("division by zero")
+        expect(combined).to_contain("= help: check the divisor before dividing")
+        expect(combined.contains("semantic:")).to_equal(false)
+
+    it "prints stable missing file code and help":
+        remove_missing_run_fixture()
+
+        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["run", MISSING_RUN_FIXTURE_PATH])
+        val combined = stdout + stderr
+
+        expect(code).to_equal(1)
+        expect(combined).to_contain("error[E0001]")
+        expect(combined).to_contain("cannot read file")
+        expect(combined).to_contain("= help: check that the path exists and is readable")

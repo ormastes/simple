@@ -1,0 +1,82 @@
+"""
+Claude full user tool error message parity model.
+"""
+
+const USER_TOOL_ERROR_MESSAGE_SOURCE_LINES = 102
+const USER_TOOL_ERROR_INTERRUPT_MESSAGE = "[Request interrupted by user for tool use]"
+const USER_TOOL_ERROR_REJECT_WITH_REASON_PREFIX = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+const USER_TOOL_ERROR_PLAN_REJECTION_PREFIX = "The agent proposed a plan that was rejected by the user. The user chose to stay in plan mode rather than proceed with implementation.\n\nRejected plan:\n"
+const USER_TOOL_ERROR_CLASSIFIER_DENIAL_PREFIX = "Permission for this action has been denied. Reason: "
+
+class UserToolErrorProgressMessage:
+    data_type: text
+
+impl UserToolErrorProgressMessage:
+    static fn new(dataType: text) -> UserToolErrorProgressMessage:
+        UserToolErrorProgressMessage(data_type: dataType)
+
+class UserToolErrorTool:
+    name: text
+    can_render_error: bool
+
+impl UserToolErrorTool:
+    static fn new(name: text, canRenderError: bool) -> UserToolErrorTool:
+        UserToolErrorTool(name: name, can_render_error: canRenderError)
+
+class UserToolErrorRender:
+    kind: text
+    content: text
+    response_height: i64
+    dim: bool
+    tool_name: text
+    used_custom_tool_renderer: bool
+    used_fallback_renderer: bool
+    filtered_progress_count: i64
+    verbose: bool
+    is_transcript_mode: bool
+
+impl UserToolErrorRender:
+    static fn interrupted() -> UserToolErrorRender:
+        UserToolErrorRender(kind: "interrupted", content: "", response_height: 1, dim: false, tool_name: "", used_custom_tool_renderer: false, used_fallback_renderer: false, filtered_progress_count: 0, verbose: false, is_transcript_mode: false)
+
+    static fn rejectedPlan(plan: text) -> UserToolErrorRender:
+        UserToolErrorRender(kind: "rejected-plan", content: plan, response_height: 0, dim: false, tool_name: "", used_custom_tool_renderer: false, used_fallback_renderer: false, filtered_progress_count: 0, verbose: false, is_transcript_mode: false)
+
+    static fn rejectedToolUse() -> UserToolErrorRender:
+        UserToolErrorRender(kind: "rejected-tool-use", content: "Tool use rejected", response_height: 1, dim: true, tool_name: "", used_custom_tool_renderer: false, used_fallback_renderer: false, filtered_progress_count: 0, verbose: false, is_transcript_mode: false)
+
+    static fn classifierDenial() -> UserToolErrorRender:
+        UserToolErrorRender(kind: "classifier-denial", content: "Denied by auto mode classifier - /feedback if incorrect", response_height: 1, dim: true, tool_name: "", used_custom_tool_renderer: false, used_fallback_renderer: false, filtered_progress_count: 0, verbose: false, is_transcript_mode: false)
+
+    static fn customTool(toolName: text, content: text, filteredProgressCount: i64, verbose: bool, isTranscriptMode: bool) -> UserToolErrorRender:
+        UserToolErrorRender(kind: "custom-tool-error", content: content, response_height: 0, dim: false, tool_name: toolName, used_custom_tool_renderer: true, used_fallback_renderer: false, filtered_progress_count: filteredProgressCount, verbose: verbose, is_transcript_mode: isTranscriptMode)
+
+    static fn fallback(content: text, verbose: bool) -> UserToolErrorRender:
+        UserToolErrorRender(kind: "fallback-tool-error", content: content, response_height: 0, dim: false, tool_name: "", used_custom_tool_renderer: false, used_fallback_renderer: true, filtered_progress_count: 0, verbose: verbose, is_transcript_mode: false)
+
+fn userToolErrorFilteredProgressCount(progressMessagesForMessage: [UserToolErrorProgressMessage]) -> i64:
+    var count = 0
+    for message in progressMessagesForMessage:
+        if message.data_type != "hook_progress":
+            count = count + 1
+    count
+
+fn userToolErrorIsClassifierDenial(content: text) -> bool:
+    content.starts_with(USER_TOOL_ERROR_CLASSIFIER_DENIAL_PREFIX)
+
+fn userToolErrorMessage(content: text, progressMessagesForMessage: [UserToolErrorProgressMessage], tool: UserToolErrorTool?, verbose: bool, isTranscriptMode: bool, transcriptClassifierFeatureEnabled: bool) -> UserToolErrorRender:
+    if content.contains(USER_TOOL_ERROR_INTERRUPT_MESSAGE):
+        return UserToolErrorRender.interrupted()
+    if content.starts_with(USER_TOOL_ERROR_PLAN_REJECTION_PREFIX):
+        return UserToolErrorRender.rejectedPlan(content.slice(USER_TOOL_ERROR_PLAN_REJECTION_PREFIX.len(), content.len()))
+    if content.starts_with(USER_TOOL_ERROR_REJECT_WITH_REASON_PREFIX):
+        return UserToolErrorRender.rejectedToolUse()
+    if transcriptClassifierFeatureEnabled and userToolErrorIsClassifierDenial(content):
+        return UserToolErrorRender.classifierDenial()
+    if val activeTool = tool:
+        if activeTool.can_render_error:
+            return UserToolErrorRender.customTool(activeTool.name, content, userToolErrorFilteredProgressCount(progressMessagesForMessage), verbose, isTranscriptMode)
+    UserToolErrorRender.fallback(content, verbose)
+
+fn userToolErrorMessageSourceLinesModeled() -> i64:
+    USER_TOOL_ERROR_MESSAGE_SOURCE_LINES

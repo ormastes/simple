@@ -1,0 +1,128 @@
+#!/bin/sh
+set -eu
+
+ATTEMPT_ID="${1:-llm_backed_app_server_dry_run_retry5}"
+MANIFEST="${2:-.spipe/llm-finetune-process/data/${ATTEMPT_ID}_cache_manifest.sdn}"
+
+value_for() {
+  key="$1"
+  sed -n "s/^[[:space:]]*${key}: \"\\(.*\\)\"[[:space:]]*$/\\1/p" "$MANIFEST" | tail -1
+}
+
+file_sha256() {
+  path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return 0
+  fi
+  if command -v sha256 >/dev/null 2>&1; then
+    sha256 -q "$path"
+    return 0
+  fi
+  return 1
+}
+
+artifact_size() {
+  path="$1"
+  if [ -n "$path" ] && [ -s "$path" ]; then
+    wc -c <"$path" | tr -d ' '
+  else
+    printf '%s\n' "0"
+  fi
+}
+
+artifact_sha256() {
+  path="$1"
+  if [ -n "$path" ] && [ -s "$path" ]; then
+    file_sha256 "$path" || printf '%s\n' "unavailable"
+  else
+    printf '%s\n' "missing"
+  fi
+}
+
+emit_missing() {
+  cat <<EOF
+attempt_id=${ATTEMPT_ID}
+manifest=${MANIFEST}
+manifest_exists=false
+manifest_artifact_status=missing
+manifest_size=0
+manifest_sha256=missing
+license_review=missing
+data_access=missing
+cache_path=missing
+cache_path_exists=false
+cache_checksum=missing
+expected_checksum=missing
+actual_checksum=missing
+checksum_match=false
+training_allowed=false
+result=BLOCKED_CACHE_MANIFEST_MISSING
+STATUS: WARN retry5-cache-manifest
+EOF
+}
+
+if [ ! -f "$MANIFEST" ]; then
+  emit_missing
+  exit 0
+fi
+
+manifest_artifact_status="ready"
+manifest_size="$(artifact_size "$MANIFEST")"
+manifest_sha256="$(artifact_sha256 "$MANIFEST")"
+license_review="$(value_for license_review)"
+data_access="$(value_for data_access)"
+cache_path="$(value_for cache_path)"
+expected_checksum="$(value_for checksum)"
+training_allowed="false"
+result="BLOCKED_CACHE_MANIFEST_INCOMPLETE"
+status="WARN"
+actual_checksum="missing"
+cache_path_exists="false"
+checksum_match="false"
+
+if [ -n "$cache_path" ] && [ -f "$cache_path" ]; then
+  cache_path_exists="true"
+  if digest="$(file_sha256 "$cache_path")"; then
+    actual_checksum="sha256:${digest}"
+  fi
+fi
+
+if [ -n "$expected_checksum" ] && [ "$expected_checksum" = "$actual_checksum" ]; then
+  checksum_match="true"
+fi
+
+if [ "$license_review" = "approved" ] &&
+   [ "$data_access" = "granted" ] &&
+   [ -n "$cache_path" ] &&
+   [ -f "$cache_path" ] &&
+   [ -n "$expected_checksum" ] &&
+   [ "$checksum_match" = "true" ]; then
+  training_allowed="true"
+  result="CACHE_MANIFEST_VERIFIED"
+  status="PASS"
+fi
+
+cat <<EOF
+attempt_id=${ATTEMPT_ID}
+manifest=${MANIFEST}
+manifest_exists=true
+manifest_artifact_status=${manifest_artifact_status}
+manifest_size=${manifest_size}
+manifest_sha256=${manifest_sha256}
+license_review=${license_review:-missing}
+data_access=${data_access:-missing}
+cache_path=${cache_path:-missing}
+cache_path_exists=${cache_path_exists}
+cache_checksum=${actual_checksum}
+expected_checksum=${expected_checksum:-missing}
+actual_checksum=${actual_checksum}
+checksum_match=${checksum_match}
+training_allowed=${training_allowed}
+result=${result}
+STATUS: ${status} retry5-cache-manifest
+EOF

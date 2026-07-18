@@ -1,0 +1,188 @@
+# Serial MCP Server
+#
+# Migrated to McpServer facade (Wave C3).
+# Apps own only tool handlers + wiring (design rule D5).
+
+use app.simple_lsp_mcp.json_helpers.{LB, RB, SB_L, SB_R, jp, js, jo2}
+use app.serial_mcp.tools.{
+    handle_ssh_serial_connect,
+    handle_ssh_serial_exec,
+    handle_serial_open,
+    handle_serial_write,
+    handle_serial_read
+}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve}
+use std.mcp_sdk.transport.transport.{StdioTransport}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+use std.io_runtime.{get_args}
+
+val SERVER_NAME = "serial-mcp"
+val SERVER_VERSION = "0.1.0"
+
+fn print_usage():
+    print "Serial MCP Server"
+    print ""
+    print "Usage: simple serial-mcp [options]"
+    print ""
+    print "Runs the serial MCP JSON-RPC server over stdin/stdout."
+    print ""
+    print "Options:"
+    print "  -h, --help            Show this help"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn serial_mcp_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn serial_mcp_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if serial_mcp_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn serial_mcp_get_args() -> [text]:
+    val all_args = get_args()
+    var args: [text] = []
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if found:
+            args.push(all_args[i])
+        elif all_args[i] == "serial-mcp" or all_args[i] == "serial_mcp":
+            found = true
+        i = i + 1
+    if found:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("/app/serial_mcp/main.spl") or all_args[i] == "src/app/serial_mcp/main.spl":
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn prop_str(name: text, desc: text) -> text:
+    jp(name, jo2(jp("type", js("string")), jp("description", js(desc))))
+
+fn prop_int(name: text, desc: text) -> text:
+    jp(name, jo2(jp("type", js("integer")), jp("description", js(desc))))
+
+fn make_schema(props_body: text, required_list: text) -> text:
+    LB()
+        + jp("type", js("object"))
+        + "," + jp("properties", LB() + props_body + RB())
+        + "," + jp("required", SB_L() + required_list + SB_R())
+        + RB()
+
+fn schema_ssh_serial_connect() -> text:
+    val props = prop_str("device", "Serial device path, e.g. /dev/ttyUSB0")
+        + "," + prop_int("baud", "Baud rate (9600 / 19200 / 115200 / 230400)")
+        + "," + prop_str("user", "SSH username on remote target")
+        + "," + prop_str("path", "Transport path: socat (default) or native")
+    make_schema(props, js("device") + "," + js("baud") + "," + js("user"))
+
+fn schema_ssh_serial_exec() -> text:
+    val props = prop_str("device", "Serial device path")
+        + "," + prop_int("baud", "Baud rate")
+        + "," + prop_str("user", "SSH username")
+        + "," + prop_str("cmd", "Shell command to run on the remote target")
+        + "," + prop_str("path", "Transport path: socat (default) or native")
+    make_schema(props, js("device") + "," + js("baud") + "," + js("user") + "," + js("cmd"))
+
+fn schema_serial_open() -> text:
+    val props = prop_str("device", "Serial device path")
+        + "," + prop_int("baud", "Baud rate")
+    make_schema(props, js("device") + "," + js("baud"))
+
+fn schema_serial_write() -> text:
+    val props = prop_int("handle", "Serial handle from serial_open")
+        + "," + prop_str("data", "Data string to send to the serial port")
+    make_schema(props, js("handle") + "," + js("data"))
+
+fn schema_serial_read() -> text:
+    val props = prop_int("handle", "Serial handle from serial_open")
+        + "," + prop_int("max_bytes", "Maximum bytes to read (default 1024)")
+    make_schema(props, js("handle"))
+
+fn main() -> i64:
+    val raw_args = serial_mcp_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("serial-mcp", log_opts.error)
+        return 1
+
+    val args = serial_mcp_clean_args(raw_args)
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"serial-mcp\",\"status\":\"ready\"}"
+            return 0
+    elif args[0] == "--help" or args[0] == "-h":
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_usage()
+        return 0
+    elif args[0].starts_with("-"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"serial-mcp\",\"status\":\"error\",\"error\":\"unknown option\"}"
+            return 1
+        print "Error: Unknown option: {args[0]}"
+        print_usage()
+        return 1
+
+    mcp_server_init(SERVER_NAME, SERVER_VERSION)
+
+    mcp_server_tool(
+        "ssh_serial_connect",
+        "Validate SSH-over-serial connection parameters. Returns session info for ssh_serial_exec.",
+        fn() -> text: schema_ssh_serial_connect(),
+        fn(a: text) -> text: handle_ssh_serial_connect(a)
+    )
+    mcp_server_tool(
+        "ssh_serial_exec",
+        "Run a shell command on a remote device over a serial SSH connection. Returns stdout, stderr, and exit_code.",
+        fn() -> text: schema_ssh_serial_exec(),
+        fn(a: text) -> text: handle_ssh_serial_exec(a)
+    )
+    mcp_server_tool(
+        "serial_open",
+        "Open a serial port in raw mode. Returns a handle (integer) for serial_read/write.",
+        fn() -> text: schema_serial_open(),
+        fn(a: text) -> text: handle_serial_open(a)
+    )
+    mcp_server_tool(
+        "serial_write",
+        "Write data to an open serial port. Returns number of bytes written.",
+        fn() -> text: schema_serial_write(),
+        fn(a: text) -> text: handle_serial_write(a)
+    )
+    mcp_server_tool(
+        "serial_read",
+        "Read data from an open serial port. Blocks until data arrives (5s timeout).",
+        fn() -> text: schema_serial_read(),
+        fn(a: text) -> text: handle_serial_read(a)
+    )
+
+    val t = StdioTransport.json_lines()
+    mcp_serve(t)
+    0

@@ -1,0 +1,349 @@
+# TLS 1.3 PSK + Session Resumption — RFC 8446 §4.2.11 + §4.6.1
+#
+# Provides:
+#   - PskIdentity / PskBinder / OfferedPsk wire types (§4.2.11)
+#   - StoredPsk: cached resumption_secret + ticket data (§4.6.1)
+#   - encode/decode for OfferedPsk wire format
+#
+# This file does NOT compute binder MACs or derive early-data keys; those live
+# in key_schedule.spl (tls13_early_secret_from_psk, tls13_binder_key,
+# tls13_compute_psk_binder, tls13_client_early_traffic_secret).
+#
+# Wire format (RFC 8446 §4.2.11):
+#   struct {
+#       opaque identity<1..2^16-1>;
+#       uint32 obfuscated_ticket_age;
+#   } PskIdentity;
+#
+#   opaque PskBinderEntry<32..255>;
+#
+#   struct {
+#       PskIdentity identities<7..2^16-1>;
+#       PskBinderEntry binders<33..2^16-1>;
+#   } OfferedPsks;
+
+# ============================================================================
+# Data classes
+# ============================================================================
+
+class PskIdentity:
+    identity: [u8]
+    obfuscated_ticket_age: u32
+
+class PskBinder:
+    binder: [u8]
+
+class OfferedPsk:
+    identities: [PskIdentity]
+    binders: [PskBinder]
+
+class StoredPsk:
+    """Client-side cached PSK from a prior NewSessionTicket (RFC 8446 §4.6.1).
+
+    Fields mirror the NST wire format plus the derived resumption_secret.
+    For external PSKs (out-of-band), use external_psk constructor with
+    lifetime_seconds = 0 and ticket = identity.
+    """
+    resumption_secret: [u8]
+    lifetime_seconds: u32
+    age_add: u32
+    ticket_nonce: [u8]
+    ticket: [u8]
+    cipher_suite: u16
+    max_early_data_size: u32
+
+# ============================================================================
+# Encode helpers
+# ============================================================================
+
+fn _push_u8(buf: [u8], v: u8) -> [u8]:
+    var out = buf
+    out.push(v)
+    out
+
+fn _push_u16_be(buf: [u8], v: u32) -> [u8]:
+    var out = buf
+    out.push(((v >> 8) & 0xFF).to_u8())
+    out.push((v & 0xFF).to_u8())
+    out
+
+fn _push_u32_be(buf: [u8], v: u32) -> [u8]:
+    var out = buf
+    out.push(((v >> 24) & 0xFF).to_u8())
+    out.push(((v >> 16) & 0xFF).to_u8())
+    out.push(((v >> 8) & 0xFF).to_u8())
+    out.push((v & 0xFF).to_u8())
+    out
+
+fn _append(buf: [u8], src: [u8]) -> [u8]:
+    var out = buf
+    var i: u64 = 0
+    val n = src.len().to_u64()
+    while i < n:
+        out.push(src[i.to_i64()])
+        i = i + 1
+    out
+
+# ============================================================================
+# encode_psk_identity — opaque identity<1..2^16-1> + uint32 ticket_age
+# ============================================================================
+
+fn encode_psk_identity(id: PskIdentity) -> [u8]:
+    """Encode a single PskIdentity per RFC 8446 §4.2.11."""
+    var out: [u8] = []
+    val n = id.identity.len().to_u32()
+    out = _push_u16_be(out, n)
+    out = _append(out, id.identity)
+    out = _push_u32_be(out, id.obfuscated_ticket_age)
+    out
+
+# ============================================================================
+# encode_psk_binder — opaque binder<32..255> (1-byte length prefix)
+# ============================================================================
+
+fn encode_psk_binder(b: PskBinder) -> [u8]:
+    """Encode a single PskBinderEntry: 1-byte length + binder bytes."""
+    var out: [u8] = []
+    val n = b.binder.len().to_u32()
+    out = _push_u8(out, (n & 0xFF).to_u8())
+    out = _append(out, b.binder)
+    out
+
+# ============================================================================
+# encode_offered_psk — full OfferedPsks extension data (RFC 8446 §4.2.11)
+#
+# Wire layout:
+#   uint16 identities_len
+#   PskIdentity identities[identities_len]
+#   uint16 binders_len
+#   PskBinderEntry binders[binders_len]
+# ============================================================================
+
+fn encode_offered_psk(o: OfferedPsk) -> [u8]:
+    """Serialize OfferedPsks per RFC 8446 §4.2.11."""
+    # identities block
+    var ids_buf: [u8] = []
+    var i: u64 = 0
+    val ni = o.identities.len().to_u64()
+    while i < ni:
+        ids_buf = _append(ids_buf, encode_psk_identity(o.identities[i.to_i64()]))
+        i = i + 1
+    # binders block
+    var bin_buf: [u8] = []
+    var j: u64 = 0
+    val nb = o.binders.len().to_u64()
+    while j < nb:
+        bin_buf = _append(bin_buf, encode_psk_binder(o.binders[j.to_i64()]))
+        j = j + 1
+    var out: [u8] = []
+    out = _push_u16_be(out, ids_buf.len().to_u32())
+    out = _append(out, ids_buf)
+    out = _push_u16_be(out, bin_buf.len().to_u32())
+    out = _append(out, bin_buf)
+    out
+
+# ============================================================================
+# encode_offered_psk_partial — identities + zero-filled binders placeholder
+#
+# Per RFC 8446 §4.1.4 / §4.2.11.2 the binder MAC is computed over the partial
+# ClientHello with the binders block present but zeroed. The caller writes
+# real binder bytes back into the same range after computing the MAC.
+# ============================================================================
+
+fn encode_offered_psk_partial(identities: [PskIdentity], binder_lens: [u32]) -> [u8]:
+    """Serialize identities + zero-filled binders sized per binder_lens."""
+    var ids_buf: [u8] = []
+    var i: u64 = 0
+    val ni = identities.len().to_u64()
+    while i < ni:
+        ids_buf = _append(ids_buf, encode_psk_identity(identities[i.to_i64()]))
+        i = i + 1
+    var bin_buf: [u8] = []
+    var j: u64 = 0
+    val nb = binder_lens.len().to_u64()
+    while j < nb:
+        val plen = binder_lens[j.to_i64()]
+        bin_buf = _push_u8(bin_buf, (plen & 0xFF).to_u8())
+        var k: u32 = 0
+        while k < plen:
+            bin_buf = _push_u8(bin_buf, 0x00u8)
+            k = k + 1
+        j = j + 1
+    var out: [u8] = []
+    out = _push_u16_be(out, ids_buf.len().to_u32())
+    out = _append(out, ids_buf)
+    out = _push_u16_be(out, bin_buf.len().to_u32())
+    out = _append(out, bin_buf)
+    out
+
+# ============================================================================
+# Decode helpers
+# ============================================================================
+
+fn _u16_be(buf: [u8], off: u64) -> u32:
+    val hi = buf[off.to_i64()].to_u32()
+    val lo = buf[(off + 1).to_i64()].to_u32()
+    (hi << 8) | lo
+
+fn _u32_be(buf: [u8], off: u64) -> u32:
+    val b0 = buf[off.to_i64()].to_u32()
+    val b1 = buf[(off + 1).to_i64()].to_u32()
+    val b2 = buf[(off + 2).to_i64()].to_u32()
+    val b3 = buf[(off + 3).to_i64()].to_u32()
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn _slice(buf: [u8], off: u64, n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(buf[(off + i).to_i64()])
+        i = i + 1
+    out
+
+# ============================================================================
+# decode_psk_identity — returns (PskIdentity, bytes_consumed)
+# ============================================================================
+
+class DecodedPskIdentity:
+    id: PskIdentity
+    bytes_consumed: u64
+    ok: bool
+
+fn decode_psk_identity(buf: [u8], off: u64) -> DecodedPskIdentity:
+    """Decode a single PskIdentity starting at off.
+
+    Returns ok=false on truncation. Does not validate against the outer
+    extension length — caller must do that.
+    """
+    val avail = buf.len().to_u64()
+    if off + 2 > avail:
+        return DecodedPskIdentity(
+            id: PskIdentity(identity: [], obfuscated_ticket_age: 0u32),
+            bytes_consumed: 0,
+            ok: false,
+        )
+    val id_len = _u16_be(buf, off).to_u64()
+    if off + 2 + id_len + 4 > avail:
+        return DecodedPskIdentity(
+            id: PskIdentity(identity: [], obfuscated_ticket_age: 0u32),
+            bytes_consumed: 0,
+            ok: false,
+        )
+    val id_bytes = _slice(buf, off + 2, id_len)
+    val age = _u32_be(buf, off + 2 + id_len)
+    DecodedPskIdentity(
+        id: PskIdentity(identity: id_bytes, obfuscated_ticket_age: age),
+        bytes_consumed: 2 + id_len + 4,
+        ok: true,
+    )
+
+# ============================================================================
+# decode_offered_psk — full server-side parse of OfferedPsks extension data
+# ============================================================================
+
+class DecodedOfferedPsk:
+    psk: OfferedPsk
+    ok: bool
+    reason: text
+
+fn decode_offered_psk(buf: [u8]) -> DecodedOfferedPsk:
+    """Decode OfferedPsks extension data per RFC 8446 §4.2.11.
+
+    Validates: outer length frames, identity count = binder count.
+    """
+    val n = buf.len().to_u64()
+    if n < 4:
+        return DecodedOfferedPsk(
+            psk: OfferedPsk(identities: [], binders: []),
+            ok: false,
+            reason: "decode_error: too short for identities length",
+        )
+    val ids_len = _u16_be(buf, 0).to_u64()
+    if 2 + ids_len + 2 > n:
+        return DecodedOfferedPsk(
+            psk: OfferedPsk(identities: [], binders: []),
+            ok: false,
+            reason: "decode_error: identities truncated",
+        )
+    var ids: [PskIdentity] = []
+    var off: u64 = 2
+    val ids_end = 2 + ids_len
+    while off < ids_end:
+        val d = decode_psk_identity(buf, off)
+        if not d.ok:
+            return DecodedOfferedPsk(
+                psk: OfferedPsk(identities: [], binders: []),
+                ok: false,
+                reason: "decode_error: identity malformed",
+            )
+        ids.push(d.id)
+        off = off + d.bytes_consumed
+    if off != ids_end:
+        return DecodedOfferedPsk(
+            psk: OfferedPsk(identities: [], binders: []),
+            ok: false,
+            reason: "decode_error: identity overrun",
+        )
+    val binders_len = _u16_be(buf, ids_end).to_u64()
+    if ids_end + 2 + binders_len > n:
+        return DecodedOfferedPsk(
+            psk: OfferedPsk(identities: [], binders: []),
+            ok: false,
+            reason: "decode_error: binders truncated",
+        )
+    var binders: [PskBinder] = []
+    var boff: u64 = ids_end + 2
+    val binders_end = boff + binders_len
+    while boff < binders_end:
+        if boff + 1 > n:
+            return DecodedOfferedPsk(
+                psk: OfferedPsk(identities: [], binders: []),
+                ok: false,
+                reason: "decode_error: binder length missing",
+            )
+        val plen = buf[boff.to_i64()].to_u64()
+        if plen < 32:
+            return DecodedOfferedPsk(
+                psk: OfferedPsk(identities: [], binders: []),
+                ok: false,
+                reason: "illegal_parameter: binder shorter than 32",
+            )
+        if boff + 1 + plen > binders_end:
+            return DecodedOfferedPsk(
+                psk: OfferedPsk(identities: [], binders: []),
+                ok: false,
+                reason: "decode_error: binder overrun",
+            )
+        binders.push(PskBinder(binder: _slice(buf, boff + 1, plen)))
+        boff = boff + 1 + plen
+    if ids.len() != binders.len():
+        return DecodedOfferedPsk(
+            psk: OfferedPsk(identities: ids, binders: binders),
+            ok: false,
+            reason: "illegal_parameter: identity/binder count mismatch",
+        )
+    DecodedOfferedPsk(
+        psk: OfferedPsk(identities: ids, binders: binders),
+        ok: true,
+        reason: "",
+    )
+
+# ============================================================================
+# StoredPsk constructors
+# ============================================================================
+
+fn stored_psk_from_external(psk_bytes: [u8], identity: [u8], cipher_suite: u16) -> StoredPsk:
+    """Build a StoredPsk for an external (out-of-band) PSK.
+
+    Per RFC 8446 §4.2.11, external PSKs use obfuscated_ticket_age = 0 and the
+    identity is the externally-provisioned label.
+    """
+    StoredPsk(
+        resumption_secret: psk_bytes,
+        lifetime_seconds: 0u32,
+        age_add: 0u32,
+        ticket_nonce: [],
+        ticket: identity,
+        cipher_suite: cipher_suite,
+        max_early_data_size: 0u32,
+    )

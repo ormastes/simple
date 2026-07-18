@@ -1,0 +1,180 @@
+"""
+SMF Loader — bounds-check unit specs.
+**Feature IDs:** #FS-EXEC-MULTIARCH-AC3
+**Category:** Kernel loader
+
+Verifies that _smf_copy_range (via smf_extract_executable_stub) fails closed
+on truncated images and out-of-range sizes, and that the in_range guard in
+byte_utils rejects overflow/negative inputs.
+"""
+use std.spec.*
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.smf.{
+    smf_parse_header,
+    smf_extract_executable_stub,
+    smf_extract_executable_stub_for_arch,
+    smf_extract_library_stub,
+    SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3,
+    SMF_HEADER_TRAILER_SIZE,
+    SMF_ERR_MALFORMED, SMF_ERR_MISSING_ELF
+}
+use os.kernel.loader.byte_utils.{in_range}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _make_trailer(entry_point: i64, stub_size: i64) -> [u8]:
+    """Build a minimal 128-byte SMF trailer with given stub_size."""
+    var b: [u8] = []
+    var i: i64 = 0
+    while i < SMF_HEADER_TRAILER_SIZE:
+        b.push(0u8)
+        i = i + 1
+    # magic at offset 0 within trailer
+    b[0] = SMF64_MAGIC_0
+    b[1] = SMF64_MAGIC_1
+    b[2] = SMF64_MAGIC_2
+    b[3] = SMF64_MAGIC_3
+    # entry_point LE u64 at offset 44
+    b[44] = (entry_point & 0xFF).to_u8()
+    b[45] = ((entry_point >> 8) & 0xFF).to_u8()
+    b[46] = ((entry_point >> 16) & 0xFF).to_u8()
+    b[47] = ((entry_point >> 24) & 0xFF).to_u8()
+    # stub_size LE u32 at offset 52
+    b[52] = (stub_size & 0xFF).to_u8()
+    b[53] = ((stub_size >> 8) & 0xFF).to_u8()
+    b[54] = ((stub_size >> 16) & 0xFF).to_u8()
+    b[55] = ((stub_size >> 24) & 0xFF).to_u8()
+    b
+
+fn _elf_prefix(size: i64) -> [u8]:
+    """Build a fake ELF-magic prefix of given size."""
+    var b: [u8] = []
+    b.push(0x7Fu8)
+    b.push(0x45u8)  # 'E'
+    b.push(0x4Cu8)  # 'L'
+    b.push(0x46u8)  # 'F'
+    var i: i64 = 4
+    while i < size:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _smf_with_elf_stub(stub_size: i64) -> [u8]:
+    """Well-formed SMF: ELF stub of stub_size bytes followed by 128-byte trailer."""
+    var buf: [u8] = _elf_prefix(stub_size)
+    val trailer = _make_trailer(0x1000i64, stub_size)
+    for byte in trailer:
+        buf.push(byte)
+    buf
+
+fn _truncated_smf(declared_stub_size: i64, actual_stub_bytes: i64) -> [u8]:
+    """SMF whose header declares declared_stub_size but only actual_stub_bytes exist before trailer."""
+    var buf: [u8] = _elf_prefix(actual_stub_bytes)
+    val trailer = _make_trailer(0x1000i64, declared_stub_size)
+    for byte in trailer:
+        buf.push(byte)
+    buf
+
+# ---------------------------------------------------------------------------
+# in_range — byte_utils guard
+# ---------------------------------------------------------------------------
+
+describe "in_range bounds guard":
+
+    it "accepts a zero-size range at offset zero":
+        var data: [u8] = []
+        data.push(0u8)
+        expect(in_range(data, 0i64, 0i64)).to_equal(true)
+
+    it "accepts a range that exactly fills the buffer":
+        var data: [u8] = []
+        data.push(1u8)
+        data.push(2u8)
+        data.push(3u8)
+        expect(in_range(data, 0i64, 3i64)).to_equal(true)
+
+    it "rejects a range that exceeds the buffer":
+        var data: [u8] = []
+        data.push(1u8)
+        data.push(2u8)
+        expect(in_range(data, 0i64, 3i64)).to_equal(false)
+
+    it "rejects a negative offset":
+        var data: [u8] = []
+        data.push(1u8)
+        expect(in_range(data, -1i64, 1i64)).to_equal(false)
+
+    it "rejects a negative size":
+        var data: [u8] = []
+        data.push(1u8)
+        expect(in_range(data, 0i64, -1i64)).to_equal(false)
+
+    it "rejects an empty buffer with nonzero size":
+        var data: [u8] = []
+        expect(in_range(data, 0i64, 1i64)).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Truncated image — header claims more bytes than present
+# ---------------------------------------------------------------------------
+
+describe "smf_extract_executable_stub — truncated image":
+
+    it "rejects an image where stub_size exceeds bytes before the trailer":
+        # declared stub_size=16 but only 4 ELF bytes precede the trailer
+        # stub_size(16) > header_offset(4) so callers return SMF_ERR_MALFORMED
+        val bytes = _truncated_smf(16i64, 4i64)
+        val result = smf_extract_executable_stub(bytes)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_equal(SMF_ERR_MALFORMED)
+
+    it "rejects an image where the entire buffer is just the trailer (no room for stub)":
+        # stub_size=8 but header_offset=0 (trailer at offset 0, no leading bytes)
+        var trailer = _make_trailer(0x1000i64, 8i64)
+        # set stub_size to non-zero
+        trailer[52] = 8u8
+        val result = smf_extract_executable_stub(trailer)
+        expect(result.is_err()).to_equal(true)
+
+    it "accepts a well-formed SMF with a valid ELF stub":
+        val bytes = _smf_with_elf_stub(8i64)
+        val result = smf_extract_executable_stub(bytes)
+        expect(result.is_ok()).to_equal(true)
+        val stub = result.unwrap()
+        expect(stub.len()).to_equal(8)
+        expect(stub[0]).to_equal(0x7Fu8)
+
+# ---------------------------------------------------------------------------
+# Zero-size range
+# ---------------------------------------------------------------------------
+
+describe "smf_extract_executable_stub — zero stub_size":
+
+    it "returns SMF_ERR_MISSING_ELF when stub_size is zero":
+        # _make_trailer with stub_size=0 means no ELF stub declared
+        var trailer = _make_trailer(0x1000i64, 0i64)
+        val result = smf_extract_executable_stub(trailer)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_equal(SMF_ERR_MISSING_ELF)
+
+# ---------------------------------------------------------------------------
+# _smf_copy_range via unchecked path — bounds closed even with in_range guard
+# ---------------------------------------------------------------------------
+
+describe "smf_extract_executable_stub_for_arch — truncated image arch-checked":
+
+    it "rejects truncated image on x86_64 arch check":
+        val bytes = _truncated_smf(32i64, 4i64)
+        val result = smf_extract_executable_stub_for_arch(bytes, Architecture.X86_64)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects truncated image on arm64 arch check":
+        val bytes = _truncated_smf(32i64, 4i64)
+        val result = smf_extract_executable_stub_for_arch(bytes, Architecture.Arm64)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects truncated image on riscv64 arch check":
+        val bytes = _truncated_smf(32i64, 4i64)
+        val result = smf_extract_executable_stub_for_arch(bytes, Architecture.Riscv64)
+        expect(result.is_err()).to_equal(true)

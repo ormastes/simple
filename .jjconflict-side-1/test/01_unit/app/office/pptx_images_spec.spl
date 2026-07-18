@@ -1,0 +1,108 @@
+"""PPTX images: deck `![alt](path)` lines through export/import/HTML render.
+
+Ground truth is structural, on the Word lane's 68-byte PNG fixture: the PNG
+bytes land in ppt/media/image1.png (checked with our own zip reader AND the
+system unzip on a scratchpad file), the slide rels wire rId3 to the media
+part, the `<p:pic>` shape references it via r:embed, `unzip -t` exits 0, and
+deck -> pptx -> deck preserves the exact `![alt](path)` line in position.
+A missing file degrades to an alt-text textbox (no media part, no crash).
+HTML render emits an `<img>` for existing files and a styled alt box
+otherwise.
+
+Lives in its own spec file: pptx_export_spec.spl already runs near the
+per-file time budget (see pptx_layout_spec.spl's note).
+"""
+
+use std.spec
+use std.fs.{File}
+use std.process.{run}
+use std.common.archive.zip.{zip_extract, zip_extract_text}
+use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
+use app.office.slides.deck_format.{parse_deck, deck_to_text}
+use app.office.slides.html_render.{render_slide_html}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+val _SCRATCH = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/de80534b-2c68-466d-a211-9ec2529fed18/scratchpad"
+
+fn _tiny_png_bytes() -> [u8]:
+    """A hand-verified valid 1x1 PNG (68 bytes) — the Word lane's fixture
+    (see word_docx_features_spec.spl)."""
+    var b: [u8] = []
+    for v in [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0, 1, 233, 250, 220, 216, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]:
+        b.push(v.to_u8())
+    b
+
+fn _fixture_png_path() -> text:
+    val p = "{_SCRATCH}/pptx_images_spec_tiny.png"
+    rt_file_write_bytes(p, _tiny_png_bytes())
+    p
+
+describe "PPTX images: export embeds PNG media":
+    it "embeds a deck image as ppt/media/image1.png with wired rels and a p:pic":
+        val png_path = _fixture_png_path()
+        val deck = parse_deck("Pics\nintro line\n![a tiny dot]({png_path})")
+        val pptx = deck_to_pptx_bytes(deck)
+        # media part exists (own zip reader) and holds the exact PNG bytes
+        val media = zip_extract(pptx, "ppt/media/image1.png")
+        expect(media != nil).to_be(true)
+        if val bytes = media:
+            expect(bytes.len()).to_equal(68)
+        # slide rels wire rId3 -> the media part with the image rel type
+        val rels = zip_extract_text(pptx, "ppt/slides/_rels/slide1.xml.rels")
+        expect(rels).to_contain("Id=\"rId3\"")
+        expect(rels).to_contain("relationships/image")
+        expect(rels).to_contain("Target=\"../media/image1.png\"")
+        # slide part carries the pic shape referencing the rel, alt/src stashed
+        val slide1 = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide1).to_contain("<p:pic>")
+        expect(slide1).to_contain("r:embed=\"rId3\"")
+        expect(slide1).to_contain("name=\"a tiny dot\"")
+        expect(slide1).to_contain("descr=\"{png_path}\"")
+        # png content-type Default present
+        val types = zip_extract_text(pptx, "[Content_Types].xml")
+        expect(types).to_contain("Extension=\"png\"")
+        # system unzip agrees: media listed, archive intact
+        val out_path = "{_SCRATCH}/pptx_images_spec.pptx"
+        File.write_bytes(out_path, pptx)
+        val list_result = run("unzip", ["-l", out_path])
+        expect(list_result.stdout).to_contain("ppt/media/image1.png")
+        val test_result = run("unzip", ["-t", out_path])
+        expect(test_result.exit_code).to_equal(0)
+
+    it "falls back to an alt-text textbox for a missing file (no media, no crash)":
+        val deck = parse_deck("Pics\n![gone](/no/such/path/missing.png)")
+        val pptx = deck_to_pptx_bytes(deck)
+        val media = zip_extract(pptx, "ppt/media/image1.png")
+        expect(media).to_equal(nil)
+        val slide1 = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide1.contains("<p:pic>")).to_be(false)
+        expect(slide1).to_contain("name=\"imageAlt\"")
+        expect(slide1).to_contain("<a:t>gone</a:t>")
+
+describe "PPTX images: import round-trip":
+    it "preserves the ![alt](path) line in position through deck -> pptx -> deck":
+        val png_path = _fixture_png_path()
+        val src = "Pics\nbefore line\n![a tiny dot]({png_path})\nafter line"
+        val deck = parse_deck(src)
+        expect(deck_to_text(deck)).to_equal(src)
+        val pptx = deck_to_pptx_bytes(deck)
+        val deck2 = pptx_bytes_to_deck(pptx)
+        expect(deck2.len()).to_equal(1)
+        expect(deck_to_text(deck2)).to_equal(src)
+
+describe "PPTX images: HTML render":
+    it "renders an <img> with inline max-width for an existing file":
+        val png_path = _fixture_png_path()
+        val deck = parse_deck("Pics\n![a tiny dot]({png_path})")
+        val html = render_slide_html(deck[0])
+        expect(html).to_contain("<img src=\"{png_path}\"")
+        expect(html).to_contain("alt=\"a tiny dot\"")
+        expect(html).to_contain("max-width: 100%")
+
+    it "renders the alt text in a styled box when the file is missing":
+        val deck = parse_deck("Pics\n![gone](/no/such/path/missing.png)")
+        val html = render_slide_html(deck[0])
+        expect(html.contains("<img")).to_be(false)
+        expect(html).to_contain("border: 1px dashed")
+        expect(html).to_contain("gone")

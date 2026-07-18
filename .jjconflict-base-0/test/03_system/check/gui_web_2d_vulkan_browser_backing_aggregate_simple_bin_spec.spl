@@ -1,0 +1,84 @@
+"""
+# GUI Web 2D Vulkan Browser Backing Aggregate Simple Binary Contract
+
+Validates that browser-backing-only Vulkan evidence carries the Simple binary
+provenance selected by `setup-gui-web-2d-vulkan-env.shs` into the aggregate.
+
+## Overview
+
+The aggregate can be run with only `GUI_WEB_2D_VULKAN_BROWSER_BACKING_ENV`.
+In that mode it must not emit stale direct-run defaults such as `bin/simple`
+or an empty status. The browser-backing setup row already records the release
+Simple binary used for the evidence lane, and the aggregate must preserve it.
+
+## Requirements
+
+**Requirements:** N/A
+
+- REQ-GUI-VK-BROWSER-BIN-001: Browser-backing-only aggregate output preserves
+  `gui_web_2d_vulkan_simple_bin` from the browser-backing evidence row.
+- REQ-GUI-VK-BROWSER-BIN-002: Browser-backing-only aggregate output preserves
+  `gui_web_2d_vulkan_simple_bin_selection_reason`.
+- REQ-GUI-VK-BROWSER-BIN-003: Browser-backing-only aggregate output preserves
+  `gui_web_2d_vulkan_simple_bin_status`.
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md
+
+1. Create a minimal browser-backing env with passing browser status and release
+   Simple provenance.
+2. Run the GUI RenderDoc aggregate with only that browser-backing env.
+3. Assert the aggregate emits the same Simple binary, reason, and status.
+
+## Design
+
+**Design:** doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md
+
+## Examples
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_vulkan_browser_backing_aggregate_simple_bin_spec.spl --mode=interpreter --clean
+```
+"""
+
+# @tag: system, gui, vulkan, browser-backing, evidence
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+fn _value_of(lines: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = lines.split("\n")
+    var found = ""
+    for line in parts:
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+describe "GUI Web 2D Vulkan browser-backing aggregate Simple binary contract":
+
+    it "preserves browser backing Simple binary provenance":
+        val root = "build/test-gui-web-2d-vulkan-browser-backing-aggregate-bin"
+        val env_path = root + "/browser/evidence.env"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/browser && " +
+            "printf 'gui_web_2d_vulkan_mode=--browser-backing\\n" +
+            "gui_web_2d_vulkan_simple_bin=release/x86_64-unknown-linux-gnu/simple\\n" +
+            "gui_web_2d_vulkan_simple_bin_selection_reason=self-hosted-release\\n" +
+            "gui_web_2d_vulkan_simple_bin_status=pass\\n" +
+            "gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\n" +
+            "gui_web_2d_vulkan_browser_backing_status=pass\\n" +
+            "gui_web_2d_vulkan_browser_backing_reason=pass\\n" +
+            "gui_web_2d_vulkan_electron_browser_backing_status=pass\\n" +
+            "gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\n" +
+            "gui_web_2d_vulkan_chrome_browser_backing_status=pass\\n" +
+            "gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\n' > " + env_path + " && " +
+            "GUI_WEB_2D_VULKAN_BROWSER_BACKING_ENV=" + env_path + " BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/out/evidence.env")
+        expect(_value_of(evidence, "gui_web_2d_vulkan_browser_backing_status")).to_equal("pass")
+        expect(_value_of(evidence, "gui_web_2d_vulkan_simple_bin")).to_equal("release/x86_64-unknown-linux-gnu/simple")
+        expect(_value_of(evidence, "gui_web_2d_vulkan_simple_bin_selection_reason")).to_equal("self-hosted-release")
+        expect(_value_of(evidence, "gui_web_2d_vulkan_simple_bin_status")).to_equal("pass")

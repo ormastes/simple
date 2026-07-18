@@ -1,0 +1,135 @@
+#![allow(unnamed_duplicate_typed_args)]
+# PBKDF1 — Password-Based Key Derivation Function 1 (RFC 2898 §5.1)
+#
+# Iterates a hash function on (password || salt) to derive a key.
+# Supported hash variants: SHA-1 (hLen=20), SHA-256 (hLen=32), MD5 (hLen=16).
+#
+# WARNING: PBKDF1 is a legacy construct. Maximum derived-key length equals
+# the hash output size (hLen). For new systems use PBKDF2 (RFC 2898 §5.2).
+#
+# Reference: RFC 2898 §5.1 (PKCS #5 v2.0)
+
+use std.spipe.*
+use std.crypto.sha1.{sha1_bytes}
+use std.crypto.sha256.{sha256_bytes}
+use std.crypto.md5.{md5_bytes}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Error type
+# ============================================================================
+
+# Error variants for PBKDF1 parameter validation.
+enum PbkdfError:
+    DkLenTooLarge   # dk_len exceeds hash output length (hLen)
+    IterTooSmall    # iter < 1 is not permitted by RFC 2898
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+# Result of a PBKDF1 derivation.
+enum Pbkdf1Result:
+    Ok(dk: [u8])
+    Err(error: PbkdfError)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Convert a [u8] array to a plain list for SHA-1 / SHA-256 / MD5 which
+# accept `list` not `[u8]` (same boundary conversion as mgf1.spl).
+fn _pbkdf1_u8_to_list(data: [u8]) -> list:
+    var result = []
+    var i: u64 = 0
+    while i < data.len():
+        result.push(data[i].to_i64())
+        i = i + 1
+    result
+
+# Convert a plain list (i64 byte values) back to [u8].
+fn _pbkdf1_list_to_u8(data: list) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < data.len():
+        result.push(data.get(i))
+        i = i + 1
+    result
+
+# Concatenate password and salt into one [u8] buffer.
+fn _pbkdf1_concat(password: [u8], salt: [u8]) -> [u8]:
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < password.len():
+        result.push(password[i])
+        i = i + 1
+    i = 0
+    while i < salt.len():
+        result.push(salt[i])
+        i = i + 1
+    result
+
+# Truncate a [u8] array to `dk_len` bytes.
+fn _pbkdf1_truncate(data: [u8], dk_len: i64) -> [u8]:
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < data.len() and result.len().to_i64() < dk_len:
+        result.push(data[i])
+        i = i + 1
+    result
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+# PBKDF1-SHA-1: derive dk_len bytes (≤ 20) from password and salt.
+# RFC 2898 §5.1 — T_1 = SHA-1(P || S), T_i = SHA-1(T_{i-1}), DK = T_c[0..dk_len].
+fn pbkdf1_sha1(password: [u8], salt: [u8], iter: i64, dk_len: i64) -> Pbkdf1Result:
+    if iter < 1:
+        return Pbkdf1Result.Err(error: PbkdfError.IterTooSmall)
+    elif dk_len > 20:
+        return Pbkdf1Result.Err(error: PbkdfError.DkLenTooLarge)
+    else:
+        val seed = _pbkdf1_concat(password, salt)
+        val seed_list = _pbkdf1_u8_to_list(seed)
+        var t = sha1_bytes(seed_list)
+        var i = 1
+        while i < iter:
+            t = sha1_bytes(t)
+            i = i + 1
+        val dk = _pbkdf1_truncate(_pbkdf1_list_to_u8(t), dk_len)
+        Pbkdf1Result.Ok(dk: dk)
+
+# PBKDF1-SHA-256: derive dk_len bytes (≤ 32) from password and salt.
+fn pbkdf1_sha256(password: [u8], salt: [u8], iter: i64, dk_len: i64) -> Pbkdf1Result:
+    if iter < 1:
+        return Pbkdf1Result.Err(error: PbkdfError.IterTooSmall)
+    elif dk_len > 32:
+        return Pbkdf1Result.Err(error: PbkdfError.DkLenTooLarge)
+    else:
+        val seed = _pbkdf1_concat(password, salt)
+        val seed_list = _pbkdf1_u8_to_list(seed)
+        var t = sha256_bytes(seed_list)
+        var i = 1
+        while i < iter:
+            t = sha256_bytes(t)
+            i = i + 1
+        val dk = _pbkdf1_truncate(_pbkdf1_list_to_u8(t), dk_len)
+        Pbkdf1Result.Ok(dk: dk)
+
+# PBKDF1-MD5: derive dk_len bytes (≤ 16) from password and salt.
+fn pbkdf1_md5(password: [u8], salt: [u8], iter: i64, dk_len: i64) -> Pbkdf1Result:
+    if iter < 1:
+        return Pbkdf1Result.Err(error: PbkdfError.IterTooSmall)
+    elif dk_len > 16:
+        return Pbkdf1Result.Err(error: PbkdfError.DkLenTooLarge)
+    else:
+        val seed = _pbkdf1_concat(password, salt)
+        val seed_list = _pbkdf1_u8_to_list(seed)
+        var t = md5_bytes(seed_list)
+        var i = 1
+        while i < iter:
+            t = md5_bytes(t)
+            i = i + 1
+        val dk = _pbkdf1_truncate(_pbkdf1_list_to_u8(t), dk_len)
+        Pbkdf1Result.Ok(dk: dk)

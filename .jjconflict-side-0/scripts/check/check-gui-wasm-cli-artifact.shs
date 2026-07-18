@@ -1,0 +1,368 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_wasm_cli_artifact}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_wasm_cli_artifact_$(date -u +%F).md}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+HELLO_SOURCE="${GUI_WASM_HELLO_SOURCE:-examples/06_io/ui/hello_wasm_gui.spl}"
+HELLO_OUTPUT="${GUI_WASM_HELLO_OUTPUT:-$BUILD_DIR/hello_wasm_gui.wasm}"
+WIDGET_SOURCE="${GUI_WASM_WIDGET_SOURCE:-examples/06_io/ui/widget_matrix_wasm_gui.spl}"
+WIDGET_OUTPUT="${GUI_WASM_WIDGET_OUTPUT:-$BUILD_DIR/widget_matrix_wasm_gui.wasm}"
+BUILDER_SOURCE="${GUI_WASM_BUILDER_SOURCE:-examples/06_io/ui/builder_matrix_wasm_gui.spl}"
+BUILDER_OUTPUT="${GUI_WASM_BUILDER_OUTPUT:-$BUILD_DIR/builder_matrix_wasm_gui.wasm}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$HELLO_OUTPUT" "$WIDGET_OUTPUT" "$BUILDER_OUTPUT" "$BUILD_DIR"/*.out "$BUILD_DIR"/*.err "$BUILD_DIR"/*.strings "$REPORT_PATH"
+
+status=pass
+reason=pass
+results=""
+
+compile_and_check() {
+    name="$1"
+    source="$2"
+    output="$3"
+    out_log="$BUILD_DIR/$name.compile.out"
+    err_log="$BUILD_DIR/$name.compile.err"
+    strings_out="$BUILD_DIR/$name.artifact.strings"
+    item_status=pass
+    item_reason=pass
+    item_size=0
+    item_magic=""
+    item_version=""
+    item_import_count=0
+    item_imports=""
+
+    if [ ! -f "$source" ]; then
+        item_status=fail
+        item_reason=missing-source
+    else
+        set +e
+        "$SIMPLE_BIN" compile "$source" --target wasm32 -o "$output" >"$out_log" 2>"$err_log"
+        code=$?
+        set -e
+        if [ "$code" -ne 0 ]; then
+            item_status=fail
+            item_reason=compile-failed
+        elif [ ! -s "$output" ]; then
+            item_status=fail
+            item_reason=missing-artifact
+        else
+            item_magic="$(od -An -tx1 -N4 "$output" | tr -d ' \n')"
+            item_version="$(od -An -tx1 -j4 -N4 "$output" | tr -d ' \n')"
+            strings "$output" >"$strings_out"
+            item_size="$(wc -c <"$output")"
+            if command -v node >/dev/null 2>&1; then
+                item_imports="$(node - "$output" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+const bytes = fs.readFileSync(path);
+const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes))
+  .map((entry) => `${entry.module}.${entry.name}`);
+process.stdout.write(imports.join(','));
+NODE
+)"
+                if [ -n "$item_imports" ]; then
+                    item_import_count="$(printf '%s' "$item_imports" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ')"
+                else
+                    item_import_count=0
+                fi
+            else
+                item_status=fail
+                item_reason=missing-node-import-proof
+            fi
+            if [ "$item_magic" != "0061736d" ]; then
+                item_status=fail
+                item_reason=invalid-wasm-magic
+            elif [ "$item_version" != "01000000" ]; then
+                item_status=fail
+                item_reason=invalid-wasm-version
+            elif [ "$item_import_count" != "0" ]; then
+                item_status=fail
+                item_reason="unexpected-wasm-imports-$item_imports"
+            elif ! rg -q 'spl_main' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-spl-main-export
+            elif ! rg -q 'simple_app_init' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-simple-app-init-export
+            elif ! rg -q 'simple_app_render' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-simple-app-render-export
+            elif ! rg -q 'simple_app_event' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-simple-app-event-export
+            elif ! rg -q 'simple_app_render_probe' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-simple-app-render-probe-export
+            elif ! rg -q 'simple_app_event_probe' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-simple-app-event-probe-export
+            elif [ "$name" = "hello" ]; then
+                if ! rg -q 'hello_button:clicked' "$strings_out"; then
+                    item_status=fail
+                    item_reason=missing-gui-event-string
+                elif ! rg -q 'Generated WASM UI' "$strings_out"; then
+                    item_status=fail
+                    item_reason=missing-gui-ui-string
+                elif ! rg -q "id='hello_taskbar'" "$strings_out"; then
+                    item_status=fail
+                    item_reason=missing-gui-taskbar-surface
+                elif ! rg -q "id='hello_command_bar'" "$strings_out"; then
+                    item_status=fail
+                    item_reason=missing-gui-command-bar-surface
+                elif ! rg -q 'hello_command:accepted' "$strings_out"; then
+                    item_status=fail
+                    item_reason=missing-gui-command-event
+                fi
+            elif [ "$name" = "widget_matrix" ]; then
+                for marker in \
+                    "data-simple-wasm='widget_matrix'" \
+                    "data-layout='column-gap-8-padding-16'" \
+                    "type='checkbox'" \
+                    "<select id='matrix_dropdown'" \
+                    "data-state='alpha'" \
+                    "id='matrix_textfield' type='text'" \
+                    "<textarea id='matrix_textarea'" \
+                    "id='matrix_tabs' data-simple-surface='tabs'" \
+                    "role='tab'" \
+                    "<dialog id='matrix_dialog'" \
+                    "data-dialog-state='open'" \
+                    "<table id='matrix_table'" \
+                    "id='matrix_table_row_primary' data-selected='false'" \
+                    "<ul id='matrix_list'" \
+                    "<progress id='matrix_progress'" \
+                    "data-valid='true'" \
+                    "<img id='matrix_image'" \
+                    "data-load-state='idle'" \
+                    "title='Widget matrix tooltip'" \
+                    "id='matrix_tree_scroll' data-simple-surface='tree scroll'" \
+                    "id='matrix_scroll' style='max-height:64px;overflow:auto'" \
+                    "<menu id='matrix_menu'" \
+                    "id='matrix_menu_file'" \
+                    "id='matrix_menu_view_zoom' data-menu-parent='matrix_menu_view'" \
+                    "id='matrix_statusbar' data-simple-surface='statusbar'" \
+                    "matrix_checkbox:changed" \
+                    "matrix_dropdown:changed" \
+                    "matrix_dropdown:beta-selected" \
+                    "matrix_textfield:accepted" \
+                    "matrix_textarea:accepted" \
+                    "matrix_tabs:selected" \
+                    "matrix_dialog:opened" \
+                    "matrix_dialog:closed" \
+                    "matrix_table:selected" \
+                    "matrix_table:row-primary-selected" \
+                    "matrix_list:selected" \
+                    "matrix_progress:changed" \
+                    "matrix_progress:clamped" \
+                    "matrix_tooltip:shown" \
+                    "matrix_image:loaded" \
+                    "matrix_image:error" \
+                    "matrix_scroll:accepted" \
+                    "matrix_menu:accepted" \
+                    "matrix_menu:view-accepted" \
+                    "matrix_menu:zoom-accepted" \
+                    "matrix_statusbar:updated" \
+                    "matrix_statusbar:queued" \
+                    "matrix_event:ignored"
+                do
+                    if ! rg -F -q "$marker" "$strings_out"; then
+                        item_status=fail
+                        item_reason="missing-widget-marker-$marker"
+                        break
+                    fi
+                done
+            else
+                for marker in \
+                    "data-simple-wasm='builder_matrix'" \
+                    "data-builder-source='common.ui.builder'" \
+                    "use common.ui.builder" \
+                    "use common.ui.ios.builder" \
+                    "fn builder_matrix_tree() -> UITree" \
+                    "WidgetKind.RadioButton.to_wire()" \
+                    "WidgetKind.Heading.to_wire()" \
+                    "WidgetKind.CommandPalette.to_wire()" \
+                    "WidgetKind.GlassTitleBar" \
+                    "WidgetKind.WorkspaceTabs" \
+                    "WidgetKind.SheetModal" \
+                    "WidgetKind.ContextMenu" \
+                    "WidgetKind.EmptyState" \
+                    "id='builder_navigation_bar' data-simple-surface='navigation_bar tab_bar'" \
+                    "id='builder_matrix_controls' data-simple-surface='radio switch search_bar segmented_control button'" \
+                    "id='builder_card_summary' data-simple-surface='card heading label divider command_palette'" \
+                    "id='builder_layout_surfaces' data-simple-surface='sidebar inspector scroll textarea tree treenode'" \
+                    "id='builder_shell_surfaces' data-simple-surface='glass_title_bar command_bar workspace_tabs toast sheet_modal context_menu utility_rail status_chip selection_pill empty_state'" \
+                    "builder_navigation_bar" \
+                    "builder_tab_bar" \
+                    "builder_radio_ready" \
+                    "builder_switch_enabled" \
+                    "builder_search_bar" \
+                    "builder_segmented_mode" \
+                    "builder_card_summary" \
+                    "builder_heading_title" \
+                    "builder_label_status" \
+                    "builder_divider_main" \
+                    "builder_command_palette" \
+                    "builder_sidebar" \
+                    "builder_inspector" \
+                    "builder_scroll" \
+                    "builder_textarea_notes" \
+                    "builder_tree_root" \
+                    "builder_glass_title_bar" \
+                    "builder_command_bar" \
+                    "builder_workspace_tabs" \
+                    "builder_toast" \
+                    "builder_sheet_modal" \
+                    "builder_context_menu" \
+                    "builder_utility_rail" \
+                    "builder_status_chip" \
+                    "builder_selection_pill" \
+                    "builder_empty_state" \
+                    "builder_radio:changed" \
+                    "builder_switch:toggled" \
+                    "builder_search:accepted" \
+                    "builder_segmented:changed" \
+                    "builder_command_palette:accepted" \
+                    "builder_sheet_modal:opened" \
+                    "builder_context_menu:opened" \
+                    "builder_event:ignored"
+                do
+                    if ! rg -F -q "$marker" "$strings_out"; then
+                        item_status=fail
+                        item_reason="missing-builder-marker-$marker"
+                        break
+                    fi
+                done
+            fi
+        fi
+    fi
+
+    if [ "$item_status" != "pass" ] && [ "$status" = "pass" ]; then
+        status=fail
+        reason="$name-$item_reason"
+    fi
+
+    results="${results}${name}|${item_status}|${item_reason}|${source}|${output}|${item_size}|${item_magic}|${item_version}|${item_import_count}|${item_imports}
+"
+}
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    status=unavailable
+    reason=simple-bin-forbidden
+elif [ "$SIMPLE_BIN_STATUS" != "pass" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    status=unavailable
+    reason=missing-simple-bin
+else
+    compile_and_check "hello" "$HELLO_SOURCE" "$HELLO_OUTPUT"
+    compile_and_check "widget_matrix" "$WIDGET_SOURCE" "$WIDGET_OUTPUT"
+    compile_and_check "builder_matrix" "$BUILDER_SOURCE" "$BUILDER_OUTPUT"
+fi
+
+{
+    echo "gui_wasm_cli_status=$status"
+    echo "gui_wasm_cli_reason=$reason"
+    echo "gui_wasm_cli_simple_bin=$SIMPLE_BIN"
+    echo "gui_wasm_cli_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "gui_wasm_cli_simple_bin_status=$SIMPLE_BIN_STATUS"
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version import_count imports; do
+        [ -n "$name" ] || continue
+        echo "gui_wasm_cli_${name}_status=$item_status"
+        echo "gui_wasm_cli_${name}_reason=$item_reason"
+        echo "gui_wasm_cli_${name}_source=$source"
+        echo "gui_wasm_cli_${name}_output=$output"
+        echo "gui_wasm_cli_${name}_size_bytes=$size"
+        echo "gui_wasm_cli_${name}_magic_hex=$magic"
+        echo "gui_wasm_cli_${name}_version_hex=$version"
+        echo "gui_wasm_cli_${name}_import_count=$import_count"
+        echo "gui_wasm_cli_${name}_imports=$imports"
+    done
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# GUI WASM CLI Artifact Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    echo
+    echo "## Artifacts"
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version import_count imports; do
+        [ -n "$name" ] || continue
+        echo
+        echo "### $name"
+        echo "- status: $item_status"
+        echo "- reason: $item_reason"
+        echo "- source: $source"
+        echo "- output: $output"
+        echo "- size bytes: $size"
+        echo "- magic hex: $magic"
+        echo "- version hex: $version"
+        echo "- import count: $import_count"
+        echo "- imports: ${imports:-none}"
+        if [ "$name" = "widget_matrix" ]; then
+            echo "- marker coverage: checkbox, dropdown/select transitions, text input/textfield, textarea, tabs, dialog open/close, table/list selection, progress validation, image load/error/tooltip, tree/scroll, menu hierarchy, statusbar update/queue, and supported menu-command/event response strings; this does not claim command-bar coverage for the widget matrix"
+            echo "- event markers: matrix_checkbox:changed, matrix_dropdown:changed, matrix_dropdown:beta-selected, matrix_textfield:accepted, matrix_textarea:accepted, matrix_tabs:selected, matrix_dialog:opened, matrix_dialog:closed, matrix_table:selected, matrix_table:row-primary-selected, matrix_list:selected, matrix_progress:changed, matrix_progress:clamped, matrix_tooltip:shown, matrix_image:loaded, matrix_image:error, matrix_scroll:accepted, matrix_menu:accepted, matrix_menu:view-accepted, matrix_menu:zoom-accepted, matrix_statusbar:updated, matrix_statusbar:queued, matrix_event:ignored"
+        elif [ "$name" = "builder_matrix" ]; then
+            echo "- marker coverage: real common.ui builder imports and builder_matrix_tree construction, radio, switch, search_bar, segmented_control, navigation_bar, tab_bar, card, heading, label, divider, command_palette, sidebar, inspector, scroll, textarea, tree/treenode, glass_title_bar, command_bar, workspace_tabs, toast, sheet_modal, context_menu, utility_rail, status_chip, selection_pill, empty_state, and supported builder event response strings"
+            echo "- event markers: builder_radio:changed, builder_switch:toggled, builder_search:accepted, builder_segmented:changed, builder_command_palette:accepted, builder_sheet_modal:opened, builder_context_menu:opened, builder_event:ignored"
+        fi
+    done
+    echo
+    echo "## Compiler Output"
+    for out_log in "$BUILD_DIR"/*.compile.out; do
+        [ -f "$out_log" ] || continue
+        echo
+        echo "### $(basename "$out_log")"
+        sed 's/^/- /' "$out_log" 2>/dev/null || true
+    done
+    echo
+    echo "## Compiler Error"
+    for err_log in "$BUILD_DIR"/*.compile.err; do
+        [ -f "$err_log" ] || continue
+        echo
+        echo "### $(basename "$err_log")"
+        sed 's/^/- /' "$err_log" 2>/dev/null || true
+    done
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

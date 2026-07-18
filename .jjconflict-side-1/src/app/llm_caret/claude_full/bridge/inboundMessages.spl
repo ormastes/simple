@@ -1,0 +1,85 @@
+"""
+Claude full bridge inbound message normalization parity model.
+"""
+
+const INBOUND_MESSAGES_SOURCE_LINES = 80
+
+class InboundContentBlock:
+    type_name: text
+    source_type: text
+    media_type: text
+    mediaType: text
+    data: text
+    text_value: text
+
+impl InboundContentBlock:
+    static fn textBlock(value: text) -> InboundContentBlock:
+        InboundContentBlock(type_name: "text", source_type: "", media_type: "", mediaType: "", data: "", text_value: value)
+
+    static fn imageBlock(mediaTypeSnake: text, mediaTypeCamel: text, data: text) -> InboundContentBlock:
+        InboundContentBlock(type_name: "image", source_type: "base64", media_type: mediaTypeSnake, mediaType: mediaTypeCamel, data: data, text_value: "")
+
+class InboundMessage:
+    type_name: text
+    uuid: text
+    string_content: text
+    blocks: [InboundContentBlock]
+
+impl InboundMessage:
+    static fn text(uuid: text, content: text) -> InboundMessage:
+        InboundMessage(type_name: "user", uuid: uuid, string_content: content, blocks: [])
+
+    static fn block(uuid: text, blocks: [InboundContentBlock]) -> InboundMessage:
+        InboundMessage(type_name: "user", uuid: uuid, string_content: "", blocks: blocks)
+
+class InboundExtractedFields:
+    present: bool
+    uuid: text
+    string_content: text
+    blocks: [InboundContentBlock]
+
+impl InboundExtractedFields:
+    static fn none() -> InboundExtractedFields:
+        InboundExtractedFields(present: false, uuid: "", string_content: "", blocks: [])
+
+    static fn new(uuid: text, stringContent: text, blocks: [InboundContentBlock]) -> InboundExtractedFields:
+        InboundExtractedFields(present: true, uuid: uuid, string_content: stringContent, blocks: blocks)
+
+fn inboundDetectImageFormat(data: text) -> text:
+    if data.starts_with("/9j/"):
+        return "image/jpeg"
+    if data.starts_with("iVBOR"):
+        return "image/png"
+    "image/png"
+
+fn inboundIsMalformedBase64Image(block: InboundContentBlock) -> bool:
+    if block.type_name != "image":
+        return false
+    if block.source_type != "base64":
+        return false
+    block.media_type == ""
+
+fn normalizeImageBlocks(blocks: [InboundContentBlock]) -> [InboundContentBlock]:
+    var out: [InboundContentBlock] = []
+    var i = 0
+    while i < blocks.len():
+        val block = blocks[i]
+        if inboundIsMalformedBase64Image(block):
+            var media = block.mediaType
+            if media == "":
+                media = inboundDetectImageFormat(block.data)
+            out.push(InboundContentBlock.imageBlock(media, "", block.data))
+        else:
+            out.push(block)
+        i = i + 1
+    out
+
+fn extractInboundMessageFields(msg: InboundMessage) -> InboundExtractedFields:
+    if msg.type_name != "user":
+        return InboundExtractedFields.none()
+    if msg.string_content == "" and msg.blocks.len() == 0:
+        return InboundExtractedFields.none()
+    InboundExtractedFields.new(msg.uuid, msg.string_content, normalizeImageBlocks(msg.blocks))
+
+fn inboundMessagesSourceLinesModeled() -> i64:
+    INBOUND_MESSAGES_SOURCE_LINES

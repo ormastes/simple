@@ -1,0 +1,440 @@
+# Production GUI/Web Renderer Parity Harness
+#
+# Builds marker-free GUI widget HTML through the real common.ui builder and
+# renderer, then compares Simple Web Renderer backends at exact pixel level.
+
+use common.ui.builder.{button, column, image, label, build_tree_with_title, with_icon}
+use common.ui.state.{init_state}
+use app.ui.render.html_widgets.{render_html_tree}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_opencl.{OpenClBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name}
+use std.nogc_sync_mut.env.platform.{is_macos}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+
+val GENERATED_GUI_RENDER_TIMING_BUDGET_US: i64 = 1000000
+val BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US: i64 = 250000
+
+struct ProductionGuiWebParityReport:
+    width: i32
+    height: i32
+    html: text
+    has_widget_html: bool
+    has_legacy_fixture_marker: bool
+    tolerance_used: bool
+    software_resolved_backend: text
+    cpu_simd_resolved_backend: text
+    metal_resolved_backend: text
+    software_pixel_count: i32
+    cpu_simd_pixel_count: i32
+    metal_pixel_count: i32
+    distinct_software_colors: i32
+    cpu_simd_different_pixels: i64
+    cpu_simd_match_percentage: i64
+    cpu_simd_max_channel_diff: i32
+    metal_different_pixels: i64
+    metal_match_percentage: i64
+    metal_max_channel_diff: i32
+    exact_backend_parity: bool
+    html_build_elapsed_us: i64
+    software_render_elapsed_us: i64
+    cpu_simd_render_elapsed_us: i64
+    metal_render_elapsed_us: i64
+    total_elapsed_us: i64
+    software_pixels_per_second: i64
+    cpu_simd_pixels_per_second: i64
+    metal_pixels_per_second: i64
+    total_pixels_per_second: i64
+    timing_budget_us: i64
+    timing_budget_status: text
+    timing_budget_reason: text
+
+struct BackendExecutedGuiSceneReport:
+    width: i32
+    height: i32
+    software_resolved_backend: text
+    cpu_simd_resolved_backend: text
+    metal_resolved_backend: text
+    software_pixel_count: i32
+    cpu_simd_pixel_count: i32
+    metal_pixel_count: i32
+    cpu_simd_different_pixels: i64
+    cpu_simd_match_percentage: i64
+    cpu_simd_max_channel_diff: i32
+    metal_different_pixels: i64
+    metal_match_percentage: i64
+    metal_max_channel_diff: i32
+    cpu_simd_fill_hits: i64
+    cpu_simd_copy_hits: i64
+    cpu_simd_alpha_hits: i64
+    cpu_simd_blit_hits: i64
+    cpu_simd_scroll_hits: i64
+    cpu_simd_total_hits: i64
+    metal_gpu_frame_complete: bool
+    metal_gpu_readback_pixel_count: i32
+    metal_gpu_readback_checksum: i64
+    metal_command_queue_handle: i64
+    software_checksum: i64
+    cpu_simd_checksum: i64
+    metal_checksum: i64
+    backend_checksum_match: bool
+    same_frame_backend_readback: bool
+    backend_readback_source: text
+    software_first_pixel: u32
+    cpu_simd_first_pixel: u32
+    metal_first_pixel: u32
+    metal_gpu_first_pixel: u32
+    software_rect_pixel: u32
+    cpu_simd_rect_pixel: u32
+    metal_rect_pixel: u32
+    metal_gpu_rect_pixel: u32
+    tolerance_used: bool
+    exact_backend_parity: bool
+    software_render_elapsed_us: i64
+    cpu_simd_render_elapsed_us: i64
+    metal_render_elapsed_us: i64
+    total_elapsed_us: i64
+    software_pixels_per_second: i64
+    cpu_simd_pixels_per_second: i64
+    metal_pixels_per_second: i64
+    total_pixels_per_second: i64
+    timing_budget_us: i64
+    timing_budget_status: text
+    timing_budget_reason: text
+
+struct MetalReducedSceneResult:
+    resolved_backend: text
+    pixels: [u32]
+    gpu_frame_complete: bool
+    gpu_pixels: [u32]
+    command_queue_handle: i64
+
+struct ExactPixelComparison:
+    different_pixels: i64
+    match_percentage: i64
+    max_channel_diff: i32
+
+var _generated_gui_widget_backend_parity_cache_keys: [text] = []
+var _generated_gui_widget_backend_parity_cache_values: [ProductionGuiWebParityReport] = []
+
+fn exact_pixel_comparison_match() -> ExactPixelComparison:
+    ExactPixelComparison(different_pixels: 0, match_percentage: 10000, max_channel_diff: 0)
+
+fn positive_elapsed_us(start_us: i64) -> i64:
+    val elapsed = time_now_micros() - start_us
+    if elapsed <= 0:
+        return 1
+    elapsed
+
+fn timing_budget_status(elapsed_us: i64, budget_us: i64) -> text:
+    if elapsed_us <= budget_us:
+        return "pass"
+    "warn"
+
+fn timing_budget_reason(elapsed_us: i64, budget_us: i64) -> text:
+    if elapsed_us <= budget_us:
+        return "within-render-budget"
+    "render-budget-exceeded"
+
+fn pixels_per_second(pixel_count: i32, elapsed_us: i64) -> i64:
+    if pixel_count <= 0 or elapsed_us <= 0:
+        return 0
+    ((pixel_count as i64) * 1000000) / elapsed_us
+
+fn generated_gui_widget_html() -> text:
+    val hero = label("prod_gui_text", "AB CD")
+    val detail = label("prod_gui_detail", "EF")
+    val preview_src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='16' viewBox='0 0 24 16'%3E%3Crect width='24' height='16' fill='%232563eb'/%3E%3Crect x='3' y='4' width='8' height='7' fill='%23f59e0b'/%3E%3Crect x='13' y='5' width='8' height='6' fill='%2322c55e'/%3E%3C/svg%3E"
+    val preview = image("prod_gui_image", preview_src, "Production preview")
+    val action = with_icon(button("prod_gui_button", "RUN", "run_production_gui"), "image")
+    val root = column("prod_gui_root", [hero, detail, preview, action])
+    val tree = build_tree_with_title(root, "Production GUI Web Parity", "light")
+    val state = init_state(tree)
+    render_html_tree(state.tree.root_node(), state)
+
+fn has_legacy_fixture_marker(html: text) -> bool:
+    html.contains("data-simple-actual-gui-button") or
+    html.contains("simple-web-engine2d-") or
+    html.contains("data-font-corpus=\"known-site-fonts\"") or
+    html.contains("wm-app-titlebar") or
+    html.contains("wm-app-content")
+
+fn count_distinct_colors(px: [u32]) -> i32:
+    var seen: Dict<text, bool> = {}
+    var count = 0
+    var i = 0
+    val px_count = px.len()
+    while i < px_count:
+        val c = px[i]
+        val key = c.to_string()
+        if not seen.get(key).?:
+            seen[key] = true
+            count = count + 1
+        i = i + 1
+    count
+
+fn checksum_pixels(px: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    val px_count = px.len()
+    while i < px_count:
+        sum = sum + (px[i] as i64) * ((i + 1) as i64)
+        i = i + 1
+    sum
+
+fn sample_pixel(px: [u32], idx: i32) -> u32:
+    if idx >= 0 and idx < px.len():
+        return px[idx]
+    0x00000000u32
+
+fn abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn channel_diff(a: u32, b: u32, shift: i32) -> i32:
+    val av = ((a >> shift) & 0xFF) as i32
+    val bv = ((b >> shift) & 0xFF) as i32
+    abs_i32(av - bv)
+
+fn max_rgb_diff(a: u32, b: u32) -> i32:
+    val rd = channel_diff(a, b, 16)
+    val gd = channel_diff(a, b, 8)
+    val bd = channel_diff(a, b, 0)
+    var m = rd
+    if gd > m:
+        m = gd
+    if bd > m:
+        m = bd
+    m
+
+fn compare_exact_pixels(a: [u32], b: [u32], width: i32, height: i32) -> ExactPixelComparison:
+    if width <= 0 or height <= 0:
+        return ExactPixelComparison(different_pixels: 1, match_percentage: 0, max_channel_diff: 255)
+    val total = width * height
+    if a.len() != total or b.len() != total:
+        return ExactPixelComparison(different_pixels: total as i64, match_percentage: 0, max_channel_diff: 255)
+    var different: i64 = 0
+    var max_diff = 0
+    var i = 0
+    while i < total:
+        if a[i] != b[i]:
+            different = different + 1
+            val d = max_rgb_diff(a[i], b[i])
+            if d > max_diff:
+                max_diff = d
+        i = i + 1
+    val same = (total as i64) - different
+    val pct = if total > 0: (same * 10000) / (total as i64) else: 0
+    ExactPixelComparison(different_pixels: different, match_percentage: pct, max_channel_diff: max_diff)
+
+fn render_reduced_gui_widget_scene_software(width: i32, height: i32) -> [u32]:
+    var backend = SoftwareBackend.create()
+    backend.init(width, height)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+    backend.present()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+fn render_reduced_gui_widget_scene_cpu_simd(width: i32, height: i32) -> [u32]:
+    var backend = CpuBackend.create()
+    backend.init(width, height)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+    backend.present()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReducedSceneResult:
+    if not is_macos():
+        var opencl = OpenClBackend.create()
+        if opencl.init(width, height):
+            opencl.clear(0xFF102030u32)
+            opencl.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+            opencl.present()
+            val readback = opencl.read_pixels_with_source()
+            val pixels = readback.pixels
+            val complete = readback.source == "device_readback" and pixels.len() == width * height
+            val handle = readback.backend_handle
+            opencl.shutdown()
+            if complete:
+                return MetalReducedSceneResult(resolved_backend: "opencl", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: pixels, command_queue_handle: handle)
+        var vulkan = VulkanBackend.create()
+        if not vulkan.init(width, height):
+            return MetalReducedSceneResult(resolved_backend: "vulkan-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [], command_queue_handle: 0)
+        vulkan.clear(0xFF102030u32)
+        vulkan.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+        val vulkan_readback = vulkan.read_pixels_with_source()
+        val vulkan_pixels = vulkan_readback.pixels
+        val vulkan_complete = vulkan_readback.source == "device_readback" and vulkan_pixels.len() == width * height
+        val vulkan_handle = vulkan_readback.backend_handle
+        vulkan.shutdown()
+        return MetalReducedSceneResult(resolved_backend: "vulkan", pixels: vulkan_pixels, gpu_frame_complete: vulkan_complete, gpu_pixels: vulkan_pixels, command_queue_handle: vulkan_handle)
+    var metal = MetalBackend.create()
+    if not metal.init(width, height):
+        return MetalReducedSceneResult(resolved_backend: "metal-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [], command_queue_handle: 0)
+    val command_queue_handle = metal.command_queue
+    metal.clear(0xFF102030u32)
+    metal.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+    metal.present()
+    val complete = metal.gpu_frame_complete
+    val gpu_pixels = if complete: metal.read_pixels_gpu_only() else: []
+    val pixels = metal.read_pixels()
+    metal.shutdown()
+    MetalReducedSceneResult(resolved_backend: "metal", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: gpu_pixels, command_queue_handle: command_queue_handle)
+
+fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> BackendExecutedGuiSceneReport:
+    val total_start_us = time_now_micros()
+    val software_start_us = time_now_micros()
+    val software = render_reduced_gui_widget_scene_software(width, height)
+    val software_elapsed_us = positive_elapsed_us(software_start_us)
+    reset_simd_hits()
+    val cpu_start_us = time_now_micros()
+    val cpu_simd = render_reduced_gui_widget_scene_cpu_simd(width, height)
+    val cpu_elapsed_us = positive_elapsed_us(cpu_start_us)
+    val hits = simd_hit_counts()
+    val metal_start_us = time_now_micros()
+    val metal_result = render_reduced_gui_widget_scene_metal(width, height)
+    val metal_elapsed_us = positive_elapsed_us(metal_start_us)
+    val metal_backend = metal_result.resolved_backend
+    val metal_pixels = metal_result.pixels
+    val metal_complete = metal_result.gpu_frame_complete
+    val metal_gpu_pixels = metal_result.gpu_pixels
+    val software_checksum = checksum_pixels(software)
+    val cpu_simd_checksum = checksum_pixels(cpu_simd)
+    val metal_checksum = checksum_pixels(metal_pixels)
+    val metal_gpu_checksum = checksum_pixels(metal_gpu_pixels)
+    val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
+    val metal_cmp = if metal_backend == "software": exact_pixel_comparison_match() else: compare_exact_pixels(software, metal_pixels, width, height)
+    val device_backend = metal_backend == "metal" or metal_backend == "opencl" or metal_backend == "vulkan"
+    val backend_checksum_match = software_checksum == cpu_simd_checksum and (metal_backend == "software" or software_checksum == metal_checksum) and (not device_backend or software_checksum == metal_gpu_checksum)
+    val same_frame_backend_readback = if device_backend: metal_complete and metal_gpu_pixels.len() == width * height and metal_gpu_checksum == metal_checksum and metal_gpu_checksum == software_checksum else: true
+    val backend_readback_source = if device_backend and same_frame_backend_readback: "device_readback" else: "software_reference"
+    val total_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
+    val rect_idx = 4 + (4 * width)
+    val total_elapsed_us = positive_elapsed_us(total_start_us)
+    BackendExecutedGuiSceneReport(
+        width: width,
+        height: height,
+        software_resolved_backend: "software",
+        cpu_simd_resolved_backend: "cpu_simd",
+        metal_resolved_backend: metal_backend,
+        software_pixel_count: software.len(),
+        cpu_simd_pixel_count: cpu_simd.len(),
+        metal_pixel_count: metal_pixels.len(),
+        cpu_simd_different_pixels: cpu_cmp.different_pixels,
+        cpu_simd_match_percentage: cpu_cmp.match_percentage,
+        cpu_simd_max_channel_diff: cpu_cmp.max_channel_diff,
+        metal_different_pixels: metal_cmp.different_pixels,
+        metal_match_percentage: metal_cmp.match_percentage,
+        metal_max_channel_diff: metal_cmp.max_channel_diff,
+        cpu_simd_fill_hits: hits.fill_hits,
+        cpu_simd_copy_hits: hits.copy_hits,
+        cpu_simd_alpha_hits: hits.alpha_hits,
+        cpu_simd_blit_hits: hits.blit_hits,
+        cpu_simd_scroll_hits: hits.scroll_hits,
+        cpu_simd_total_hits: total_hits,
+        metal_gpu_frame_complete: metal_complete,
+        metal_gpu_readback_pixel_count: metal_gpu_pixels.len(),
+        metal_gpu_readback_checksum: metal_gpu_checksum,
+        metal_command_queue_handle: metal_result.command_queue_handle,
+        software_checksum: software_checksum,
+        cpu_simd_checksum: cpu_simd_checksum,
+        metal_checksum: metal_checksum,
+        backend_checksum_match: backend_checksum_match,
+        same_frame_backend_readback: same_frame_backend_readback,
+        backend_readback_source: backend_readback_source,
+        software_first_pixel: sample_pixel(software, 0),
+        cpu_simd_first_pixel: sample_pixel(cpu_simd, 0),
+        metal_first_pixel: sample_pixel(metal_pixels, 0),
+        metal_gpu_first_pixel: sample_pixel(metal_gpu_pixels, 0),
+        software_rect_pixel: sample_pixel(software, rect_idx),
+        cpu_simd_rect_pixel: sample_pixel(cpu_simd, rect_idx),
+        metal_rect_pixel: sample_pixel(metal_pixels, rect_idx),
+        metal_gpu_rect_pixel: sample_pixel(metal_gpu_pixels, rect_idx),
+        tolerance_used: false,
+        exact_backend_parity: cpu_cmp.different_pixels == 0 and metal_cmp.different_pixels == 0 and cpu_cmp.max_channel_diff == 0 and metal_cmp.max_channel_diff == 0,
+        software_render_elapsed_us: software_elapsed_us,
+        cpu_simd_render_elapsed_us: cpu_elapsed_us,
+        metal_render_elapsed_us: metal_elapsed_us,
+        total_elapsed_us: total_elapsed_us,
+        software_pixels_per_second: pixels_per_second(software.len(), software_elapsed_us),
+        cpu_simd_pixels_per_second: pixels_per_second(cpu_simd.len(), cpu_elapsed_us),
+        metal_pixels_per_second: pixels_per_second(metal_pixels.len(), metal_elapsed_us),
+        total_pixels_per_second: pixels_per_second(software.len(), total_elapsed_us),
+        timing_budget_us: BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US,
+        timing_budget_status: timing_budget_status(total_elapsed_us, BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US),
+        timing_budget_reason: timing_budget_reason(total_elapsed_us, BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US)
+    )
+
+fn run_generated_gui_widget_backend_parity(width: i32, height: i32) -> ProductionGuiWebParityReport:
+    val total_start_us = time_now_micros()
+    val cache_key = width.to_string() + "x" + height.to_string()
+    var cache_i = 0
+    val cache_count = _generated_gui_widget_backend_parity_cache_keys.len()
+    while cache_i < cache_count:
+        if _generated_gui_widget_backend_parity_cache_keys[cache_i] == cache_key:
+            return _generated_gui_widget_backend_parity_cache_values[cache_i]
+        cache_i = cache_i + 1
+    val html_start_us = time_now_micros()
+    val html = generated_gui_widget_html()
+    val html_elapsed_us = positive_elapsed_us(html_start_us)
+    val software_backend = simple_web_resolved_engine2d_backend_name(width, height, "software")
+    val cpu_simd_backend = simple_web_resolved_engine2d_backend_name(width, height, "cpu_simd")
+    val metal_backend = simple_web_resolved_engine2d_backend_name(width, height, "metal")
+    val software_start_us = time_now_micros()
+    val software = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "software")
+    val software_elapsed_us = positive_elapsed_us(software_start_us)
+    val cpu_start_us = time_now_micros()
+    val cpu_simd = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "cpu_simd")
+    val cpu_elapsed_us = positive_elapsed_us(cpu_start_us)
+    val metal_start_us = time_now_micros()
+    val metal = if metal_backend == software_backend: software else: simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "metal")
+    val metal_elapsed_us = positive_elapsed_us(metal_start_us)
+    val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
+    val metal_cmp = if metal_backend == software_backend: exact_pixel_comparison_match() else: compare_exact_pixels(software, metal, width, height)
+    val total_elapsed_us = positive_elapsed_us(total_start_us)
+    val report = ProductionGuiWebParityReport(
+        width: width,
+        height: height,
+        html: html,
+        has_widget_html: html.contains("widget-") and html.contains("data-action="),
+        has_legacy_fixture_marker: has_legacy_fixture_marker(html),
+        tolerance_used: false,
+        software_resolved_backend: software_backend,
+        cpu_simd_resolved_backend: cpu_simd_backend,
+        metal_resolved_backend: metal_backend,
+        software_pixel_count: software.len(),
+        cpu_simd_pixel_count: cpu_simd.len(),
+        metal_pixel_count: metal.len(),
+        distinct_software_colors: count_distinct_colors(software),
+        cpu_simd_different_pixels: cpu_cmp.different_pixels,
+        cpu_simd_match_percentage: cpu_cmp.match_percentage,
+        cpu_simd_max_channel_diff: cpu_cmp.max_channel_diff,
+        metal_different_pixels: metal_cmp.different_pixels,
+        metal_match_percentage: metal_cmp.match_percentage,
+        metal_max_channel_diff: metal_cmp.max_channel_diff,
+        exact_backend_parity: cpu_cmp.different_pixels == 0 and metal_cmp.different_pixels == 0 and cpu_cmp.max_channel_diff == 0 and metal_cmp.max_channel_diff == 0,
+        html_build_elapsed_us: html_elapsed_us,
+        software_render_elapsed_us: software_elapsed_us,
+        cpu_simd_render_elapsed_us: cpu_elapsed_us,
+        metal_render_elapsed_us: metal_elapsed_us,
+        total_elapsed_us: total_elapsed_us,
+        software_pixels_per_second: pixels_per_second(software.len(), software_elapsed_us),
+        cpu_simd_pixels_per_second: pixels_per_second(cpu_simd.len(), cpu_elapsed_us),
+        metal_pixels_per_second: pixels_per_second(metal.len(), metal_elapsed_us),
+        total_pixels_per_second: pixels_per_second(software.len(), total_elapsed_us),
+        timing_budget_us: GENERATED_GUI_RENDER_TIMING_BUDGET_US,
+        timing_budget_status: timing_budget_status(total_elapsed_us, GENERATED_GUI_RENDER_TIMING_BUDGET_US),
+        timing_budget_reason: timing_budget_reason(total_elapsed_us, GENERATED_GUI_RENDER_TIMING_BUDGET_US)
+    )
+    _generated_gui_widget_backend_parity_cache_keys.push(cache_key)
+    _generated_gui_widget_backend_parity_cache_values.push(report)
+    report

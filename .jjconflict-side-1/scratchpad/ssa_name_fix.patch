@@ -1,0 +1,40 @@
+diff --git a/src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl b/src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+index a1a2b0a4f9b..d02cda6f6e7 100644
+--- a/src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
++++ b/src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+@@ -19,7 +19,14 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
+ extern fn rt_env_get(key: text) -> text
+ 
+ fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
+-    if fn_.blocks.len() == 1:
++    # A single-block function is NOT skippable: a straight-line reassignment
++    # (e.g. a fixed-width `c = c + 1` twice, #171) lowers to multiple defs of
++    # one local inside ONE block, which the textual `%lN` emitter would emit as
++    # a duplicate SSA def -> llc "multiple definition of local value". The
++    # alloca transform below slots such single-block multi-def locals (its own
++    # `slotted.len() == 0` check keeps a single-def single-block function a
++    # byte-for-byte no-op), so only a truly empty function is skipped here.
++    if fn_.blocks.len() == 0:
+         return fn_
+     # SIMPLE_BOOTSTRAP-only: replace the hand-built SSA-phi mechanism (which
+     # cannot correctly resolve each phi's incoming-value-per-predecessor for
+diff --git a/src/compiler/80.driver/driver_bootstrap.spl b/src/compiler/80.driver/driver_bootstrap.spl
+index 9eb21430064..150a3c8b868 100644
+--- a/src/compiler/80.driver/driver_bootstrap.spl
++++ b/src/compiler/80.driver/driver_bootstrap.spl
+@@ -215,7 +215,14 @@ pub fn bootstrap_lower_hir_globals_to_mir_module_driver() -> MirModule:
+     module
+ 
+ fn bootstrap_ssa_phi_function(fn_: MirFunction) -> MirFunction:
+-    if fn_.blocks.len() == 1:
++    # A single-block function is NOT skippable: a straight-line reassignment
++    # (e.g. a fixed-width `c = c + 1` twice, #171) lowers to multiple defs of
++    # one local inside ONE block, which the textual `%lN` emitter would emit as
++    # a duplicate SSA def -> llc "multiple definition of local value". The
++    # alloca transform below slots such single-block multi-def locals (its own
++    # `slotted.len() == 0` check keeps a single-def single-block function a
++    # byte-for-byte no-op), so only a truly empty function is skipped here.
++    if fn_.blocks.len() == 0:
+         return fn_
+     # This whole file only runs under the SIMPLE_BOOTSTRAP real-LLVM path
+     # (bootstrap_emit_real_llvm_object / bootstrap_emit_real_llvm_module_object,

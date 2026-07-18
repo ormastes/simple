@@ -1,0 +1,439 @@
+# Static Method Desugaring
+#
+# Transforms static method definitions in impl blocks into module-level
+# functions. The convention is TypeName__method_name (double underscore).
+#
+# INPUT:
+#   impl Point:
+#       static fn origin() -> Point:
+#           Point(x: 0, y: 0)
+#       fn distance() -> f64:
+#           (self.x ** 2 + self.y ** 2).sqrt()
+#
+# OUTPUT:
+#   fn Point__origin() -> Point:
+#       Point(x: 0, y: 0)
+#   impl Point:
+#       fn distance() -> f64:
+#           (self.x ** 2 + self.y ** 2).sqrt()
+#
+# NOTE: This module runs on the Rust runtime, so it MUST NOT use
+# static fn patterns. All BUG workarounds applied.
+
+
+export desugar_static_methods
+
+# Main entry: desugar all static methods in source text
+fn desugar_static_methods(source: text) -> text:
+    val lines = source.split("\n")
+    var result_lines = []
+    var i = 0
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Check if this line starts an impl block
+        val impl_info = parse_impl_header(trimmed)
+        if impl_info.is_impl:
+            val type_name = impl_info.type_name
+            val trait_name = impl_info.trait_name
+            val type_params = impl_info.type_params
+            val impl_indent = get_indent(line)
+
+            # Collect the entire impl block
+            var impl_lines = [line]
+            var j = i + 1
+            while j < lines.len():
+                val next_line = lines[j]
+                # Empty lines inside the block are part of it
+                if next_line.trim() == "":
+                    impl_lines.push(next_line)
+                    j = j + 1
+                # Lines with greater indent are part of the block
+                elif get_indent(next_line) > impl_indent:
+                    impl_lines.push(next_line)
+                    j = j + 1
+                # Lines with same or less indent end the block
+                else:
+                    break
+
+            # Process the impl block: extract static methods, keep instance methods
+            val processed = process_impl_block(type_name, trait_name, type_params, impl_indent, impl_lines)
+
+            # Add hoisted static functions BEFORE the impl block
+            for hoisted_line in processed.hoisted_lines:
+                result_lines.push(hoisted_line)
+
+            # Add remaining impl block (may be empty if all methods were static)
+            if processed.remaining_lines.len() > 0:
+                # Add blank line separator if we hoisted anything
+                if processed.hoisted_lines.len() > 0:
+                    result_lines.push("")
+
+                for remaining_line in processed.remaining_lines:
+                    result_lines.push(remaining_line)
+
+            i = j
+        else:
+            result_lines.push(line)
+            i = i + 1
+
+    result_lines.join("\n")
+
+# ================================================================
+# Impl Header Parsing
+# ================================================================
+
+struct ImplInfo:
+    is_impl: bool
+    type_name: text
+    trait_name: text  # empty if inherent impl
+    type_params: text  # generic parameters like "<T>" or "<K, V>"
+
+fn parse_impl_header(trimmed: text) -> ImplInfo:
+    # Match "impl TypeName:" or "impl Trait for TypeName:"
+    if not trimmed.starts_with("impl "):
+        return ImplInfo(is_impl: false, type_name: "", trait_name: "", type_params: "")
+
+    # Remove trailing ':'
+    var header = trimmed
+    if header.ends_with(":"):
+        val hlen = header.len()
+        header = header[0:hlen - 1]
+
+    # Remove "impl " prefix
+    header = header[5:]
+    header = header.trim()
+
+    # Check for "Trait for Type" pattern
+    val for_parts = split_on_for(header)
+    if for_parts.len() == 2:
+        val trait_part = for_parts[0]
+        val trait_name = trait_part.trim()
+        val type_part = for_parts[1]
+        val type_name_with_params = type_part.trim()
+        # Extract type parameters before stripping
+        val type_params = extract_generics(type_name_with_params)
+        val type_name = strip_generics(type_name_with_params)
+        return ImplInfo(is_impl: true, type_name: type_name, trait_name: trait_name, type_params: type_params)
+
+    # Inherent impl: "impl TypeName" or "impl TypeName<T>"
+    val type_name_with_params = header.trim()
+    val type_params = extract_generics(type_name_with_params)
+    val type_name = strip_generics(type_name_with_params)
+    ImplInfo(is_impl: true, type_name: type_name, trait_name: "", type_params: type_params)
+
+# Split "Trait for Type" on first " for " occurrence
+# BUG-14 workaround: Don't chain .split().map()
+fn split_on_for(s: text) -> [text]:
+    # Find " for " in the string
+    var idx = -1
+    var ci = 0
+    val slen = s.len()
+    while ci < slen - 4:
+        val chunk = s[ci:ci + 5]
+        if chunk == " for ":
+            idx = ci
+            break
+        ci = ci + 1
+
+    if idx < 0:
+        return [s]
+
+    val before = s[0:idx]
+    val after = s[idx + 5:]
+    [before, after]
+
+# Strip generic parameters: "Foo<T, U>" -> "Foo"
+fn strip_generics(name: text) -> text:
+    var angle = -1
+    var ni = 0
+    val nlen = name.len()
+    while ni < nlen:
+        val ch = name[ni:ni + 1]
+        if ch == "<":
+            angle = ni
+            break
+        ni = ni + 1
+
+    if angle >= 0:
+        return name[0:angle]
+    name
+
+# Extract generic parameters: "Foo<T, U>" -> "<T, U>"
+fn extract_generics(name: text) -> text:
+    var angle_start = -1
+    var ni = 0
+    val nlen = name.len()
+
+    # Find opening <
+    while ni < nlen:
+        val ch = name[ni:ni + 1]
+        if ch == "<":
+            angle_start = ni
+            break
+        ni = ni + 1
+
+    if angle_start < 0:
+        return ""  # No generics
+
+    # Find closing > (handle nested <>)
+    var depth = 0
+    var ci = angle_start
+    while ci < nlen:
+        val ch = name[ci:ci + 1]
+        if ch == "<":
+            depth = depth + 1
+        elif ch == ">":
+            depth = depth - 1
+            if depth == 0:
+                # Found matching >
+                return name[angle_start:ci + 1]
+        ci = ci + 1
+
+    # No matching >, return what we have
+    name[angle_start:]
+
+# ================================================================
+# Impl Block Processing
+# ================================================================
+
+struct ProcessedImpl:
+    hoisted_lines: [text]       # Static methods as module-level functions
+    remaining_lines: [text]     # Impl block with only instance methods
+
+fn process_impl_block(type_name: text, trait_name: text, type_params: text, impl_indent: i64,
+                      impl_lines: [text]) -> ProcessedImpl:
+    # Parse the impl block into individual methods
+    val methods = extract_methods(impl_lines, impl_indent)
+
+    var hoisted = []
+    var instance_methods = []
+
+    for method in methods:
+        if method.is_static:
+            # Hoist this static method as a module-level function
+            val hoisted_lines = hoist_static_method(type_name, type_params, method, impl_indent)
+            for hl in hoisted_lines:
+                hoisted.push(hl)
+            hoisted.push("")  # blank line between hoisted functions
+        else:
+            instance_methods.push(method)
+
+    # Rebuild impl block with only instance methods
+    var remaining = []
+    if instance_methods.len() > 0:
+        # Reconstruct impl header
+        val indent_str = " ".repeat(impl_indent)
+        if trait_name != "":
+            remaining.push("{indent_str}impl {trait_name} for {type_name}:")
+        else:
+            remaining.push("{indent_str}impl {type_name}:")
+
+        for method in instance_methods:
+            for ml in method.lines:
+                remaining.push(ml)
+    # else: impl block is empty after removing static methods, drop it
+
+    ProcessedImpl(hoisted_lines: hoisted, remaining_lines: remaining)
+
+# ================================================================
+# Method Extraction
+# ================================================================
+
+struct MethodBlock:
+    name: text
+    is_static: bool
+    is_mutable: bool     # 'me' methods
+    lines: [text]         # Raw source lines including definition
+
+fn extract_methods(impl_lines: [text], impl_indent: i64) -> [MethodBlock]:
+    var methods = []
+    val method_indent = impl_indent + 4  # Methods are indented one level deeper
+
+    # Skip the impl header line
+    var i = 1
+    while i < impl_lines.len():
+        val line = impl_lines[i]
+        val trimmed = line.trim()
+
+        # Skip blank lines between methods
+        if trimmed == "":
+            i = i + 1
+            continue
+
+        # Check if this line starts a method
+        val method_info = parse_method_header(trimmed)
+        if method_info.is_method:
+            var method_lines = [line]
+            var j = i + 1
+
+            # Collect body lines (indent > method_indent)
+            while j < impl_lines.len():
+                val body_line = impl_lines[j]
+                if body_line.trim() == "":
+                    # Empty line might be inside the method body
+                    # Check if next non-empty line is still part of body
+                    var k = j + 1
+                    while k < impl_lines.len() and impl_lines[k].trim() == "":
+                        k = k + 1
+                    if k < impl_lines.len() and get_indent(impl_lines[k]) > method_indent:
+                        method_lines.push(body_line)
+                        j = j + 1
+                    else:
+                        break
+                elif get_indent(body_line) > method_indent:
+                    method_lines.push(body_line)
+                    j = j + 1
+                else:
+                    break
+
+            methods.push(MethodBlock(
+                name: method_info.name,
+                is_static: method_info.is_static,
+                is_mutable: method_info.is_mutable,
+                lines: method_lines))
+            i = j
+        else:
+            # Non-method line in impl block (e.g., comments, constants)
+            i = i + 1
+
+    methods
+
+struct MethodInfo:
+    is_method: bool
+    name: text
+    is_static: bool
+    is_mutable: bool
+
+fn parse_method_header(trimmed: text) -> MethodInfo:
+    var s = trimmed
+
+    # Check for doc comments or decorators - not a method
+    if s.starts_with("#") or s.starts_with("@") or s.starts_with("\"\"\""):
+        return MethodInfo(is_method: false, name: "", is_static: false, is_mutable: false)
+
+    var is_static = false
+    var is_mutable = false
+
+    # Strip "static " prefix
+    if s.starts_with("static "):
+        is_static = true
+        s = s[7:]
+
+    # Check for "fn " or "me " keyword
+    if s.starts_with("fn "):
+        s = s[3:]
+    elif s.starts_with("me "):
+        is_mutable = true
+        s = s[3:]
+    else:
+        return MethodInfo(is_method: false, name: "", is_static: false, is_mutable: false)
+
+    # Extract function name (everything before '(' or '<')
+    var name = ""
+    var ci = 0
+    val slen = s.len()
+    while ci < slen:
+        val ch = s[ci:ci + 1]
+        if ch == "(" or ch == "<" or ch == ":" or ch == " ":
+            break
+        name = name + ch
+        ci = ci + 1
+
+    if name == "":
+        return MethodInfo(is_method: false, name: "", is_static: false, is_mutable: false)
+
+    MethodInfo(is_method: true, name: name, is_static: is_static, is_mutable: is_mutable)
+
+# ================================================================
+# Static Method Hoisting
+# ================================================================
+
+# Transform a static method into a module-level function
+fn hoist_static_method(type_name: text, type_params: text, method: MethodBlock, impl_indent: i64) -> [text]:
+    var result = []
+    val method_indent = impl_indent + 4
+    val body_indent = method_indent + 4
+
+    # The first line is the method definition
+    val first_line = method.lines[0]
+    val first_trimmed = first_line.trim()
+
+    # Remove "static " prefix, change fn name to TypeName__name
+    var def_line = first_trimmed
+    if def_line.starts_with("static "):
+        def_line = def_line[7:]
+
+    # Replace "fn name" with "fn TypeName__name<T>" (preserving type params)
+    if def_line.starts_with("fn "):
+        val rest = def_line[3:]
+        # Insert type parameters after function name but before parameters
+        # rest looks like: "method_name(args) -> ReturnType:"
+        # We need: "TypeName__method_name<T>(args) -> ReturnType:"
+        if type_params != "":
+            # Find where to insert type params (before '(' or ':')
+            var insert_pos = -1
+            var ci = 0
+            val rlen = rest.len()
+            while ci < rlen:
+                val ch = rest[ci:ci + 1]
+                if ch == "(" or ch == "<" or ch == ":":
+                    insert_pos = ci
+                    break
+                ci = ci + 1
+
+            if insert_pos > 0:
+                val name_part = rest[0:insert_pos]
+                val rest_part = rest[insert_pos:]
+                def_line = "fn {type_name}__{name_part}{type_params}{rest_part}"
+            else:
+                def_line = "fn {type_name}__{rest}"
+        else:
+            def_line = "fn {type_name}__{rest}"
+    elif def_line.starts_with("me "):
+        # Static me methods don't make much sense, but handle them
+        val rest = def_line[3:]
+        if type_params != "":
+            def_line = "fn {type_name}__{rest}{type_params}"
+        else:
+            def_line = "fn {type_name}__{rest}"
+
+    # Add at module level (no indent)
+    result.push(def_line)
+
+    # Add body lines, de-indented to be at module level
+    var li = 1
+    while li < method.lines.len():
+        val body_line = method.lines[li]
+        if body_line.trim() == "":
+            result.push("")
+        else:
+            # De-indent: remove impl_indent + 4 (method) -> just use body indent level
+            val current_indent = get_indent(body_line)
+            val new_indent = current_indent - method_indent
+            val new_indent = if new_indent < 4: 4 else: new_indent
+            val indent_str = " ".repeat(new_indent)
+            result.push("{indent_str}{body_line.trim()}")
+        li = li + 1
+
+    result
+
+# ================================================================
+# Helpers
+# ================================================================
+
+# Get the indentation level (number of leading spaces) of a line
+fn get_indent(line: text) -> i64:
+    var count = 0
+    val llen = line.len()
+    while count < llen:
+        val ch = line[count:count + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4  # Tab = 4 spaces
+        else:
+            break
+    count

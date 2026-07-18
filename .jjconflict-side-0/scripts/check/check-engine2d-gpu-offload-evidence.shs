@@ -1,0 +1,204 @@
+#!/bin/sh
+# GPU-offload evidence gate: live GUI paint -> Engine2D Metal dispatch.
+#
+# Runs test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# (parity + WM composite + indexed_fill palette-LUT + glyph-atlas draw_text
+# edge-case stages), which renders identical GUI scenes on the CPU software
+# backend and the Metal GPU backend with ONE persistent session, asserts
+# pixel-exact equality, and requires the Metal readback source to be
+# device_readback (a cpu_mirror source = silent software fallback = FAIL).
+# The indexed_fill row is the GPU-dict pilot's buffer-backed palette LUT
+# proven bit-exact vs the CPU oracle; the text_edge row is GPU-dict use case
+# #2 (glyph atlas backing kernel_glyph_atlas_blit, the draw_text accelerator)
+# proven bit-exact on out-of-charset glyphs, scale=1, and off-framebuffer-edge
+# text (design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md
+# §3/§4, W4). The gradient_rect row is W3 (plan
+# doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md) — the plain
+# kernel_draw_gradient_rect dispatch (no GpuLut) proven bit-exact vs the
+# CPU-lane integer-lerp oracle on h=1, off-edge-clip, and alpha-channel-lerp
+# edge cases. The rounded_rect row is the 2026-07-07 CPU-vs-Metal parity fix
+# (doc/08_tracking/bug/engine2d_metal_rounded_rect_kernel_stale_outline_2026-07-07.md)
+# — kernel_draw_rounded_rect rebuilt as a FILL (band + corner-arc membership
+# test) to match the CPU-lane fill oracle (emu_draw_rounded_rect), proven
+# bit-exact on a radius==min(w,h)/2 clamp, an off-framebuffer-edge clip, and
+# an alpha-blended fill. The image row is the 2026-07-07 parity-sweep
+# coverage close — kernel_blit_image (raw clipped copy, no blend) had a real
+# Metal dispatch path since GPU-offload landed but no parity harness ever
+# exercised it; proven bit-exact on a fully on-surface blit and both
+# left/top and right/bottom off-framebuffer-edge clips.
+# On non-macOS the harness reports skip; a skip is not verified evidence and
+# must not be reported as a pass.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-self-hosted
+    for _cand in bin/simple ./bin/simple release/*/simple bin/release/*/simple build/bootstrap/stage3/simple; do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
+    done
+fi
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+fi
+
+TIMEOUT_SECS="${ENGINE2D_GPU_OFFLOAD_TIMEOUT_SECS:-600}"
+WORK_DIR="${BUILD_DIR:-build/engine2d-gpu-offload-evidence}"
+HARNESS="test/02_integration/rendering/engine2d_gpu_offload_evidence.spl"
+LOG="$WORK_DIR/offload.log"
+mkdir -p "$WORK_DIR"
+rm -f "$LOG"
+
+emit() {
+    echo "engine2d_gpu_offload_status=$STATUS"
+    echo "engine2d_gpu_offload_reason=$REASON"
+    echo "engine2d_gpu_offload_simple_bin=$SIMPLE_BIN"
+    echo "engine2d_gpu_offload_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "engine2d_gpu_offload_primitives=${PRIM_LINE:-none}"
+    echo "engine2d_gpu_offload_text=${TEXT_LINE:-none}"
+    echo "engine2d_gpu_offload_wm_composite=${WM_LINE:-none}"
+    echo "engine2d_gpu_offload_indexed_fill=${IF_LINE:-none}"
+    echo "engine2d_gpu_offload_gradient_rect=${GR_LINE:-none}"
+    echo "engine2d_gpu_offload_rounded_rect=${RR_LINE:-none}"
+    echo "engine2d_gpu_offload_image=${IMG_LINE:-none}"
+    echo "engine2d_gpu_offload_text_edge=${TE_LINE:-none}"
+    echo "engine2d_gpu_offload_provenance_wm=${PROV_WM:-none}"
+    echo "engine2d_gpu_offload_provenance_indexed_fill=${PROV_IF:-none}"
+    echo "engine2d_gpu_offload_provenance_gradient_rect=${PROV_GR:-none}"
+    echo "engine2d_gpu_offload_provenance_rounded_rect=${PROV_RR:-none}"
+    echo "engine2d_gpu_offload_provenance_image=${PROV_IMG:-none}"
+    echo "engine2d_gpu_offload_provenance_text_edge=${PROV_TE:-none}"
+    echo "engine2d_gpu_offload_policy=exact-bitmap-no-blur-no-tolerance+device-readback-required"
+    echo "engine2d_gpu_offload_harness=$HARNESS"
+    echo "engine2d_gpu_offload_log=$LOG"
+}
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    STATUS=fail
+    REASON="simple-bin-$SIMPLE_BIN_STATUS"
+    emit
+    exit 1
+fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout() {
+    if have timeout; then timeout "$TIMEOUT_SECS" "$@"; else "$@"; fi
+}
+
+# Parity + WM stages only (the perf stages are report evidence, not a gate).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=parity \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >"$LOG" 2>&1 || true
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=wm \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# GPU-dict pilot: prove indexed_fill (Metal palette LUT) bit-exact vs the CPU
+# oracle through genuine device_readback (design cpu_gpu_dual_algorithm §3/§4).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=indexed_fill \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# GPU-dict use case #2: prove glyph_atlas_blit (Metal draw_text accelerator)
+# bit-exact vs the CPU oracle on edge cases (out-of-charset glyphs, scale=1,
+# off-framebuffer-edge text) through genuine device_readback (design W4).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=text_edge \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# W3: prove draw_gradient_rect (plain kernel_draw_gradient_rect, no GpuLut)
+# bit-exact vs the CPU-lane integer-lerp oracle through genuine
+# device_readback (plan doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=gradient_rect \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# 2026-07-07 parity fix: prove draw_rounded_rect (kernel_draw_rounded_rect
+# rebuilt as a FILL) bit-exact vs the CPU-lane fill oracle through genuine
+# device_readback (see doc/08_tracking/bug/
+# engine2d_metal_rounded_rect_kernel_stale_outline_2026-07-07.md).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=rounded_rect \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# 2026-07-07 parity-sweep coverage close: prove draw_image (kernel_blit_image,
+# raw clipped copy, no blend) bit-exact vs the CPU-lane oracle through genuine
+# device_readback — a real dual-algorithm op that had a Metal dispatch path
+# but zero parity coverage until this sweep.
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=image \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+
+PRIM_LINE="$(grep -E '^primitives: ' "$LOG" | tail -n 1)"
+TEXT_LINE="$(grep -E '^text: ' "$LOG" | tail -n 1)"
+WM_LINE="$(grep -E '^wm_composite: ' "$LOG" | tail -n 1)"
+IF_LINE="$(grep -E '^indexed_fill: ' "$LOG" | tail -n 1)"
+GR_LINE="$(grep -E '^gradient_rect: ' "$LOG" | tail -n 1)"
+RR_LINE="$(grep -E '^rounded_rect: ' "$LOG" | tail -n 1)"
+IMG_LINE="$(grep -E '^image: ' "$LOG" | tail -n 1)"
+TE_LINE="$(grep -E '^text_edge: ' "$LOG" | tail -n 1)"
+PROV_WM="$(grep -E '^PROVENANCE wm_composite ' "$LOG" | tail -n 1)"
+PROV_IF="$(grep -E '^PROVENANCE indexed_fill ' "$LOG" | tail -n 1)"
+PROV_GR="$(grep -E '^PROVENANCE gradient_rect ' "$LOG" | tail -n 1)"
+PROV_RR="$(grep -E '^PROVENANCE rounded_rect ' "$LOG" | tail -n 1)"
+PROV_IMG="$(grep -E '^PROVENANCE image ' "$LOG" | tail -n 1)"
+PROV_TE="$(grep -E '^PROVENANCE text_edge ' "$LOG" | tail -n 1)"
+SKIP_LINE="$(grep -E '^GPU_OFFLOAD: skip' "$LOG" | tail -n 1)"
+
+STATUS=fail
+REASON=unknown
+if [ -n "$SKIP_LINE" ]; then
+    STATUS=skip
+    REASON=metal-unavailable
+elif echo "$PRIM_LINE" | grep -q 'MATCH' \
+    && echo "$TEXT_LINE" | grep -q 'MATCH' \
+    && echo "$WM_LINE" | grep -q 'MATCH' \
+    && echo "$WM_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_WM" | grep -q 'source=device_readback' \
+    && echo "$IF_LINE" | grep -q 'MATCH' \
+    && echo "$IF_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_IF" | grep -q 'source=device_readback' \
+    && echo "$GR_LINE" | grep -q 'MATCH' \
+    && echo "$GR_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_GR" | grep -q 'source=device_readback' \
+    && echo "$RR_LINE" | grep -q 'MATCH' \
+    && echo "$RR_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_RR" | grep -q 'source=device_readback' \
+    && echo "$IMG_LINE" | grep -q 'MATCH' \
+    && echo "$IMG_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_IMG" | grep -q 'source=device_readback' \
+    && echo "$TE_LINE" | grep -q 'MATCH' \
+    && echo "$TE_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_TE" | grep -q 'source=device_readback'; then
+    STATUS=pass
+    REASON=cpu-metal-bitexact-device-readback
+elif [ -z "$PRIM_LINE" ] && [ -z "$WM_LINE" ]; then
+    REASON=no-verdict-emitted
+else
+    REASON=pixel-divergence-or-fallback
+fi
+
+emit
+echo "engine2d-gpu-offload: $STATUS ($REASON)"
+[ "$STATUS" = "pass" ] || exit 1

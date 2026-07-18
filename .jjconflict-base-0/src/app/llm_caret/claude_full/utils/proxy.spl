@@ -1,0 +1,110 @@
+class ProxyEnv:
+    httpsProxyLower: text
+    httpsProxyUpper: text
+    httpProxyLower: text
+    httpProxyUpper: text
+    noProxyLower: text
+    noProxyUpper: text
+
+impl ProxyEnv:
+    static fn new(httpsProxyLower: text, httpsProxyUpper: text, httpProxyLower: text, httpProxyUpper: text, noProxyLower: text, noProxyUpper: text) -> ProxyEnv:
+        ProxyEnv(httpsProxyLower: httpsProxyLower, httpsProxyUpper: httpsProxyUpper, httpProxyLower: httpProxyLower, httpProxyUpper: httpProxyUpper, noProxyLower: noProxyLower, noProxyUpper: noProxyUpper)
+
+class ProxyTarget:
+    host: text
+    port: text
+
+fn getProxyUrl(env: ProxyEnv) -> Option<text>:
+    if env.httpsProxyLower != "":
+        return Some(env.httpsProxyLower)
+    if env.httpsProxyUpper != "":
+        return Some(env.httpsProxyUpper)
+    if env.httpProxyLower != "":
+        return Some(env.httpProxyLower)
+    if env.httpProxyUpper != "":
+        return Some(env.httpProxyUpper)
+    nil
+
+fn getNoProxy(env: ProxyEnv) -> Option<text>:
+    if env.noProxyLower != "":
+        return Some(env.noProxyLower)
+    if env.noProxyUpper != "":
+        return Some(env.noProxyUpper)
+    nil
+
+fn shouldBypassProxy(url: text, noProxy: Option<text>) -> bool:
+    val entries = proxyNoProxyEntries(noProxy ?? "")
+    for entry in entries:
+        if entry == "*":
+            return true
+    val target = proxyTargetFromUrl(url)
+    if target.host == "":
+        return false
+    for entry in entries:
+        if proxyNoProxyEntryMatches(target, entry):
+            return true
+    false
+
+fn proxyNoProxyEntries(rawNoProxy: text) -> [text]:
+    val normalized = rawNoProxy.replace(",", " ")
+    var entries: [text] = []
+    for rawEntry in normalized.split(" "):
+        val entry = rawEntry.trim().lower()
+        if entry != "":
+            entries.push(entry)
+    entries
+
+fn proxyTargetFromUrl(url: text) -> ProxyTarget:
+    val scheme = url.index_of("://") ?? -1
+    if scheme < 0:
+        return ProxyTarget(host: "", port: "")
+    var rest = url.substring(scheme + 3)
+    val slash = rest.index_of("/") ?? -1
+    if slash >= 0:
+        rest = rest.substring(0, slash)
+    val query = rest.index_of("?") ?? -1
+    if query >= 0:
+        rest = rest.substring(0, query)
+    val fragment = rest.index_of("#") ?? -1
+    if fragment >= 0:
+        rest = rest.substring(0, fragment)
+    val at = rest.rfind("@")
+    if at >= 0:
+        rest = rest.substring(at + 1)
+    proxyTargetFromHostPort(rest)
+
+fn proxyTargetFromHostPort(value: text) -> ProxyTarget:
+    if value.starts_with("["):
+        val close = value.index_of("]") ?? -1
+        if close < 0:
+            return ProxyTarget(host: "", port: "")
+        val host = value.substring(1, close).lower()
+        var port = ""
+        val tail = value.substring(close + 1)
+        if tail.starts_with(":"):
+            port = tail.substring(1)
+        return ProxyTarget(host: host, port: port)
+    val colon = value.rfind(":")
+    if colon >= 0 and proxyColonCount(value) == 1:
+        return ProxyTarget(host: value.substring(0, colon).lower(), port: value.substring(colon + 1))
+    ProxyTarget(host: value.lower(), port: "")
+
+fn proxyColonCount(value: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < value.len():
+        if value.substring(i, i + 1) == ":":
+            count = count + 1
+        i = i + 1
+    count
+
+fn proxyNoProxyEntryMatches(target: ProxyTarget, entry: text) -> bool:
+    var normalized = entry
+    if normalized.starts_with("."):
+        normalized = normalized.substring(1)
+    val entryTarget = proxyTargetFromHostPort(normalized)
+    if entryTarget.host == "":
+        return false
+    if entryTarget.port != "" and entryTarget.port != target.port:
+        return false
+    target.host == entryTarget.host or target.host.ends_with("." + entryTarget.host)

@@ -1,0 +1,35 @@
+# Regression spec for process_run_tuple_ambiguity_2026-07-17.
+#
+# std.io_runtime.process_run used to return a bare (text, text, i64) tuple.
+# Two unlabeled `text` fields tripped a standalone-compile-mode-only
+# ambiguity check ("anonymous multi-return tuple contains repeated field
+# types; add labels to disambiguate") the moment any entry file (e.g.
+# src/app/mcp/main_lazy_json.spl) did field access or destructuring on the
+# result. Root fix: label the tuple as (stdout: text, stderr: text,
+# exit_code: i64) in src/lib/nogc_sync_mut/io_runtime.spl. This spec pins
+# that both call styles every real caller in the repo actually uses —
+# indexed field access (.0/.1/.2) and 3-way destructuring — still work and
+# that a real subprocess run reports the right stdout/exit_code. (Named
+# field access, e.g. `result.stdout`, works under direct interpreter `run`
+# but fails under the test-runner execution path with "unknown property or
+# method 'stdout' on Tuple" — a separate, pre-existing gap unrelated to this
+# fix and not exercised by any current caller, so it is intentionally not
+# asserted here.)
+# See doc/08_tracking/bug/mcp_main_lazy_json_standalone_compile_process_run_tuple_ambiguity_2026-07-17.md
+
+use std.io_runtime.{process_run}
+
+describe "std.io_runtime.process_run labeled-tuple result":
+    it "reports stdout and exit_code via indexed field access":
+        val result = process_run("echo", ["hello_process_run"])
+        expect(result.0.contains("hello_process_run")).to_equal(true)
+        expect(result.2).to_equal(0)
+
+    it "supports 3-way destructuring assignment":
+        val (stdout, stderr, code) = process_run("echo", ["hello_destructure"])
+        expect(stdout.contains("hello_destructure")).to_equal(true)
+        expect(code).to_equal(0)
+
+    it "reports a nonzero exit_code for a failing command via indexed access":
+        val result = process_run("sh", ["-c", "exit 7"])
+        expect(result.2).to_equal(7)

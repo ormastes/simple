@@ -1,0 +1,92 @@
+use std.spec
+use std.common.encoding.sfnt.{OtFont, OtTable, parse_offset_table, validate_glyf_font_instance}
+use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYF_MOVE, parse_sfnt_glyf_outline, parse_sfnt_glyf_simple_at, rasterize_sfnt_glyf}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+fn _glyf_test_font() -> OtFont:
+    var blob: [u8] = []
+    var index: i64 = 0
+    while index < 68:
+        blob.push(0)
+        index = index + 1
+    # head: unitsPerEm=1000, long loca.
+    blob[18] = 3
+    blob[19] = 232
+    blob[50] = 0
+    blob[51] = 1
+    # maxp: one glyph.
+    blob[58] = 0
+    blob[59] = 1
+    # loca: [0, 19].
+    blob[64] = 0
+    blob[65] = 0
+    blob[66] = 0
+    blob[67] = 19
+    # One on-curve point at (2, 3).
+    val glyph: [u8] = [0, 1, 0, 2, 0, 3, 0, 2, 0, 3, 0, 0, 0, 0, 1, 0, 2, 0, 3]
+    for byte in glyph: blob.push(byte)
+    OtFont(blob: blob, tables: [
+        OtTable(tag: 1751474532, offset: 0, length: 54),
+        OtTable(tag: 1835104368, offset: 54, length: 6),
+        OtTable(tag: 1819239265, offset: 60, length: 8),
+        OtTable(tag: 1735162214, offset: 68, length: 19)
+    ])
+
+fn _glyf_raster_test_font() -> OtFont:
+    var font = _glyf_test_font()
+    val hhea = font.blob.len()
+    var index: i64 = 0
+    while index < 36:
+        font.blob.push(0)
+        index = index + 1
+    font.blob[hhea + 35] = 1
+    val hmtx = font.blob.len()
+    for byte in [3, 232, 0, 50]: font.blob.push(byte)
+    font.tables.push(OtTable(tag: 1751672161, offset: hhea as u32, length: 36))
+    font.tables.push(OtTable(tag: 1752003704, offset: hmtx as u32, length: 4))
+    font
+
+describe "neutral sfnt glyf owner":
+    it "parses commands without a Skia dependency":
+        val outline = parse_sfnt_glyf_outline(_glyf_test_font(), 0)
+        expect(outline != None).to_equal(true)
+        expect(outline.unwrap().commands[0].verb).to_equal(SFNT_GLYF_MOVE)
+        expect(parse_sfnt_glyf_simple_at(_glyf_test_font(), 68) != None).to_equal(true)
+
+    it "fails closed when raster metrics are absent":
+        expect(rasterize_sfnt_glyf(_glyf_test_font(), 0, 16)).to_equal(None)
+
+    it "rasterizes directly without a Skia dependency":
+        val bitmap = rasterize_sfnt_glyf(_glyf_raster_test_font(), 0, 16)
+        expect(bitmap != None).to_equal(true)
+        expect(bitmap.unwrap().pixels.len()).to_equal(bitmap.unwrap().width * bitmap.unwrap().height)
+
+    it "rasterizes the pinned variable font at its unchanged default instance":
+        val bytes = file_read_bytes("assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf")
+        expect(validate_glyf_font_instance(bytes, "wght=400").supported).to_be(true)
+        expect(validate_glyf_font_instance(bytes, "wght=500").reason).to_equal("unsupported-variation-instance")
+        val font = match parse_offset_table(bytes):
+            Some(value): value
+            None: fail("pinned Pixelify Sans sfnt must parse")
+        val glyph_id = sfnt_cmap_glyph_id(font, 65)
+        expect(glyph_id).to_be_greater_than(0)
+        val first = match rasterize_sfnt_glyf(font, glyph_id, 32):
+            Some(value): value
+            None: fail("pinned Pixelify Sans default glyph must rasterize")
+        val second = match rasterize_sfnt_glyf(font, glyph_id, 32):
+            Some(value): value
+            None: fail("repeat default glyph raster must succeed")
+        expect(first.width).to_be_greater_than(0)
+        expect(first.height).to_be_greater_than(0)
+        expect(first.advance).to_be_greater_than(0)
+        expect(first.pixels.len()).to_equal(first.width * first.height)
+        expect(first.width).to_equal(15)
+        expect(first.height).to_equal(21)
+        expect(first.advance).to_equal(19)
+        expect(sha256_u8_hex(first.pixels)).to_equal("63ccb93fa2c9f5007397a08b02a2fb09312c00734a476134e53f9ec17097568d")
+        expect(second.width).to_equal(first.width)
+        expect(second.height).to_equal(first.height)
+        expect(second.advance).to_equal(first.advance)
+        expect(second.pixels).to_equal(first.pixels)

@@ -1,0 +1,78 @@
+#!/bin/sh
+# simple_browser_board_gate.shs — Lane BR item 4: stage `simple-browser` as
+# /usr/bin/simple-browser, boot OVMF, run `simple-browser /index.html` over
+# SSH, and gate on a render marker + framebuffer (PPM) capture.
+#
+# STATUS: blocked. This script performs the achievable staging steps
+# (build the render entry, stage a page) and then reports the precise
+# blocker instead of faking a pass. Two independent blockers, both
+# reproduced/evidenced directly, not assumed:
+#
+#   1. No ring-3 userland target for Simple source. The SSH-exec FS-exec
+#      path (see scripts/os/ssh_clang_hello_ring3.shs, the proven precedent
+#      this script is modeled on) execs a real ELF built for the guest's
+#      ring-3 userland ABI. Every existing `--target x86_64-unknown-simpleos`
+#      invocation in this repo (build_user_hello_elf.shs,
+#      build_simpleos_llvm_image.shs, scp_retrieve_over_ssh*.shs,
+#      fhs_path_exec_gate_uefi.shs) cross-compiles *C* source with the ported
+#      clang/LLVM toolchain (build/os/llvm/cross-x86_64-unknown-simpleos).
+#      Simple's own `native-build` has only been exercised against
+#      `--target x86_64-unknown-none` (the bare-metal *kernel* entry-closure
+#      target used to boot a whole SimpleOS image, not a ring-3 userland
+#      payload loaded by fs_exec_spawn). There is no proven way, today, to
+#      compile src/os/apps/simple_browser/main.spl into an ELF the shell's
+#      `fs_exec_spawn` (os.kernel.loader.fs_exec_spawn, resolved via
+#      src/os/apps/shell/path_search.spl's /usr/bin:/sys/apps search) can
+#      load and run in ring 3. This is a repo-wide "keystone" gap (the
+#      M0-M2 ring-3 userland work tracked elsewhere), not specific to the
+#      browser — see test/03_system/app/simple_browser_in_qemu_spec.spl for
+#      the direct-kernel negative gate proving an asset-less entry fails closed.
+#
+#   2. The toolchain needed to even attempt a build is currently broken in
+#      this environment: `bin/simple test` / `bin/simple run <spec>` both
+#      fail outright (`error: semantic: unknown extern function:
+#      rt_cli_arg_count` from the seed CLI; a parse error in
+#      src/lib/common/encoding/sfnt.spl from the deployed self-hosted
+#      binary). scripts/os/build_fsexec_prod_ring3.shs already encodes this
+#      exact guard: it refuses to run without a "proven self-hosted
+#      compiler" (SIMPLE_BUILD_COMPILER) and explicitly rejects the Rust
+#      bootstrap seed. No such proven compiler was available when this gate
+#      was written.
+#
+# Once (1) is closed, replace the "blocked" exit below with a native-build
+# invocation targeting the ring-3 userland triple, stage the resulting ELF
+# at $FSEXEC_DISK:/usr/bin/simple-browser (see build_fsexec_general_ring3.shs
+# for the FAT32 staging convention) and an /index.html page, boot via
+# ssh_ring3_entry.spl (or an SSH-capable sibling), then:
+#   ssh -p "$SSH_PORT" root@127.0.0.1 /usr/bin/simple-browser /index.html
+# and gate on:
+#   - "simple_browser render pid=" (see simple_browser_render_marker)
+#   - "[simple-browser] page=/index.html non_bg_pixels=" with a positive count
+#   - retrieval of /tmp/simple_browser_fb.ppm as the framebuffer capture
+#     (scp_retrieve_over_ssh.shs shows the retrieval pattern).
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+PAGE_SRC="${SIMPLE_BROWSER_PAGE:-}"
+STAGE_DIR="build/os/simple_browser_gate"
+mkdir -p "$STAGE_DIR"
+
+if [ -n "$PAGE_SRC" ] && [ -f "$PAGE_SRC" ]; then
+    cp "$PAGE_SRC" "$STAGE_DIR/index.html"
+else
+    cat > "$STAGE_DIR/index.html" <<'HTML'
+<html><body style='margin:0;background:#ffffff'>
+<h1 style='color:#0055cc'>Simple Browser board gate</h1>
+<div style='width:20px;height:15px;background-color:#ff0000'></div>
+</body></html>
+HTML
+fi
+echo "[simple-browser-gate] staged page -> $STAGE_DIR/index.html"
+
+echo "[simple-browser-gate] BLOCKED: no proven Simple-source ring-3 userland"
+echo "[simple-browser-gate] ELF target exists in this repo (see header comment"
+echo "[simple-browser-gate] for the exact evidence). Run"
+echo "[simple-browser-gate]   bin/simple test test/03_system/app/simple_browser_in_qemu_spec.spl"
+echo "[simple-browser-gate] for the direct-kernel asset-catalog rejection gate."
+exit 2

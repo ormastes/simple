@@ -1,0 +1,396 @@
+# 2D Engine — Vulkan Backend Helpers
+#
+# Extension impl for VulkanBackend: compute dispatch methods and text fallback.
+# Free functions: push-constant packing, pixel/byte conversion, type helpers.
+#
+# Depends on: backend_vulkan.spl (VulkanBackend class)
+#             backend_vulkan_glsl.spl (shader sources, accessed via main init)
+
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
+    vulkan_sffi_destroy_descriptor_set, vulkan_sffi_begin_compute,
+    vulkan_sffi_bind_pipeline, vulkan_sffi_bind_descriptors,
+    vulkan_sffi_push_constants, vulkan_sffi_dispatch,
+    vulkan_sffi_end_compute, vulkan_sffi_discard_command,
+    vulkan_sffi_fence_submission_supported,
+    vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
+    vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
+    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
+    vulkan_sffi_read_buffer_bytes, vulkan_sffi_wait_idle,
+    vulkan_sffi_dispatch_buffer_compute_checked,
+    vulkan_sffi_quarantine_dependencies,
+    vulkan_sffi_quarantine_unsubmitted_command,
+    vulkan_sffi_reap_dependency_quarantine
+}
+
+# ============================================================================
+# Vulkan SFFI (re-declared for use in this module)
+# ============================================================================
+
+# ============================================================================
+# Push Constant Size (must match backend_vulkan.spl)
+# ============================================================================
+
+val VK_PUSH_CONSTANT_SIZE: i64 = 64
+val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
+val VK_IMAGE_COMPOSITE_COPY: i32 = 0
+val VK_IMAGE_COMPOSITE_SRC_OVER: i32 = 1
+
+# ============================================================================
+# Compute Dispatch Methods
+# ============================================================================
+
+fn vulkan_dispatch_framebuffer_compute_checked(d_framebuffer: i64, pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Engine2D compatibility name for the shared checked buffer dispatch."""
+    vulkan_sffi_dispatch_buffer_compute_checked(d_framebuffer, pipe, push_data, gx, gy, gz)
+
+fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Dispatch image copy/src-over with a non-replayable completion status.
+
+    Returns 1 for receipt-eligible completion, 2 for completed mutation whose
+    cleanup evidence is ineligible, 0 when no submission occurred, and -1 when
+    completion or dependency release is unknown.
+    """
+    if d_framebuffer <= 0 or pipe <= 0 or d_src <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
+        if d_src > 0:
+            vulkan_sffi_free_buffer(d_src)
+        return 0
+    if not vulkan_sffi_reap_dependency_quarantine():
+        vulkan_sffi_free_buffer(d_src)
+        return -1
+    if not vulkan_sffi_fence_submission_supported():
+        vulkan_sffi_free_buffer(d_src)
+        return 0
+    val desc = vulkan_sffi_create_descriptor_set(pipe)
+    if desc <= 0:
+        vulkan_sffi_free_buffer(d_src)
+        return 0
+
+    var cmd: i64 = 0
+    var ready = vulkan_sffi_bind_buffer(desc, 0, d_framebuffer)
+    if ready:
+        ready = vulkan_sffi_bind_buffer(desc, 1, d_src)
+    if ready:
+        cmd = vulkan_sffi_begin_compute()
+        ready = cmd > 0
+    if ready:
+        ready = vulkan_sffi_bind_pipeline(cmd, pipe)
+    if ready:
+        ready = vulkan_sffi_bind_descriptors(cmd, desc)
+    if ready:
+        ready = vulkan_sffi_push_constants(cmd, pipe, push_data)
+    if ready:
+        ready = vulkan_sffi_dispatch(cmd, gx, gy, gz)
+    if ready:
+        ready = vulkan_sffi_end_compute(cmd)
+
+    if not ready:
+        val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
+        if not command_released:
+            vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, d_src)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        val source_freed = vulkan_sffi_free_buffer(d_src)
+        return 0
+
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    if fence < 0:
+        # The runtime quarantines the command/fence. A successful device-idle
+        # proves their dependent descriptor/source are now safe to release.
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, d_src, 0, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        val source_freed = vulkan_sffi_free_buffer(d_src)
+        return VK_DISPATCH_COMPLETED_INELIGIBLE
+    if fence == 0:
+        # The runtime frees commands that were not submitted.
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        val source_freed = vulkan_sffi_free_buffer(d_src)
+        return 0
+
+    val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+    if not completion_waited:
+        # submit_and_wait_fence already waited indefinitely before returning a
+        # positive fence, but fail closed if its evidence cannot be observed.
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, d_src, 0, 0)
+            return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+    val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+    val source_freed = vulkan_sffi_free_buffer(d_src)
+    if completion_waited and fence_destroyed and descriptor_destroyed and source_freed:
+        return 1
+    VK_DISPATCH_COMPLETED_INELIGIBLE
+
+impl VulkanBackend:
+
+    me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.cpu_fallback_used = true
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                # Status 0 may follow a completed mutation whose cleanup
+                # evidence failed. Refresh device bytes, but never promote it.
+                self.dirty = true
+        dispatched
+
+    me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        """Render text on CPU and upload affected region to GPU.
+
+        For production use, a glyph atlas would be pre-uploaded to GPU memory
+        and sampled by a compute shader. This fallback is acceptable
+        for low-frequency text draws (UI labels, debug overlays).
+        """
+        self.cpu_fallback_used = true
+        if not self.initialized:
+            return
+        # Ensure host buffer is current
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
+            vulkan_sffi_wait_idle()
+            self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+
+        # Render glyphs into host buffer using shared glyph module
+        render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
+
+        # Upload entire host buffer back to GPU
+        val fb_size = _i64(self.w) * _i64(self.h) * 4
+        val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
+        vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
+        self.dirty = false
+
+# ============================================================================
+# Type Conversion Helpers
+# ============================================================================
+
+fn _i64(v: i32) -> i64:
+    v as i64
+
+fn _i32_to_u32(v: i32) -> u32:
+    v as u32
+
+fn _u32_to_u8(v: u32) -> u8:
+    v as u8
+
+fn _u8_to_u32(v: u8) -> u32:
+    v as u32
+
+fn _bool_to_i32(v: bool) -> i32:
+    if v: 1
+    else: 0
+
+# ============================================================================
+# Push Constant Packing
+#
+# Push constants are packed as [u8] arrays of i32 values in little-endian.
+# Each kernel's push constant layout is documented in the GLSL source.
+# ============================================================================
+
+fn _pack_i32_le(mut buf: [u8], offset: i32, value: i32) -> [u8]:
+    """Pack an i32 into buf at byte offset in little-endian order."""
+    val v = _i32_to_u32(value)
+    buf[offset] = _u32_to_u8(v & 0xFF)
+    buf[offset + 1] = _u32_to_u8((v >> 8) & 0xFF)
+    buf[offset + 2] = _u32_to_u8((v >> 16) & 0xFF)
+    buf[offset + 3] = _u32_to_u8((v >> 24) & 0xFF)
+    buf
+
+fn _pack_u32_le(mut buf: [u8], offset: i32, value: u32) -> [u8]:
+    """Pack a u32 into buf at byte offset in little-endian order."""
+    buf[offset] = _u32_to_u8(value & 0xFF)
+    buf[offset + 1] = _u32_to_u8((value >> 8) & 0xFF)
+    buf[offset + 2] = _u32_to_u8((value >> 16) & 0xFF)
+    buf[offset + 3] = _u32_to_u8((value >> 24) & 0xFF)
+    buf
+
+fn _pack_clear_pc(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Push constants for clear kernel: color, fb_w, fb_h."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_u32_le(buf, 0, color)
+    buf = _pack_i32_le(buf, 4, fb_w)
+    buf = _pack_i32_le(buf, 8, fb_h)
+    buf
+
+fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Push constants for rect kernels."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x)
+    buf = _pack_i32_le(buf, 4, y)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_u32_le(buf, 16, color)
+    buf = _pack_i32_le(buf, 20, fb_w)
+    buf = _pack_i32_le(buf, 24, fb_h)
+    buf = _pack_i32_le(buf, 28, clip_x)
+    buf = _pack_i32_le(buf, 32, clip_y)
+    buf = _pack_i32_le(buf, 36, clip_w)
+    buf = _pack_i32_le(buf, 40, clip_h)
+    buf = _pack_i32_le(buf, 44, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_line_pc(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Push constants for line kernel."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x1)
+    buf = _pack_i32_le(buf, 4, y1)
+    buf = _pack_i32_le(buf, 8, x2)
+    buf = _pack_i32_le(buf, 12, y2)
+    buf = _pack_u32_le(buf, 16, color)
+    buf = _pack_i32_le(buf, 20, thickness)
+    buf = _pack_i32_le(buf, 24, fb_w)
+    buf = _pack_i32_le(buf, 28, fb_h)
+    buf = _pack_i32_le(buf, 32, clip_x)
+    buf = _pack_i32_le(buf, 36, clip_y)
+    buf = _pack_i32_le(buf, 40, clip_w)
+    buf = _pack_i32_le(buf, 44, clip_h)
+    buf = _pack_i32_le(buf, 48, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_circle_pc(cx: i32, cy: i32, r: i32, color: u32, fb_w: i32, fb_h: i32, filled: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Push constants for circle kernels."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, cx)
+    buf = _pack_i32_le(buf, 4, cy)
+    buf = _pack_i32_le(buf, 8, r)
+    buf = _pack_u32_le(buf, 12, color)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, filled)
+    buf = _pack_i32_le(buf, 28, clip_x)
+    buf = _pack_i32_le(buf, 32, clip_y)
+    buf = _pack_i32_le(buf, 36, clip_w)
+    buf = _pack_i32_le(buf, 40, clip_h)
+    buf = _pack_i32_le(buf, 44, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_rounded_rect_pc(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Push constants for rounded rect kernel."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x)
+    buf = _pack_i32_le(buf, 4, y)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_i32_le(buf, 16, radius)
+    buf = _pack_u32_le(buf, 20, color)
+    buf = _pack_i32_le(buf, 24, fb_w)
+    buf = _pack_i32_le(buf, 28, fb_h)
+    buf = _pack_i32_le(buf, 32, clip_x)
+    buf = _pack_i32_le(buf, 36, clip_y)
+    buf = _pack_i32_le(buf, 40, clip_w)
+    buf = _pack_i32_le(buf, 44, clip_h)
+    buf = _pack_i32_le(buf, 48, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_triangle_pc(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, fb_w: i32, fb_h: i32, min_x: i32, min_y: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Push constants for triangle kernel."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x1)
+    buf = _pack_i32_le(buf, 4, y1)
+    buf = _pack_i32_le(buf, 8, x2)
+    buf = _pack_i32_le(buf, 12, y2)
+    buf = _pack_i32_le(buf, 16, x3)
+    buf = _pack_i32_le(buf, 20, y3)
+    buf = _pack_u32_le(buf, 24, color)
+    buf = _pack_i32_le(buf, 28, fb_w)
+    buf = _pack_i32_le(buf, 32, fb_h)
+    buf = _pack_i32_le(buf, 36, min_x)
+    buf = _pack_i32_le(buf, 40, min_y)
+    buf = _pack_i32_le(buf, 44, clip_x)
+    buf = _pack_i32_le(buf, 48, clip_y)
+    buf = _pack_i32_le(buf, 52, clip_w)
+    buf = _pack_i32_le(buf, 56, clip_h)
+    buf = _pack_i32_le(buf, 60, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_gradient_pc(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Push constants for gradient rect kernel."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x)
+    buf = _pack_i32_le(buf, 4, y)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_u32_le(buf, 16, top_color)
+    buf = _pack_u32_le(buf, 20, bottom_color)
+    buf = _pack_i32_le(buf, 24, fb_w)
+    buf = _pack_i32_le(buf, 28, fb_h)
+    buf = _pack_i32_le(buf, 32, clip_x)
+    buf = _pack_i32_le(buf, 36, clip_y)
+    buf = _pack_i32_le(buf, 40, clip_w)
+    buf = _pack_i32_le(buf, 44, clip_h)
+    buf = _pack_i32_le(buf, 48, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_image_composite_pc(x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32,
+                            clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32,
+                            clip_enabled: bool, opacity_milli: i32, composite_mode: i32,
+                            src_w: i32, src_h: i32) -> [u8]:
+    """Push constants for checked image copy/src-over."""
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x)
+    buf = _pack_i32_le(buf, 4, y)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, clip_x)
+    buf = _pack_i32_le(buf, 28, clip_y)
+    buf = _pack_i32_le(buf, 32, clip_w)
+    buf = _pack_i32_le(buf, 36, clip_h)
+    buf = _pack_i32_le(buf, 40, _bool_to_i32(clip_enabled))
+    buf = _pack_i32_le(buf, 44, opacity_milli)
+    buf = _pack_i32_le(buf, 48, composite_mode)
+    buf = _pack_i32_le(buf, 52, src_w)
+    buf = _pack_i32_le(buf, 56, src_h)
+    buf
+
+# ============================================================================
+# Byte / Pixel Conversion
+# ============================================================================
+
+fn _pixels_to_bytes(pixels: [u32], count: i64) -> [u8]:
+    """Convert a [u32] pixel array to [u8] little-endian byte array."""
+    var bytes: [u8] = [0u8; count * 4]
+    var i: i64 = 0
+    while i < count:
+        val p = pixels[i]
+        val off = i * 4
+        bytes[off] = _u32_to_u8(p & 0xFF)
+        bytes[off + 1] = _u32_to_u8((p >> 8) & 0xFF)
+        bytes[off + 2] = _u32_to_u8((p >> 16) & 0xFF)
+        bytes[off + 3] = _u32_to_u8((p >> 24) & 0xFF)
+        i = i + 1
+    bytes
+
+fn _bytes_to_pixels(bytes: [u8], mut pixels: [u32], count: i32):
+    """Convert a [u8] little-endian byte array back to [u32] pixel array."""
+    var i = 0
+    while i < count:
+        val off = i * 4
+        val b0 = _u8_to_u32(bytes[off])
+        val b1 = _u8_to_u32(bytes[off + 1])
+        val b2 = _u8_to_u32(bytes[off + 2])
+        val b3 = _u8_to_u32(bytes[off + 3])
+        pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        i = i + 1
+
+fn _bytes_to_pixel_array(bytes: [u8], count: i32) -> [u32]:
+    """Convert little-endian bytes into a new [u32] pixel array."""
+    var pixels: [u32] = [0u32; count]
+    var i = 0
+    while i < count:
+        val off = i * 4
+        val b0 = _u8_to_u32(bytes[off])
+        val b1 = _u8_to_u32(bytes[off + 1])
+        val b2 = _u8_to_u32(bytes[off + 2])
+        val b3 = _u8_to_u32(bytes[off + 3])
+        pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        i = i + 1
+    pixels

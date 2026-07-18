@@ -1,0 +1,106 @@
+"""
+# Parser Gap: Array-Repeat Expression + `mut` Parameters
+
+**Feature IDs:** #PARSER-GAP-A1, #PARSER-GAP-A2
+**Category:** Syntax / Self-hosted frontend parity
+**Status:** In Progress
+**Design:** doc/05_design/compiler/parsing/frontend_parser_gaps_and_lazy_closure_design.md
+**Plan:** doc/03_plan/compiler/self_hosted_frontend/full_cli_redeploy_and_browser_startup_plan.md (Track A)
+
+## Overview
+
+Closes two grammar-surface gaps the self-hosted `parse_full_frontend` rejected
+but the interpreter accepts:
+
+- **A1 — array-repeat expression `[value; count]`** (count may be non-literal).
+- **A2 — `mut` parameters** (`fn f(mut buf: [u8], ...)`).
+
+If the module-level declarations below parse, the self-hosted parser accepts the
+grammar (parse errors = file won't load at all). The `it` blocks assert the
+constructs also *evaluate* identically under the interpreter (behavior parity).
+
+## Syntax
+
+```simple
+var buf: [i32] = [0; 12]          # literal count
+var b2: [i32]  = [7; n]           # runtime count
+fn pack(mut buf: [i32], v: i32) -> i32:
+    buf[0] = v
+    buf[0]
+```
+"""
+
+use std.spec
+
+# ============================================================================
+# A1 — array-repeat expression (module-level parse coverage)
+# ============================================================================
+
+# Literal-count repeat with a typed byte value.
+fn ar_literal_u8() -> i32:
+    var buf: [i32] = [0; 12]
+    buf.len()
+
+# Runtime (non-literal) count — the case parse-time expansion cannot handle.
+fn ar_runtime_count(n: i32) -> i32:
+    var buf: [i32] = [7; n]
+    buf.len()
+
+# Repeat value read-back.
+fn ar_value_readback() -> i32:
+    var buf: [i32] = [9; 4]
+    buf[0] + buf[3]
+
+# Count as a compound expression.
+fn ar_expr_count(base: i32) -> i32:
+    var buf: [i32] = [1; base + 2]
+    buf.len()
+
+# ============================================================================
+# A2 — `mut` parameters (module-level parse coverage)
+# ============================================================================
+
+# `mut` first param.
+fn mp_pack_first(mut buf: [i32], v: i32) -> i32:
+    buf[0] = v
+    buf[0]
+
+# `mut` on a later param plus a non-mut param before it.
+fn mp_pack_middle(off: i32, mut buf: [i32], v: i32) -> i32:
+    buf[off] = v
+    buf[off]
+
+# Multiple `mut` params.
+fn mp_two_mut(mut a: [i32], mut b: [i32]) -> i32:
+    a[0] = 3
+    b[0] = 4
+    a[0] + b[0]
+
+describe "parser gap A1: array-repeat expression":
+    context "evaluation parity under the interpreter":
+        it "builds a literal-count array of the right length":
+            assert_equal(ar_literal_u8(), 12)
+
+        it "builds a runtime-count array of the right length":
+            assert_equal(ar_runtime_count(5), 5)
+
+        it "fills every slot with the repeated value":
+            assert_equal(ar_value_readback(), 18)
+
+        it "accepts a compound count expression":
+            assert_equal(ar_expr_count(3), 5)
+
+describe "parser gap A2: mut parameters":
+    context "evaluation parity under the interpreter":
+        it "accepts and mutates a leading mut param":
+            var buf: [i32] = [0; 3]
+            assert_equal(mp_pack_first(buf, 42), 42)
+
+        it "accepts a mut param after a plain param":
+            var buf: [i32] = [0; 4]
+            assert_equal(mp_pack_middle(2, buf, 8), 8)
+
+        it "accepts multiple mut params":
+            var a: [i32] = [0; 2]
+            var b: [i32] = [0; 2]
+            assert_equal(mp_two_mut(a, b), 7)

@@ -1,0 +1,77 @@
+# Attribute Parsing - Parse and Validate Attributes
+#
+# Handles parsing of layout-related attributes:
+# - @repr("C")         - C ABI compatible layout
+# - @repr("packed")    - No padding between fields
+# - @repr("transparent") - Single-field wrapper layout
+# - @packed            - Shorthand for @repr("packed")
+# - @align(N)          - Minimum alignment (must be power of 2)
+#
+# Handles parsing of volatile attributes:
+# - @volatile          - Full volatile (reads and writes)
+# - @volatile_read     - Read-only volatile
+# - @volatile_write    - Write-only volatile
+# - @nonvolatile       - Explicitly non-volatile (override)
+#
+# Returns a LayoutAttr for use in type layout computation.
+
+# bypass: parsing functions need L1 (Attribute/Expr) and L3 (LayoutAttr/TypeLayoutKind) types.
+# Split deferred — spawn_analysis.spl (L1) consumes parse_function_attrs/parse_task_attr,
+# so moving parsing fns to L2 would create a new L1→L2 violation.
+
+# Split from src/compiler/00.common/attributes.spl to keep module cohesion under the 800-line source limit.
+
+# ============================================================================
+# Named Argument Extraction Helpers
+# ============================================================================
+
+struct NamedArg:
+    """Extracted named argument from @attr(name=value)."""
+    name: text
+    value: Expr
+
+fn extract_named_args(attr: Attribute) -> {text: Expr}:
+    """Extract all named arguments (name=value) from an attribute into a map.
+
+    Returns a dictionary mapping argument names to their value expressions.
+    Empty map if no named arguments found.
+    """
+    var result = {}
+    for arg in attr.args:
+        match arg.kind:
+            case Assign(left, op, right):
+                match left.kind:
+                    case Ident(name):
+                        result[name] = right
+                    case _: ()
+            case _: ()
+    result
+
+fn get_named_string_arg(args: {text: Expr}, name: text, default: text) -> text:
+    """Extract a string named argument, returning default if not found or empty."""
+    if args.has(name):
+        val extracted = extract_string_arg(args[name])
+        if extracted.len() > 0:
+            extracted
+        else:
+            default
+    else:
+        default
+
+fn get_named_int_arg(args: {text: Expr}, name: text, default: i64) -> i64:
+    """Extract an i64 named argument, returning default if not found."""
+    if args.has(name):
+        extract_int_arg(args[name]) ?? default
+    else:
+        default
+
+fn get_named_int_array_arg(args: {text: Expr}, name: text) -> [i64]:
+    """Extract an i64 array named argument, returning empty array if not found."""
+    if args.has(name):
+        extract_int_array_arg(args[name])
+    else:
+        []
+
+export use compiler.common._Attributes.decl_attrs.{VolatileMode, VolatileAttr, parse_volatile_attrs, is_volatile, is_read_volatile, is_write_volatile, ExportAttr, DriverManifestAttrKind, DriverManifestAttr, VhdlResetPolarity, VhdlResetSynchrony, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlHardwareMetadata, parse_export_attrs, parse_driver_manifest_attrs, vhdl_clocked_metadata_default, vhdl_hardware_metadata_default, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_with_return_fields, _parse_vhdl_generic_args, _parse_vhdl_clocked_args, _vhdl_clocked_value_is_no_reset, _vhdl_clocked_domain_name_is_valid, _vhdl_reset_synchrony_name, FunctionAttr, parse_function_attrs, GpuFunctionAttrArgs, parse_gpu_function_attr_args, extract_fpga_named_or_positional_i64, TaskAttr, TaskPolicyDiagnostic}
+export use compiler.common._Attributes.layout_attrs.{TaskPolicyValidation, parse_task_attr, validate_task_policy_attr, parse_layout_attrs, parse_platform_attrs, extract_string_arg, extract_text_arg, extract_int_array_arg, extract_barriers_arg, extract_int_arg, is_power_of_two, validate_alignment}
+export NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg

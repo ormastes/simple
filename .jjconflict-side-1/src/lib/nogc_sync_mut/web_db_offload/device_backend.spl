@@ -1,0 +1,103 @@
+# codex-impl
+# Strict device backend runner boundary for production web/db GPU offload.
+
+use std.web_db_offload.contract.{GpuWdbWorkKind, GpuWdbBudget}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    GpuWdbExecutionEvidence,
+    gpu_wdb_submission_evidence_with_device_timing
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_library_empty,
+    gpu_wdb_library_with_targets,
+    gpu_wdb_submit_registered_batch_for_generation
+}
+
+struct GpuWdbDeviceBackend:
+    backend: text
+    generation: i64
+    available_targets: [text]
+    native_device_execution: bool
+    device_name: text
+
+struct GpuWdbDeviceRunResult:
+    submission: GpuWdbQueueSubmission
+    evidence: GpuWdbExecutionEvidence
+    backend: GpuWdbDeviceBackend
+    production_device_claim: bool
+    reason: text
+
+fn gpu_wdb_device_backend_unavailable() -> GpuWdbDeviceBackend:
+    GpuWdbDeviceBackend(
+        backend: "none",
+        generation: 0,
+        available_targets: [],
+        native_device_execution: false,
+        device_name: "unavailable"
+    )
+
+fn gpu_wdb_device_backend(backend: text, generation: i64, available_targets: [text],
+                          native_device_execution: bool,
+                          device_name: text) -> GpuWdbDeviceBackend:
+    GpuWdbDeviceBackend(
+        backend: backend,
+        generation: generation,
+        available_targets: available_targets,
+        native_device_execution: native_device_execution,
+        device_name: if device_name == "": "unknown-device" else: device_name
+    )
+
+fn gpu_wdb_device_backend_registry(backend: GpuWdbDeviceBackend) -> GpuWdbLibraryRegistry:
+    if not backend.native_device_execution:
+        return gpu_wdb_library_with_targets(backend.backend, backend.generation, [])
+    gpu_wdb_library_with_targets(backend.backend, backend.generation, backend.available_targets)
+
+fn gpu_wdb_device_timing_source(backend: GpuWdbDeviceBackend, source: text) -> text:
+    if source != "":
+        return source
+    "{backend.backend}:{backend.device_name}"
+
+fn gpu_wdb_run_device_batch(state: GpuWdbQueueState,
+                            backend: GpuWdbDeviceBackend,
+                            kind: GpuWdbWorkKind,
+                            total_batch_bytes: i64,
+                            item_count: i64,
+                            expected_generation: i64,
+                            cpu_fallback_available: bool,
+                            budget: GpuWdbBudget,
+                            started_us: i64,
+                            finished_us: i64,
+                            measured_device_time_us: i64,
+                            timing_source: text) -> GpuWdbDeviceRunResult:
+    val registry = gpu_wdb_device_backend_registry(backend)
+    val submission = gpu_wdb_submit_registered_batch_for_generation(
+        state,
+        registry,
+        kind,
+        total_batch_bytes,
+        item_count,
+        backend.native_device_execution,
+        expected_generation,
+        cpu_fallback_available,
+        budget
+    )
+    val timing_valid = submission.accepted and backend.native_device_execution and measured_device_time_us > 0
+    val evidence = gpu_wdb_submission_evidence_with_device_timing(
+        submission,
+        item_count,
+        if submission.accepted: submission.pinned_host_bytes else: 0,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        gpu_wdb_device_timing_source(backend, timing_source),
+        timing_valid
+    )
+    GpuWdbDeviceRunResult(
+        submission: submission,
+        evidence: evidence,
+        backend: backend,
+        production_device_claim: timing_valid,
+        reason: if timing_valid: "production-device-measured" else: submission.reason
+    )

@@ -1,0 +1,125 @@
+# Play Session Store Unit Tests
+#
+# **Feature IDs:** #PLAY-005
+# **Category:** App | Play
+# **Difficulty:** 2/5
+# **Status:** Implemented
+#
+# ## Overview
+# Validates the file-backed session store that persists PlaySession
+# records across short-lived CLI processes.
+
+use std.play.types.*
+use app.play.session_store.{
+    session_store_init, session_store_save,
+    session_store_load, session_store_delete,
+    session_store_list
+}
+
+fn _test_session() -> PlaySession:
+    PlaySession(
+        id: "test-session-1234",
+        backend: BACKEND_CDP,
+        state: STATE_READY,
+        pid: 42,
+        cwd: "/tmp/test",
+        executable_path: "/usr/bin/electron",
+        args: [".", "--no-sandbox"],
+        ws_url: "ws://127.0.0.1:9222/devtools/browser/abc",
+        http_url: "",
+        artifacts_dir: "doc/08_tracking/test/play/test-session-1234",
+        first_window_id: "target-123",
+        windows: [],
+        created_at_us: 1000000,
+        last_activity_us: 2000000,
+        stdout_path: "/tmp/stdout.log",
+        stderr_path: "/tmp/stderr.log",
+        console_log_path: "/tmp/console.log",
+        cdp_trace_path: "/tmp/cdp.log"
+    )
+
+# ============================================================================
+# Init
+# ============================================================================
+
+describe "session_store_init":
+    it "creates the store directory":
+        val result = session_store_init()
+        expect(result).to_equal(true)
+
+# ============================================================================
+# Save + Load round-trip
+# ============================================================================
+
+describe "session_store save and load":
+    it "round-trips a session":
+        session_store_init()
+        val sess = _test_session()
+        session_store_save(sess)
+        val loaded = session_store_load("test-session-1234")
+        match loaded:
+            case Some(s):
+                expect(s.id).to_equal("test-session-1234")
+                expect(s.backend).to_equal("cdp")
+                expect(s.state).to_equal("ready")
+                expect(s.pid).to_equal(42)
+                expect(s.ws_url).to_equal("ws://127.0.0.1:9222/devtools/browser/abc")
+                expect(s.first_window_id).to_equal("target-123")
+                expect(s.artifacts_dir).to_equal("doc/08_tracking/test/play/test-session-1234")
+                expect(s.args.length()).to_equal(2)
+                expect(s.args[0]).to_equal(".")
+                expect(s.args[1]).to_equal("--no-sandbox")
+            case nil:
+                expect(false).to_equal(true)
+        # Clean up
+        session_store_delete("test-session-1234")
+
+    it "returns nil for non-existent session":
+        session_store_init()
+        val loaded = session_store_load("does-not-exist-xyz")
+        match loaded:
+            case Some(_):
+                expect(false).to_equal(true)
+            case nil:
+                expect(true).to_equal(true)
+
+# ============================================================================
+# Delete
+# ============================================================================
+
+describe "session_store delete":
+    it "removes a saved session":
+        session_store_init()
+        val sess = _test_session()
+        session_store_save(sess)
+        val del = session_store_delete("test-session-1234")
+        expect(del).to_equal(true)
+        val loaded = session_store_load("test-session-1234")
+        match loaded:
+            case Some(_):
+                expect(false).to_equal(true)
+            case nil:
+                expect(true).to_equal(true)
+
+    it "returns true for already-deleted session":
+        session_store_init()
+        val del = session_store_delete("never-existed-99")
+        expect(del).to_equal(true)
+
+# ============================================================================
+# List
+# ============================================================================
+
+describe "session_store list":
+    it "lists saved sessions":
+        session_store_init()
+        val sess = _test_session()
+        session_store_save(sess)
+        val all = session_store_list()
+        var found = false
+        for s in all:
+            if s.id == "test-session-1234":
+                found = true
+        expect(found).to_equal(true)
+        # Clean up
+        session_store_delete("test-session-1234")

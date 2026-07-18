@@ -1,0 +1,209 @@
+# Driver Helpers - Utility functions and types for the compiler driver
+#
+# Extracted from driver.spl to keep file sizes manageable.
+# Contains:
+# - Extern declarations for runtime helpers
+# - Logging helper functions
+# - Source reader state
+# - CheckBackendImpl class
+# - Source collection utilities
+# - Error formatting helpers
+
+use compiler.hir.hir.*
+use compiler.backend.backend.backend_api.{Backend}
+use compiler.backend.backend_types.{BackendResult}
+use compiler.types.type_infer.*
+use compiler.borrow.borrow_check.*
+use compiler.traits.trait_coherence.{CoherenceError}
+use compiler.traits.trait_validation.{TraitError}
+use compiler.semantics.const_eval.{ConstEvalError}
+use driver_types.*
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_time_ms() -> i64
+
+# Lightweight logging helpers (module-level free functions for simplicity)
+# Phase 3: These stubs will be replaced with logger_port calls in
+# CompilerDriver methods. Kept for backward compatibility with free functions.
+fn log_debug(msg: text):
+    ()
+fn log_trace(msg: text):
+    ()
+fn log_info(msg: text):
+    ()
+fn log_warn(msg: text):
+    print "[WARN] {msg}"
+fn log_error(msg: text):
+    print "[ERROR] {msg}"
+
+# Phase 2: Module-level source reader — defaults to rt_file_read_text,
+# overridden by CompilerDriver.load_sources_impl() to use module_storage port.
+fn _default_read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+var _active_read_source: fn(text) -> text = _default_read_source
+
+# Phase 4: Track modules with fresh cached SMF (module_name -> source_path)
+var _smf_cached_modules: {text: text} = {}
+
+class CheckBackendImpl(Backend):
+    fn name() -> text:
+        "check"
+
+    fn is_allowed(op: text) -> bool:
+        # Allow everything for type checking
+        true
+
+    fn process_module(module: HirModule) -> Result<Any, text>:
+        # Just validate, don't execute
+        Ok(nil)
+
+    fn eval_expr(expr: HirExpr, env: Environment) -> Result<Value, text>:
+        # Don't evaluate, just return unit
+        Ok(Value.Unit)
+
+    fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
+        Ok(Value.Unit)
+
+# ------------------------------------------------------------------------------
+# Source loading helpers
+# ------------------------------------------------------------------------------
+
+# Directories to skip during source collection
+val _skip_dirs = ["test", "tests", "doc", "docs", "examples", "verification", "resources", "scripts", "build"]
+
+fn _driver_should_skip_dir(name: text) -> bool:
+    var i = 0
+    while i < _skip_dirs.len():
+        if name == _skip_dirs[i]:
+            return true
+        i = i + 1
+    false
+
+fn _driver_collect_sources(p: text) -> [SourceFile]:
+    """Collect source files from a path (file or directory). Returns list of SourceFile."""
+    var result: [SourceFile] = []
+    if p.ends_with(".spl"):
+        # It's a source file
+        if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
+            return result
+        if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/examples/") or p.contains("/verification/"):
+            return result
+        # Phase 2: Use module_storage port (via module-level reader)
+        val content = _active_read_source(p)
+        if content != "":
+            var mod_path = p
+            if mod_path.starts_with("src/"):
+                mod_path = mod_path.substring(4)
+            mod_path = mod_path.replace(".spl", "")
+            mod_path = mod_path.replace(".sdn", "")
+            val module_name = mod_path.replace("/", ".")
+            result = result.push(SourceFile(
+                path: p,
+                content: content,
+                module_name: module_name
+            ))
+    else:
+        # Treat as directory — depth-first traversal with pruning
+        val entries = rt_dir_list(p) ?? []
+        var idx = 0
+        while idx < entries.len():
+            val child = entries[idx]
+            val child_path = "{p}/{child}"
+            if _driver_should_skip_dir(child):
+                idx = idx + 1
+                continue
+            val child_sources = _driver_collect_sources(child_path)
+            for s in child_sources:
+                result = result.push(s)
+            idx = idx + 1
+    result
+
+fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
+    var result: [SourceFile] = []
+    for path in paths:
+        val loaded = _driver_collect_sources(path)
+        for s in loaded:
+            result = result.push(s)
+    result
+
+# ------------------------------------------------------------------------------
+# Structured Error Formatting Helpers
+# ------------------------------------------------------------------------------
+# Errors are encoded as: "line:col: message" with optional related info
+# appended as "|||RELATED:line:col:message" segments and optional help
+# appended as "|||HELP:message".
+
+fn _format_type_infer_error(err: TypeInferError) -> text:
+    """Format a TypeInferError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    # Add related information based on error variant
+    match err:
+        case TypeInferError.Mismatch(expected, found, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if found.span.line > 0 and found.span.line != s.line:
+                result = result + "|||RELATED:{found.span.line}:{found.span.col}:found type originates here"
+        case TypeInferError.OccursCheck(var_id, ty, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:recursive type reference here"
+            result = result + "|||HELP:break the recursive type by using an explicit type annotation"
+        case TypeInferError.TraitNotImplemented(ty, trait_name, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:type that needs to implement '{trait_name}'"
+            result = result + "|||HELP:add an impl block: impl {trait_name} for {ty.kind}"
+        case TypeInferError.DimensionError(dim_err):
+            for note in dim_err.notes:
+                if note.span.?:
+                    val note_span = note.span.unwrap()
+                    result = result + "|||RELATED:{note_span.line}:{note_span.col}:{note.message}"
+            if dim_err.help.?:
+                result = result + "|||HELP:{dim_err.help.unwrap()}"
+        case TypeInferError.Undefined(name, s):
+            result = result + "|||HELP:check spelling or add an import for '{name}'"
+        case TypeInferError.Other(message, s):
+            pass_do_nothing
+    result
+
+fn _format_nll_error(err: NLLError) -> text:
+    """Format an NLLError into a structured error string with related info."""
+    val primary = if err.has_primary_span: err.primary_span else: 0
+    var result = "{primary}:1: {err.message}"
+    for span_label in err.secondary_spans:
+        result = result + "|||RELATED:{span_label.span}:1:{span_label.label}"
+    if err.has_help:
+        result = result + "|||HELP:{err.help}"
+    result
+
+fn _format_coherence_error(err: CoherenceError) -> text:
+    """Format a CoherenceError into a structured error string."""
+    val msg = err.message()
+    "1:1: {msg}"
+
+fn _format_trait_error(err: TraitError) -> text:
+    """Format a TraitError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    match err:
+        case TraitError.MissingMethod(trait_, method, ty, s):
+            result = result + "|||HELP:add method '{method}' to the impl block"
+        case TraitError.UndefinedTrait(name, s):
+            result = result + "|||HELP:check spelling or add an import for the trait"
+        case TraitError.Unsatisfied(obligation):
+            if obligation.span.line > 0:
+                result = result + "|||RELATED:{obligation.span.line}:{obligation.span.col}:required by this bound"
+        case TraitError.MissingAssocType(trait_, assoc_name, ty, s):
+            result = result + "|||HELP:add 'type {assoc_name} = ...' to the impl block"
+        case TraitError.AssocTypeMismatch(trait_, assoc_name, expected, actual, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if actual.span.line > 0:
+                result = result + "|||RELATED:{actual.span.line}:{actual.span.col}:actual type found here"
+        case _:
+            pass_do_nothing
+    result

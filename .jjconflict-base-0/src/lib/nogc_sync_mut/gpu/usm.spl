@@ -1,0 +1,155 @@
+"""Unified Shared Memory (USM) — SYCL-parity allocation trio (NoGC).
+
+Wave 1 (W1.2) of
+doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026-06-13.md
+
+Three allocation kinds, mirroring SYCL malloc_device/malloc_host/malloc_shared:
+  - device: device-resident, not host-addressable
+  - host:   host-resident, device-accessible (pinned when runtime supports it)
+  - shared: migrates between host and device
+
+On GpuBackend.None_ (and whenever no native runtime binding is available)
+all three kinds are backed by deterministic host byte storage, so specs run
+without GPU hardware and behave identically across machines.
+
+TODO(W1.2-native): bind device/shared kinds to rt_cuda_malloc_managed /
+rt_cuda_host_alloc (new seed externs) and rt_oneapi_malloc_shared once the
+seed bootstrap redeploy lands; the API here is final.
+"""
+
+use std.common.gpu.device.{Gpu, GpuBackend}
+
+# Native CUDA runtime exports (same ABI as src/lib/nogc_sync_mut/cuda/sffi.spl).
+extern fn rt_cuda_available() -> i64
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+
+fn usm_cuda_available() -> i64:
+    rt_cuda_available()
+
+fn usm_cuda_mem_alloc(size: i64) -> i64:
+    rt_cuda_mem_alloc(size)
+
+fn usm_cuda_mem_free(ptr: i64) -> i64:
+    rt_cuda_mem_free(ptr)
+
+fn _is_cuda(gpu: Gpu) -> bool:
+    match gpu.backend:
+        case GpuBackend.Cuda: true
+        case GpuBackend.Vulkan: false
+        case GpuBackend.Rocm: false
+        case GpuBackend.Oneapi: false
+        case GpuBackend.Metal: false
+        case GpuBackend.None_: false
+
+# ============================================================================
+# UsmBuffer
+# ============================================================================
+
+class UsmBuffer:
+    """A USM allocation. kind is one of "device" | "host" | "shared"."""
+    kind: text
+    device_id: i64
+    ptr: i64          # native pointer when runtime-backed, 0 on host fallback
+    bytes: i64
+    storage: [u8]     # host-visible backing store on the fallback path
+    valid: bool
+
+    fn len() -> i64:
+        self.bytes
+
+    fn host_visible() -> bool:
+        """Device-kind memory is host-visible only on the fallback path."""
+        if self.kind == "device":
+            return self.ptr == 0
+        true
+
+    me write_u8(offset: i64, value: i64) -> bool:
+        if not self.valid or offset < 0 or offset >= self.bytes:
+            return false
+        if value < 0 or value > 255:
+            return false
+        if not self.host_visible():
+            return false
+        self.storage[offset] = value as u8
+        true
+
+    fn read_u8(offset: i64) -> i64:
+        """Byte at offset, or -1 when out of range / not host-visible."""
+        if not self.valid or offset < 0 or offset >= self.bytes:
+            return -1
+        if not self.host_visible():
+            return -1
+        self.storage[offset] as i64
+
+    me copy_from(src: UsmBuffer, count: i64) -> bool:
+        """Copy count bytes from src into self; fail-closed on size/visibility.
+
+        A me-method (not a free fn) so field mutation is reliable across
+        modules — see feedback_cross_module_mutation_loss.
+        """
+        if not self.valid or not src.valid:
+            return false
+        if count < 0 or count > src.bytes or count > self.bytes:
+            return false
+        if not src.host_visible() or not self.host_visible():
+            return false
+        var i = 0
+        while i < count:
+            self.storage[i] = src.storage[i]
+            i = i + 1
+        true
+
+    me free() -> bool:
+        if not self.valid:
+            return false
+        if self.ptr != 0:
+            usm_cuda_mem_free(self.ptr)
+            self.ptr = 0
+        self.valid = false
+        self.storage = []
+        self.bytes = 0
+        true
+
+# ============================================================================
+# Allocation trio
+# ============================================================================
+
+fn _usm_alloc(kind: text, device_id: i64, bytes: i64) -> UsmBuffer:
+    if bytes < 0:
+        return UsmBuffer(kind: kind, device_id: device_id, ptr: 0,
+                         bytes: 0, storage: [], valid: false)
+    var storage: [u8] = []
+    var i = 0
+    while i < bytes:
+        storage.push(0 as u8)
+        i = i + 1
+    UsmBuffer(kind: kind, device_id: device_id, ptr: 0,
+              bytes: bytes, storage: storage, valid: true)
+
+fn usm_malloc_device(gpu: Gpu, bytes: i64) -> UsmBuffer:
+    """Allocate device memory (SYCL malloc_device equivalent).
+
+    Backed by rt_cuda_mem_alloc when the device is CUDA and the runtime
+    reports availability; deterministic host fallback otherwise.
+    """
+    if bytes > 0 and _is_cuda(gpu) and usm_cuda_available() == 1:
+        val ptr = usm_cuda_mem_alloc(bytes)
+        if ptr != 0:
+            return UsmBuffer(kind: "device", device_id: gpu.device_id, ptr: ptr, bytes: bytes, storage: [], valid: true)
+    _usm_alloc("device", gpu.device_id, bytes)
+
+fn usm_malloc_host(bytes: i64) -> UsmBuffer:
+    """Allocate host memory accessible to devices (SYCL malloc_host)."""
+    _usm_alloc("host", -1, bytes)
+
+fn usm_malloc_shared(gpu: Gpu, bytes: i64) -> UsmBuffer:
+    """Allocate migrating shared memory (SYCL malloc_shared equivalent)."""
+    _usm_alloc("shared", gpu.device_id, bytes)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export UsmBuffer
+export usm_malloc_device, usm_malloc_host, usm_malloc_shared

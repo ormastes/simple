@@ -1,0 +1,193 @@
+"""PERCENTOF, GROUPBY, PIVOTBY aggregation functions spec.
+
+PERCENTOF(data_subset, data_all) — numeric path: SUM(subset)/SUM(all).
+GROUPBY(row_fields, values, function_name) — array path: groups by key, aggregates per group.
+PIVOTBY(row_fields, col_fields, values, function_name) — array path: pivot table with totals.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _disp(sh: Sheet, ref: text) -> text:
+    """Display text of one cell."""
+    cell_display_text(sh.get_cell(ref))
+
+describe "PERCENTOF numeric aggregation":
+    it "PERCENTOF(subset, all) divides sum of subset by sum of all":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "10")
+        sh.set_value("B2", "20")
+        sh.set_value("B3", "30")
+        sh.set_value("B4", "40")
+        sh.set_value("B5", "50")
+        sh.set_value("B6", "60")
+        sh.set_value("A1", "=PERCENTOF(B1:B3, B1:B6)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_start_with("0.285714")
+
+    it "PERCENTOF with all equal values returns 1.0":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "5")
+        sh.set_value("B2", "5")
+        sh.set_value("B3", "5")
+        sh.set_value("A1", "=PERCENTOF(B1:B3, B1:B3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+
+    it "PERCENTOF with zero denominator returns #ERR":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "0")
+        sh.set_value("B2", "0")
+        sh.set_value("A1", "=PERCENTOF(B1:B2, B1:B2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_contain("#ERR")
+
+describe "GROUPBY array aggregation":
+    it "GROUPBY with SUM groups by key and sums values":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("A2", "West")
+        sh.set_value("A3", "East")
+        sh.set_value("A4", "West")
+        sh.set_value("A5", "East")
+        sh.set_value("A6", "West")
+        sh.set_value("B1", "10")
+        sh.set_value("B2", "20")
+        sh.set_value("B3", "30")
+        sh.set_value("B4", "40")
+        sh.set_value("B5", "50")
+        sh.set_value("B6", "60")
+        sh.set_value("D1", "=GROUPBY(A1:A6, B1:B6, SUM)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("East")
+        expect(_disp(sh, "E1")).to_equal("90")
+        expect(_disp(sh, "D2")).to_equal("West")
+        expect(_disp(sh, "E2")).to_equal("120")
+        expect(_disp(sh, "D3")).to_equal("Total")
+        expect(_disp(sh, "E3")).to_equal("210")
+
+    it "GROUPBY with AVERAGE computes mean per group":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("A2", "West")
+        sh.set_value("A3", "East")
+        sh.set_value("A4", "West")
+        sh.set_value("A5", "East")
+        sh.set_value("A6", "West")
+        sh.set_value("B1", "10")
+        sh.set_value("B2", "20")
+        sh.set_value("B3", "30")
+        sh.set_value("B4", "40")
+        sh.set_value("B5", "50")
+        sh.set_value("B6", "60")
+        sh.set_value("D1", "=GROUPBY(A1:A6, B1:B6, AVERAGE)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("East")
+        expect(_disp(sh, "E1")).to_equal("30")
+        expect(_disp(sh, "D2")).to_equal("West")
+        expect(_disp(sh, "E2")).to_equal("40")
+        expect(_disp(sh, "D3")).to_equal("Total")
+        expect(_disp(sh, "E3")).to_equal("35")
+
+    it "GROUPBY with COUNT counts rows per group":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("A2", "West")
+        sh.set_value("A3", "East")
+        sh.set_value("A4", "West")
+        sh.set_value("A5", "East")
+        sh.set_value("A6", "West")
+        sh.set_value("B1", "10")
+        sh.set_value("B2", "20")
+        sh.set_value("B3", "30")
+        sh.set_value("B4", "40")
+        sh.set_value("B5", "50")
+        sh.set_value("B6", "60")
+        sh.set_value("D1", "=GROUPBY(A1:A6, B1:B6, COUNT)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("East")
+        expect(_disp(sh, "E1")).to_equal("3")
+        expect(_disp(sh, "D2")).to_equal("West")
+        expect(_disp(sh, "E2")).to_equal("3")
+        expect(_disp(sh, "D3")).to_equal("Total")
+        expect(_disp(sh, "E3")).to_equal("6")
+
+    it "GROUPBY with mismatched range heights returns #ERR":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("A2", "West")
+        sh.set_value("B1", "10")
+        sh.set_value("D1", "=GROUPBY(A1:A2, B1:B3, SUM)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+    it "GROUPBY with unknown function returns #ERR":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("B1", "10")
+        sh.set_value("D1", "=GROUPBY(A1:A1, B1:B1, FOO)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+describe "PIVOTBY array pivot table":
+    it "PIVOTBY with SUM creates a pivot grid with row/col totals":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("A2", "West")
+        sh.set_value("A3", "East")
+        sh.set_value("A4", "West")
+        sh.set_value("A5", "East")
+        sh.set_value("A6", "West")
+        sh.set_value("B1", "A")
+        sh.set_value("B2", "B")
+        sh.set_value("B3", "A")
+        sh.set_value("B4", "B")
+        sh.set_value("B5", "A")
+        sh.set_value("B6", "B")
+        sh.set_value("C1", "10")
+        sh.set_value("C2", "20")
+        sh.set_value("C3", "30")
+        sh.set_value("C4", "40")
+        sh.set_value("C5", "50")
+        sh.set_value("C6", "60")
+        sh.set_value("E1", "=PIVOTBY(A1:A6, B1:B6, C1:C6, SUM)")
+        sh = recalculate_formula_cells(sh)
+        # Design grid (no header row): a formula origin cell cannot cache an
+        # empty display (empty cached_display falls back to raw formula text),
+        # so the spill starts at the first row key. First-appearance order.
+        expect(_disp(sh, "E1")).to_equal("East")
+        expect(_disp(sh, "F1")).to_equal("90")
+        expect(_disp(sh, "G1")).to_equal("0")
+        expect(_disp(sh, "H1")).to_equal("90")
+        expect(_disp(sh, "E2")).to_equal("West")
+        expect(_disp(sh, "F2")).to_equal("0")
+        expect(_disp(sh, "G2")).to_equal("120")
+        expect(_disp(sh, "H2")).to_equal("120")
+        expect(_disp(sh, "E3")).to_equal("Total")
+        expect(_disp(sh, "F3")).to_equal("90")
+        expect(_disp(sh, "G3")).to_equal("120")
+        expect(_disp(sh, "H3")).to_equal("210")
+
+    it "PIVOTBY with mismatched range heights returns #ERR":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "East")
+        sh.set_value("A2", "West")
+        sh.set_value("B1", "A")
+        sh.set_value("C1", "10")
+        sh.set_value("E1", "=PIVOTBY(A1:A2, B1:B1, C1:C2, SUM)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "E1")).to_contain("#ERR")
+
+    it "PERCENTOF result with small percent":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "1")
+        sh.set_value("B2", "1")
+        sh.set_value("B3", "1")
+        sh.set_value("B4", "1")
+        sh.set_value("B5", "1")
+        sh.set_value("B6", "1")
+        sh.set_value("A1", "=PERCENTOF(B1:B1, B1:B6)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_start_with("0.166666")

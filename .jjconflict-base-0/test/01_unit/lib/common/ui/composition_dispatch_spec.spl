@@ -1,0 +1,98 @@
+# @cover src/lib/common/ui/event.spl 80%
+"""
+# IME Composition Dispatch Spec
+
+## Overview
+
+`UIEvent.CompositionUpdate` / `CompositionCommit` are the IME (input-method
+editor) composition events used for CJK/accented text input, where a single
+committed character can be more than one Unicode codepoint and the host
+shows an in-progress "preedit" string before the user confirms it. This
+spec drives the full sequence through the public
+`process_event(state, event) -> state` reducer, mirroring the DragStart/
+DragDrop dispatch spec's style: `CompositionUpdate` must show the preedit
+without mutating the focused input's committed `value`/`caret`, and
+`CompositionCommit` must insert the committed STRING at the caret
+(char-indexed, not byte-indexed, so multi-byte UTF-8 like "你好" is not
+corrupted) and clear the preedit.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** N/A
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+A tree with a single focused text input: an update shows a preedit without
+touching value/caret, then a commit of "你好" inserts both characters at the
+caret and clears the preedit.
+"""
+
+use std.spec.*
+use common.ui.widget.{WidgetNode, UIEvent, UIState}
+use common.ui.builder.{column, text_input, build_tree}
+use common.ui.event.{process_event}
+
+fn composition_state(p: text) -> UIState:
+    val root = column("{p}_root", [
+        text_input("{p}_field", "type here")
+    ])
+    var state = UIState.new(build_tree(root))
+    state = process_event(state, UIEvent.FocusEvent(target_id: "{p}_field", kind: "focus"))
+    state
+
+describe "IME composition — process_event reducer path":
+
+    it "CompositionUpdate sets a preedit prop without touching value or caret":
+        step("Focus the input, then send an in-progress composition update")
+        var state = composition_state("upd")
+        WidgetNode(id: "upd_field").set_prop("value", "abc")
+        WidgetNode(id: "upd_field").set_prop("caret", "3")
+        state = process_event(state, UIEvent.CompositionUpdate(text: "n"))
+
+        expect(WidgetNode(id: "upd_field").get_prop("preedit")).to_equal("n")
+        expect(WidgetNode(id: "upd_field").get_prop("value")).to_equal("abc")
+        expect(WidgetNode(id: "upd_field").get_prop("caret")).to_equal("3")
+
+    it "CompositionCommit inserts a multi-char CJK string at the caret and clears preedit":
+        step("Focus the input, show a preedit, then commit 你好 at caret position 0")
+        var state = composition_state("commit")
+        WidgetNode(id: "commit_field").set_prop("value", "")
+        state = process_event(state, UIEvent.CompositionUpdate(text: "n"))
+        state = process_event(state, UIEvent.CompositionCommit(text: "你好"))
+
+        step("Both CJK characters landed (char-indexed, not byte-corrupted)")
+        expect(WidgetNode(id: "commit_field").get_prop("value")).to_equal("你好")
+        expect(WidgetNode(id: "commit_field").get_prop("caret")).to_equal("2")
+        expect(WidgetNode(id: "commit_field").get_prop("preedit")).to_equal("")
+
+    it "CompositionCommit inserts at the caret, preserving text on both sides":
+        step("Commit into the middle of existing text")
+        var state = composition_state("mid")
+        WidgetNode(id: "mid_field").set_prop("value", "ac")
+        WidgetNode(id: "mid_field").set_prop("caret", "1")
+        state = process_event(state, UIEvent.CompositionCommit(text: "b"))
+
+        expect(WidgetNode(id: "mid_field").get_prop("value")).to_equal("abc")
+        expect(WidgetNode(id: "mid_field").get_prop("caret")).to_equal("2")
+
+    it "CompositionUpdate/Commit on no focused widget is a no-op":
+        step("No FocusEvent sent — focused_id is empty")
+        val root = column("nofocus_root", [text_input("nofocus_field", "x")])
+        var state = UIState.new(build_tree(root))
+        state = process_event(state, UIEvent.CompositionUpdate(text: "n"))
+        state = process_event(state, UIEvent.CompositionCommit(text: "n"))
+
+        expect(WidgetNode(id: "nofocus_field").get_prop("preedit")).to_equal("")
+        expect(WidgetNode(id: "nofocus_field").get_prop("value")).to_equal("")

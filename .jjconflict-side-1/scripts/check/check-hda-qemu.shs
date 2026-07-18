@@ -1,0 +1,43 @@
+#!/bin/sh
+# check-hda-qemu.shs — QEMU intel-hda lane for the SimpleOS HDA driver
+#
+# GATE STATUS: BLOCKED. Two independent blockers, both must clear before
+# this script can produce a real pass/fail:
+#
+#   1. Toolchain redeploy in flight (doc/03_plan/cert/redeploy_selfhost_plan.md)
+#      — building a bootable SimpleOS kernel image needs the self-hosted
+#      `bin/simple`, which is currently the bootstrap-seed-only Rust binary
+#      (verified this session: `bin/simple test` fails with "unknown extern
+#      function: rt_cli_arg_count" — a pre-existing gap unrelated to audio).
+#   2. No kernel boot entry calls HdaController.initialize()/handle_irq()
+#      yet. src/os/drivers/audio/hda_controller.spl now has a real,
+#      unit-tested (test/01_unit/os/drivers/audio/hda_controller_spec.spl)
+#      MMIO register-write sequence, but nothing in the kernel boot path
+#      constructs an HdaController from a PCI-discovered BAR0/IRQ and calls
+#      it yet — that PCI-enumeration-to-driver-instantiation wiring is a
+#      follow-up, tracked alongside this script rather than faked here.
+#
+# This script intentionally FAILS CLOSED (exit 1, no fake "ok") until both
+# are resolved, rather than reporting a pass it cannot back up. When ready,
+# the intended flow is:
+#
+#   qemu-system-x86_64 ... -device intel-hda -device hda-output -audiodev none \
+#       -serial file:$LOG
+#
+# and this script should grep $LOG for the markers the boot entry point
+# will print: "hda_init ok" (from HdaController.initialize(), proves
+# CORB/RIRB/interrupt/codec bring-up) and "hda_irq ok" appearing at least
+# once (from handle_irq(), proves the period-IRQ path is live) — see
+# hda_controller.spl's `initialize()`/`handle_irq()` for the exact strings.
+# Audio need not be audible (`-audiodev none`); the DMA/IRQ proof is the gate.
+
+set -eu
+
+echo "check-hda-qemu: GATE BLOCKED"
+echo "  - blocker 1: toolchain redeploy in flight (self-hosted bin/simple unavailable for a kernel build)"
+echo "  - blocker 2: no kernel boot entry wires HdaController.initialize()/handle_irq() into the boot path yet"
+echo "  - driver software correctness is proven at the unit level instead:"
+echo "      bin/simple run test/01_unit/os/drivers/audio/hda_controller_spec.spl"
+echo "    (8/8 passing as of this change, against os.kernel.boot.mmio's test-mode register model)"
+echo "check-hda-qemu: exiting 1 (fail-closed — not a real QEMU pass)"
+exit 1

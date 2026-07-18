@@ -1,0 +1,83 @@
+# GC-Aware Allocator
+#
+# Under GC mode, memory allocation uses GcHeap instead of manual malloc/free.
+# Provides the same Allocator trait interface but backed by the GC runtime.
+# Deallocation is a no-op — GC handles reclamation automatically.
+
+use std.gc.{GcHeap, GcStats, GcPtr}
+
+# ============================================================================
+# GcAllocator - GC-Backed Allocator
+# ============================================================================
+
+class GcAllocator:
+    """Allocator backed by the garbage collector.
+
+    All allocations go through GcHeap. Deallocation is a no-op since
+    the GC's mark-and-sweep collector handles reclamation.
+
+    Characteristics:
+    - No manual free required
+    - Automatic memory reclamation via GC
+    - Tri-color marking with generational collection
+    - Thread-safe (GcHeap handles synchronization)
+    """
+    heap: GcHeap
+
+    static fn new() -> GcAllocator:
+        """Create GC allocator with default heap."""
+        val heap = GcHeap.new()
+        GcAllocator(heap: heap)
+
+    static fn with_heap(heap: GcHeap) -> GcAllocator:
+        """Create GC allocator with existing heap."""
+        GcAllocator(heap: heap)
+
+fn gc_allocator_new() -> GcAllocator:
+    """Convenience: create a default GC allocator."""
+    GcAllocator.new()
+
+fn gc_allocate(alloc: GcAllocator, size: usize, align: usize) -> [u8]?:
+    """Allocate via GC heap.
+
+    Args:
+        alloc: GC allocator
+        size: Bytes to allocate
+        align: Alignment (power of 2)
+
+    Returns:
+        Some(ptr) on success, nil on OOM
+    """
+    val ptr = alloc.heap.allocate(size)
+    if ptr == nil:
+        nil
+    else:
+        Some(ptr)
+
+fn gc_deallocate(alloc: GcAllocator, ptr: [u8], size: usize, align: usize):
+    """No-op: GC handles deallocation automatically.
+
+    Kept for Allocator trait compatibility.
+    """
+    # No-op — GC reclaims memory during collection
+
+fn gc_reallocate(alloc: GcAllocator, ptr: [u8], old_size: usize, new_size: usize, align: usize) -> [u8]?:
+    """Reallocate via GC heap.
+
+    Allocates new block, copies data, old block is reclaimed by GC.
+    """
+    val new_ptr = gc_allocate(alloc, new_size, align)
+    if new_ptr == nil:
+        return nil
+    # Copy old data
+    val copy_size = if old_size < new_size: old_size else: new_size
+    var i: usize = 0
+    while i < copy_size:
+        new_ptr[i] = ptr[i]
+        i = i + 1
+    Some(new_ptr)
+
+fn gc_total_allocated(alloc: GcAllocator) -> usize:
+    """Get total bytes allocated through this GC allocator."""
+    val stats = alloc.heap.stats()
+    stats.total_allocated

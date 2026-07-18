@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+SIMPLE_BINARY=${SIMPLE_BINARY:-"$repo_root/bin/simple"}
+case "$SIMPLE_BINARY" in
+    /*) ;;
+    *) SIMPLE_BINARY="$repo_root/$SIMPLE_BINARY" ;;
+esac
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "essential_tools_binary=false"
+    echo "error=missing_simple_binary:$SIMPLE_BINARY"
+    exit 1
+fi
+
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT INT TERM
+
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 5s 60s "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout -k 5s 60s "$@"
+    else
+        "$@"
+    fi
+}
+
+run_probe() {
+    label=$1
+    expected_rc=$2
+    shift 2
+    set +e
+    (cd "$work_dir" && run_with_timeout env SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 "$@") >"$work_dir/$label.out" 2>&1
+    rc=$?
+    set -e
+    echo "${label}_rc=$rc"
+    if [ "$rc" -ne "$expected_rc" ]; then
+        echo "error=${label}_unexpected_exit"
+        sed -n '1,120p' "$work_dir/$label.out"
+        exit 1
+    fi
+}
+
+# Test runner: prove a real pass, assertion failure, and zero-example refusal.
+run_probe test_runner_pass 0 "$SIMPLE_BINARY" test "$repo_root/test/fixtures/pure_simple_tooling/sibling_describe_green_fixture.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
+grep -Fq 'Results: 2 total, 2 passed, 0 failed' "$work_dir/test_runner_pass.out" || { echo 'error=test_runner_pass_summary_missing'; exit 1; }
+grep -Fq 'PASS' "$work_dir/test_runner_pass.out" || { echo 'error=test_runner_pass_marker_missing'; exit 1; }
+
+run_probe list_constructor 0 "$SIMPLE_BINARY" test "$repo_root/test/01_unit/lib/core/list_constructor_hardening_spec.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
+grep -Fq 'Results: 1 total, 1 passed, 0 failed' "$work_dir/list_constructor.out" || { echo 'error=list_constructor_summary_missing'; exit 1; }
+echo 'essential_list_constructor_smoke=true'
+
+run_probe test_runner_fail 1 "$SIMPLE_BINARY" test "$repo_root/scripts/check/fixtures/font_evidence_runner_fail_spec.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
+grep -Fq 'Results: 1 total, 0 passed, 1 failed' "$work_dir/test_runner_fail.out" || { echo 'error=test_runner_failure_summary_missing'; exit 1; }
+grep -Fq 'FAIL' "$work_dir/test_runner_fail.out" || { echo 'error=test_runner_failure_marker_missing'; exit 1; }
+
+run_probe test_runner_empty 1 "$SIMPLE_BINARY" test "$repo_root/scripts/check/fixtures/font_evidence_runner_empty_spec.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
+grep -Eq 'no executed BDD examples|--assert-ran' "$work_dir/test_runner_empty.out" || { echo 'error=test_runner_empty_refusal_missing'; exit 1; }
+echo 'essential_test_runner_smoke=true'
+
+# Lint: prove a clean file and one real deny rule, not help or missing-file paths.
+run_probe lint_clean 0 "$SIMPLE_BINARY" lint "$repo_root/test/fixtures/pure_simple_tooling/clean.spl"
+grep -Fq 'Lint passed: all files clean' "$work_dir/lint_clean.out" || { echo 'error=lint_clean_marker_missing'; exit 1; }
+
+cat >"$work_dir/lint_deny.spl" <<'EOF'
+fn unfinished(value: i64) -> i64:
+    pass_todo("bootstrap lint sanity intentionally remains incomplete")
+EOF
+run_probe lint_deny 1 "$SIMPLE_BINARY" lint "$work_dir/lint_deny.spl"
+grep -Fq 'STUB003' "$work_dir/lint_deny.out" || { echo 'error=lint_deny_rule_missing'; exit 1; }
+grep -Fq 'Lint failed in 1 file(s)' "$work_dir/lint_deny.out" || { echo 'error=lint_deny_summary_missing'; exit 1; }
+echo 'essential_lint_smoke=true'
+
+# Duplicate checker: execute from outside the repo so raw-source CLI fallback fails.
+mkdir -p "$work_dir/duplicates"
+printf '%s\n' 'fn clean_value(input: i64) -> i64:' '    val adjusted = input + 7' '    adjusted * 3' >"$work_dir/clean.spl"
+printf '%s\n' 'fn repeated_value(input: i64) -> i64:' '    val alpha = input + 10' '    val beta = alpha * 2' '    val gamma = beta - 3' '    gamma + 1' >"$work_dir/duplicates/a.spl"
+cp "$work_dir/duplicates/a.spl" "$work_dir/duplicates/b.spl"
+
+run_probe duplicate_clean 0 "$SIMPLE_BINARY" duplicate-check "$work_dir/clean.spl" --mode token --min-lines 5 --min-tokens 8 --format json
+grep -Fq '"mode": "token"' "$work_dir/duplicate_clean.out" || { echo 'error=duplicate_clean_mode_missing'; exit 1; }
+grep -Fq '"total_groups": 0' "$work_dir/duplicate_clean.out" || { echo 'error=duplicate_clean_summary_missing'; exit 1; }
+
+run_probe duplicate_found 1 "$SIMPLE_BINARY" duplicate-check "$work_dir/duplicates" --mode token --min-lines 5 --min-tokens 8 --format json
+grep -Fq '"mode": "token"' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_mode_missing'; exit 1; }
+grep -Fq '"total_groups": 1' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_group_count_wrong'; exit 1; }
+grep -Fq '"total_occurrences": 2' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_occurrence_count_wrong'; exit 1; }
+grep -Fq '"total_lines": 10' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_line_count_wrong'; exit 1; }
+echo 'essential_duplicate_checker_smoke=true'
+
+echo 'bootstrap_essential_tools_smoke=true'

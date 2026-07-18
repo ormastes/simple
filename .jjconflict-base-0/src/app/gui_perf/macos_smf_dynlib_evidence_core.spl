@@ -1,0 +1,315 @@
+# macOS arm64 SMF/dynlib evidence runner helpers.
+
+class GuiMacSmfDynlibEvidencePaths:
+    simple_bin: text
+    build_dir: text
+    dynlib_path: text
+    smf_path: text
+    wrapper_path: text
+    probe_path: text
+
+fn gui_mac_smf_dynlib_is_arm64(arch: text) -> bool:
+    val normalized = arch.trim().lower()
+    normalized == "arm64" or normalized == "aarch64"
+
+fn gui_mac_smf_dynlib_host_supported(host_os: text, arch: text) -> bool:
+    host_os == "macos" and gui_mac_smf_dynlib_is_arm64(arch)
+
+fn gui_mac_smf_dynlib_default_paths(simple_bin: text) -> GuiMacSmfDynlibEvidencePaths:
+    GuiMacSmfDynlibEvidencePaths(
+        simple_bin: simple_bin,
+        build_dir: "build/gui",
+        dynlib_path: "build/gui/libpure_gui_hot.dylib",
+        smf_path: "build/gui/pure_gui_hot.smf",
+        wrapper_path: "build/gui/smf_wrap_host_dynlib",
+        probe_path: "build/gui/smf_dynlib_probe"
+    )
+
+fn gui_mac_smf_dynlib_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn gui_mac_smf_dynlib_env_assign(name: text, value: text) -> text:
+    name + "=" + gui_mac_smf_dynlib_shell_quote(value)
+
+fn gui_mac_smf_dynlib_evidence_token(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return "unknown"
+    val no_spaces = trimmed.replace(" ", "_")
+    val no_tabs = no_spaces.replace("\t", "_")
+    no_tabs.replace("\n", "_")
+
+fn gui_mac_smf_dynlib_compile_dynlib_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o " +
+    gui_mac_smf_dynlib_shell_quote(paths.dynlib_path)
+
+fn gui_mac_smf_dynlib_compile_wrapper_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " compile src/app/gui_perf/smf_wrap_host_dynlib.spl --native --strip -o " +
+    gui_mac_smf_dynlib_shell_quote(paths.wrapper_path)
+
+fn gui_mac_smf_dynlib_compile_probe_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " compile src/app/gui_perf/smf_dynlib_probe.spl --native --strip -o " +
+    gui_mac_smf_dynlib_shell_quote(paths.probe_path)
+
+fn gui_mac_smf_dynlib_wrap_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARCH", "arm64") + " " +
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_INPUT", paths.dynlib_path) + " " +
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_SMF_OUTPUT", paths.smf_path) + " " +
+    gui_mac_smf_dynlib_shell_quote(paths.wrapper_path)
+
+fn gui_mac_smf_dynlib_probe_command_with_host(paths: GuiMacSmfDynlibEvidencePaths, host_profile: text, host_cpu: text) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARTIFACT", paths.smf_path) + " " +
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_HOST_PROFILE", host_profile) + " " +
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_HOST_CPU", host_cpu) + " " +
+    gui_mac_smf_dynlib_shell_quote(paths.probe_path)
+
+fn gui_mac_smf_dynlib_probe_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_probe_command_with_host(paths, "macos-arm64", "unknown")
+
+fn gui_mac_smf_dynlib_qemu_parity_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARTIFACT", paths.smf_path) + " " +
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " run src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl"
+
+fn gui_mac_smf_dynlib_qemu_loader_parity_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARTIFACT", paths.smf_path) + " " +
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " run src/app/gui_perf/qemu_arm64_smf_loader_parity_evidence.spl"
+
+fn gui_mac_smf_dynlib_contract_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARTIFACT", paths.smf_path) + " " +
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " run src/app/gui_perf/smf_artifact_contract.spl"
+
+fn gui_mac_smf_dynlib_row_kind(row: text, kind: text) -> bool:
+    val parts = row.split(" ")
+    if parts.len() == 0:
+        return false
+    parts[0] == kind
+
+fn gui_mac_smf_dynlib_select_stdout_row(stdout: text, kind: text) -> text:
+    val lines = stdout.split("\n")
+    var selected = ""
+    var count = 0
+    var i = 0
+    while i < lines.len():
+        val row = lines[i].trim()
+        if gui_mac_smf_dynlib_row_kind(row, kind):
+            selected = row
+            count = count + 1
+        i = i + 1
+    if count == 1:
+        return selected
+    ""
+
+fn gui_mac_smf_dynlib_row_key_count(row: text, key: text) -> i32:
+    val prefix = key + "="
+    val parts = row.split(" ")
+    var count = 0
+    var i = 0
+    while i < parts.len():
+        if parts[i].starts_with(prefix):
+            count = count + 1
+        i = i + 1
+    count
+
+fn gui_mac_smf_dynlib_row_value(row: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = row.split(" ")
+    var i = 0
+    while i < parts.len():
+        if parts[i].starts_with(prefix):
+            return parts[i].replace(prefix, "")
+        i = i + 1
+    ""
+
+fn gui_mac_smf_dynlib_row_has(row: text, key: text, value: text) -> bool:
+    gui_mac_smf_dynlib_row_key_count(row, key) == 1 and gui_mac_smf_dynlib_row_value(row, key) == value
+
+fn gui_mac_smf_dynlib_row_has_unsigned_decimal(row: text, key: text) -> bool:
+    gui_mac_smf_dynlib_row_key_count(row, key) == 1 and gui_mac_smf_dynlib_unsigned_decimal_token(gui_mac_smf_dynlib_row_value(row, key))
+
+fn gui_mac_smf_dynlib_row_unsigned_i64(row: text, key: text) -> i64:
+    if not gui_mac_smf_dynlib_row_has_unsigned_decimal(row, key):
+        return -1
+    gui_mac_smf_dynlib_row_value(row, key).to_int() ?? -1
+
+fn gui_mac_smf_dynlib_accepts_contract_row(row: text) -> bool:
+    val sha256 = gui_mac_smf_dynlib_row_value(row, "sha256")
+    gui_mac_smf_dynlib_row_kind(row, "GUI_SMF_ARTIFACT_CONTRACT") and
+    gui_mac_smf_dynlib_row_has(row, "status", "pass") and
+    gui_mac_smf_dynlib_row_has(row, "artifact", "build/gui/pure_gui_hot.smf") and
+    gui_mac_smf_dynlib_row_key_count(row, "sha256") == 1 and
+    sha256 != "" and
+    gui_mac_smf_dynlib_row_has_unsigned_decimal(row, "size") and
+    gui_mac_smf_dynlib_row_unsigned_i64(row, "size") > 0 and
+    gui_mac_smf_dynlib_row_has(row, "smf_role", "2") and
+    gui_mac_smf_dynlib_row_has(row, "arch", "3") and
+    gui_mac_smf_dynlib_row_has(row, "embedded_dynlib", "true") and
+    gui_mac_smf_dynlib_row_has(row, "symbol", "gui_dynlib_hot_probe_tick") and
+    gui_mac_smf_dynlib_row_has(row, "qemu_status", "not-run") and
+    gui_mac_smf_dynlib_row_has(row, "macos_status", "not-run")
+
+fn gui_mac_smf_dynlib_accepts_qemu_parity_row(row: text) -> bool:
+    gui_mac_smf_dynlib_row_kind(row, "GUI_QEMU_ARM64_SMF_PARITY") and
+    gui_mac_smf_dynlib_row_has(row, "status", "contract-pass") and
+    gui_mac_smf_dynlib_row_has(row, "artifact", "build/gui/pure_gui_hot.smf") and
+    gui_mac_smf_dynlib_row_has(row, "smf_role", "2") and
+    gui_mac_smf_dynlib_row_has(row, "arch", "3") and
+    gui_mac_smf_dynlib_row_has(row, "embedded_dynlib", "true") and
+    gui_mac_smf_dynlib_row_has(row, "symbol", "gui_dynlib_hot_probe_tick") and
+    gui_mac_smf_dynlib_row_has(row, "adapter", "simpleos-framebuffer-virtio") and
+    gui_mac_smf_dynlib_row_has(row, "same_artifact_contract", "true") and
+    gui_mac_smf_dynlib_row_has(row, "live_qemu", "false") and
+    gui_mac_smf_dynlib_row_has(row, "reason", "same-smf-artifact-reaches-pure-gui-adapter")
+
+fn gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(row: text) -> bool:
+    gui_mac_smf_dynlib_row_kind(row, "GUI_QEMU_ARM64_SMF_LOADER_PARITY") and
+    gui_mac_smf_dynlib_row_has(row, "status", "loader-contract-pass") and
+    gui_mac_smf_dynlib_row_has(row, "artifact", "build/gui/pure_gui_hot.smf") and
+    gui_mac_smf_dynlib_row_has(row, "smf_role", "2") and
+    gui_mac_smf_dynlib_row_has(row, "arch", "3") and
+    gui_mac_smf_dynlib_row_has(row, "embedded_dynlib", "true") and
+    gui_mac_smf_dynlib_row_has(row, "symbol", "gui_dynlib_hot_probe_tick") and
+    gui_mac_smf_dynlib_row_has(row, "loader", "smf_dynlib") and
+    gui_mac_smf_dynlib_row_has(row, "adapter", "simpleos-framebuffer-virtio") and
+    gui_mac_smf_dynlib_row_has(row, "dynload_pass", "true") and
+    gui_mac_smf_dynlib_row_has(row, "process_callable", "true") and
+    gui_mac_smf_dynlib_row_has(row, "live_qemu", "false") and
+    gui_mac_smf_dynlib_row_has(row, "reason", "smf-dynlib-artifact-reaches-pure-gui-adapter")
+
+fn gui_mac_smf_dynlib_row_i64(row: text, key: text) -> i64:
+    val value = gui_mac_smf_dynlib_row_value(row, key)
+    if value == "":
+        return -1
+    value.to_int() ?? -1
+
+fn gui_mac_smf_dynlib_row_has_one_i64(row: text, key: text) -> bool:
+    gui_mac_smf_dynlib_row_key_count(row, key) == 1 and gui_mac_smf_dynlib_row_i64(row, key) >= 0
+
+fn gui_mac_smf_dynlib_unsigned_decimal_token(value: text) -> bool:
+    if value == "":
+        return false
+    var rest = value.replace("0", "")
+    rest = rest.replace("1", "")
+    rest = rest.replace("2", "")
+    rest = rest.replace("3", "")
+    rest = rest.replace("4", "")
+    rest = rest.replace("5", "")
+    rest = rest.replace("6", "")
+    rest = rest.replace("7", "")
+    rest = rest.replace("8", "")
+    rest.replace("9", "") == ""
+
+fn gui_mac_smf_dynlib_probe_metrics_valid(row: text) -> bool:
+    val p50 = gui_mac_smf_dynlib_row_unsigned_i64(row, "p50_us")
+    val p95 = gui_mac_smf_dynlib_row_unsigned_i64(row, "p95_us")
+    val p99 = gui_mac_smf_dynlib_row_unsigned_i64(row, "p99_us")
+    val max = gui_mac_smf_dynlib_row_unsigned_i64(row, "max_us")
+    val threshold = gui_mac_smf_dynlib_row_unsigned_i64(row, "threshold_us")
+    gui_mac_smf_dynlib_row_has_unsigned_decimal(row, "warmup") and
+    gui_mac_smf_dynlib_row_unsigned_i64(row, "warmup") > 0 and
+    p50 >= 0 and
+    p95 >= p50 and
+    p99 >= p95 and
+    max >= p99 and
+    threshold == 1000 and
+    p99 < threshold
+
+fn gui_mac_smf_dynlib_accepts_probe_row(row: text) -> bool:
+    val host_cpu = gui_mac_smf_dynlib_row_value(row, "host_cpu")
+    val error = gui_mac_smf_dynlib_row_value(row, "error")
+    gui_mac_smf_dynlib_row_kind(row, "GUI_DYNLIB_PERF") and
+    gui_mac_smf_dynlib_row_has(row, "artifact", "build/gui/pure_gui_hot.smf") and
+    gui_mac_smf_dynlib_row_has(row, "dynlib_path", "build/gui/pure_gui_hot.smf.extracted.dylib") and
+    gui_mac_smf_dynlib_row_has(row, "host_os", "macos") and
+    (gui_mac_smf_dynlib_row_has(row, "host_arch", "arm64") or gui_mac_smf_dynlib_row_has(row, "host_arch", "aarch64")) and
+    gui_mac_smf_dynlib_row_has(row, "host_profile", "macos-arm64") and
+    host_cpu != "" and
+    host_cpu != "unknown" and
+    gui_mac_smf_dynlib_row_key_count(row, "host_cpu") == 1 and
+    gui_mac_smf_dynlib_row_has(row, "loader", "smf_dynlib") and
+    gui_mac_smf_dynlib_row_has(row, "dynload", "smf_dynlib") and
+    gui_mac_smf_dynlib_row_has(row, "host_dynload", "sffi") and
+    gui_mac_smf_dynlib_row_has(row, "symbol", "gui_dynlib_hot_probe_tick") and
+    gui_mac_smf_dynlib_row_has(row, "call_source", "dynlib_symbol_call") and
+    gui_mac_smf_dynlib_row_has(row, "pass", "true") and
+    gui_mac_smf_dynlib_row_key_count(row, "error") == 1 and
+    gui_mac_smf_dynlib_row_key_count(row, "p99_us") == 1 and
+    gui_mac_smf_dynlib_row_key_count(row, "threshold_us") == 1 and
+    gui_mac_smf_dynlib_row_has(row, "samples", "128") and
+    gui_mac_smf_dynlib_row_has(row, "expected_samples", "128") and
+    gui_mac_smf_dynlib_row_has(row, "threshold_us", "1000") and
+    gui_mac_smf_dynlib_probe_metrics_valid(row) and
+    error == ""
+
+fn gui_mac_smf_dynlib_skip_row(host_os: text, arch: text) -> text:
+    "GUI_MAC_SMF_DYNLIB_EVIDENCE status=skip host_os=" + host_os + " arch=" + arch + " reason=requires-macos-arm64"
+
+fn gui_mac_smf_dynlib_pass_row(host_os: text, arch: text, host_profile: text, host_cpu: text, artifact_path: text, artifact_sha256: text, artifact_size: text) -> text:
+    "GUI_MAC_SMF_DYNLIB_EVIDENCE status=pass" +
+    " host_os=" + host_os +
+    " arch=" + arch +
+    " host_profile=" + gui_mac_smf_dynlib_evidence_token(host_profile) +
+    " host_cpu=" + gui_mac_smf_dynlib_evidence_token(host_cpu) +
+    " artifact=" + artifact_path +
+    " artifact_sha256=" + artifact_sha256 +
+    " artifact_size=" + artifact_size
+
+fn gui_mac_smf_dynlib_accepts_pass_row(row: text) -> bool:
+    val host_cpu = gui_mac_smf_dynlib_row_value(row, "host_cpu")
+    val artifact_sha256 = gui_mac_smf_dynlib_row_value(row, "artifact_sha256")
+    gui_mac_smf_dynlib_row_kind(row, "GUI_MAC_SMF_DYNLIB_EVIDENCE") and
+    gui_mac_smf_dynlib_row_has(row, "status", "pass") and
+    gui_mac_smf_dynlib_row_has(row, "host_os", "macos") and
+    (gui_mac_smf_dynlib_row_has(row, "arch", "arm64") or gui_mac_smf_dynlib_row_has(row, "arch", "aarch64")) and
+    gui_mac_smf_dynlib_row_has(row, "host_profile", "macos-arm64") and
+    gui_mac_smf_dynlib_row_has(row, "artifact", "build/gui/pure_gui_hot.smf") and
+    gui_mac_smf_dynlib_row_key_count(row, "artifact_sha256") == 1 and
+    artifact_sha256 != "" and
+    gui_mac_smf_dynlib_row_has_unsigned_decimal(row, "artifact_size") and
+    gui_mac_smf_dynlib_row_unsigned_i64(row, "artifact_size") > 0 and
+    host_cpu != "" and
+    host_cpu != "unknown" and
+    gui_mac_smf_dynlib_row_key_count(row, "host_cpu") == 1
+
+fn gui_mac_smf_dynlib_accepts_transcript(transcript: text) -> bool:
+    val lines = transcript.split("\n")
+    var stage = 0
+    var contract_sha256 = ""
+    var contract_size = ""
+    var i = 0
+    while i < lines.len():
+        val row = lines[i].trim()
+        if row == "":
+            i = i + 1
+            continue
+        if stage == 0 and gui_mac_smf_dynlib_accepts_contract_row(row):
+            contract_sha256 = gui_mac_smf_dynlib_row_value(row, "sha256")
+            contract_size = gui_mac_smf_dynlib_row_value(row, "size")
+            stage = 1
+        else:
+            if stage == 1 and gui_mac_smf_dynlib_accepts_qemu_parity_row(row):
+                stage = 2
+            else:
+                if stage == 2 and gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(row):
+                    stage = 3
+                else:
+                    if stage == 3 and gui_mac_smf_dynlib_accepts_probe_row(row):
+                        stage = 4
+                    else:
+                        val pass_matches_contract = gui_mac_smf_dynlib_accepts_pass_row(row) and gui_mac_smf_dynlib_row_has(row, "artifact_sha256", contract_sha256) and gui_mac_smf_dynlib_row_has(row, "artifact_size", contract_size)
+                        if stage == 4 and pass_matches_contract:
+                            stage = 5
+                        else:
+                            return false
+        i = i + 1
+    stage == 5
+
+fn gui_mac_smf_dynlib_transcript_check_row(transcript: text) -> text:
+    if gui_mac_smf_dynlib_accepts_transcript(transcript):
+        return "GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=pass"
+    "GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=fail reason=incomplete-or-out-of-order-smf-dynlib-chain"

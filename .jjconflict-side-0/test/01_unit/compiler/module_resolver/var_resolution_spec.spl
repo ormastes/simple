@@ -1,0 +1,251 @@
+# Unit spec: variant overlay candidate-root ordering + fail-closed validation.
+use std.spec.*
+use compiler.module_resolver.var_resolution.{VarGroup, VarManifest, VarSelection, VarSources, var_group_dir, var_candidate_roots, var_validate, var_parse_manifest, var_resolve_selections, var_module_candidates, var_config_selections}
+
+# Value selected for a group in a [VarSelection], or "" if absent.
+fn sel_value(sels: [VarSelection], group: text) -> text:
+    for s in sels:
+        if s.group == group:
+            return s.value
+    ""
+
+extern fn rt_file_exists(path: text) -> bool
+
+val FIX = "test/01_unit/compiler/module_resolver/fixtures"
+
+# First existing candidate path, or "" — mirrors what the live resolver picks.
+fn first_existing(cands: [text]) -> text:
+    for c in cands:
+        if rt_file_exists(c):
+            return c
+    ""
+
+# A representative manifest: platform > hw > lib.crypto, global default "default".
+fn sample_manifest() -> VarManifest:
+    VarManifest(
+        version: 1,
+        global_default: "default",
+        order: ["platform", "hw", "lib.crypto"],
+        groups: [
+            VarGroup(name: "platform", values: ["default", "mac", "linux", "windows"], select_default: "auto"),
+            VarGroup(name: "hw", values: ["default", "x86_64", "arm64"], select_default: "auto"),
+            VarGroup(name: "lib.crypto", values: ["default", "openssl", "mbedtls"], select_default: "default")
+        ]
+    )
+
+describe "var overlay resolution":
+    it "maps dotted group names to nested directories":
+        step("lib.crypto resolves under lib/crypto")
+        expect(var_group_dir("lib.crypto")).to_equal("lib/crypto")
+        expect(var_group_dir("platform")).to_equal("platform")
+
+    it "orders selected roots before all default roots":
+        step("Select mac + arm64 + openssl")
+        val sels = [
+            VarSelection(group: "platform", value: "mac"),
+            VarSelection(group: "hw", value: "arm64"),
+            VarSelection(group: "lib.crypto", value: "openssl")
+        ]
+        val roots = var_candidate_roots("variants", sample_manifest(), sels)
+        step("Selected roots come first, in group order")
+        expect(roots[0]).to_equal("variants/platform/mac")
+        expect(roots[1]).to_equal("variants/hw/arm64")
+        expect(roots[2]).to_equal("variants/lib/crypto/openssl")
+        step("Then group defaults, then global default")
+        expect(roots[3]).to_equal("variants/platform/default")
+        expect(roots[4]).to_equal("variants/hw/default")
+        expect(roots[5]).to_equal("variants/lib/crypto/default")
+        expect(roots[6]).to_equal("variants/default")
+
+    it "omits the selected root when a group is left at default":
+        step("Only select hw; platform + lib.crypto stay default")
+        val sels = [VarSelection(group: "hw", value: "x86_64")]
+        val roots = var_candidate_roots("variants", sample_manifest(), sels)
+        step("Only one selected root, then the three group defaults + global")
+        expect(roots[0]).to_equal("variants/hw/x86_64")
+        expect(roots[1]).to_equal("variants/platform/default")
+        expect(roots.len()).to_equal(5)
+
+    it "passes validation for a well-formed manifest + selections":
+        val sels = [VarSelection(group: "platform", value: "mac")]
+        val errs = var_validate(sample_manifest(), sels)
+        # NOTE: `expect(n).to_equal(0)` mis-reports 0 as falsy (see bug
+        # sspec_matcher_to_equal_zero_falsy_2026-06-29); assert via bool instead.
+        val is_empty = errs.len() == 0
+        expect(is_empty).to_equal(true)
+
+    it "rejects an unknown group (E-VAR001)":
+        val sels = [VarSelection(group: "nope", value: "x")]
+        expect(var_validate(sample_manifest(), sels)).to_contain("E-VAR001")
+
+    it "rejects an unknown value (E-VAR002)":
+        val sels = [VarSelection(group: "hw", value: "sparc")]
+        expect(var_validate(sample_manifest(), sels)).to_contain("E-VAR002")
+
+    it "rejects a group missing its default (E-VAR003)":
+        step("Build a manifest whose hw group has no `default` value")
+        val bad = VarManifest(
+            version: 1,
+            global_default: "default",
+            order: ["hw"],
+            groups: [VarGroup(name: "hw", values: ["x86_64", "arm64"], select_default: "auto")]
+        )
+        expect(var_validate(bad, [])).to_contain("E-VAR003")
+
+    it "rejects a duplicate group in order (E-VAR004)":
+        val bad = VarManifest(
+            version: 1,
+            global_default: "default",
+            order: ["hw", "hw"],
+            groups: [VarGroup(name: "hw", values: ["default", "x86_64"], select_default: "auto")]
+        )
+        expect(var_validate(bad, [])).to_contain("E-VAR004")
+
+describe "var config reader (config/var.sdn)":
+    fn sample_config() -> text:
+        "var:\n" +
+        "  profile: dev\n" +
+        "  profiles:\n" +
+        "    dev: { platform: auto, hw: auto, lib.crypto: default, ui.renderer: cpu }\n" +
+        "    prod: { platform: auto, hw: auto, lib.crypto: openssl, ui.renderer: auto }\n" +
+        "    mac_metal: { platform: mac, hw: auto, lib.crypto: openssl, ui.renderer: metal }\n"
+
+    it "reads the file's active profile when no override":
+        val sels = var_config_selections(sample_config(), "")
+        expect(sel_value(sels, "lib.crypto")).to_equal("default")
+        expect(sel_value(sels, "ui.renderer")).to_equal("cpu")
+
+    it "honors a profile override (CLI --var-profile)":
+        val sels = var_config_selections(sample_config(), "prod")
+        expect(sel_value(sels, "lib.crypto")).to_equal("openssl")
+        expect(sel_value(sels, "ui.renderer")).to_equal("auto")
+
+    it "parses dotted-group keys and non-auto values":
+        val sels = var_config_selections(sample_config(), "mac_metal")
+        expect(sel_value(sels, "platform")).to_equal("mac")
+        expect(sel_value(sels, "ui.renderer")).to_equal("metal")
+
+    it "feeds the precedence chain end-to-end (config profile -> resolved roots)":
+        step("prod config selects openssl; manifest drives candidate roots")
+        val cfg = var_config_selections(sample_config(), "prod")
+        val src = VarSources(cli: [], env: [], config_profile: cfg,
+            host_platform: "linux", host_arch: "x86_64")
+        val resolved = var_resolve_selections(sample_manifest(), src)
+        # sample_manifest has no ui.renderer group; lib.crypto[2] -> openssl
+        expect(resolved[2].value).to_equal("openssl")
+
+describe "var active-selection precedence":
+    # sample_manifest groups order: [0]=platform [1]=hw [2]=lib.crypto
+    it "CLI override beats env and config":
+        val src = VarSources(
+            cli: [VarSelection(group: "platform", value: "linux")],
+            env: [VarSelection(group: "platform", value: "windows")],
+            config_profile: [VarSelection(group: "platform", value: "mac")],
+            host_platform: "freebsd", host_arch: "x86_64")
+        val sels = var_resolve_selections(sample_manifest(), src)
+        expect(sels[0].value).to_equal("linux")
+
+    it "env beats config when no CLI override":
+        val src = VarSources(
+            cli: [],
+            env: [VarSelection(group: "platform", value: "windows")],
+            config_profile: [VarSelection(group: "platform", value: "mac")],
+            host_platform: "freebsd", host_arch: "x86_64")
+        val sels = var_resolve_selections(sample_manifest(), src)
+        expect(sels[0].value).to_equal("windows")
+
+    it "select_default=auto resolves to host detection":
+        step("No overrides; platform/hw select_default is auto")
+        val src = VarSources(cli: [], env: [], config_profile: [],
+            host_platform: "mac", host_arch: "arm64")
+        val sels = var_resolve_selections(sample_manifest(), src)
+        expect(sels[0].value).to_equal("mac")     # platform -> host_platform
+        expect(sels[1].value).to_equal("arm64")   # hw -> host_arch
+
+    it "a non-auto select_default with no override stays default":
+        val src = VarSources(cli: [], env: [], config_profile: [],
+            host_platform: "mac", host_arch: "arm64")
+        val sels = var_resolve_selections(sample_manifest(), src)
+        expect(sels[2].value).to_equal("default") # lib.crypto select_default=default
+
+    it "auto on a non-detectable group falls back to global default":
+        step("hw=auto but no host_arch supplied")
+        val src = VarSources(cli: [], env: [], config_profile: [],
+            host_platform: "mac", host_arch: "")
+        val sels = var_resolve_selections(sample_manifest(), src)
+        expect(sels[1].value).to_equal("default")
+
+describe "var file probe (real filesystem fixtures)":
+    # fixtures: variants/lib/crypto/{openssl,default}/crypto/provider.spl (no mbedtls)
+    it "resolves the selected variant file, skipping an absent higher-priority root":
+        step("mbedtls selected but absent; openssl present -> openssl wins")
+        val roots = ["variants/lib/crypto/mbedtls", "variants/lib/crypto/openssl", "variants/lib/crypto/default"]
+        val cands = var_module_candidates(FIX, roots, ["crypto", "provider"])
+        expect(first_existing(cands)).to_contain("variants/lib/crypto/openssl/crypto/provider.spl")
+
+    it "falls through to the default root when no selected root has the file":
+        val roots = ["variants/lib/crypto/mbedtls", "variants/lib/crypto/default"]
+        val cands = var_module_candidates(FIX, roots, ["crypto", "provider"])
+        expect(first_existing(cands)).to_contain("variants/lib/crypto/default/crypto/provider.spl")
+
+    it "finds nothing when no root provides the module":
+        val roots = ["variants/lib/crypto/mbedtls"]
+        val cands = var_module_candidates(FIX, roots, ["crypto", "provider"])
+        val none = first_existing(cands).len() == 0
+        expect(none).to_equal(true)
+
+describe "var file probe — std-prefixed stable import (renderer_select)":
+    # Fixtures: variants/renderer/vulkan/std/gpu/engine2d/renderer_select.spl (present)
+    #           variants/renderer/default/                                    (dir only, no file)
+    # Proves: full segments including leading `std` are used in variant path, and
+    # the default profile falls through (no variant found) so canonical src wins.
+
+    it "var_module_candidates preserves leading std segment in candidate paths":
+        step("segments [std,gpu,engine2d,renderer_select] -> path must include std/gpu/engine2d/renderer_select")
+        val cands = var_module_candidates(FIX, ["variants/renderer/vulkan"], ["std", "gpu", "engine2d", "renderer_select"])
+        expect(cands[0]).to_contain("std/gpu/engine2d/renderer_select.spl")
+
+    it "non-default profile resolves variant with full std/* path":
+        step("vulkan selected; file present at variants/renderer/vulkan/std/gpu/engine2d/renderer_select.spl")
+        val roots = ["variants/renderer/vulkan", "variants/renderer/default", "variants/default"]
+        val cands = var_module_candidates(FIX, roots, ["std", "gpu", "engine2d", "renderer_select"])
+        expect(first_existing(cands)).to_contain("variants/renderer/vulkan/std/gpu/engine2d/renderer_select.spl")
+
+    it "default profile finds no variant — falls through to canonical src":
+        step("No variant file under default/global-default roots; var search returns empty")
+        val roots = ["variants/renderer/default", "variants/default"]
+        val cands = var_module_candidates(FIX, roots, ["std", "gpu", "engine2d", "renderer_select"])
+        val none = first_existing(cands).len() == 0
+        expect(none).to_equal(true)
+
+    it "selected-but-absent root is skipped; vulkan still wins over absent cpu root":
+        step("cpu root missing; vulkan present -> vulkan wins (same precedence logic as crypto test)")
+        val roots = ["variants/renderer/cpu", "variants/renderer/vulkan", "variants/renderer/default"]
+        val cands = var_module_candidates(FIX, roots, ["std", "gpu", "engine2d", "renderer_select"])
+        expect(first_existing(cands)).to_contain("variants/renderer/vulkan/std/gpu/engine2d/renderer_select.spl")
+
+describe "var manifest reader (bootstrap-safe)":
+    it "parses the canonical manifest text into a usable VarManifest":
+        val src = "var:\n" +
+            "  version: 1\n" +
+            "  default: default\n" +
+            "  order: [platform, hw, lib.crypto]\n" +
+            "  groups:\n" +
+            "    platform: { values: [default, mac, linux], select_default: auto }\n" +
+            "    hw: { values: [default, x86_64, arm64], select_default: auto }\n" +
+            "    lib.crypto: { values: [default, openssl, mbedtls], select_default: default }\n"
+        val m = var_parse_manifest(src)
+        step("Top-level fields parsed")
+        expect(m.global_default).to_equal("default")
+        expect(m.order).to_equal(["platform", "hw", "lib.crypto"])
+        expect(m.groups.len()).to_equal(3)
+        step("Group values + select_default parsed")
+        expect(m.groups[0].name).to_equal("platform")
+        expect(m.groups[0].values).to_equal(["default", "mac", "linux"])
+        expect(m.groups[2].name).to_equal("lib.crypto")
+        expect(m.groups[1].select_default).to_equal("auto")
+        step("Parsed manifest validates and drives root ordering")
+        val errs_empty = var_validate(m, [VarSelection(group: "hw", value: "arm64")]).len() == 0
+        expect(errs_empty).to_equal(true)
+        val roots = var_candidate_roots("variants", m, [VarSelection(group: "lib.crypto", value: "openssl")])
+        expect(roots[0]).to_equal("variants/lib/crypto/openssl")

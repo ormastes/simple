@@ -1,0 +1,536 @@
+# Task Types — Entity Dimension
+#
+# Process/task types used by scheduler, IPC, and capability layers.
+
+struct AddressSpace:
+    """Per-process virtual address space handle.
+
+    Opaque handle returned by `vmm.create_user_address_space()`. Carries the
+    physical root of the top-level page table (PML4 on x86_64, root SATP PPN
+    on riscv64) plus a monotonic id used for logging/debugging.
+
+    The scheduler's TCB persists the `phys_root` field as a `u64` for ABI
+    compatibility with existing context-switch code; callers that need the
+    full handle can reconstruct it via `AddressSpace(phys_root: tcb.address_space,
+    id: 0)` or look it up from the VMM's internal registry.
+    """
+    phys_root: u64          # Top-level page-table physical address (CR3 / SATP root)
+    id: u64                 # Monotonic address-space identifier (opaque)
+
+struct TaskId:
+    """Unique task identifier."""
+    id: u64
+
+enum TaskState:
+    """Task execution state."""
+    Ready           # Can be scheduled
+    Running         # Currently executing
+    Blocked(reason: BlockReason)  # Waiting for something
+    Zombie          # Exited, waiting for parent to collect
+
+enum BlockReason:
+    """Why a task is blocked."""
+    IpcRecv(port: u64)      # Waiting for IPC message
+    IpcSend(port: u64)      # Waiting for IPC send to complete
+    Sleep(until_ns: u64)    # Sleeping until timestamp
+    PageFault(addr: u64)    # Waiting for page-in
+    Exit                    # Exited
+    Signal                  # Stopped by signal
+    Notification(id: u64)   # Waiting for notification object
+
+enum TaskPriority:
+    """Task scheduling priority."""
+    Realtime    # Highest: interrupt handlers, critical services
+    High        # System services (compositor, VFS)
+    Normal      # User applications
+    Low         # Background tasks (package manager, indexer)
+    Idle        # Only when nothing else to run
+
+enum SchedulerPolicy:
+    """Kernel scheduler policy attached to a task."""
+    Internal
+    Fair
+    Background
+    RtFifo
+    RtRoundRobin
+    Deadline
+    Idle
+
+enum SchedulerDomainKind:
+    """Scheduler topology domain level used for placement decisions."""
+    Flat
+    Smt
+    Cache
+    Numa
+
+struct SchedulerDomain:
+    """A compact scheduling domain spanning a contiguous CPU range."""
+    id: u32
+    kind: SchedulerDomainKind
+    parent_id: u32?
+    first_cpu: u32
+    cpu_count: u32
+    rebalance_threshold: i32
+    wake_affine_threshold: i32
+
+struct SchedulerTopology:
+    """Scheduler-visible CPU topology.
+
+    The default topology is a single flat domain. It is explicit so wake
+    placement and load balancing have a typed model before hardware discovery
+    grows SMT, cache, package, or NUMA domains.
+    """
+    cpu_count: u32
+    domains: [SchedulerDomain]
+
+struct CpuTopologyInfo:
+    """Hardware-discovered CPU topology entry in scheduler CPU order.
+
+    `cpu_id` is expected to be the zero-based logical CPU id for this entry.
+    Domains are emitted as contiguous scheduler CPU ranges, so callers should
+    pass entries sorted by `cpu_id` without gaps. Invalid or empty input falls
+    back to a flat topology.
+    """
+    cpu_id: u32
+    smt_id: u32
+    cache_id: u32
+    numa_id: u32
+
+var g_scheduler_platform_cpu_info: [CpuTopologyInfo] = []
+
+struct TaskScheduleConfig:
+    """Scheduler class metadata and fair/deadline accounting.
+
+    RT policies are represented directly in run-queue selection. Deadline
+    policies carry admission budget fields and enter the deadline lane only
+    through scheduler admission control.
+    """
+    policy: SchedulerPolicy
+    weight: i64
+    priority: i64
+    requested_slice_ns: u64
+    vruntime: i64
+    lag: i64
+    virtual_deadline: i64
+    runtime_ns: u64
+    period_ns: u64
+    deadline_ns: u64
+    affinity_mask: u64
+    home_cpu: u32
+
+fn scheduler_flat_topology(cpu_count: u32) -> SchedulerTopology:
+    """Build the scheduler's flat fallback topology."""
+    val normalized = if cpu_count == 0u32: 1u32 else: cpu_count
+    SchedulerTopology(
+        cpu_count: normalized,
+        domains: [SchedulerDomain(
+            id: 0u32,
+            kind: SchedulerDomainKind.Flat,
+            parent_id: nil,
+            first_cpu: 0u32,
+            cpu_count: normalized,
+            rebalance_threshold: 2,
+            wake_affine_threshold: 1
+        )]
+    )
+
+fn default_scheduler_topology(cpu_count: u32) -> SchedulerTopology:
+    """Build the scheduler's legacy-compatible default topology."""
+    scheduler_flat_topology(cpu_count)
+
+fn _cpu_topology_info_is_contiguous(cpu_info: [CpuTopologyInfo]) -> bool:
+    var idx = 0
+    while idx < cpu_info.len():
+        if cpu_info[idx].cpu_id != idx.to_u32():
+            return false
+        idx = idx + 1
+    true
+
+fn _topology_has_numa_split(cpu_info: [CpuTopologyInfo]) -> bool:
+    if cpu_info.len() <= 1:
+        return false
+    val first = cpu_info[0].numa_id
+    var idx = 1
+    while idx < cpu_info.len():
+        if cpu_info[idx].numa_id != first:
+            return true
+        idx = idx + 1
+    false
+
+fn _topology_has_cache_split(cpu_info: [CpuTopologyInfo]) -> bool:
+    if cpu_info.len() <= 1:
+        return false
+    val first = cpu_info[0].cache_id
+    var idx = 1
+    while idx < cpu_info.len():
+        if cpu_info[idx].cache_id != first:
+            return true
+        idx = idx + 1
+    false
+
+fn _topology_has_smt_siblings(cpu_info: [CpuTopologyInfo]) -> bool:
+    if cpu_info.len() <= 1:
+        return false
+    var idx = 1
+    while idx < cpu_info.len():
+        if cpu_info[idx].smt_id == cpu_info[idx - 1].smt_id:
+            return true
+        idx = idx + 1
+    false
+
+fn _domain_contains_cpu(domain: SchedulerDomain, cpu_id: u32) -> bool:
+    cpu_id >= domain.first_cpu and cpu_id < domain.first_cpu + domain.cpu_count
+
+fn _find_parent_domain(domains: [SchedulerDomain], kind: SchedulerDomainKind, cpu_id: u32) -> u32?:
+    var idx = 0
+    while idx < domains.len():
+        val domain = domains[idx]
+        if domain.kind == kind and _domain_contains_cpu(domain, cpu_id):
+            return domain.id
+        idx = idx + 1
+    nil
+
+fn _cache_parent_domain(domains: [SchedulerDomain], cpu_id: u32) -> u32?:
+    val numa_parent = _find_parent_domain(domains, SchedulerDomainKind.Numa, cpu_id)
+    if numa_parent != nil:
+        return numa_parent
+    0u32
+
+fn _smt_parent_domain(domains: [SchedulerDomain], cpu_id: u32) -> u32?:
+    val cache_parent = _find_parent_domain(domains, SchedulerDomainKind.Cache, cpu_id)
+    if cache_parent != nil:
+        return cache_parent
+    val numa_parent = _find_parent_domain(domains, SchedulerDomainKind.Numa, cpu_id)
+    if numa_parent != nil:
+        return numa_parent
+    0u32
+
+fn _domain_rebalance_threshold(kind: SchedulerDomainKind) -> i32:
+    if kind == SchedulerDomainKind.Smt:
+        1
+    elif kind == SchedulerDomainKind.Cache:
+        3
+    elif kind == SchedulerDomainKind.Numa:
+        8
+    else:
+        2
+
+fn _domain_wake_affine_threshold(kind: SchedulerDomainKind) -> i32:
+    if kind == SchedulerDomainKind.Smt:
+        1
+    elif kind == SchedulerDomainKind.Cache:
+        2
+    elif kind == SchedulerDomainKind.Numa:
+        4
+    else:
+        1
+
+fn _make_scheduler_domain(id: u32, kind: SchedulerDomainKind, parent_id: u32?, first_cpu: u32, cpu_count: u32) -> SchedulerDomain:
+    SchedulerDomain(
+        id: id,
+        kind: kind,
+        parent_id: parent_id,
+        first_cpu: first_cpu,
+        cpu_count: cpu_count,
+        rebalance_threshold: _domain_rebalance_threshold(kind),
+        wake_affine_threshold: _domain_wake_affine_threshold(kind)
+    )
+
+fn _append_numa_domains(domains: [SchedulerDomain], cpu_info: [CpuTopologyInfo]) -> [SchedulerDomain]:
+    var out = domains
+    var start = 0
+    while start < cpu_info.len():
+        val numa_id = cpu_info[start].numa_id
+        var end = start + 1
+        while end < cpu_info.len() and cpu_info[end].numa_id == numa_id:
+            end = end + 1
+        out.push(_make_scheduler_domain(
+            out.len().to_u32(),
+            SchedulerDomainKind.Numa,
+            0u32,
+            cpu_info[start].cpu_id,
+            (end - start).to_u32()
+        ))
+        start = end
+    out
+
+fn _append_cache_domains(domains: [SchedulerDomain], cpu_info: [CpuTopologyInfo]) -> [SchedulerDomain]:
+    var out = domains
+    var start = 0
+    while start < cpu_info.len():
+        val cache_id = cpu_info[start].cache_id
+        var end = start + 1
+        while end < cpu_info.len() and cpu_info[end].cache_id == cache_id:
+            end = end + 1
+        out.push(_make_scheduler_domain(
+            out.len().to_u32(),
+            SchedulerDomainKind.Cache,
+            _cache_parent_domain(out, cpu_info[start].cpu_id),
+            cpu_info[start].cpu_id,
+            (end - start).to_u32()
+        ))
+        start = end
+    out
+
+fn _append_smt_domains(domains: [SchedulerDomain], cpu_info: [CpuTopologyInfo]) -> [SchedulerDomain]:
+    var out = domains
+    var start = 0
+    while start < cpu_info.len():
+        val smt_id = cpu_info[start].smt_id
+        var end = start + 1
+        while end < cpu_info.len() and cpu_info[end].smt_id == smt_id:
+            end = end + 1
+        if end - start > 1:
+            out.push(_make_scheduler_domain(
+                out.len().to_u32(),
+                SchedulerDomainKind.Smt,
+                _smt_parent_domain(out, cpu_info[start].cpu_id),
+                cpu_info[start].cpu_id,
+                (end - start).to_u32()
+            ))
+        start = end
+    out
+
+fn scheduler_topology_from_cpu_info(cpu_info: [CpuTopologyInfo]) -> SchedulerTopology:
+    """Build scheduler domains from ordered hardware CPU topology data."""
+    if cpu_info.len() == 0:
+        return scheduler_flat_topology(1u32)
+    if not _cpu_topology_info_is_contiguous(cpu_info):
+        return scheduler_flat_topology(cpu_info.len().to_u32())
+
+    val cpu_count = cpu_info.len().to_u32()
+    var domains: [SchedulerDomain] = [_make_scheduler_domain(
+        0u32,
+        SchedulerDomainKind.Flat,
+        nil,
+        0u32,
+        cpu_count
+    )]
+
+    if _topology_has_numa_split(cpu_info):
+        domains = _append_numa_domains(domains, cpu_info)
+    if _topology_has_cache_split(cpu_info):
+        domains = _append_cache_domains(domains, cpu_info)
+    if _topology_has_smt_siblings(cpu_info):
+        domains = _append_smt_domains(domains, cpu_info)
+
+    SchedulerTopology(cpu_count: cpu_count, domains: domains)
+
+fn scheduler_register_platform_cpu_topology(cpu_info: [CpuTopologyInfo]):
+    """Install boot-discovered CPU topology for later scheduler construction."""
+    g_scheduler_platform_cpu_info = cpu_info
+
+fn scheduler_clear_platform_cpu_topology_for_test():
+    """Test hook: reset boot-discovered topology to the flat fallback."""
+    g_scheduler_platform_cpu_info = []
+
+fn scheduler_detect_platform_topology(fallback_cpu_count: u32) -> SchedulerTopology:
+    """Return boot-discovered topology, or a flat fallback during early boot."""
+    if g_scheduler_platform_cpu_info.len() == 0:
+        return scheduler_flat_topology(fallback_cpu_count)
+    scheduler_topology_from_cpu_info(g_scheduler_platform_cpu_info)
+
+struct TaskIsolationProfile:
+    """Per-task isolation metadata used by process, capability, and VMM code."""
+    profile_id: u64
+    address_space_id: u64
+    capability_generation: u64
+    sandboxed: bool
+    allow_network: bool
+    max_memory_pages: u64
+    max_threads: u32
+
+fn default_task_schedule(priority: TaskPriority) -> TaskScheduleConfig:
+    """Build a default schedule config from the legacy priority enum."""
+    match priority:
+        case Realtime:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.RtRoundRobin,
+                weight: 4096,
+                priority: 0,
+                requested_slice_ns: 1000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 1000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case High:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Fair,
+                weight: 2048,
+                priority: 1,
+                requested_slice_ns: 3000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 3000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case Normal:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Fair,
+                weight: 1024,
+                priority: 2,
+                requested_slice_ns: 5000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 5000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case Low:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Background,
+                weight: 256,
+                priority: 3,
+                requested_slice_ns: 10000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 10000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case Idle:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Idle,
+                weight: 1,
+                priority: 4,
+                requested_slice_ns: 20000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 20000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+
+fn default_task_isolation(address_space_id: u64) -> TaskIsolationProfile:
+    """Build the default kernel process-isolation metadata for a task."""
+    TaskIsolationProfile(
+        profile_id: 0,
+        address_space_id: address_space_id,
+        capability_generation: 1,
+        sandboxed: true,
+        allow_network: false,
+        max_memory_pages: 0,
+        max_threads: 1u32
+    )
+
+struct UserLoadSegment:
+    """Mapped user segment description for transitional process images."""
+    virt_addr: u64
+    mem_size: u64
+    file_size: u64
+    flags: u32
+    align: u64
+    data: [u8]
+
+struct UserProcessImage:
+    """Architecture-neutral user process image for scheduler handoff.
+
+    `initial_sp` is the user sp register value once the Phase-3 SysV
+    argv/envp/auxv frame has been placed; the scheduler loads it into the
+    arch sp register instead of `stack_top`. `initial_stack_bytes` is the
+    serialized frame to memcpy to (stack_top - len(initial_stack_bytes))
+    inside the user stack region mapped by the segment mapper.
+    """
+    binary_path: text
+    entry: u64
+    stack_top: u64
+    stack_size: u64
+    argv: [text]
+    envp: [text]
+    segments: [UserLoadSegment]
+    segment_count: i32
+    # Phase-2 addition (segment_mapper): raw ELF bytes retained so the
+    # scheduler can copy PT_LOAD file-backed ranges into user pages.
+    # Kept at the end of the struct to minimise conflict with the
+    # Phase-1 AddressSpace refactor.
+    file_bytes: [u8]
+    # Phase-3 addition (stack_builder): SysV initial stack frame.
+    initial_sp: u64
+    initial_stack_bytes: [u8]
+
+fn user_load_segment_virt_addr(segment: UserLoadSegment) -> u64:
+    segment.virt_addr
+
+fn user_load_segment_mem_size(segment: UserLoadSegment) -> u64:
+    segment.mem_size
+
+fn user_load_segment_file_size(segment: UserLoadSegment) -> u64:
+    segment.file_size
+
+fn user_load_segment_data(segment: UserLoadSegment) -> [u8]:
+    segment.data
+
+fn user_load_segment_flags(segment: UserLoadSegment) -> u32:
+    segment.flags
+
+fn user_process_image_entry(image: UserProcessImage) -> u64:
+    image.entry
+
+fn user_process_image_stack_top(image: UserProcessImage) -> u64:
+    image.stack_top
+
+fn user_process_image_stack_size(image: UserProcessImage) -> u64:
+    image.stack_size
+
+fn user_process_image_segments(image: UserProcessImage) -> [UserLoadSegment]:
+    image.segments
+
+fn user_process_image_segment_count(image: UserProcessImage) -> i32:
+    image.segment_count
+
+fn user_process_image_file_bytes(image: UserProcessImage) -> [u8]:
+    image.file_bytes
+
+fn user_process_image_initial_sp(image: UserProcessImage) -> u64:
+    image.initial_sp
+
+fn user_process_image_initial_stack_bytes(image: UserProcessImage) -> [u8]:
+    image.initial_stack_bytes
+
+@repr("C")
+struct TaskContext:
+    """Saved CPU state for context switch.
+    Architecture-specific fields filled by arch_adapt transform."""
+    # General purpose registers (x86_64)
+    rax: u64
+    rbx: u64
+    rcx: u64
+    rdx: u64
+    rsi: u64
+    rdi: u64
+    rbp: u64
+    rsp: u64
+    r8: u64
+    r9: u64
+    r10: u64
+    r11: u64
+    r12: u64
+    r13: u64
+    r14: u64
+    r15: u64
+    # Instruction pointer and flags
+    rip: u64
+    rflags: u64
+    # Segment selectors
+    cs: u64
+    ss: u64
+    # FPU/SSE state pointer (optional, 0 if not saved)
+    fpu_state: u64

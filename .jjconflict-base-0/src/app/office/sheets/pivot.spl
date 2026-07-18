@@ -1,0 +1,326 @@
+# Pivot Tables
+#
+# Group a data range by one or two key columns and aggregate a value column
+# (SUM/COUNT/AVERAGE/MIN/MAX) into a 2D result grid — the core of Excel's
+# PivotTable feature without the interactive drag-and-drop UI. Disjoint from
+# formula.spl (owned by another lane); reuses the range-iteration idiom from
+# data_ops.spl (parse_range + min/max normalization + get_cell/
+# cell_display_text) and the CellValue.NumberVal match idiom for numeric
+# extraction (see chart.spl's `_cell_number`).
+#
+# NOTE: never name a local/param `grid` or `unit` — both collide with
+# reserved parser tokens in this interpreter (see
+# doc/08_tracking/bug/parser_grid_identifier_keyword_collision_2026-07-03.md).
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{CellValue, CellRef, cell_ref_to_string, cell_display_text, number_cell}
+use app.office.sheets.cell_ref.{parse_range}
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _min_i32(a: i32, b: i32) -> i32:
+    if a < b:
+        return a
+    b
+
+fn _max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        return a
+    b
+
+fn _num_text(v: f64) -> text:
+    """Render a float via the sheet's own 'general' number format by routing
+    through cell_display_text/number_cell — reuses the exact formatting the
+    rest of the sheet uses (no trailing .0 on whole numbers; decimals kept
+    otherwise), rather than duplicating cell.spl's private formatter."""
+    cell_display_text(number_cell(v))
+
+fn _index_of_text(items: [text], target: text) -> i32:
+    """Linear scan; -1 if not found. Pivot key sets are small, so O(n) scans
+    per row are fine and avoid Dict-in-loop subtleties."""
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn _agg_is_valid(agg_lower: text) -> bool:
+    """SUM/COUNT/AVERAGE/MIN/MAX (case-insensitive); anything else is a bad
+    agg name and the caller must fail closed."""
+    (agg_lower == "sum" or agg_lower == "count" or agg_lower == "average" or
+     agg_lower == "min" or agg_lower == "max")
+
+fn _agg_value(agg_lower: text, sum_v: f64, count_v: i64, min_v: f64, max_v: f64, has_any: bool) -> f64:
+    """Combine running accumulators into the requested aggregate. A group
+    with no numeric values (has_any=false — every value cell in the group
+    was skipped as non-numeric) fails closed to 0.0 rather than NaN/inf."""
+    if not has_any:
+        return 0.0
+    if agg_lower == "sum":
+        return sum_v
+    if agg_lower == "count":
+        return count_v.to_f64()
+    if agg_lower == "average":
+        return sum_v / count_v.to_f64()
+    if agg_lower == "min":
+        return min_v
+    max_v
+
+# =========================================================================
+# pivot_build
+# =========================================================================
+
+fn pivot_build(sheet: Sheet, range_a1: text, row_key_col: i32, col_key_col: i32, value_col: i32, agg: text) -> [[text]]:
+    """Group `range_a1` by the text value in `row_key_col` — and, when
+    `col_key_col >= 0`, cross-tabulate by the text value in `col_key_col` —
+    aggregating the numeric value in `value_col` with `agg`
+    (sum|count|average|min|max, case-insensitive). All column indices are
+    0-based WITHIN the range (column 0 = the range's leftmost column).
+
+    `col_key_col == -1` selects the one-dimensional form: a single value
+    column, no cross-tab.
+
+    Grouping order: row keys and column keys are emitted in FIRST-SEEN
+    order — the order distinct values are first encountered scanning the
+    range top-to-bottom — not lexicographic. This keeps output deterministic
+    and matches the natural encounter order of PivotTable source data
+    without an extra sort pass.
+
+    Numeric extraction only recognizes `CellValue.NumberVal` cells; every
+    other value cell (empty, text, bool, formula, error) is SILENTLY SKIPPED
+    from aggregation, matching Excel's PivotTable behavior of ignoring
+    non-numeric cells in a numeric value field. A group whose value cells
+    were all skipped renders as 0 for every aggregate (documented fail-soft,
+    not an error) — this differs from the whole-call fail-closed cases below
+    only in scope (per-group vs. whole-grid).
+
+    Returns a 2D grid of display strings:
+      1D: [["Row", "<AGG>"], [key1, val1], ..., ["Grand Total", grand]]
+      2D: [["Row/Col", colkey1, ..., "Grand Total"],
+           [rowkey1, v11, ..., rowTotal1], ...,
+           ["Grand Total", colTotal1, ..., grand]]
+
+    Fail-closed (returns `[]` — the #ERR-equivalent empty grid) on: an
+    unparsable/empty range, an out-of-bounds row/col/value column index, an
+    unrecognized `agg` name, or a range with zero rows (so zero row keys)."""
+    val range_val = parse_range(range_a1)
+    if range_val == nil:
+        return []
+    val rng = range_val
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+    val span = max_col - min_col
+
+    if row_key_col < 0 or row_key_col > span:
+        return []
+    if value_col < 0 or value_col > span:
+        return []
+    if col_key_col != -1 and (col_key_col < 0 or col_key_col > span):
+        return []
+
+    val agg_lower = agg.lower()
+    if not _agg_is_valid(agg_lower):
+        return []
+
+    val is_2d = col_key_col != -1
+
+    # ---- Pass 1: discover distinct row/col keys, first-seen order ----
+    var row_keys: [text] = []
+    var col_keys: [text] = []
+    var r = min_row
+    while r <= max_row:
+        val row_ref = CellRef(col: min_col + row_key_col, row: r)
+        val row_key_text = cell_display_text(sheet.get_cell(cell_ref_to_string(row_ref)))
+        if _index_of_text(row_keys, row_key_text) < 0:
+            row_keys.push(row_key_text)
+        if is_2d:
+            val col_ref = CellRef(col: min_col + col_key_col, row: r)
+            val col_key_text = cell_display_text(sheet.get_cell(cell_ref_to_string(col_ref)))
+            if _index_of_text(col_keys, col_key_text) < 0:
+                col_keys.push(col_key_text)
+        r = r + 1
+
+    if row_keys.len() == 0:
+        return []
+
+    val ncols = if is_2d: col_keys.len() else: 1
+
+    # ---- Pass 2: init flat row-major accumulators (idx = row_idx*ncols+col_idx) ----
+    var cell_sum: [f64] = []
+    var cell_count: [i64] = []
+    var cell_min: [f64] = []
+    var cell_max: [f64] = []
+    var cell_has: [bool] = []
+    var init_i = 0
+    val ncells = row_keys.len() * ncols
+    while init_i < ncells:
+        cell_sum.push(0.0)
+        cell_count.push(0)
+        cell_min.push(0.0)
+        cell_max.push(0.0)
+        cell_has.push(false)
+        init_i = init_i + 1
+
+    var row_sum: [f64] = []
+    var row_count: [i64] = []
+    var row_min: [f64] = []
+    var row_max: [f64] = []
+    var row_has: [bool] = []
+    var ri = 0
+    while ri < row_keys.len():
+        row_sum.push(0.0)
+        row_count.push(0)
+        row_min.push(0.0)
+        row_max.push(0.0)
+        row_has.push(false)
+        ri = ri + 1
+
+    var col_sum: [f64] = []
+    var col_count: [i64] = []
+    var col_min: [f64] = []
+    var col_max: [f64] = []
+    var col_has: [bool] = []
+    var ci = 0
+    while ci < ncols:
+        col_sum.push(0.0)
+        col_count.push(0)
+        col_min.push(0.0)
+        col_max.push(0.0)
+        col_has.push(false)
+        ci = ci + 1
+
+    var grand_sum = 0.0
+    var grand_count: i64 = 0
+    var grand_min = 0.0
+    var grand_max = 0.0
+    var grand_has = false
+
+    # ---- Pass 3: accumulate numeric value cells into cell/row/col/grand ----
+    r = min_row
+    while r <= max_row:
+        val row_ref2 = CellRef(col: min_col + row_key_col, row: r)
+        val row_key_text2 = cell_display_text(sheet.get_cell(cell_ref_to_string(row_ref2)))
+        val row_idx = _index_of_text(row_keys, row_key_text2)
+
+        var col_idx = 0
+        if is_2d:
+            val col_ref2 = CellRef(col: min_col + col_key_col, row: r)
+            val col_key_text2 = cell_display_text(sheet.get_cell(cell_ref_to_string(col_ref2)))
+            col_idx = _index_of_text(col_keys, col_key_text2)
+
+        val value_ref = CellRef(col: min_col + value_col, row: r)
+        val value_cell = sheet.get_cell(cell_ref_to_string(value_ref))
+        match value_cell.value:
+            CellValue.NumberVal(v):
+                val cidx = row_idx * ncols + col_idx
+
+                cell_sum[cidx] = cell_sum[cidx] + v
+                cell_count[cidx] = cell_count[cidx] + 1
+                val cur_cell_min = cell_min[cidx]
+                if not cell_has[cidx] or v < cur_cell_min:
+                    cell_min[cidx] = v
+                if not cell_has[cidx] or v > cell_max[cidx]:
+                    cell_max[cidx] = v
+                cell_has[cidx] = true
+
+                row_sum[row_idx] = row_sum[row_idx] + v
+                row_count[row_idx] = row_count[row_idx] + 1
+                val cur_row_min = row_min[row_idx]
+                if not row_has[row_idx] or v < cur_row_min:
+                    row_min[row_idx] = v
+                if not row_has[row_idx] or v > row_max[row_idx]:
+                    row_max[row_idx] = v
+                row_has[row_idx] = true
+
+                if is_2d:
+                    col_sum[col_idx] = col_sum[col_idx] + v
+                    col_count[col_idx] = col_count[col_idx] + 1
+                    val cur_col_min = col_min[col_idx]
+                    if not col_has[col_idx] or v < cur_col_min:
+                        col_min[col_idx] = v
+                    if not col_has[col_idx] or v > col_max[col_idx]:
+                        col_max[col_idx] = v
+                    col_has[col_idx] = true
+
+                grand_sum = grand_sum + v
+                grand_count = grand_count + 1
+                if not grand_has or v < grand_min:
+                    grand_min = v
+                if not grand_has or v > grand_max:
+                    grand_max = v
+                grand_has = true
+            _:
+                pass_do_nothing("non-numeric value cells are skipped, matching Excel PivotTable behavior")
+        r = r + 1
+
+    # ---- Emit the result grid ----
+    var out: [[text]] = []
+    if is_2d:
+        var header: [text] = ["Row/Col"]
+        var hc = 0
+        while hc < col_keys.len():
+            header.push(col_keys[hc])
+            hc = hc + 1
+        header.push("Grand Total")
+        out.push(header)
+
+        var rr = 0
+        while rr < row_keys.len():
+            var data_row: [text] = [row_keys[rr]]
+            var cc = 0
+            while cc < ncols:
+                val idx = rr * ncols + cc
+                val cv = _agg_value(agg_lower, cell_sum[idx], cell_count[idx], cell_min[idx], cell_max[idx], cell_has[idx])
+                data_row.push(_num_text(cv))
+                cc = cc + 1
+            val rowv = _agg_value(agg_lower, row_sum[rr], row_count[rr], row_min[rr], row_max[rr], row_has[rr])
+            data_row.push(_num_text(rowv))
+            out.push(data_row)
+            rr = rr + 1
+
+        var grand_row: [text] = ["Grand Total"]
+        var gc = 0
+        while gc < ncols:
+            val colv = _agg_value(agg_lower, col_sum[gc], col_count[gc], col_min[gc], col_max[gc], col_has[gc])
+            grand_row.push(_num_text(colv))
+            gc = gc + 1
+        val grandv = _agg_value(agg_lower, grand_sum, grand_count, grand_min, grand_max, grand_has)
+        grand_row.push(_num_text(grandv))
+        out.push(grand_row)
+    else:
+        out.push(["Row", agg_lower.upper()])
+        var rr2 = 0
+        while rr2 < row_keys.len():
+            val cv2 = _agg_value(agg_lower, cell_sum[rr2], cell_count[rr2], cell_min[rr2], cell_max[rr2], cell_has[rr2])
+            out.push([row_keys[rr2], _num_text(cv2)])
+            rr2 = rr2 + 1
+        val grandv2 = _agg_value(agg_lower, grand_sum, grand_count, grand_min, grand_max, grand_has)
+        out.push(["Grand Total", _num_text(grandv2)])
+
+    out
+
+# =========================================================================
+# pivot_to_sheet
+# =========================================================================
+
+fn pivot_to_sheet(rows_in: [[text]], name: text) -> Sheet:
+    """Render a pivot_build result grid into a new Sheet (row-major, starting
+    at A1) — for CSV/xlsx/ods export or on-screen rendering via the existing
+    sheet pipeline. An empty grid (`[]`, e.g. from a fail-closed pivot_build
+    call) yields an empty named Sheet."""
+    var sheet = Sheet.new(name)
+    var r = 0
+    while r < rows_in.len():
+        val row = rows_in[r]
+        var c = 0
+        while c < row.len():
+            val ref_val = CellRef(col: c, row: r)
+            sheet.set_value(cell_ref_to_string(ref_val), row[c])
+            c = c + 1
+        r = r + 1
+    sheet

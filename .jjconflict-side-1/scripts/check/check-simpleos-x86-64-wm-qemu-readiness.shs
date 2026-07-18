@@ -1,0 +1,219 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+QEMU_BIN="${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}"
+QEMU_TIMEOUT="${X86_64_WM_QEMU_READINESS_TIMEOUT:-3}"
+# Bounded wait (seconds) for the real boot-verification step below.
+BOOT_WAIT="${X86_64_WM_QEMU_BOOT_WAIT:-60}"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+# Earliest reliable serial marker emitted by gui_entry_desktop.spl's own entry point
+# (the very first statement of fn spl_start()) — see report_gap below for why
+# this one was picked over the generic "[boot] memory init OK" marker other
+# gates use (that marker belongs to a different entry point).
+BOOT_MARKER="\[desktop-gui\] spl_start"
+
+ENTRY="${ROOT_DIR}/examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
+# No dedicated "simpleos_x86_64_wm_qemu.md" guide exists (unlike arm64's
+# simpleos_arm64_wm_qemu.md). The closest available doc is the dev guide's
+# Entry Points (8.6) / QEMU Configuration (8.7) sections for the x86_64 WM
+# target — see guide_gap below.
+GUIDE="${ROOT_DIR}/doc/07_guide/platform/simpleos/simpleos_dev_guide.md"
+guide_gap="true"
+
+status="ready"
+qemu_path=""
+machine_q35="false"
+vga_std="false"
+dry_run_parse="false"
+boot_verified="false"
+boot_skipped_reason=""
+reason=""
+host_os="$(uname -s 2>/dev/null || echo unknown)"
+host_machine="$(uname -m 2>/dev/null || echo unknown)"
+accelerator="tcg"
+cpu="qemu64"
+if [ "$host_os" = "Darwin" ] && [ "$host_machine" = "x86_64" ]; then
+    accelerator="hvf"
+    cpu="host"
+elif [ "$host_os" = "Linux" ] && [ "$host_machine" = "x86_64" ] && [ -e /dev/kvm ]; then
+    accelerator="kvm"
+    cpu="host"
+fi
+
+if [ ! -f "$ENTRY" ]; then
+    status="not-ready"
+    reason="missing x86_64 WM entry"
+elif [ ! -f "$GUIDE" ]; then
+    status="not-ready"
+    reason="missing x86_64 WM QEMU guide"
+elif ! qemu_path="$(command -v "$QEMU_BIN" 2>/dev/null)"; then
+    status="not-ready"
+    reason="qemu-system-x86_64 not found"
+elif ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    status="not-ready"
+    reason="grub-mkstandalone not found"
+else
+    if "$QEMU_BIN" -machine help 2>/dev/null | grep -Eq '(^|[[:space:]])q35([[:space:],]|$)'; then
+        machine_q35="true"
+    fi
+    if "$QEMU_BIN" -vga help 2>/dev/null | grep -Eq '(^|[[:space:]])std([[:space:]]|$)'; then
+        vga_std="true"
+    fi
+    if [ "$machine_q35" != "true" ]; then
+        status="not-ready"
+        reason="qemu-system-x86_64 does not list q35 machine"
+    elif [ "$vga_std" != "true" ]; then
+        status="not-ready"
+        reason="qemu-system-x86_64 does not list std (BGA) VGA device"
+    else
+        set +e
+        dry_out="$(timeout "${QEMU_TIMEOUT}s" "$QEMU_BIN" \
+            -no-user-config -monitor none -net none \
+            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 512M \
+            -display none -serial none \
+            -vga std -S 2>&1)"
+        dry_code=$?
+        set -e
+        if [ "$dry_code" -eq 124 ]; then
+            dry_run_parse="true"
+        elif printf '%s\n' "$dry_out" | grep -q 'gtk initialization failed'; then
+            dry_run_parse="true"
+        else
+            status="not-ready"
+            reason="qemu-system-x86_64 failed to parse q35/std-vga dry run: ${dry_out}"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Real boot verification: the checks above only prove QEMU can *parse* the
+# q35/std-vga arguments (via -S, paused, never actually running the kernel).
+# That is not proof the kernel boots. If a built kernel ELF is available
+# (SIMPLEOS_KERNEL_ELF — built out-of-band by the coordinator/build step,
+# same convention as the other check-simpleos-*-qemu.shs gates' $KERNEL),
+# actually boot it and wait for its earliest real serial marker. If no
+# kernel ELF is available in this environment, SKIP the boot-verification
+# step explicitly rather than silently reporting "ready".
+# ---------------------------------------------------------------------------
+if [ "$status" = "ready" ]; then
+    KERNEL_ELF="${SIMPLEOS_KERNEL_ELF:-}"
+    if [ -z "$KERNEL_ELF" ] || [ ! -f "$KERNEL_ELF" ]; then
+        status="skip"
+        boot_skipped_reason="SIMPLEOS_KERNEL_ELF not set or file missing (arg-parse pre-check passed, but no kernel was booted)"
+    elif [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS_SRC" ]; then
+        status="not-ready"
+        reason="OVMF firmware not found ($OVMF_CODE / $OVMF_VARS_SRC)"
+    else
+        SERIAL_LOG="${ROOT_DIR}/build/os/check_simpleos_x86_64_wm_qemu_readiness.serial.log"
+        UEFI_BUILD="${ROOT_DIR}/build/os/wm_qemu_readiness_uefi"
+        ESP="$UEFI_BUILD/esp"
+        EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+        OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+        mkdir -p "$(dirname "$SERIAL_LOG")"
+        rm -f "$SERIAL_LOG"
+        rm -rf "$UEFI_BUILD"
+        mkdir -p "$ESP/EFI/BOOT"
+        cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+        cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM qemu-readiness (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+        set +e
+        grub-mkstandalone \
+            --format=x86_64-efi \
+            --output="$EFIAPP" \
+            --modules="multiboot normal echo part_gpt fat" \
+            "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+            "boot/kernel.elf=$KERNEL_ELF"
+        grub_mkstandalone_code=$?
+        set -e
+        if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+            status="not-ready"
+            reason="grub-mkstandalone did not produce BOOTX64.EFI"
+        else
+        "$QEMU_BIN" -no-user-config -monitor none -nographic -no-reboot \
+            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 512M \
+            -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+            -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+            -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+            -device virtio-blk-pci,drive=esp,bootindex=0 \
+            -serial "file:$SERIAL_LOG" \
+            -vga std &
+        QEMU_PID=$!
+
+        i=0
+        found="false"
+        while [ "$i" -lt "$BOOT_WAIT" ]; do
+            if grep -qa -- "$BOOT_MARKER" "$SERIAL_LOG" 2>/dev/null; then
+                found="true"
+                break
+            fi
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ "$found" != "true" ]; then
+            grep -qa -- "$BOOT_MARKER" "$SERIAL_LOG" 2>/dev/null && found="true"
+        fi
+
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+
+        if [ "$found" = "true" ]; then
+            boot_verified="true"
+        else
+            status="not-ready"
+            reason="kernel did not print boot marker within ${BOOT_WAIT}s: ${BOOT_MARKER}"
+            echo "===== serial tail (${SERIAL_LOG}) ====="
+            tail -60 "$SERIAL_LOG" 2>/dev/null || true
+            echo "======================="
+        fi
+        fi
+    fi
+fi
+
+grub_efi_ran="false"
+kernel_start_reached="false"
+if [ -n "${SERIAL_LOG:-}" ] && [ -f "$SERIAL_LOG" ]; then
+    grep -qa "\[grub-uefi\] multiboot loading" "$SERIAL_LOG" 2>/dev/null && grub_efi_ran="true"
+    grep -qa "\[BOOT64\] call _start" "$SERIAL_LOG" 2>/dev/null && kernel_start_reached="true"
+fi
+
+echo "x86_64_wm_qemu_readiness: $status"
+echo "qemu_system: $QEMU_BIN"
+echo "qemu_path: ${qemu_path:-}"
+echo "machine_q35: $machine_q35"
+echo "vga_std: $vga_std"
+echo "dry_run_parse: $dry_run_parse"
+echo "boot_verified: $boot_verified"
+echo "grub_efi_ran: $grub_efi_ran"
+echo "kernel_start_reached: $kernel_start_reached"
+if [ -n "$boot_skipped_reason" ]; then
+    echo "boot_verification_skipped: $boot_skipped_reason"
+fi
+echo "host_os: $host_os"
+echo "host_machine: $host_machine"
+echo "accelerator: $accelerator"
+echo "cpu: $cpu"
+echo "entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
+echo "guide: doc/07_guide/platform/simpleos/simpleos_dev_guide.md"
+echo "guide_gap: $guide_gap (no dedicated simpleos_x86_64_wm_qemu.md; arm64 has simpleos_arm64_wm_qemu.md, x86_64 does not -- using simpleos_dev_guide.md section 8.6/8.7 as the closest available doc)"
+if [ -n "$reason" ]; then
+    echo "reason: $reason"
+fi
+
+if [ "$status" = "not-ready" ]; then
+    exit 1
+fi
+exit 0

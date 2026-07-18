@@ -1,0 +1,146 @@
+# Simple CLI - tree command
+# Shows dependency tree
+
+use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use app.io.mod (file_exists, file_read, cwd)
+use std.log.{error}
+
+fn print_help():
+    print "Usage: simple tree [options]"
+    print ""
+    print "Display the dependency tree for the current project."
+    print ""
+    print "Options:"
+    print "  --json       Output as JSON"
+    print "  --depth=N    Maximum tree depth (default: unlimited)"
+    print "  --dev        Include dev dependencies"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_array(names: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < names.len():
+        parts.push("\"{names[i]}\"")
+        i = i + 1
+    "[" + parts.join(",") + "]"
+
+fn parse_tree_depth_or_default(value: text, default_value: i64) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return default_value
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return default_value
+    return trimmed.to_int() ?? default_value
+
+fn print_tree_node(name: text, prefix: text, is_last: bool, modules_dir: text, max_depth: i64, current_depth: i64):
+    val connector = if is_last then "└── " else "├── "
+    val status = if file_exists("{modules_dir}/{name}/__init__.spl") then "" else " (not installed)"
+    print "{prefix}{connector}{name} (*){status}"
+
+    # Check for transitive deps in the installed package
+    if current_depth < max_depth:
+        val pkg_manifest = "{modules_dir}/{name}/simple.sdn"
+        if file_exists(pkg_manifest):
+            val pkg_content = file_read(pkg_manifest)
+            val sub_deps = parse_deps_section(pkg_content, "dependencies")
+            val child_prefix = if is_last then prefix + "    " else prefix + "│   "
+            var i = 0
+            for sub_name in sub_deps:
+                val sub_last = i == sub_deps.len() - 1
+                print_tree_node(sub_name, child_prefix, sub_last, modules_dir, max_depth, current_depth + 1)
+                i = i + 1
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var max_depth = 99
+    var include_dev = false
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("tree", log_opts.error)
+        return 1
+
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg.starts_with("--depth="):
+            max_depth = parse_tree_depth_or_default(arg[8:], max_depth)
+        elif arg == "--dev":
+            include_dev = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
+
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        print "tree: no simple.sdn or simple.toml found in current directory"
+        return 1
+    val content = file_read(manifest_path)
+    val deps = parse_deps_section(content, "dependencies")
+    val dev_deps = if include_dev then parse_deps_section(content, "dev_dependencies") else []
+
+    # Parse project name
+    var project_name = "unknown"
+    var project_version = "0.0.0"
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("name:"):
+            project_name = trimmed[5:].trim()
+        elif trimmed.starts_with("version:"):
+            project_version = trimmed[8:].trim()
+
+    val current_dir = cwd()
+    val modules_dir = "{current_dir}/simple_modules"
+
+    var all_deps = []
+    for name in deps:
+        all_deps.push(name)
+    for name in dev_deps:
+        all_deps.push(name)
+
+    if as_json:
+        print "{\"name\":\"{project_name}\",\"version\":\"{project_version}\",\"dependencies\":" + _json_array(deps) + ",\"dev_dependencies\":" + _json_array(dev_deps) + ",\"root_count\":{all_deps.len()}}"
+        return 0
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, all_deps.len(), all_deps.len(), "tree")
+        if progress_line != "":
+            print progress_line
+
+    print "{project_name} v{project_version}"
+
+    if all_deps.len() == 0:
+        print "└── (no dependencies)"
+        return 0
+
+    var i = 0
+    for name in all_deps:
+        val is_last = i == all_deps.len() - 1
+        print_tree_node(name, "", is_last, modules_dir, max_depth, 0)
+        i = i + 1
+
+    0

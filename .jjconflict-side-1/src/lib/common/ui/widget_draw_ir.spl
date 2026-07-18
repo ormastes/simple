@@ -1,0 +1,262 @@
+# widget_draw_ir.spl — Widget-tree → Draw-IR converter.
+#
+# Walks a laid-out WidgetNode tree (via compute_layout) and emits shared
+# Draw-IR commands (rect / text / image) that engine2d `draw_ir_adv` can
+# render directly. This is the preferred pipeline the UI docs call for:
+# interactive apps stop hand-rolling draw calls and instead lay out widgets,
+# then convert to Draw IR.
+#
+# Interaction state (hover / pressed / checked / focus / scroll offset) is read
+# from the same process-local widget prop store the event router writes, so a
+# re-conversion after an event shows the updated frame.
+#
+# Renderer support: engine2d draw_ir_adv executes RECT + TEXT + IMAGE commands
+# and applies clipping per-batch (batch.embedding.clip). Scroll areas therefore
+# become their own clipped batch with content offset by the scroll amount.
+#
+# ponytail: compact local palette instead of pulling the full glass token
+# machinery — swap constants for glass tokens if theme parity is required.
+
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.widget.{WidgetNode, WidgetRect}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrBatch,
+    DrawIrComposition,
+    DrawIrCommand,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_image_command,
+    draw_ir_rect,
+    draw_ir_text,
+    draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font
+}
+use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+
+# =========================================================================
+# Palette (ARGB u32, 0xff = opaque)
+# =========================================================================
+
+val PANEL_BG: u32 = 0xff222834u32
+val LABEL_FG: u32 = 0xffe6e6eeu32
+val BTN_NORMAL: u32 = 0xff3b6ea5u32
+val BTN_HOVER: u32 = 0xff4f86c6u32
+val BTN_PRESSED: u32 = 0xff274b73u32
+val BTN_LABEL: u32 = 0xffffffffu32
+val CHECK_BORDER: u32 = 0xff8894a8u32
+val CHECK_BG: u32 = 0xff2a2f3au32
+val CHECK_MARK: u32 = 0xff4f86c6u32
+val INPUT_BG: u32 = 0xff11151cu32
+val INPUT_BORDER: u32 = 0xff3a4150u32
+val INPUT_TEXT: u32 = 0xffd8dde6u32
+val CARET_COLOR: u32 = 0xffffffffu32
+val SCROLL_TRACK: u32 = 0xff161a21u32
+val PROGRESS_TRACK: u32 = 0xff21262fu32
+val PROGRESS_FILL: u32 = 0xff4f86c6u32
+val IMAGE_PLACEHOLDER: u32 = 0xff33405au32
+
+val GLYPH_ADVANCE: i32 = 7
+
+# =========================================================================
+# Prop helpers
+# =========================================================================
+
+fn _prop_int(node: WidgetNode, key: text) -> i32:
+    val raw = node.get_prop(key)
+    if raw == "":
+        return 0
+    raw.to_int() ?? 0
+
+fn _label_text(node: WidgetNode) -> text:
+    val lbl = node.get_prop("label")
+    if lbl != "":
+        return lbl
+    node.get_prop("content")
+
+fn _button_color(node: WidgetNode) -> u32:
+    if node.get_prop("ui_pressed") == "true":
+        return BTN_PRESSED
+    if node.get_prop("ui_hover") == "true":
+        return BTN_HOVER
+    BTN_NORMAL
+
+fn _default_text(node: WidgetNode, component_id: text, x: i32, y: i32, value: text, color: u32) -> DrawIrCommand:
+    val candidate = simpleos_default_font_asset_candidate()
+    val language = node.get_prop("lang")
+    val normalized_language = language.trim().lower()
+    val requested_family = node.get_prop("font-family")
+    val family = if requested_family != "": requested_family else if normalized_language != "" and normalized_language != "und": "sans" else: candidate.family
+    val metrics = resolve_font_metrics_with_language(family, value, 12, language)
+    if not metrics.valid:
+        return draw_ir_text(component_id, x, y, value, color)
+    if metrics.shaping_required:
+        return draw_ir_text_shaped_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12, metrics.glyph_run)
+    draw_ir_text_resolved_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12)
+
+fn _default_text_centered(node: WidgetNode, component_id: text, x: i32, legacy_y: i32, box_y: i32, box_h: i32, value: text, color: u32) -> DrawIrCommand:
+    var command = _default_text(node, component_id, x, legacy_y, value, color)
+    if command.height > 0:
+        command.y = box_y + (box_h - command.height) / 2
+    command
+
+# =========================================================================
+# Per-widget command emission. Coordinates are shifted by (ox, oy) so the
+# same helper serves the absolute main batch (ox=oy=0) and a scroll batch
+# (ox=scroll.x, oy=scroll.y+offset) whose embedding re-adds the origin.
+# =========================================================================
+
+fn _emit_widget(node: WidgetNode, rect: WidgetRect, ox: i32, oy: i32, cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+    var result = cmds
+    if rect.w <= 0 or rect.h <= 0:
+        return result
+    val x = rect.x - ox
+    val y = rect.y - oy
+    val kind = node.kind_name()
+    val mid_y = y + rect.h / 2
+
+    if kind == "button":
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _button_color(node)))
+        val lbl = _label_text(node)
+        if lbl != "":
+            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, lbl, BTN_LABEL))
+    elif kind == "checkbox":
+        val box = 18
+        val box_y = y + (rect.h - box) / 2
+        result.push(draw_ir_rect("{rect.id}-box", x, box_y, box, box, CHECK_BORDER))
+        val inner_color = if node.get_prop("checked") == "true": CHECK_MARK else: CHECK_BG
+        result.push(draw_ir_rect("{rect.id}-mark", x + 2, box_y + 2, box - 4, box - 4, inner_color))
+        val lbl = _label_text(node)
+        if lbl != "":
+            result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, LABEL_FG))
+    elif kind == "input" or kind == "textfield":
+        result.push(draw_ir_rect("{rect.id}-border", x, y, rect.w, rect.h, INPUT_BORDER))
+        result.push(draw_ir_rect("{rect.id}-field", x + 2, y + 2, rect.w - 4, rect.h - 4, INPUT_BG))
+        val value = node.get_prop("value")
+        if value != "":
+            result.push(_default_text_centered(node, "{rect.id}-value", x + 5, mid_y, y, rect.h, value, INPUT_TEXT))
+        if node.get_prop("ui_focus") == "true":
+            val caret = _prop_int(node, "caret")
+            val prefix = if caret > 0 and caret < value.len(): value.slice(0, caret) elif caret >= value.len(): value else: ""
+            val prefix_command = _default_text(node, "{rect.id}-caret-metrics", 0, 0, prefix, INPUT_TEXT)
+            val caret_x = x + 5 + (if prefix_command.computed_style.len() > 0: prefix_command.width else: caret * GLYPH_ADVANCE)
+            result.push(draw_ir_rect("{rect.id}-caret", caret_x, y + 3, 2, rect.h - 6, CARET_COLOR))
+    elif kind == "progress":
+        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, PROGRESS_TRACK))
+        var value = _prop_int(node, "value")
+        if value < 0:
+            value = 0
+        if value > 100:
+            value = 100
+        val fill_w = rect.w * value / 100
+        if fill_w > 0:
+            result.push(draw_ir_rect("{rect.id}-fill", x, y, fill_w, rect.h, PROGRESS_FILL))
+    elif kind == "image":
+        result.push(draw_ir_rect("{rect.id}-bg", x, y, rect.w, rect.h, IMAGE_PLACEHOLDER))
+        val src = node.get_prop("src")
+        if src != "":
+            result.push(draw_ir_image_command(rect.id, x, y, rect.w, rect.h, src, []))
+    elif kind == "text" or kind == "label" or kind == "heading":
+        val lbl = _label_text(node)
+        if lbl != "":
+            result.push(_default_text_centered(node, rect.id, x + 2, mid_y, y, rect.h, lbl, LABEL_FG))
+    elif kind == "scroll":
+        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, SCROLL_TRACK))
+    else:
+        # container / panel / unknown -> background surface
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, PANEL_BG))
+    return result
+
+# =========================================================================
+# Main-batch walk (absolute coords). Scroll subtrees are handled separately,
+# so the walk draws the scroll frame but does not recurse into it.
+# =========================================================================
+
+fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+    var result = cmds
+    if not node.is_visible():
+        return result
+    match find_rect(rects, node.id):
+        case Some(rect):
+            result = _emit_widget(node, rect, 0, 0, result)
+        case _:
+            return result
+    if node.kind_name() == "scroll":
+        return result
+    for child in node.children():
+        result = _walk_main(child, rects, result)
+    return result
+
+# =========================================================================
+# Scroll batches: each scroll node becomes a clipped batch whose descendants
+# are offset by the scroll amount. ponytail: nested scroll-in-scroll not
+# supported (descendants are attributed to the outer scroll); add a
+# depth-aware split if a real app needs it.
+# =========================================================================
+
+fn _walk_scroll_children(node: WidgetNode, rects: [WidgetRect], ox: i32, oy: i32, cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+    var result = cmds
+    if not node.is_visible():
+        return result
+    match find_rect(rects, node.id):
+        case Some(rect):
+            result = _emit_widget(node, rect, ox, oy, result)
+        case _:
+            pass
+    for child in node.children():
+        result = _walk_scroll_children(child, rects, ox, oy, result)
+    return result
+
+fn _build_scroll_batch(scroll_node: WidgetNode, rects: [WidgetRect], backend: text) -> DrawIrBatch?:
+    match find_rect(rects, scroll_node.id):
+        case Some(srect):
+            val offset = _prop_int(scroll_node, "scroll_offset")
+            var cmds: [DrawIrCommand] = []
+            for child in scroll_node.children():
+                cmds = _walk_scroll_children(child, rects, srect.x, srect.y + offset, cmds)
+            val embedding = draw_ir_embedding_config("scroll-{scroll_node.id}", scroll_node.id, srect.x, srect.y, srect.w, srect.h, 5, 1000, true)
+            return draw_ir_batch("scroll-{scroll_node.id}", backend, embedding, cmds)
+        case _:
+            return nil
+
+fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text, batches: [DrawIrBatch]) -> [DrawIrBatch]:
+    var result = batches
+    if not node.is_visible():
+        return result
+    if node.kind_name() == "scroll":
+        match _build_scroll_batch(node, rects, backend):
+            case Some(batch):
+                result.push(batch)
+            case _:
+                pass
+    for child in node.children():
+        result = _collect_scroll_batches(child, rects, backend, result)
+    return result
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
+    """Lay out `root` at (w, h) and project it to a Draw-IR composition.
+
+    Batch 0 is the whole tree in absolute coordinates (unclipped). Each scroll
+    area contributes an additional clipped batch whose content is shifted by
+    its `scroll_offset`. The result renders through
+    `engine2d_draw_ir_adv_composition[_with_images]`.
+    """
+    val rects = compute_layout(root, 0, 0, w, h)
+    var main_cmds: [DrawIrCommand] = []
+    main_cmds = _walk_main(root, rects, main_cmds)
+    val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
+    val main_batch = draw_ir_batch("widget-main", backend, embedding, main_cmds)
+    var batches: [DrawIrBatch] = [main_batch]
+    batches = _collect_scroll_batches(root, rects, backend, batches)
+    draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
+
+fn widget_tree_to_draw_ir_cpu(root: WidgetNode, w: i32, h: i32) -> DrawIrComposition:
+    widget_tree_to_draw_ir(root, w, h, DRAW_IR_BACKEND_CPU)
+
+export widget_tree_to_draw_ir, widget_tree_to_draw_ir_cpu

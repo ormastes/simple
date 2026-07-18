@@ -1,0 +1,162 @@
+# Isolated RSS probe for the paired legacy/multiface 2D and 3D font lanes.
+# Each invocation emits exactly one strict record on stdout.
+
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{file_exists, file_read}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{rgb}
+use std.gpu.engine3d.engine.{Engine3D}
+use std.gpu.engine3d.types3d.{mat4_translate, mat4_perspective}
+use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font, glyph_index}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.nogc_sync_mut.text_layout.font_types.{FontGlyphRun}
+
+val SC_FACE = "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"
+val DEVANAGARI_FACE = "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
+val ARABIC_FACE = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
+
+class ProbeResult:
+    status: text
+    rss_kb: i64
+    reason: text
+
+fn _unavailable(reason: text) -> ProbeResult:
+    ProbeResult(status: "unavailable", rss_kb: 0, reason: reason)
+
+fn _rss_kb() -> i64:
+    val path = "/proc/self/status"
+    if not file_exists(path): return 0
+    for line in file_read(path).split("\n"):
+        if line.starts_with("VmRSS:"):
+            for part in line.split(" "):
+                val parsed = part.trim().to_i64() ?? 0
+                if parsed > 0: return parsed
+    0
+
+fn _glyph_run(face: FontHandle, codepoints: [i64]) -> FontGlyphRun:
+    var ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    var index: i64 = 0
+    while index < codepoints.len():
+        val id = glyph_index(face, codepoints[index])
+        if id <= 0:
+            return FontGlyphRun(valid: false, face_id: face.handle,
+                face_generation: face.generation, glyph_ids: [], xs: [], ys: [], clusters: [])
+        ids.push(id.to_u32())
+        xs.push((index * 20).to_i32())
+        ys.push(0)
+        clusters.push(index)
+        index = index + 1
+    FontGlyphRun(valid: ids.len() > 0, face_id: face.handle,
+        face_generation: face.generation, glyph_ids: ids, xs: xs, ys: ys,
+        clusters: clusters)
+
+fn _free_faces(faces: [FontHandle]):
+    for face in faces: free_font(face)
+
+fn _load_runs(multiface: bool) -> ([FontHandle], [FontGlyphRun]):
+    val sc_loaded = load_font(SC_FACE)
+    if sc_loaded == nil: return ([], [])
+    val sc = sc_loaded as FontHandle
+    if not multiface:
+        val legacy = _glyph_run(sc, [65, 65, 65])
+        if not legacy.valid:
+            free_font(sc)
+            return ([], [])
+        return ([sc], [legacy])
+
+    val devanagari_loaded = load_font(DEVANAGARI_FACE)
+    if devanagari_loaded == nil:
+        free_font(sc)
+        return ([], [])
+    val devanagari = devanagari_loaded as FontHandle
+    val arabic_loaded = load_font(ARABIC_FACE)
+    if arabic_loaded == nil:
+        free_font(sc)
+        free_font(devanagari)
+        return ([], [])
+    val arabic = arabic_loaded as FontHandle
+    val runs = [
+        _glyph_run(sc, [65]),
+        _glyph_run(devanagari, [0x0905]),
+        _glyph_run(arabic, [0x0628]),
+    ]
+    if not runs[0].valid or not runs[1].valid or not runs[2].valid:
+        _free_faces([sc, devanagari, arabic])
+        return ([], [])
+    ([sc, devanagari, arabic], runs)
+
+fn _run_2d(multiface: bool) -> ProbeResult:
+    val loaded = _load_runs(multiface)
+    val faces = loaded.0
+    val runs = loaded.1
+    if runs.len() == 0: return _unavailable("font-material-unavailable")
+    var engine = Engine2D.create_with_backend(256, 128, "vulkan")
+    if engine.backend_name() != "vulkan" or engine.vulkan_backend == nil:
+        engine.shutdown()
+        _free_faces(faces)
+        return _unavailable("vulkan-2d-unavailable")
+    engine.font_renderer = FontRenderer.new()
+    engine.clear(rgb(0, 0, 0))
+    var drawn = true
+    var index: i64 = 0
+    while index < runs.len():
+        drawn = drawn and engine.draw_glyph_run(8, 8 + (index * 28).to_i32(),
+            runs[index], 0xffffffffu32, 24)
+        index = index + 1
+    val evidence = engine.vulkan_font_performance_evidence()
+    val promoted = evidence != nil and evidence.?.promotion_ready
+    val rss = if drawn and promoted: _rss_kb() else: 0
+    engine.shutdown()
+    _free_faces(faces)
+    if not drawn: return _unavailable("vulkan-2d-draw-failed")
+    if not promoted: return _unavailable("vulkan-2d-evidence-unavailable")
+    if rss <= 0: return _unavailable("proc-rss-unavailable")
+    ProbeResult(status: "pass", rss_kb: rss, reason: "pass")
+
+fn _run_3d(multiface: bool) -> ProbeResult:
+    val loaded = _load_runs(multiface)
+    val faces = loaded.0
+    val runs = loaded.1
+    if runs.len() == 0: return _unavailable("font-material-unavailable")
+    var engine = Engine3D.create_with_backend(128, 128, "vulkan")
+    if engine.backend_name() != "vulkan-font":
+        engine.shutdown()
+        _free_faces(faces)
+        return _unavailable("vulkan-3d-unavailable")
+    engine.set_camera(mat4_translate(-0.5, 0.0, -2.0),
+        mat4_perspective(1.0, 1.0, 0.1, 100.0))
+    engine.begin_frame()
+    var drawn = true
+    var index: i64 = 0
+    while index < runs.len():
+        drawn = drawn and engine.draw_glyph_run_hud(4, 4 + (index * 28).to_i32(),
+            runs[index], 0xffffffffu32, 22)
+        drawn = drawn and engine.draw_glyph_run_world(0.5f32, 0.0f32,
+            ((index as f32) * -0.05f32), runs[index], 0xff40ff40u32, 18)
+        index = index + 1
+    engine.end_frame()
+    val evidence = engine.vulkan_font_evidence()
+    val native_ready = evidence != nil and evidence.?.ready and
+        evidence.?.hud_draws >= runs.len() and evidence.?.world_draws >= runs.len()
+    val rss = if drawn and native_ready: _rss_kb() else: 0
+    engine.shutdown()
+    _free_faces(faces)
+    if not drawn: return _unavailable("vulkan-3d-draw-failed")
+    if not native_ready: return _unavailable("vulkan-3d-evidence-unavailable")
+    if rss <= 0: return _unavailable("proc-rss-unavailable")
+    ProbeResult(status: "pass", rss_kb: rss, reason: "pass")
+
+fn _run(mode: text) -> ProbeResult:
+    if mode == "legacy-2d": return _run_2d(false)
+    if mode == "multiface-2d": return _run_2d(true)
+    if mode == "legacy-3d": return _run_3d(false)
+    if mode == "multiface-3d": return _run_3d(true)
+    _unavailable("invalid-mode")
+
+val args = get_cli_args()
+val mode = if args.len() == 1: args[0] else: "invalid"
+val result = _run(mode)
+print "font-perf-rss/v1 mode={mode} status={result.status} rss_kb={result.rss_kb} reason={result.reason}"

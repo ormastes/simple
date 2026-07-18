@@ -1,0 +1,167 @@
+use std.io_runtime.{file_exists, read_file}
+
+pub struct LlmDiagnosticPanel:
+    source_path: text
+    event_count: i64
+    session_count: i64
+    tool_event_count: i64
+    vllm_event_count: i64
+    last_event: text
+    last_session_id: text
+    last_vllm_status: text
+    last_vllm_reason: text
+
+    fn empty(path: text) -> LlmDiagnosticPanel:
+        LlmDiagnosticPanel(
+            source_path: path,
+            event_count: 0,
+            session_count: 0,
+            tool_event_count: 0,
+            vllm_event_count: 0,
+            last_event: "",
+            last_session_id: "",
+            last_vllm_status: "",
+            last_vllm_reason: ""
+        )
+
+fn _json_string_field(json: text, name: text) -> text:
+    val key = "\"" + name + "\""
+    val parts = json.split(key)
+    var part_index = 1
+    while part_index < parts.len():
+        val parsed = _json_string_value_after_key(parts[part_index])
+        if parsed != "":
+            return parsed
+        part_index = part_index + 1
+    ""
+
+fn _json_string_value_after_key(after_key: text) -> text:
+    var seen_colon = false
+    var in_string = false
+    var escaped = false
+    var value = ""
+    for ch in after_key:
+        if not seen_colon:
+            if ch == ":":
+                seen_colon = true
+            elif ch == " " or ch == "\t" or ch == "\r" or ch == "\n":
+                pass
+            else:
+                return ""
+            continue
+        if not in_string:
+            if ch == " " or ch == "\t" or ch == "\r" or ch == "\n":
+                continue
+            if ch == "\"":
+                in_string = true
+                continue
+            return ""
+        if escaped:
+            if ch == "n":
+                value = value + "\n"
+            elif ch == "r":
+                value = value + "\r"
+            elif ch == "t":
+                value = value + "\t"
+            else:
+                value = value + ch
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return value
+        else:
+            value = value + ch
+    ""
+
+fn _first_nonempty(a: text, b: text) -> text:
+    if a != "":
+        return a
+    b
+
+fn _html_escape(value: text) -> text:
+    var escaped = value.split("&").join("&amp;")
+    escaped = escaped.split("<").join("&lt;")
+    escaped = escaped.split(">").join("&gt;")
+    escaped.split("\"").join("&quot;")
+
+fn _public_absence(value: text) -> text:
+    if value == "":
+        return "none"
+    value
+
+fn _is_tool_event(event_name: text) -> bool:
+    event_name == "PreToolUse" or event_name == "PostToolUse" or
+        event_name == "PostToolUseFailure" or event_name == "tool_pre" or
+        event_name == "tool_post" or event_name == "tool_failure"
+
+fn _is_vllm_event(event_name: text) -> bool:
+    event_name.starts_with("llm_runtime_vllm_")
+
+fn _session_seen(sessions: [text], session_id: text) -> bool:
+    for existing in sessions:
+        if existing == session_id:
+            return true
+    false
+
+pub fn collect_llm_diagnostics_jsonl(path: text) -> LlmDiagnosticPanel:
+    if not file_exists(path):
+        return LlmDiagnosticPanel.empty(path)
+    val content = read_file(path) ?? ""
+    var panel = LlmDiagnosticPanel.empty(path)
+    var sessions: [text] = []
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val event_name = _first_nonempty(_json_string_field(trimmed, "event"), _json_string_field(trimmed, "hook_event_name"))
+        val session_id = _first_nonempty(_json_string_field(trimmed, "sid"), _json_string_field(trimmed, "session_id"))
+        val is_vllm = _is_vllm_event(event_name)
+        val vllm_status = _json_string_field(trimmed, "status")
+        val vllm_reason = _json_string_field(trimmed, "reason")
+        panel = LlmDiagnosticPanel(
+            source_path: path,
+            event_count: panel.event_count + 1,
+            session_count: panel.session_count,
+            tool_event_count: if _is_tool_event(event_name): panel.tool_event_count + 1 else: panel.tool_event_count,
+            vllm_event_count: if is_vllm: panel.vllm_event_count + 1 else: panel.vllm_event_count,
+            last_event: event_name,
+            last_session_id: if session_id == "": panel.last_session_id else: session_id,
+            last_vllm_status: if is_vllm and vllm_status != "": vllm_status else: panel.last_vllm_status,
+            last_vllm_reason: if is_vllm and vllm_reason != "": vllm_reason else: panel.last_vllm_reason
+        )
+        if session_id != "" and not _session_seen(sessions, session_id):
+            sessions.push(session_id)
+            panel = LlmDiagnosticPanel(
+                source_path: path,
+                event_count: panel.event_count,
+                session_count: sessions.len(),
+                tool_event_count: panel.tool_event_count,
+                vllm_event_count: panel.vllm_event_count,
+                last_event: panel.last_event,
+                last_session_id: panel.last_session_id,
+                last_vllm_status: panel.last_vllm_status,
+                last_vllm_reason: panel.last_vllm_reason
+            )
+    panel
+
+pub fn render_llm_diagnostics_panel_text(panel: LlmDiagnosticPanel) -> text:
+    "LLM Diagnostics events=" + panel.event_count.to_text() +
+        " sessions=" + panel.session_count.to_text() +
+        " tool_events=" + panel.tool_event_count.to_text() +
+        " vllm_events=" + panel.vllm_event_count.to_text() +
+        " last_event=" + _public_absence(panel.last_event) +
+        " last_session=" + _public_absence(panel.last_session_id) +
+        " vllm_status=" + _public_absence(panel.last_vllm_status) +
+        " vllm_reason=" + _public_absence(panel.last_vllm_reason)
+
+pub fn render_llm_diagnostics_panel_html(panel: LlmDiagnosticPanel) -> text:
+    "<section id=\"llm-diagnostics-panel\"><h2>LLM Diagnostics</h2><p>events=" +
+        panel.event_count.to_text() + "</p><p>sessions=" +
+        panel.session_count.to_text() + "</p><p>tool_events=" +
+        panel.tool_event_count.to_text() + "</p><p>vllm_events=" +
+        panel.vllm_event_count.to_text() + "</p><p>last_event=" +
+        _html_escape(_public_absence(panel.last_event)) + "</p><p>last_session=" +
+        _html_escape(_public_absence(panel.last_session_id)) + "</p><p>vllm_status=" +
+        _html_escape(_public_absence(panel.last_vllm_status)) + "</p><p>vllm_reason=" +
+        _html_escape(_public_absence(panel.last_vllm_reason)) + "</p></section>"

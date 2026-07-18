@@ -1,0 +1,66 @@
+"""
+# Timer API
+
+Simple-script timer scheduling API for the browser engine.
+Wraps EventLoop to provide setTimeout/setInterval/requestAnimationFrame.
+
+JS Equivalent → Simple Function:
+    setTimeout()               → set_timeout()
+    setInterval()              → set_interval()
+    clearTimeout()             → clear_timeout()
+    clearInterval()            → clear_interval()
+    requestAnimationFrame()    → request_animation_frame()
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# =========================================================================
+# Timeout / Interval
+# =========================================================================
+
+pub fn set_timeout(mut loop_ref: EventLoop, callback_id: i64, ms: i64) -> i64:
+    """Schedule a one-shot timer. Returns the timer id for cancellation.
+
+    The callback_id is an opaque identifier the caller uses to map back
+    to the actual callback to invoke when the timer fires.
+
+    `deadline_micros` is an ABSOLUTE wall-clock timestamp (same basis as
+    rt_time_now_unix_micros(), which is what EventLoop.drain_expired()'s
+    `now_micros` argument is computed from by every real caller — see
+    script_host.spl / simple_script.spl `tick(now_micros)`). Storing a bare
+    relative `ms * 1000` here (the previous behavior) compared a
+    since-epoch-zero deadline against a since-epoch `now`, so every timer
+    looked already-expired and fired on the very next drain.
+    """
+    val deadline = rt_time_now_unix_micros() + ms * 1000
+    loop_ref.schedule_timer(callback_id, deadline, 0)
+
+pub fn set_interval(mut loop_ref: EventLoop, callback_id: i64, ms: i64) -> i64:
+    """Schedule a repeating timer. Returns the timer id for cancellation.
+
+    interval_micros is stored so the event loop can re-queue after each fire.
+    `deadline_micros` uses the same absolute wall-clock basis as set_timeout.
+    """
+    val deadline = rt_time_now_unix_micros() + ms * 1000
+    val interval = ms * 1000
+    loop_ref.schedule_timer(callback_id, deadline, interval)
+
+pub fn clear_timeout(mut loop_ref: EventLoop, timer_id: i64):
+    """Cancel a pending timeout by timer id."""
+    loop_ref.cancel_timer(timer_id)
+
+pub fn clear_interval(mut loop_ref: EventLoop, timer_id: i64):
+    """Cancel a pending interval by timer id."""
+    loop_ref.cancel_timer(timer_id)
+
+# =========================================================================
+# requestAnimationFrame
+# =========================================================================
+
+pub fn request_animation_frame(mut loop_ref: EventLoop, callback_id: i64):
+    """Register a callback for the next animation frame."""
+    loop_ref.schedule_raf(callback_id)

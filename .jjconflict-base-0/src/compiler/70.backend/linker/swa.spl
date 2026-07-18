@@ -1,0 +1,362 @@
+# SWA Format - Simple Web Archive container
+#
+# This module defines the SWA (.swa) format, which bundles compiled modules,
+# static assets, and a deployment descriptor into a single archive file.
+#
+# Format Layout:
+# +------------------------------------------+ Offset 0
+# |  SWA Header (256 bytes)                  |  Magic, version, counts, offsets
+# +------------------------------------------+ Offset 256
+# |  Module Index Table                      |  Array of ModuleIndexEntry
+# |  (128 bytes x module_count)              |  Reuses LSMF ModuleIndexEntry
+# +------------------------------------------+
+# |  Asset Index Table                       |  Array of AssetIndexEntry
+# |  (128 bytes x asset_count)               |  Path, offset, size, hash, mime
+# +------------------------------------------+
+# |  Deployment Descriptor                   |  webapp.sdn contents (UTF-8)
+# +------------------------------------------+
+# |  Module Data                             |  Compiled .spl modules (SMF)
+# +------------------------------------------+
+# |  Asset Data                              |  Static files (HTML, CSS, JS...)
+# +------------------------------------------+
+#
+# Benefits:
+# - Single file deployment for web applications
+# - Fast random access via path-based index
+# - Embedded deployment descriptor
+# - Combined compiled modules and static assets
+
+use compiler.backend.linker.lib_smf.{ModuleIndexEntry, u32_to_bytes, u64_to_bytes, bytes_to_u32, bytes_to_u64, fnv1a_hash, char_from_byte}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SWA_MAGIC: [u8] = [83, 87, 65, 0]  # "SWA\0"
+val SWA_HEADER_SIZE: i64 = 256
+val SWA_ASSET_ENTRY_SIZE: i64 = 128
+val SWA_VERSION_MAJOR: u8 = 1
+val SWA_VERSION_MINOR: u8 = 0
+
+# ============================================================================
+# SWA Header
+# ============================================================================
+
+# SWA header structure (256 bytes).
+# The header is at the beginning of the file and contains:
+# - Magic number, version, flags, counts, offsets, hash
+struct SwaHeader:
+    # Identification (6 bytes)
+    magic: [u8]              # Magic number "SWA\0" (4 bytes)
+    version_major: u8        # Major version (1)
+    version_minor: u8        # Minor version (0)
+
+    # Flags (4 bytes)
+    flags: u32               # bit 0: has_runtime, bit 1: compressed_assets
+
+    # Counts (8 bytes)
+    module_count: u32        # Number of modules in archive
+    asset_count: u32         # Number of assets in archive
+
+    # Offsets (48 bytes)
+    descriptor_offset: u64   # Offset to deployment descriptor
+    descriptor_size: u64     # Size of deployment descriptor
+    module_index_offset: u64 # Offset to module index (always 256)
+    asset_index_offset: u64  # Offset to asset index
+    module_data_offset: u64  # Offset where module data begins
+    asset_data_offset: u64   # Offset where asset data begins
+
+    # Hashing (8 bytes)
+    archive_hash: u64        # Hash of entire archive content
+
+    # Network (2 bytes)
+    default_port: u16        # Default port for serving
+
+    # Reserved (180 bytes) - padding to 256 bytes
+    reserved: [u8]
+
+impl SwaHeader:
+    # Create a new SWA header with defaults.
+    static fn new_default() -> SwaHeader:
+        var reserved_bytes: [u8] = []
+        var i = 0
+        while i < 180:
+            reserved_bytes.push(0)
+            i = i + 1
+
+        SwaHeader(
+            magic: SWA_MAGIC,
+            version_major: SWA_VERSION_MAJOR,
+            version_minor: SWA_VERSION_MINOR,
+            flags: 0,
+            module_count: 0,
+            asset_count: 0,
+            descriptor_offset: 0,
+            descriptor_size: 0,
+            module_index_offset: SWA_HEADER_SIZE as u64,
+            asset_index_offset: 0,
+            module_data_offset: 0,
+            asset_data_offset: 0,
+            archive_hash: 0,
+            default_port: 8080,
+            reserved: reserved_bytes
+        )
+
+    # Check if magic number is valid.
+    fn is_valid() -> bool:
+        val check1 = self.magic[0] == 83 and self.magic[1] == 87
+        val check2 = self.magic[2] == 65 and self.magic[3] == 0
+        check1 and check2
+
+    # Get version as (major, minor) tuple.
+    fn version() -> (u8, u8):
+        (self.version_major, self.version_minor)
+
+    # Serialize header to bytes (exactly 256 bytes).
+    fn to_bytes() -> [u8]:
+        var bytes: [u8] = []
+
+        # Identification (6 bytes)
+        bytes = bytes + (self.magic)
+        bytes.push(self.version_major)
+        bytes.push(self.version_minor)
+
+        # Flags (4 bytes)
+        bytes = bytes + (u32_to_bytes(self.flags))
+
+        # Counts (8 bytes)
+        bytes = bytes + (u32_to_bytes(self.module_count))
+        bytes = bytes + (u32_to_bytes(self.asset_count))
+
+        # Offsets (48 bytes)
+        bytes = bytes + (u64_to_bytes(self.descriptor_offset))
+        bytes = bytes + (u64_to_bytes(self.descriptor_size))
+        bytes = bytes + (u64_to_bytes(self.module_index_offset))
+        bytes = bytes + (u64_to_bytes(self.asset_index_offset))
+        bytes = bytes + (u64_to_bytes(self.module_data_offset))
+        bytes = bytes + (u64_to_bytes(self.asset_data_offset))
+
+        # Hashing (8 bytes)
+        bytes = bytes + (u64_to_bytes(self.archive_hash))
+
+        # Network (2 bytes)
+        val port_lo = (self.default_port and 0xFF) as u8
+        val port_hi = ((self.default_port >> 8) and 0xFF) as u8
+        bytes.push(port_lo)
+        bytes.push(port_hi)
+
+        # Reserved (180 bytes)
+        bytes = bytes + (self.reserved)
+
+        bytes
+
+    # Deserialize header from bytes.
+    static fn from_bytes(bytes: [u8]) -> Result<SwaHeader, text>:
+        if bytes.len() < 256:
+            return Err("Invalid header size: expected 256 bytes")
+
+        # Read magic
+        val magic = [bytes[0], bytes[1], bytes[2], bytes[3]]
+        if magic[0] != 83 or magic[1] != 87 or magic[2] != 65 or magic[3] != 0:
+            return Err("Invalid magic number: expected SWA\\0")
+
+        # Read version
+        val version_major = bytes[4]
+        val version_minor = bytes[5]
+
+        # Read flags (offset 6)
+        val flags = bytes_to_u32(bytes, 6)
+
+        # Read counts (offset 10)
+        val module_count = bytes_to_u32(bytes, 10)
+        val asset_count = bytes_to_u32(bytes, 14)
+
+        # Read offsets (offset 18)
+        val descriptor_offset = bytes_to_u64(bytes, 18)
+        val descriptor_size = bytes_to_u64(bytes, 26)
+        val module_index_offset = bytes_to_u64(bytes, 34)
+        val asset_index_offset = bytes_to_u64(bytes, 42)
+        val module_data_offset = bytes_to_u64(bytes, 50)
+        val asset_data_offset = bytes_to_u64(bytes, 58)
+
+        # Read hashing (offset 66)
+        val archive_hash = bytes_to_u64(bytes, 66)
+
+        # Read port (offset 74)
+        val port_lo = bytes[74] as u16
+        val port_hi = (bytes[75] as u16) << 8
+        val default_port = port_lo or port_hi
+
+        # Read reserved (offset 76..256)
+        var reserved: [u8] = []
+        var i = 76
+        while i < 256:
+            reserved.push(bytes[i])
+            i = i + 1
+
+        Ok(SwaHeader(
+            magic: magic,
+            version_major: version_major,
+            version_minor: version_minor,
+            flags: flags,
+            module_count: module_count,
+            asset_count: asset_count,
+            descriptor_offset: descriptor_offset,
+            descriptor_size: descriptor_size,
+            module_index_offset: module_index_offset,
+            asset_index_offset: asset_index_offset,
+            module_data_offset: module_data_offset,
+            asset_data_offset: asset_data_offset,
+            archive_hash: archive_hash,
+            default_port: default_port,
+            reserved: reserved
+        ))
+
+# ============================================================================
+# Asset Index Entry
+# ============================================================================
+
+# Asset index entry (128 bytes).
+# Each entry describes one static asset in the archive:
+# - Relative path, location (offset/size), verification hash, mime type
+struct AssetIndexEntry:
+    # Asset path (64 bytes) - null-terminated UTF-8
+    path: [u8]               # Relative path (e.g., "css/style.css")
+
+    # Location (16 bytes)
+    offset: u64              # Offset to asset data
+    size: u64                # Size of asset data
+
+    # Metadata (8 bytes)
+    hash: u64                # FNV-1a hash of asset data
+
+    # Mime type (16 bytes) - null-terminated UTF-8
+    mime_type: [u8]          # e.g. "text/html"
+
+    # Reserved (24 bytes)
+    reserved: [u8]
+
+impl AssetIndexEntry:
+    # Create a new asset index entry.
+    static fn new(path: text, offset: u64, size: u64, hash: u64, mime_type: text) -> AssetIndexEntry:
+        # Encode path (64 bytes, null-terminated)
+        var path_bytes: [u8] = []
+        val path_limit = path.len().min(63)
+        var i = 0
+        while i < path_limit:
+            path_bytes.push(path[i] as u8)
+            i = i + 1
+        # Null-terminate and pad to 64 bytes
+        while path_bytes.len() < 64:
+            path_bytes.push(0)
+
+        # Encode mime type (16 bytes, null-terminated)
+        var mime_bytes: [u8] = []
+        val mime_limit = mime_type.len().min(15)
+        i = 0
+        while i < mime_limit:
+            mime_bytes.push(mime_type[i] as u8)
+            i = i + 1
+        # Null-terminate and pad to 16 bytes
+        while mime_bytes.len() < 16:
+            mime_bytes.push(0)
+
+        # Reserved (24 bytes)
+        var reserved_bytes: [u8] = []
+        i = 0
+        while i < 24:
+            reserved_bytes.push(0)
+            i = i + 1
+
+        AssetIndexEntry(
+            path: path_bytes,
+            offset: offset,
+            size: size,
+            hash: hash,
+            mime_type: mime_bytes,
+            reserved: reserved_bytes
+        )
+
+    # Get asset path as text.
+    fn get_path() -> text:
+        var chars: [text] = []
+        for i in 0..self.path.len():
+            if self.path[i] == 0:
+                return chars.join("")
+            chars.push(char_from_byte(self.path[i]))
+        chars.join("")
+
+    # Get mime type as text.
+    fn get_mime_type() -> text:
+        var chars: [text] = []
+        for i in 0..self.mime_type.len():
+            if self.mime_type[i] == 0:
+                return chars.join("")
+            chars.push(char_from_byte(self.mime_type[i]))
+        chars.join("")
+
+    # Serialize entry to bytes (exactly 128 bytes).
+    fn to_bytes() -> [u8]:
+        var bytes: [u8] = []
+
+        # Path (64 bytes)
+        bytes = bytes + (self.path)
+
+        # Location (16 bytes)
+        bytes = bytes + (u64_to_bytes(self.offset))
+        bytes = bytes + (u64_to_bytes(self.size))
+
+        # Metadata (8 bytes)
+        bytes = bytes + (u64_to_bytes(self.hash))
+
+        # Mime type (16 bytes)
+        bytes = bytes + (self.mime_type)
+
+        # Reserved (24 bytes)
+        bytes = bytes + (self.reserved)
+
+        bytes
+
+    # Deserialize entry from bytes.
+    static fn from_bytes(bytes: [u8], start: i64) -> Result<AssetIndexEntry, text>:
+        if bytes.len() < start + 128:
+            return Err("Invalid asset entry size")
+
+        # Read path (64 bytes)
+        var path: [u8] = []
+        for i in start..(start + 64):
+            path.push(bytes[i])
+
+        # Read location (16 bytes)
+        val offset = bytes_to_u64(bytes, start + 64)
+        val size = bytes_to_u64(bytes, start + 72)
+
+        # Read metadata (8 bytes)
+        val hash = bytes_to_u64(bytes, start + 80)
+
+        # Read mime type (16 bytes)
+        var mime_type: [u8] = []
+        for i in (start + 88)..(start + 104):
+            mime_type.push(bytes[i])
+
+        # Read reserved (24 bytes)
+        var reserved: [u8] = []
+        for i in (start + 104)..(start + 128):
+            reserved.push(bytes[i])
+
+        Ok(AssetIndexEntry(
+            path: path,
+            offset: offset,
+            size: size,
+            hash: hash,
+            mime_type: mime_type,
+            reserved: reserved
+        ))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SWA_HEADER_SIZE
+export SWA_ASSET_ENTRY_SIZE
+export SWA_MAGIC

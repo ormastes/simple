@@ -1,0 +1,85 @@
+# HTTP Baremetal -- Minimal kernel-native HTTP loop for SimpleOS
+#
+# MDSOC: feature dimension, application layer
+# Status: B5 minimal launcher. This path deliberately avoids the hosted
+# std.http_server worker/config/router closure until the freestanding runtime
+# and PCI/VirtIO network surfaces can support that larger ABI.
+#
+# NOTE: the boot entries this lane's one-boot QEMU gate actually exercises
+# link os.kernel.boot.http_baremetal (the rt_net_*-backed launcher), not this
+# os.kernel.net variant — its rt_io_tcp_* family is backed by the hosted
+# tcp_shim.spl/netstack service, which is not proven to link into a
+# freestanding x86_64-unknown-none boot image today. This file gets the same
+# route hardening for source-level consistency and for whichever future boot
+# path does exercise it; see src/os/kernel/boot/http_baremetal.spl for the
+# gate-proven server.
+#
+# Routing comes from the pure, spec-tested classifier
+# (os.kernel.net.http_route.http_classify_request, which reuses the real
+# parse_request_line + path_is_safe); this file only does socket I/O and the
+# VFS read for the File route — no hand-rolled request-line parser.
+#
+# GET /files/<name> reads through the switchable VFS hub
+# (os.services.vfs.vfs_init.g_vfs_read_file_bytes / g_vfs_file_exists) —
+# no filesystem-specific token appears in this file.
+
+use os.kernel.log.klog_api.{log_raw_println}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_file_exists}
+use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
+
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+val SIMPLEOS_HTTP_LISTEN_ADDR: text = "0.0.0.0:8080"
+val HTTP_MAX_REQUEST_BYTES: i64 = 4096
+# Status body only; the framing (and its Content-Length) is built by
+# _http_text_response so the length is always body.len() and can never drift
+# from the body. (A prior hardcoded "Content-Length: 44" over-declared this
+# 36-byte body by 8, hanging any client that honored the length.)
+val HTTP_STATUS_BODY: text = "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
+
+fn _http_text_response(status: text, content_type: text, body: text) -> text:
+    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nServer: SimpleOS\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n{body}"
+
+fn _http_serve_file(file_path: text) -> text:
+    if not g_vfs_file_exists(file_path):
+        return _http_text_response("404 Not Found", "text/plain", "ERR file not found\n")
+    val bytes = g_vfs_read_file_bytes(file_path)
+    if bytes.len() == 0:
+        return _http_text_response("404 Not Found", "text/plain", "ERR file not found\n")
+    _http_text_response("200 OK", "application/octet-stream", rt_bytes_to_text(bytes))
+
+fn _http_route(request: text) -> text:
+    val route = http_classify_request(request)
+    match route.kind:
+        HttpRouteKind.BadRequest:
+            _http_text_response("400 Bad Request", "text/plain", "ERR malformed request\n")
+        HttpRouteKind.NotFound:
+            _http_text_response("404 Not Found", "text/plain", "ERR route not found\n")
+        HttpRouteKind.Status:
+            _http_text_response("200 OK", "application/json", HTTP_STATUS_BODY)
+        HttpRouteKind.File:
+            _http_serve_file(route.file_path)
+
+fn start_http_server_baremetal():
+    """Start a minimal single-core HTTP loop on the boot core."""
+    log_raw_println("[http_baremetal] Starting minimal HTTP loop...")
+
+    val listener = rt_io_tcp_bind(SIMPLEOS_HTTP_LISTEN_ADDR)
+    if listener < 0:
+        log_raw_println("[http_baremetal] ERROR: bind failed")
+        return
+
+    log_raw_println("[http_baremetal] Listening on 0.0.0.0:8080")
+    log_raw_println("[http] serving on 0.0.0.0:8080")
+    while true:
+        val client = rt_io_tcp_accept_timeout(listener, 1)
+        if client >= 0:
+            val request_bytes = rt_io_tcp_read(client, HTTP_MAX_REQUEST_BYTES)
+            val request = rt_bytes_to_text(request_bytes)
+            rt_io_tcp_write_text(client, _http_route(request))
+            rt_io_tcp_close(client)

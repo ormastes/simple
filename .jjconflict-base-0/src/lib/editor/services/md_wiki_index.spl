@@ -1,0 +1,800 @@
+# Markdown Wiki Index
+#
+# Vault-level data model for Obsidian-style wiki features. This module indexes
+# already-loaded Markdown documents; callers own file discovery and invalidation.
+
+struct MdWikiDocument:
+    path: text
+    title: text
+    content: text
+
+struct MdWikiLink:
+    source_path: text
+    target: text
+    display: text
+    line: i64
+    col: i64
+    resolved: bool
+
+struct MdWikiEmbed:
+    source_path: text
+    target: text
+    display: text
+    line: i64
+    col: i64
+    resolved: bool
+
+struct MdWikiTask:
+    path: text
+    line: i64
+    text_content: text
+    checked: bool
+
+struct MdWikiTag:
+    path: text
+    tag: text
+    line: i64
+
+struct MdWikiProperty:
+    path: text
+    key: text
+    value: text
+
+struct MdWikiCallout:
+    path: text
+    line: i64
+    callout_type: text
+    title: text
+    folded: bool
+
+struct MdWikiAttachment:
+    source_path: text
+    target: text
+    display: text
+    line: i64
+    col: i64
+    embed: bool
+
+struct MdWikiGraphEdge:
+    source_path: text
+    target: text
+    edge_type: text
+    resolved: bool
+
+struct MdWikiQuickSwitchScore:
+    score: i64
+    result_index: i64
+
+struct MdWikiTemplate:
+    name: text
+    body: text
+
+struct MdWikiTemplateVar:
+    key: text
+    value: text
+
+struct MdWikiDailyNoteConfig:
+    folder: text
+    title_format: text
+    extension: text
+    template_item: MdWikiTemplate
+
+struct MdWikiIndex:
+    documents: [MdWikiDocument]
+    links: [MdWikiLink]
+    embeds: [MdWikiEmbed]
+    tasks: [MdWikiTask]
+    tags: [MdWikiTag]
+    properties: [MdWikiProperty]
+    callouts: [MdWikiCallout]
+    attachments: [MdWikiAttachment]
+    graph_edges: [MdWikiGraphEdge]
+
+fn md_wiki_document(path: text, content: text) -> MdWikiDocument:
+    MdWikiDocument(path: path, title: md_wiki_title_from_path(path), content: content)
+
+fn md_wiki_index_documents(documents: [MdWikiDocument]) -> MdWikiIndex:
+    var links: [MdWikiLink] = []
+    var embeds: [MdWikiEmbed] = []
+    var tasks: [MdWikiTask] = []
+    var tags: [MdWikiTag] = []
+    var properties: [MdWikiProperty] = []
+    var callouts: [MdWikiCallout] = []
+    var attachments: [MdWikiAttachment] = []
+    for doc in documents:
+        val doc_links = md_wiki_extract_links(doc, documents)
+        for link in doc_links:
+            links.push(link)
+        val doc_embeds = md_wiki_extract_embeds(doc, documents)
+        for embed in doc_embeds:
+            embeds.push(embed)
+        val doc_tasks = md_wiki_extract_tasks(doc)
+        for task in doc_tasks:
+            tasks.push(task)
+        val doc_tags = md_wiki_extract_tags(doc)
+        for tag in doc_tags:
+            tags.push(tag)
+        val doc_props = md_wiki_extract_properties(doc)
+        for prop in doc_props:
+            properties.push(prop)
+        val doc_callouts = md_wiki_extract_callouts(doc)
+        for callout in doc_callouts:
+            callouts.push(callout)
+        val doc_attachments = md_wiki_extract_attachments(doc)
+        for attachment in doc_attachments:
+            attachments.push(attachment)
+    MdWikiIndex(
+        documents: documents,
+        links: links,
+        embeds: embeds,
+        tasks: tasks,
+        tags: tags,
+        properties: properties,
+        callouts: callouts,
+        attachments: attachments,
+        graph_edges: md_wiki_graph_edges_from(links, embeds)
+    )
+
+fn md_wiki_backlinks(index: MdWikiIndex, target_path: text) -> [MdWikiLink]:
+    var result: [MdWikiLink] = []
+    val target_title = md_wiki_title_from_path(target_path)
+    val target_slug = md_wiki_slug(target_title)
+    for link in index.links:
+        if link.resolved and md_wiki_slug(link.target) == target_slug:
+            result.push(link)
+    result
+
+fn md_wiki_unresolved_links(index: MdWikiIndex) -> [MdWikiLink]:
+    var result: [MdWikiLink] = []
+    for link in index.links:
+        if not link.resolved:
+            result.push(link)
+    result
+
+fn md_wiki_embeds(index: MdWikiIndex, path: text) -> [MdWikiEmbed]:
+    var result: [MdWikiEmbed] = []
+    for embed in index.embeds:
+        if path == "" or embed.source_path == path:
+            result.push(embed)
+    result
+
+fn md_wiki_unresolved_embeds(index: MdWikiIndex) -> [MdWikiEmbed]:
+    var result: [MdWikiEmbed] = []
+    for embed in index.embeds:
+        if not embed.resolved:
+            result.push(embed)
+    result
+
+fn md_wiki_tasks(index: MdWikiIndex, checked: bool) -> [MdWikiTask]:
+    var result: [MdWikiTask] = []
+    for task in index.tasks:
+        if task.checked == checked:
+            result.push(task)
+    result
+
+fn md_wiki_tasks_filtered(index: MdWikiIndex, filter: text) -> [MdWikiTask]:
+    val normalized = filter.trim().to_lower()
+    if normalized == "done" or normalized == "checked" or normalized == "complete" or normalized == "completed":
+        return md_wiki_tasks(index, true)
+    if normalized == "all":
+        return index.tasks
+    md_wiki_tasks(index, false)
+
+fn md_wiki_tags(index: MdWikiIndex, tag: text) -> [MdWikiTag]:
+    var result: [MdWikiTag] = []
+    val needle = md_wiki_normalize_tag(tag)
+    for entry in index.tags:
+        if md_wiki_normalize_tag(entry.tag) == needle:
+            result.push(entry)
+    result
+
+fn md_wiki_properties_for_path(index: MdWikiIndex, path: text) -> [MdWikiProperty]:
+    var result: [MdWikiProperty] = []
+    for prop in index.properties:
+        if prop.path == path:
+            result.push(prop)
+    result
+
+fn md_wiki_callouts(index: MdWikiIndex, path: text) -> [MdWikiCallout]:
+    var result: [MdWikiCallout] = []
+    for callout in index.callouts:
+        if path == "" or callout.path == path:
+            result.push(callout)
+    result
+
+fn md_wiki_attachments(index: MdWikiIndex, path: text) -> [MdWikiAttachment]:
+    var result: [MdWikiAttachment] = []
+    for attachment in index.attachments:
+        if path == "" or attachment.source_path == path:
+            result.push(attachment)
+    result
+
+fn md_wiki_graph_edges(index: MdWikiIndex, path: text) -> [MdWikiGraphEdge]:
+    var result: [MdWikiGraphEdge] = []
+    for edge in index.graph_edges:
+        if path == "" or edge.source_path == path or edge.target == md_wiki_title_from_path(path):
+            result.push(edge)
+    result
+
+fn md_wiki_template(name: text, body: text) -> MdWikiTemplate:
+    MdWikiTemplate(name: name, body: body)
+
+fn md_wiki_template_var(key: text, value: text) -> MdWikiTemplateVar:
+    MdWikiTemplateVar(key: key, value: value)
+
+fn md_wiki_apply_template(template_item: MdWikiTemplate, title: text, date: text) -> text:
+    val with_title = template_item.body.replace("{{title}}", title)
+    with_title.replace("{{date}}", date)
+
+fn md_wiki_apply_template_vars(template_item: MdWikiTemplate, title: text, date: text, vars: [MdWikiTemplateVar]) -> text:
+    var rendered = md_wiki_apply_template(template_item, title, date)
+    for entry in vars:
+        val key = entry.key.trim()
+        if key != "":
+            rendered = rendered.replace("{{" + key + "}}", entry.value)
+    rendered
+
+fn md_wiki_daily_note_config(folder: text, template_body: text) -> MdWikiDailyNoteConfig:
+    md_wiki_daily_note_config_with_title(folder, "{{date}}", ".md", template_body)
+
+fn md_wiki_daily_note_config_with_title(folder: text, title_format: text, extension: text, template_body: text) -> MdWikiDailyNoteConfig:
+    MdWikiDailyNoteConfig(
+        folder: folder,
+        title_format: if title_format == "" then "{{date}}" else: title_format,
+        extension: md_wiki_daily_note_extension(extension),
+        template_item: md_wiki_template("daily", template_body)
+    )
+
+fn md_wiki_daily_note_path(config: MdWikiDailyNoteConfig, date: text) -> text:
+    val title = config.title_format.replace("{{date}}", date)
+    val prefix = if config.folder == "" then "" else: md_wiki_trim_trailing_slash(config.folder) + "/"
+    prefix + title + config.extension
+
+fn md_wiki_daily_note_content(config: MdWikiDailyNoteConfig, date: text) -> text:
+    val title = config.title_format.replace("{{date}}", date)
+    md_wiki_apply_template(config.template_item, title, date)
+
+fn md_wiki_daily_note_extension(extension: text) -> text:
+    val clean = extension.trim()
+    if clean == "":
+        return ".md"
+    if clean.starts_with("."):
+        return clean
+    "." + clean
+
+fn md_wiki_quick_switch(index: MdWikiIndex, query: text) -> [MdWikiDocument]:
+    var matches: [MdWikiDocument] = []
+    var scores: [MdWikiQuickSwitchScore] = []
+    val q = query.trim().to_lower()
+    for doc in index.documents:
+        val title = doc.title.to_lower()
+        val path = doc.path.to_lower()
+        if q == "":
+            matches.push(doc)
+            scores.push(MdWikiQuickSwitchScore(score: matches.len() - 1, result_index: matches.len() - 1))
+        else:
+            val title_score = md_wiki_quick_switch_score(q, title, 0)
+            val path_score = md_wiki_quick_switch_score(q, path, 40)
+            val score = if title_score <= path_score then title_score else: path_score
+            if score < 9999:
+                matches.push(doc)
+                scores.push(MdWikiQuickSwitchScore(score: score, result_index: matches.len() - 1))
+    md_wiki_quick_switch_sort(matches, scores)
+
+fn md_wiki_quick_switch_score(query: text, candidate: text, penalty: i64) -> i64:
+    if candidate == query:
+        return penalty
+    if candidate.starts_with(query):
+        return penalty + 1
+    val contains_at = md_wiki_find_text(candidate, query, 0)
+    if contains_at >= 0:
+        return penalty + 10 + contains_at
+    if md_wiki_fuzzy_match(query, candidate):
+        return penalty + 100 + md_wiki_fuzzy_score(query, candidate)
+    9999
+
+fn md_wiki_quick_switch_sort(matches: [MdWikiDocument], scores: [MdWikiQuickSwitchScore]) -> [MdWikiDocument]:
+    var sorted: [MdWikiDocument] = []
+    var used: [bool] = []
+    var i = 0
+    while i < scores.len():
+        used.push(false)
+        i = i + 1
+    var count = 0
+    while count < scores.len():
+        var best_idx = -1
+        var best_score = 99999
+        var j = 0
+        while j < scores.len():
+            if not used[j]:
+                val candidate = scores[j]
+                if candidate.score < best_score:
+                    best_score = candidate.score
+                    best_idx = j
+            j = j + 1
+        if best_idx >= 0:
+            used[best_idx] = true
+            sorted.push(matches[scores[best_idx].result_index])
+        count = count + 1
+    sorted
+
+fn md_wiki_fuzzy_match(query: text, candidate: text) -> bool:
+    if query == "":
+        return true
+    var qi = 0
+    var ci = 0
+    while qi < query.len() and ci < candidate.len():
+        if query.char_at(qi) == candidate.char_at(ci):
+            qi = qi + 1
+        ci = ci + 1
+    qi >= query.len()
+
+fn md_wiki_fuzzy_score(query: text, candidate: text) -> i64:
+    if query == "":
+        return 0
+    var qi = 0
+    var ci = 0
+    var score = 0
+    var last_match_pos = -1
+    while qi < query.len() and ci < candidate.len():
+        if query.char_at(qi) == candidate.char_at(ci):
+            if last_match_pos >= 0:
+                score = score + ci - last_match_pos - 1
+            last_match_pos = ci
+            qi = qi + 1
+        ci = ci + 1
+    if qi < query.len():
+        return 9999
+    score
+
+fn md_wiki_extract_links(doc: MdWikiDocument, documents: [MdWikiDocument]) -> [MdWikiLink]:
+    var result: [MdWikiLink] = []
+    val lines = doc.content.split("\n")
+    var line_idx = 0
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        var col = 0
+        while col < line.len():
+            if col + 1 < line.len() and line.slice(col, col + 2) == "[[" and (col == 0 or line.char_at(col - 1) != "!"):
+                val close = md_wiki_find_text(line, "]]", col + 2)
+                if close >= 0:
+                    val raw = line.slice(col + 2, close)
+                    val parsed = md_wiki_parse_link_target(raw)
+                    # Empty [[]] or [[|alias]] has no target — skip, don't index
+                    if parsed.0.len() > 0:
+                        result.push(MdWikiLink(
+                            source_path: doc.path,
+                            target: parsed.0,
+                            display: parsed.1,
+                            line: line_idx,
+                            col: col,
+                            resolved: md_wiki_target_exists(documents, parsed.0)
+                        ))
+                    col = close + 2
+                else:
+                    col = col + 1
+            else:
+                col = col + 1
+        line_idx = line_idx + 1
+    result
+
+fn md_wiki_extract_embeds(doc: MdWikiDocument, documents: [MdWikiDocument]) -> [MdWikiEmbed]:
+    var result: [MdWikiEmbed] = []
+    val lines = doc.content.split("\n")
+    var line_idx = 0
+    var in_fence = false
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        val trimmed_line = line.trim()
+        if trimmed_line.starts_with("```") or trimmed_line.starts_with("~~~"):
+            in_fence = not in_fence
+            line_idx = line_idx + 1
+            continue
+        if in_fence:
+            line_idx = line_idx + 1
+            continue
+        var col = 0
+        while col < line.len():
+            if col + 2 < line.len() and line.slice(col, col + 3) == "![[":
+                val close = md_wiki_find_text(line, "]]", col + 3)
+                if close >= 0:
+                    val raw = line.slice(col + 3, close)
+                    val parsed = md_wiki_parse_link_target(raw)
+                    # Empty ![[]] has no target — skip, don't index
+                    if parsed.0.len() > 0:
+                        result.push(MdWikiEmbed(
+                            source_path: doc.path,
+                            target: parsed.0,
+                            display: parsed.1,
+                            line: line_idx,
+                            col: col,
+                            resolved: md_wiki_target_exists(documents, parsed.0)
+                        ))
+                    col = close + 2
+                else:
+                    col = col + 1
+            else:
+                col = col + 1
+        line_idx = line_idx + 1
+    result
+
+fn md_wiki_extract_tasks(doc: MdWikiDocument) -> [MdWikiTask]:
+    var result: [MdWikiTask] = []
+    val lines = doc.content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("- [ ] ") or trimmed.starts_with("* [ ] "):
+            result.push(MdWikiTask(path: doc.path, line: i, text_content: trimmed.slice(6, trimmed.len()), checked: false))
+        elif trimmed.starts_with("- [x] ") or trimmed.starts_with("- [X] ") or trimmed.starts_with("* [x] ") or trimmed.starts_with("* [X] "):
+            result.push(MdWikiTask(path: doc.path, line: i, text_content: trimmed.slice(6, trimmed.len()), checked: true))
+        i = i + 1
+    result
+
+fn md_wiki_extract_tags(doc: MdWikiDocument) -> [MdWikiTag]:
+    var result: [MdWikiTag] = []
+    val props = md_wiki_extract_properties(doc)
+    for prop in props:
+        if prop.key == "tags":
+            val prop_tags = md_wiki_split_tags_value(prop.value)
+            for prop_tag in prop_tags:
+                result.push(MdWikiTag(path: doc.path, tag: prop_tag, line: 0))
+    val lines = doc.content.split("\n")
+    var line_idx = 0
+    var in_fence = false
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        val trimmed_line = line.trim()
+        # Toggle fenced code block tracking — do not index tags inside fences
+        if trimmed_line.starts_with("```") or trimmed_line.starts_with("~~~"):
+            in_fence = not in_fence
+            line_idx = line_idx + 1
+        elif in_fence:
+            line_idx = line_idx + 1
+        else:
+            var col = 0
+            while col < line.len():
+                if line.char_at(col) == "#" and md_wiki_tag_start(line, col):
+                    val end = md_wiki_tag_end(line, col + 1)
+                    if end > col + 1:
+                        result.push(MdWikiTag(path: doc.path, tag: line.slice(col + 1, end), line: line_idx))
+                        col = end
+                    else:
+                        col = col + 1
+                else:
+                    col = col + 1
+            line_idx = line_idx + 1
+    result
+
+fn md_wiki_extract_properties(doc: MdWikiDocument) -> [MdWikiProperty]:
+    var result: [MdWikiProperty] = []
+    val lines = doc.content.split("\n")
+    if lines.len() < 3:
+        return result
+    if lines[0].trim() != "---":
+        return result
+    var i = 1
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed == "---":
+            return result
+        val sep = md_wiki_find_char(trimmed, ":", 0)
+        if sep > 0:
+            val key = trimmed.slice(0, sep).trim()
+            val value = trimmed.slice(sep + 1, trimmed.len()).trim()
+            if key != "":
+                result.push(MdWikiProperty(path: doc.path, key: key, value: value))
+        i = i + 1
+    result
+
+fn md_wiki_extract_callouts(doc: MdWikiDocument) -> [MdWikiCallout]:
+    var result: [MdWikiCallout] = []
+    val lines = doc.content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("> [!"):
+            val close = md_wiki_find_char(trimmed, "]", 4)
+            if close > 4:
+                val marker = trimmed.slice(4, close)
+                var folded = false
+                var ctype = marker
+                if marker.ends_with("+") or marker.ends_with("-"):
+                    folded = marker.ends_with("-")
+                    ctype = marker.slice(0, marker.len() - 1)
+                var title_start = close + 1
+                if title_start < trimmed.len() and (trimmed.char_at(title_start) == "+" or trimmed.char_at(title_start) == "-"):
+                    folded = trimmed.char_at(title_start) == "-"
+                    title_start = title_start + 1
+                val title = trimmed.slice(title_start, trimmed.len()).trim()
+                result.push(MdWikiCallout(
+                    path: doc.path,
+                    line: i,
+                    callout_type: ctype.to_lower(),
+                    title: title,
+                    folded: folded
+                ))
+        i = i + 1
+    result
+
+fn md_wiki_extract_attachments(doc: MdWikiDocument) -> [MdWikiAttachment]:
+    var result: [MdWikiAttachment] = []
+    val lines = doc.content.split("\n")
+    var line_idx = 0
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        var col = 0
+        while col < line.len():
+            if col + 2 < line.len() and line.slice(col, col + 3) == "![[":
+                val close = md_wiki_find_text(line, "]]", col + 3)
+                if close >= 0:
+                    val raw = line.slice(col + 3, close)
+                    val parsed = md_wiki_parse_link_target(raw)
+                    if md_wiki_is_attachment_target(parsed.0):
+                        result.push(MdWikiAttachment(
+                            source_path: doc.path,
+                            target: parsed.0,
+                            display: parsed.1,
+                            line: line_idx,
+                            col: col,
+                            embed: true
+                        ))
+                    col = close + 2
+                else:
+                    col = col + 1
+            elif col + 1 < line.len() and line.slice(col, col + 2) == "![":
+                val alt_close = md_wiki_find_char(line, "]", col + 2)
+                if alt_close >= 0 and alt_close + 1 < line.len() and line.char_at(alt_close + 1) == "(":
+                    val path_close = md_wiki_find_char(line, ")", alt_close + 2)
+                    if path_close >= 0:
+                        val display = line.slice(col + 2, alt_close)
+                        val target = line.slice(alt_close + 2, path_close).trim()
+                        result.push(MdWikiAttachment(
+                            source_path: doc.path,
+                            target: target,
+                            display: display,
+                            line: line_idx,
+                            col: col,
+                            embed: true
+                        ))
+                        col = path_close + 1
+                    else:
+                        col = col + 1
+                else:
+                    col = col + 1
+            else:
+                col = col + 1
+        line_idx = line_idx + 1
+    result
+
+fn md_wiki_graph_edges_from(links: [MdWikiLink], embeds: [MdWikiEmbed]) -> [MdWikiGraphEdge]:
+    var result: [MdWikiGraphEdge] = []
+    for link in links:
+        result.push(MdWikiGraphEdge(
+            source_path: link.source_path,
+            target: link.target,
+            edge_type: "link",
+            resolved: link.resolved
+        ))
+    for embed in embeds:
+        result.push(MdWikiGraphEdge(
+            source_path: embed.source_path,
+            target: embed.target,
+            edge_type: "embed",
+            resolved: embed.resolved
+        ))
+    result
+
+fn md_wiki_title_from_path(path: text) -> text:
+    var start = 0
+    var i = 0
+    while i < path.len():
+        if path.char_at(i) == "/":
+            start = i + 1
+        i = i + 1
+    var title = path.slice(start, path.len())
+    if title.ends_with(".markdown"):
+        title = title.slice(0, title.len() - 9)
+    elif title.ends_with(".md"):
+        title = title.slice(0, title.len() - 3)
+    title
+
+fn md_wiki_parse_link_target(raw: text) -> (text, text):
+    val pipe = md_wiki_find_char(raw, "|", 0)
+    val target_raw = if pipe >= 0 then raw.slice(0, pipe).trim() else: raw.trim()
+    val display = if pipe >= 0 then raw.slice(pipe + 1, raw.len()).trim() else: target_raw
+    val heading = md_wiki_find_char(target_raw, "#", 0)
+    val target = if heading >= 0 then target_raw.slice(0, heading).trim() else: target_raw
+    (target, display)
+
+fn md_wiki_target_exists(documents: [MdWikiDocument], target: text) -> bool:
+    val slug = md_wiki_slug(target)
+    for doc in documents:
+        if md_wiki_slug(doc.title) == slug:
+            return true
+    false
+
+fn md_wiki_transclusion_content(index: MdWikiIndex, target: text) -> text:
+    # "note#heading" embeds only that heading's section of the note
+    var note = target
+    var anchor = ""
+    val hash = md_wiki_find_char(target, "#", 0)
+    if hash > 0:
+        # Intermediate vars: chained slice().trim() corrupts in interpreter
+        val anchor_raw = target.slice(hash + 1, target.len())
+        anchor = anchor_raw.trim()
+        val note_raw = target.slice(0, hash)
+        note = note_raw.trim()
+    val slug = md_wiki_slug(note)
+    for doc in index.documents:
+        # Slug match first; case-insensitive exact title as fallback because
+        # markdown_slugify is unreliable in the interpreter (see bug
+        # md_slugify_string_corruption).
+        var matched = md_wiki_slug(doc.title) == slug
+        if not matched:
+            matched = md_wiki_titles_equal(doc.title, note)
+        if matched:
+            val body = md_wiki_strip_frontmatter(doc.content)
+            if anchor == "":
+                return body
+            return md_wiki_heading_section(body, anchor)
+    ""
+
+fn md_wiki_titles_equal(a: text, b: text) -> bool:
+    val ta = a.trim()
+    val tb = b.trim()
+    val la = ta.lower()
+    val lb = tb.lower()
+    la == lb
+
+# Section of `body` under the heading whose title equals `anchor` (exact
+# after trimming): the heading line through the line before the next heading
+# of the same or higher level. Empty when no heading matches.
+# Exact comparison, not slug comparison: markdown_slugify returns
+# heap-state-dependent corrupted values in the interpreter (see bug
+# md_slugify_string_corruption), so slugs only compare reliably against
+# other slugs produced by the identical call path.
+fn md_wiki_heading_section(body: text, anchor: text) -> text:
+    val lines = body.split("\n")
+    val want = anchor.trim()
+    var start = -1
+    var level = 0
+    var end = lines.len() - 1
+    var i = 0
+    while i < lines.len():
+        val hl = md_wiki_heading_line_level(lines[i])
+        if start < 0:
+            if hl > 0:
+                val raw_title = lines[i].slice(hl, lines[i].len())
+                val trimmed_title = raw_title.trim()
+                if trimmed_title == want:
+                    start = i
+                    level = hl
+        elif hl > 0 and hl <= level:
+            end = i - 1
+            i = lines.len()
+        i = i + 1
+    if start < 0:
+        return ""
+    var result = ""
+    var row = start
+    while row <= end:
+        if result != "":
+            result = result + "\n"
+        result = result + lines[row]
+        row = row + 1
+    result
+
+fn md_wiki_heading_line_level(line: text) -> i64:
+    var level = 0
+    while level < line.len() and line.char_at(level) == "#":
+        level = level + 1
+    if level > 0 and level <= 6 and level < line.len() and line.char_at(level) == " ":
+        return level
+    0
+
+fn md_wiki_strip_frontmatter(content: text) -> text:
+    val lines = content.split("\n")
+    if lines.len() < 3:
+        return content
+    if lines[0].trim() != "---":
+        return content
+    var end = -1
+    var i = 1
+    while i < lines.len():
+        if lines[i].trim() == "---":
+            end = i
+            i = lines.len()
+        else:
+            i = i + 1
+    if end < 0:
+        return content
+    var result = ""
+    var row = end + 1
+    while row < lines.len():
+        if result != "":
+            result = result + "\n"
+        result = result + lines[row]
+        row = row + 1
+    result
+
+fn md_wiki_slug(value: text) -> text:
+    markdown_slugify(value)
+
+fn md_wiki_normalize_tag(tag: text) -> text:
+    var value = tag
+    if value.starts_with("#"):
+        value = value.slice(1, value.len())
+    value.to_lower()
+
+fn md_wiki_is_attachment_target(target: text) -> bool:
+    val lower = target.to_lower()
+    lower.ends_with(".png") or lower.ends_with(".jpg") or lower.ends_with(".jpeg") or lower.ends_with(".gif") or lower.ends_with(".webp") or lower.ends_with(".svg") or lower.ends_with(".pdf")
+
+fn md_wiki_trim_trailing_slash(path: text) -> text:
+    var result = path
+    while result.ends_with("/") and result.len() > 1:
+        result = result.slice(0, result.len() - 1)
+    result
+
+fn md_wiki_split_tags_value(value: text) -> [text]:
+    var result: [text] = []
+    var current = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "," or ch == " ":
+            val normalized = md_wiki_normalize_tag(current.trim())
+            if normalized != "":
+                result.push(normalized)
+            current = ""
+        elif ch == "[" or ch == "]":
+            current = current
+        else:
+            current = current + ch
+        i = i + 1
+    val last = md_wiki_normalize_tag(current.trim())
+    if last != "":
+        result.push(last)
+    result
+
+fn md_wiki_tag_start(line: text, col: i64) -> bool:
+    if col + 1 >= line.len():
+        return false
+    val next = line.char_at(col + 1)
+    if next == " ":
+        return false
+    if col == 0:
+        return true
+    val prev = line.char_at(col - 1)
+    prev == " " or prev == "\t" or prev == "(" or prev == "["
+
+fn md_wiki_tag_end(line: text, start: i64) -> i64:
+    var i = start
+    while i < line.len():
+        val ch = line.char_at(i)
+        if md_wiki_tag_char(ch):
+            i = i + 1
+        else:
+            return i
+    i
+
+fn md_wiki_tag_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "/"
+
+fn md_wiki_find_char(haystack: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < haystack.len():
+        if haystack.char_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn md_wiki_find_text(haystack: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i + needle.len() <= haystack.len():
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+use std.common.markdown.{markdown_slugify}

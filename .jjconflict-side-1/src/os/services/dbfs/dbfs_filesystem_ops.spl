@@ -1,0 +1,349 @@
+# DBFS Filesystem Trait Implementation
+#
+# MDSOC: feature dimension, vfs layer
+# Implements the shared `Filesystem` trait (os.services.vfs.vfs.Filesystem)
+# for DbFsDriver, mirroring fat32_filesystem_ops.spl. This is the ONLY glue
+# needed for a DBFS-backed root to be mountable through the same
+# VfsManager.mount() call the FAT32 path uses (os.services.vfs.vfs.{vfs_mount,
+# VfsManager.mount}) -- consumers that only depend on the Filesystem trait
+# (open/read/write/close/seek/stat/mkdir/readdir/unlink/rename) see no
+# difference between a FAT32 mount and a DBFS mount.
+#
+# DbFsDriver is a `struct` (value type) whose methods mutate module-level
+# state keyed by `inst_id` rather than `self` fields (see dbfs_driver.spl
+# header comment: an interpreter value-semantics workaround). None of the
+# DbFsDriver methods this file calls mutate `self`, so no state is lost
+# across the by-value `me` receiver used by the trait's mutating methods.
+#
+# DbFsDriver has no persistent per-handle read/write cursor (read_handle /
+# write_bytes_handle always operate from byte 0; only pread/pwrite take an
+# explicit offset). The Filesystem trait's read()/write()/seek() assume a
+# cursor that survives across calls (matching FAT32's Fat32OpenFile.current_offset
+# semantics), so this file tracks (inst_id, handle_id) -> offset itself,
+# using the exact same "module-level array keyed by inst_id" idiom
+# dbfs_driver.spl already establishes for the same reason.
+#
+# Known engine gaps (fail closed, do not fake success):
+#   - chmod:   DbFsInode has no permission-bits field. Err.
+#   - symlink: DbFsDriver has no symlink primitive. Err.
+#   - rmdir:   DBFS is currently a flat namespace (DbFsFd/DbFsInode.parent is
+#              always 1; readdir_handle returns every inode in the instance,
+#              not children of a specific directory). There is no reliable
+#              way to check "is this directory empty" without inventing
+#              hierarchy tracking the engine does not have, so rmdir returns
+#              Err rather than deleting something that might not actually be
+#              empty. Follow-up: needs real parent-scoped directory tracking
+#              in dbfs_engine before rmdir can be implemented honestly.
+#   - readdir: works, but -- because of the same flat-namespace limitation --
+#              returns ALL live entries in the mounted instance regardless of
+#              which path was asked for (matches the underlying engine's
+#              actual behavior; not narrowed by this adapter).
+#   - stat:    FsNode.id/created_ns/modified_ns are always 0 -- DbFsInode
+#              does not track inode numbers or timestamps yet.
+
+use os.services.vfs.vfs.{Filesystem, SeekWhence, VfsManager, vfs_mount}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.types.{Path, OpenFlags, FileHandle}
+use std.fs_driver.error.{FsError}
+
+fn _dbfs_fsops_err_text(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "unsupported"
+        case FsError.Transient(_): "transient"
+        case FsError.Corrupt: "corrupt"
+        case FsError.NoSpace: "no-space"
+        case FsError.Permission: "permission"
+        case FsError.NotFound: "not-found"
+        case FsError.AlreadyExists: "already-exists"
+        case FsError.Busy: "busy"
+        case FsError.IoError(code): "io-error:" + code.to_u64().to_text()
+        case FsError.Interrupted: "interrupted"
+        case FsError.TooLarge: "too-large"
+        case FsError.ReadOnly: "read-only"
+        case FsError.InvalidArg: "invalid-arg"
+        case FsError.StaleHandle: "stale-handle"
+        case FsError.PathTraversal: "path-traversal"
+
+# ============================================================================
+# Per-handle cursor tracking (module-level, keyed by inst_id + handle_id)
+# ============================================================================
+
+struct _DbfsFsOpsCursor:
+    inst_id:   i64
+    handle_id: u64
+    path:      text
+    offset:    i64
+
+var _dbfs_fsops_cursors: [_DbfsFsOpsCursor] = []
+
+fn _dbfs_fsops_cursor_idx(inst_id: i64, handle_id: u64) -> i32:
+    var i: i32 = 0
+    while i < _dbfs_fsops_cursors.len() as i32:
+        val c = _dbfs_fsops_cursors[i]
+        if c.inst_id == inst_id and c.handle_id == handle_id:
+            return i
+        i = i + 1
+    -1
+
+fn _dbfs_fsops_cursor_open(inst_id: i64, handle_id: u64, path: text):
+    val idx = _dbfs_fsops_cursor_idx(inst_id, handle_id)
+    if idx >= 0:
+        _dbfs_fsops_cursors.remove(idx)
+    _dbfs_fsops_cursors.push(_DbfsFsOpsCursor(inst_id: inst_id, handle_id: handle_id, path: path, offset: 0))
+
+fn _dbfs_fsops_cursor_set(inst_id: i64, handle_id: u64, offset: i64):
+    val idx = _dbfs_fsops_cursor_idx(inst_id, handle_id)
+    if idx < 0:
+        return
+    val c = _dbfs_fsops_cursors[idx]
+    _dbfs_fsops_cursors.remove(idx)
+    _dbfs_fsops_cursors.push(_DbfsFsOpsCursor(inst_id: c.inst_id, handle_id: c.handle_id, path: c.path, offset: offset))
+
+fn _dbfs_fsops_cursor_close(inst_id: i64, handle_id: u64):
+    val idx = _dbfs_fsops_cursor_idx(inst_id, handle_id)
+    if idx >= 0:
+        _dbfs_fsops_cursors.remove(idx)
+
+# ============================================================================
+# Filesystem trait implementation for DbFsDriver
+# ============================================================================
+
+impl Filesystem for DbFsDriver:
+    fn fs_name() -> text: "dbfs"
+
+    me fn mount(device: text, options: text) -> Result<bool, text>:
+        # DbFsDriver arrives already opened/formatted via
+        # DbFsDriver.open_on_device before it is handed to VfsManager.mount();
+        # this is just a readiness confirmation, matching how mount() is a
+        # validation step (not a fresh-open step) for other in-tree drivers.
+        Ok(true)
+
+    me fn unmount() -> Result<bool, text>:
+        val committed = self.group_commit()
+        if committed.is_err():
+            return Err("dbfs unmount: group_commit failed: " + committed.unwrap_err())
+        Ok(true)
+
+    me fn open(path: text, flags: FileFlags) -> Result<u64, text>:
+        val open_flags = if flags.write or flags.create or flags.append or flags.truncate:
+            OpenFlags.read_write().with_create()
+        else:
+            OpenFlags.read_only()
+        val opened = self.open_path(Path(raw: path), open_flags)
+        if opened.is_err():
+            return Err(_dbfs_fsops_err_text(opened.unwrap_err()))
+        val handle = opened.unwrap()
+        _dbfs_fsops_cursor_open(self.inst_id, handle.id, path)
+        if flags.truncate:
+            val truncated = self.write_bytes_handle(handle, [])
+            if truncated.is_err():
+                return Err(_dbfs_fsops_err_text(truncated.unwrap_err()))
+        Ok(handle.id)
+
+    me fn read(handle: u64, size: u64) -> Result<[u8], text>:
+        val idx = _dbfs_fsops_cursor_idx(self.inst_id, handle)
+        val offset: i64 = if idx >= 0: _dbfs_fsops_cursors[idx].offset else: 0
+        val want: i64 = offset + size.to_i64()
+        val full = self.read_bytes_handle(FileHandle(id: handle), want)
+        if full.is_err():
+            return Err(_dbfs_fsops_err_text(full.unwrap_err()))
+        val bytes = full.unwrap()
+        var out: [u8] = []
+        var i: i64 = offset
+        while i < bytes.len() as i64 and i < want:
+            out.push(bytes[i as i32])
+            i = i + 1
+        _dbfs_fsops_cursor_set(self.inst_id, handle, offset + out.len() as i64)
+        Ok(out)
+
+    me fn write(handle: u64, data: [u8]) -> Result<u64, text>:
+        # DbFsDriver only exposes whole-file overwrite (write_bytes_handle,
+        # byte-exact) and a text-based patch (pwrite_handle, which would
+        # corrupt non-ASCII bytes through text round-tripping). Patch at the
+        # byte level ourselves using the byte-exact primitives so binary
+        # payloads (e.g. an ELF seeded at /sbin/init) survive intact.
+        val idx = _dbfs_fsops_cursor_idx(self.inst_id, handle)
+        if idx < 0:
+            return Err("dbfs write: invalid or unopened handle")
+        val cursor = _dbfs_fsops_cursors[idx]
+        val offset = cursor.offset
+        val stat_r = self.stat_path(Path(raw: cursor.path))
+        val existing_size: i64 = if stat_r.is_ok(): stat_r.unwrap().size else: 0
+        val current_r = self.read_bytes_handle(FileHandle(id: handle), existing_size)
+        if current_r.is_err():
+            return Err(_dbfs_fsops_err_text(current_r.unwrap_err()))
+        val current = current_r.unwrap()
+        var patched: [u8] = []
+        var i: i64 = 0
+        while i < offset:
+            if i < current.len() as i64:
+                patched.push(current[i as i32])
+            else:
+                patched.push(0u8)
+            i = i + 1
+        var j: i64 = 0
+        while j < data.len() as i64:
+            patched.push(data[j as i32])
+            j = j + 1
+        var k: i64 = offset + data.len() as i64
+        while k < current.len() as i64:
+            patched.push(current[k as i32])
+            k = k + 1
+        val written = self.write_bytes_handle(FileHandle(id: handle), patched)
+        if written.is_err():
+            return Err(_dbfs_fsops_err_text(written.unwrap_err()))
+        _dbfs_fsops_cursor_set(self.inst_id, handle, offset + data.len() as i64)
+        Ok(data.len() as u64)
+
+    me fn close(handle: u64) -> Result<bool, text>:
+        val closed = self.close_handle(FileHandle(id: handle))
+        _dbfs_fsops_cursor_close(self.inst_id, handle)
+        if closed.is_err():
+            return Err(_dbfs_fsops_err_text(closed.unwrap_err()))
+        Ok(true)
+
+    me fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        val idx = _dbfs_fsops_cursor_idx(self.inst_id, handle)
+        if idx < 0:
+            return Err("dbfs seek: invalid or unopened handle")
+        val cursor = _dbfs_fsops_cursors[idx]
+        val stat_r = self.stat_path(Path(raw: cursor.path))
+        val size: i64 = if stat_r.is_ok(): stat_r.unwrap().size else: 0
+        val new_offset: i64 = match whence:
+            case SeekWhence.Set: offset
+            case SeekWhence.Cur: cursor.offset + offset
+            case SeekWhence.End: size + offset
+        if new_offset < 0:
+            return Err("dbfs seek: negative offset")
+        _dbfs_fsops_cursor_set(self.inst_id, handle, new_offset)
+        Ok(new_offset as u64)
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        val result = self.stat_path(Path(raw: path))
+        if result.is_err():
+            return Err(_dbfs_fsops_err_text(result.unwrap_err()))
+        val info = result.unwrap()
+        val kind = if info.is_dir: FsNodeKind.Directory else: FsNodeKind.File
+        val mode: u16 = if info.is_dir: 0o755 else: 0o644
+        Ok(FsNode(
+            id: 0,
+            kind: kind,
+            size: info.size as u64,
+            permissions: mode,
+            owner: 0,
+            group: 0,
+            created_ns: 0,
+            modified_ns: 0
+        ))
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Err("chmod not supported on dbfs (engine does not track permission bits yet)")
+
+    fn symlink(target: text, link_path: text) -> Result<bool, text>:
+        Err("symlinks not supported on dbfs (engine has no symlink primitive yet)")
+
+    me fn mkdir(path: text) -> Result<bool, text>:
+        val result = self.mkdir_path(path, 0o755)
+        if result.is_err():
+            return Err(_dbfs_fsops_err_text(result.unwrap_err()))
+        Ok(true)
+
+    me fn rmdir(path: text) -> Result<bool, text>:
+        # See file header: DBFS is a flat namespace today, so there is no
+        # honest way to confirm "directory is empty" here. Fail closed
+        # rather than risk deleting a directory that is not actually empty.
+        Err("rmdir not supported on dbfs yet (flat namespace: engine cannot scope entries to a parent directory)")
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        val opened = self.opendir_path(Path(raw: path))
+        if opened.is_err():
+            return Err(_dbfs_fsops_err_text(opened.unwrap_err()))
+        val handle = opened.unwrap()
+        val listed = self.readdir_handle(handle)
+        if listed.is_err():
+            return Err(_dbfs_fsops_err_text(listed.unwrap_err()))
+        var entries: [DirEntry] = []
+        for e in listed.unwrap():
+            val kind = if e.is_dir: FsNodeKind.Directory else: FsNodeKind.File
+            val mode: u16 = if e.is_dir: 0o755 else: 0o644
+            entries.push(DirEntry(
+                name: e.name,
+                node: FsNode(
+                    id: 0, kind: kind, size: e.size as u64,
+                    permissions: mode, owner: 0, group: 0,
+                    created_ns: 0, modified_ns: 0
+                )
+            ))
+        Ok(entries)
+
+    me fn unlink(path: text) -> Result<bool, text>:
+        val result = self.unlink_path(path)
+        if result.is_err():
+            return Err(_dbfs_fsops_err_text(result.unwrap_err()))
+        Ok(true)
+
+    me fn rename(old_path: text, new_path: text) -> Result<bool, text>:
+        val result = self.rename_path(old_path, new_path)
+        if result.is_err():
+            return Err(_dbfs_fsops_err_text(result.unwrap_err()))
+        Ok(true)
+
+# ============================================================================
+# Boot-time trait smoke proof
+# ============================================================================
+
+pub fn dbfs_filesystem_ops_self_test(driver: DbFsDriver, seed_path: text) -> Result<text, text>:
+    """Prove DBFS is reachable through the shared Filesystem trait /
+    VfsManager.mount() surface -- the same generic surface Fat32Driver
+    implements (fat32_filesystem_ops.spl) -- not just the boot-time
+    MountTable/DriverInstance root-mount path boot_fs.spl uses to become
+    root. Mounts a throwaway VfsManager at "/", readdir("/")s it through the
+    trait, and stat()s seed_path through the trait.
+    """
+    var manager = VfsManager.new()
+    val fs: Filesystem = driver
+    val mount_r = vfs_mount(manager, "/", fs)
+    if mount_r.is_err():
+        return Err("dbfs trait self-test: mount failed: " + mount_r.unwrap_err())
+    val listing = manager.readdir("/")
+    if listing.is_err():
+        return Err("dbfs trait self-test: readdir failed: " + listing.unwrap_err())
+    val stat_r = manager.stat(seed_path)
+    if stat_r.is_err():
+        return Err("dbfs trait self-test: stat failed: " + stat_r.unwrap_err())
+    val node = stat_r.unwrap()
+    Ok("entries=" + listing.unwrap().len().to_text() + " seed_size=" + node.size.to_text())
+
+val DBFS_PERSISTENCE_MARKER_PATH: text = "/boot-marker.txt"
+val DBFS_PERSISTENCE_MARKER_CONTENT: text = "dbfs-persist-ok"
+
+pub fn dbfs_filesystem_ops_persistence_check(driver: DbFsDriver) -> Result<text, text>:
+    """Boot-time persistence proof, run through the Filesystem trait on every
+    DBFS-root boot. First boot on a fresh image: the marker file does not
+    exist yet, so this writes it and returns "written:first-boot". Any later
+    boot against the SAME disk image: the marker already exists, so this
+    reads it back and confirms the content matches, returning
+    "persisted:match ...". A QEMU gate that boots the same DBFS image twice
+    (-no-reboot, fresh QEMU process each time) and asserts the second boot's
+    serial output contains "persisted:match" has proven inode/namespace
+    state survives a reboot.
+    """
+    var manager = VfsManager.new()
+    val fs: Filesystem = driver
+    val mount_r = vfs_mount(manager, "/", fs)
+    if mount_r.is_err():
+        return Err("dbfs persistence check: mount failed: " + mount_r.unwrap_err())
+    val stat_r = manager.stat(DBFS_PERSISTENCE_MARKER_PATH)
+    if stat_r.is_ok():
+        val read_r = manager.read_text(DBFS_PERSISTENCE_MARKER_PATH)
+        if read_r.is_err():
+            return Err("dbfs persistence check: read-back failed: " + read_r.unwrap_err())
+        val content = read_r.unwrap()
+        if content == DBFS_PERSISTENCE_MARKER_CONTENT:
+            return Ok("persisted:match content=" + content)
+        return Err("persisted:mismatch content=" + content)
+    val write_r = manager.write_text(DBFS_PERSISTENCE_MARKER_PATH, DBFS_PERSISTENCE_MARKER_CONTENT)
+    if write_r.is_err():
+        return Err("dbfs persistence check: write failed: " + write_r.unwrap_err())
+    Ok("written:first-boot")

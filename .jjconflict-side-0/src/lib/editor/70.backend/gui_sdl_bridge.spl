@@ -1,0 +1,238 @@
+# gui_sdl_bridge.spl
+#
+# Simple-language SDL bridge for the editor GUI shell.
+# Uses editor-facing rt_sdl_* extern aliases backed by the runtime SDL implementation.
+#
+# Rendering model: software framebuffer ([i64] packed RGBA pixels)
+# presented via rt_sdl_present_rgba. Text rendering fills colored
+# rectangles as placeholder glyphs (no font rasteriser in runtime).
+#
+# Pixel format: R*16777216 + G*65536 + B*256 + A  (each channel 0-255)
+#
+# Extern constants for rt_sdl_poll_event() return codes:
+#   0=none 1=quit 2=keydown 3=keyup
+#   4=mousemotion 5=mousedown 6=mouseup 7=mousewheel
+#   8=windowevent 9=textinput
+
+# ============================================================
+# Tier 1: Extern Declarations (Raw SFFI to the runtime SDL backend)
+# ============================================================
+
+# --- Initialization ---
+extern fn rt_sdl_init() -> i64
+extern fn rt_sdl_quit()
+
+# --- Window Management ---
+extern fn rt_sdl_create_window(title: text, width: i64, height: i64) -> i64
+extern fn rt_sdl_destroy_window(handle: i64)
+extern fn rt_sdl_get_window_width(handle: i64) -> i64
+extern fn rt_sdl_get_window_height(handle: i64) -> i64
+extern fn rt_sdl_set_window_title(handle: i64, title: text)
+
+# --- Framebuffer Present ---
+# pixels is [i64] (SplArray* of packed RGBA i64 values)
+extern fn rt_sdl_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64) -> bool
+
+# --- Event Polling ---
+# Returns event type: 0=none, 1=quit, 2=keydown, 3=keyup,
+#   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
+#   8=windowevent, 9=textinput
+extern fn rt_sdl_poll_event() -> i64
+extern fn rt_sdl_event_key_sym() -> i64
+extern fn rt_sdl_event_key_mod() -> i64
+extern fn rt_sdl_event_text() -> text
+extern fn rt_sdl_event_mouse_x() -> i64
+extern fn rt_sdl_event_mouse_y() -> i64
+extern fn rt_sdl_event_mouse_button() -> i64
+extern fn rt_sdl_event_window_event_id() -> i64
+extern fn rt_sdl_event_window_data1() -> i64
+extern fn rt_sdl_event_window_data2() -> i64
+
+# --- Window State ---
+extern fn rt_sdl_window_should_close() -> i64
+extern fn rt_sdl_clear_quit()
+
+# ============================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================
+
+# --- Helpers ---
+
+# Pack RGBA bytes into a single i64 pixel value.
+fn _sdl_pack_rgba(r: i64, g: i64, b: i64, a: i64) -> i64:
+    r * 16777216 + g * 65536 + b * 256 + a
+
+# Fill a framebuffer slice with a solid color.
+fn _sdl_fill(fb: [i64], color: i64, count: i64):
+    var idx: i64 = 0
+    while idx < count:
+        fb[idx] = color
+        idx = idx + 1
+
+# Fill a rectangular region of the framebuffer with a color.
+fn _sdl_fill_rect(fb: [i64], fb_w: i64, x: i64, y: i64, rw: i64, rh: i64, color: i64):
+    var row: i64 = 0
+    while row < rh:
+        var col: i64 = 0
+        while col < rw:
+            val px = (y + row) * fb_w + (x + col)
+            if px >= 0 and px < fb.len():
+                fb[px] = color
+            col = col + 1
+        row = row + 1
+
+# Allocate a zeroed [i64] framebuffer of width*height pixels.
+fn _sdl_alloc_fb(w: i64, h: i64) -> [i64]:
+    var buf: [i64] = []
+    val total = w * h
+    var i: i64 = 0
+    while i < total:
+        buf.push(0)
+        i = i + 1
+    buf
+
+# ============================================================
+# Public API
+# ============================================================
+
+# Initialise SDL and create a window.
+# Returns the window handle (0 on failure).
+fn gui_sdl_init(title: text, width: i64, height: i64) -> i64:
+    val ok = rt_sdl_init()
+    if ok == 0:
+        return 0
+    rt_sdl_create_window(title, width, height)
+
+# Destroy a window and shut down SDL.
+fn gui_sdl_shutdown(window: i64):
+    rt_sdl_destroy_window(window)
+    rt_sdl_quit()
+
+# Render a list of plain-text lines into the framebuffer starting at (x, y).
+# Each character cell is approximated as a 8x14 colored rectangle so that
+# the layout is visible even without a font rasteriser in the runtime.
+# A full font/glyph implementation would replace _sdl_fill_rect with a
+# proper bitmapped text call once rt_sdl_draw_text is available.
+fn gui_sdl_render_text_block(fb: [i64], fb_w: i64, lines: [text], x: i64, y: i64, line_height: i64, fg: i64):
+    val char_w: i64 = 8
+    var row: i64 = 0
+    while row < lines.len():
+        val line = lines[row]
+        val cell_y = y + row * line_height
+        # Render each character as a narrow rectangle (placeholder glyph).
+        var col: i64 = 0
+        while col < line.len():
+            val cell_x = x + col * char_w
+            # Non-space characters get a foreground-colored rect.
+            if line.char_at(col) != " ":
+                _sdl_fill_rect(fb, fb_w, cell_x, cell_y, char_w - 1, line_height - 2, fg)
+            col = col + 1
+        row = row + 1
+
+# Clear the window to a background color, render each section of the
+# GuiFrame as plain text rows, then present the completed framebuffer.
+fn gui_sdl_present_frame(window: i64, frame: GuiFrame) -> bool:
+    if window == 0:
+        return false
+    val w = rt_sdl_get_window_width(window)
+    val h = rt_sdl_get_window_height(window)
+    if w <= 0 or h <= 0:
+        return false
+
+    var fb = _sdl_alloc_fb(w, h)
+
+    # Background: dark grey
+    val bg   = _sdl_pack_rgba(30, 30, 30, 255)
+    val fg   = _sdl_pack_rgba(220, 220, 220, 255)
+    val hdr  = _sdl_pack_rgba(50, 50, 80, 255)
+    val stat = _sdl_pack_rgba(40, 60, 40, 255)
+
+    _sdl_fill(fb, bg, w * h)
+
+    val line_h: i64 = 16
+    val tab_h:  i64 = 20
+    val tree_w: i64 = 200
+    val stat_h: i64 = 20
+
+    # Tab bar strip (top)
+    _sdl_fill_rect(fb, w, 0, 0, w, tab_h, hdr)
+    val tab_lines: [text] = [frame.tab_bar_html]
+    gui_sdl_render_text_block(fb, w, tab_lines, 4, 2, line_h, fg)
+
+    # File tree strip (left)
+    val tree_lines: [text] = [frame.file_tree_html]
+    gui_sdl_render_text_block(fb, w, tree_lines, 4, tab_h + 2, line_h, fg)
+
+    # Editor area (right of file tree)
+    val editor_lines: [text] = [frame.editor_html]
+    gui_sdl_render_text_block(fb, w, editor_lines, tree_w + 4, tab_h + 2, line_h, fg)
+
+    # Status bar strip (bottom)
+    val stat_y = h - stat_h
+    _sdl_fill_rect(fb, w, 0, stat_y, w, stat_h, stat)
+    val stat_lines: [text] = [frame.status_html]
+    gui_sdl_render_text_block(fb, w, stat_lines, 4, stat_y + 2, line_h, fg)
+
+    rt_sdl_present_rgba(window, fb, w, h)
+
+# Poll one SDL event and translate it to a GuiEvent.
+fn gui_sdl_poll() -> GuiEvent:
+    val ev = rt_sdl_poll_event()
+    if ev == 0:
+        return GuiEvent(kind: "", data: "")
+    if ev == 1:
+        return GuiEvent(kind: "close", data: "")
+    if ev == 2:
+        val sym = rt_sdl_event_key_sym()
+        val mods = rt_sdl_event_key_mod()
+        val ctrl = (mods & 192) != 0
+        val shift = (mods & 3) != 0
+        val alt = (mods & 768) != 0
+        if shift and alt and sym == 1073741903:
+            return GuiEvent(kind: "key", data: "Shift+Alt+Right")
+        if shift and alt and sym == 1073741904:
+            return GuiEvent(kind: "key", data: "Shift+Alt+Left")
+        if ctrl and sym >= 65 and sym <= 90:
+            val letter = char_from_code(sym)
+            if shift:
+                return GuiEvent(kind: "key", data: "Ctrl+Shift+" + letter)
+            return GuiEvent(kind: "key", data: "Ctrl+" + letter)
+        if ctrl and sym >= 97 and sym <= 122:
+            val letter = char_from_code(sym - 32)
+            if shift:
+                return GuiEvent(kind: "key", data: "Ctrl+Shift+" + letter)
+            return GuiEvent(kind: "key", data: "Ctrl+" + letter)
+        if sym == 27:
+            return GuiEvent(kind: "key", data: "Escape")
+        if sym == 13:
+            return GuiEvent(kind: "key", data: "Enter")
+        if sym == 8:
+            return GuiEvent(kind: "key", data: "Backspace")
+        if sym == 9:
+            return GuiEvent(kind: "key", data: "Tab")
+        if sym >= 32 and sym <= 126:
+            return GuiEvent(kind: "key", data: char_from_code(sym))
+        return GuiEvent(kind: "key", data: str(sym))
+    if ev == 4:
+        val mx = rt_sdl_event_mouse_x()
+        val my = rt_sdl_event_mouse_y()
+        return GuiEvent(kind: "mouse-move", data: str(mx) + "," + str(my))
+    if ev == 5:
+        val mx = rt_sdl_event_mouse_x()
+        val my = rt_sdl_event_mouse_y()
+        return GuiEvent(kind: "mouse-down", data: str(mx) + "," + str(my))
+    if ev == 6:
+        return GuiEvent(kind: "mouse-up", data: "")
+    if ev == 9:
+        return GuiEvent(kind: "text", data: rt_sdl_event_text())
+    if ev == 8:
+        val window_event = rt_sdl_event_window_event_id()
+        if window_event == 5 or window_event == 6:
+            val w = rt_sdl_event_window_data1()
+            val h = rt_sdl_event_window_data2()
+            return GuiEvent(kind: "resize", data: str(w) + "," + str(h))
+        if window_event == 12:
+            return GuiEvent(kind: "focus", data: "")
+        if window_event == 13:
+            return GuiEvent(kind: "blur", data: "")
+    GuiEvent(kind: "", data: "")

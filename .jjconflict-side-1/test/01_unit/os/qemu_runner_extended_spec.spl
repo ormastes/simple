@@ -1,0 +1,534 @@
+use os.qemu_runner.{
+    build_qemu_command, build_qemu_command_with_options,
+    get_all_targets, get_gui_target, get_qemu_target, get_target,
+    get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
+    scenario_riscv64_virtio_fat32_smf, scenario_riscv64_hosted, scenario_riscv32_virtio_fat32_smf,
+    scenario_x64_desktop_uefi, scenario_x64_wm_simple_web_check, scenario_arm64_wm_ramfb,
+    scenario_x64_net_user, scenario_x64_ssh,
+    build_scenario_command, scenario_test_timeout_ms, arm64_wm_ramfb_serial_log_path, arm_fs_exec_disk_image_path,
+    riscv_fs_exec_disk_image_path, scenario_target, get_wm_simple_web_check_target,
+    get_ssh_live_target, get_ssh_x25519_probe_target,
+    get_arm64_wm_qemu_target, arm64_wm_qemu_cpu_for_host, arm64_wm_qemu_extra_for_host,
+    default_os_build_backend_for_target,
+    desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
+    desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
+    desktop_release_installer_iso_path, native_build_prerequisite_hint, ovmf_code_path,
+    os_native_build_args, os_native_build_sources, os_native_build_env_prefix,
+    desktop_container_marker_fragments,
+    desktop_uefi_disk_image_tool_app_validation_command, build_os_with_backend,
+    board_bundle_command, ensure_board_bundle, board_lane_test_command, test_board_lane,
+    desktop_uefi_required_marker_fragments, riscv64_hosted_required_marker_fragments,
+    desktop_wine_exec_env_marker_contract_accepts,
+    desktop_wine_exec_env_required_marker_fragments,
+    arm_fs_exec_required_marker_fragments,
+    scenario_lane_kind,
+    is_qemu_success, scenario_qemu_exit_success,
+    qemu_protection_serial_accepts_hardening,
+    qemu_protection_serial_reason,
+    qemu_scenario_protection_board_id,
+    qemu_scenario_protection_serial_accepts_hardening,
+    qemu_scenario_protection_serial_reason,
+    _simpleos_log_config_source,
+    OsTarget,
+    qemu_run_options_debug_gui
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.desktop_qemu_contract.{run_x64_desktop_disk_probe}
+use os.port.simpleos_multiplatform_build.{SimpleOsLaneKind, simpleos_platform_qemu_lane}
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_exit(code: i32) -> void
+
+fn scenario_name_or_missing(name: text) -> text:
+    val scenario = get_scenario(name)
+    if val resolved = scenario:
+        return resolved.name
+    "missing"
+
+fn command_contains_label(cmd: [text], needle: text) -> text:
+    if cmd.contains(needle):
+        return "present"
+    "absent"
+
+fn shell_exit_code(cmd: text) -> i32:
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code
+
+fn shell_status_output(cmd: text) -> text:
+    val wrapped = cmd + "\ncode=$?\nprintf '\\n__exit=%s\\n' \"$code\"\nexit 0"
+    val (stdout, _stderr, _exit_code) = rt_process_run_timeout("/bin/sh", ["-c", wrapped], 5000)
+    stdout
+
+fn shell_ok(cmd: text) -> bool:
+    shell_exit_code(cmd) == 0
+
+fn write_shell_shim(path: text, content: text) -> bool:
+    if not rt_file_write_text(path, content):
+        return false
+    shell_ok("/bin/chmod +x \"" + path + "\"")
+
+fn install_failing_simple_shim(root: text, exit_code: i32) -> text:
+    val path = root + "/simple-fails.sh"
+    val _ = rt_dir_create_all(root)
+    val _ok = write_shell_shim(path, "#!/bin/sh\nexit " + exit_code.to_text() + "\n")
+    path
+
+fn restore_board_bundle_tooling(root: text) -> bool:
+    val script_backup = root + "/backup/scripts/os/make_os_disk.shs"
+    val runner_backup = root + "/backup/scripts/mlk_s02_100t_generated_linux.shs"
+    val simple_backup = root + "/backup/bin/simple"
+    var ok = true
+    val _ = shell_exit_code("rm -f \"scripts/os/make_os_disk.shs\"")
+    val _ = shell_exit_code("rm -f \"scripts/mlk_s02_100t_generated_linux.shs\"")
+    val _ = shell_exit_code("rm -f \"bin/simple\"")
+    if rt_file_exists(script_backup):
+        if not shell_ok("mv \"" + script_backup + "\" \"scripts/os/make_os_disk.shs\""):
+            ok = false
+    if rt_file_exists(runner_backup):
+        if not shell_ok("mv \"" + runner_backup + "\" \"scripts/mlk_s02_100t_generated_linux.shs\""):
+            ok = false
+    if rt_file_exists(simple_backup):
+        if not shell_ok("mv \"" + simple_backup + "\" \"bin/simple\""):
+            ok = false
+    ok
+
+fn install_board_bundle_tooling_shims(root: text) -> bool:
+    val _ = shell_exit_code("rm -rf \"" + root + "\"")
+    if not rt_dir_create_all(root + "/backup/scripts"):
+        return false
+    if not rt_dir_create_all(root + "/backup/bin"):
+        return false
+    if rt_file_exists("scripts/os/make_os_disk.shs"):
+        if not shell_ok("mv \"scripts/os/make_os_disk.shs\" \"" + root + "/backup/scripts/os/make_os_disk.shs\""):
+            return false
+    if rt_file_exists("scripts/mlk_s02_100t_generated_linux.shs"):
+        if not shell_ok("mv \"scripts/mlk_s02_100t_generated_linux.shs\" \"" + root + "/backup/scripts/mlk_s02_100t_generated_linux.shs\""):
+            val _ = shell_exit_code("mv \"" + root + "/backup/scripts/os/make_os_disk.shs\" \"scripts/os/make_os_disk.shs\"")
+            return false
+    if rt_file_exists("bin/simple"):
+        if not shell_ok("mv \"bin/simple\" \"" + root + "/backup/bin/simple\""):
+            val _ = shell_exit_code("mv \"" + root + "/backup/scripts/os/make_os_disk.shs\" \"scripts/os/make_os_disk.shs\"")
+            val _ = shell_exit_code("mv \"" + root + "/backup/scripts/mlk_s02_100t_generated_linux.shs\" \"scripts/mlk_s02_100t_generated_linux.shs\"")
+            return false
+    val disk_shim = "#!/bin/sh\n" +
+        "mkdir -p \"$(dirname \"$2\")\"\n" +
+        "printf 'fake-board-bundle:%s\\n' \"$4\" > \"$2\"\n"
+    if not write_shell_shim("scripts/os/make_os_disk.shs", disk_shim):
+        return false
+    val simple_shim = "#!/bin/sh\n" +
+        "out=\"\"\n" +
+        "for arg in \"$@\"; do out=\"$arg\"; done\n" +
+        "mkdir -p \"$out\"\n" +
+        "printf 'fake-board-bundle:riscv64\\n' > \"$out/board_linux_boot_products.sdn\"\n"
+    if not write_shell_shim("bin/simple", simple_shim):
+        return false
+    val runner_shim = "#!/bin/sh\n" +
+        "bundle_root=\"\"\n" +
+        "product_root=\"\"\n" +
+        "for arg in \"$@\"; do\n" +
+        "  case \"$arg\" in\n" +
+        "    --bundle-root=*) bundle_root=\"$(printf '%s\\n' \"$arg\" | cut -d= -f2-)\" ;;\n" +
+        "    --product-root=*) product_root=\"$(printf '%s\\n' \"$arg\" | cut -d= -f2-)\" ;;\n" +
+        "  esac\n" +
+        "done\n" +
+        "[ -n \"$bundle_root\" ] || exit 2\n" +
+        "[ -n \"$product_root\" ] || exit 2\n" +
+        "mkdir -p \"$bundle_root\" \"$product_root\"\n" +
+        "printf 'fake-board-run:riscv64\\n' > \"$product_root/run.log\"\n" +
+        "[ -f \"$bundle_root/board_linux_boot_products.sdn\" ] || exit 3\n"
+    if not write_shell_shim("scripts/mlk_s02_100t_generated_linux.shs", runner_shim):
+        return false
+    true
+
+fn desktop_tool_app_fallback_fixture() -> text:
+    "SBROWSMF\n" +
+        "SMUXSMF\n" +
+        "info|src/app/info/main.spl|smoke|staged\n" +
+        "SCOMPSMF\n" +
+        "SINTSMF\n" +
+        "SLOADSMF\n" +
+        "SIMPLSTC\n" +
+        "LLVMSMF\n" +
+        "CLANGSMF\n" +
+        "RUSTSMF\n" +
+        "WINHLSMF\n" +
+        "SimpleOS LLVM standalone app v1\n" +
+        "clang version 20.0.0\n" +
+        "SimpleOS Rust standalone app v1\n" +
+        "mode=native-filesystem-app\n" +
+        "lane=x86_64-uefi-hardware\n" +
+        "status=standalone-required\n" +
+        "SIMPLECLI.CAT\n" +
+        "/sys/apps/simple_browser\n" +
+        "/sys/apps/smux\n" +
+        "/sys/apps/simple_compiler\n" +
+        "/sys/apps/simple_interpreter\n" +
+        "/sys/apps/simple_loader\n" +
+        "/sys/apps/simple\n" +
+        "/sys/apps/llvm\n" +
+        "/sys/apps/clang\n" +
+        "/sys/apps/rust\n" +
+        "/sys/apps/wine_hello\n" +
+        "/usr/share/simpleos/toolchain/clang/hello.c\n" +
+        "/usr/share/simpleos/toolchain/clang/pipeline.step\n" +
+        "/usr/share/simpleos/toolchain/llvm/hello.ll\n" +
+        "/usr/share/simpleos/toolchain/llvm/pipeline.step\n" +
+        "/usr/share/simpleos/toolchain/rust/hello.rs\n" +
+        "/usr/share/simpleos/toolchain/rust/pipeline.step\n" +
+        "SMF\n"
+
+fn expect_tool_app_validation_reference(cmd: text, app_name: text, marker: text, app_path: text):
+    val img_path = "build/os/fat32-x86_64.img"
+    expect(cmd).to_contain("::/SYS/APPS/{app_name}")
+    expect(cmd).to_contain("::/SYS/APPS/{app_name}.smf")
+    expect(cmd).to_contain("grep -a -q '{marker}'")
+    expect(cmd).to_contain("grep -a -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name} 2>/dev/null | strings | grep -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | strings | grep -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | grep -a -q 'SMF'")
+
+describe "Qemu runner native-build prerequisites":
+    it "passes entry closure for the x86_64 OS entry build":
+        val target = OsTarget(
+            arch: Architecture.X86_64,
+            entry: "examples/09_embedded/simple_os/arch/x86_64/os_entry.spl",
+            linker_script: "examples/09_embedded/simple_os/arch/x86_64/linker.ld",
+            target_triple: "x86_64-unknown-none",
+            output: "build/os/simpleos_x86_64.elf",
+            qemu_system: "qemu-system-x86_64",
+            qemu_machine: "q35",
+            qemu_cpu: "qemu64",
+            qemu_memory: "128M",
+            qemu_bios: "",
+            qemu_extra: [],
+            gui_mode: false
+        )
+        val args = os_native_build_args(target, "llvm")
+        expect(args).to_contain("--entry-closure")
+        expect(args).to_contain("--entry")
+        expect(args).to_contain("examples/09_embedded/simple_os/arch/x86_64/os_entry.spl")
+        expect(args.contains("examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl")).to_equal(false)
+
+    it "defaults RISC-V OS targets to LLVM native-build backend":
+        expect(default_os_build_backend_for_target(get_target(Architecture.Riscv32))).to_equal("llvm")
+        expect(default_os_build_backend_for_target(get_target(Architecture.Riscv64))).to_equal("llvm")
+        expect(default_os_build_backend_for_target(get_target(Architecture.Arm64))).to_equal("llvm")
+        expect(default_os_build_backend_for_target(get_target(Architecture.Arm32))).to_equal("llvm")
+
+    it "explains when the selected compiler lacks the LLVM backend":
+        val stderr = "LLVM backend requested but 'llvm' feature not enabled"
+        val hint = native_build_prerequisite_hint("llvm", stderr)
+        expect(hint).to_contain("Rust `llvm` feature")
+        expect(hint).to_contain("LLVM 18")
+
+    it "explains when cranelift cannot initialize a freestanding target":
+        val stderr = "Compilation error: Support for this target has not been implemented yet"
+        val hint = native_build_prerequisite_hint("cranelift", stderr)
+        expect(hint).to_contain("Cranelift cannot build this freestanding target")
+        expect(hint).to_contain("LLVM-enabled")
+
+    it "adds the generated SSH live marker source to the live build source set":
+        val sources = os_native_build_sources(get_ssh_live_target())
+        expect(sources).to_contain("src/os")
+        expect(sources).to_contain("src/lib")
+        expect(sources).to_contain("examples/09_embedded/simple_os")
+        expect(sources).to_contain("build/os/generated")
+
+    it "uses the baremetal bootstrap env for the SSH live target":
+        val env_prefix = os_native_build_env_prefix(get_ssh_live_target(), "")
+        expect(env_prefix).to_contain("SIMPLE_BOOTSTRAP=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+
+    it "uses the baremetal bootstrap env for the SSH X25519 probe target":
+        val env_prefix = os_native_build_env_prefix(get_ssh_x25519_probe_target(), "")
+        expect(env_prefix).to_contain("SIMPLE_BOOTSTRAP=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+
+    it "uses the ARM64 WM QEMU build contract for ramfb source and env setup":
+        val target = get_arm64_wm_qemu_target()
+        val sources = os_native_build_sources(target)
+        expect(sources).to_contain("build/os/generated")
+        expect(sources).to_contain("src/os")
+        expect(sources).to_contain("src/lib")
+        expect(sources).to_contain("examples/09_embedded/simple_os")
+        val env_prefix = os_native_build_env_prefix(target, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOTSTRAP=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix).to_contain("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
+
+    it "selects portable ARM64 WM acceleration by host":
+        expect(arm64_wm_qemu_cpu_for_host("macos", "aarch64")).to_equal("host")
+        expect(arm64_wm_qemu_extra_for_host("macos", "aarch64")).to_equal(["-accel", "hvf", "-device", "ramfb"])
+        expect(arm64_wm_qemu_cpu_for_host("linux", "x86_64")).to_equal("cortex-a57")
+        expect(arm64_wm_qemu_extra_for_host("linux", "x86_64")).to_equal(["-accel", "tcg", "-device", "ramfb"])
+
+    it "resolves the named ARM64 WM ramfb scenario to the WM target":
+        val scenario = scenario_arm64_wm_ramfb()
+        val target = scenario_target(scenario)
+        val cmd = build_scenario_command(scenario, target.output)
+        expect(scenario_name_or_missing("arm64-wm-ramfb")).to_equal("arm64-wm-ramfb")
+        expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+        expect(target.output).to_equal("build/os/simpleos_arm64_wm.elf")
+        expect(cmd).to_contain("qemu-system-aarch64")
+        expect(cmd).to_contain("-serial")
+        expect(cmd).to_contain("file:" + arm64_wm_ramfb_serial_log_path())
+        expect(cmd).to_contain("-kernel")
+        expect(cmd).to_contain("build/os/simpleos_arm64_wm.elf")
+        expect(cmd).to_contain("-device")
+        expect(cmd).to_contain("ramfb")
+
+    it "accepts ARM64 WM ramfb marker completion even when QEMU remains live":
+        val scenario = scenario_arm64_wm_ramfb()
+        val serial = arm64_wm_ramfb_required_marker_fragments().join("\n")
+        expect(qemu_scenario_serial_accepts_completion(scenario, "", serial)).to_equal(true)
+        expect(scenario_qemu_exit_success(scenario, 124)).to_equal(false)
+
+    it "keeps RV64 hosted builds on minimal boot sources without freestanding unresolved-symbol stubs":
+        val hosted_target = scenario_target(scenario_riscv64_hosted())
+        val env_prefix = os_native_build_env_prefix(hosted_target, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM64 smoke builds on minimal boot sources without freestanding unresolved-symbol stubs":
+        val smoke = OsTarget(
+            arch: Architecture.Arm64,
+            entry: "examples/09_embedded/simple_os/arch/arm64/smoke_entry.spl",
+            linker_script: "examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld",
+            target_triple: "aarch64-unknown-none",
+            output: "build/os/simpleos_arm64_smoke.elf",
+            qemu_system: "qemu-system-aarch64",
+            qemu_machine: "virt",
+            qemu_cpu: "cortex-a72",
+            qemu_memory: "128M",
+            qemu_bios: "",
+            qemu_extra: [],
+            gui_mode: false
+        )
+        val env_prefix = os_native_build_env_prefix(smoke, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM32 smoke builds on minimal boot sources without freestanding unresolved-symbol stubs":
+        val smoke = OsTarget(
+            arch: Architecture.Arm32,
+            entry: "examples/09_embedded/simple_os/arch/arm32/smoke_entry.spl",
+            linker_script: "examples/09_embedded/simple_os/arch/arm32/fs_exec_linker.ld",
+            target_triple: "armv7-none-eabi",
+            output: "build/os/simpleos_arm32_smoke.elf",
+            qemu_system: "qemu-system-arm",
+            qemu_machine: "virt",
+            qemu_cpu: "cortex-a15",
+            qemu_memory: "128M",
+            qemu_bios: "",
+            qemu_extra: [],
+            gui_mode: false
+        )
+        val env_prefix = os_native_build_env_prefix(smoke, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM64 fs-exec on minimal boot sources without freestanding unresolved-symbol stubs":
+        val fs_exec = scenario_target(scenario_arm64_virtio_fat32_smf())
+        val env_prefix = os_native_build_env_prefix(fs_exec, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM32 fs-exec on minimal boot sources without freestanding unresolved-symbol stubs":
+        val fs_exec = scenario_target(scenario_arm32_virtio_fat32_smf())
+        val env_prefix = os_native_build_env_prefix(fs_exec, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps the checked-in generated fallback aligned with the enabled override template":
+        val fallback = rt_file_read_text("src/generated/simpleos_log_config.spl")
+        expect(fallback).to_equal(_simpleos_log_config_source(true))
+
+    it "does not reuse a stale SSH live artifact after a failed build":
+        val target = get_ssh_live_target()
+        expect(rt_dir_create_all("build/os")).to_equal(true)
+        expect(rt_file_write_text(target.output, "stale-kernel")).to_equal(true)
+        expect(rt_file_exists(target.output)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", install_failing_simple_shim("build/test-qemu-failing-simple/stale", 42))).to_equal(true)
+
+        val built = build_os_with_backend(target, "cranelift")
+
+        expect(built).to_equal(false)
+        expect(rt_file_exists(target.output)).to_equal(false)
+        expect(rt_env_set("SIMPLE_BINARY", "bin/simple")).to_equal(true)
+
+    it "cleans up the generated log config override after a failed build":
+        val target = get_ssh_live_target()
+        val config_path = "build/os/generated/generated/simpleos_log_config.spl"
+        val original_path = rt_env_get("PATH") ?? ""
+        val original_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+        expect(rt_env_set("PATH", "/tmp/simple-path-before-build")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", install_failing_simple_shim("build/test-qemu-failing-simple/log-config", 43))).to_equal(true)
+        expect(rt_env_set("SIMPLE_OS_LOG_MODE", "off")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "prior-marker")).to_equal(true)
+
+        val built = build_os_with_backend(target, "cranelift")
+
+        expect(built).to_equal(false)
+        expect(rt_file_exists(config_path)).to_equal(false)
+        expect(rt_env_get("PATH") ?? "").to_equal("/tmp/simple-path-before-build")
+        expect(rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? "").to_equal("prior-marker")
+        expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", "bin/simple")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", original_marker)).to_equal(true)
+        expect(rt_env_set("PATH", original_path)).to_equal(true)
+
+    it "cleans up the generated log config override after a prepare-stage failure":
+        val target = get_ssh_live_target()
+        val config_path = "build/os/generated/generated/simpleos_log_config.spl"
+        val marker_path = "build/os/generated/ssh_live_build_marker.spl"
+        val original_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+        expect(rt_env_set("SIMPLE_BINARY", "bin/simple")).to_equal(true)
+        expect(rt_env_set("SIMPLE_OS_LOG_MODE", "off")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "prepare-prior-marker")).to_equal(true)
+        expect(shell_exit_code("rm -rf \"" + marker_path + "\"")).to_equal(0)
+        expect(rt_dir_create_all(marker_path)).to_equal(true)
+
+        val built = build_os_with_backend(target, "cranelift")
+
+        expect(built).to_equal(false)
+        expect(rt_file_exists(config_path)).to_equal(false)
+        expect(shell_exit_code("rm -rf \"" + marker_path + "\"")).to_equal(0)
+        expect(rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? "").to_equal("prepare-prior-marker")
+        expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", original_marker)).to_equal(true)
+        expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
+
+    it "restores the prior SSH live marker and PATH on native-build failure":
+        val target = get_ssh_live_target()
+        val original_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+        val original_path = rt_env_get("PATH") ?? ""
+        val original_simple_binary = rt_env_get("SIMPLE_BINARY") ?? ""
+        expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "tooling-prior-marker")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", install_failing_simple_shim("build/test-qemu-failing-simple/tooling", 44))).to_equal(true)
+        expect(rt_env_set("SIMPLE_OS_LOG_MODE", "off")).to_equal(true)
+        expect(rt_env_set("PATH", "/tmp/simple-path-tooling-failure")).to_equal(true)
+
+        val built = build_os_with_backend(target, "cranelift")
+
+        expect(built).to_equal(false)
+        expect(rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? "").to_equal("tooling-prior-marker")
+        expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", original_marker)).to_equal(true)
+        expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", original_simple_binary)).to_equal(true)
+        expect(rt_env_set("PATH", original_path)).to_equal(true)
+
+describe "Qemu runner release artifacts":
+    it "prefers release disk images before platform and legacy build fixtures":
+        val candidates = desktop_disk_image_candidates()
+        expect(candidates[0]).to_start_with("release/")
+        expect(candidates[1]).to_equal("build/os/fat32-x86_64.img")
+        expect(candidates[2]).to_equal("build/os/fat32.img")
+
+    it "materializes the desktop disk lane at the platform image path":
+        val args = desktop_disk_make_script_args("build/os/fat32-x86_64.img")
+        expect(args[0]).to_equal("scripts/os/make_os_disk.shs")
+        expect(args[1]).to_equal("64")
+        expect(args[2]).to_equal("build/os/fat32-x86_64.img")
+
+    it "resolves the release disk path when the release artifact exists":
+        val release_root = "build/test-qemu-release-artifacts"
+        val release_path = desktop_release_disk_image_path_in(release_root)
+        rt_dir_create_all("{release_root}/x86_64/images")
+        expect(rt_file_write_text(release_path, "disk-image")).to_equal(true)
+        expect(desktop_disk_image_path_in(release_root)).to_equal(release_path)
+
+    it "exposes the future installer ISO path hook":
+        val iso_path = desktop_release_installer_iso_path()
+        expect(iso_path).to_end_with(".iso")
+        val candidates = desktop_installer_iso_candidates()
+        expect(candidates[0]).to_equal(iso_path)
+
+describe "Qemu runner board bundle smoke":
+    it "materializes representative board bundle outputs through deterministic host-side shims":
+        val root = "build/test-qemu-board-bundle-smoke"
+        val kernel_path = root + "/kernel.elf"
+        val x64_output = root + "/x64-board.img"
+        val arm64_output = root + "/arm64-board.img"
+        val riscv64_output = root + "/riscv64-board"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(rt_file_write_text(kernel_path, "kernel")).to_equal(true)
+
+        val x64_cmd = board_bundle_command("x86_64", kernel_path, x64_output)
+        expect(x64_cmd[0]).to_equal("/bin/sh")
+        expect(x64_cmd[1]).to_equal("-c")
+        expect(x64_cmd[2]).to_contain("scripts/os/make_os_disk.shs")
+        expect(x64_cmd[2]).to_contain("x86_64")
+        expect(x64_cmd[3]).to_equal("simpleos-uefi-disk")
+        expect(x64_cmd[4]).to_equal(kernel_path)
+        expect(x64_cmd[5]).to_equal(x64_output)
+
+        val arm64_cmd = board_bundle_command("arm64", kernel_path, arm64_output)
+        expect(arm64_cmd).to_equal(["/bin/sh", "scripts/os/make_os_disk.shs", "64", arm64_output, "", "arm64"])
+
+        val riscv64_cmd = board_bundle_command("riscv64", kernel_path, riscv64_output)
+        expect(riscv64_cmd).to_equal([
+            "bin/simple", "run", "src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl",
+            "--", "--board=mlk_s02_100t", riscv64_output
+        ])
+
+        val setup_ok = install_board_bundle_tooling_shims(root)
+        var x64_ok = false
+        var arm64_ok = false
+        var riscv64_ok = false
+        if setup_ok:
+            x64_ok = ensure_board_bundle("x86_64", kernel_path, x64_output)
+            arm64_ok = ensure_board_bundle("arm64", kernel_path, arm64_output)
+            riscv64_ok = ensure_board_bundle("riscv64", kernel_path, riscv64_output)
+        val restore_ok = restore_board_bundle_tooling(root)
+
+        expect(setup_ok).to_equal(true)
+        expect(restore_ok).to_equal(true)
+        expect(x64_ok).to_equal(true)
+        expect(arm64_ok).to_equal(true)
+        expect(riscv64_ok).to_equal(true)
+        expect(rt_file_exists(x64_output)).to_equal(true)
+        expect(rt_file_exists(arm64_output)).to_equal(true)
+        expect(rt_file_exists(riscv64_output + "/board_linux_boot_products.sdn")).to_equal(true)
+
+describe "Qemu runner board execution smoke":
+    it "runs the representative riscv64 board lane through the generated-linux wrapper":
+        val root = "build/test-qemu-board-lane-smoke"
+        val kernel_path = root + "/kernel.elf"
+        val riscv64_output = root + "/riscv64-board"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(rt_file_write_text(kernel_path, "kernel")).to_equal(true)
+
+        val cmd = board_lane_test_command("riscv64", riscv64_output)
+        expect(cmd).to_equal([
+            "/bin/sh",
+            "scripts/mlk_s02_100t_generated_linux.shs",
+            "--arch=rv64",
+            "--bundle-root=" + riscv64_output,
+            "--product-root=" + riscv64_output + "/products"
+        ])
+        expect(board_lane_test_command("x86_64", root).len()).to_equal(4)
+        expect(board_lane_test_command("arm64", root).len()).to_equal(4)
+
+        val setup_ok = install_board_bundle_tooling_shims(root)
+        var riscv64_ok = false
+        if setup_ok:
+            riscv64_ok = test_board_lane("riscv64", kernel_path, riscv64_output)
+        val restore_ok = restore_board_bundle_tooling(root)
+
+        expect(setup_ok).to_equal(true)
+        expect(restore_ok).to_equal(true)
+        expect(riscv64_ok).to_equal(true)
+        expect(rt_file_exists(riscv64_output + "/board_linux_boot_products.sdn")).to_equal(true)
+        expect(rt_file_exists(riscv64_output + "/products/run.log")).to_equal(true)
+
+
+rt_exit(0)

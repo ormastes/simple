@@ -1,0 +1,193 @@
+diff --git a/src/compiler/50.mir/_MirLowering/module_lowering.spl b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+index b85e6bba7f7..2c4b954960e 100644
+--- a/src/compiler/50.mir/_MirLowering/module_lowering.spl
++++ b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+@@ -69,6 +69,8 @@ impl MirLowering:
+             struct_field_order: {},
+             struct_field_type_name: {},
+             struct_value_syms: {},
++            struct_method_syms: {},
++            struct_method_ambiguous: {},
+             runtime_array_locals: {},
+             runtime_dict_locals: {},
+             runtime_value_locals: {},
+@@ -364,6 +366,44 @@ impl MirLowering:
+         if not self.enum_variant_index.has("Result"):
+             self.enum_variant_index["Result"] = ["Ok", "Err"]
+ 
++        # Build (struct NAME, method name) -> method SymbolId lookup from
++        # module.impls. Bug #138/#156: a receiver with no HIR type inference
++        # (receiver.type_ nil) leaves MethodResolution.Unresolved for every
++        # user struct instance method on the native-build path (try_
++        # instance_method requires a typed receiver). The Unresolved fallback
++        # in method_calls_literals.spl recovers the receiver's struct NAME
++        # from struct_value_syms and looks it up here to dispatch the real
++        # method instead of failing.
++        # Bare method name -> the first struct NAME seen defining it. Local
++        # (not a MirLowering field) -- only used here to detect a SECOND,
++        # different owner for the same bare name and mark it ambiguous (see
++        # struct_method_ambiguous doc comment in mir_lowering_types.spl).
++        var struct_method_first_owner: Dict<text, text> = {}
++        var impl_mi = 0
++        while impl_mi < module.impls.len():
++            val impl_def = module.impls[impl_mi]
++            var impl_type_name = ""
++            match impl_def.type_.kind:
++                case Named(impl_type_sym, _):
++                    val impl_type_symbol = self.symbols.get_symbol(impl_type_sym)
++                    if impl_type_symbol.?:
++                        impl_type_name = impl_type_symbol.name
++                case _: ()
++            if impl_type_name != "":
++                val impl_method_names = impl_def.methods.keys()
++                var mni = 0
++                while mni < impl_method_names.len():
++                    val impl_method_name = impl_method_names[mni]
++                    self.struct_method_syms["{impl_type_name}::{impl_method_name}"] = impl_def.methods[impl_method_name]
++                    val existing_owner = struct_method_first_owner.get(impl_method_name)
++                    if existing_owner != nil:
++                        if existing_owner != impl_type_name:
++                            self.struct_method_ambiguous[impl_method_name] = true
++                    else:
++                        struct_method_first_owner[impl_method_name] = impl_type_name
++                    mni = mni + 1
++            impl_mi = impl_mi + 1
++
+         val class_values = module.classes.values()
+         var ci = 0
+         while ci < class_values.len():
+diff --git a/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl b/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+index 8cef2a50ce3..8ba34a35ee8 100644
+--- a/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
++++ b/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+@@ -632,6 +632,65 @@ impl MirLowering:
+                     temp
+ 
+             case Unresolved:
++                # Bug #138/#156 keystone: minimal-viable native resolution of
++                # struct INSTANCE methods when HIR type inference left
++                # `resolution` Unresolved (receiver.type_ nil -- see the
++                # resolution_is_unresolved doc comment above). MethodResolver
++                # (resolve_strategies.spl try_instance_method) requires a
++                # typed receiver to resolve `c.get()`, which native-build
++                # never provides for a plain struct local/param, so every
++                # user struct method previously fell all the way through to
++                # the `self.error(...)` placeholder below. struct_value_syms
++                # (populated for locals/params/constructions -- see
++                # function_lowering.spl's self-param copy and
++                # switch_operators_calls.spl's struct-construction
++                # registration) recovers the receiver's struct NAME from the
++                # lowered local; struct_method_syms (module.impls-derived --
++                # see module_lowering.spl) maps "{struct}::{method}" to the
++                # method's real SymbolId. Dispatch mirrors the resolved
++                # InstanceMethod case above exactly (symbol_to_operand +
++                # resolved_call_return_type), just reached via a name-keyed
++                # lookup instead of `resolution`. The receiver is lowered
++                # ONCE here (reused below by the `push` special-case, which
++                # previously re-lowered it) to avoid double-evaluating a
++                # side-effecting receiver expression.
++                val unresolved_receiver_local = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
++                val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
++                if unresolved_struct_name != nil and unresolved_struct_name != "":
++                    val unresolved_method_key = "{unresolved_struct_name}::{method}"
++                    # struct_method_ambiguous guard: refuse the fast dispatch
++                    # when `method`'s bare name is shared by >1 distinct
++                    # struct's impl -- the backend links direct calls by bare
++                    # name, so dispatching here would silently call whichever
++                    # same-named body won the link, corrupting the OTHER
++                    # struct's result (verified empirically: two structs both
++                    # defining `get()` with different bodies -- without this
++                    # guard the second struct's call returned the first
++                    # struct's answer). Falling through preserves the
++                    # existing (loud) "unresolved method call" error instead.
++                    if self.struct_method_syms.has(unresolved_method_key) and not self.struct_method_ambiguous.has(method):
++                        val resolved_method_id = self.struct_method_syms[unresolved_method_key]
++                        var im_arg_operands: [MirOperand] = [mir_operand_copy(unresolved_receiver_local)]
++                        for arg in args:
++                            val im_arg_local = self.lower_expr(arg.value)
++                            im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
++                        val im_method_operand = self.symbol_to_operand(resolved_method_id)
++                        val im_return_type = self.resolved_call_return_type(resolved_method_id)
++                        var im_b = self.builder
++                        val im_result = im_b.emit_call(im_method_operand, im_arg_operands, im_return_type)
++                        self.builder = im_b
++                        var im_wb_value = wb_receiver
++                        if val im_result_local = im_result:
++                            im_wb_value = im_result_local
++                        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, im_wb_value)
++                        if val im_result_local = im_result:
++                            return im_result_local
++                        var im_b2 = self.builder
++                        val im_temp = im_b2.new_temp(MirType.i64())
++                        im_b2.emit_const(im_temp, MirConstValue.Int(0), MirType.i64())
++                        self.builder = im_b2
++                        return im_temp
++
+                 # Bug #149: `x.push(item)` never resolves via MethodResolver
+                 # (try_instance_method/try_trait_method/try_ufcs in
+                 # resolve_strategies.spl all require a symbol-bearing HIR
+@@ -667,7 +726,7 @@ impl MirLowering:
+                 # mutating methods) and a true no-op for a plain Var
+                 # receiver (wb_kind == 0) -- never a silently-dropped append.
+                 if method == "push" and args.len() == 1:
+-                    val push_recv = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
++                    val push_recv = unresolved_receiver_local
+                     val push_val_raw = self.lower_expr(args[0].value)
+                     var push_val_tagged = push_val_raw
+                     var push_val_is_raw_str = false
+diff --git a/src/compiler/50.mir/mir_lowering_types.spl b/src/compiler/50.mir/mir_lowering_types.spl
+index f474dafe787..0fd5d8d73c1 100644
+--- a/src/compiler/50.mir/mir_lowering_types.spl
++++ b/src/compiler/50.mir/mir_lowering_types.spl
+@@ -50,6 +50,29 @@ struct MirLowering:
+     # type-inference, so a bare `p` Var carries no `.type_` and resolve_field_index
+     # cannot recover the struct's field ordering otherwise.
+     struct_value_syms: Dict<i64, text>
++    # "{struct NAME}::{method name}" -> the method's real SymbolId, built from
++    # module.impls in lower_module. Bug #138/#156: a receiver with no HIR type
++    # inference (receiver.type_ nil) makes MethodResolver return Unresolved for
++    # every user struct instance method on the native-build path, since
++    # try_instance_method requires a typed receiver. struct_value_syms already
++    # recovers the receiver's struct NAME from the lowered local (populated for
++    # locals/params/constructions); this map lets the Unresolved fallback in
++    # method_calls_literals.spl look up the real method symbol by
++    # (struct_name, method_name) and dispatch a direct call instead of failing.
++    struct_method_syms: Dict<text, SymbolId>
++    # Bare method NAME -> true, when that name is defined by impls on MORE
++    # THAN ONE distinct struct (e.g. both `impl A: fn get(self)` and `impl B:
++    # fn get(self)`). The native backend currently dispatches direct calls by
++    # the bare (unqualified) function name -- impl methods are registered
++    # without struct qualification (see hir module_lowering.spl's "Declare
++    # impl methods" loop) -- so two same-named methods on different structs
++    # emit colliding LLVM symbols and a call silently binds to whichever
++    # definition wins, reading/returning the WRONG struct's data. The
++    # Unresolved fallback in method_calls_literals.spl checks this set and
++    # refuses the fast dispatch for an ambiguous name, falling through to the
++    # existing (loud) "unresolved method call" error instead of risking a
++    # silently wrong result.
++    struct_method_ambiguous: Dict<text, bool>
+     # MIR local ID -> true, for locals holding a runtime array value. Explicit
+     # id-keyed set (mirrors struct_value_syms) because the native flat-bridge
+     # path does not reliably thread the local's Array/Slice MIR type, so the
+diff --git a/src/compiler/80.driver/driver_pipeline.spl b/src/compiler/80.driver/driver_pipeline.spl
+index 3fa591c9610..e899def8cd9 100644
+--- a/src/compiler/80.driver/driver_pipeline.spl
++++ b/src/compiler/80.driver/driver_pipeline.spl
+@@ -408,6 +408,8 @@ impl CompilerDriver:
+                 struct_field_order: {},
+                 struct_field_type_name: {},
+                 struct_value_syms: {},
++                struct_method_syms: {},
++                struct_method_ambiguous: {},
+                 runtime_array_locals: {},
+                 runtime_dict_locals: {},
+                 enum_variant_index: {},
+@@ -473,6 +475,8 @@ impl CompilerDriver:
+             struct_field_order: {},
+             struct_field_type_name: {},
+             struct_value_syms: {},
++            struct_method_syms: {},
++            struct_method_ambiguous: {},
+             runtime_array_locals: {},
+             runtime_dict_locals: {},
+             enum_variant_index: {},

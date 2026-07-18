@@ -1,0 +1,549 @@
+# Collection Optimization — Concat & Hoisting Patterns
+#
+# Extracted pattern implementations for CollectionOptimization:
+#   - Pattern 1: Array concat -> push (3-instruction sliding window)
+#   - Pattern 2: String concat -> spl_str_append (2-instruction sliding window)
+#   - Pattern 4: Loop-invariant pure call hoisting
+#
+# These are free functions taking CollectionOptimization as first argument,
+# called from the main class in collection_opt.spl.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
+use compiler.mir_opt.mir_opt.collection_opt_core.{CollectionOptimization}
+
+# ============================================================================
+# Non-loop concat sweep (applies same patterns to all blocks)
+# ============================================================================
+
+fn colopt_optimize_concat_all_blocks(self: CollectionOptimization, blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
+    # Build set of blocks already in loops (skip them)
+    var loop_block_set = {}
+    for loop_info in self.detector.loops:
+        loop_block_set[loop_info.header.id] = true
+        for bid in loop_info.body:
+            loop_block_set[bid.id] = true
+
+    var new_blocks: [MirBlock] = []
+    for block in blocks:
+        if loop_block_set.has(block.id.id):
+            new_blocks.push(block)
+        else:
+            val optimized = colopt_optimize_concat_block(self, block, func)
+            new_blocks.push(optimized)
+    new_blocks
+
+# ============================================================================
+# Pattern 1: Array concat -> push
+# ============================================================================
+
+fn colopt_optimize_concat_in_loop(self: CollectionOptimization, blocks: [MirBlock], loop_info: LoopInfo, func: MirFunction) -> [MirBlock]:
+    # Build loop membership set
+    var loop_set = {}
+    loop_set[loop_info.header.id] = true
+    for bid in loop_info.body:
+        loop_set[bid.id] = true
+
+    var new_blocks: [MirBlock] = []
+
+    for block in blocks:
+        if loop_set.has(block.id.id):
+            val optimized = colopt_optimize_concat_block(self, block, func)
+            new_blocks.push(optimized)
+        else:
+            new_blocks.push(block)
+
+    new_blocks
+
+me colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, func: MirFunction) -> MirBlock:
+    val insts = block.instructions
+    val count = insts.len()
+
+    if count < 2:
+        return block
+
+    var new_insts: [MirInst] = []
+    var changed = false
+    var i = 0
+
+    while i < count:
+        # Try 3-instruction window match (array concat -> push)
+        if i + 2 < count:
+            val matched = colopt_match_concat_pattern(self, insts[i], insts[i + 1], insts[i + 2])
+            if matched.?:
+                new_insts.push(matched.unwrap())
+                self.concat_replaced = self.concat_replaced + 1
+                changed = true
+                i = i + 3
+                continue
+
+        # Try 2-instruction window match (string concat -> append)
+        if i + 1 < count:
+            val str_matched = colopt_match_str_concat_pattern(self, insts[i], insts[i + 1], func)
+            if str_matched.?:
+                new_insts.push(str_matched.unwrap())
+                self.str_append_replaced = self.str_append_replaced + 1
+                changed = true
+                i = i + 2
+                continue
+
+        new_insts.push(insts[i])
+        i = i + 1
+
+    if not changed:
+        return block
+
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )
+
+fn colopt_match_concat_pattern(self: CollectionOptimization, inst1: MirInst, inst2: MirInst, inst3: MirInst) -> MirInst?:
+    # inst1: Aggregate(tmp, Array(T), [x])
+    val agg: LocalId? = colopt_match_single_element_aggregate(inst1)
+    if not agg.?:
+        return nil
+    val agg_dest: LocalId = agg.unwrap()
+
+    # inst2: Call(result, "+", [arr, tmp])
+    val call_info: bool? = colopt_match_add_call(self, inst2, agg_dest)
+    if not call_info.?:
+        return nil
+
+    # inst3: Copy(arr, result) where arr is the array from the call
+    val copy_info: bool? = colopt_match_copy_back(self, inst3, inst2)
+    if not copy_info.?:
+        return nil
+
+    # Extract the single element and array operand for push
+    val element: MirOperand? = colopt_get_aggregate_element(inst1)
+    val arr_operand: MirOperand? = colopt_get_call_first_arg(inst2)
+
+    if not element.? or not arr_operand.?:
+        return nil
+
+    val push_arr: MirOperand = arr_operand.unwrap()
+    val push_element: MirOperand = element.unwrap()
+
+    # Create push call: Call(_, "push", [arr, element])
+    val push_func = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("push"),
+        MirType.unit()
+    ))
+    MirInst(
+        kind: MirInstKind.Call(nil, push_func, [push_arr, push_element]),
+        span: inst2.span
+    )
+
+fn colopt_match_single_element_aggregate(inst: MirInst) -> LocalId?:
+    match inst.kind:
+        case Aggregate(dest, kind, operands):
+            match kind:
+                case Array(_):
+                    if operands.len() == 1:
+                        return dest
+                    return nil
+                case _: return nil
+        case _: return nil
+
+fn colopt_match_add_call(self: CollectionOptimization, inst: MirInst, agg_local: LocalId) -> bool?:
+    match inst.kind:
+        case Call(dest, func, args):
+            # Check func is "+"
+            val fname = self.get_func_name(func)
+            if fname == "+":
+                # Check second arg references agg_local
+                if args.len() == 2:
+                    val second = args[1]
+                    if colopt_operand_refs_local(second, agg_local):
+                        return true
+            return nil
+        case _: return nil
+
+fn colopt_match_copy_back(self: CollectionOptimization, inst: MirInst, call_inst: MirInst) -> bool?:
+    match inst.kind:
+        case Copy(dest, src):
+            # Check src matches call dest
+            val call_dest = colopt_get_call_dest(call_inst)
+            if call_dest.?:
+                if src.id == call_dest.unwrap().id:
+                    return true
+            return nil
+        case _: return nil
+
+fn colopt_get_aggregate_element(inst: MirInst) -> MirOperand?:
+    match inst.kind:
+        case Aggregate(_, _, operands):
+            if operands.len() == 1:
+                return operands[0]
+            return nil
+        case _: return nil
+
+fn colopt_get_call_first_arg(inst: MirInst) -> MirOperand?:
+    match inst.kind:
+        case Call(_, _, args):
+            if args.len() >= 1:
+                return args[0]
+            return nil
+        case _: return nil
+
+fn colopt_get_call_dest(inst: MirInst) -> LocalId?:
+    match inst.kind:
+        case Call(dest, _, _): return dest
+        case _: return nil
+
+fn colopt_operand_refs_local(op: MirOperand, target: LocalId) -> bool:
+    match op.kind:
+        case Copy(local):
+            local.id == target.id
+        case Move(local):
+            local.id == target.id
+        case _: false
+
+# ============================================================================
+# Pattern 2: String concat -> spl_str_append
+# ============================================================================
+
+fn colopt_match_str_concat_pattern(self: CollectionOptimization, inst1: MirInst, inst2: MirInst, func: MirFunction) -> MirInst?:
+    # inst1: BinOp(tmp, Add, Copy(str_var), Copy(suffix))
+    match inst1.kind:
+        case BinOp(tmp_dest, op, left, right):
+            match op:
+                case Add:
+                    # Check left operand is a local with Ptr(I8) type (text)
+                    val str_local = self.operand_local_id(left)
+                    if not str_local.?:
+                        return nil
+                    if not colopt_local_is_text(str_local.unwrap(), func):
+                        return nil
+                    # inst2: Copy(str_var, tmp) — same local as left operand
+                    match inst2.kind:
+                        case Copy(copy_dest, copy_src):
+                            if copy_src.id == tmp_dest.id and copy_dest.id == str_local.unwrap().id:
+                                # Match! Replace with spl_str_append call
+                                val append_func = MirOperand(kind: MirOperandKind.Const(
+                                    MirConstValue.Str("spl_str_append"),
+                                    MirType.unit()
+                                ))
+                                return MirInst(
+                                    kind: MirInstKind.Call(copy_dest, append_func, [left, right]),
+                                    span: inst1.span
+                                )
+                            return nil
+                        case _: return nil
+                case _: return nil
+        case _: return nil
+
+fn colopt_local_is_text(local_id: LocalId, func: MirFunction) -> bool:
+    # Text is represented as Ptr(I8, false) in MIR
+    for loc in func.locals:
+        if loc.id.id == local_id.id:
+            match loc.type_.kind:
+                case Ptr(pointee, _):
+                    match pointee.kind:
+                        case I8: return true
+                        case _: return false
+                case _: return false
+    false
+
+# ============================================================================
+# Pattern 4: Loop-invariant pure call hoisting
+# ============================================================================
+
+me colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loop_info: LoopInfo) -> [MirBlock]:
+    # Build loop membership set
+    var loop_set = {}
+    loop_set[loop_info.header.id] = true
+    for bid in loop_info.body:
+        loop_set[bid.id] = true
+
+    # Build set of locals defined inside the loop
+    var loop_defs: Dict<i64, bool> = {}
+    for block in blocks:
+        if loop_set.has(block.id.id):
+            for inst in block.instructions:
+                val dest = self.inst_dest(inst)
+                if dest.?:
+                    val found_dest = dest
+                    loop_defs[found_dest.id] = true
+    val loop_has_collection_mutation = colopt_loop_has_collection_state_mutation(self, blocks, loop_set)
+
+    # Find hoistable pure calls
+    var to_hoist: [MirInst] = []
+    var hoisted_ids: Dict<i64, bool> = {}
+
+    for block in blocks:
+        if loop_set.has(block.id.id):
+            for inst in block.instructions:
+                if colopt_is_hoistable_loop_invariant_inst(self, inst, loop_defs, hoisted_ids, loop_has_collection_mutation):
+                    to_hoist.push(inst)
+                    val dest = self.inst_dest(inst)
+                    if dest.?:
+                        val found_dest = dest
+                        hoisted_ids[found_dest.id] = true
+
+    if to_hoist.len() == 0:
+        return blocks
+
+    self.calls_hoisted = self.calls_hoisted + to_hoist.len()
+
+    # Build new blocks: insert hoisted before header, remove from body
+    var new_blocks: [MirBlock] = []
+    var inserted = false
+
+    for block in blocks:
+        if block.id.id == loop_info.header.id and not inserted:
+            # Insert hoisted instructions at start of header
+            var new_insts: [MirInst] = []
+            for h in to_hoist:
+                new_insts.push(h)
+            for inst in block.instructions:
+                if not self.inst_in_list(inst, to_hoist):
+                    new_insts.push(inst)
+            new_blocks.push(MirBlock(
+                id: block.id, label: block.label,
+                instructions: new_insts, terminator: block.terminator
+            ))
+            inserted = true
+        elif loop_set.has(block.id.id):
+            # Remove hoisted from body blocks
+            var kept: [MirInst] = []
+            for inst in block.instructions:
+                if not self.inst_in_list(inst, to_hoist):
+                    kept.push(inst)
+            new_blocks.push(MirBlock(
+                id: block.id, label: block.label,
+                instructions: kept, terminator: block.terminator
+            ))
+        else:
+            new_blocks.push(block)
+
+    new_blocks
+
+fn colopt_loop_has_collection_state_mutation(self: CollectionOptimization, blocks: [MirBlock], loop_set: Dict<i64, bool>) -> bool:
+    for block in blocks:
+        if loop_set.has(block.id.id):
+            for inst in block.instructions:
+                if self.inst_may_mutate_collection_state(inst):
+                    return true
+    false
+
+me colopt_is_hoistable_loop_invariant_inst(self: CollectionOptimization, inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
+    if colopt_is_hoistable_pure_call(self, inst, loop_defs, hoisted, loop_has_collection_mutation):
+        return true
+    if colopt_is_hoistable_scalar_inst(inst, loop_defs, hoisted):
+        self.scalar_ops_hoisted = self.scalar_ops_hoisted + 1
+        return true
+    false
+
+fn colopt_is_hoistable_pure_call(self: CollectionOptimization, inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
+    match inst.kind:
+        case Call(dest, func, args):
+            val fname = self.get_func_name(func)
+            if not self.is_pure_method(fname):
+                if loop_has_collection_mutation or not colopt_is_hoistable_runtime_metadata_read(fname):
+                    return false
+            if not dest.?:
+                return false
+            # All args must be loop-invariant
+            for arg in args:
+                if not colopt_operand_invariant(arg, loop_defs, hoisted):
+                    return false
+            true
+        case _: false
+
+fn colopt_is_hoistable_scalar_inst(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+    match inst.kind:
+        case BinOp(_, op, left, right):
+            if not colopt_is_safe_loop_invariant_binop(op):
+                return false
+            colopt_operand_invariant(left, loop_defs, hoisted) and colopt_operand_invariant(right, loop_defs, hoisted)
+        case UnaryOp(_, _, operand):
+            colopt_operand_invariant(operand, loop_defs, hoisted)
+        case Cast(_, operand, _):
+            colopt_operand_invariant(operand, loop_defs, hoisted)
+        case Bitcast(_, operand, _):
+            colopt_operand_invariant(operand, loop_defs, hoisted)
+        case _: false
+
+fn colopt_is_safe_loop_invariant_binop(op: MirBinOp) -> bool:
+    match op:
+        case BitAnd: true
+        case BitOr: true
+        case BitXor: true
+        case Shl: true
+        case Shr: true
+        case Eq: true
+        case Ne: true
+        case Lt: true
+        case Le: true
+        case Gt: true
+        case Ge: true
+        case _: false
+
+fn colopt_is_hoistable_runtime_metadata_read(name: text) -> bool:
+    if name == "rt_array_len":
+        return true
+    if name == "rt_string_len":
+        return true
+    if name == "rt_dict_len":
+        return true
+    if name == "rt_array_data_ptr":
+        return true
+    name == "rt_array_header_ptr"
+
+fn colopt_operand_invariant(op: MirOperand, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+    match op.kind:
+        case Copy(local):
+            val in_loop = loop_defs.has(local.id)
+            val was_hoisted = hoisted.has(local.id)
+            (not in_loop) or was_hoisted
+        case Move(local):
+            val in_loop = loop_defs.has(local.id)
+            val was_hoisted = hoisted.has(local.id)
+            (not in_loop) or was_hoisted
+        case Const(_, _): true
+
+# ============================================================================
+# Improvement B — Linear-scan early-return pattern (pattern annotation)
+# ============================================================================
+#
+# Recognizes the shape:
+#   loop_cond: i < arr.len()
+#   loop_body:
+#     BoundsCheck(i, arr.len())
+#     val tmp = arr[i]
+#     if tmp.field == target: return tmp   // or return i / Some(tmp)
+#     i = i + 1
+#
+# This pattern appears in inode lookups, directory-entry scans, route-table
+# lookups, and symbol-table searches — anywhere Simple code linearly scans [T].
+#
+# The recognizer returns a LinearScanMatch describing the detected shape.
+# The backend can lower this to an efficient loop with no per-iteration overhead;
+# in interpreter mode the instructions are left unchanged (safe fallback).
+
+class LinearScanMatch:
+    """Records a recognized linear-scan-with-early-return loop shape."""
+    arr_local_id: i64
+    index_var_id: i64
+    field_name: text
+    has_early_return: bool
+
+fn colopt_match_linear_scan_early_return(self: CollectionOptimization, loop_info: LoopInfo, blocks: [MirBlock]) -> LinearScanMatch?:
+    # Build loop membership set
+    var loop_set: Dict<i64, bool> = {}
+    loop_set[loop_info.header.id] = true
+    for bid in loop_info.body:
+        loop_set[bid.id] = true
+
+    # Step 1: Detect i < arr.len() loop guard in header
+    val guard = colopt_detect_linear_scan_guard(loop_info.header)
+    if not guard.?:
+        return nil
+    val g = guard.unwrap()
+
+    # Step 2: Verify monotone increment of index var in body blocks
+    var has_increment = false
+    for block in blocks:
+        if loop_set.has(block.id.id):
+            if colopt_block_increments_index(block, g.index_var_id):
+                has_increment = true
+
+    if not has_increment:
+        return nil
+
+    # Step 3: Look for an early-return branch in a body block
+    var found_return = false
+    var field_name = ""
+    for block in blocks:
+        if loop_set.has(block.id.id) and block.id.id != loop_info.header.id:
+            val ret = colopt_block_has_conditional_return(block)
+            if ret.?:
+                found_return = true
+                field_name = ret.unwrap()
+
+    LinearScanMatch(
+        arr_local_id: g.arr_local_id,
+        index_var_id: g.index_var_id,
+        field_name: field_name,
+        has_early_return: found_return
+    )
+
+class ColoptLinearScanGuard:
+    """Recognized i < arr.len() guard."""
+    index_var_id: i64
+    arr_local_id: i64
+
+fn colopt_detect_linear_scan_guard(header: MirBlock) -> ColoptLinearScanGuard?:
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(_, op, left, right):
+                match op:
+                    case Lt:
+                        # NOTE: explicit match, not `if idx.? and arr.?:` --
+                        # local id 0 landmine (`.?` truthiness on a boxed
+                        # `i64?` collapses `Some(0)` to falsy in the
+                        # bootstrap seed interpreter, see var_reassign_ssa
+                        # .spl's ssa_alloca_apply_def_store). Safe direction
+                        # here (a miss just skips this optimization) but the
+                        # identical landmine, fixed for consistency.
+                        match colopt_operand_to_local_id(left):
+                            case Some(index_var_id):
+                                match colopt_operand_to_local_id(right):
+                                    case Some(arr_local_id):
+                                        return ColoptLinearScanGuard(
+                                            index_var_id: index_var_id,
+                                            arr_local_id: arr_local_id
+                                        )
+                                    case nil:
+                                        ()
+                            case nil:
+                                ()
+                    case _: ()
+            case _: ()
+    return nil
+
+fn colopt_block_increments_index(block: MirBlock, index_var_id: i64) -> bool:
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, _):
+                match op:
+                    case Add:
+                        if dest.id == index_var_id:
+                            # NOTE: explicit match, not `if src.?:` -- local
+                            # id 0 landmine, see colopt_detect_linear_scan_guard
+                            # above.
+                            match colopt_operand_to_local_id(left):
+                                case Some(src_id):
+                                    if src_id == index_var_id:
+                                        return true
+                                case nil:
+                                    pass_do_nothing
+                        ()
+                    case _: ()
+            case _: ()
+    false
+
+fn colopt_block_has_conditional_return(block: MirBlock) -> text?:
+    # Look for a BinOp(Eq) followed by a conditional branch that is the
+    # loop's early-exit path. Returns the field name comparison target if found.
+    # Conservative: returns a sentinel "field" if any Eq comparison is detected.
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(_, op, _, _):
+                match op:
+                    case Eq: return Some("field")
+                    case _: ()
+            case _: ()
+    return nil
+
+fn colopt_operand_to_local_id(op: MirOperand) -> i64?:
+    match op.kind:
+        case Copy(local): Some(local.id)
+        case Move(local): Some(local.id)
+        case _: return nil

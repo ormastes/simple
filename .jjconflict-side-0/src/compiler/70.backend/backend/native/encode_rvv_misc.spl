@@ -1,0 +1,107 @@
+# src/compiler/70.backend/backend/native/encode_rvv_misc.spl
+#
+# RVV v1.0 Mask-Query + ID Generation Byte-Emit Encoder — Pure Simple
+#
+# Produces exact 4-byte little-endian instruction words for RISC-V Vector
+# mask-query (vcpop.m, vfirst.m) and identity (viota.m, vid.v) operations.
+#
+# Reference: RISC-V Vector Extension v1.0 §16 (Mask operations)
+#
+# Instruction format (all OP-V, 32-bit, opcode 0x57):
+#   bits[31:26] = funct6
+#   bit[25]     = vm   (1=unmasked)
+#   bits[24:20] = vs2
+#   bits[19:15] = rs1/vs1  (fixed per instruction)
+#   bits[14:12] = funct3 (OPMVV = 010 = 2)
+#   bits[11:7]  = rd/vd
+#   bits[6:0]   = opcode 0x57
+#
+# funct6/rs1 values (RVV v1.0 §16):
+#   vcpop.m   funct6=16 (010000)  rs1=16 (10000)  rd=GPR
+#   vfirst.m  funct6=16 (010000)  rs1=17 (10001)  rd=GPR
+#   viota.m   funct6=20 (010100)  vs1=16 (10000)  vd=VEC
+#   vid.v     funct6=20 (010100)  vs2=0, vs1=17 (10001)  vd=VEC
+#
+# Encoding convention: multiplication/division only (avoids negative-bit-op
+# hazards in interpreter mode). Consistent with encode_rvv_zvk.spl.
+# Return type: [i64] (4 bytes, little-endian).
+
+# ============================================================================
+# Internal helpers (independent copy; encode_rvv_zvk.spl is a separate module)
+# ============================================================================
+
+fn _rvv_misc_word_to_le4(word: i64) -> [i64]:
+    """
+    Convert a 32-bit instruction word to 4 little-endian bytes.
+    Uses division/modulo to avoid negative bit-op hazards in interpreter.
+    """
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn _rvv_misc_encode_opmvv(funct6: i64, vm: i64, vs2: i64, vs1: i64, rd: i64) -> [i64]:
+    """
+    Encode an OPMVV instruction (funct3=2, opcode=0x57=87).
+
+    funct6: 6-bit function code (bits[31:26])
+    vm:     1=unmasked (bit[25])
+    vs2:    source register 2 (bits[24:20])
+    vs1:    source register 1 or fixed encoding (bits[19:15])
+    rd:     destination register, GPR or vector (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (vs1 * 32768) + (2 * 4096) + (rd * 128) + 87
+    _rvv_misc_word_to_le4(word)
+
+# ============================================================================
+# Mask-query instructions (RVV v1.0 §16.1–16.2)
+# ============================================================================
+
+"""Emit vcpop.m rd, vs2 — count set bits in mask register.
+
+# RVV v1.0 §16.1 vcpop.m; funct6=16 (010000); OPMVV funct3=010; vm=1; rs1=16
+# Canonical: vcpop.m x0,v0 → word=0x42082057 LE [0x57,0x20,0x08,0x42]
+"""
+fn emit_vcpop_m(rd: i64, vs2: i64) -> [i64]:
+    _rvv_misc_encode_opmvv(16, 1, vs2, 16, rd)
+
+"""Emit vfirst.m rd, vs2 — find index of first set bit in mask register.
+
+# RVV v1.0 §16.2 vfirst.m; funct6=16 (010000); OPMVV funct3=010; vm=1; rs1=17
+# Canonical: vfirst.m x0,v0 → word=0x4208A057 LE [0x57,0xA0,0x08,0x42]
+"""
+fn emit_vfirst_m(rd: i64, vs2: i64) -> [i64]:
+    _rvv_misc_encode_opmvv(16, 1, vs2, 17, rd)
+
+# ============================================================================
+# ID generation instructions (RVV v1.0 §16.4–16.5)
+# ============================================================================
+
+"""Emit viota.m vd, vs2 — iota (prefix-sum of mask) into vector register.
+
+# RVV v1.0 §16.4 viota.m; funct6=20 (010100); OPMVV funct3=010; vm=1; vs1=16
+# Canonical: viota.m v0,v0 → word=0x52082057 LE [0x57,0x20,0x08,0x52]
+"""
+fn emit_viota_m(vd: i64, vs2: i64) -> [i64]:
+    _rvv_misc_encode_opmvv(20, 1, vs2, 16, vd)
+
+"""Emit vid.v vd — write element indices [0, 1, 2, ...] into vector register.
+
+# RVV v1.0 §16.5 vid.v; funct6=20 (010100); OPMVV funct3=010; vm=1; vs2=0; vs1=17
+# Canonical: vid.v v0 → word=0x5208A057 LE [0x57,0xA0,0x08,0x52]
+"""
+fn emit_vid_v(vd: i64) -> [i64]:
+    _rvv_misc_encode_opmvv(20, 1, 0, 17, vd)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vcpop_m
+export emit_vfirst_m
+export emit_viota_m
+export emit_vid_v

@@ -1,0 +1,274 @@
+# Lightweight entrypoint for `simple native-build`.
+
+use app.io.env_ops.{env_get, env_set, cwd}
+use app.io.process_ops.{process_run_timeout}
+use lazy app.io._CliCompile.compile_targets (cli_native_build)
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+# Absolute path of the current bootstrap-stage compiler.
+fn self_exe() -> text:
+    val pid = rt_getpid()
+    val (out, _err, code) = process_run_timeout("readlink", ["-f", "/proc/{pid}/exe"], 2000)
+    if code == 0 and out != "":
+        return out.trim()
+    # Darwin has no /proc. `ps ... -o comm=` returns the executable path
+    # without the argv tail, so bootstrap workers keep using the compiler that
+    # invoked native-build instead of silently falling back to stale bin/simple.
+    val (darwin_out, _darwin_err, darwin_code) = process_run_timeout("ps", ["-p", "{pid}", "-o", "comm="], 2000)
+    if darwin_code == 0 and darwin_out != "":
+        return darwin_out.trim()
+    ""
+
+# Absolutize a repo-relative path for the timeout wrapper.
+fn abs_path(rel: text) -> text:
+    val here = cwd()
+    if here == "" or here == ".":
+        return rel
+    "{here}/{rel}"
+
+fn abs_if_needed(p: text) -> text:
+    if p.starts_with("/"):
+        return p
+    abs_path(p)
+
+# Resolve the compiler binary used to run the native-build worker. The old
+# `SIMPLE_BINARY -> SIMPLE_BIN -> "bin/simple"` chain handed an empty/relative
+# argv[0] to the worker during bootstrap:
+#   - env_get returns nil (not "") for an unset var, so the `== ""` fallback
+#     never fired -> empty binary -> `timeout: failed to run command 'run'`.
+#   - the "bin/simple" fallback is relative, which the timeout wrapper cannot
+#     exec -> worker spawn fails (reported as a spurious timeout).
+# Guard nil, and return an ABSOLUTE path.
+fn resolve_simple_binary() -> text:
+    val from_binary = env_get("SIMPLE_BINARY")
+    if from_binary != nil and from_binary != "" and rt_file_exists(from_binary):
+        return abs_if_needed(from_binary)
+    val from_bin = env_get("SIMPLE_BIN")
+    if from_bin != nil and from_bin != "" and rt_file_exists(from_bin):
+        return abs_if_needed(from_bin)
+    # Prefer the binary that invoked us during bootstrap.
+    val se = self_exe()
+    if se != "" and rt_file_exists(se):
+        return abs_if_needed(se)
+    if rt_file_exists("bin/simple"):
+        return abs_path("bin/simple")
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return abs_path("src/compiler_rust/target/bootstrap/simple")
+    "bin/simple"
+
+val OUTPUT_LIMIT = 12000
+
+fn native_build_text_eq(a: text, b: text) -> bool:
+    a.len() == b.len() and a.starts_with(b)
+
+fn native_build_entry_args() -> [text]:
+    val raw_args = rt_cli_get_args() ?? []
+    var start_idx = 1
+    var i = 0
+    while i < raw_args.len():
+        if raw_args[i].ends_with("native_build_main.spl") or native_build_text_eq(raw_args[i], "native-build"):
+            start_idx = i + 1
+            break
+        i = i + 1
+    var args: [text] = []
+    i = start_idx
+    while i < raw_args.len():
+        args = args.push(raw_args[i])
+        i = i + 1
+    args
+
+# The interpreted worker loads the compiler graph before codegen.
+val DEFAULT_TIMEOUT_MS = 7200000
+
+fn print_help():
+    print "Simple Native Build"
+    print ""
+    print "Usage: simple native-build [options] [source-dirs...]"
+    print ""
+    print "Options:"
+    print "  --source <dir>       Source directory to compile (repeatable)"
+    print "  -o <path>            Output binary path"
+    print "  --entry <file>       Entry file"
+    print "  --target <triple>    Target triple (for example x86_64-unknown-simpleos)"
+    print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
+    print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+    print "  --mode <name>        Build mode: dynload (default) or one-binary"
+    print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
+    print "  --timeout <secs>     Worker timeout in seconds (default 7200)"
+    print "  --release            Release build"
+    print "  -h, --help           Show this help"
+
+fn _parse_secs(s: text) -> i64:
+    # Safe numeric parse (avoids int() erroring on a non-numeric --timeout value).
+    var n = 0
+    var ok = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + int(ch)
+            ok = true
+        else:
+            return -1
+    if ok: n else: -1
+
+fn native_build_timeout_ms(args: [text]) -> i64:
+    # Worker subprocess timeout. Honors --timeout <secs> (also forwarded to the
+    # worker as its per-file budget); defaults large because the old hardcoded
+    # 120s killed any real multi-file freestanding build mid-compile.
+    var i = 0
+    while i < args.len():
+        if native_build_text_eq(args[i], "--timeout") and i + 1 < args.len():
+            val secs = _parse_secs(args[i + 1])
+            if secs > 0:
+                return secs * 1000
+        elif args[i].starts_with("--timeout="):
+            val secs = _parse_secs(args[i].substring(10))
+            if secs > 0:
+                return secs * 1000
+        i = i + 1
+    DEFAULT_TIMEOUT_MS
+
+fn env_enabled(name: text) -> bool:
+    val value = env_get(name)
+    if value == nil:
+        return false
+    if value == "":
+        return false
+    if native_build_text_eq(value, "0"):
+        return false
+    if native_build_text_eq(value, "false"):
+        return false
+    true
+
+fn native_build_has_timeout(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if native_build_text_eq(arg, "--timeout") or arg.starts_with("--timeout="):
+            return true
+        i = i + 1
+    false
+
+fn native_build_should_use_worker(args: [text]) -> bool:
+    val mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    if env_enabled("SIMPLE_NATIVE_BUILD_FORCE_WORKER"):
+        return true
+    if env_enabled("SIMPLE_BOOTSTRAP"):
+        return true
+    if native_build_text_eq(mode, "interpret"):
+        return true
+    if native_build_text_eq(mode, "interpreter"):
+        return true
+    native_build_has_timeout(args)
+
+fn print_bounded(output: text):
+    if output.len() == 0:
+        return
+    if output.len() <= OUTPUT_LIMIT:
+        print output
+        return
+    val head_len = OUTPUT_LIMIT / 2
+    val tail_len = OUTPUT_LIMIT - head_len
+    print output[0:head_len]
+    print "[stdout truncated by native-build entry]"
+    print output[output.len() - tail_len:output.len()]
+
+# Best-effort extraction of the `-o`/`--output` path from the raw native-build
+# args, so the parent can verify the worker actually produced a binary instead
+# of trusting a bare exit code of 0 (see
+# doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md).
+fn output_path_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if (native_build_text_eq(a, "-o") or native_build_text_eq(a, "--output")) and i + 1 < args.len():
+            return args[i + 1]
+        elif a.starts_with("--output="):
+            return a.substring(9)
+        elif a.starts_with("-o") and a.len() > 2:
+            return a.substring(2)
+        i = i + 1
+    ""
+
+fn eprint_bounded(output: text):
+    if output.len() == 0:
+        return
+    if output.len() <= OUTPUT_LIMIT:
+        eprint output
+        return
+    val head_len = OUTPUT_LIMIT / 2
+    val tail_len = OUTPUT_LIMIT - head_len
+    eprint output[0:head_len]
+    eprint "[stderr truncated by native-build entry]"
+    eprint output[output.len() - tail_len:output.len()]
+
+fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
+    stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
+
+fn native_build_print_failure_hints(stdout: text, stderr: text):
+    if native_build_output_has_nil_field_id(stdout, stderr):
+        eprint "hint: nil `.id` field access usually lost the MIR/HIR context above."
+        eprint "      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names."
+
+fn run_native_build_worker(args: [text]) -> i64:
+    var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
+    val mode = env_get("SIMPLE_EXECUTION_MODE")
+    if mode == nil or mode == "":
+        env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    for arg in args:
+        worker_args = worker_args.push(arg)
+    val simple_bin = resolve_simple_binary()
+    # Propagate the resolved absolute/validated binary so the worker (and any
+    # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
+    # an empty one.
+    env_set("SIMPLE_BINARY", simple_bin)
+    val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+    val (stdout, stderr, code) = process_run_timeout(simple_bin, worker_args, native_build_timeout_ms(args))
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+    print_bounded(stdout)
+    val output_path = output_path_arg(args)
+    if code == 0 and output_path != "" and not rt_file_exists(output_path):
+        # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
+        # worker chain died in a way that still reports success (an early-exit
+        # helper, a killed sibling, etc.) but left no output file, fail loudly
+        # here immediately instead of letting the caller silently proceed with a
+        # stale/missing binary.
+        eprint_bounded(stderr)
+        native_build_print_failure_hints(stdout, stderr)
+        eprint "error: native-build worker exited 0 but produced no output binary: {output_path}"
+        eprint "  Treating a successful-looking exit with a missing output file as a hard failure."
+        return 1
+    if code != 0:
+        eprint_bounded(stderr)
+        native_build_print_failure_hints(stdout, stderr)
+        # Keep the real cause visible after stderr truncation.
+        if code == -1:
+            val secs = native_build_timeout_ms(args) / 1000
+            eprint "error: native-build worker timed out after {secs}s before producing a binary."
+            eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"
+            eprint "  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget. Raise"
+            eprint "  --timeout, shrink --source, or use the in-process backend for cross-target builds."
+        else:
+            eprint "error: native-build worker exited with code {code}."
+            eprint "  interpreter: {simple_bin} (exit code {code})"
+    code as i64
+
+fn native_build_has_help(args: [text]) -> bool:
+    for arg in args:
+        if native_build_text_eq(arg, "-h") or native_build_text_eq(arg, "--help"):
+            return true
+    false
+
+fn main() -> i64:
+    val args = native_build_entry_args()
+    if args.len() == 0 or native_build_has_help(args):
+        print_help()
+        return 0
+
+    if native_build_should_use_worker(args):
+        return run_native_build_worker(args)
+
+    cli_native_build(args)

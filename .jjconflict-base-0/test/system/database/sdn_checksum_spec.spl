@@ -1,0 +1,48 @@
+use std.io_runtime
+use std.spec.{describe, it, expect}
+
+extern fn rt_crc32_text(content: text) -> i64
+
+describe "CRC32 Runtime":
+    it "returns consistent hash for same input":
+        val crc1 = rt_crc32_text("hello")
+        val crc2 = rt_crc32_text("hello")
+        expect crc1 == crc2
+
+    it "returns different hash for different input":
+        val crc1 = rt_crc32_text("hello")
+        val crc2 = rt_crc32_text("world")
+        expect crc1 != crc2
+
+    it "handles empty string":
+        val crc = rt_crc32_text("")
+        expect crc == 0
+
+    it "matches known CRC32 test vector":
+        val crc = rt_crc32_text("123456789")
+        expect crc == 3421780262
+
+describe "SDN Checksum Integration":
+    it "computes and verifies checksum header":
+        val body = "test data here\n"
+        val crc = rt_crc32_text(body)
+        val content = "#sdn-crc32:{crc}\n" + body
+        expect content.starts_with("#sdn-crc32:")
+
+    it "detects corruption in body":
+        val body = "original data\n"
+        val crc = rt_crc32_text(body)
+        val corrupted = "corrupted data\n"
+        val crc2 = rt_crc32_text(corrupted)
+        expect crc != crc2
+
+    it "parses checksum header correctly":
+        val body = "table_data|col1,col2|\n1\tAlice\n"
+        val crc = rt_crc32_text(body)
+        val content = "#sdn-crc32:{crc}\n" + body
+        val lines = content.split("\n")
+        val header_line = lines[0]
+        expect header_line.starts_with("#sdn-crc32:")
+        val stored_str = header_line.slice(11, header_line.len())
+        val stored_crc = stored_str.to_int() ?? -1
+        expect stored_crc == crc

@@ -1,0 +1,402 @@
+# HIR item lowering - trait, impl, assoc-type, const, and AOP/DI/arch/mock lowering.
+use compiler.hir.hir_lowering.items.*
+# HIR Lowering - Item Lowering
+#
+# This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
+use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.types.{int_to_str}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+impl HirLowering:
+    me lower_bitfield_field(f: BitfieldField, offset: i64) -> HirBitfieldField:
+        val symbol = self.symbols.define(f.name, SymbolKind.Field, nil, f.span, Visibility.Private, false, nil)
+
+        # Determine bit width:
+        # 1. Explicit @bits(N) takes precedence
+        # 2. For reserved fields, use explicit bits
+        # 3. For typed fields, infer from type
+        val bit_width = if f.bits.?:
+            f.bits.unwrap()
+        elif f.is_reserved:
+            0  # Reserved without explicit bits = 0
+        else:
+            # Infer from type (use default primitive widths)
+            self.infer_bit_width(f.type_)
+
+        val ftype = if f.type_.?: self.lower_type(f.type_) else: nil
+        HirBitfieldField(
+            symbol: symbol,
+            name: f.name,
+            type_: ftype,
+            bit_width: bit_width,
+            bit_offset: offset,
+            is_reserved: f.is_reserved,
+            span: f.span
+        )
+
+    fn infer_bit_width(type_: Type?) -> i64:
+        if not type_.?:
+            return 0
+
+        val t = type_.unwrap()
+        match t.kind:
+            case Named(name, _):
+                if name == "bool":
+                    return 1
+                val primitive_bits = primitive_integer_bit_width_from_name(name)
+                if primitive_bits > 0:
+                    return primitive_bits
+                custom_primitive_integer_bit_width_by_name(name)
+            case _: 0  # Complex types require explicit @bits
+
+    me lower_trait(trait_: Trait) -> HirTrait:
+        val symbol = self.symbols.lookup_or_invalid(trait_.name)
+
+        self.symbols.push_scope(ScopeKind.Class)
+
+        var type_params: [HirTypeParam] = []
+        for tp in trait_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        # Lower supertraits
+        var supertraits: [HirType] = []
+        for st in trait_.super_traits:
+            supertraits = supertraits.push(self.lower_type(st))
+
+        # Lower where clause
+        var where_clause: [HirTraitBound] = []
+        for bound in trait_.where_clause:
+            where_clause = where_clause.push(self.lower_trait_bound(bound))
+
+        # Lower associated type declarations
+        var assoc_types: [HirAssocTypeDecl] = []
+        for at in trait_.assoc_types:
+            assoc_types = assoc_types.push(self.lower_assoc_type_decl(at))
+
+        # Separate methods into abstract (no body) and defaults (with body)
+        var abstract_methods: [HirFunction] = []
+        var defaults: [HirFunction] = []
+        for method in trait_.methods:
+            val method_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+            val method_type = self.declared_callable_type(method, Some(symbol))
+            self.symbols.define(method.name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+        for m in trait_.methods:
+            val hir_fn = self.lower_function(m)
+            # Check if method has a body (default implementation)
+            # Function.body is a Block, check if it has statements
+            if m.body.stmts.is_empty():
+                abstract_methods = abstract_methods.push(hir_fn)
+            else:
+                defaults = defaults.push(hir_fn)
+
+        self.symbols.pop_scope()
+
+        # Compute effective visibility using filename matching
+        val effective_visibility = self.compute_visibility(trait_.name, trait_.visibility)
+
+        val hir_trait = HirTrait(
+            symbol: symbol,
+            name: trait_.name,
+            type_params: type_params,
+            methods: abstract_methods,
+            supertraits: supertraits,
+            defaults: defaults,
+            where_clause: where_clause,
+            assoc_types: assoc_types,
+            visibility: effective_visibility,
+            is_public: trait_.is_public,
+            doc_comment: trait_.doc_comment,
+            span: trait_.span,
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        )
+
+        # Stash by name so lower_impl (run later in the same lower_module pass)
+        # can inject un-overridden default methods into the impl's method table.
+        self.lowered_traits[trait_.name] = hir_trait
+        hir_trait
+
+    me lower_impl(impl_: Impl) -> HirImpl:
+        self.symbols.push_scope(ScopeKind.Impl)
+
+        # Lower generic type parameters
+        var type_params: [HirTypeParam] = []
+        for tp in impl_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        # Lower where clause
+        var where_clause: [HirTraitBound] = []
+        for bound in impl_.where_clause:
+            where_clause = where_clause.push(self.lower_trait_bound(bound))
+
+        val type_ = self.lower_type(impl_.type_)
+        val trait_ = if impl_.trait_.?: self.lower_type(impl_.trait_) else: nil
+
+        # #158 generics sweep: an impl block for a generic struct/class (e.g.
+        # methods nested inside `struct Box<T>: ... fn get(self) -> T: ...`,
+        # desugared by the parser into a synthetic impl -- see
+        # fn_struct_decls.spl) has no monomorphization support on the native
+        # build path, same as bare generic functions (#158 Phase A). Before
+        # `impl_.type_params` was threaded through (this sweep), this was
+        # silently unreachable dead code (always `[]`) and the method's use of
+        # the struct's own `T` fell through to an unrelated
+        # bareword-forward-declared-type path, producing an opaque zero-field
+        # struct that crashed `llc` downstream with a cryptic, wrong-layer
+        # diagnostic instead of failing loudly here. Mirrors lower_function's
+        # gate exactly: loud-fail-always (regardless of whether a given
+        # method's signature actually mentions `T`), consistent with Phase A's
+        # documented choice, until real Phase B monomorphization lands.
+        if type_params.len() > 0:
+            self.error("generic struct/class methods are not supported on the native build path yet: impl for a type with type parameter(s) declares method(s); monomorphization is not implemented (#158 Phase B)", impl_.span)
+
+        var methods: Dict<text, SymbolId> = {}
+        # Method name -> declared return type's struct NAME (methchain lane;
+        # see HirImpl.method_return_struct_names doc comment). Computed here,
+        # not at MIR time, because HIR lowering has already resolved the
+        # method's `-> Pt` return annotation via self.symbols regardless of
+        # whether the eventual backend path runs expression type-inference.
+        var method_return_struct_names: Dict<text, text> = {}
+        var method_return_is_array: Dict<text, bool> = {}
+        val previous_self_type = self.current_method_self_type
+        self.current_method_self_type = Some(type_)
+        for name in impl_.methods.keys():
+            val fn_ = impl_.methods[name]
+            val hir_fn = self.lower_function(fn_)
+            methods[name] = hir_fn.symbol
+            self.lowered_impl_functions[hir_fn.symbol] = hir_fn
+            var ret_struct_name = ""
+            var ret_is_array = false
+            match hir_fn.return_type.kind:
+                case Named(ret_type_symbol, _):
+                    val ret_sym = self.symbols.get_symbol(ret_type_symbol)
+                    if ret_sym != nil:
+                        ret_struct_name = ret_sym.name
+                case Array(_, _):
+                    ret_is_array = true
+                case Slice(_):
+                    ret_is_array = true
+                case _: ()
+            method_return_struct_names[name] = ret_struct_name
+            method_return_is_array[name] = ret_is_array
+        self.current_method_self_type = previous_self_type
+
+        # Inject trait default methods that this impl does NOT override.
+        # Without this, HirImpl.methods only contains textually-present methods,
+        # so positional dispatch against the trait's full method list aliases the
+        # wrong body (or SIGSEGVs). See task #55.
+        if impl_.has_trait_:
+            match impl_.trait_.kind:
+                case Named(trait_name, _):
+                    if self.lowered_traits.contains_key(trait_name):
+                        val trait_hir = self.lowered_traits[trait_name]
+                        for default_fn in trait_hir.defaults:
+                            if not methods.contains_key(default_fn.name):
+                                var concrete_default = default_fn
+                                var concrete_symbol_type: HirType? = nil
+                                val default_symbol = self.symbols.get_symbol(default_fn.symbol)
+                                if default_symbol != nil:
+                                    concrete_symbol_type = default_symbol.type_
+                                val concrete_symbol_name = match type_.kind:
+                                    case Named(owner_symbol, _): self.symbols.method_symbol_name(owner_symbol, default_fn.name)
+                                    case _: default_fn.name
+                                if not default_fn.is_static and concrete_symbol_type != nil:
+                                    match concrete_symbol_type.unwrap().kind:
+                                        case Function(default_params, default_return, default_effects):
+                                            if default_params.len() > 0:
+                                                var concrete_params: [HirType] = [type_]
+                                                var concrete_param_i = 1
+                                                while concrete_param_i < default_params.len():
+                                                    concrete_params.push(default_params[concrete_param_i])
+                                                    concrete_param_i = concrete_param_i + 1
+                                                concrete_symbol_type = Some(HirType(
+                                                    kind: HirTypeKind.Function(concrete_params, default_return, default_effects),
+                                                    span: default_fn.span
+                                                ))
+                                        case _:
+                                            ()
+                                val concrete_symbol = self.symbols.define(
+                                    concrete_symbol_name,
+                                    if default_fn.is_static: SymbolKind.Function else: SymbolKind.Method,
+                                    concrete_symbol_type,
+                                    default_fn.span,
+                                    default_fn.visibility,
+                                    false,
+                                    self.module_filename
+                                )
+                                # #157 body half: the default body was lowered in
+                                # the trait scope where `self` is the trait's Self
+                                # type, so MIR's function_lowering would not
+                                # register the self local as the concrete struct
+                                # (`self.name()` inside the body then fails
+                                # "unresolved method call"). Retype the self param
+                                # to the concrete impl type so struct_value_syms
+                                # picks up the receiver's real name and inner
+                                # required/default calls resolve. HirFunction and
+                                # HirParam are value structs, so rebuilding params
+                                # here does not alias the shared trait default
+                                # (safe for two impls of one trait).
+                                if not default_fn.is_static and concrete_default.params.len() > 0:
+                                    var retyped_params: [HirParam] = []
+                                    var retyped_i = 0
+                                    while retyped_i < concrete_default.params.len():
+                                        var retyped_param = concrete_default.params[retyped_i]
+                                        if retyped_i == 0:
+                                            retyped_param.type_ = type_
+                                        retyped_params.push(retyped_param)
+                                        retyped_i = retyped_i + 1
+                                    concrete_default.params = retyped_params
+                                concrete_default.symbol = concrete_symbol
+                                methods[default_fn.name] = concrete_symbol
+                                self.lowered_impl_functions[concrete_symbol] = concrete_default
+                                var default_ret_struct_name = ""
+                                var default_ret_is_array = false
+                                match default_fn.return_type.kind:
+                                    case Named(ret_type_symbol, _):
+                                        val ret_sym = self.symbols.get_symbol(ret_type_symbol)
+                                        if ret_sym != nil:
+                                            default_ret_struct_name = ret_sym.name
+                                    case Array(_, _) | Slice(_):
+                                        default_ret_is_array = true
+                                    case _: ()
+                                method_return_struct_names[default_fn.name] = default_ret_struct_name
+                                method_return_is_array[default_fn.name] = default_ret_is_array
+                case _:
+                    pass_dn
+
+        # Lower associated type implementations
+        var assoc_type_impls: [HirAssocTypeImpl] = []
+        for at in impl_.assoc_types:
+            assoc_type_impls = assoc_type_impls.push(self.lower_assoc_type_impl(at))
+
+        self.symbols.pop_scope()
+
+        HirImpl(
+            type_: type_,
+            trait_: trait_,
+            type_params: type_params,
+            where_clause: where_clause,
+            methods: methods,
+            method_return_struct_names: method_return_struct_names,
+            method_return_is_array: method_return_is_array,
+            assoc_type_impls: assoc_type_impls,
+            span: impl_.span
+        )
+
+    me lower_assoc_type_decl(at: AssocTypeDecl) -> HirAssocTypeDecl:
+        var bounds: [HirType] = []
+        for b in at.bounds:
+            bounds = bounds.push(self.lower_type(b))
+
+        # Lower default type if present
+        val default_type = if at.has_default:
+            Some(self.lower_type(at.default))
+        else:
+            nil
+
+        HirAssocTypeDecl(
+            name: at.name,
+            bounds: bounds,
+            default: default_type,
+            span: at.span
+        )
+
+    me lower_assoc_type_impl(at: AssocTypeDecl) -> HirAssocTypeImpl:
+        val concrete = if at.has_default:
+            self.lower_type(at.default)
+        else:
+            # Missing concrete type -- report error
+            self.error("associated type '{at.name}' in impl block must have a concrete type", at.span)
+            HirType(kind: HirTypeKind.Error, span: at.span)
+
+        HirAssocTypeImpl(
+            name: at.name,
+            concrete_type: concrete,
+            span: at.span
+        )
+
+    me lower_const(const_: Const) -> HirConst:
+        val symbol = self.symbols.lookup_or_invalid(const_.name)
+        val type_ = if const_.type_.?:
+            self.lower_type(const_.type_)
+        else:
+            match const_.value.kind:
+                case ExprKind.IntLit(_): HirType(kind: HirTypeKind.Int(64, true), span: const_.span)
+                case ExprKind.FloatLit(_): HirType(kind: HirTypeKind.Float(64), span: const_.span)
+                case ExprKind.StringLit(_, _): HirType(kind: HirTypeKind.Str, span: const_.span)
+                case ExprKind.BoolLit(_): HirType(kind: HirTypeKind.Bool, span: const_.span)
+                case _: HirType(kind: HirTypeKind.Infer(0, 0), span: const_.span)
+        val value = self.lower_hir_expr(const_.value)
+
+        # Compute effective visibility using filename matching
+        val effective_visibility = self.compute_visibility(const_.name, const_.visibility)
+
+        HirConst(
+            symbol: symbol,
+            name: const_.name,
+            type_: type_,
+            value: value,
+            is_mutable: const_.is_mutable,
+            visibility: effective_visibility,
+            is_public: const_.is_public,
+            is_volatile: const_.is_volatile,
+            fixed_address: const_.fixed_address,
+            span: const_.span
+        )
+
+    me lower_static_assert(assert_: StaticAssert) -> HirStaticAssert:
+        val condition = self.lower_hir_expr(assert_.condition)
+
+        HirStaticAssert(
+            condition: condition,
+            message: assert_.message,
+            span: assert_.span
+        )
+
+    fn lower_aop_advice(advice: AopAdvice) -> HirAopAdvice:
+        HirAopAdvice(
+            predicate_text: advice.pointcut,
+            advice_function: advice.handler,
+            form: advice.form,
+            priority: advice.priority,
+            span: advice.span
+        )
+
+    fn lower_di_binding(binding: DiBinding) -> HirDiBinding:
+        HirDiBinding(
+            predicate_text: binding.pointcut,
+            implementation: binding.implementation,
+            span: binding.span
+        )
+
+    fn lower_arch_rule(rule: ArchRule) -> HirArchRule:
+        HirArchRule(
+            kind: rule.kind,
+            predicate_text: rule.pointcut,
+            message: rule.message,
+            span: rule.span
+        )
+
+    fn lower_mock_decl(mock_decl: MockDecl) -> HirMockDecl:
+        HirMockDecl(
+            name: mock_decl.name,
+            trait_name: mock_decl.trait_name,
+            span: mock_decl.span
+        )

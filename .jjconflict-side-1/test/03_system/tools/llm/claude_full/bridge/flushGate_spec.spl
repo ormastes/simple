@@ -1,0 +1,51 @@
+"""
+# Claude Full Bridge FlushGate
+
+Mirrors `bridge/flushGate.ts`, the queueing state machine that prevents new
+messages from interleaving with an initial history flush.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.flushGate.{flushGateNew, flushGateIsActive, flushGatePendingCount}
+
+describe "Claude full bridge FlushGate":
+    it "should queue messages only while active and drain them on end":
+        step("Create a gate and confirm the initial inactive state")
+        val gate = flushGateNew()
+        expect(flushGateIsActive(gate)).to_equal(false)
+        expect(flushGatePendingCount(gate)).to_equal(0)
+        expect(gate.enqueue("direct")).to_equal(false)
+
+        step("Start the flush and queue messages")
+        gate.start()
+        expect(gate.isActive()).to_equal(true)
+        expect(gate.enqueue("a")).to_equal(true)
+        expect(gate.enqueue2("b", "c")).to_equal(true)
+        expect(gate.pendingCount()).to_equal(3)
+        expect(gate.firstPending()).to_equal("a")
+        expect(gate.lastPending()).to_equal("c")
+
+        step("End the flush and drain pending messages")
+        val drained = gate.end()
+        expect(gate.isActive()).to_equal(false)
+        expect(gate.pendingCount()).to_equal(0)
+        expect(drained.len()).to_equal(3)
+        expect(drained[0]).to_equal("a")
+        expect(drained[2]).to_equal("c")
+
+    it "should drop or preserve pending messages according to lifecycle method":
+        step("Drop pending messages on permanent close")
+        val gate = flushGateNew()
+        gate.start()
+        expect(gate.enqueueMany(["x", "y"])).to_equal(true)
+        expect(gate.drop()).to_equal(2)
+        expect(gate.isActive()).to_equal(false)
+        expect(gate.hasPending()).to_equal(false)
+
+        step("Deactivate without clearing pending messages for transport replacement")
+        gate.start()
+        expect(gate.enqueue("replacement")).to_equal(true)
+        gate.deactivate()
+        expect(gate.isActive()).to_equal(false)
+        expect(gate.pendingCount()).to_equal(1)
+        expect(gate.end()[0]).to_equal("replacement")

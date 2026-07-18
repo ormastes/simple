@@ -1,0 +1,163 @@
+# simd_scan_spec.spl — SIMD-seam byte scan parity + absolute oracle (AC-5)
+#
+# Proves two things, both required by AC-5:
+#   1. ABSOLUTE ORACLE: scan results equal hand-computed KNOWN byte positions
+#      (not just "dispatch == scalar", which would be a self-comparison trap
+#      since both currently share code).
+#   2. PARITY SEAM: the dispatch entry `scan_byte` is byte-for-byte equal to the
+#      scalar oracle `scan_byte_scalar` across several fixtures — locking the
+#      contract any future AVX2/NEON backend must honor.
+#
+# Fixtures use "banana" = [98,97,110,97,110,97]:
+#   'b'=98 at {0}    'a'=97 at {1,3,5}    'n'=110 at {2,4}    'z'=122 absent
+use std.spec
+use lib.common.search.simd_scan.{scan_byte, scan_byte_scalar, scan_byte_haystack, first_last_byte_filter, first_last_byte_filter_scalar, pos_list_equals, active_tier, SimdTier}
+use lib.common.search.types.{Haystack, MatchPos}
+use std.common.bytes.span.{ByteSpan}
+
+# "banana"
+fn banana() -> ByteSpan:
+    ByteSpan.new([98u8, 97u8, 110u8, 97u8, 110u8, 97u8])
+
+# Extract plain i64 indices from a [MatchPos] for absolute-value assertions.
+fn indices_of(matches: [MatchPos]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < matches.len():
+        out.push(matches[i].value())
+        i = i + 1
+    out
+
+describe "scan_byte_scalar absolute oracle (KNOWN positions)":
+    it "finds 'a' in banana at exactly 1, 3, 5":
+        val r = scan_byte_scalar(banana(), 97u8)
+        val idx = indices_of(r)
+        expect(idx.len()).to_equal(3)
+        expect(idx[0]).to_equal(1)
+        expect(idx[1]).to_equal(3)
+        expect(idx[2]).to_equal(5)
+
+    it "finds 'b' only at index 0 (byte at index 0)":
+        val r = scan_byte_scalar(banana(), 98u8)
+        val idx = indices_of(r)
+        expect(idx.len()).to_equal(1)
+        expect(idx[0]).to_equal(0)
+
+    it "finds last byte 'a' includes the final index 5 (byte at last index)":
+        val r = scan_byte_scalar(banana(), 97u8)
+        val idx = indices_of(r)
+        # last match is the final span position
+        expect(idx[idx.len() - 1]).to_equal(5)
+
+    it "finds 'n' at 2 and 4":
+        val r = scan_byte_scalar(banana(), 110u8)
+        val idx = indices_of(r)
+        expect(idx.len()).to_equal(2)
+        expect(idx[0]).to_equal(2)
+        expect(idx[1]).to_equal(4)
+
+    it "byte-not-present returns empty":
+        val r = scan_byte_scalar(banana(), 122u8)
+        expect(r.len()).to_equal(0)
+
+    it "empty span returns empty":
+        val r = scan_byte_scalar(ByteSpan.empty(), 97u8)
+        expect(r.len()).to_equal(0)
+
+describe "scan_byte dispatch absolute oracle":
+    it "dispatch finds 'a' at exactly 1, 3, 5 (not via self-comparison)":
+        val r = scan_byte(banana(), 97u8)
+        val idx = indices_of(r)
+        expect(idx.len()).to_equal(3)
+        expect(idx[0]).to_equal(1)
+        expect(idx[1]).to_equal(3)
+        expect(idx[2]).to_equal(5)
+
+    it "dispatch byte-not-present returns empty":
+        val r = scan_byte(banana(), 122u8)
+        expect(r.len()).to_equal(0)
+
+    it "dispatch empty span returns empty":
+        val r = scan_byte(ByteSpan.empty(), 98u8)
+        expect(r.len()).to_equal(0)
+
+describe "PARITY SEAM: scan_byte (dispatch) === scan_byte_scalar (oracle)":
+    it "matches the oracle byte-for-byte for 'a' in banana":
+        val sp = banana()
+        assert_true(pos_list_equals(scan_byte(sp, 97u8), scan_byte_scalar(sp, 97u8)))
+
+    it "matches the oracle for 'b' (single, index 0)":
+        val sp = banana()
+        assert_true(pos_list_equals(scan_byte(sp, 98u8), scan_byte_scalar(sp, 98u8)))
+
+    it "matches the oracle for an absent byte (both empty)":
+        val sp = banana()
+        assert_true(pos_list_equals(scan_byte(sp, 122u8), scan_byte_scalar(sp, 122u8)))
+
+    it "matches the oracle on an empty span":
+        val sp = ByteSpan.empty()
+        assert_true(pos_list_equals(scan_byte(sp, 97u8), scan_byte_scalar(sp, 97u8)))
+
+    it "matches the oracle on a single-byte span (byte at index 0 == last index)":
+        val sp = ByteSpan.new([42u8])
+        assert_true(pos_list_equals(scan_byte(sp, 42u8), scan_byte_scalar(sp, 42u8)))
+        expect(scan_byte(sp, 42u8).len()).to_equal(1)
+        expect(scan_byte(sp, 42u8)[0].value()).to_equal(0)
+
+describe "active_tier reports the shipped backend honestly":
+    it "is Scalar (no SIMD intrinsics wired this phase)":
+        assert_true(active_tier().is_scalar())
+        assert_true(active_tier().equals(SimdTier.scalar()))
+
+describe "scan_byte_haystack over a Haystack":
+    it "finds 'a' at 1,3,5 through the Haystack wrapper":
+        val hay = Haystack.new([98u8, 97u8, 110u8, 97u8, 110u8, 97u8])
+        val idx = indices_of(scan_byte_haystack(hay, 97u8))
+        expect(idx.len()).to_equal(3)
+        expect(idx[0]).to_equal(1)
+        expect(idx[2]).to_equal(5)
+
+describe "first_last_byte_filter substring prefilter (absolute oracle)":
+    it "needle 'ana' (first='a',last='a',len=3) yields candidate starts 1 and 3":
+        # ABSOLUTE oracle: "banana" b[1]='a'&b[3]='a' -> 1; b[3]='a'&b[5]='a' -> 3.
+        # i=5 cannot fit (5+2=7 out of range), so exactly {1, 3}.
+        val r = first_last_byte_filter(banana(), 97u8, 97u8, 3)
+        val idx = indices_of(r)
+        expect(idx.len()).to_equal(2)
+        expect(idx[0]).to_equal(1)
+        expect(idx[1]).to_equal(3)
+
+    it "never drops a true match: real 'ana' occurrences (1,3) are both present":
+        # Both candidate starts are genuine "ana" substrings -> no false negatives.
+        val r = first_last_byte_filter(banana(), 97u8, 97u8, 3)
+        val idx = indices_of(r)
+        expect(idx).to_contain(1)
+        expect(idx).to_contain(3)
+
+    it "needle 'ban' (first='b',last='n',len=3) yields candidate start 0 only":
+        # b[0]='b' & b[2]='n' -> 0. No other 'b'. Absolute oracle {0}.
+        val r = first_last_byte_filter(banana(), 98u8, 110u8, 3)
+        val idx = indices_of(r)
+        expect(idx.len()).to_equal(1)
+        expect(idx[0]).to_equal(0)
+
+    it "needle longer than span yields no candidates":
+        val r = first_last_byte_filter(banana(), 98u8, 97u8, 99)
+        expect(r.len()).to_equal(0)
+
+    it "zero-length needle yields no candidates":
+        val r = first_last_byte_filter(banana(), 97u8, 97u8, 0)
+        expect(r.len()).to_equal(0)
+
+describe "PARITY SEAM: first_last_byte_filter === its scalar oracle":
+    it "dispatch matches scalar for 'ana' in banana":
+        val sp = banana()
+        val a = first_last_byte_filter(sp, 97u8, 97u8, 3)
+        val b = first_last_byte_filter_scalar(sp, 97u8, 97u8, 3)
+        assert_true(pos_list_equals(a, b))
+
+    it "dispatch matches scalar for 'ban' in banana":
+        val sp = banana()
+        val a = first_last_byte_filter(sp, 98u8, 110u8, 3)
+        val b = first_last_byte_filter_scalar(sp, 98u8, 110u8, 3)
+        assert_true(pos_list_equals(a, b))

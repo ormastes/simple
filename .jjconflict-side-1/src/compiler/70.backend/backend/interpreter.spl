@@ -1,0 +1,1034 @@
+# Interpreter Backend - Tree-walking interpreter (optimized mode only)
+#
+# Classic mode (GC, debug hooks, SFFI arithmetic) has been removed.
+# For runtime (interpreter mode), use compiler.core.interpreter instead.
+# For compiled mode with JIT, prefer JitInterpreterBackend from jit_interpreter.spl.
+# Function calls, builtins, and SFFI conversion are in interpreter_calls.spl
+
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend_types.*
+use compiler.backend.backend.env.{EvalContext, Environment}
+use compiler.backend.backend.interpreter_calls.*
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: HirExprKind) -> i64
+
+# Env-gated interpreter trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
+# [EE]/[ES]/[EB] eval probe trail (invaluable for stage4 codegen diagnosis).
+fn itrace(msg: text) -> ():
+    if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+        eprint(msg)
+
+# Resolve a SymbolId to its stable variable name (bug doc iteration 21, target
+# (a)). The environment is name-keyed; a `Let` carries only a SymbolId, so we
+# map its (define-fresh, readable) `.id` back to the name via ctx.names. Falls
+# back to the empty string when the id is absent (defensive).
+fn resolve_sym_name(symbol: SymbolId, ctx: EvalContext) -> text:
+    val sid: i64 = symbol.id
+    val nm = ctx.names.get(sid)
+    if nm != nil:
+        return nm ?? ""
+    ""
+
+# ============================================================================
+# Interpreter Backend Implementation
+# ============================================================================
+
+struct InterpreterBackendImpl:
+    """Tree-walking interpreter backend (optimized mode only)."""
+
+impl InterpreterBackendImpl:
+    static fn new() -> InterpreterBackendImpl:
+        InterpreterBackendImpl()
+
+    static fn optimized() -> InterpreterBackendImpl:
+        InterpreterBackendImpl()
+
+# NOTE: Trait implementation syntax not supported by runtime parser
+# impl Backend for InterpreterBackendImpl:
+impl InterpreterBackendImpl:
+    fn name() -> text:
+        "interpreter"
+
+    fn kind() -> BackendKind:
+        BackendKind.Interpreter
+
+    # Uniquely-named entry point for the interpreter driver path. The seed
+    # miscompiles a direct/closure call to `process_module` on a concrete
+    # InterpreterBackendImpl: because SEVEN structs define an identically-named
+    # and identically-signatured `process_module(HirModule) -> Result<...>`, the
+    # seed's method-name dispatch resolves the call to a stub that returns
+    # Ok(default) WITHOUT running the interpreter body (main never executes,
+    # nothing prints). A uniquely-named method breaks the collision so the call
+    # dispatches to the real body. See doc/08_tracking/bug/
+    # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 14).
+    fn interpret_hir_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        self.process_module(module)
+
+    fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        # Create evaluation context
+        val env = Environment.new()
+        # Build the id -> name map (bug doc iteration 21, target (a)). The
+        # environment is keyed by variable NAME; a `Let`/`Var`'s SymbolId is
+        # resolved to its name through this map. `module.symbols.symbols` is a
+        # Dict<i64, Symbol>; iterate .values() bound to `val s: Symbol` (ANY-
+        # erasure cure) and read the proven-readable `s.id.id` / `s.name`.
+        var names_map: Dict<i64, text> = {}
+        for nsym_ in module.symbols.symbols.values():
+            val ns: Symbol = nsym_
+            val ns_id: i64 = ns.id.id
+            names_map[ns_id] = ns.name
+        # Build the name -> HirFunction index ONCE (perf). Both the Call
+        # fast-path in eval_expr and call_function used to linear-scan
+        # module.functions.values() with NO early break on every named call;
+        # for a self-host build (~5.8k fns) that is an O(calls * fns) blowup.
+        # Last-writer-wins here mirrors the old no-break loop exactly. Iterate
+        # .values() bound to a typed local (ANY-erasure cure, same idiom as
+        # names_map) and key by the proven-readable HirFunction.name text.
+        var fn_index: Dict<text, HirFunction> = {}
+        for fidx_fn_ in module.functions.values():
+            val fidx_f: HirFunction = fidx_fn_
+            fn_index[fidx_f.name] = fidx_f
+        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true)
+
+        # Locate `main` by symbol name via the symbol table. The cranelift seed
+        # miscompiles two things on the single-file / synthetic-main HIR module:
+        #   1. `HirFunction.name` read off a `.values()`-iterated struct returns
+        #      a garbage text (len == -1), so a name compare never matches.
+        #   2. `Dict<SymbolId, HirFunction>.has()/[]` (a struct-keyed Dict) fails
+        #      to find an entry that is present.
+        # ROOT CAUSE (iteration 9): the seed erases `Dict<K,V>` to `ANY`
+        # (`type_resolver.rs`: `"Dict" => TypeId::ANY`), so `module.functions`
+        # has type ANY and `module.functions.values()` yields elements typed ANY
+        # (`mod.rs`: `"keys"|"values" => TypeId::ANY`). Field access on an
+        # ANY-typed receiver whose field name is defined in more than one struct
+        # (`name`/`symbol`/`body`/`span` are ubiquitous) falls to the seed's
+        # "most-fields-wins" global field resolver (`access.rs`), which picks the
+        # WRONG struct's field index -> garbage reads (`.name.len()==-1`,
+        # `.symbol==null`) and stubs out this function. The runtime pointer is
+        # correct; only the static field-index resolution is wrong. Binding each
+        # element to a typed local `val f: HirFunction = ...` restores the real
+        # struct type so field access resolves the correct index (proven with a
+        # minimal field-name-collision repro, iteration 9).
+        # Iterate .values() (not .keys()+re-index) and bind each element to a
+        # typed local `val sym: Symbol`. `module.symbols.symbols` is a
+        # Dict<i64, Symbol>, but the seed erases Dict<K,V> to ANY, so both
+        # .keys()/[] re-index elements and .values() elements come out ANY-typed.
+        # Field access (`sym.id`/`sym.name`/`sym.id.id`) on an ANY receiver hits
+        # the seed's most-fields-wins resolver and reads the WRONG struct's field
+        # index -> a nil slot -> "field access on nil receiver" trap (iteration
+        # 10). The typed binding restores the real Symbol type so field indices
+        # resolve correctly (same idiom as the functions.values() loop below).
+        for sym_ in module.symbols.symbols.values():
+            val sym: Symbol = sym_
+            val g_fv: FunctionValue = FunctionValue(symbol: sym.id, name: sym.name)
+            ctx.env.define_global(sym.name, Value.Function(g_fv))
+
+        for fn_ in module.functions.values():
+            val f: HirFunction = fn_
+            val fsym = f.symbol
+            val g_fv2: FunctionValue = FunctionValue(symbol: fsym, name: f.name)
+            ctx.env.define_global(f.name, Value.Function(g_fv2))
+
+        for fn_ in module.functions.values():
+            val f: HirFunction = fn_
+            # Match main by the function's own name. Requiring a duplicate symbol
+            # table entry silently skipped valid single-file modules.
+            if f.name == "main":
+                val result = self.call_hir_function(f, [], ctx)?
+                return Ok(BackendResult.Value(result))
+        Err(BackendError.runtime_error("module has no main function", nil))
+
+    fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
+        Ok(BackendResult.Unit)
+
+    fn process_class(class_: HirClass) -> Result<BackendResult, BackendError>:
+        Ok(BackendResult.Unit)
+
+    fn process_struct(struct_: HirStruct) -> Result<BackendResult, BackendError>:
+        Ok(BackendResult.Unit)
+
+    fn process_enum(enum_: HirEnum) -> Result<BackendResult, BackendError>:
+        Ok(BackendResult.Unit)
+
+    fn process_trait(trait_: HirTrait) -> Result<BackendResult, BackendError>:
+        Ok(BackendResult.Unit)
+
+    fn process_impl(impl_: HirImpl) -> Result<BackendResult, BackendError>:
+        Ok(BackendResult.Unit)
+
+    # Construct a Value.Struct when a Call's callee names a declared struct or
+    # class (bug doc iteration 21, target (b)). Returns nil when the name is not
+    # a type (so the caller falls through to ordinary call dispatch). Named args
+    # bind by `arg.name`; positional args bind in declared field order.
+    fn try_construct_struct(type_name: text, args: [HirCallArg], arg_values: [Value], ctx: EvalContext) -> Value?:
+        var field_names: [text] = []
+        var found_type = false
+        # Task #112: classes get REFERENCE semantics (a store handle), structs
+        # keep VALUE semantics (inline Value.Struct). Track which we matched.
+        var is_class = false
+        for s_ in ctx.module.structs.values():
+            val s: HirStruct = s_
+            if s.name == type_name:
+                found_type = true
+                for f_ in s.fields:
+                    val f: HirField = f_
+                    field_names = field_names.push(f.name)
+        if not found_type:
+            for c_ in ctx.module.classes.values():
+                val c: HirClass = c_
+                if c.name == type_name:
+                    found_type = true
+                    is_class = true
+                    for cf_ in c.fields:
+                        val cf: HirField = cf_
+                        field_names = field_names.push(cf.name)
+        if not found_type:
+            return nil
+        var fields: Dict<text, Value> = {}
+        for i in 0..args.len():
+            val arg_t: HirCallArg = args[i]
+            val fname = if arg_t.has_name and arg_t.name != "":
+                arg_t.name
+            elif i < field_names.len():
+                field_names[i]
+            else:
+                ""
+            if fname != "" and i < arg_values.len():
+                fields[fname] = arg_values[i]
+        if is_class:
+            # Allocate in the shared store; return a handle-carrying Value.Object.
+            # Copies of this Value copy the int handle, so all holders share the
+            # one record -> reference semantics (Task #112).
+            val handle = ctx.env.store.alloc(type_name, fields)
+            return Some(Value.Object(ObjectValue(class_name: type_name, handle: handle)))
+        Some(Value.Struct(type_name, fields))
+
+    fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
+        val ee_disc: i64 = rt_enum_discriminant(expr.kind)
+        itrace("[EE] eval_expr entry disc={ee_disc}")
+        # DISC PRE-DISPATCH for struct-shadowed variant `Field` (bug doc
+        # iteration 21, target (c)). `struct Field` (parser_types.spl:232) exists,
+        # so a `case HirExprKind.Field(...)` TEST compiles ALWAYS-TRUE on stage4
+        # (seed struct/tuple pattern fallback = iconst 1) and would swallow every
+        # expression that reaches it in the big match. Handle it here, keyed on
+        # the discriminant (rt_enum_discriminant = DefaultHasher(variant name)
+        # truncated u32: hash("Field")=21232742), and keep it OUT of the match.
+        if ee_disc == 21232742:  # hash("Field")
+            match expr.kind:
+                case HirExprKind.Field(base, field, _):
+                    val fld_base_t: HirExpr = base
+                    val fld_name_t: text = field
+                    val base_val = self.eval_expr(fld_base_t, ctx)?
+                    # Task #112: a CLASS instance is a `Value.Object(handle)`.
+                    # Its arm MUST precede the `Value.Struct` arm: `Value.Struct`
+                    # is struct-shadowed (`struct Struct`) so its TEST compiles
+                    # ALWAYS-TRUE on stage4 and would swallow an Object. `Object`
+                    # is NOT struct-shadowed, so its test is genuinely refutable —
+                    # it matches only real Objects and lets Structs fall through.
+                    # Field reads dereference the shared store (reference sem).
+                    match base_val:
+                        case Value.Object(objv):
+                            val ov: ObjectValue = objv
+                            val fld_opt = ctx.env.store.get_field(ov.handle, fld_name_t)
+                            if fld_opt.?:
+                                return Ok(fld_opt.unwrap())
+                            return Err(BackendError.runtime_error("no such field: {fld_name_t}", Some(expr.span)))
+                        # `Value.Struct` is itself struct-shadowed (`struct Struct`),
+                        # so this arm compiles always-true and acts as the struct
+                        # extractor; the payload binding still uses rt_enum_payload
+                        # (correct). For `p.x`, base_val is genuinely a Struct.
+                        case Value.Struct(_stype, sfields):
+                            val sf: Dict<text, Value> = sfields
+                            if sf.has(fld_name_t):
+                                return Ok(sf[fld_name_t])
+                            return Err(BackendError.runtime_error("no such field: {fld_name_t}", Some(expr.span)))
+                        case _:
+                            return Err(BackendError.runtime_error("field access on non-struct value", Some(expr.span)))
+                case _:
+                    pass
+        if ee_disc == 1138084884:  # hash("Block")
+            match expr.kind:
+                case HirExprKind.Block(block):
+                    return self.eval_block(block, ctx)
+                case _:
+                    pass
+        match expr.kind:
+            case HirExprKind.IntLit(value, _):
+                itrace("[EE] IntLit arm")
+                Ok(Value.Int(value))
+
+            case HirExprKind.FloatLit(value, _):
+                itrace("[EE] FloatLit arm")
+                Ok(Value.Float(value))
+
+            case HirExprKind.StringLit(value, _):
+                itrace("[EE] StringLit arm")
+                # Hoist nested enum construction: direct Ok(Value.String(...))
+                # loses the inner payload on the current stage4 AOT path.
+                val string_value: Value = Value.String(value)
+                Ok(string_value)
+
+            case HirExprKind.BoolLit(value):
+                itrace("[EE] BoolLit arm")
+                Ok(Value.Bool(value))
+
+            case HirExprKind.Var(symbol):
+                # Env is name-keyed (iteration 21, target (a)); resolve the
+                # SymbolId to its name via ctx.names.
+                val var_name = resolve_sym_name(symbol, ctx)
+                itrace("[EE] Var arm name={var_name}")
+                val value = ctx.env.lookup(var_name)
+                if value.?:
+                    Ok(value.unwrap())
+                else:
+                    Err(BackendError.runtime_error("undefined variable", Some(expr.span)))
+
+            case HirExprKind.NamedVar(symbol, name):
+                # Typed rebinds (stage4 extracted-payload hazard, iteration 18).
+                val nv_name_t: text = name
+                itrace("[EE] NamedVar arm name={nv_name_t}")
+                # Name-keyed lookup (iteration 21): the NamedVar's `symbol` is a
+                # corrupt looked-up handle on stage4, but `name` is reliable.
+                val nv_value = ctx.env.lookup(nv_name_t)
+                if nv_value.?:
+                    itrace("[EE] NamedVar env-hit")
+                    Ok(nv_value.unwrap())
+                else:
+                    # Builtins and module functions are dispatched by NAME in
+                    # call_function/try_call_builtin; fall back to a Function
+                    # value carrying the name (SymbolId-keyed env lookup can
+                    # also miss under the seed's struct-keyed-Dict defect).
+                    # HOISTED nested construction: a struct literal used
+                    # directly as an enum-constructor argument stores a NIL
+                    # payload on stage4 ([CF] f_nil=true, iteration 18).
+                    itrace("[EE] NamedVar fallback")
+                    val nv_fv: FunctionValue = FunctionValue(symbol: symbol, name: nv_name_t)
+                    itrace("[EE] NamedVar fv_nil={nv_fv == nil}")
+                    val nv_fn_value: Value = Value.Function(nv_fv)
+                    Ok(nv_fn_value)
+
+            case HirExprKind.ArrayLit(elements, _):
+                itrace("[EE] ArrayLit arm")
+                var values: [Value] = []
+                for elem in elements:
+                    val v = self.eval_expr(elem, ctx)?
+                    values = values.push(v)
+                Ok(Value.Array(values))
+
+            case HirExprKind.ArrayRepeat(value, count, _):
+                itrace("[EE] ArrayRepeat arm")
+                val repeat_val = self.eval_expr(value, ctx)?
+                val count_val = self.eval_expr(count, ctx)?
+                val n = match count_val:
+                    case Value.Int(cv): cv
+                    case _: 0
+                var repeated: [Value] = []
+                var ri: i64 = 0
+                while ri < n:
+                    repeated = repeated.push(repeat_val)
+                    ri = ri + 1
+                Ok(Value.Array(repeated))
+
+            case HirExprKind.TupleLit(elements):
+                itrace("[EE] TupleLit arm")
+                var values: [Value] = []
+                for elem in elements:
+                    val v = self.eval_expr(elem, ctx)?
+                    values = values.push(v)
+                Ok(Value.Tuple(values))
+
+            case HirExprKind.Index(base, index):
+                itrace("[EE] Index arm")
+                # Task #112 (class-in-array): reading a CLASS element out of an
+                # array yields the element's `Value.Object(handle)` verbatim.
+                # Copying the int handle aliases the one shared ObjectStore record
+                # (see objects.spl / env.spl), so a later `arr[i].f = v` or an
+                # alias var's field mutation is observed through every holder —
+                # reference semantics. The array itself keeps value semantics;
+                # only the CLASS element shares (STRUCT elements stay inline value
+                # copies). Without this arm `arr[0]` fell through to the catch-all
+                # `not_implemented`, so the whole class-in-array repro could not run
+                # on the interpret-mode engine (CompileMode.Interpret ->
+                # InterpreterBackendImpl, driver_types.spl).
+                #
+                # Typed rebinds: `base`/`index` erase to ANY on stage4; passing an
+                # ANY receiver straight to eval_expr misreads its kind (iters 9/18).
+                val idx_base_e: HirExpr = base
+                val idx_key_e: HirExpr = index
+                val idx_base_v = self.eval_expr(idx_base_e, ctx)?
+                val idx_key_v = self.eval_expr(idx_key_e, ctx)?
+                match idx_base_v:
+                    case Value.Array(arr_elems):
+                        val ae: [Value] = arr_elems
+                        match idx_key_v:
+                            case Value.Int(iv):
+                                if iv < 0 or iv >= ae.len():
+                                    Err(BackendError.runtime_error("array index out of bounds", Some(expr.span)))
+                                else:
+                                    Ok(ae[iv])
+                            case _:
+                                Err(BackendError.type_error("array index must be an integer", Some(expr.span)))
+                    # ponytail: only Array indexing is needed for the #112
+                    # class-in-array repro. Dict/Tuple/string indexing and
+                    # Index-as-assignment-target (`arr[i] = v`) are intentionally
+                    # left out until a concrete case needs them.
+                    case _:
+                        Err(BackendError.type_error("indexing requires an array", Some(expr.span)))
+
+            case HirExprKind.DictLit(entries, _, _):
+                itrace("[EE] DictLit arm")
+                var dict: Dict<text, Value> = {}
+                for i in 0..entries.len():
+                    val entry = entries[i]
+                    val key_expr = entry[0]
+                    val value_expr = entry[1]
+                    val key = self.eval_expr(key_expr, ctx)?
+                    val value = self.eval_expr(value_expr, ctx)?
+                    match key:
+                        case Value.String(k):
+                            dict[k] = value
+                        case _:
+                            return Err(BackendError.type_error("dict key must be string", Some(expr.span)))
+                Ok(Value.Dict(dict))
+
+            case HirExprKind.Binary(op, left, right):
+                itrace("[EE] Binary arm")
+                # Typed rebinds (stage4 extracted-payload hazard, iteration 18).
+                val bin_op_t: HirBinOp = op
+                val bin_left_t: HirExpr = left
+                val bin_right_t: HirExpr = right
+                val lv = self.eval_expr(bin_left_t, ctx)?
+                val rv = self.eval_expr(bin_right_t, ctx)?
+                itrace("[EE] Binary lv_nil={lv == nil} rv_nil={rv == nil}")
+                val bo_res = self.eval_binop(bin_op_t, lv, rv, expr.span)
+                itrace("[EE] Binary eval_binop returned nil={bo_res == nil}")
+                bo_res
+
+            case HirExprKind.Unary(op, operand):
+                itrace("[EE] Unary arm")
+                val v = self.eval_expr(operand, ctx)?
+                self.eval_unaryop(op, v, expr.span)
+
+            case HirExprKind.If(cond, then_, else_):
+                itrace("[EE] If arm")
+                val cv = self.eval_expr(cond, ctx)?
+                if cv.is_truthy():
+                    self.eval_block(then_, ctx)
+                elif else_.?:
+                    self.eval_block(else_.unwrap(), ctx)
+                else:
+                    Ok(Value.Nil)
+
+            case HirExprKind.Call(callee, args, _):
+                itrace("[EE] Call arm")
+                # Typed rebinds: extracted ANY-ish payloads misread on stage4
+                # when consumed directly — `arg.value` on the untyped list
+                # element read disc=-1 garbage (bug doc iteration 18).
+                val call_callee_t: HirExpr = callee
+                val call_args_t: [HirCallArg] = args
+                var arg_values: [Value] = []
+                for arg in call_args_t:
+                    val arg_t: HirCallArg = arg
+                    val arg_value_t: HirExpr = arg_t.value
+                    # Keep the nested Result<Value> payload typed across the
+                    # stage4 boundary.  The `?` lowering can substitute NIL
+                    # when the Ok payload is itself an enum value.
+                    val evaluated_arg: Result<Value, BackendError> = self.eval_expr(arg_value_t, ctx)
+                    if evaluated_arg.is_err():
+                        return Err(evaluated_arg.unwrap_err())
+                    val v: Value = evaluated_arg.unwrap()
+                    arg_values = arg_values.push(v)
+                # Builtin fast-path keyed on the callee NAME: the Value.Function
+                # payload channel loses its FunctionValue on stage4 ([CF]
+                # f_nil=true even for a freshly constructed global — enum
+                # construction with a struct payload stores nil), so dispatch
+                # builtins directly from the HIR callee (iteration 18).
+                val callee_kind_v: HirExprKind = call_callee_t.kind
+                match callee_kind_v:
+                    case HirExprKind.NamedVar(_cs, cname):
+                        val cname_t: text = cname
+                        itrace("[EE] Call builtin fast-path name={cname_t}")
+                        val builtin_result = self.try_call_builtin(cname_t, arg_values)
+                        if builtin_result.?:
+                            return builtin_result.unwrap()
+                        # User-defined function fast-path keyed on the callee NAME.
+                        # The `Value.Function` payload channel loses its
+                        # FunctionValue on stage4 (env-hit yields f_nil=true, so
+                        # call_function's `f_t.name` nil-derefs — iteration 18/19).
+                        # Resolve the HirFunction straight from the module by name
+                        # (same robust idiom process_module uses for `main`) and
+                        # call it directly, bypassing the nil-payload Function value.
+                        # O(1) resolve via the prebuilt name index (perf). The
+                        # index is populated by process_module; when absent (other
+                        # EvalContext entry points) fall back to the linear scan
+                        # so behavior is unchanged. Last-writer-wins in the index
+                        # matches the old no-break loop.
+                        var cf_named_index = -1
+                        var cf_named_hit: HirFunction? = nil
+                        if ctx.fn_by_name.has(cname_t):
+                            val cf_hit: HirFunction = ctx.fn_by_name[cname_t]
+                            cf_named_hit = Some(cf_hit)
+                        elif not ctx.has_fn_index:
+                            val cf_named_candidates = ctx.module.functions.values()
+                            var cf_named_i = 0
+                            while cf_named_i < cf_named_candidates.len():
+                                val cf_f2: HirFunction = cf_named_candidates[cf_named_i]
+                                if cf_f2.name == cname_t:
+                                    cf_named_index = cf_named_i
+                                cf_named_i = cf_named_i + 1
+                            if cf_named_index >= 0:
+                                cf_named_hit = Some(cf_named_candidates[cf_named_index])
+                        if cf_named_hit.?:
+                            itrace("[EE] Call user-fn fast-path name={cname_t}")
+                            return self.call_hir_function(cf_named_hit.unwrap(), arg_values, ctx)
+                        # Struct/class construction (bug doc iteration 21, target
+                        # (b)): `P(x: 5)` lowers to a Call whose callee names a
+                        # declared struct/class. After builtin + user-fn misses,
+                        # build a Value.Struct from the args.
+                        val struct_result = self.try_construct_struct(cname_t, call_args_t, arg_values, ctx)
+                        if struct_result.?:
+                            itrace("[EE] Call struct-construct name={cname_t}")
+                            return Ok(struct_result.unwrap())
+                    case _:
+                        pass
+                val fn_value = self.eval_expr(call_callee_t, ctx)?
+                self.call_function(fn_value, arg_values, ctx, expr.span)
+
+            # Qualified pattern: bare `MethodCall` collides with a global class of
+            # the same name; the seed's unqualified-pattern heuristic would then
+            # extract the payload as a struct FieldAccess at offset 0 (garbage)
+            # instead of rt_enum_payload (stage4 iteration 15). Same for the
+            # Block/Expr arms below.
+            case HirExprKind.MethodCall(receiver, method_name, args, resolution):
+                match resolution:
+                    case MethodResolution.StaticMethod(_, method_id):
+                        # Static method: ClassName.method(args) - no receiver needed
+                        var arg_values: [Value] = []
+                        for arg in args:
+                            val v = self.eval_expr(arg.value, ctx)?
+                            arg_values = arg_values.push(v)
+
+                        # Look up method by symbol ID
+                        self.call_function_by_id(method_id, arg_values, ctx, expr.span)
+
+                    case MethodResolution.InstanceMethod(_, method_id):
+                        # Instance method: receiver.method(args)
+                        val receiver_val = self.eval_expr(receiver, ctx)?
+
+                        var arg_values: [Value] = []
+                        arg_values = arg_values.push(receiver_val)  # Receiver as first arg
+                        for arg in args:
+                            val v = self.eval_expr(arg.value, ctx)?
+                            arg_values = arg_values.push(v)
+
+                        self.call_function_by_id(method_id, arg_values, ctx, expr.span)
+
+                    case MethodResolution.FreeFunction(func_id):
+                        # UFCS: receiver.func(args) → func(receiver, args)
+                        val receiver_val = self.eval_expr(receiver, ctx)?
+
+                        var arg_values: [Value] = []
+                        arg_values = arg_values.push(receiver_val)
+                        for arg in args:
+                            val v = self.eval_expr(arg.value, ctx)?
+                            arg_values = arg_values.push(v)
+
+                        self.call_function_by_id(func_id, arg_values, ctx, expr.span)
+
+                    case MethodResolution.TraitMethod(_, _):
+                        # Trait method - requires dynamic dispatch (not implemented yet)
+                        Err(BackendError.not_implemented("trait method calls not yet supported"))
+
+                    case MethodResolution.Unresolved:
+                        Err(BackendError.runtime_error("unresolved method call: {method_name}", Some(expr.span)))
+
+            case HirExprKind.StaticCall(type_, method_name, args, resolution):
+                # Static call: Type.method(args) - similar to StaticMethod variant
+                match resolution:
+                    case MethodResolution.StaticMethod(_, method_id):
+                        var arg_values: [Value] = []
+                        for arg in args:
+                            val v = self.eval_expr(arg.value, ctx)?
+                            arg_values = arg_values.push(v)
+
+                        self.call_function_by_id(method_id, arg_values, ctx, expr.span)
+
+                    case _:
+                        Err(BackendError.runtime_error("invalid static call resolution", Some(expr.span)))
+
+            case HirExprKind.Lambda(params, body, _):
+                val captures = ctx.env.snapshot_locals()
+                Ok(Value.Closure(ClosureValue(
+                    params: params,
+                    body: body,
+                    captures: captures
+                )))
+
+            case HirExprKind.HostGpuLane(lane_code, payload_size, marker, body):
+                self.eval_expr(marker, ctx)?
+                if lane_code == 2:
+                    return Err(BackendError.not_implemented(
+                        "GPU target.later is unavailable in the SimpleOS standalone interpreter"))
+                val _ = payload_size
+                self.eval_block(body, ctx)?
+                Ok(Value.Nil)
+
+            # Seed treats these no-payload patterns as irrefutable, so they must
+            # remain after every payload-bearing expression arm.
+            case HirExprKind.NilLit:
+                Ok(Value.Nil)
+
+            case HirExprKind.UnitLit:
+                Ok(Value.Nil)
+
+            case _:
+                itrace("[EE] catch-all arm")
+                Err(BackendError.not_implemented("expression kind not implemented"))
+
+    fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
+        # LOAD-BEARING: explicitly materialize stmt.kind's discriminant BEFORE the
+        # match. `Expr`/`Block` are struct-shadowed variant names whose pattern
+        # tests compile ALWAYS-TRUE on stage4 (bug doc iteration 18 hazard #1);
+        # without this pre-read the seed compiles the sound Let/Assign arms such
+        # that a real Let statement falls through to the always-true Expr arm and
+        # eval_expr receives a garbage payload → "field access on nil receiver"
+        # SIGILL. Reading the discriminant first (iteration-18 disc pre-dispatch)
+        # forces the value to materialize so the qualified arms test correctly.
+        # Feed it into itrace so it is never dead-code-eliminated.
+        val stmt_disc = rt_enum_discriminant(stmt.kind)
+        itrace("[ES] exec_stmt entry disc={stmt_disc}")
+        # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
+        # variant names, so their pattern tests compile ALWAYS-TRUE (bug doc
+        # iteration 18 hazard #1) — an `Expr`-first arm swallows EVERY statement,
+        # including `Let`/`Assign`, routing them to eval_expr with a garbage
+        # payload (disc reads "Error") → "field access on nil receiver" SIGILL.
+        # Keep the sound (non-shadowed) Let/Assign arms FIRST so they are tested
+        # by a real discriminant; Expr then legitimately takes Expr stmts; Block
+        # stays last (shadowed too). Mirrors the proven 40.mono scan_stmt reorder.
+        match stmt.kind:
+            case HirStmtKind.Let(symbol, _, init):
+                val value = self.eval_expr(init, ctx)?
+                # Env is name-keyed (iteration 21, target (a)). The Let's `symbol`
+                # is define-fresh (readable `.id`); resolve to its name.
+                val let_name = resolve_sym_name(symbol, ctx)
+                ctx.env.define(let_name, value)
+                Ok(())
+
+            case HirStmtKind.Assign(target, op, value):
+                val new_value = self.eval_expr(value, ctx)?
+                # Task #112: field assignment on a CLASS instance (`c.x = v`).
+                # `target.kind` may be a struct-shadowed `Field` whose pattern
+                # test is always-true on stage4, so DISC-DISPATCH on the target's
+                # discriminant (hash("Field")=21232742) BEFORE the name match,
+                # mirroring the eval_expr Field pre-dispatch. The mutation goes
+                # through the shared store so every holder of the handle sees it.
+                val tgt_disc_c: i64 = rt_enum_discriminant(target.kind)
+                if tgt_disc_c == 21232742:  # hash("Field")
+                    match target.kind:
+                        case HirExprKind.Field(fbase, ffield, _):
+                            val ab: HirExpr = fbase
+                            val afld: text = ffield
+                            val base_v = self.eval_expr(ab, ctx)?
+                            match base_v:
+                                case Value.Object(objv):
+                                    val ov: ObjectValue = objv
+                                    if op.?:
+                                        val cur = ctx.env.store.get_field(ov.handle, afld)
+                                        if cur.is_none():
+                                            return Err(BackendError.runtime_error("no such field: {afld}", Some(stmt.span)))
+                                        val combined = self.apply_assign_op(op.unwrap(), cur.unwrap(), new_value, stmt.span)?
+                                        ctx.env.store.set_field(ov.handle, afld, combined)
+                                    else:
+                                        ctx.env.store.set_field(ov.handle, afld, new_value)
+                                    return Ok(())
+                                case _:
+                                    return Err(BackendError.not_implemented("field assignment target must be a class instance"))
+                        case _:
+                            pass
+                # Resolve the assignment target name. Idents lower to NamedVar
+                # (reliable `name`); a plain Var carries a SymbolId resolved via
+                # ctx.names (iteration 21, target (a)).
+                val tgt_kind_v: HirExprKind = target.kind
+                var tgt_name: text = ""
+                match tgt_kind_v:
+                    case HirExprKind.NamedVar(_asym, aname):
+                        tgt_name = aname
+                    case HirExprKind.Var(asym2):
+                        tgt_name = resolve_sym_name(asym2, ctx)
+                    case _:
+                        tgt_name = ""
+                if tgt_name == "":
+                    Err(BackendError.not_implemented("assignment target not implemented"))
+                else:
+                    if op.?:
+                        val old_value = ctx.env.lookup(tgt_name)
+                        if old_value.is_none():
+                            return Err(BackendError.runtime_error("undefined variable", Some(stmt.span)))
+                        val combined = self.apply_assign_op(op.unwrap(), old_value.unwrap(), new_value, stmt.span)?
+                        ctx.env.assign(tgt_name, combined)
+                    else:
+                        ctx.env.assign(tgt_name, new_value)
+                    Ok(())
+
+            case HirStmtKind.Expr(expr):
+                itrace("[ES] Expr arm")
+                self.eval_expr(expr, ctx)?
+                Ok(())
+
+            case HirStmtKind.Block(block):
+                self.eval_block(block, ctx)?
+                Ok(())
+
+    fn is_allowed(expr: HirExpr) -> bool:
+        # Interpreter allows all expressions
+        match expr.kind:
+            case _: true
+
+    fn is_allowed_stmt(stmt: HirStmt) -> bool:
+        # Interpreter allows all statements
+        match stmt.kind:
+            case _: true
+
+impl InterpreterBackendImpl:
+    fn eval_block(block: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
+        itrace("[EB] eval_block stmts.len={block.stmts.len()} has={block.has}")
+        ctx.env.push_scope()
+
+        for stmt in block.stmts:
+            # `block.stmts` is `[HirStmt]` whose elements the seed erases to ANY;
+            # the loop var is ANY-typed and passing it straight to exec_stmt yields
+            # a garbage receiver so `stmt.kind` misreads (disc "Error") and every
+            # statement falls to the always-true struct-shadowed Expr arm (bug doc
+            # iterations 9/18). Rebind to a typed local first (the iter-9 cure that
+            # 40.mono scan_block already applies) to restore the concrete HirStmt.
+            val stmt_t: HirStmt = stmt
+            self.exec_stmt(stmt_t, ctx)?
+
+        # `HirBlock.value` is a DESUGARED plain `HirExpr` field gated by the
+        # separate `has: bool` flag (hir_definitions.spl:677) — it is NOT an
+        # Option. The previous code used `block.value.?` / `block.value.unwrap()`
+        # (Option semantics), which on the ANY-erased single-file `main` HIR
+        # mis-evaluates so the trailing expression-statement (e.g. the `print(...)`
+        # that `lower_block` extracts as the block value, leaving `stmts` empty)
+        # was never evaluated → `main` ran but produced no output (iteration 14).
+        # Correct: gate on `block.has`, then eval `block.value` directly, guarding
+        # against a nil expr (single-file lowering can set has=true with value nil,
+        # iteration 10).
+        val result = if block.has and block.value != nil:
+            self.eval_expr(block.value, ctx)?
+        else:
+            Value.Nil
+
+        ctx.env.pop_scope()
+        Ok(result)
+
+    # Helper functions for comparison operators
+    fn eval_gt(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+        match left:
+            case Value.Int(l):
+                match right:
+                    case Value.Int(r):
+                        Ok(Value.Bool(l > r))
+                    case Value.Float(r):
+                        Ok(Value.Bool(l.to_f64() > r))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for >", Some(span)))
+            case Value.Float(l):
+                match right:
+                    case Value.Float(r):
+                        Ok(Value.Bool(l > r))
+                    case Value.Int(r):
+                        Ok(Value.Bool(l > r.to_f64()))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for >", Some(span)))
+            case _:
+                Err(BackendError.type_error("invalid operands for >", Some(span)))
+
+    fn eval_gteq(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+        match left:
+            case Value.Int(l):
+                match right:
+                    case Value.Int(r):
+                        Ok(Value.Bool(l >= r))
+                    case Value.Float(r):
+                        Ok(Value.Bool(l.to_f64() >= r))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for >=", Some(span)))
+            case Value.Float(l):
+                match right:
+                    case Value.Float(r):
+                        Ok(Value.Bool(l >= r))
+                    case Value.Int(r):
+                        Ok(Value.Bool(l >= r.to_f64()))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for >=", Some(span)))
+            case _:
+                Err(BackendError.type_error("invalid operands for >=", Some(span)))
+
+    fn eval_binop(op: HirBinOp, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+        itrace("[EBO] eval_binop enter")
+        var op_t: HirBinOp = op
+        if op_t == nil:
+            return Err(BackendError(
+                message: "internal: missing HIR binary operator",
+                span: Some(span),
+                kind: BackendErrorKind.Internal
+            ))
+        itrace("[EBO] op non-nil path disc={interp_binop_disc(op_t)}")
+        match op_t:
+            case HirBinOp.Add:
+                itrace("[EBO] Add arm")
+                match left:
+                    case Value.Int(l):
+                        itrace("[EBO] Add left=Int {l}")
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l + r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() + r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for +", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l + r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l + r.to_f64()))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for +", Some(span)))
+                    case Value.String(l):
+                        match right:
+                            case Value.String(r):
+                                Ok(Value.String(l + r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for +", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for +", Some(span)))
+
+            case HirBinOp.Sub:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l - r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() - r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for -", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l - r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l - r.to_f64()))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for -", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for -", Some(span)))
+
+            case HirBinOp.Mul:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l * r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() * r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for *", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l * r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l * r.to_f64()))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for *", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for *", Some(span)))
+
+            case HirBinOp.Div:
+                if left.is_int() or left.is_float():
+                    match right:
+                        case Value.Int(r):
+                            if r == 0:
+                                return Err(BackendError.runtime_error("division by zero", Some(span)))
+                        case Value.Float(r):
+                            if r == 0.0:
+                                return Err(BackendError.runtime_error("division by zero", Some(span)))
+                        case _: ()
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l / r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() / r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for /", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l / r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l / r.to_f64()))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for /", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for /", Some(span)))
+
+            case HirBinOp.Mod:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                if r == 0:
+                                    Err(BackendError.runtime_error("modulo by zero", Some(span)))
+                                else:
+                                    Ok(Value.Int(l % r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for %", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for %", Some(span)))
+
+            case HirBinOp.Eq:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l == r))
+                            case _:
+                                Ok(Value.Bool(self.values_equal(left, right)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l == r))
+                            case _:
+                                Ok(Value.Bool(self.values_equal(left, right)))
+                    case _:
+                        Ok(Value.Bool(self.values_equal(left, right)))
+
+            case HirBinOp.NotEq:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l != r))
+                            case _:
+                                Ok(Value.Bool(not self.values_equal(left, right)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l != r))
+                            case _:
+                                Ok(Value.Bool(not self.values_equal(left, right)))
+                    case _:
+                        Ok(Value.Bool(not self.values_equal(left, right)))
+
+            case HirBinOp.Lt:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l < r))
+                            case Value.Float(r):
+                                Ok(Value.Bool(l.to_f64() < r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l < r))
+                            case Value.Int(r):
+                                Ok(Value.Bool(l < r.to_f64()))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <", Some(span)))
+                    case Value.String(l):
+                        match right:
+                            case Value.String(r):
+                                Ok(Value.Bool(l < r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for <", Some(span)))
+
+            case HirBinOp.LtEq:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l <= r))
+                            case Value.Float(r):
+                                Ok(Value.Bool(l.to_f64() <= r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <=", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l <= r))
+                            case Value.Int(r):
+                                Ok(Value.Bool(l <= r.to_f64()))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <=", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for <=", Some(span)))
+
+            case HirBinOp.Gt:
+                self.eval_gt(left, right, span)
+            case HirBinOp.GtEq:
+                self.eval_gteq(left, right, span)
+
+            case HirBinOp.And:
+                Ok(Value.Bool(left.is_truthy() and right.is_truthy()))
+
+            case HirBinOp.Or:
+                Ok(Value.Bool(left.is_truthy() or right.is_truthy()))
+
+            case _:
+                Err(BackendError.not_implemented("binary operator not implemented"))
+
+    fn eval_unaryop(op: HirUnaryOp, operand: Value, span: Span) -> Result<Value, BackendError>:
+        match op:
+            case HirUnaryOp.Neg:
+                match operand:
+                    case Value.Int(i): Ok(Value.Int(-i))
+                    case Value.Float(f): Ok(Value.Float(-f))
+                    case _: Err(BackendError.type_error("invalid operand for -", Some(span)))
+
+            case HirUnaryOp.Not:
+                Ok(Value.Bool(not operand.is_truthy()))
+
+            case _:
+                Err(BackendError.not_implemented("unary operator not implemented"))
+
+    fn values_equal(left: Value, right: Value) -> bool:
+        match left:
+            case Value.Nil:
+                match right:
+                    case Value.Nil: true
+                    case _: false
+            case Value.Bool(l):
+                match right:
+                    case Value.Bool(r): l == r
+                    case _: false
+            case Value.Int(l):
+                match right:
+                    case Value.Int(r): l == r
+                    case _: false
+            case Value.Float(l):
+                match right:
+                    case Value.Float(r): l == r
+                    case _: false
+            case Value.String(l):
+                match right:
+                    case Value.String(r): l == r
+                    case _: false
+            case _:
+                false
+
+# ============================================================================
+# Exports
+# ============================================================================

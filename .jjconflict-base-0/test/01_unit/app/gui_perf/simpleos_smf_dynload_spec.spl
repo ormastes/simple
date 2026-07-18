@@ -1,0 +1,171 @@
+"""
+# SimpleOS SMF dynload evidence
+
+## Overview
+
+Verifies that the pure GUI SMF artifact can pass through the SimpleOS dynload
+registry and resolve the hot-call symbol.
+
+This is contract evidence for the GUI hardening release lane. It does not claim
+live QEMU execution or pixel rendering. It proves that a role-2 ARM64 SMF
+library envelope containing the GUI hot-call symbol can be opened through the
+SimpleOS loader registry, resolved through `loader_dynsym`, and reported as a
+machine-readable `GUI_SIMPLEOS_SMF_DYNLOAD` row. It also proves that wrong
+symbols, wrong architectures, and missing artifact bytes fail closed.
+
+## Examples
+
+The expected passing row starts with `GUI_SIMPLEOS_SMF_DYNLOAD
+status=simpleos-dynload-pass` and includes
+`symbol=gui_dynlib_hot_probe_tick`, `loader=smf_dynlib`,
+`adapter=simpleos-framebuffer-virtio`, and `pass=true`.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
+**Design:** doc/05_design/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/local/gui_color_image_pipeline_8k.md
+"""
+use std.spec.*
+use app.gui_perf.smf_dynlib_artifact.{gui_smf_wrap_native_library}
+use app.gui_perf.simpleos_smf_dynload.{gui_simpleos_smf_dynload_probe, gui_simpleos_smf_dynload_row}
+use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _pad_to(buf: [u8], target: i32) -> [u8]:
+    while buf.len() < target:
+        buf.push(0u8)
+    buf
+
+fn _push_text_bytes(buf: [u8], value: text) -> [u8]:
+    var out = buf
+    val chars = value.bytes()
+    var i = 0
+    while i < chars.len():
+        out.push(chars[i])
+        i = i + 1
+    out
+
+fn _elf64_with_gui_hot_dynsym() -> [u8]:
+    val symbol = "gui_dynlib_hot_probe_tick"
+    var b: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8, 1u8]
+    b = _pad_to(b, 16)
+    b = _push_u16_le(b, 2)
+    b = _push_u16_le(b, 183)
+    b = _push_u32_le(b, 1)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 64)
+    b = _push_u64_le(b, 256)
+    b = _push_u32_le(b, 0)
+    b = _push_u16_le(b, 64)
+    b = _push_u16_le(b, 56)
+    b = _push_u16_le(b, 1)
+    b = _push_u16_le(b, 64)
+    b = _push_u16_le(b, 3)
+    b = _push_u16_le(b, 0)
+    b = _push_u32_le(b, 1)
+    b = _push_u32_le(b, 5)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 160)
+    b = _push_u64_le(b, 160)
+    b = _push_u64_le(b, 0x1000)
+    b = _pad_to(b, 128)
+    b.push(0u8)
+    b = _push_text_bytes(b, symbol)
+    b.push(0u8)
+    b = _pad_to(b, 176)
+    b = _pad_to(b, 200)
+    b = _push_u32_le(b, 1)
+    b.push(0x12u8)
+    b.push(0u8)
+    b = _push_u16_le(b, 1)
+    b = _push_u64_le(b, 0x400010)
+    b = _push_u64_le(b, 8)
+    b = _pad_to(b, 256)
+    b = _pad_to(b, 320)
+    b = _push_u32_le(b, 0)
+    b = _push_u32_le(b, 11)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 176)
+    b = _push_u64_le(b, 48)
+    b = _push_u32_le(b, 2)
+    b = _push_u32_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 24)
+    b = _push_u32_le(b, 0)
+    b = _push_u32_le(b, 3)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 128)
+    b = _push_u64_le(b, symbol.len() + 2)
+    b = _push_u32_le(b, 0)
+    b = _push_u32_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b
+
+describe "SimpleOS SMF dynload evidence":
+    it "opens an ARM64 role-2 SMF and resolves the GUI hot-call symbol":
+        # @step: Reset the dynlib registry before probing the artifact
+        dylib_registry_reset_for_test()
+        # @step: Build a role-2 ARM64 SMF envelope with the GUI hot-call symbol
+        val smf = gui_smf_wrap_native_library(_elf64_with_gui_hot_dynsym(), 3u8)
+        # @step: Probe the SMF envelope through the SimpleOS dynload registry
+        val evidence = gui_simpleos_smf_dynload_probe("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
+        expect(evidence.pass).to_equal(true)
+        expect(evidence.loader).to_equal("smf_dynlib")
+        expect(evidence.symbol_addr).to_equal(0x400010)
+        expect(evidence.process_callable).to_equal(true)
+        # @step: Emit a machine-readable SimpleOS dynload evidence row
+        val row = gui_simpleos_smf_dynload_row(evidence)
+        expect(row).to_contain("GUI_SIMPLEOS_SMF_DYNLOAD")
+        expect(row).to_contain("status=simpleos-dynload-pass")
+        expect(row).to_contain("symbol=gui_dynlib_hot_probe_tick")
+        expect(row).to_contain("process_callable=true")
+        expect(row).to_contain("pass=true")
+
+    it "fails closed for a wrong symbol":
+        # @step: Build a valid ARM64 SMF envelope
+        dylib_registry_reset_for_test()
+        val smf = gui_smf_wrap_native_library(_elf64_with_gui_hot_dynsym(), 3u8)
+        # @step: Probe a symbol that is not the GUI release hot-call symbol
+        val evidence = gui_simpleos_smf_dynload_probe("build/gui/pure_gui_hot.smf", smf, "other_symbol")
+        expect(evidence.pass).to_equal(false)
+        expect(evidence.error).to_equal("wrong-symbol")
+
+    it "fails closed for non-ARM64 SMF library envelopes":
+        # @step: Build a role-2 SMF envelope for the wrong architecture
+        dylib_registry_reset_for_test()
+        val smf = gui_smf_wrap_native_library(_elf64_with_gui_hot_dynsym(), 1u8)
+        # @step: Probe the wrong-architecture artifact through the ARM64 dynload path
+        val evidence = gui_simpleos_smf_dynload_probe("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
+        expect(evidence.pass).to_equal(false)
+        expect(evidence.error).to_equal("not-arm64")
+        expect(evidence.handle).to_be_less_than(0)
+
+    it "fails closed for missing artifact bytes":
+        # @step: Probe an empty artifact without registering a dynload handle
+        dylib_registry_reset_for_test()
+        val evidence = gui_simpleos_smf_dynload_probe("", [], "gui_dynlib_hot_probe_tick")
+        expect(evidence.pass).to_equal(false)
+        expect(evidence.error).to_equal("bad-smf-contract")
+        expect(evidence.handle).to_be_less_than(0)

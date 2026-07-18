@@ -1,0 +1,212 @@
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+pub struct AppEntry:
+    canonical_path: text
+    fat32_leaf: text
+    boot_seed: bool
+    cached_bytes: [u8]
+
+var g_app_entries: [AppEntry] = []
+var g_registry_loaded: bool = false
+var g_boot_browser_demo_bytes: [u8] = []
+var g_boot_hello_world_bytes: [u8] = []
+var g_boot_clang_bytes: [u8] = []
+
+pub fn app_registry_cache_boot_app_id(app_id: u64, bytes: [u8]):
+    if app_id == 1u64:
+        g_boot_browser_demo_bytes = bytes
+    elif app_id == 3u64:
+        g_boot_hello_world_bytes = bytes
+    elif app_id == 12u64:
+        g_boot_clang_bytes = bytes
+
+pub fn app_registry_cached_boot_app_id(app_id: u64) -> [u8]:
+    if app_id == 1u64:
+        return g_boot_browser_demo_bytes
+    if app_id == 3u64:
+        return g_boot_hello_world_bytes
+    if app_id == 12u64:
+        return g_boot_clang_bytes
+    []
+
+pub fn app_registry_load(manifest_text: text):
+    g_app_entries = []
+    val lines = manifest_text.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() < 3:
+            continue
+        val canonical = parts[0].trim()
+        val leaf = parts[1].trim()
+        val seed_str = parts[2].trim()
+        val seed = seed_str == "true"
+        g_app_entries.push(AppEntry(canonical_path: canonical, fat32_leaf: leaf, boot_seed: seed, cached_bytes: []))
+    g_registry_loaded = true
+
+pub fn app_registry_register(canonical_path: text, fat32_leaf: text, boot_seed: bool):
+    var new_entries: [AppEntry] = []
+    var found = false
+    for entry in g_app_entries:
+        if entry.canonical_path == canonical_path:
+            new_entries.push(AppEntry(canonical_path: canonical_path, fat32_leaf: fat32_leaf, boot_seed: boot_seed, cached_bytes: entry.cached_bytes))
+            found = true
+        else:
+            new_entries.push(entry)
+    if not found:
+        new_entries.push(AppEntry(canonical_path: canonical_path, fat32_leaf: fat32_leaf, boot_seed: boot_seed, cached_bytes: []))
+    g_app_entries = new_entries
+
+pub fn app_registry_entries() -> [AppEntry]:
+    g_app_entries
+
+pub fn app_registry_is_loaded() -> bool:
+    g_registry_loaded
+
+pub fn app_registry_lookup(canonical_path: text) -> AppEntry?:
+    val path = _normalize_lookup_path(canonical_path)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            return Some(entry)
+    nil
+
+pub fn app_registry_lookup_by_fat32(fat32_path: text) -> AppEntry?:
+    var leaf = fat32_path.upper()
+    if leaf.starts_with("/SYS/APPS/"):
+        leaf = leaf.slice(10, leaf.len())
+    else if leaf.starts_with("/"):
+        leaf = leaf.slice(1, leaf.len())
+    for entry in g_app_entries:
+        if entry.fat32_leaf.upper() == leaf:
+            return Some(entry)
+    nil
+
+pub fn app_registry_fat32_alias(canonical_path: text) -> text?:
+    # Iterate g_app_entries directly instead of via app_registry_lookup().
+    # native-build miscompiles the `Option<AppEntry> == nil` guard for a
+    # by-value struct payload (the None guard falls through), so the follow-up
+    # `.unwrap()` panics on a legitimately-absent app (e.g. the disk-less WM
+    # harness where no app binary is registered), faulting cr2=0x0. Mirroring
+    # app_registry_cached_bytes' direct-scan pattern avoids Option<struct>
+    # entirely and returns a clean nil when the app is unregistered.
+    val path = _normalize_lookup_path(canonical_path)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            if entry.fat32_leaf.len() == 0:
+                return nil
+            return Some("/SYS/APPS/" + entry.fat32_leaf)
+    nil
+
+pub fn app_registry_root_alias(canonical_path: text) -> text?:
+    # See app_registry_fat32_alias: direct scan avoids the native-build
+    # Option<AppEntry> nil-guard miscompile + unwrap-on-None fault.
+    val path = _normalize_lookup_path(canonical_path)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            if entry.fat32_leaf.len() == 0:
+                return nil
+            return Some("/" + entry.fat32_leaf)
+    nil
+
+pub fn app_registry_canonical_from_bytes(path_bytes: [u8]) -> text?:
+    val path_text = rt_bytes_to_text(path_bytes)
+    val path = _normalize_lookup_path(path_text)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            return Some(entry.canonical_path)
+    if path.starts_with("/sys/apps/"):
+        return Some(path)
+    nil
+
+pub fn app_registry_cache_bytes(canonical_path: text, bytes: [u8]):
+    val path = _normalize_lookup_path(canonical_path)
+    var new_entries: [AppEntry] = []
+    var found = false
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            new_entries.push(AppEntry(canonical_path: path, fat32_leaf: entry.fat32_leaf, boot_seed: entry.boot_seed, cached_bytes: bytes))
+            found = true
+        else:
+            new_entries.push(entry)
+    if not found:
+        new_entries.push(AppEntry(canonical_path: path, fat32_leaf: "", boot_seed: false, cached_bytes: bytes))
+    g_app_entries = new_entries
+
+pub fn app_registry_cached_bytes(canonical_path: text) -> [u8]:
+    val path = _normalize_lookup_path(canonical_path)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            return entry.cached_bytes
+    []
+
+pub fn app_registry_boot_seed_entries() -> [AppEntry]:
+    var result: [AppEntry] = []
+    for entry in g_app_entries:
+        if entry.boot_seed:
+            result.push(entry)
+    result
+
+pub fn app_registry_clear():
+    g_app_entries = []
+    g_registry_loaded = false
+
+pub fn app_registry_load_hardcoded_fallback():
+    g_app_entries = []
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/info", fat32_leaf: "info", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/browser_demo", fat32_leaf: "BROWSMF.SMF", boot_seed: true, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/hello_world", fat32_leaf: "HELLOSMF.SMF", boot_seed: true, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/file_manager", fat32_leaf: "FILESMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/shell", fat32_leaf: "SHELLSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/editor", fat32_leaf: "EDITORSM.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/simple_browser", fat32_leaf: "SBROWSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/smux", fat32_leaf: "SMUXSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/simple_compiler", fat32_leaf: "SCOMPSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/simple_interpreter", fat32_leaf: "SINTSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/simple_loader", fat32_leaf: "SLOADSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/llvm", fat32_leaf: "LLVMSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/clang", fat32_leaf: "CLANGSMF.SMF", boot_seed: true, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/rust", fat32_leaf: "RUSTSMF.SMF", boot_seed: true, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/steam_2048", fat32_leaf: "STEAM204.SMF", boot_seed: true, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/wine_hello", fat32_leaf: "WINHLSMF.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/clang_static", fat32_leaf: "CLANGSTC.SMF", boot_seed: false, cached_bytes: []))
+    # clang_as_general_fs_exec (task 1): /usr/bin/clang is the general-path
+    # canonical entry for the guest compiler. It shares clang_static's
+    # existing flat-root CLANGSTC.SMF payload (disk_image_bake.spl already
+    # embeds this ELF when build/os/.bake_include_toolchain is set), so
+    # _seed_direct_fat32_exec_cache picks it up at boot via the exact same
+    # /SYS/APPS/<leaf> then /<leaf> lookup every other boot-seeded app uses --
+    # no special-casing needed in the boot-time FAT32 reader for this task.
+    # disk_image_bake.spl additionally places a REAL nested /usr/bin/clang
+    # FAT32 file (real /usr, /usr/bin subdirectories), walkable via the
+    # general Fat32Core.resolve_path once mounted on NVMe (task 2).
+    g_app_entries.push(AppEntry(canonical_path: "/usr/bin/clang", fat32_leaf: "CLANGSTC.SMF", boot_seed: true, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/rustc_static", fat32_leaf: "RUSTCSTC.SMF", boot_seed: false, cached_bytes: []))
+    g_app_entries.push(AppEntry(canonical_path: "/sys/apps/simple", fat32_leaf: "SIMPLSTC.SMF", boot_seed: true, cached_bytes: []))
+    g_registry_loaded = true
+
+fn _strip_smf_suffix(path: text) -> text:
+    if path.ends_with(".smf"):
+        return path.slice(0, path.len() - 4)
+    path
+
+fn _normalize_lookup_path(path: text) -> text:
+    val stripped = _strip_smf_suffix(path)
+    match stripped:
+        case "/usr/bin/simple":
+            "/sys/apps/simple"
+        case "/bin/simple":
+            "/sys/apps/simple"
+        case "/usr/bin/sh":
+            "/sys/apps/shell"
+        case "/bin/sh":
+            "/sys/apps/shell"
+        case "/usr/bin/shell":
+            "/sys/apps/shell"
+        case "/bin/shell":
+            "/sys/apps/shell"
+        case _:
+            stripped

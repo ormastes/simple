@@ -1,0 +1,102 @@
+# @tag: unit, ui, web_render, host_gpu_queue
+"""
+# Web Render Pixel Backend Runtime Queue Spec
+
+## Overview
+
+This focused spec proves the shared WebRenderArtifact boundary carries
+host/GPU runtime queue submit and drain provenance for GPU-backed web pixel
+artifacts. BrowserBackend mirrors these fields from the artifact after
+`render_frame`.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+The GPU scenario renders a tiny HTML fixture through the Vulkan-selected
+Engine2D pixel backend, then asserts that the `WebRenderArtifact` records a
+submitted packet, one drained packet, and the runtime backend handle. The
+software scenario asserts the same artifact fields remain queue-neutral.
+"""
+
+use std.spec.*
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+    WEB_RENDER_QUEUE_STATUS_DRAINED,
+    WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED,
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    web_render_adapter_request
+}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_draw_ir_request_to_pixel_artifact, web_render_html_request_to_pixel_artifact_with_backend}
+
+extern fn rt_host_gpu_queue_reset()
+
+describe "web render pixel backend runtime queue provenance":
+
+    it "rejects an invalid Draw IR viewport before Engine2D creation":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Draw IR", "", "", "", 0, 48).with_pixel_output()
+        val composition = draw_ir_composition("invalid", "invalid", DRAW_IR_BACKEND_CPU, [])
+        val artifact = web_render_draw_ir_request_to_pixel_artifact(req, composition, "software")
+
+        expect(artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
+        expect(artifact.pixels.len()).to_equal(0)
+        expect(artifact.queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+
+    it "preserves the executor readback source without fabricating queue dispatch":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Draw IR", "", "", "", 8, 8).with_pixel_output()
+        val embedding = draw_ir_embedding_config("surface", "rect", 0, 0, 8, 8, 0, 1000, false)
+        val batch = draw_ir_batch("rect", DRAW_IR_BACKEND_CPU, embedding, [draw_ir_rect("rect", 0, 0, 8, 8, 0xff112233u32)])
+        val artifact = web_render_draw_ir_request_to_pixel_artifact(req, draw_ir_composition("rect", "rect", DRAW_IR_BACKEND_CPU, [batch]), "software")
+
+        expect(artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+        expect(artifact.pixels.len()).to_equal(64)
+        expect(artifact.gpu_readback_source).to_equal("cpu_mirror")
+        expect(artifact.queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+        expect(artifact.queue_dispatch_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+
+    it "stamps GPU web render artifacts with runtime queue submit and drain evidence":
+        rt_host_gpu_queue_reset()
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Queue", "<main><p>queued</p></main>", "", "", 64, 48).with_pixel_output()
+        val artifact = web_render_html_request_to_pixel_artifact_with_backend(req, "<html><body><main><p>queued</p></main></body></html>", "vulkan")
+
+        expect(artifact.engine2d_backend).to_equal("vulkan")
+        expect(artifact.queue_submit_status).to_equal("submitted")
+        expect(artifact.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_DRAINED)
+        expect(artifact.queue_packet_id).to_equal(1)
+        expect(artifact.queue_drained).to_equal(1)
+        expect(artifact.queue_backend_handle).to_equal(7)
+        expect(artifact.queue_payload_size).to_equal(64 * 48 * 4)
+        expect(artifact.queue_payload_hash).to_equal(artifact.readback_checksum)
+        expect(artifact.queue_payload_text).to_contain("web-render-frame;backend=vulkan;pixels=3072;checksum=")
+        expect(artifact.queue_reason).to_contain("drained runtime queue")
+
+    it "keeps software web render artifacts queue-neutral":
+        rt_host_gpu_queue_reset()
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Queue", "<main><p>host</p></main>", "", "", 64, 48).with_pixel_output()
+        val artifact = web_render_html_request_to_pixel_artifact_with_backend(req, "<html><body><main><p>host</p></main></body></html>", "software")
+
+        expect(artifact.engine2d_backend).to_equal("software")
+        expect(artifact.queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+        expect(artifact.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+        expect(artifact.queue_packet_id).to_equal(0)
+        expect(artifact.queue_drained).to_equal(0)
+        expect(artifact.queue_backend_handle).to_equal(0)
+        expect(artifact.queue_payload_size).to_equal(0)
+        expect(artifact.queue_payload_hash).to_equal(0)
+        expect(artifact.queue_payload_text).to_equal("")

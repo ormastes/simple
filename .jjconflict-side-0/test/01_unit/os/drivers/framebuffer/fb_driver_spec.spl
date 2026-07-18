@@ -1,0 +1,322 @@
+"""
+# Framebuffer Driver Specification
+
+**Feature IDs:** #OS-FB
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+
+## Overview
+
+Tests Color struct construction, ARGB packing, static color constructors,
+and the 8x16 bitmap font glyph lookup.
+"""
+
+use std.spec
+use os.drivers.framebuffer.fb_driver.{Color, FramebufferDriver, get_glyph_8x16}
+use os.kernel.boot.mmio.{mmio_reset_for_test, mmio_read32, mmio_write32}
+use common.gpu.simpleos_host_gpu_protocol.{simpleos_host_gpu_readback_checksum}
+
+
+# ============================================================================
+# Test Group 1: Color Construction
+# ============================================================================
+
+describe "Color":
+    describe "rgb":
+        it "creates color with full alpha":
+            val c = Color.rgb(128, 64, 32)
+            expect(c.r).to_equal(128)
+            expect(c.g).to_equal(64)
+            expect(c.b).to_equal(32)
+            expect(c.a).to_equal(255)
+
+        it "creates color with zero components":
+            val c = Color.rgb(0, 0, 0)
+            expect(c.r).to_equal(0)
+            expect(c.g).to_equal(0)
+            expect(c.b).to_equal(0)
+
+        it "creates color with max components":
+            val c = Color.rgb(255, 255, 255)
+            expect(c.r).to_equal(255)
+            expect(c.g).to_equal(255)
+            expect(c.b).to_equal(255)
+
+    # ========================================================================
+    # Test Group 2: ARGB Packing
+    # ========================================================================
+
+    describe "to_u32":
+        it "packs black as 0xFF000000":
+            val c = Color.black()
+            expect(c.to_u32()).to_equal(0xFF000000)
+
+        it "packs white as 0xFFFFFFFF":
+            val c = Color.white()
+            expect(c.to_u32()).to_equal(0xFFFFFFFF)
+
+        it "packs red as 0xFFFF0000":
+            val c = Color.red()
+            expect(c.to_u32()).to_equal(0xFFFF0000)
+
+        it "packs green as 0xFF00FF00":
+            val c = Color.green()
+            expect(c.to_u32()).to_equal(0xFF00FF00)
+
+        it "packs blue as 0xFF0000FF":
+            val c = Color.blue()
+            expect(c.to_u32()).to_equal(0xFF0000FF)
+
+        it "encodes alpha in bits 31-24":
+            val c = Color(r: 0, g: 0, b: 0, a: 128)
+            val alpha_bits = (c.to_u32() >> 24) & 0xFF
+            expect(alpha_bits).to_equal(128)
+
+        it "encodes red in bits 23-16":
+            val c = Color.rgb(0xAB, 0, 0)
+            val red_bits = (c.to_u32() >> 16) & 0xFF
+            expect(red_bits).to_equal(0xAB)
+
+        it "encodes green in bits 15-8":
+            val c = Color.rgb(0, 0xCD, 0)
+            val green_bits = (c.to_u32() >> 8) & 0xFF
+            expect(green_bits).to_equal(0xCD)
+
+        it "encodes blue in bits 7-0":
+            val c = Color.rgb(0, 0, 0xEF)
+            val blue_bits = c.to_u32() & 0xFF
+            expect(blue_bits).to_equal(0xEF)
+
+    # ========================================================================
+    # Test Group 3: Static Color Constructors
+    # ========================================================================
+
+    describe "static constructors":
+        it "black is (0,0,0)":
+            val c = Color.black()
+            expect(c.r).to_equal(0)
+            expect(c.g).to_equal(0)
+            expect(c.b).to_equal(0)
+
+        it "white is (255,255,255)":
+            val c = Color.white()
+            expect(c.r).to_equal(255)
+            expect(c.g).to_equal(255)
+            expect(c.b).to_equal(255)
+
+        it "red is (255,0,0)":
+            val c = Color.red()
+            expect(c.r).to_equal(255)
+            expect(c.g).to_equal(0)
+            expect(c.b).to_equal(0)
+
+        it "green is (0,255,0)":
+            val c = Color.green()
+            expect(c.r).to_equal(0)
+            expect(c.g).to_equal(255)
+            expect(c.b).to_equal(0)
+
+        it "blue is (0,0,255)":
+            val c = Color.blue()
+            expect(c.r).to_equal(0)
+            expect(c.g).to_equal(0)
+            expect(c.b).to_equal(255)
+
+        it "gray is (128,128,128)":
+            val c = Color.gray()
+            expect(c.r).to_equal(128)
+            expect(c.g).to_equal(128)
+            expect(c.b).to_equal(128)
+
+        it "dark_gray is (64,64,64)":
+            val c = Color.dark_gray()
+            expect(c.r).to_equal(64)
+            expect(c.g).to_equal(64)
+            expect(c.b).to_equal(64)
+
+        it "light_gray is (192,192,192)":
+            val c = Color.light_gray()
+            expect(c.r).to_equal(192)
+            expect(c.g).to_equal(192)
+            expect(c.b).to_equal(192)
+
+
+# ============================================================================
+# Test Group 4: 8x16 Glyph Lookup
+# ============================================================================
+
+describe "get_glyph_8x16":
+    it "returns 16 bytes per glyph":
+        val glyph = get_glyph_8x16(0x41)  # 'A'
+        expect(glyph.len()).to_equal(16)
+
+    it "returns all zeros for space (0x20)":
+        val glyph = get_glyph_8x16(0x20)
+        var all_zero = true
+        for byte in glyph:
+            if byte != 0:
+                all_zero = false
+        expect(all_zero).to_equal(true)
+
+    it "returns non-zero bitmap for A (0x41)":
+        val glyph = get_glyph_8x16(0x41)
+        var has_nonzero = false
+        for byte in glyph:
+            if byte != 0:
+                has_nonzero = true
+        expect(has_nonzero).to_equal(true)
+
+    it "returns non-zero bitmap for B (0x42)":
+        val glyph = get_glyph_8x16(0x42)
+        var has_nonzero = false
+        for byte in glyph:
+            if byte != 0:
+                has_nonzero = true
+        expect(has_nonzero).to_equal(true)
+
+    it "returns non-zero bitmap for S (0x53)":
+        val glyph = get_glyph_8x16(0x53)
+        var has_nonzero = false
+        for byte in glyph:
+            if byte != 0:
+                has_nonzero = true
+        expect(has_nonzero).to_equal(true)
+
+    it "returns filled block for unknown char":
+        val glyph = get_glyph_8x16(0x7F)  # DEL - not defined, gets default
+        var all_ff = true
+        for byte in glyph:
+            if byte != 0xFF:
+                all_ff = false
+        expect(all_ff).to_equal(true)
+
+    it "space glyph first row is zero":
+        val glyph = get_glyph_8x16(0x20)
+        expect(glyph[0]).to_equal(0x00)
+
+    it "A glyph has specific known row values":
+        val glyph = get_glyph_8x16(0x41)
+        # Row 2 (index 2) = 0x10, Row 3 (index 3) = 0x38
+        expect(glyph[2]).to_equal(0x10)
+        expect(glyph[3]).to_equal(0x38)
+
+describe "FramebufferDriver MMIO ARGB presenter":
+    it "validates before writing and copies exact rows with destination stride":
+        step("Validate the complete shared readback before scanout writes")
+        mmio_reset_for_test()
+        val source = 0x1000u64
+        val destination = 0x2000u64
+        val pixels: [u32] = [0xFF010203u32, 0xFF040506u32, 0xFF070809u32, 0xFF0A0B0Cu32]
+        var i = 0
+        while i < pixels.len():
+            mmio_write32(source + i.to_u64() * 4u64, pixels[i])
+            i = i + 1
+        var fb = FramebufferDriver.from_scanout_raw(destination, 2u32, 2u32, 16u32, 32u32)
+
+        step("Copy exact ARGB rows through the framebuffer MMIO owner")
+        expect(fb.present_argb32_from_mmio(source, 2u32, 2u32, 16, simpleos_host_gpu_readback_checksum(pixels, 4))).to_be(true)
+        expect(mmio_read32(destination)).to_equal(pixels[0])
+        expect(mmio_read32(destination + 4u64)).to_equal(pixels[1])
+        expect(mmio_read32(destination + 16u64)).to_equal(pixels[2])
+        expect(mmio_read32(destination + 20u64)).to_equal(pixels[3])
+        expect(mmio_read32(destination + 8u64)).to_equal(0u32)
+
+    it "leaves the destination untouched when the complete checksum is wrong":
+        mmio_reset_for_test()
+        val source = 0x3000u64
+        val destination = 0x4000u64
+        mmio_write32(source, 0xFF112233u32)
+        mmio_write32(destination, 0xFFAABBCCu32)
+        var fb = FramebufferDriver.from_scanout_raw(destination, 1u32, 1u32, 4u32, 32u32)
+        assert_false(fb.present_argb32_from_mmio(source, 1u32, 1u32, 4, 1))
+        expect(mmio_read32(destination)).to_equal(0xFFAABBCCu32)
+
+    it "rejects invalid dimensions bytes pitch addresses and overlapping ranges":
+        mmio_reset_for_test()
+        val pixels: [u32] = [0xFF112233u32, 0xFF445566u32, 0xFF778899u32, 0xFFAABBCCu32]
+        val checksum = simpleos_host_gpu_readback_checksum(pixels, 4)
+        var valid = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 8u32, 32u32)
+        var short_pitch = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 4u32, 32u32)
+        var unaligned_pitch = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 9u32, 32u32)
+        var wrong_bpp = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 8u32, 24u32)
+        var overlap = FramebufferDriver.from_scanout_raw(0x5008u64, 2u32, 2u32, 8u32, 32u32)
+        var short_host = FramebufferDriver.from_buffer(2u32, 2u32)
+        short_host.host_buffer = []
+        expect(valid.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_equal(true)
+        assert_false(valid.present_argb32_from_mmio(0u64, 2u32, 2u32, 16, checksum))
+        assert_false(valid.present_argb32_from_mmio(0x5002u64, 2u32, 2u32, 16, checksum))
+        assert_false(valid.present_argb32_from_mmio(0x5000u64, 1u32, 2u32, 8, checksum))
+        assert_false(valid.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 12, checksum))
+        assert_false(valid.present_argb32_from_mmio(0xFFFFFFFFFFFFFFFCu64, 2u32, 2u32, 16, checksum))
+        assert_false(short_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(unaligned_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(wrong_bpp.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(overlap.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(short_host.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+
+    it "copies into an existing host-backed buffer without a staging allocation":
+        mmio_reset_for_test()
+        val source = 0x7000u64
+        val pixels: [u32] = [0xFF102030u32, 0xFF405060u32]
+        mmio_write32(source, pixels[0])
+        mmio_write32(source + 4u64, pixels[1])
+        var fb = FramebufferDriver.from_buffer(2u32, 1u32)
+        expect(fb.present_argb32_from_mmio(source, 2u32, 1u32, 8, simpleos_host_gpu_readback_checksum(pixels, 2))).to_be(true)
+        expect(fb.host_pixels()).to_equal(pixels)
+
+
+# ============================================================================
+# Test Group 5: MMIO double buffering (draw targets back_buffer, swap_buffers
+# flushes only the tracked dirty rect to the hardware framebuffer)
+# ============================================================================
+
+describe "FramebufferDriver MMIO double buffering":
+    it "put_pixel does not touch the front buffer until swap_buffers is called":
+        mmio_reset_for_test()
+        val dest = 0x9000u64
+        mmio_write32(dest, 0xDEADBEEFu32)
+        var fb = FramebufferDriver.from_scanout_raw(dest, 1u32, 1u32, 4u32, 32u32)
+        fb.put_pixel(0u32, 0u32, Color.red())
+        expect(mmio_read32(dest)).to_equal(0xDEADBEEFu32)
+        fb.swap_buffers()
+        expect(mmio_read32(dest)).to_equal(Color.red().to_u32())
+
+    it "fill_rect + swap_buffers makes pixels visible in the front buffer":
+        mmio_reset_for_test()
+        val dest = 0xA000u64
+        var fb = FramebufferDriver.from_scanout_raw(dest, 2u32, 2u32, 8u32, 32u32)
+        fb.fill_rect(0u32, 0u32, 2u32, 2u32, Color.blue())
+        expect(mmio_read32(dest)).to_equal(0u32)
+        fb.swap_buffers()
+        expect(mmio_read32(dest)).to_equal(Color.blue().to_u32())
+        expect(mmio_read32(dest + 4u64)).to_equal(Color.blue().to_u32())
+        expect(mmio_read32(dest + 8u64)).to_equal(Color.blue().to_u32())
+        expect(mmio_read32(dest + 12u64)).to_equal(Color.blue().to_u32())
+
+    it "swap_buffers copies only the tracked dirty rect, leaving other front pixels untouched":
+        mmio_reset_for_test()
+        val dest = 0xB000u64
+        val sentinel = 0xCAFEF00Du32
+        var fb = FramebufferDriver.from_scanout_raw(dest, 4u32, 4u32, 16u32, 32u32)
+        var row: u64 = 0u64
+        while row < 4u64:
+            var col: u64 = 0u64
+            while col < 4u64:
+                mmio_write32(dest + (row * 4u64 + col) * 4u64, sentinel)
+                col = col + 1u64
+            row = row + 1u64
+        fb.put_pixel(1u32, 1u32, Color.green())
+        fb.swap_buffers()
+        expect(mmio_read32(dest + (1u64 * 4u64 + 1u64) * 4u64)).to_equal(Color.green().to_u32())
+        expect(mmio_read32(dest)).to_equal(sentinel)
+        expect(mmio_read32(dest + (3u64 * 4u64 + 3u64) * 4u64)).to_equal(sentinel)
+
+    it "clear_dirty via clear_dirty tracking resets after swap":
+        mmio_reset_for_test()
+        val dest = 0xC000u64
+        var fb = FramebufferDriver.from_scanout_raw(dest, 1u32, 1u32, 4u32, 32u32)
+        fb.put_pixel(0u32, 0u32, Color.white())
+        expect(fb.dirty_rect().valid).to_equal(true)
+        fb.swap_buffers()
+        assert_false(fb.dirty_rect().valid)

@@ -1,0 +1,374 @@
+# BackendSession Mode Separation Tests
+#
+# Verifies that LegacyNoSession, ManagedShared, and PerfExclusive modes
+# behave correctly in isolation.
+#
+# No imports — logic is replicated at module level to avoid interpreter
+# timeout issues (same pattern as test/unit/compiler/target/*).
+# Types mirror backend_session.spl and cpu_session.spl exactly.
+
+# ============================================================================
+# Replicated enums
+# ============================================================================
+
+enum BackendSessionMode:
+    LegacyNoSession
+    ManagedShared
+    PerfExclusive
+
+enum BackendSessionKind:
+    Cpu
+    Cuda
+    Vulkan
+    Metal
+    WebGpu
+
+# ============================================================================
+# Replicated CpuFeatureSet
+# ============================================================================
+
+class CpuFeatureSet:
+    has_sse2: bool
+    has_avx2: bool
+    has_neon: bool
+    has_rvv: bool
+    arch_name: text
+    pointer_bits: i64
+
+# ============================================================================
+# Replicated CpuSession
+# ============================================================================
+
+class CpuSession:
+    features: CpuFeatureSet
+    kernel_table: i64
+    ref_count: i64
+    is_initialized: bool
+    generation: i64
+
+    me retain():
+        self.ref_count = self.ref_count + 1
+
+    me release():
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+
+    fn is_valid() -> bool:
+        self.is_initialized and self.ref_count > 0
+
+    fn selected_backend_name() -> text:
+        val arch = self.features.arch_name
+        if arch == "riscv32":
+            return "scalar"
+        if arch == "riscv64":
+            return "scalar"
+        if self.features.has_avx2:
+            return "avx2"
+        if self.features.has_sse2:
+            return "sse2"
+        if self.features.has_neon:
+            return "neon"
+        "scalar"
+
+# ============================================================================
+# Replicated BackendSessionHandle
+# ============================================================================
+
+class BackendSessionHandle:
+    id: i64
+    kind: BackendSessionKind
+    mode: BackendSessionMode
+    device_name: text
+    generation: i64
+
+# ============================================================================
+# Module-level factory helpers (avoids var-rebind issues in it-blocks)
+# ============================================================================
+
+fn make_legacy_handle() -> BackendSessionHandle:
+    BackendSessionHandle(
+        id: 1,
+        kind: BackendSessionKind.Cpu,
+        mode: BackendSessionMode.LegacyNoSession,
+        device_name: "cpu-legacy",
+        generation: 0
+    )
+
+fn make_managed_handle() -> BackendSessionHandle:
+    BackendSessionHandle(
+        id: 2,
+        kind: BackendSessionKind.Cpu,
+        mode: BackendSessionMode.ManagedShared,
+        device_name: "cpu-shared",
+        generation: 0
+    )
+
+fn make_perf_exclusive_handle() -> BackendSessionHandle:
+    BackendSessionHandle(
+        id: 3,
+        kind: BackendSessionKind.Cpu,
+        mode: BackendSessionMode.PerfExclusive,
+        device_name: "cpu-exclusive",
+        generation: 0
+    )
+
+fn make_null_handle() -> BackendSessionHandle:
+    BackendSessionHandle(
+        id: 0,
+        kind: BackendSessionKind.Cpu,
+        mode: BackendSessionMode.LegacyNoSession,
+        device_name: "",
+        generation: 0
+    )
+
+fn make_initialized_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: false,
+            has_avx2: false,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "x86_64",
+            pointer_bits: 64
+        ),
+        kernel_table: 0,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn make_uninitialized_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: false,
+            has_avx2: false,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "unknown",
+            pointer_bits: 64
+        ),
+        kernel_table: 0,
+        ref_count: 0,
+        is_initialized: false,
+        generation: 0
+    )
+
+fn make_riscv32_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: false,
+            has_avx2: false,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "riscv32",
+            pointer_bits: 32
+        ),
+        kernel_table: 0,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn make_riscv64_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: false,
+            has_avx2: false,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "riscv64",
+            pointer_bits: 64
+        ),
+        kernel_table: 0,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn make_avx2_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: true,
+            has_avx2: true,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "x86_64",
+            pointer_bits: 64
+        ),
+        kernel_table: 2,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn make_sse2_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: true,
+            has_avx2: false,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "x86_64",
+            pointer_bits: 64
+        ),
+        kernel_table: 1,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn make_neon_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: false,
+            has_avx2: false,
+            has_neon: true,
+            has_rvv: false,
+            arch_name: "aarch64",
+            pointer_bits: 64
+        ),
+        kernel_table: 3,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn make_scalar_session() -> CpuSession:
+    CpuSession(
+        features: CpuFeatureSet(
+            has_sse2: false,
+            has_avx2: false,
+            has_neon: false,
+            has_rvv: false,
+            arch_name: "x86_64",
+            pointer_bits: 64
+        ),
+        kernel_table: 0,
+        ref_count: 1,
+        is_initialized: true,
+        generation: 1
+    )
+
+fn managed_retain_result(session: CpuSession, handle: BackendSessionHandle) -> i64:
+    # Attempt a managed retain.
+    # Returns new ref_count on success, or -1 if handle mode is PerfExclusive.
+    if handle.mode == BackendSessionMode.PerfExclusive:
+        return -1
+    session.retain()
+    session.ref_count
+
+fn handle_retain(handle: BackendSessionHandle) -> BackendSessionHandle:
+    """Return a new handle with incremented generation (mode preserved)."""
+    BackendSessionHandle(
+        id: handle.id,
+        kind: handle.kind,
+        mode: handle.mode,
+        device_name: handle.device_name,
+        generation: handle.generation + 1
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "BackendSession mode separation":
+
+    it "legacy no-session creates standalone state":
+        val h = make_legacy_handle()
+        expect(h.mode).to_equal(BackendSessionMode.LegacyNoSession)
+        expect(h.id).to_equal(1)
+        expect(h.device_name).to_equal("cpu-legacy")
+
+    it "null handle has legacy mode and zero id":
+        val h = make_null_handle()
+        expect(h.id).to_equal(0)
+        expect(h.mode).to_equal(BackendSessionMode.LegacyNoSession)
+
+    it "managed shared session initialises with ref_count 1":
+        val s = make_initialized_session()
+        expect(s.ref_count).to_equal(1)
+        expect(s.is_initialized).to_equal(true)
+
+    it "managed shared supports retain - ref_count increments":
+        val s = make_initialized_session()
+        val h = make_managed_handle()
+        val count_after = managed_retain_result(s, h)
+        expect(count_after).to_equal(2)
+
+    it "managed shared supports release - ref_count decrements":
+        val s = make_initialized_session()
+        s.retain()
+        expect(s.ref_count).to_equal(2)
+        s.release()
+        expect(s.ref_count).to_equal(1)
+
+    it "perf exclusive cannot be retained via managed path":
+        val s = make_initialized_session()
+        val h = make_perf_exclusive_handle()
+        val result = managed_retain_result(s, h)
+        expect(result).to_equal(-1)
+        expect(s.ref_count).to_equal(1)
+
+    it "two engine2d surfaces sharing one managed session share the same generation":
+        val shared = make_initialized_session()
+        val gen_before = shared.generation
+        val gen_after = shared.generation
+        expect(gen_before).to_equal(gen_after)
+        expect(gen_before).to_equal(1)
+
+    it "mode is immutable after handle creation - legacy stays legacy after retain":
+        val h = make_legacy_handle()
+        val h2 = handle_retain(h)
+        expect(h.mode).to_equal(BackendSessionMode.LegacyNoSession)
+        expect(h2.mode).to_equal(BackendSessionMode.LegacyNoSession)
+        expect(h2.generation).to_equal(1)
+
+    it "mode is immutable after handle creation - perf exclusive stays exclusive after retain":
+        val h = make_perf_exclusive_handle()
+        val h2 = handle_retain(h)
+        expect(h2.mode).to_equal(BackendSessionMode.PerfExclusive)
+
+    it "mode is immutable after handle creation - managed shared stays managed after retain":
+        val h = make_managed_handle()
+        val h2 = handle_retain(h)
+        expect(h2.mode).to_equal(BackendSessionMode.ManagedShared)
+
+    it "riscv32 session reports scalar backend (AC-7)":
+        val s = make_riscv32_session()
+        expect(s.selected_backend_name()).to_equal("scalar")
+        expect(s.features.arch_name).to_equal("riscv32")
+        expect(s.features.pointer_bits).to_equal(32)
+
+    it "riscv64 session reports scalar backend (AC-7)":
+        val s = make_riscv64_session()
+        expect(s.selected_backend_name()).to_equal("scalar")
+        expect(s.features.arch_name).to_equal("riscv64")
+        expect(s.features.pointer_bits).to_equal(64)
+
+    it "avx2 session selects avx2 backend name":
+        val s = make_avx2_session()
+        expect(s.selected_backend_name()).to_equal("avx2")
+
+    it "sse2-only session selects sse2 backend name":
+        val s = make_sse2_session()
+        expect(s.selected_backend_name()).to_equal("sse2")
+
+    it "neon session selects neon backend name":
+        val s = make_neon_session()
+        expect(s.selected_backend_name()).to_equal("neon")
+
+    it "no-simd session selects scalar backend name":
+        val s = make_scalar_session()
+        expect(s.selected_backend_name()).to_equal("scalar")
+
+    it "released session becomes invalid":
+        val s = make_initialized_session()
+        expect(s.is_valid()).to_equal(true)
+        s.release()
+        expect(s.is_valid()).to_equal(false)
+
+    it "uninitialised session is invalid":
+        val s = make_uninitialized_session()
+        expect(s.is_valid()).to_equal(false)
+        expect(s.is_initialized).to_equal(false)

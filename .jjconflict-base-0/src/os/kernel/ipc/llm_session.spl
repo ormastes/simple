@@ -1,0 +1,138 @@
+# LlmSession — Sealed, Ephemeral LLM-Role Session (OCap P1, Lane S-llm)
+#
+# The headline scenario: the SAME immutable binary (one `image_hash`) is run at
+# DIFFERENT privilege per LLM role — a "ticketing" instance and a "scheduling"
+# instance are the same code, distinguished ONLY by the capability pouch injected
+# at spawn. This module wraps `spawn_with_cspace` (the least-authority spawn
+# primitive, src/os/kernel/ipc/cspace_spawn.spl) as a named SESSION object so the
+# LLM-facing layer (OsMcpServer tool gating, src/os/services/llm/mcp_tool_gate.spl)
+# can carry a per-request identity + role instead of the current stateless,
+# ambient singleton.
+#
+# Design: doc/01_research/os/security/llm_role_cspace_container_design.md
+#   §3.3 (label->cap DI, `caps.get(label) -> nil` for un-granted authority),
+#   §3.4 (sealed mode — no ambient authority, set at spawn, irreversible).
+# Plan: doc/04_architecture/os/security/ocap_privilege_architecture.md (§P1).
+#
+# Properties this object guarantees:
+#   1. SEALED — `caps` is always `is_pledged: true`, so an un-granted capability
+#      check fails closed (deny-all), never the ambient allow-all of
+#      `CapabilitySet.full()`. There is no ambient-authority path out of a session.
+#   2. EPHEMERAL — a fresh `session_id` tags the child C-Space arena for O(1)
+#      teardown / `revoke_transitive` at end-of-request (research §3.2, §D.4).
+#   3. MONOTONIC — every grant is minted by `spawn_with_cspace`, which rejects any
+#      requested authority the parent's CURRENT arena does not hold (never the
+#      user's max). `rejected > 0` means the role recipe asked for more than the
+#      parent could delegate — a caller policy bug, surfaced not silently widened.
+#
+# Kernel-side, pure Simple — seed-run verifiable
+# (test/01_unit/os/security/llm_role_session_spec.spl).
+#
+# S-core integration point: a sibling lane is adding `Session { kind }`. When that
+# lands, `LlmSession` should become the `kind == Session.Llm` payload (or a thin
+# view over it). Until then this is a standalone wrapper that takes an EXPLICIT
+# parent `CapabilitySet`, so it does not block on S-core. The only coupling is the
+# `caps` field (a `CapabilitySet`) + `session_id` — both already the currency of
+# `spawn_with_cspace` / `CspaceMint`, so the merge is mechanical.
+
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, CspaceMint, spawn_with_cspace}
+
+# ============================================================================
+# LlmSession — one sealed, capability-scoped LLM role instance
+# ============================================================================
+
+struct LlmSession:
+    """A single LLM-role session: one sealed, ephemeral child C-Space minted from
+    a parent orchestrator pouch.
+
+    role         — human/role label ("ticketing", "scheduling"). NOT authority:
+                   two sessions with different roles but identical `image_hash`
+                   are the SAME binary; the role IS the injected `caps`, never a
+                   code branch. Carried only for logging / audit / manual.
+    session_id   — fresh arena tag for O(1) teardown (revoke_transitive on end).
+    image_hash   — the content-address of the immutable binary. Equal across roles
+                   is the headline property being proven.
+    caps         — the child CapabilitySet: EXACTLY the attenuated grants the
+                   parent was authorized to delegate. Always `is_pledged: true`.
+    sealed       — no ambient authority (cap_enter analogue, default-on, research
+                   §3.4). Always true for an LLM role; irreversible.
+    rejected     — count of role-recipe grants dropped for lack of parent
+                   authority (non-zero = the role asked for more than the parent
+                   holds — a monotonicity violation surfaced, not widened).
+    grant_labels — the role-neutral labels the recipe requested and the mint
+                   granted (the Tier-2 `caps.get(label)` surface, research §3.3).
+                   A label absent here == an authority this role was never given.
+    """
+    role: text
+    session_id: u64
+    image_hash: text
+    caps: CapabilitySet
+    sealed: bool
+    rejected: i64
+    grant_labels: [text]
+
+impl LlmSession:
+    fn can(kind: CapabilityKind) -> bool:
+        """The single authority question: does this session hold a capability that
+        authorizes `kind`?
+
+        Fail-closed twice over: a non-sealed session is a construction bug and is
+        DENIED unconditionally; otherwise the answer is the pledged-set check,
+        which for an empty pouch denies everything (never ambient allow-all)."""
+        if not self.sealed:
+            return false
+        self.caps.has(kind)
+
+    fn has_label(label: text) -> bool:
+        """True if the role was granted the authority behind `label`. The `caps.get`
+        DI property (research §3.3): an un-granted label is indistinguishable from
+        nonexistence, so a prompt-injected instance cannot even probe what it was
+        not given."""
+        for l in self.grant_labels:
+            if l == label:
+                return true
+        false
+
+    fn grant_count() -> i64:
+        """Number of capabilities actually minted into this session's C-Space."""
+        self.caps.caps.len()
+
+# ============================================================================
+# spawn_llm — mint a sealed LLM-role session from a parent pouch
+# ============================================================================
+
+fn spawn_llm(parent: CapabilitySet, spec: SpawnSpec, role: text, session_id: u64, child_owner: u64, gen_base: u64, tid_base: u64) -> LlmSession:
+    """Spawn one LLM-role session: `spawn_with_cspace` wrapped as a SEALED,
+    ephemeral child.
+
+    `spec` is the ROLE RECIPE — `spec.image_hash` pins the immutable binary
+    (identical across roles) and `spec.grants` is the pouch. The resulting session
+    holds EXACTLY the attenuated grants the parent's CURRENT arena authorized;
+    anything the parent lacks is dropped (fail-closed) and counted in `rejected`.
+    The child set is always pledged (`sealed: true`) — no ambient authority.
+
+    Two `spawn_llm` calls with the SAME `spec.image_hash` but different
+    `spec.grants` yield two sessions of the SAME binary at DIFFERENT privilege —
+    the role is the pouch, never a config file or an `if role == ...` branch."""
+    val mint: CspaceMint = spawn_with_cspace(parent, spec, child_owner, gen_base, tid_base)
+    var labels: [text] = []
+    for g in spec.grants:
+        labels.push(g.label)
+    LlmSession(
+        role: role,
+        session_id: session_id,
+        image_hash: spec.image_hash,
+        caps: mint.caps,
+        sealed: true,
+        rejected: mint.rejected,
+        grant_labels: labels
+    )
+
+fn spawn_llm_role(parent: CapabilitySet, role: text, image_hash: text, role_grants: [CapGrant], session_id: u64, child_owner: u64, gen_base: u64, tid_base: u64) -> LlmSession:
+    """Convenience form matching the Lane S-llm brief signature `spawn_llm(parent,
+    role_grants)` — builds a sandbox `SpawnSpec` from the raw role pouch and
+    delegates to `spawn_llm`. `image_hash` is explicit so the "same binary"
+    property stays visible at the call site."""
+    val spec = SpawnSpec(image_hash: image_hash, grants: role_grants, isolation: "sandbox", budget: 0u64)
+    spawn_llm(parent, spec, role, session_id, child_owner, gen_base, tid_base)

@@ -1,0 +1,118 @@
+# HTTP/2 Connection State — RFC 9113 §6.5 / §6.9
+#
+# Connection-level SETTINGS (typed) and connection-level flow-control window
+# accounting for the sync HTTP/2 tier. Per-stream state/flow-control lives in
+# h2_stream.spl.
+#
+# Scope:
+#   - Typed SETTINGS parameters with RFC defaults
+#   - Connection-level send/recv flow-control window accounting
+#   - WINDOW_UPDATE dispatch (stream_id == 0 -> connection; else per-stream)
+
+use std.nogc_sync_mut.http.h2.h2_stream.{
+    H2Stream, h2_stream_apply_window_update,
+    h2_default_initial_window_size, h2_max_window_size
+}
+
+# ============================================================================
+# Typed SETTINGS (RFC 9113 §6.5.2) with defaults
+# ============================================================================
+
+class H2Settings:
+    """Connection SETTINGS with RFC 9113 default values."""
+    header_table_size: i64        # default 4096
+    enable_push: i64              # default 1
+    max_concurrent_streams: i64   # default -1 (unlimited / no value)
+    initial_window_size: i64      # default 65535
+    max_frame_size: i64           # default 16384
+    max_header_list_size: i64     # default -1 (unlimited / no value)
+
+fn h2_settings_default() -> H2Settings:
+    return H2Settings(
+        header_table_size: 4096,
+        enable_push: 1,
+        max_concurrent_streams: -1,
+        initial_window_size: h2_default_initial_window_size(),
+        max_frame_size: 16384,
+        max_header_list_size: -1
+    )
+
+# ============================================================================
+# Connection struct
+# ============================================================================
+
+class H2Connection:
+    """Connection-level state: peer settings + connection flow-control windows."""
+    settings: H2Settings
+    send_window: i64    # connection-level send window (bytes we may send)
+    recv_window: i64    # connection-level recv window (bytes peer may send us)
+
+fn h2_connection_new() -> H2Connection:
+    val s = h2_settings_default()
+    val iw = h2_default_initial_window_size()
+    return H2Connection(
+        settings: s,
+        send_window: iw,
+        recv_window: iw
+    )
+
+# ----------------------------------------------------------------------------
+# Connection-level flow control (RFC 9113 §6.9)
+# ----------------------------------------------------------------------------
+
+# Can `n` bytes of DATA be sent at the connection level right now?
+fn h2_connection_can_send(conn: H2Connection, n: i64) -> bool:
+    return n >= 0 and conn.send_window >= n
+
+# Consume `n` bytes from the connection send window after emitting DATA.
+fn h2_connection_consume_send(conn: H2Connection, n: i64) -> H2Connection:
+    return H2Connection(
+        settings: conn.settings,
+        send_window: conn.send_window - n,
+        recv_window: conn.recv_window
+    )
+
+# Consume `n` bytes from the connection recv window after receiving DATA.
+fn h2_connection_consume_recv(conn: H2Connection, n: i64) -> H2Connection:
+    return H2Connection(
+        settings: conn.settings,
+        send_window: conn.send_window,
+        recv_window: conn.recv_window - n
+    )
+
+# Apply a connection-level WINDOW_UPDATE (stream_id == 0): grow the send window.
+# Returns nil on non-positive increment or overflow past 2^31-1.
+fn h2_connection_apply_window_update(conn: H2Connection, increment: i64) -> H2Connection?:
+    if increment <= 0:
+        return nil
+    val nw = conn.send_window + increment
+    if nw > h2_max_window_size():
+        return nil
+    return Some(H2Connection(
+        settings: conn.settings,
+        send_window: nw,
+        recv_window: conn.recv_window
+    ))
+
+# Dispatch a WINDOW_UPDATE addressed to a specific target.
+#   stream_id == 0 -> connection window (conn updated, stream returned unchanged)
+#   stream_id != 0 -> stream window     (stream updated, conn returned unchanged)
+# Returns nil if either underlying update is invalid (overflow / non-positive).
+fn h2_apply_window_update(conn: H2Connection, stream: H2Stream, stream_id: i64, increment: i64) -> (H2Connection, H2Stream)?:
+    if stream_id == 0:
+        val nc = h2_connection_apply_window_update(conn, increment)
+        if nc == nil:
+            return nil
+        val cc = nc ?? conn
+        return Some((cc, stream))
+    val ns = h2_stream_apply_window_update(stream, increment)
+    if ns == nil:
+        return nil
+    val ss = ns ?? stream
+    return Some((conn, ss))
+
+export H2Settings, H2Connection
+export h2_settings_default, h2_connection_new
+export h2_connection_can_send, h2_connection_consume_send, h2_connection_consume_recv
+export h2_connection_apply_window_update, h2_apply_window_update
+

@@ -1,0 +1,62 @@
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn llvm_pointer_return_output() -> text:
+    val translator = MirToLlvm.create("test.llvm.pointer_return", CodegenTarget.X86_64, nil)
+    translator.current_return_type = "ptr"
+    translator.translate_terminator(MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Int(0),
+        MirType.ptr(MirType.i64(), false)
+    )))))
+    translator.builder.build()
+
+describe "LLVM pointer return null":
+    it "emits null instead of integer zero for pointer returns":
+        val output = llvm_pointer_return_output()
+
+        expect(output).to_contain("ret ptr null")
+        expect(output.contains("ret ptr 0")).to_equal(false)
+
+    it "mirrors string globals into text for bootstrap flush":
+        val translator = MirToLlvm.create("test.llvm.pointer_return", CodegenTarget.X86_64, nil)
+        translator.translate_const(
+            LocalId(id: 1),
+            MirConstValue.Str("hello"),
+            MirType.ptr(MirType.i64(), false)
+        )
+
+        expect(translator.string_global_text).to_contain("@.str.0 = private unnamed_addr constant")
+        expect(translator.string_global_text).to_contain("hello\\00")
+
+    it "keeps libLLVM pointer zero constants on the null path":
+        extern fn rt_file_read_text(path: text) -> text
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_lib_translate_expr.spl") ?? ""
+
+        expect(source).to_contain("if v == 0 and llvm_get_type_kind(llvm_ty) == 14:")
+        expect(source).to_contain("llvm_const_null(llvm_ty)")
+
+    it "renders string function pointer calls as LLVM symbol callees":
+        val translator = MirToLlvm.create("test.llvm.direct_call", CodegenTarget.X86_64, nil)
+        val func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("callee_symbol"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        translator.translate_call(Some(LocalId(id: 1)), func, [])
+        val output = translator.builder.build()
+
+        expect(output).to_contain("%l1 = call i64 @callee_symbol()")
+        expect(output.contains("call i64 0()")).to_equal(false)
+
+    it "does not emit nil as a getelementptr element type":
+        val translator = MirToLlvm.create("test.llvm.gep", CodegenTarget.X86_64, nil)
+        translator.translate_gep(
+            LocalId(id: 1),
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+            [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))]
+        )
+        val output = translator.builder.build()
+
+        expect(output).to_contain("%l1 = getelementptr i64")
+        expect(output.contains("getelementptr nil")).to_equal(false)

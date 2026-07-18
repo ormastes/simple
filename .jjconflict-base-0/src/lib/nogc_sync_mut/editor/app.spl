@@ -1,0 +1,263 @@
+# EditorApp — main game editor application
+#
+# Owns the main loop. Hosts Engine2D/3D in tick mode, Blink HTML panels,
+# drawing tool, and audio mixer. Dispatches events between all three tools.
+
+use std.common.command.history.{CommandHistory}
+use std.common.editor.scene_format.{SceneFile, SceneNodeData}
+use std.common.drawing.vector.{SkRect}
+use std.nogc_sync_mut.editor.mode.{EditorMode}
+use std.nogc_sync_mut.editor.selection.{NodeId, SelectionState}
+use std.nogc_sync_mut.editor.typed_event_bus.{EditorEvent, EventQueue}
+use std.nogc_sync_mut.editor.panel.{PanelLayout, PanelKind}
+use std.nogc_sync_mut.editor.viewport.{Viewport}
+use std.nogc_sync_mut.editor.gizmo.{Gizmo, GizmoDelta, GizmoMode}
+use std.nogc_sync_mut.editor.panels.hierarchy.{HierarchyPanel, build_hierarchy_entries}
+use std.nogc_sync_mut.editor.panels.inspector.{InspectorPanel}
+use std.nogc_sync_mut.editor.panels.asset_browser.{AssetBrowserPanel}
+use std.nogc_sync_mut.editor.panels.audio_mixer.{AudioMixerPanel}
+use std.nogc_sync_mut.drawing.tool_app.{DrawingToolApp}
+
+# ============================================================================
+# EditorApp
+# ============================================================================
+
+class EditorApp:
+    mode: EditorMode
+    scene: SceneFile
+    selection: SelectionState
+    command_history: CommandHistory
+    event_queue: EventQueue
+    layout: PanelLayout
+    viewport: Viewport
+    gizmo: Gizmo
+    hierarchy: HierarchyPanel
+    inspector: InspectorPanel
+    asset_browser: AssetBrowserPanel
+    audio_mixer: AudioMixerPanel
+    drawing_tool: DrawingToolApp?
+    play_snapshot: text
+    running: bool
+    window_width: f64
+    window_height: f64
+
+impl EditorApp:
+    static fn new(width: f64, height: f64) -> EditorApp:
+        EditorApp(
+            mode: EditorMode.Edit2D,
+            scene: SceneFile.new("Untitled"),
+            selection: SelectionState.empty(),
+            command_history: CommandHistory.with_defaults(),
+            event_queue: EventQueue.new(),
+            layout: PanelLayout.default_layout(width, height),
+            viewport: Viewport.new(width - 450.0, height),
+            gizmo: Gizmo.new(),
+            hierarchy: HierarchyPanel.new(),
+            inspector: InspectorPanel.new(),
+            asset_browser: AssetBrowserPanel.new("assets"),
+            audio_mixer: AudioMixerPanel.new(),
+            drawing_tool: nil,
+            play_snapshot: "",
+            running: true,
+            window_width: width,
+            window_height: height
+        )
+
+    # ------------------------------------------------------------------
+    # Scene operations
+    # ------------------------------------------------------------------
+
+    me new_scene(name: text):
+        self.scene = SceneFile.new(name)
+        self.selection.clear()
+        self.inspector.clear()
+        self.command_history.clear()
+        self.refresh_hierarchy()
+        self.event_queue.push(EditorEvent.SceneLoaded(scene_path: name))
+
+    me load_scene(scene: SceneFile):
+        self.scene = scene
+        self.selection.clear()
+        self.inspector.clear()
+        self.refresh_hierarchy()
+        self.event_queue.push(EditorEvent.SceneLoaded(scene_path: scene.name))
+
+    me add_node(name: text, parent_id: i32) -> SceneNodeData:
+        val node = self.scene.add_node(name, parent_id)
+        val node_id = NodeId(id: node.node_id)
+        val parent_node_id = NodeId(id: parent_id)
+        self.event_queue.push(EditorEvent.SceneNodeAdded(
+            node_id: node_id,
+            parent_id: parent_node_id,
+            name: name
+        ))
+        self.refresh_hierarchy()
+        node
+
+    me remove_node(node_id: i32):
+        self.scene.remove_node(node_id)
+        val nid = NodeId(id: node_id)
+        self.selection.deselect(nid)
+        self.event_queue.push(EditorEvent.SceneNodeRemoved(node_id: nid))
+        self.inspector.clear()
+        self.refresh_hierarchy()
+
+    me select_node(node_id: i32):
+        val nid = NodeId(id: node_id)
+        self.selection.select(nid)
+        self.event_queue.push(EditorEvent.SelectionChanged(node_ids: [nid]))
+        if val Some(node) = self.scene.find_node(node_id):
+            self.inspector.inspect_node(node)
+            self.gizmo.set_origin(node.transform_x, node.transform_y)
+        self.refresh_hierarchy()
+
+    # ------------------------------------------------------------------
+    # Mode transitions
+    # ------------------------------------------------------------------
+
+    me enter_play_mode():
+        if self.mode.is_playing():
+            return
+        self.play_snapshot = self.scene.to_sdn()
+        if self.mode.is_2d():
+            self.mode = EditorMode.Play2D
+        else:
+            self.mode = EditorMode.Play3D
+        self.event_queue.push(EditorEvent.ModeChanged(mode_name: self.mode.to_text()))
+
+    me stop_play_mode():
+        if self.mode.is_editing():
+            return
+        if self.mode.is_2d():
+            self.mode = EditorMode.Edit2D
+        else:
+            self.mode = EditorMode.Edit3D
+        self.event_queue.push(EditorEvent.ModeChanged(mode_name: self.mode.to_text()))
+
+    me toggle_2d_3d():
+        if self.mode.is_playing():
+            return
+        if self.mode.is_2d():
+            self.mode = EditorMode.Edit3D
+        else:
+            self.mode = EditorMode.Edit2D
+        self.event_queue.push(EditorEvent.ModeChanged(mode_name: self.mode.to_text()))
+
+    # ------------------------------------------------------------------
+    # Drawing tool integration (Phase 5)
+    # ------------------------------------------------------------------
+
+    me open_drawing_tool(texture_path: text):
+        self.drawing_tool = DrawingToolApp.new(512, 512)
+        self.event_queue.push(EditorEvent.AssetOpened(
+            asset_path: texture_path,
+            asset_type: "texture"
+        ))
+
+    me close_drawing_tool():
+        if val Some(dt) = self.drawing_tool:
+            if dt.is_dirty():
+                self.event_queue.push(EditorEvent.TextureSaved(asset_path: ""))
+        self.drawing_tool = nil
+
+    fn has_drawing_tool(self) -> bool:
+        if val Some(_) = self.drawing_tool:
+            return true
+        false
+
+    # ------------------------------------------------------------------
+    # Audio integration (Phase 5)
+    # ------------------------------------------------------------------
+
+    me place_audio_source(node_id: i32, clip_path: text):
+        if val Some(node) = self.scene.find_node(node_id):
+            val nid = NodeId(id: node_id)
+            self.event_queue.push(EditorEvent.AudioSourcePlaced(
+                node_id: nid,
+                clip_path: clip_path
+            ))
+
+    # ------------------------------------------------------------------
+    # Undo/Redo
+    # ------------------------------------------------------------------
+
+    me undo():
+        if val Some(snapshot) = self.command_history.undo():
+            self.event_queue.push(EditorEvent.UndoPerformed(description: snapshot))
+
+    me redo():
+        if val Some(snapshot) = self.command_history.redo():
+            self.event_queue.push(EditorEvent.RedoPerformed(description: snapshot))
+
+    # ------------------------------------------------------------------
+    # Gizmo interaction
+    # ------------------------------------------------------------------
+
+    me set_gizmo_mode(mode: GizmoMode):
+        self.gizmo.set_mode(mode)
+
+    me apply_gizmo_delta(delta: GizmoDelta):
+        if not delta.has_change():
+            return
+        if self.selection.is_empty():
+            return
+        val primary = self.selection.primary_node
+        if primary.is_null():
+            return
+        self.event_queue.push(EditorEvent.PropertyChanged(
+            node_id: primary,
+            property: "transform",
+            value: "dx:{delta.dx} dy:{delta.dy}"
+        ))
+
+    # ------------------------------------------------------------------
+    # Event dispatch
+    # ------------------------------------------------------------------
+
+    me process_events():
+        val events = self.event_queue.drain()
+        for event in events:
+            self.dispatch_event(event)
+
+    me dispatch_event(event: EditorEvent):
+        match event:
+            EditorEvent.AssetOpened(asset_path, asset_type) =>
+                if asset_type == "texture":
+                    self.open_drawing_tool(asset_path)
+            EditorEvent.TextureSaved(asset_path) =>
+                self.close_drawing_tool()
+            EditorEvent.SelectionChanged(node_ids) =>
+                if node_ids.len() > 0:
+                    val first = node_ids[0]
+                    if val Some(node) = self.scene.find_node(first.id):
+                        self.inspector.inspect_node(node)
+                        self.gizmo.set_origin(node.transform_x, node.transform_y)
+            _ =>
+                pass_dn
+
+    # ------------------------------------------------------------------
+    # Frame update
+    # ------------------------------------------------------------------
+
+    me tick(dt_seconds: f64):
+        self.process_events()
+
+    me resize(width: f64, height: f64):
+        self.window_width = width
+        self.window_height = height
+        self.layout = PanelLayout.default_layout(width, height)
+        self.viewport.resize(width - 450.0, height)
+
+    fn is_running(self) -> bool:
+        self.running
+
+    me quit():
+        self.running = false
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    me refresh_hierarchy():
+        val entries = build_hierarchy_entries(self.scene, self.selection)
+        self.hierarchy.rebuild(entries)

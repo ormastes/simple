@@ -1,0 +1,92 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+CHECK_LEAN="$ROOT_DIR/scripts/check/check-lean-proofs.shs"
+
+require_theorem() {
+    file="$1"
+    name="$2"
+    if ! grep -Eq "^[[:space:]]*theorem[[:space:]]+$name([[:space:]]|:|\\(|$)" "$ROOT_DIR/$file"; then
+        echo "FAIL: missing theorem $name in $file" >&2
+        exit 1
+    fi
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+
+    assert_stripped_theorem_rejected() {
+        source_file="$1"
+        theorem="$2"
+        mutated="$tmp_dir/$theorem.lean"
+        grep -v "^theorem $theorem" "$ROOT_DIR/$source_file" >"$mutated"
+        if (ROOT_DIR="$tmp_dir" require_theorem "$(basename -- "$mutated")" "$theorem" 2>/dev/null); then
+            echo "STATUS: FAIL simpleos-boundary-formal-proofs self-test: require_theorem did not fail after stripping $theorem" >&2
+            exit 1
+        fi
+    }
+
+    assert_stripped_theorem_rejected \
+        "src/verification/ffi_contract/src/FfiContract.lean" \
+        "no_null_call"
+    assert_stripped_theorem_rejected \
+        "src/verification/process_lifecycle/src/ProcessLifecycle.lean" \
+        "exit_clears_resources"
+    assert_stripped_theorem_rejected \
+        "src/verification/process_lifecycle/src/ProcessLifecycle.lean" \
+        "wait_blocks_on_running"
+    assert_stripped_theorem_rejected \
+        "src/verification/process_lifecycle/src/ProcessLifecycle.lean" \
+        "reap_requires_exited"
+    assert_stripped_theorem_rejected \
+        "src/verification/process_lifecycle/src/ProcessLifecycle.lean" \
+        "no_zombie_persist_table"
+    assert_stripped_theorem_rejected \
+        "src/verification/process_lifecycle/src/ProcessLifecycle.lean" \
+        "live_orphan_not_reaped"
+    echo "STATUS: PASS simpleos-boundary-formal-proofs self-test (require_theorem correctly rejects a stripped theorem)"
+    exit 0
+fi
+
+sh "$CHECK_LEAN" --self-test >/dev/null
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/ffi_contract" "verification/ffi_contract"
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/process_lifecycle" "verification/process_lifecycle"
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/tls_isolation" "verification/tls_isolation"
+
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "no_null_call"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "undefined_rejects"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "accept_extend_defined"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "tag_of_packed"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "payload_of_packed"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "int_roundtrip"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "heap_roundtrip"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "no_double_untag"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "unbox_result_not_reboxable"
+require_theorem "src/verification/ffi_contract/src/FfiContract.lean" "int_never_heap"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "spawn_created"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "run_from_created"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "exit_from_running"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "exit_clears_resources"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "wait_returns_only_exited"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "wait_blocks_on_running"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "wait_blocks_on_created"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "reap_requires_exited"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "reap_yields_reaped"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "exit_advances"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "reap_advances"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "no_double_reap"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "reaped_terminal"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "no_zombie_persist"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "collect_monotone"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "no_zombie_persist_table"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "adopt_reparents"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "orphan_exited_reaped"
+require_theorem "src/verification/process_lifecycle/src/ProcessLifecycle.lean" "live_orphan_not_reaped"
+require_theorem "src/verification/tls_isolation/src/TlsIsolation.lean" "tls_read_own"
+require_theorem "src/verification/tls_isolation/src/TlsIsolation.lean" "tls_thread_isolated"
+require_theorem "src/verification/tls_isolation/src/TlsIsolation.lean" "tls_key_isolated"
+require_theorem "src/verification/tls_isolation/src/TlsIsolation.lean" "tls_writes_commute"
+
+echo "STATUS: PASS simpleos-boundary-formal-proofs"

@@ -1,0 +1,183 @@
+# OptionCE builder spec
+#
+# Tests for src/lib/option_ce.spl
+# Option computation expression builder - monadic nil propagation.
+
+use std.option_ce.{
+    option_ce_bind, option_ce_return, option_ce_zero,
+    option_ce_or_else, option_ce_map, option_ce_filter
+}
+
+describe "OptionCE builder":
+    describe "option_ce_zero":
+        it "returns nil":
+            expect(option_ce_zero()).to_be_nil()
+
+    describe "option_ce_return":
+        it "returns integer value unchanged":
+            expect(option_ce_return(99)).to_equal(99)
+
+        it "returns text value unchanged":
+            expect(option_ce_return("hello")).to_equal("hello")
+
+        it "returns zero unchanged":
+            expect(option_ce_return(0)).to_equal(0)
+
+    describe "option_ce_bind":
+        it "calls continuation on non-nil value":
+            val result = option_ce_bind("value", fn(v):
+                "wrapped: {v}"
+            )
+            expect(result).to_equal("wrapped: value")
+
+        it "short-circuits on nil":
+            val result = option_ce_bind(nil, fn(v):
+                "should not reach"
+            )
+            expect(result).to_be_nil()
+
+        it "passes integer through to continuation":
+            val result = option_ce_bind(42, fn(n):
+                n * 2
+            )
+            expect(result).to_equal(84)
+
+        it "chains two binds successfully":
+            val result = option_ce_bind("user", fn(u):
+                option_ce_bind("profile", fn(p):
+                    "{u}:{p}"
+                )
+            )
+            expect(result).to_equal("user:profile")
+
+        it "chain short-circuits when inner bind is nil":
+            val result = option_ce_bind("user", fn(u):
+                option_ce_bind(nil, fn(p):
+                    "{u}:{p}"
+                )
+            )
+            expect(result).to_be_nil()
+
+        it "chain short-circuits on first nil":
+            val result = option_ce_bind(nil, fn(u):
+                option_ce_bind("profile", fn(p):
+                    "{u}:{p}"
+                )
+            )
+            expect(result).to_be_nil()
+
+        it "chains three levels successfully":
+            val result = option_ce_bind("a", fn(x):
+                option_ce_bind("b", fn(y):
+                    option_ce_bind("c", fn(z):
+                        "{x}{y}{z}"
+                    )
+                )
+            )
+            expect(result).to_equal("abc")
+
+    describe "option_ce_or_else":
+        it "returns value when non-nil":
+            val result = option_ce_or_else("found", fn():
+                "default"
+            )
+            expect(result).to_equal("found")
+
+        it "calls alternative when nil":
+            val result = option_ce_or_else(nil, fn():
+                "default"
+            )
+            expect(result).to_equal("default")
+
+        it "returns integer value when non-nil":
+            val result = option_ce_or_else(5, fn():
+                0
+            )
+            expect(result).to_equal(5)
+
+        it "calls alternative returning integer when nil":
+            val result = option_ce_or_else(nil, fn():
+                42
+            )
+            expect(result).to_equal(42)
+
+    describe "option_ce_map":
+        it "transforms a non-nil text value":
+            val result = option_ce_map("hello", fn(v):
+                "mapped: {v}"
+            )
+            expect(result).to_equal("mapped: hello")
+
+        it "transforms a non-nil integer value":
+            val result = option_ce_map(5, fn(v):
+                v * 3
+            )
+            expect(result).to_equal(15)
+
+        it "returns nil for nil input":
+            val result = option_ce_map(nil, fn(v):
+                "should not reach"
+            )
+            expect(result).to_be_nil()
+
+        it "can chain map operations via bind":
+            val step1 = option_ce_map("hello", fn(v):
+                v.len()
+            )
+            val step2 = option_ce_map(step1, fn(n):
+                n * 2
+            )
+            expect(step2).to_equal(10)
+
+    describe "option_ce_filter":
+        it "keeps value when predicate is true":
+            val result = option_ce_filter("hello", fn(v):
+                v.len() > 0
+            )
+            expect(result).to_equal("hello")
+
+        it "returns nil when predicate is false":
+            val result = option_ce_filter("hi", fn(v):
+                v.len() > 10
+            )
+            expect(result).to_be_nil()
+
+        it "passes through nil input":
+            val result = option_ce_filter(nil, fn(v):
+                true
+            )
+            expect(result).to_be_nil()
+
+        it "works with integer predicate":
+            val result = option_ce_filter(42, fn(n):
+                n > 10
+            )
+            expect(result).to_equal(42)
+
+        it "filters out integer when predicate fails":
+            val result = option_ce_filter(3, fn(n):
+                n > 10
+            )
+            expect(result).to_be_nil()
+
+    describe "composition patterns":
+        it "bind then map succeeds":
+            val bound = option_ce_bind("hello", fn(v): v)
+            val result = option_ce_map(bound, fn(v):
+                v.len()
+            )
+            expect(result).to_equal(5)
+
+        it "bind then filter on matching predicate":
+            val bound = option_ce_bind("hello", fn(v): v)
+            val result = option_ce_filter(bound, fn(v):
+                v.len() > 3
+            )
+            expect(result).to_equal("hello")
+
+        it "or_else after nil bind returns alternative":
+            val bound = option_ce_bind(nil, fn(v): v)
+            val result = option_ce_or_else(bound, fn():
+                "fallback"
+            )
+            expect(result).to_equal("fallback")

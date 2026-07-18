@@ -1,0 +1,284 @@
+"""
+# Network API
+
+Simple-script network API for the browser engine.
+Provides fetch() and WebSocket abstractions.
+
+JS Equivalent → Simple Function:
+    fetch()                    → fetch_send()
+    new Request()              → fetch_create_request()
+    request.headers.set()      → fetch_set_header()
+    new WebSocket()            → websocket_connect()
+    ws.send()                  → websocket_send()
+    ws.close()                 → websocket_close()
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, FetchResponse, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.common.base_encoding.utilities.{bytes_to_text, text_to_bytes}
+
+pub const WEBSOCKET_CONNECTING: i32 = 0
+pub const WEBSOCKET_OPEN: i32 = 1
+pub const WEBSOCKET_CLOSING: i32 = 2
+pub const WEBSOCKET_CLOSED: i32 = 3
+pub const WEBSOCKET_CLOSE_NORMAL: i32 = 1000
+pub const WEBSOCKET_CLOSE_NO_STATUS: i32 = 1005
+
+# =========================================================================
+# Fetch API — Simplified request/response types for script use
+# =========================================================================
+
+pub class ScriptFetchRequest:
+    """A simplified fetch request for script-level use.
+
+    Fields:
+        url     - target URL string
+        method  - HTTP method (GET, POST, etc.)
+        headers - flat [name, value, name, value, ...] pairs
+        body    - request body text
+    """
+    url: text
+    method: text
+    headers: [text]
+    body: text
+
+pub class ScriptFetchResponse:
+    """A simplified fetch response for script-level use.
+
+    Fields:
+        status  - HTTP status code
+        headers - flat [name, value, name, value, ...] pairs
+        body    - response body as text
+        ok      - true if status is 200-299
+    """
+    status: i32
+    headers: [text]
+    body: text
+    ok: bool
+
+pub fn fetch_create_request(url: text, method: text) -> ScriptFetchRequest:
+    """Create a new fetch request."""
+    ScriptFetchRequest(url: url, method: method, headers: [], body: "")
+
+pub fn fetch_set_header(req: ScriptFetchRequest, name: text, value: text) -> ScriptFetchRequest:
+    """Add a header to the fetch request."""
+    var next = req
+    next.headers.push(name)
+    next.headers.push(value)
+    next
+
+pub fn fetch_send(req: ScriptFetchRequest) -> ScriptFetchResponse:
+    """Return a fail-closed no-dispatch response.
+
+    Real network I/O is only available through an explicit host dispatch.
+    """
+    ScriptFetchResponse(status: 0, headers: [], body: "", ok: false)
+
+pub class ScriptStaticFetchDispatch:
+    status: i32
+    headers_text: text
+    body_text: text
+
+    static fn create(status: i32, headers_text: text, body_text: text) -> ScriptStaticFetchDispatch:
+        ScriptStaticFetchDispatch(status: status, headers_text: headers_text, body_text: body_text)
+
+    fn dispatch(request: FetchRequest) -> FetchResponse:
+        FetchResponse(status: self.status as i64, headers: self.headers_text, body: text_to_bytes(self.body_text))
+
+pub fn fetch_send_with_dispatch(req: ScriptFetchRequest, dispatch: ScriptStaticFetchDispatch) -> ScriptFetchResponse:
+    val response = dispatch.dispatch(script_fetch_to_net_request(req))
+    script_response_from_net(response)
+
+pub fn fetch_send_with_optional_dispatch(req: ScriptFetchRequest, dispatch: ScriptStaticFetchDispatch?) -> ScriptFetchResponse:
+    if val d = dispatch:
+        return fetch_send_with_dispatch(req, d)
+    fetch_send(req)
+
+pub fn script_fetch_to_net_request(req: ScriptFetchRequest) -> FetchRequest:
+    FetchRequest(
+        method: req.method,
+        url: script_parse_url(req.url),
+        headers: script_headers_to_text(req.headers),
+        body: text_to_bytes(req.body),
+        mode: RequestMode.Cors,
+        credentials: "same-origin"
+    )
+
+pub fn script_response_from_net(response: FetchResponse) -> ScriptFetchResponse:
+    """Convert the canonical network response into the script-facing shape."""
+    val status = response.status as i32
+    ScriptFetchResponse(
+        status: status,
+        headers: script_headers_from_text(response.headers),
+        body: bytes_to_text(response.body),
+        ok: status >= 200 and status <= 299
+    )
+
+fn script_headers_to_text(headers: [text]) -> text:
+    var lines: [text] = []
+    var i = 0
+    while i + 1 < headers.len():
+        lines.push(headers[i] + ": " + headers[i + 1])
+        i = i + 2
+    lines.join("\n")
+
+fn script_headers_from_text(headers_text: text) -> [text]:
+    var out: [text] = []
+    val lines = headers_text.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val sep = trimmed.index_of(":")
+        if sep < 0:
+            out.push(trimmed)
+            out.push("")
+        else:
+            out.push(trimmed.substring(0, sep).trim())
+            out.push(trimmed.substring(sep + 1, trimmed.len()).trim())
+    out
+
+fn script_parse_url(raw: text) -> Url:
+    var scheme = "http"
+    var remaining = raw
+    val scheme_end = remaining.index_of("://")
+    if scheme_end >= 0:
+        scheme = remaining.substring(0, scheme_end)
+        remaining = remaining.substring(scheme_end + 3, remaining.len())
+    var fragment = ""
+    val fragment_start = remaining.index_of("#")
+    if fragment_start >= 0:
+        fragment = remaining.substring(fragment_start + 1, remaining.len())
+        remaining = remaining.substring(0, fragment_start)
+    var query = ""
+    val query_start = remaining.index_of("?")
+    if query_start >= 0:
+        query = remaining.substring(query_start + 1, remaining.len())
+        remaining = remaining.substring(0, query_start)
+    var path = "/"
+    val path_start = remaining.index_of("/")
+    if path_start >= 0:
+        path = remaining.substring(path_start, remaining.len())
+        remaining = remaining.substring(0, path_start)
+    var host = remaining
+    var port: i64 = 80
+    if scheme == "https" or scheme == "wss":
+        port = 443
+    val port_start = remaining.index_of(":")
+    if port_start >= 0:
+        host = remaining.substring(0, port_start)
+        port = remaining.substring(port_start + 1, remaining.len()).parse_int() ?? port
+    Url(scheme: scheme, host: host, port: port, path: path, query: query, fragment: fragment)
+
+# =========================================================================
+# WebSocket API
+# =========================================================================
+
+pub class WebSocketConnection:
+    """An in-memory WebSocket connection model.
+
+    Fields:
+        url      - connection URL
+        state    - connection state: "connecting", "open", "closing", "closed"
+        messages - received message buffer
+    """
+    url: text
+    state: text
+    ready_state: i32
+    buffered_amount: i32
+    protocol: text
+    extensions: text
+    messages: [text]
+    received_messages: [text]
+    close_code: i32
+    close_reason: text
+    close_was_clean: bool
+
+pub class WebSocketReceiveResult:
+    connection: WebSocketConnection
+    has_message: bool
+    message: text
+
+pub fn websocket_connect(url: text) -> WebSocketConnection:
+    """Create an in-memory WebSocket connection.
+
+    This validates URL shape but performs no network I/O.
+    """
+    websocket_connect_with_protocols(url, [])
+
+pub fn websocket_connect_with_protocols(url: text, protocols: [text]) -> WebSocketConnection:
+    val valid = websocket_url_is_valid(url)
+    val state = if valid: "open" else: "closed"
+    val ready = if valid: WEBSOCKET_OPEN else: WEBSOCKET_CLOSED
+    WebSocketConnection(
+        url: url,
+        state: state,
+        ready_state: ready,
+        buffered_amount: 0,
+        protocol: if valid: websocket_select_protocol(protocols) else: "",
+        extensions: "",
+        messages: [],
+        received_messages: [],
+        close_code: WEBSOCKET_CLOSE_NO_STATUS,
+        close_reason: "",
+        close_was_clean: false
+    )
+
+fn websocket_url_is_valid(url: text) -> bool:
+    (url.starts_with("ws://") or url.starts_with("wss://")) and not url.contains("#")
+
+fn websocket_select_protocol(protocols: [text]) -> text:
+    for protocol in protocols:
+        if protocol != "" and protocol == protocol.trim() and not protocol.contains(" "):
+            return protocol
+    ""
+
+pub fn websocket_send(ws: WebSocketConnection, msg: text) -> WebSocketConnection:
+    """Send a message through the WebSocket.
+
+    Stores sent messages on the in-memory connection when open.
+    """
+    var next = ws
+    if next.ready_state != WEBSOCKET_OPEN:
+        return next
+    next.messages.push(msg)
+    next.buffered_amount = next.buffered_amount + msg.len()
+    next
+
+pub fn websocket_close(ws: WebSocketConnection) -> WebSocketConnection:
+    """Close the WebSocket connection."""
+    websocket_close_with_code(ws, WEBSOCKET_CLOSE_NORMAL, "")
+
+pub fn websocket_close_with_code(ws: WebSocketConnection, code: i32, reason: text) -> WebSocketConnection:
+    var next = ws
+    next.state = "closed"
+    next.ready_state = WEBSOCKET_CLOSED
+    if code == 1000 or (code >= 3000 and code <= 4999):
+        next.close_code = code
+        next.close_reason = reason
+        next.close_was_clean = true
+    else:
+        next.close_code = WEBSOCKET_CLOSE_NO_STATUS
+        next.close_reason = ""
+        next.close_was_clean = false
+    next
+
+pub fn websocket_queue_received(ws: WebSocketConnection, msg: text) -> WebSocketConnection:
+    var next = ws
+    if next.ready_state != WEBSOCKET_OPEN:
+        return next
+    next.received_messages.push(msg)
+    next
+
+pub fn websocket_receive_count(ws: WebSocketConnection) -> i32:
+    ws.received_messages.len()
+
+pub fn websocket_receive_next(ws: WebSocketConnection) -> WebSocketReceiveResult:
+    var next = ws
+    if next.received_messages.len() == 0:
+        return WebSocketReceiveResult(connection: next, has_message: false, message: "")
+    val msg = next.received_messages[0]
+    next.received_messages.remove(0)
+    WebSocketReceiveResult(connection: next, has_message: true, message: msg)

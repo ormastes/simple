@@ -1,0 +1,64 @@
+# HWIR Legality Lint — stable diagnostics for hardware lowering constraints.
+
+use compiler.mir.hwir.types.{HwModule, HwSignal}
+
+class HwirLegalityDiagnostic:
+    """Stable HWIR legality diagnostic."""
+    code: text
+    severity: text
+    message: text
+    node_id: text
+    hint: text
+
+    me to_text() -> text:
+        return "[" + self.code + "] " + self.severity + ": " + self.message
+
+    static fn error(code: text, message: text, node_id: text, hint: text) -> HwirLegalityDiagnostic:
+        return HwirLegalityDiagnostic(code: code, severity: "ERROR", message: message, node_id: node_id, hint: hint)
+
+fn hwir_float_error(node_id: text) -> HwirLegalityDiagnostic:
+    return HwirLegalityDiagnostic.error("HWIR-E-FLOAT", "floating point operations are not legal in production HWIR", node_id, "use fixed-point or integer hardware types")
+
+fn hwir_pointer_error(node_id: text) -> HwirLegalityDiagnostic:
+    return HwirLegalityDiagnostic.error("HWIR-E-PTR", "pointers are not legal in production HWIR", node_id, "replace pointer access with explicit ports, memories, or registers")
+
+fn hwir_unbounded_loop_error(node_id: text) -> HwirLegalityDiagnostic:
+    return HwirLegalityDiagnostic.error("HWIR-E-UNBOUNDED", "unbounded loops are not legal in production HWIR", node_id, "add a static bound or rewrite as an FSM")
+
+fn hwir_multi_driver_error(node_id: text) -> HwirLegalityDiagnostic:
+    return HwirLegalityDiagnostic.error("HWIR-E-MULTI-DRIVER", "signal has multiple drivers", node_id, "merge assignments through one selected driver or mux")
+
+fn hwir_comb_loop_error(node_id: text) -> HwirLegalityDiagnostic:
+    return HwirLegalityDiagnostic.error("HWIR-E-COMB-LOOP", "combinational feedback loop detected", node_id, "insert a register or break the feedback path")
+
+class HwirLegalitySummary:
+    """Compact legality result for an HWIR module."""
+    module_name: text
+    diagnostic_count: i32
+    first_code: text
+    is_legal: bool
+
+    static fn pass(module_name: text) -> HwirLegalitySummary:
+        return HwirLegalitySummary(module_name: module_name, diagnostic_count: 0, first_code: "", is_legal: true)
+
+    static fn fail(module_name: text, count: i32, first_code: text) -> HwirLegalitySummary:
+        return HwirLegalitySummary(module_name: module_name, diagnostic_count: count, first_code: first_code, is_legal: false)
+
+fn check_hwir_signal_legality(signal: HwSignal) -> [HwirLegalityDiagnostic]:
+    """Check signal-level legality conditions currently expressible in HWIR."""
+    var diagnostics: [HwirLegalityDiagnostic] = []
+    if not signal.has_single_driver():
+        diagnostics.push(hwir_multi_driver_error(signal.name))
+    diagnostics
+
+fn check_hwir_module_legality(module: HwModule) -> HwirLegalitySummary:
+    """Return a compact summary for module-level HWIR invariants.
+
+    Full expression and control-flow checks are added when MIR instructions are
+    attached to HWIR nodes; this foundation slice validates stable module shape.
+    """
+    if module.clock_domain_count < 1:
+        return HwirLegalitySummary.fail(module.name, 1, "HWIR-E-COMB-LOOP")
+    if module.signal_count < 0 or module.register_count < 0 or module.port_count < 0:
+        return HwirLegalitySummary.fail(module.name, 1, "HWIR-E-MULTI-DRIVER")
+    return HwirLegalitySummary.pass(module.name)

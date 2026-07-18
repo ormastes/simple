@@ -1,0 +1,114 @@
+## E2E gate: filesystem-installed Simple interpreter and native compiler.
+##
+## This is deliberately live and fail-closed. The caller must set
+## SIMPLEOS_SIMPLE_FS_E2E=1 and provide SIMPLEOS_DISK_IMAGE (or the default
+## build/os/simpleos_disk.img). Missing live prerequisites are test failures,
+## never skipped evidence.
+##
+## @platform: baremetal(x86_64)
+## @tag: os,qemu,e2e,simple-from-fs
+# @req REQ-005
+## @evidence-display: links
+## codex-system-test
+
+use std.spec.*
+use std.io_runtime.{env_get, file_exists}
+use os.qemu_runner.{boot_disk_image_serial}
+
+val MARKER_STARTED = "SIMPLEOS_SMOKE_INIT_STARTED"
+val MARKER_VERSION = "SIMPLE_FROM_FS_VERSION_OK"
+val MARKER_INTERPRETER = "TRIVIAL_INTERPRETER_OK"
+val MARKER_NATIVE = "TRIVIAL_SELFHOST_OK"
+val MARKER_DONE = "SIMPLEOS_SMOKE_INIT_DONE"
+val VERSION_OUTPUT = "Simple v1.0.0-beta"
+val HELLO_OUTPUT = "hello from self-host"
+
+var _serial_cache: text = ""
+var _boot_attempted: bool = false
+
+fn _gate() -> text:
+    env_get("SIMPLEOS_SIMPLE_FS_E2E")
+
+fn _disk_image_path() -> text:
+    val override = env_get("SIMPLEOS_DISK_IMAGE")
+    if override == "":
+        return "build/os/simpleos_disk.img"
+    override
+
+fn _marker_line_index(serial: text, marker: text) -> i64:
+    var line_index: i64 = 0
+    val normalized = serial.replace("\r", "")
+    val lines = normalized.split("\n")
+    for line in lines:
+        if line == marker:
+            return line_index
+        line_index = line_index + 1
+    -1
+
+fn _line_index_after(serial: text, expected: text, after: i64) -> i64:
+    var line_index: i64 = 0
+    val normalized = serial.replace("\r", "")
+    val lines = normalized.split("\n")
+    for line in lines:
+        if line_index > after and line == expected:
+            return line_index
+        line_index = line_index + 1
+    -1
+
+fn ensure_serial() -> text:
+    if _boot_attempted:
+        return _serial_cache
+    _boot_attempted = true
+    if _gate() != "1":
+        _serial_cache = "[live-gate-error: SIMPLEOS_SIMPLE_FS_E2E must equal 1]"
+        return _serial_cache
+    val image = _disk_image_path()
+    if not file_exists(image):
+        _serial_cache = "[boot-error: disk image not found: " + image + "]"
+        return _serial_cache
+    val (stdout, stderr, exit_code) = boot_disk_image_serial(image, 240000)
+    _serial_cache = stdout + stderr
+    if _serial_cache == "":
+        _serial_cache = "[boot-error: empty serial output, exit=" + exit_code.to_text() + "]"
+    _serial_cache
+
+describe "E2E: Simple compiler runs from the SimpleOS filesystem":
+    """
+    Live QEMU evidence for the filesystem-installed Simple CLI. The guest must
+    emit exact markers for version, interpreted execution, native compilation,
+    native execution, and clean init completion.
+    """
+
+    it "should require an explicit live gate and disk image":
+        step("Require SIMPLEOS_SIMPLE_FS_E2E=1")
+        expect(_gate()).to_equal("1")
+        step("Require the selected SimpleOS disk image")
+        expect(file_exists(_disk_image_path())).to_equal(true)
+
+    it "should run the filesystem Simple version command":
+        step("Boot the selected SimpleOS disk image once")
+        val serial = ensure_serial()
+        step("Observe the exact smoke-init start marker")
+        val started_line = _marker_line_index(serial, MARKER_STARTED)
+        expect(started_line).to_be_greater_than(-1)
+        step("Observe the child Simple version output")
+        val version_output_line = _line_index_after(serial, VERSION_OUTPUT, started_line)
+        expect(version_output_line).to_be_greater_than(started_line)
+        step("Observe the exact filesystem Simple version marker")
+        expect(_marker_line_index(serial, MARKER_VERSION)).to_be_greater_than(version_output_line)
+
+    it "should interpret before native-building and running the same source":
+        step("Reuse the live SimpleOS serial capture")
+        val serial = ensure_serial()
+        step("Observe the exact interpreter success marker")
+        val interpreted_output_line = _line_index_after(serial, HELLO_OUTPUT, -1)
+        expect(interpreted_output_line).to_be_greater_than(-1)
+        val interpreter_line = _marker_line_index(serial, MARKER_INTERPRETER)
+        expect(interpreter_line).to_be_greater_than(interpreted_output_line)
+        step("Observe the exact native compile-and-run success marker")
+        val native_output_line = _line_index_after(serial, HELLO_OUTPUT, interpreter_line)
+        expect(native_output_line).to_be_greater_than(interpreter_line)
+        val native_line = _marker_line_index(serial, MARKER_NATIVE)
+        expect(native_line).to_be_greater_than(native_output_line)
+        step("Observe the exact smoke-init completion marker")
+        expect(_marker_line_index(serial, MARKER_DONE)).to_be_greater_than(native_line)

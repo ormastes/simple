@@ -1,0 +1,687 @@
+# DOM Color Parsing Helpers
+#
+# Pure color parsing functions extracted from dom.spl.
+# No dependencies on BeDomNode or other browser-engine types.
+
+use common.string_builder.{StringBuilder}
+
+pub fn parse_color_value(s: text) -> u32:
+    """Parse a color string to a u32 RGBA value.
+    Supports: '#RRGGBB', '#RRGGBBAA', '#RGB', 'rgb(r,g,b)',
+    'rgba(r,g,b,a)', 'hsl(h,s%,l%)', 'hsla(h,s%,l%,a)',
+    modern space-separated syntax, named colors, currentColor,
+    and decimal numbers.
+    """
+    val cleaned = strip_css_comments(s.trim())
+    if cleaned.len() == 0:
+        return 0x000000FF
+
+    val lower = cleaned.lower()
+
+    if lower == "currentcolor":
+        # Sentinel: caller should resolve. Return black as fallback.
+        return 0x000000FF
+
+    if cleaned.starts_with("#"):
+        return parse_hex_color(cleaned)
+
+    # hsl/hsla before rgb so they're matched first
+    if lower.starts_with("hsla(") and cleaned.ends_with(")"):
+        return parse_hsl_func(cleaned, true)
+    if lower.starts_with("hsl(") and cleaned.ends_with(")"):
+        return parse_hsl_func(cleaned, false)
+
+    # rgba/rgb — unified parser handles both
+    if lower.starts_with("rgba(") and cleaned.ends_with(")"):
+        val rgba_inner = cleaned.slice(5, cleaned.len() - 1)
+        return parse_rgb_unified(rgba_inner)
+    if lower.starts_with("rgb(") and cleaned.ends_with(")"):
+        val rgb_inner = cleaned.slice(4, cleaned.len() - 1)
+        return parse_rgb_unified(rgb_inner)
+
+    if cleaned.starts_with("var("):
+        return 0x00000000
+
+    val named = named_color_to_u32(cleaned)
+    if named != nil:
+        val c = named ?? 0
+        return c
+
+    val num = cleaned.parse_i64()
+    if num != nil:
+        val nval = num ?? 0
+        return nval.to_u32()
+    return 0x000000FF
+
+pub fn strip_css_comments(s: text) -> text:
+    """Remove CSS comments /* ... */ from a string."""
+    val sb = StringBuilder.new()
+    var i = 0
+    while i < s.len():
+        if i + 1 < s.len() and s.slice(i, i + 2) == "/*":
+            val end = dom_find_str(s, "*/", i + 2)
+            if end < 999999999:
+                i = end + 2
+            else:
+                i = s.len()
+        else:
+            sb.push(s.char_at(i))
+            i = i + 1
+    sb.to_text()
+
+pub fn dom_find_str(s: text, needle: text, start: i64) -> i64:
+    val nlen = needle.len()
+    var i = start
+    val slen = s.len()
+    while i + nlen <= slen:
+        if s.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    999999999
+
+pub fn parse_hex_color(s: text) -> u32:
+    """Parse a hex color string like '#RRGGBB', '#RRGGBBAA', '#RGB', or '#RGBA' to u32 RGBA."""
+    val hex = s.slice(1, s.len())
+    if hex.len() == 8:
+        val r = hex_byte(hex.slice(0, 2))
+        val g = hex_byte(hex.slice(2, 4))
+        val b = hex_byte(hex.slice(4, 6))
+        val a = hex_byte(hex.slice(6, 8))
+        return (r * 16777216) + (g * 65536) + (b * 256) + a
+    if hex.len() == 6:
+        val r = hex_byte(hex.slice(0, 2))
+        val g = hex_byte(hex.slice(2, 4))
+        val b = hex_byte(hex.slice(4, 6))
+        return (r * 16777216) + (g * 65536) + (b * 256) + 255
+    elif hex.len() == 3:
+        val r = hex_nibble(hex.slice(0, 1))
+        val g = hex_nibble(hex.slice(1, 2))
+        val b = hex_nibble(hex.slice(2, 3))
+        val rr = r * 17
+        val gg = g * 17
+        val bb = b * 17
+        return (rr * 16777216) + (gg * 65536) + (bb * 256) + 255
+    elif hex.len() == 4:
+        val r = hex_nibble(hex.slice(0, 1))
+        val g = hex_nibble(hex.slice(1, 2))
+        val b = hex_nibble(hex.slice(2, 3))
+        val a = hex_nibble(hex.slice(3, 4))
+        val rr = r * 17
+        val gg = g * 17
+        val bb = b * 17
+        val aa = a * 17
+        return (rr * 16777216) + (gg * 65536) + (bb * 256) + aa
+    return 0x000000FF
+
+pub fn parse_rgb_unified(inner_raw: text) -> u32:
+    """Parse rgb/rgba inner content. Supports:
+    - Comma-separated: '128, 0, 255' or '128, 0, 255, 0.5'
+    - Space-separated: '128 0 255' or '128 0 255 / 0.5'
+    - Percentage values: '50% 0% 100%' or '50%, 0%, 100%'
+    """
+    val inner_stripped = strip_css_comments(inner_raw)
+    val inner = inner_stripped.trim()
+    if inner.len() == 0:
+        return 0x000000FF
+
+    # Determine separator: comma or space
+    var has_comma = false
+    var idx_1 = 0
+    val inner_len = inner.len()
+    while idx_1 < inner_len:
+        val ch = inner.char_at(idx_1)
+        if ch == ",":
+            has_comma = true
+        idx_1 = idx_1 + 1
+
+    var color_parts: [text] = []
+    var alpha_str = ""
+
+    if has_comma:
+        val comma_parts = split_comma(inner)
+        color_parts = comma_parts
+    else:
+        # Space-separated, may have / for alpha
+        val slash_pos = dom_find_str(inner, "/", 0)
+        if slash_pos < 999999999:
+            val before_slash_raw = inner.slice(0, slash_pos)
+            val before_slash = before_slash_raw.trim()
+            val alpha_raw = inner.slice(slash_pos + 1, inner.len())
+            alpha_str = alpha_raw.trim()
+            color_parts = dom_split_ws(before_slash)
+        else:
+            color_parts = dom_split_ws(inner)
+
+    if color_parts.len() < 3:
+        return 0x000000FF
+
+    val r_str = color_parts[0].trim()
+    val r = parse_color_component(r_str)
+    val g_str = color_parts[1].trim()
+    val g = parse_color_component(g_str)
+    val b_str = color_parts[2].trim()
+    val b = parse_color_component(b_str)
+
+    var a: u32 = 255
+    if alpha_str.len() > 0:
+        val a_trimmed = alpha_str.trim()
+        a = parse_alpha_component(a_trimmed)
+    elif color_parts.len() >= 4:
+        val a4_str = color_parts[3].trim()
+        a = parse_alpha_component(a4_str)
+
+    return (r * 16777216) + (g * 65536) + (b * 256) + a
+
+pub fn parse_color_component(s: text) -> u32:
+    """Parse a single color component (integer 0-255 or percentage 0%-100%)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        # Parse percentage: manual integer parse of number before %
+        val pct_str = trimmed.slice(0, trimmed.len() - 1)
+        val pct_i = pcc_parse_int(pct_str)
+        var v = (pct_i * 255) / 100
+        if v < 0:
+            v = 0
+        if v > 255:
+            v = 255
+        return v.to_u32()
+    # Parse integer directly — avoid f64? optional bug in Cranelift
+    val n = pcc_parse_int(trimmed)
+    if n < 0:
+        return 0
+    if n > 255:
+        return 255
+    return n.to_u32()
+
+pub fn pcc_parse_int(s: text) -> i64:
+    """Manual integer parser that avoids optional types (Cranelift f64? bug)."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if trimmed.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif trimmed.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = trimmed.len()
+    while idx < slen:
+        val ch = trimmed.char_at(idx)
+        if ch == "." or ch == "e" or ch == "E":
+            break
+        val d = pcc_digit(ch)
+        if d < 0:
+            break
+        result = result * 10 + d
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
+
+pub fn pcc_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return 0 - 1
+
+pub fn parse_alpha_component(s: text) -> u32:
+    """Parse an alpha component (float 0-1, percentage 0%-100%, or integer)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val pct_str = trimmed.slice(0, trimmed.len() - 1)
+        val pct_i = pcc_parse_int(pct_str)
+        var v = (pct_i * 255) / 100
+        if v < 0:
+            v = 0
+        if v > 255:
+            v = 255
+        return v.to_u32()
+    # Check if it looks like a decimal 0.0-1.0 (contains '.')
+    var has_dot = false
+    var ai = 0
+    val alen = trimmed.len()
+    while ai < alen:
+        if trimmed.char_at(ai) == ".":
+            has_dot = true
+        ai = ai + 1
+    if has_dot:
+        # Parse as integer fraction: "0.5" → 5/10 → 127
+        # Simple approach: parse the part before and after dot
+        val dot_pos = pcc_find_dot(trimmed)
+        val int_part = pcc_parse_int(trimmed.slice(0, dot_pos))
+        val frac_str = trimmed.slice(dot_pos + 1, alen)
+        val frac_val = pcc_parse_int(frac_str)
+        var divisor = 1
+        var di = 0
+        while di < frac_str.len():
+            divisor = divisor * 10
+            di = di + 1
+        # Combined value in thousandths
+        val combined = int_part * 1000 + (frac_val * 1000) / divisor
+        if combined <= 1000:
+            var v = (combined * 255) / 1000
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            return v.to_u32()
+    # Plain integer 0-255
+    val n = pcc_parse_int(trimmed)
+    if n < 0:
+        return 0
+    if n > 255:
+        return 255
+    return n.to_u32()
+
+pub fn pcc_find_dot(s: text) -> i64:
+    var i = 0
+    val slen = s.len()
+    while i < slen:
+        if s.char_at(i) == ".":
+            return i
+        i = i + 1
+    999999999
+    255
+
+pub fn dom_split_ws(s: text) -> [text]:
+    var parts: [text] = []
+    val sb = StringBuilder.new()
+    var idx_2 = 0
+    while idx_2 < s.len():
+        val ch = s.char_at(idx_2)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if not sb.is_empty():
+                parts.push(sb.to_text())
+                sb.clear()
+        else:
+            sb.push(ch)
+        idx_2 = idx_2 + 1
+    if not sb.is_empty():
+        parts.push(sb.to_text())
+    parts
+
+pub fn split_comma(s: text) -> [text]:
+    """Split a string by commas."""
+    var parts: [text] = []
+    val sb = StringBuilder.new()
+    var idx_4 = 0
+    while idx_4 < s.len():
+        val ch = s.char_at(idx_4)
+        if ch == ",":
+            parts.push(sb.to_text())
+            sb.clear()
+        else:
+            sb.push(ch)
+        idx_4 = idx_4 + 1
+    if not sb.is_empty():
+        parts.push(sb.to_text())
+    return parts
+
+pub fn parse_int_clamped(s: text, min_val: u32, max_val: u32) -> u32:
+    """Parse an integer string, clamp to [min_val, max_val]."""
+    val n = s.parse_i64()
+    if n == nil:
+        return 0
+    var v: u32 = 0
+    if n != nil:
+        val nval = n ?? 0
+        v = nval.to_u32()
+    if v < min_val:
+        v = min_val
+    if v > max_val:
+        v = max_val
+    return v
+
+pub fn hex_byte(s: text) -> u32:
+    """Parse a two-character hex string to a byte value (0-255)."""
+    if s.len() != 2:
+        return 0
+    val high = hex_digit(s[0])
+    val low = hex_digit(s[1])
+    return high * 16 + low
+
+pub fn hex_nibble(s: text) -> u32:
+    """Parse a single hex character to a nibble value (0-15)."""
+    if s.len() != 1:
+        return 0
+    return hex_digit(s[0])
+
+pub fn hex_digit(ch: text) -> u32:
+    """Convert a single hex digit character to its numeric value."""
+    match ch:
+        "0" => 0
+        "1" => 1
+        "2" => 2
+        "3" => 3
+        "4" => 4
+        "5" => 5
+        "6" => 6
+        "7" => 7
+        "8" => 8
+        "9" => 9
+        "a" => 10
+        "A" => 10
+        "b" => 11
+        "B" => 11
+        "c" => 12
+        "C" => 12
+        "d" => 13
+        "D" => 13
+        "e" => 14
+        "E" => 14
+        "f" => 15
+        "F" => 15
+        _ => 0
+
+pub fn parse_float_value(s: text) -> f32:
+    """Parse a string to f32. Returns 1.0 on failure.
+    Uses manual int parser to avoid Cranelift f64? optional bug."""
+    val n = pcc_parse_int(s)
+    if n != 0 or s.trim() == "0":
+        return n.to_f32()
+    return 1.0
+
+pub fn parse_int_value(s: text) -> i32:
+    """Parse a string to i32. Returns 0 on failure.
+    Uses manual int parser to avoid Cranelift optional bug."""
+    val n = pcc_parse_int(s)
+    return n.to_i32()
+
+# =========================================================================
+# HSL/HSLA Color Parsing
+# =========================================================================
+
+pub fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
+    """Parse hsl() or hsla() color function.
+    Supports: hsl(120, 75%, 50%), hsla(120, 75%, 50%, 0.5),
+    hsl(120 75% 50%), hsl(120 75% 50% / 0.5)
+    """
+    val prefix_len = if is_hsla: 5 else: 4
+    val inner_raw_hsl = strip_css_comments(s.slice(prefix_len, s.len() - 1))
+    val inner = inner_raw_hsl.trim()
+
+    var has_comma = false
+    var idx_3 = 0
+    while idx_3 < inner.len():
+        val ch = inner.char_at(idx_3)
+        if ch == ",":
+            has_comma = true
+        idx_3 = idx_3 + 1
+
+    var parts: [text] = []
+    var alpha_str = ""
+
+    if has_comma:
+        parts = split_comma(inner)
+    else:
+        val slash_pos = dom_find_str(inner, "/", 0)
+        if slash_pos < 999999999:
+            val before_slash_raw_hsl = inner.slice(0, slash_pos)
+            val before_slash = before_slash_raw_hsl.trim()
+            val alpha_raw_hsl = inner.slice(slash_pos + 1, inner.len())
+            alpha_str = alpha_raw_hsl.trim()
+            parts = dom_split_ws(before_slash)
+        else:
+            parts = dom_split_ws(inner)
+
+    if parts.len() < 3:
+        return 0x000000FF
+
+    # Parse H (degrees), S (percentage), L (percentage)
+    val h_str = parts[0].trim()
+    val s_str = parts[1].trim()
+    val l_str = parts[2].trim()
+
+    val h_val_opt = h_str.parse_f64()
+    if h_val_opt == nil:
+        return 0x000000FF
+    var h_val_unwrapped: f64 = 0.0
+    if h_val_opt != nil:
+        val hv = h_val_opt ?? 0.0
+        h_val_unwrapped = hv
+    var h = h_val_unwrapped.to_f32()
+    # Normalize hue to [0, 360)
+    while h < 0.0:
+        h = h + 360.0
+    while h >= 360.0:
+        h = h - 360.0
+
+    val s_pct = parse_pct_value(s_str)
+    val l_pct = parse_pct_value(l_str)
+
+    # Convert HSL to RGB
+    val sat = s_pct / 100.0
+    val lit = l_pct / 100.0
+
+    val c = (1.0 - f32_abs(2.0 * lit - 1.0)) * sat
+    val hp = h / 60.0
+    val x = c * (1.0 - f32_abs(f32_fmod(hp, 2.0) - 1.0))
+    val m = lit - c / 2.0
+
+    var r1 = 0.0
+    var g1 = 0.0
+    var b1 = 0.0
+
+    if hp < 1.0:
+        r1 = c
+        g1 = x
+    elif hp < 2.0:
+        r1 = x
+        g1 = c
+    elif hp < 3.0:
+        g1 = c
+        b1 = x
+    elif hp < 4.0:
+        g1 = x
+        b1 = c
+    elif hp < 5.0:
+        r1 = x
+        b1 = c
+    else:
+        r1 = c
+        b1 = x
+
+    var r = ((r1 + m) * 255.0 + 0.5).to_i32()
+    var g = ((g1 + m) * 255.0 + 0.5).to_i32()
+    var b = ((b1 + m) * 255.0 + 0.5).to_i32()
+    if r < 0: r = 0
+    if r > 255: r = 255
+    if g < 0: g = 0
+    if g > 255: g = 255
+    if b < 0: b = 0
+    if b > 255: b = 255
+
+    var a: u32 = 255
+    if alpha_str.len() > 0:
+        a = parse_alpha_component(alpha_str)
+    elif parts.len() >= 4:
+        a = parse_alpha_component(parts[3].trim())
+
+    return (r.to_u32() * 16777216) + (g.to_u32() * 65536) + (b.to_u32() * 256) + a
+
+pub fn parse_pct_value(s: text) -> f32:
+    """Parse a percentage value like '75%' to float (75.0)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val n = num_str.parse_f64()
+        if n != nil:
+            val nval = n ?? 0.0
+            return nval.to_f32()
+        return 0.0
+    val n = trimmed.parse_f64()
+    if n != nil:
+        val nval = n ?? 0.0
+        return nval.to_f32()
+    0.0
+
+pub fn f32_abs(v: f32) -> f32:
+    if v < 0.0: 0.0 - v else: v
+
+pub fn f32_fmod(a: f32, b: f32) -> f32:
+    """Float modulo."""
+    if b == 0.0:
+        return 0.0
+    val div = (a / b).to_i32().to_f32()
+    a - div * b
+
+# =========================================================================
+# CSS Level 4 Named Color Table (148 colors)
+# =========================================================================
+
+pub fn named_color_to_u32(name: text) -> u32?:
+    """Look up a CSS named color, returning u32 RGBA value."""
+    val n = name.lower()
+    # Most common colors first for fast-path
+    if n == "black": return 0x000000FF
+    if n == "white": return 0xFFFFFFFF
+    if n == "red": return 0xFF0000FF
+    if n == "green": return 0x008000FF
+    if n == "blue": return 0x0000FFFF
+    if n == "transparent": return 0x00000000
+    if n == "yellow": return 0xFFFF00FF
+    if n == "orange": return 0xFFA500FF
+    if n == "gray" or n == "grey": return 0x808080FF
+    if n == "cyan" or n == "aqua": return 0x00FFFFFF
+    if n == "magenta" or n == "fuchsia": return 0xFF00FFFF
+    if n == "silver": return 0xC0C0C0FF
+    if n == "maroon": return 0x800000FF
+    if n == "olive": return 0x808000FF
+    if n == "navy": return 0x000080FF
+    if n == "teal": return 0x008080FF
+    if n == "purple": return 0x800080FF
+    if n == "lime": return 0x00FF00FF
+    # Extended colors
+    if n == "aliceblue": return 0xF0F8FFFF
+    if n == "antiquewhite": return 0xFAEBD7FF
+    if n == "aquamarine": return 0x7FFFD4FF
+    if n == "azure": return 0xF0FFFFFF
+    if n == "beige": return 0xF5F5DCFF
+    if n == "bisque": return 0xFFE4C4FF
+    if n == "blanchedalmond": return 0xFFEBCDFF
+    if n == "blueviolet": return 0x8A2BE2FF
+    if n == "brown": return 0xA52A2AFF
+    if n == "burlywood": return 0xDEB887FF
+    if n == "cadetblue": return 0x5F9EA0FF
+    if n == "chartreuse": return 0x7FFF00FF
+    if n == "chocolate": return 0xD2691EFF
+    if n == "coral": return 0xFF7F50FF
+    if n == "cornflowerblue": return 0x6495EDFF
+    if n == "cornsilk": return 0xFFF8DCFF
+    if n == "crimson": return 0xDC143CFF
+    if n == "darkblue": return 0x00008BFF
+    if n == "darkcyan": return 0x008B8BFF
+    if n == "darkgoldenrod": return 0xB8860BFF
+    if n == "darkgray" or n == "darkgrey": return 0xA9A9A9FF
+    if n == "darkgreen": return 0x006400FF
+    if n == "darkkhaki": return 0xBDB76BFF
+    if n == "darkmagenta": return 0x8B008BFF
+    if n == "darkolivegreen": return 0x556B2FFF
+    if n == "darkorange": return 0xFF8C00FF
+    if n == "darkorchid": return 0x9932CCFF
+    if n == "darkred": return 0x8B0000FF
+    if n == "darksalmon": return 0xE9967AFF
+    if n == "darkseagreen": return 0x8FBC8FFF
+    if n == "darkslateblue": return 0x483D8BFF
+    if n == "darkslategray" or n == "darkslategrey": return 0x2F4F4FFF
+    if n == "darkturquoise": return 0x00CED1FF
+    if n == "darkviolet": return 0x9400D3FF
+    if n == "deeppink": return 0xFF1493FF
+    if n == "deepskyblue": return 0x00BFFFFF
+    if n == "dimgray" or n == "dimgrey": return 0x696969FF
+    if n == "dodgerblue": return 0x1E90FFFF
+    if n == "firebrick": return 0xB22222FF
+    if n == "floralwhite": return 0xFFFAF0FF
+    if n == "forestgreen": return 0x228B22FF
+    if n == "gainsboro": return 0xDCDCDCFF
+    if n == "ghostwhite": return 0xF8F8FFFF
+    if n == "gold": return 0xFFD700FF
+    if n == "goldenrod": return 0xDAA520FF
+    if n == "greenyellow": return 0xADFF2FFF
+    if n == "honeydew": return 0xF0FFF0FF
+    if n == "hotpink": return 0xFF69B4FF
+    if n == "indianred": return 0xCD5C5CFF
+    if n == "indigo": return 0x4B0082FF
+    if n == "ivory": return 0xFFFFF0FF
+    if n == "khaki": return 0xF0E68CFF
+    if n == "lavender": return 0xE6E6FAFF
+    if n == "lavenderblush": return 0xFFF0F5FF
+    if n == "lawngreen": return 0x7CFC00FF
+    if n == "lemonchiffon": return 0xFFFACDFF
+    if n == "lightblue": return 0xADD8E6FF
+    if n == "lightcoral": return 0xF08080FF
+    if n == "lightcyan": return 0xE0FFFFFF
+    if n == "lightgoldenrodyellow": return 0xFAFAD2FF
+    if n == "lightgray" or n == "lightgrey": return 0xD3D3D3FF
+    if n == "lightgreen": return 0x90EE90FF
+    if n == "lightpink": return 0xFFB6C1FF
+    if n == "lightsalmon": return 0xFFA07AFF
+    if n == "lightseagreen": return 0x20B2AAFF
+    if n == "lightskyblue": return 0x87CEFAFF
+    if n == "lightslategray" or n == "lightslategrey": return 0x778899FF
+    if n == "lightsteelblue": return 0xB0C4DEFF
+    if n == "lightyellow": return 0xFFFFE0FF
+    if n == "limegreen": return 0x32CD32FF
+    if n == "linen": return 0xFAF0E6FF
+    if n == "mediumaquamarine": return 0x66CDAAFF
+    if n == "mediumblue": return 0x0000CDFF
+    if n == "mediumorchid": return 0xBA55D3FF
+    if n == "mediumpurple": return 0x9370DBFF
+    if n == "mediumseagreen": return 0x3CB371FF
+    if n == "mediumslateblue": return 0x7B68EEFF
+    if n == "mediumspringgreen": return 0x00FA9AFF
+    if n == "mediumturquoise": return 0x48D1CCFF
+    if n == "mediumvioletred": return 0xC71585FF
+    if n == "midnightblue": return 0x191970FF
+    if n == "mintcream": return 0xF5FFFAFF
+    if n == "mistyrose": return 0xFFE4E1FF
+    if n == "moccasin": return 0xFFE4B5FF
+    if n == "navajowhite": return 0xFFDEADFF
+    if n == "oldlace": return 0xFDF5E6FF
+    if n == "olivedrab": return 0x6B8E23FF
+    if n == "orangered": return 0xFF4500FF
+    if n == "orchid": return 0xDA70D6FF
+    if n == "palegoldenrod": return 0xEEE8AAFF
+    if n == "palegreen": return 0x98FB98FF
+    if n == "paleturquoise": return 0xAFEEEEFF
+    if n == "palevioletred": return 0xDB7093FF
+    if n == "papayawhip": return 0xFFEFD5FF
+    if n == "peachpuff": return 0xFFDAB9FF
+    if n == "peru": return 0xCD853FFF
+    if n == "pink": return 0xFFC0CBFF
+    if n == "plum": return 0xDDA0DDFF
+    if n == "powderblue": return 0xB0E0E6FF
+    if n == "rebeccapurple": return 0x663399FF
+    if n == "rosybrown": return 0xBC8F8FFF
+    if n == "royalblue": return 0x4169E1FF
+    if n == "saddlebrown": return 0x8B4513FF
+    if n == "salmon": return 0xFA8072FF
+    if n == "sandybrown": return 0xF4A460FF
+    if n == "seagreen": return 0x2E8B57FF
+    if n == "seashell": return 0xFFF5EEFF
+    if n == "sienna": return 0xA0522DFF
+    if n == "skyblue": return 0x87CEEBFF
+    if n == "slateblue": return 0x6A5ACDFF
+    if n == "slategray" or n == "slategrey": return 0x708090FF
+    if n == "snow": return 0xFFFAFAFF
+    if n == "springgreen": return 0x00FF7FFF
+    if n == "steelblue": return 0x4682B4FF
+    if n == "tan": return 0xD2B48CFF
+    if n == "thistle": return 0xD8BFD8FF
+    if n == "tomato": return 0xFF6347FF
+    if n == "turquoise": return 0x40E0D0FF
+    if n == "violet": return 0xEE82EEFF
+    if n == "wheat": return 0xF5DEB3FF
+    if n == "whitesmoke": return 0xF5F5F5FF
+    if n == "yellowgreen": return 0x9ACD32FF
+    nil

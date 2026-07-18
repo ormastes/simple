@@ -1,0 +1,176 @@
+# ============================================================================
+# common/bytes/span.spl — behavior-carrying byte views
+#
+# ByteSpan : an immutable, bounds-checked view over a [u8] (offset+len).
+# ByteBuffer : a growable [u8] accumulator that can `freeze()` into a ByteSpan.
+#
+# These replace ad-hoc `[u8]` + manual offset/len juggling across wire,
+# search, and compression code. ByteSpan is a generic-free value type
+# (per the Phase-0 plan): no `<>`.
+#
+# Receiver convention (mirrors common/net/byte_cursor.spl):
+#   static fn new(...)   constructors
+#   fn  ...              read-only methods (access self.field)
+#   me  ...              self-mutating methods
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# ByteSpan -- immutable bounds-checked view
+# ----------------------------------------------------------------------------
+struct ByteSpan:
+    """Immutable, bounds-checked view over a byte slice.
+
+    Holds the backing data plus an [off, off+span_len) window. All accessors
+    fail closed: an out-of-range index returns a safe default (0) rather than
+    corrupting or indexing out of bounds.
+    """
+    data: [u8]
+    off: i64
+    span_len: i64
+
+impl ByteSpan:
+    static fn new(data: [u8]) -> ByteSpan:
+        """Span covering the whole slice."""
+        ByteSpan(data: data, off: 0, span_len: data.len())
+
+    static fn of(data: [u8], off: i64, length: i64) -> ByteSpan:
+        """Span covering [off, off+length); clamped to valid range."""
+        var start = off
+        if start < 0:
+            start = 0
+        if start > data.len():
+            start = data.len()
+        var want = length
+        if want < 0:
+            want = 0
+        var avail = data.len() - start
+        if want > avail:
+            want = avail
+        ByteSpan(data: data, off: start, span_len: want)
+
+    static fn empty() -> ByteSpan:
+        ByteSpan(data: [], off: 0, span_len: 0)
+
+    fn len() -> i64:
+        self.span_len
+
+    fn is_empty() -> bool:
+        self.span_len == 0
+
+    fn get(i: i64) -> u8:
+        """Bounds-checked element access; out-of-range returns 0 (fail closed)."""
+        if i < 0:
+            return 0u8
+        if i >= self.span_len:
+            return 0u8
+        self.data[self.off + i]
+
+    fn try_get(i: i64) -> Result<u8, text>:
+        """Bounds-checked element access; out-of-range returns Err."""
+        if i < 0 or i >= self.span_len:
+            return Err("ByteSpan.try_get: index out of bounds")
+        Ok(self.data[self.off + i])
+
+    fn slice(start: i64, length: i64) -> ByteSpan:
+        """Sub-span relative to this span's window; clamped to valid range."""
+        var s = start
+        if s < 0:
+            s = 0
+        if s > self.span_len:
+            s = self.span_len
+        var want = length
+        if want < 0:
+            want = 0
+        var avail = self.span_len - s
+        if want > avail:
+            want = avail
+        ByteSpan(data: self.data, off: self.off + s, span_len: want)
+
+    fn slice_from(start: i64) -> ByteSpan:
+        """Sub-span from start to the end of this span."""
+        self.slice(start, self.span_len - start)
+
+    fn to_bytes() -> [u8]:
+        """Materialize this window as a fresh [u8]."""
+        var out: [u8] = []
+        var i = 0
+        while i < self.span_len:
+            out.push(self.data[self.off + i])
+            i = i + 1
+        out
+
+    fn equals(other: ByteSpan) -> bool:
+        """Value equality: same length and byte-for-byte identical contents."""
+        if self.span_len != other.span_len:
+            return false
+        var i = 0
+        while i < self.span_len:
+            if self.data[self.off + i] != other.data[other.off + i]:
+                return false
+            i = i + 1
+        true
+
+    fn starts_with(prefix: ByteSpan) -> bool:
+        if prefix.span_len > self.span_len:
+            return false
+        self.slice(0, prefix.span_len).equals(prefix)
+
+    fn sum() -> i64:
+        """Sum of all byte values; demonstrates internal iteration over the
+        window. (External `for b in span` is not yet supported for custom
+        structs — see bug for_in_custom_struct_no_iterator_protocol_2026-06-15;
+        callers iterate via `for b in span.to_bytes()` or an index loop with
+        `get(i)`.)"""
+        var total = 0
+        var i = 0
+        while i < self.span_len:
+            total = total + self.data[self.off + i].to_i64()
+            i = i + 1
+        total
+
+# ----------------------------------------------------------------------------
+# ByteBuffer -- growable accumulator
+# ----------------------------------------------------------------------------
+struct ByteBuffer:
+    """Growable byte accumulator. Mutating ops use `me`; `freeze()` produces an
+    immutable ByteSpan over the accumulated bytes."""
+    buf: [u8]
+
+impl ByteBuffer:
+    static fn new() -> ByteBuffer:
+        ByteBuffer(buf: [])
+
+    fn len() -> i64:
+        self.buf.len()
+
+    fn is_empty() -> bool:
+        self.buf.len() == 0
+
+    me push_u8(v: u8):
+        self.buf.push(v)
+
+    me push_byte(v: i64):
+        """Push a single byte from an i64 value (low 8 bits)."""
+        self.buf.push((v & 0xFF).to_u8())
+
+    me push_span(span: ByteSpan):
+        var i = 0
+        while i < span.len():
+            self.buf.push(span.get(i))
+            i = i + 1
+
+    me push_bytes(bytes: [u8]):
+        var i = 0
+        while i < bytes.len():
+            self.buf.push(bytes[i])
+            i = i + 1
+
+    me clear():
+        self.buf = []
+
+    fn freeze() -> ByteSpan:
+        """Immutable view over the accumulated bytes."""
+        ByteSpan(data: self.buf, off: 0, span_len: self.buf.len())
+
+    fn to_bytes() -> [u8]:
+        self.buf

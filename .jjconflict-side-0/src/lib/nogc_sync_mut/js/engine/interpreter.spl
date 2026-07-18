@@ -1,0 +1,517 @@
+# JavaScript tree-walking interpreter for the Simple Browser Platform.
+# Evaluates AST nodes (JsStatement / JsExpression) against a scope chain.
+# Implements JS type coercion, function calls, closures, and object property access.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use std.js.types.ast_types.JsExpression
+use std.js.types.ast_types.JsStatement
+use std.js.types.ast_types.SwitchCase
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.parser.{JsParser}
+use std.js.builtins.json.{json_parse}
+use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
+use std.nogc_sync_mut.http.types.{status_text}
+
+extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io.http_sffi.{http_request_raw}
+
+# ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+
+# ── Object store (imported from vm.spl — single canonical definition) ────
+use std.js.engine.vm_object_store.{ObjectStore}
+
+# ── Helper ───────────────────────────────────────────────────────────────
+
+fn _statement_name(stmt: JsStatement) -> text:
+    match stmt:
+        JsStatement.VarDecl(_, _): "VarDecl"
+        JsStatement.ExprStmt(_): "ExprStmt"
+        JsStatement.Return(_): "Return"
+        JsStatement.If(_, _, _): "If"
+        JsStatement.While(_, _): "While"
+        JsStatement.For(_, _, _, _): "For"
+        JsStatement.Block(_): "Block"
+        JsStatement.FnDecl(_, _, _): "FnDecl"
+        JsStatement.TryCatch(_, _, _, _): "TryCatch"
+        JsStatement.Switch(_, _): "Switch"
+        JsStatement.ForIn(_, _, _): "ForIn"
+        JsStatement.ForOf(_, _, _): "ForOf"
+        JsStatement.ThrowStmt(_): "ThrowStmt"
+        JsStatement.BreakStmt: "BreakStmt"
+        JsStatement.ContinueStmt: "ContinueStmt"
+        JsStatement.ClassDecl(_, _, _, _): "ClassDecl"
+        JsStatement.LetDecl(_, _): "LetDecl"
+        JsStatement.ConstDecl(_, _): "ConstDecl"
+        JsStatement.DestructVarDecl(_, _, _): "DestructVarDecl"
+        JsStatement.DoWhile(_, _): "DoWhile"
+        JsStatement.LabeledStmt(_, _): "LabeledStmt"
+
+fn filter_response_headers_for_script(headers: text) -> text:
+    var visible = ""
+    var removed_cookie = false
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed.lower().starts_with("set-cookie:"):
+            removed_cookie = true
+        else:
+            visible = visible + line + if removed_cookie: "\\n" else: "\n"
+    visible
+
+fn parse_non_negative_i64_text(value: text) -> i64:
+    var parsed = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        var digit = -1
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        if digit >= 0:
+            parsed = parsed * 10 + digit
+        i = i + 1
+    parsed
+
+fn text_equals_exact(left: text, right: text) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left.slice(i, i + 1) != right.slice(i, i + 1):
+            return false
+        i = i + 1
+    true
+
+fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
+    match store.get_property(obj_id, "__simple_fetch_host"):
+        JsValue.Boolean(v): v
+        _:
+            false
+
+fn _simple_fetch_base_url(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_base_url"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_cookie_header"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _simple_fetch_state(obj_id: i64, store: ObjectStore) -> text:
+    var i = store.prop_obj_ids.len() - 1
+    while i >= 0:
+        if store.prop_obj_ids.get(i) == obj_id and store.prop_keys.get(i) == "__simple_state":
+            match store.prop_values.get(i):
+                JsValue.String(v): return v
+                _: return ""
+        i = i - 1
+    ""
+
+fn _simple_fetch_value(obj_id: i64, store: ObjectStore) -> JsValue:
+    var i = store.prop_obj_ids.len() - 1
+    while i >= 0:
+        if store.prop_obj_ids.get(i) == obj_id and store.prop_keys.get(i) == "__simple_value":
+            match store.prop_values.get(i):
+                JsValue.Undefined: return JsValue.Undefined
+                JsValue.Null: return JsValue.Null
+                JsValue.Boolean(v): return JsValue.Boolean(v: v)
+                JsValue.Number(v): return JsValue.Number(v: v)
+                JsValue.String(v): return JsValue.String(v: v)
+                JsValue.Object(id): return JsValue.Object(id: id)
+                JsValue.Array(id): return JsValue.Array(id: id)
+                JsValue.Function(id): return JsValue.Function(id: id)
+                JsValue.Symbol(id): return JsValue.Symbol(id: id)
+        i = i - 1
+    JsValue.Undefined
+
+fn _simple_fetch_handlers(obj_id: i64, store: ObjectStore) -> i64:
+    match store.get_property(obj_id, "__simple_handlers"):
+        JsValue.Object(id): id
+        JsValue.Array(id): id
+        _:
+            -1
+
+fn _scheme(url: text) -> text:
+    match url.index_of("://"):
+        Some(idx): url.substring(0, idx)
+        nil: "https"
+
+fn _origin(url: text) -> text:
+    val scheme_end_opt = url.index_of("://")
+    match scheme_end_opt:
+        Some(scheme_end):
+            val after_scheme = scheme_end + 3
+            match url.substring(after_scheme).index_of("/"):
+                Some(rel_idx): url.substring(0, after_scheme + rel_idx)
+                nil: url
+        nil:
+            ""
+
+fn _without_fragment(url: text) -> text:
+    match url.index_of("#"):
+        Some(idx): url.substring(0, idx)
+        nil: url
+
+fn _without_query(url: text) -> text:
+    val clean = _without_fragment(url)
+    match clean.index_of("?"):
+        Some(idx): clean.substring(0, idx)
+        nil: clean
+
+fn _base_dir(url: text) -> text:
+    val clean = _without_query(url)
+    val origin = _origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val after_origin = clean.substring(origin.len())
+    match after_origin.last_index_of("/"):
+        Some(rel_idx): origin + after_origin.substring(0, rel_idx + 1)
+        nil: origin + "/"
+
+fn _resolve_fetch_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return _scheme(base_url) + ":" + href
+    if href.starts_with("#"):
+        return _without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return _without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = _origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    _base_dir(base_url) + href
+
+fn _simple_fetch_sync(store: ObjectStore, obj_id: i64, args: [JsValue]) -> JsValue:
+    var request_url = _simple_fetch_base_url(obj_id, store)
+    if args.len() > 0:
+        request_url = _resolve_fetch_url(request_url, js_to_string(args.get(0)))
+    var method = "GET"
+    if args.len() > 1:
+        val maybe_method = js_to_string(args.get(1)).trim().upper()
+        if maybe_method != "":
+            method = maybe_method
+    var headers_text = ""
+    if args.len() > 2:
+        headers_text = js_to_string(args.get(2))
+    val cookie_header = _simple_fetch_cookie_header(obj_id, store)
+    if cookie_header != "":
+        if headers_text != "":
+            headers_text = headers_text + "\n"
+        headers_text = headers_text + "Cookie: " + cookie_header
+    var body = ""
+    if args.len() > 3:
+        body = js_to_string(args.get(3))
+    var content_type = ""
+    if args.len() > 4:
+        content_type = js_to_string(args.get(4))
+    if content_type != "":
+        if headers_text != "":
+            headers_text = headers_text + "\n"
+        headers_text = headers_text + "Content-Type: " + content_type
+
+    var status: i64 = 0
+    var response_body = ""
+    var error_text = ""
+    if request_url.starts_with("file://"):
+        val path = request_url.slice(7, request_url.len())
+        val content = rt_file_read_text(path) ?? ""
+        if content != "":
+            status = 200
+            response_body = content
+        else:
+            status = 404
+            error_text = "file not found"
+    else:
+        val result = http_request_raw(method, request_url, headers_text, body)
+        status = result.0
+        response_body = result.1
+        error_text = result.2
+
+    val response_id = store.create_object()
+    store.set_property(response_id, "url", JsValue.String(v: request_url))
+    store.set_property(response_id, "status", JsValue.Number(v: status.to_f64()))
+    store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error_text == ""))
+    store.set_property(response_id, "headersText", JsValue.String(v: ""))
+    store.set_property(response_id, "body", JsValue.String(v: response_body))
+    store.set_property(response_id, "error", JsValue.String(v: error_text))
+    JsValue.Object(id: response_id)
+
+class PendingAsyncRequest:
+    request_obj_id: i64
+
+    static fn create(request_obj_id: i64) -> PendingAsyncRequest:
+        PendingAsyncRequest(request_obj_id: request_obj_id)
+
+class PendingPromiseTask:
+    promise_id: i64
+    handler_id: i64
+
+    static fn create(promise_id: i64, handler_id: i64) -> PendingPromiseTask:
+        PendingPromiseTask(promise_id: promise_id, handler_id: handler_id)
+
+class PromiseHandlerRecord:
+    id: i64
+    on_fulfilled: i64
+    on_rejected: i64
+    next_promise_id: i64
+    kind: text
+
+    static fn create(id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> PromiseHandlerRecord:
+        PromiseHandlerRecord(id: id, on_fulfilled: on_fulfilled, on_rejected: on_rejected, next_promise_id: next_promise_id, kind: kind)
+
+class PromiseHandlerRegistration:
+    promise_id: i64
+    handler_id: i64
+    on_fulfilled: i64
+    on_rejected: i64
+    next_promise_id: i64
+    kind: text
+
+    static fn create(promise_id: i64, handler_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> PromiseHandlerRegistration:
+        PromiseHandlerRegistration(
+            promise_id: promise_id,
+            handler_id: handler_id,
+            on_fulfilled: on_fulfilled,
+            on_rejected: on_rejected,
+            next_promise_id: next_promise_id,
+            kind: kind
+        )
+
+class PendingTimerTask:
+    id: i64
+    callback_id: i64
+    callback_args: [JsValue]
+    delay_ms: i64
+    scheduled_at_ms: i64
+    is_interval: bool
+    is_next_tick: bool
+
+    static fn create(id: i64, callback_id: i64, delay_ms: i64, scheduled_at_ms: i64, is_interval: bool) -> PendingTimerTask:
+        PendingTimerTask(
+            id: id,
+            callback_id: callback_id,
+            callback_args: [],
+            delay_ms: delay_ms,
+            scheduled_at_ms: scheduled_at_ms,
+            is_interval: is_interval,
+            is_next_tick: false,
+        )
+
+    static fn create_with_args(id: i64, callback_id: i64, callback_args: [JsValue], delay_ms: i64, scheduled_at_ms: i64, is_interval: bool) -> PendingTimerTask:
+        PendingTimerTask(
+            id: id,
+            callback_id: callback_id,
+            callback_args: callback_args,
+            delay_ms: delay_ms,
+            scheduled_at_ms: scheduled_at_ms,
+            is_interval: is_interval,
+            is_next_tick: false,
+        )
+
+    static fn create_next_tick(id: i64, callback_id: i64) -> PendingTimerTask:
+        PendingTimerTask(
+            id: id,
+            callback_id: callback_id,
+            callback_args: [],
+            delay_ms: 0,
+            scheduled_at_ms: 0,
+            is_interval: false,
+            is_next_tick: true,
+        )
+
+# ── Interpreter ──────────────────────────────────────────────────────────
+
+class JsInterpreter:
+    env_stack: EnvironmentStack
+    global_env: i64
+    object_store: ObjectStore
+    call_stack: [CallFrame]
+    functions: [JsFunction]
+    logger: Logger
+    return_value: JsValue
+    control_return: bool
+    control_break: bool
+    control_continue: bool
+    thrown_value: JsValue
+    control_thrown: bool
+    native_id_map: [NativeIdMapping]
+    bound_function_ids: [i64]
+    bound_function_target_ids: [i64]
+    bound_function_this_values: [JsValue]
+    bound_function_arg_array_ids: [i64]
+    wasm_export_fn_ids: [i64]
+    wasm_export_bound_imports: [JsValue]
+    wasm_export_const_fn_ids: [i64]
+    wasm_export_const_values: [i64]
+    wasm_export_body_fn_ids: [i64]
+    wasm_export_body_module_ids: [i64]
+    wasm_export_body_indices: [i64]
+    node_require_cache_names: [text]
+    node_require_cache_values: [JsValue]
+    node_require_last_cache_key: text
+    node_require_last_cache_value: JsValue
+    node_credential_grant_names: [text]
+    node_credential_grant_values: [text]
+    class_proto_fns: [i64]
+    class_proto_ids: [i64]
+    promise_ctor_id: i64
+    promise_proto_id: i64
+    response_proto_id: i64
+    array_buffer_proto_id: i64
+    uint8_array_proto_id: i64
+    data_view_proto_id: i64
+    next_async_request_seq: i64
+    pending_async_requests: [PendingAsyncRequest]
+    pending_async_request_registry: [PendingAsyncRequest]
+    pending_promise_tasks: [PendingPromiseTask]
+    promise_handlers: [PromiseHandlerRecord]
+    promise_handler_registrations: [PromiseHandlerRegistration]
+    next_promise_handler_id: i64
+    next_timer_id: i64
+    pending_timer_tasks: [PendingTimerTask]
+    canceled_timer_ids: [i64]
+    timer_handle_ids: [i64]
+    timer_handle_object_ids: [i64]
+    global_var_names: [text]
+    global_var_values: [JsValue]
+    host_window_id: i64
+    host_document_id: i64
+    host_body_id: i64
+    host_location_id: i64
+    host_navigator_id: i64
+    host_chrome_id: i64
+    host_session_storage_id: i64
+    host_local_storage_id: i64
+    host_promise_id: i64
+    host_document_title_value: JsValue
+    host_document_cookie_value: JsValue
+    host_body_inner_html_value: JsValue
+    host_body_text_content_value: JsValue
+    host_body_inner_html_dirty: bool
+    host_body_text_content_dirty: bool
+
+    static fn new(logger: Logger) -> JsInterpreter:
+        JsInterpreter.create(logger)
+
+    me ident_name(expr: JsExpression) -> text:
+        match expr:
+            JsExpression.Identifier(name): name
+            _: ""
+
+    static fn create(logger: Logger) -> JsInterpreter:
+        var env_stack = env_stack_new()
+        val global_env = 0
+        JsInterpreter(
+            env_stack: env_stack,
+            global_env: global_env,
+            object_store: ObjectStore.create(),
+            call_stack: [],
+            functions: [],
+            logger: logger,
+            return_value: JsValue.Undefined,
+            control_return: false,
+            control_break: false,
+            control_continue: false,
+            thrown_value: JsValue.Undefined,
+            control_thrown: false,
+            native_id_map: [],
+            bound_function_ids: [],
+            bound_function_target_ids: [],
+            bound_function_this_values: [],
+            bound_function_arg_array_ids: [],
+            wasm_export_fn_ids: [],
+            wasm_export_bound_imports: [],
+            wasm_export_const_fn_ids: [],
+            wasm_export_const_values: [],
+            wasm_export_body_fn_ids: [],
+            wasm_export_body_module_ids: [],
+            wasm_export_body_indices: [],
+            node_require_cache_names: [],
+            node_require_cache_values: [],
+            node_require_last_cache_key: "",
+            node_require_last_cache_value: JsValue.Undefined,
+            node_credential_grant_names: [],
+            node_credential_grant_values: [],
+            class_proto_fns: [],
+            class_proto_ids: [],
+            promise_ctor_id: -1,
+            promise_proto_id: -1,
+            response_proto_id: -1,
+            array_buffer_proto_id: -1,
+            uint8_array_proto_id: -1,
+            data_view_proto_id: -1,
+            next_async_request_seq: 1,
+            pending_async_requests: [],
+            pending_async_request_registry: [],
+            pending_promise_tasks: [],
+            promise_handlers: [],
+            promise_handler_registrations: [],
+            next_promise_handler_id: 1,
+            next_timer_id: 1,
+            pending_timer_tasks: [],
+            canceled_timer_ids: [],
+            timer_handle_ids: [],
+            timer_handle_object_ids: [],
+            global_var_names: [],
+            global_var_values: [],
+            host_window_id: -1,
+            host_document_id: -1,
+            host_body_id: -1,
+            host_location_id: -1,
+            host_navigator_id: -1,
+            host_chrome_id: -1,
+            host_session_storage_id: -1,
+            host_local_storage_id: -1,
+            host_promise_id: -1,
+            host_document_title_value: JsValue.Undefined,
+            host_document_cookie_value: JsValue.Undefined,
+            host_body_inner_html_value: JsValue.Undefined,
+            host_body_text_content_value: JsValue.Undefined,
+            host_body_inner_html_dirty: false,
+            host_body_text_content_dirty: false,
+        )
+
+# ── impl extensions (split files) ────────────────────────────────────────
+use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_async.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_eval.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_eval_member.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_array_methods.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_native.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
+
+export JsInterpreter

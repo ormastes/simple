@@ -1,0 +1,597 @@
+# IoDriver Shim -- Baremetal @export("C") Implementations
+#
+# MDSOC: feature dimension, network layer
+# Status: B3 stub -- implements all rt_driver_* extern functions from
+#         src/lib/nogc_async_mut/io/driver.spl for the SimpleOS baremetal
+#         environment. Bridges the completion-based IoDriver model to the
+#         cooperative netstack.
+#
+# Architecture:
+#   - Each rt_driver_create() allocates a BaremetalDriver with its own queues.
+#   - submit_* functions create PendingOp entries or complete synchronously
+#     after the underlying TCP shim accepts the operation.
+#   - flush() is a no-op (ops are "submitted" immediately to pending list).
+#   - poll() drives tick counter, checks timeout expirations, and moves
+#     completed ops into a batch array addressable by index.
+#   - poll_id/poll_result/poll_flags/poll_data read from the last batch.
+#
+# Follow-up: Wire file operations to DBFS/NVFS when the storage service has
+#            durable async completion APIs.
+
+use os.kernel.net.driver_shim_state.{
+    PendingOp, CompletedOp, BaremetalDriver,
+    OP_TYPE_ACCEPT, OP_TYPE_RECV, OP_TYPE_SEND, OP_TYPE_TIMEOUT,
+    OP_TYPE_CONNECT, OP_TYPE_SENDFILE, OP_TYPE_READ, OP_TYPE_WRITE,
+    OP_TYPE_OPEN, OP_TYPE_CLOSE, OP_TYPE_FSYNC,
+    driver_create, driver_get, driver_get_index, driver_alloc_op_id,
+    driver_add_pending, driver_add_completed, driver_destroy,
+    g_drivers
+}
+use os.kernel.net.tcp_shim.{rt_io_tcp_accept, rt_io_tcp_read, rt_io_tcp_write_text}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_net_tx_test() -> i64
+extern fn rt_net_rx_ready() -> i64
+
+fn driver_shim_packet_io_ready() -> bool:
+    rt_net_tx_test() == 0 and rt_net_rx_ready() == 0
+
+# ============================================================================
+# Lifecycle
+# ============================================================================
+
+@export("C")
+fn rt_driver_create(queue_depth: i64) -> i64:
+    """Create a new baremetal IoDriver. queue_depth is advisory (ignored)."""
+    driver_create()
+
+@export("C")
+fn rt_driver_destroy(handle: i64):
+    """Destroy a baremetal IoDriver and release all resources."""
+    driver_destroy(handle)
+
+# ============================================================================
+# Network Submissions
+# ============================================================================
+
+@export("C")
+fn rt_driver_submit_accept(handle: i64, listen_fd: i64) -> i64:
+    """Submit async accept. Returns op_id.
+
+    B3 stub: creates a pending op. The op will never complete until the
+    netstack is wired (follow-up phase). poll() will simply skip it.
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val op = PendingOp(
+        op_id: op_id, op_type: OP_TYPE_ACCEPT, fd: listen_fd,
+        timeout_target: -1, buf_size: 0, data_text: "", data_len: 0,
+        offset: 0, addr: "", port: 0, flags: 0, mode: 0
+    )
+    driver_add_pending(handle, op)
+    op_id
+
+@export("C")
+fn rt_driver_submit_connect(handle: i64, fd: i64, addr: text, port: i64) -> i64:
+    """Submit async connect. Returns op_id.
+
+    B3 stub: creates a pending op. Will not complete until netstack wired.
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val op = PendingOp(
+        op_id: op_id, op_type: OP_TYPE_CONNECT, fd: fd,
+        timeout_target: -1, buf_size: 0, data_text: "", data_len: 0,
+        offset: 0, addr: addr, port: port, flags: 0, mode: 0
+    )
+    driver_add_pending(handle, op)
+    op_id
+
+@export("C")
+fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64:
+    """Submit async recv. Returns op_id.
+
+    B3 stub: creates a pending op. Since B2 TCP read returns empty (EOF),
+    this will not produce data until the netstack is wired.
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val op = PendingOp(
+        op_id: op_id, op_type: OP_TYPE_RECV, fd: fd,
+        timeout_target: -1, buf_size: buf_size, data_text: "", data_len: 0,
+        offset: 0, addr: "", port: 0, flags: 0, mode: 0
+    )
+    driver_add_pending(handle, op)
+    op_id
+
+@export("C")
+fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64:
+    """Submit async send. Returns op_id.
+
+    Completes synchronously only after the TCP shim accepts the bytes. This
+    prevents discarded-data paths from being accepted as real network transfer.
+    """
+    if not driver_shim_packet_io_ready():
+        return -1
+    val written = rt_io_tcp_write_text(fd, data)
+    if written < 0:
+        return -1
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val comp = CompletedOp(
+        op_id: op_id, result_val: written, flags: 0,
+        data_text: "", data_len: 0
+    )
+    driver_add_completed(handle, comp)
+    op_id
+
+@export("C")
+fn rt_driver_submit_sendfile(handle: i64, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
+    """Submit async sendfile (zero-copy). Returns op_id.
+
+    Fails closed until a real packet provider is ready. The baremetal driver
+    does not currently have filesystem-backed zero-copy transfer evidence.
+    """
+    if not driver_shim_packet_io_ready():
+        return -1
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val comp = CompletedOp(
+        op_id: op_id, result_val: len, flags: 0,
+        data_text: "", data_len: 0
+    )
+    driver_add_completed(handle, comp)
+    op_id
+
+# ============================================================================
+# File I/O Submissions
+# ============================================================================
+
+@export("C")
+fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i64:
+    """Submit async file read. Returns op_id.
+
+    B3 stub: creates a pending op. No real filesystem on baremetal yet.
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val op = PendingOp(
+        op_id: op_id, op_type: OP_TYPE_READ, fd: fd,
+        timeout_target: -1, buf_size: buf_size, data_text: "", data_len: 0,
+        offset: offset, addr: "", port: 0, flags: 0, mode: 0
+    )
+    driver_add_pending(handle, op)
+    op_id
+
+@export("C")
+fn rt_driver_submit_write(handle: i64, fd: i64, data: text, len: i64, offset: i64) -> i64:
+    """Submit async file write. Returns op_id.
+
+    Fails closed because the baremetal shim has no real filesystem write path.
+    """
+    -1
+
+@export("C")
+fn rt_driver_submit_open(handle: i64, path: text, flags: i64, mode: i64) -> i64:
+    """Submit async file open. Returns op_id.
+
+    B3 stub: creates a pending op. No real filesystem yet.
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val op = PendingOp(
+        op_id: op_id, op_type: OP_TYPE_OPEN, fd: -1,
+        timeout_target: -1, buf_size: 0, data_text: path, data_len: 0,
+        offset: 0, addr: "", port: 0, flags: flags, mode: mode
+    )
+    driver_add_pending(handle, op)
+    op_id
+
+@export("C")
+fn rt_driver_submit_close(handle: i64, fd: i64) -> i64:
+    """Submit async close. Returns op_id.
+
+    B3 stub: immediately completes with result=0 (success).
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val comp = CompletedOp(
+        op_id: op_id, result_val: 0, flags: 0,
+        data_text: "", data_len: 0
+    )
+    driver_add_completed(handle, comp)
+    op_id
+
+@export("C")
+fn rt_driver_submit_fsync(handle: i64, fd: i64) -> i64:
+    """Submit async fsync. Returns op_id.
+
+    B3 stub: immediately completes with result=0 (success).
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val comp = CompletedOp(
+        op_id: op_id, result_val: 0, flags: 0,
+        data_text: "", data_len: 0
+    )
+    driver_add_completed(handle, comp)
+    op_id
+
+# ============================================================================
+# Timer
+# ============================================================================
+
+@export("C")
+fn rt_driver_submit_timeout(handle: i64, timeout_ms: i64) -> i64:
+    """Submit a timeout. Completes after timeout_ms milliseconds. Returns op_id.
+
+    B3 stub: records a tick-based target. Each poll() increments the driver
+    tick by the poll timeout_ms, and fires any timeout ops whose target has
+    been reached.
+    """
+    val op_id = driver_alloc_op_id(handle)
+    if op_id < 0:
+        return -1
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return -1
+    val current_tick = g_drivers[idx.to_u64()].tick
+    val target = current_tick + timeout_ms
+    val op = PendingOp(
+        op_id: op_id, op_type: OP_TYPE_TIMEOUT, fd: -1,
+        timeout_target: target, buf_size: 0, data_text: "", data_len: 0,
+        offset: 0, addr: "", port: 0, flags: 0, mode: 0
+    )
+    driver_add_pending(handle, op)
+    op_id
+
+# ============================================================================
+# Batch Control
+# ============================================================================
+
+@export("C")
+fn rt_driver_flush(handle: i64) -> i64:
+    """Flush queued operations to the kernel.
+
+    B3 stub: all operations are already in the pending/completed queues at
+    submit time, so flush is a no-op. Returns the count of pending ops as a
+    proxy for "submitted."
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return 0
+    val d = drv.unwrap()
+    d.pending.len().to_i64()
+
+# ============================================================================
+# Poll and Completion Retrieval
+# ============================================================================
+
+@export("C")
+fn rt_driver_poll(handle: i64, max: i64, timeout_ms: i64) -> i64:
+    """Poll for completions.
+
+    B3 stub behaviour:
+      1. Advance the driver tick by timeout_ms (simulates time passing).
+      2. Check pending timeout ops -- fire any whose target <= current tick.
+      3. Move all items from the completed queue into last_poll_batch (up to max).
+      4. Return the batch count.
+
+    The caller then reads batch[0..count-1] via poll_id/poll_result/poll_flags.
+    """
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return 0
+    val ui = idx.to_u64()
+
+    # Advance tick
+    val advance = if timeout_ms > 0: timeout_ms else: 1
+    g_drivers[ui].tick = g_drivers[ui].tick + advance
+
+    # Check pending network ops/timeouts -> move ready ops to completed
+    var still_pending: [PendingOp] = []
+    var pi: u64 = 0
+    while pi < g_drivers[ui].pending.len():
+        val op = g_drivers[ui].pending[pi]
+        if op.op_type == OP_TYPE_ACCEPT:
+            val client_fd = rt_io_tcp_accept(op.fd)
+            if client_fd >= 0:
+                val comp = CompletedOp(
+                    op_id: op.op_id, result_val: client_fd, flags: 0,
+                    data_text: "", data_len: 0
+                )
+                g_drivers[ui].completed.push(comp)
+            else:
+                still_pending.push(op)
+        elif op.op_type == OP_TYPE_RECV:
+            val data = rt_io_tcp_read(op.fd, op.buf_size)
+            if data.len() > 0:
+                val comp = CompletedOp(
+                    op_id: op.op_id, result_val: data.len().to_i64(), flags: 0,
+                    data_text: rt_bytes_to_text(data), data_len: data.len().to_i64()
+                )
+                g_drivers[ui].completed.push(comp)
+            else:
+                still_pending.push(op)
+        elif op.op_type == OP_TYPE_TIMEOUT and op.timeout_target >= 0 and op.timeout_target <= g_drivers[ui].tick:
+            # Timeout expired -- complete with result=0, flags=1 (timeout flag)
+            val comp = CompletedOp(
+                op_id: op.op_id, result_val: 0, flags: 1,
+                data_text: "", data_len: 0
+            )
+            g_drivers[ui].completed.push(comp)
+        else:
+            still_pending.push(op)
+        pi = pi + 1
+    g_drivers[ui].pending = still_pending
+
+    # TODO: when netstack is wired, call net_service_poll() here to drive
+    # packet processing and check if accept/recv ops can complete.
+
+    # Build poll batch from completed queue (up to max)
+    var batch: [CompletedOp] = []
+    var remaining: [CompletedOp] = []
+    var ci: u64 = 0
+    while ci < g_drivers[ui].completed.len():
+        if batch.len().to_i64() < max:
+            batch.push(g_drivers[ui].completed[ci])
+        else:
+            remaining.push(g_drivers[ui].completed[ci])
+        ci = ci + 1
+    g_drivers[ui].completed = remaining
+    g_drivers[ui].last_poll_batch = batch
+
+    batch.len().to_i64()
+
+@export("C")
+fn rt_driver_poll_id(handle: i64, index: i64) -> i64:
+    """Get the op_id of a completion at batch index."""
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return -1
+    val ui = idx.to_u64()
+    val batch = g_drivers[ui].last_poll_batch
+    if index < 0 or index.to_u64() >= batch.len():
+        return -1
+    batch[index.to_u64()].op_id
+
+@export("C")
+fn rt_driver_poll_result(handle: i64, index: i64) -> i64:
+    """Get the result value of a completion at batch index."""
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return -1
+    val ui = idx.to_u64()
+    val batch = g_drivers[ui].last_poll_batch
+    if index < 0 or index.to_u64() >= batch.len():
+        return -1
+    batch[index.to_u64()].result_val
+
+@export("C")
+fn rt_driver_poll_flags(handle: i64, index: i64) -> i64:
+    """Get the flags of a completion at batch index."""
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return 0
+    val ui = idx.to_u64()
+    val batch = g_drivers[ui].last_poll_batch
+    if index < 0 or index.to_u64() >= batch.len():
+        return 0
+    batch[index.to_u64()].flags
+
+@export("C")
+fn rt_driver_poll_data(handle: i64, index: i64) -> text:
+    """Get recv/read data for a completion at batch index or op id.
+
+    Must be called before the next poll() -- the batch is rotated on each poll.
+    Returns empty string if no data or index out of range.
+    """
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return ""
+    val ui = idx.to_u64()
+    val batch = g_drivers[ui].last_poll_batch
+    if index >= 0 and index.to_u64() < batch.len():
+        return batch[index.to_u64()].data_text
+
+    var i: u64 = 0
+    while i < batch.len():
+        if batch[i].op_id == index:
+            return batch[i].data_text
+        i = i + 1
+    ""
+
+@export("C")
+fn rt_driver_poll_data_len(handle: i64, index: i64) -> i64:
+    """Get byte length of recv/read data by batch index or op id."""
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return 0
+    val ui = idx.to_u64()
+    val batch = g_drivers[ui].last_poll_batch
+    if index >= 0 and index.to_u64() < batch.len():
+        return batch[index.to_u64()].data_len
+
+    var i: u64 = 0
+    while i < batch.len():
+        if batch[i].op_id == index:
+            return batch[i].data_len
+        i = i + 1
+    0
+
+# ============================================================================
+# Cancel
+# ============================================================================
+
+@export("C")
+fn rt_driver_cancel(handle: i64, op_id: i64) -> bool:
+    """Cancel a pending operation. Returns true if found and removed."""
+    val idx = driver_get_index(handle)
+    if idx < 0:
+        return false
+    val ui = idx.to_u64()
+    var new_pending: [PendingOp] = []
+    var found = false
+    var i: u64 = 0
+    while i < g_drivers[ui].pending.len():
+        if g_drivers[ui].pending[i].op_id == op_id:
+            found = true
+        else:
+            new_pending.push(g_drivers[ui].pending[i])
+        i = i + 1
+    g_drivers[ui].pending = new_pending
+    found
+
+# ============================================================================
+# Query
+# ============================================================================
+
+@export("C")
+fn rt_driver_backend_name(handle: i64) -> text:
+    """Return backend name for baremetal."""
+    "baremetal"
+
+@export("C")
+fn rt_driver_supports_sendfile(handle: i64) -> bool:
+    """Baremetal does not support sendfile (no real filesystem yet)."""
+    false
+
+@export("C")
+fn rt_driver_supports_zero_copy(handle: i64) -> bool:
+    """Baremetal does not support zero-copy send."""
+    false
+
+# ============================================================================
+# Driver Registration
+# ============================================================================
+
+fn driver_shim_link_anchor() -> bool:
+    """Force this module into freestanding boot closures that need rt_driver_* exports."""
+    true
+
+@export("C")
+fn rt_driver_register(handle: i64) -> bool:
+    """Register a driver handle as active.
+
+    B3 stub: driver_create() already tracks the handle in g_drivers.
+    This call verifies the handle is live and returns true if found.
+    Used by the IoDriver runtime to confirm the driver is operational.
+    """
+    val drv = driver_get(handle)
+    drv != nil
+
+@export("C")
+fn rt_driver_unregister(handle: i64) -> bool:
+    """Unregister and destroy a driver handle.
+
+    Delegates to driver_destroy and returns true. Safe to call on an
+    already-dead handle (destroy is idempotent).
+    """
+    driver_destroy(handle)
+    true
+
+# ============================================================================
+# MTU Handling
+# ============================================================================
+
+# Default MTU for the baremetal virtual NIC (Ethernet II standard).
+val RT_DRIVER_DEFAULT_MTU: i64 = 1500
+
+@export("C")
+fn rt_driver_mtu(handle: i64) -> i64:
+    """Return the MTU (Maximum Transmission Unit) for this driver handle.
+
+    B3 stub: returns the standard Ethernet MTU (1500 bytes) for all handles.
+    A dead handle returns -1.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return -1
+    RT_DRIVER_DEFAULT_MTU
+
+@export("C")
+fn rt_driver_set_mtu(handle: i64, mtu: i64) -> bool:
+    """Request an MTU change on this driver handle.
+
+    B3 stub: validates the handle is live and the MTU is within the
+    Ethernet range (576–9000). The value is accepted but not stored
+    (baremetal virtual NIC has a fixed MTU). Returns false for dead
+    handles or out-of-range values.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return false
+    if mtu < 576 or mtu > 9000:
+        return false
+    # Live handle, valid range -- accepted (no-op on fixed-MTU baremetal NIC)
+    true
+
+# ============================================================================
+# Link State
+# ============================================================================
+
+# Link state constants (match Linux IFLA_OPERSTATE values for portability).
+val RT_LINK_STATE_UNKNOWN: i64 = 0
+val RT_LINK_STATE_UP: i64 = 1
+val RT_LINK_STATE_DOWN: i64 = 2
+
+@export("C")
+fn rt_driver_link_state(handle: i64) -> i64:
+    """Return the link state for this driver handle.
+
+    Returns one of:
+      RT_LINK_STATE_UNKNOWN (0) -- handle not found or driver dead
+      RT_LINK_STATE_UP      (1) -- link is up after packet TX/RX readiness
+      RT_LINK_STATE_DOWN    (2) -- link is down
+
+    A live handle reports UP only after the boot packet provider proves both
+    TX and RX. A dead handle or unready packet provider returns UNKNOWN.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return RT_LINK_STATE_UNKNOWN
+    if not driver_shim_packet_io_ready():
+        return RT_LINK_STATE_UNKNOWN
+    RT_LINK_STATE_UP
+
+@export("C")
+fn rt_driver_link_up(handle: i64) -> bool:
+    """Return true if the link for this handle is UP."""
+    rt_driver_link_state(handle) == RT_LINK_STATE_UP
+
+@export("C")
+fn rt_driver_link_speed_mbps(handle: i64) -> i64:
+    """Return the link speed in Mbps.
+
+    Baremetal virtual NIC reports 1000 Mbps only when packet IO is ready;
+    otherwise link speed is unavailable.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return -1
+    if not driver_shim_packet_io_ready():
+        return -1
+    1000
+
+@export("C")
+fn rt_driver_mac_addr(handle: i64) -> text:
+    """Return the MAC address for this driver handle as "XX:XX:XX:XX:XX:XX".
+
+    Returns a fixed locally-administered unicast address only after packet IO
+    is ready. An empty string is returned for dead or unready handles.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return ""
+    if not driver_shim_packet_io_ready():
+        return ""
+    "02:00:00:00:00:01"

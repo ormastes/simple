@@ -1,0 +1,262 @@
+const DEFAULT_SESSION_TIMEOUT_MS: i64 = 86400000
+const BRIDGE_LOGIN_INSTRUCTION: text = "Remote Control is only available with claude.ai subscriptions. Please use `/login` to sign in with your claude.ai account."
+const REMOTE_CONTROL_DISCONNECTED_MSG: text = "Remote Control disconnected."
+
+class WorkData:
+    kind: text
+    id: text
+
+impl WorkData:
+    static fn session(id: text) -> WorkData:
+        WorkData(kind: "session", id: id)
+
+    static fn healthcheck(id: text) -> WorkData:
+        WorkData(kind: "healthcheck", id: id)
+
+class WorkResponse:
+    id: text
+    kind: text
+    environmentId: text
+    state: text
+    data: WorkData
+    secret: text
+    createdAt: text
+
+impl WorkResponse:
+    static fn new(id: text, environmentId: text, state: text, data: WorkData, secret: text, createdAt: text) -> WorkResponse:
+        WorkResponse(id: id, kind: "work", environmentId: environmentId, state: state, data: data, secret: secret, createdAt: createdAt)
+
+class WorkSecret:
+    version: i64
+    sessionIngressToken: text
+    apiBaseUrl: text
+    useCodeSessions: bool
+    hasClaudeCodeArgs: bool
+    hasMcpConfig: bool
+    hasEnvironmentVariables: bool
+
+impl WorkSecret:
+    static fn new(version: i64, sessionIngressToken: text, apiBaseUrl: text, useCodeSessions: bool) -> WorkSecret:
+        WorkSecret(version: version, sessionIngressToken: sessionIngressToken, apiBaseUrl: apiBaseUrl, useCodeSessions: useCodeSessions, hasClaudeCodeArgs: false, hasMcpConfig: false, hasEnvironmentVariables: false)
+
+    me withOptionalBlocks() -> WorkSecret:
+        WorkSecret(version: me.version, sessionIngressToken: me.sessionIngressToken, apiBaseUrl: me.apiBaseUrl, useCodeSessions: me.useCodeSessions, hasClaudeCodeArgs: true, hasMcpConfig: true, hasEnvironmentVariables: true)
+
+class SessionActivity:
+    kind: text
+    summary: text
+    timestamp: i64
+
+impl SessionActivity:
+    static fn new(kind: text, summary: text, timestamp: i64) -> SessionActivity:
+        SessionActivity(kind: kind, summary: summary, timestamp: timestamp)
+
+class BridgeConfig:
+    dir: text
+    machineName: text
+    branch: text
+    gitRepoUrl: text
+    maxSessions: i64
+    spawnMode: text
+    verbose: bool
+    sandbox: bool
+    bridgeId: text
+    workerType: text
+    environmentId: text
+    reuseEnvironmentId: text
+    apiBaseUrl: text
+    sessionIngressUrl: text
+    debugFile: text
+    sessionTimeoutMs: i64
+
+impl BridgeConfig:
+    static fn new(dir: text, machineName: text, branch: text, gitRepoUrl: text, maxSessions: i64, spawnMode: text, bridgeId: text, workerType: text, environmentId: text, apiBaseUrl: text, sessionIngressUrl: text) -> BridgeConfig:
+        BridgeConfig(dir: dir, machineName: machineName, branch: branch, gitRepoUrl: gitRepoUrl, maxSessions: maxSessions, spawnMode: spawnMode, verbose: false, sandbox: false, bridgeId: bridgeId, workerType: workerType, environmentId: environmentId, reuseEnvironmentId: "", apiBaseUrl: apiBaseUrl, sessionIngressUrl: sessionIngressUrl, debugFile: "", sessionTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS)
+
+    me withReconnect(reuseEnvironmentId: text) -> BridgeConfig:
+        BridgeConfig(dir: me.dir, machineName: me.machineName, branch: me.branch, gitRepoUrl: me.gitRepoUrl, maxSessions: me.maxSessions, spawnMode: me.spawnMode, verbose: me.verbose, sandbox: me.sandbox, bridgeId: me.bridgeId, workerType: me.workerType, environmentId: me.environmentId, reuseEnvironmentId: reuseEnvironmentId, apiBaseUrl: me.apiBaseUrl, sessionIngressUrl: me.sessionIngressUrl, debugFile: me.debugFile, sessionTimeoutMs: me.sessionTimeoutMs)
+
+class PermissionResponseEvent:
+    kind: text
+    subtype: text
+    requestId: text
+    response: text
+
+impl PermissionResponseEvent:
+    static fn success(requestId: text, response: text) -> PermissionResponseEvent:
+        PermissionResponseEvent(kind: "control_response", subtype: "success", requestId: requestId, response: response)
+
+class SessionHandle:
+    sessionId: text
+    doneStatus: text
+    activities: [SessionActivity]
+    currentActivity: SessionActivity
+    accessToken: text
+    lastStderr: [text]
+    killed: bool
+    forceKilled: bool
+    stdin: [text]
+
+impl SessionHandle:
+    static fn new(sessionId: text, accessToken: text) -> SessionHandle:
+        SessionHandle(sessionId: sessionId, doneStatus: "completed", activities: [], currentActivity: SessionActivity.new("", "", 0), accessToken: accessToken, lastStderr: [], killed: false, forceKilled: false, stdin: [])
+
+    me kill() -> ():
+        me.killed = true
+
+    me forceKill() -> ():
+        me.forceKilled = true
+
+    me writeStdin(data: text) -> ():
+        me.stdin = me.stdin + [data]
+
+    me updateAccessToken(token: text) -> ():
+        me.accessToken = token
+
+class SessionSpawnOpts:
+    sessionId: text
+    sdkUrl: text
+    accessToken: text
+    useCcrV2: bool
+    workerEpoch: i64
+    hasFirstUserMessageCallback: bool
+
+impl SessionSpawnOpts:
+    static fn new(sessionId: text, sdkUrl: text, accessToken: text) -> SessionSpawnOpts:
+        SessionSpawnOpts(sessionId: sessionId, sdkUrl: sdkUrl, accessToken: accessToken, useCcrV2: false, workerEpoch: 0, hasFirstUserMessageCallback: false)
+
+    me ccrV2(workerEpoch: i64) -> SessionSpawnOpts:
+        SessionSpawnOpts(sessionId: me.sessionId, sdkUrl: me.sdkUrl, accessToken: me.accessToken, useCcrV2: true, workerEpoch: workerEpoch, hasFirstUserMessageCallback: me.hasFirstUserMessageCallback)
+
+class BridgeLoggerSurface:
+    methods: [text]
+
+impl BridgeLoggerSurface:
+    static fn canonical() -> BridgeLoggerSurface:
+        BridgeLoggerSurface(methods: [
+            "printBanner",
+            "logSessionStart",
+            "logSessionComplete",
+            "logSessionFailed",
+            "logStatus",
+            "logVerbose",
+            "logError",
+            "logReconnected",
+            "updateIdleStatus",
+            "updateReconnectingStatus",
+            "updateSessionStatus",
+            "clearStatus",
+            "setRepoInfo",
+            "setDebugLogPath",
+            "setAttached",
+            "updateFailedStatus",
+            "toggleQr",
+            "updateSessionCount",
+            "setSpawnModeDisplay",
+            "addSession",
+            "updateSessionActivity",
+            "setSessionTitle",
+            "removeSession",
+            "refreshDisplay"
+        ])
+
+    me has(method: text) -> bool:
+        var i = 0
+        while i < me.methods.len():
+            if me.methods[i] == method:
+                return true
+            i = i + 1
+        false
+
+fn defaultSessionTimeoutMs() -> i64:
+    DEFAULT_SESSION_TIMEOUT_MS
+
+fn bridgeLoginInstruction() -> text:
+    BRIDGE_LOGIN_INSTRUCTION
+
+fn bridgeLoginError() -> text:
+    "Error: You must be logged in to use Remote Control.\n\n" + BRIDGE_LOGIN_INSTRUCTION
+
+fn remoteControlDisconnectedMsg() -> text:
+    REMOTE_CONTROL_DISCONNECTED_MSG
+
+fn sessionDoneStatuses() -> [text]:
+    ["completed", "failed", "interrupted"]
+
+fn sessionActivityTypes() -> [text]:
+    ["tool_start", "text", "result", "error"]
+
+fn spawnModes() -> [text]:
+    ["single-session", "worktree", "same-dir"]
+
+fn bridgeWorkerTypes() -> [text]:
+    ["claude_code", "claude_code_assistant"]
+
+fn workDataTypes() -> [text]:
+    ["session", "healthcheck"]
+
+fn bridgeApiClientMethods() -> [text]:
+    ["registerBridgeEnvironment", "pollForWork", "acknowledgeWork", "stopWork", "deregisterEnvironment", "sendPermissionResponseEvent", "archiveSession", "reconnectSession", "heartbeatWork"]
+
+fn sessionHandleMethods() -> [text]:
+    ["kill", "forceKill", "writeStdin", "updateAccessToken"]
+
+fn sessionSpawnerMethod() -> text:
+    "spawn"
+
+fn defaultSessionTimeoutHours() -> i64:
+    DEFAULT_SESSION_TIMEOUT_MS / 60 / 60 / 1000
+
+fn workerTypeClaudeCode() -> text:
+    "claude_code"
+
+fn workerTypeAssistant() -> text:
+    "claude_code_assistant"
+
+fn spawnModeSingleSession() -> text:
+    "single-session"
+
+fn spawnModeWorktree() -> text:
+    "worktree"
+
+fn spawnModeSameDir() -> text:
+    "same-dir"
+
+fn permissionResponseEventType() -> text:
+    "control_response"
+
+fn permissionResponseSuccessSubtype() -> text:
+    "success"
+
+fn useCodeSessionsFieldName() -> text:
+    "use_code_sessions"
+
+fn sessionIngressTokenFieldName() -> text:
+    "session_ingress_token"
+
+fn apiBaseUrlFieldName() -> text:
+    "api_base_url"
+
+fn environmentIdFieldName() -> text:
+    "environment_id"
+
+fn environmentSecretFieldName() -> text:
+    "environment_secret"
+
+fn workerEpochFieldName() -> text:
+    "workerEpoch"
+
+fn sessionTimeoutFieldName() -> text:
+    "sessionTimeoutMs"
+
+fn bridgeMetadataWorkerTypeField() -> text:
+    "metadata.worker_type"
+
+fn bridgeConfigHasApiBaseUrl() -> bool:
+    true
+
+fn bridgeConfigHasSessionIngressUrl() -> bool:
+    true
+
+fn sessionHandleHasActivityRing() -> bool:
+    true

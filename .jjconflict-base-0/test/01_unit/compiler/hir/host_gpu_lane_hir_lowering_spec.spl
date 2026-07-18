@@ -1,0 +1,43 @@
+# Host/GPU target.later HIR lowering regression.
+#
+# @cover src/compiler/20.hir/hir_lowering/statements.spl 5%
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+fn host_gpu_hir_lane_score(src: text, fname: text) -> i64:
+    val log = make_logger()
+    val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", log)
+    var lowering = HirLowering.with_filename(fname + ".spl")
+    val hir = lowering.lower_module(module)
+    val fn_id = hir.symbols.lookup(fname)
+    expect(fn_id.?).to_equal(true)
+    val fn_ = hir.functions[fn_id.unwrap()]
+    for stmt in fn_.body.stmts:
+        match stmt.kind:
+            case HirStmtKind.TargetLater(config, body):
+                var score = 1
+                match config.lane:
+                    case HirTargetLane.Gpu:
+                        score = score + 10
+                    case HirTargetLane.Host:
+                        score = score + 20
+                if config.has_max_packet:
+                    score = score + 100
+                score = score + body.stmts.len()
+                return score
+            case _:
+                pass
+    0
+
+describe "Host/GPU lane HIR lowering", tag: ["only-compiled"]:
+    it "preserves target.later gpu lane metadata in HIR":
+        val src = "fn f():\n    target.later(max_packet: 512) gpu \\:\n        val draw_ir_batch = \"batch\"\n"
+        expect(host_gpu_hir_lane_score(src, "f")).to_equal(112)

@@ -1,0 +1,820 @@
+# Engine2D advanced Draw IR executor.
+#
+# This is the first Simple2D-facing Draw IR boundary. It executes the shared
+# Draw IR contract through the existing Engine2D facade and keeps GPU selection
+# as metadata/fallback policy; real GPU plugin migration is a later backend job.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
+    DrawIrBatch,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrEmbeddingConfig,
+    DrawIrStyleProp,
+    Simple2dDrawIrCompositionPlan,
+    Simple2dDrawIrPlan,
+    simple_2d_draw_ir_adv_composition_plan,
+    simple_2d_draw_ir_adv_plan
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
+
+struct Engine2dDrawIrAdvResult:
+    schema: text
+    unit_id: text
+    selected_backend: text
+    fallback_required: bool
+    fallback_reason: text
+    rendered_command_count: i32
+    skipped_command_count: i32
+    pixels: [u32]
+    readback_source: text
+    backend_handle: i64
+    device_identity: i64
+    readback_checksum: i64
+
+struct Engine2dResolvedDrawIrImage:
+    image_uri: text
+    width: i32
+    height: i32
+    pixels: [u32]
+
+# Named result for the internal render walkers. Positional tuple-member reads
+# are miscompiled on the entry-closure freestanding native path; named fields
+# preserve rendered/skipped counts on every backend.
+struct Engine2dDrawIrRenderOutcome:
+    engine: Engine2D
+    rendered: i32
+    skipped: i32
+    unsupported_kinds: text
+
+fn _engine2d_draw_ir_render_outcome(engine: Engine2D, rendered: i32, skipped: i32, unsupported_kinds: text) -> Engine2dDrawIrRenderOutcome:
+    Engine2dDrawIrRenderOutcome(engine: engine, rendered: rendered, skipped: skipped, unsupported_kinds: unsupported_kinds)
+
+fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.batch_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required,
+        fallback_reason: plan.fallback_reason,
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        device_identity: readback.device_identity,
+        readback_checksum: readback.checksum
+    )
+
+fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.composition_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required,
+        fallback_reason: plan.fallback_reason,
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        device_identity: readback.device_identity,
+        readback_checksum: readback.checksum
+    )
+
+fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
+    kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT or kind == DRAW_IR_COMMAND_IMAGE
+
+# A fully transparent fill has no visible contribution. Nonzero alpha may
+# initialize a fresh transparent child through each backend's canonical fill.
+fn _engine2d_draw_ir_has_visible_alpha(color: u32) -> bool:
+    ((color >> 24) & 0xFFu32) != 0u32
+
+# Recover the pixel font size a text command was laid out with from its computed
+# style (`font-size` is a plain integer string). Falls back to 12 when absent.
+fn _engine2d_draw_ir_text_font_size(style: [DrawIrStyleProp]) -> i32:
+    for prop in style:
+        val prop_key: text = prop.key
+        if prop_key == "font-size":
+            val prop_value: text = prop.value
+            var value = 0
+            var idx: i64 = 0
+            while idx < prop_value.len():
+                val ch = prop_value.char_code_at(idx).to_i32()
+                if ch >= 48 and ch <= 57:
+                    value = value * 10 + (ch - 48)
+                idx = idx + 1
+            if value > 0:
+                return value
+    12
+
+# Look up a computed-style value by key. Style props are emitted by the browser
+# layout renderer as packed key/value pairs (colors/widths as decimal strings,
+# `background-image` as `linear-gradient(<from>,<to>)`, `box-shadow` as
+# `<x>px <y>px <color>`). Returns "" when the key is absent.
+fn _engine2d_draw_ir_style_value(props: [DrawIrStyleProp], key: text) -> text:
+    for prop in props:
+        val prop_key: text = prop.key
+        if prop_key == key:
+            val prop_value: text = prop.value
+            return prop_value
+    ""
+
+fn _engine2d_draw_ir_text_advances(command: DrawIrCommand) -> [i32]:
+    val encoded = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
+    if encoded == "":
+        return []
+    val parts = encoded.split(",")
+    var advances: [i32] = []
+    var width: i64 = 0
+    for raw in parts:
+        val advance = raw.to_int() ?? -1
+        if advance < 0 or width > 2147483647 - advance.to_i64():
+            return []
+        advances.push(advance)
+        width = width + advance.to_i64()
+    var character_count: i64 = 0
+    for ch in command.text_value:
+        character_count = character_count + 1
+    if advances.len() != character_count or width != command.width.to_i64():
+        return []
+    advances
+
+fn _engine2d_draw_ir_shaping_requested(command: DrawIrCommand) -> bool:
+    _engine2d_draw_ir_style_value(command.computed_style, "font-shaping") == "selected-pure-simple"
+
+fn _engine2d_draw_ir_shaped_payload_valid(command: DrawIrCommand, advances: [i32]) -> bool:
+    val payload = command.glyph_run
+    if (not payload.valid or payload.glyph_ids.len() == 0 or
+        payload.glyph_ids.len() != payload.xs.len() or
+        payload.glyph_ids.len() != payload.ys.len() or
+        payload.glyph_ids.len() != payload.clusters.len()):
+        return false
+    var index: i64 = 0
+    while index < payload.glyph_ids.len():
+        if (payload.glyph_ids[index] == 0u32 or payload.glyph_ids[index] > 2147483647u32 or
+            payload.clusters[index] < 0 or payload.clusters[index] >= advances.len()):
+            return false
+        index = index + 1
+    true
+
+# Scan the nth (0-based) signed integer token out of a free-form value string.
+# Accumulate in i64 so packed u32 color words (up to 4294967295) do not overflow
+# an i32 mid-scan. Returns `fallback` when the nth token is absent.
+fn _engine2d_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
+    var count = 0
+    var idx: i64 = 0
+    val length = value.len()
+    while idx < length:
+        val ch0 = value.char_code_at(idx).to_i32()
+        val is_digit = ch0 >= 48 and ch0 <= 57
+        var sign_ok = false
+        if (ch0 == 45 or ch0 == 43) and idx + 1 < length:
+            val nxt = value.char_code_at(idx + 1).to_i32()
+            sign_ok = nxt >= 48 and nxt <= 57
+        if is_digit or sign_ok:
+            val negative = ch0 == 45
+            if ch0 == 45 or ch0 == 43:
+                idx = idx + 1
+            var acc: i64 = 0
+            while idx < length:
+                val ch = value.char_code_at(idx).to_i32()
+                if ch >= 48 and ch <= 57:
+                    acc = acc * 10 + ((ch - 48) as i64)
+                    idx = idx + 1
+                else:
+                    break
+            if negative:
+                acc = 0 - acc
+            if count == n:
+                return acc
+            count = count + 1
+        else:
+            idx = idx + 1
+    fallback
+
+# Paint the per-side borders of a box. Emits a uniform rounded-border outline
+# when a corner radius plus four equal, same-colored, non-zero sides are present;
+# otherwise paints per-side slivers with `draw_rect_filled`. Engine2D is
+# value-copied across this free-function boundary, so the caller MUST reassign
+# from the returned engine.
+fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2D:
+    var eng = engine
+    val top_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32
+    val right_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-width"), 0, 0) as i32
+    val bottom_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-width"), 0, 0) as i32
+    val left_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-width"), 0, 0) as i32
+    val top_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-color"), 0, 0) as u32
+    val right_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-color"), 0, 0) as u32
+    val bottom_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-color"), 0, 0) as u32
+    val left_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-color"), 0, 0) as u32
+    val uniform = top_w == right_w and right_w == bottom_w and bottom_w == left_w and top_w > 0 and top_c == right_c and right_c == bottom_c and bottom_c == left_c
+    if radius > 0 and uniform and _engine2d_draw_ir_has_visible_alpha(top_c):
+        eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
+        return eng
+    if top_w > 0 and _engine2d_draw_ir_has_visible_alpha(top_c):
+        eng.draw_rect_filled(x, y, w, top_w, top_c)
+    if bottom_w > 0 and _engine2d_draw_ir_has_visible_alpha(bottom_c):
+        eng.draw_rect_filled(x, y + h - bottom_w, w, bottom_w, bottom_c)
+    if left_w > 0 and _engine2d_draw_ir_has_visible_alpha(left_c):
+        eng.draw_rect_filled(x, y, left_w, h, left_c)
+    if right_w > 0 and _engine2d_draw_ir_has_visible_alpha(right_c):
+        eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
+    eng
+
+# Render a single HTML/CSS box honestly instead of collapsing it to one flat
+# fill: box-shadow first (behind), then background (linear-gradient beats a solid
+# fill; a corner radius routes the solid fill to a rounded rect), then per-side
+# borders. Each sub-feature is checked independently so a transparent-background
+# box that still has a border or shadow paints instead of vanishing. Engine2D is
+# value-copied across this free-function boundary, so the caller MUST reassign
+# from the returned engine.
+fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2D:
+    var eng = engine
+    val style: [DrawIrStyleProp] = command.computed_style
+    val shadow = _engine2d_draw_ir_style_value(style, "box-shadow")
+    if shadow != "" and shadow != "none":
+        val sx = _engine2d_draw_ir_nth_int(shadow, 0, 0) as i32
+        val sy = _engine2d_draw_ir_nth_int(shadow, 1, 0) as i32
+        val scolor = _engine2d_draw_ir_nth_int(shadow, 2, 0) as u32
+        if _engine2d_draw_ir_has_visible_alpha(scolor):
+            eng.draw_shadow_rect(x, y, w, h, sx, sy, 0, scolor)
+    val radius = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-radius"), 0, 0) as i32
+    val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
+    if bg_image.starts_with("linear-gradient("):
+        val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
+        val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
+        eng.draw_gradient_rect(x, y, w, h, g_from, g_to)
+    elif _engine2d_draw_ir_has_visible_alpha(command.color):
+        if radius > 0:
+            eng.draw_rounded_rect(x, y, w, h, radius, command.color)
+        else:
+            eng.draw_rect_filled(x, y, w, h, command.color)
+    eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
+    eng
+
+fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
+    Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
+
+fn _engine2d_draw_ir_resolved_image_index(images: [Engine2dResolvedDrawIrImage], image_uri: text) -> i32:
+    var index = 0
+    while index < images.len():
+        if images[index].image_uri == image_uri:
+            return index
+        index = index + 1
+    -1
+
+fn _engine2d_draw_ir_valid_resolved_image(image: Engine2dResolvedDrawIrImage) -> bool:
+    image.width > 0 and image.height > 0 and image.pixels.len() == image.width.to_i64() * image.height.to_i64()
+
+fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool:
+    for pixel in image.pixels:
+        if ((pixel >> 24) & 0xFFu32) != 0xFFu32:
+            return false
+    true
+
+fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp]) -> bool:
+    for prop in style:
+        if prop.key != "source" and prop.key != "part" and prop.key != "z-index" and prop.key != "focused":
+            return false
+    true
+
+fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, allow_clipped: bool, allow_translucent_initializer: bool) -> bool:
+    val right = command.x.to_i64() + command.width.to_i64()
+    val bottom = command.y.to_i64() + command.height.to_i64()
+    if (command.width <= 0 or command.height <= 0 or right <= 0 or bottom <= 0 or
+        command.x >= width or command.y >= height):
+        return false
+    val wholly_bounded = command.x >= 0 and command.y >= 0 and right <= width.to_i64() and bottom <= height.to_i64()
+    if command.kind == "text":
+        val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+        val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+        if command.text_value == "" or identity == "" or (not allow_clipped and not wholly_bounded):
+            return false
+        return (_engine2d_draw_ir_style_value(command.computed_style, "font-family") != "" and
+            _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths") != "" and
+            _engine2d_draw_ir_style_value(command.computed_style, "line-height") != "" and
+            font_size > 0 and font_size <= 512)
+    if not allow_clipped and not wholly_bounded:
+        return false
+    if command.kind == "rect":
+        if not _engine2d_draw_ir_fresh_device_rect_style_supported(command.computed_style):
+            return false
+        val alpha = (command.color >> 24) & 0xFFu32
+        val pixel_work = command.width.to_i64() * command.height.to_i64()
+        return (alpha == 0xFFu32 or (allow_translucent_initializer and alpha > 0u32)) and pixel_work <= width.to_i64() * height.to_i64()
+    if command.kind != "image":
+        return false
+    val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+    if image_index < 0:
+        return false
+    val image = images[image_index]
+    val exact_size = command.width == image.width and command.height == image.height
+    val source_work = image.width.to_i64() * image.height.to_i64()
+    val scaled_work = command.width.to_i64() * command.height.to_i64()
+    val scaled_work_bounded = scaled_work <= width.to_i64() * height.to_i64() and scaled_work <= 2147483647
+    val native_index_bounded = (source_work <= 4294967295 and
+        (command.width.to_i64() - 1) * image.width.to_i64() <= 2147483647 and
+        (command.height.to_i64() - 1) * image.height.to_i64() <= 2147483647)
+    _engine2d_draw_ir_valid_resolved_image(image) and
+        native_index_bounded and
+        (exact_size or scaled_work_bounded)
+
+fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
+    if command.x != 0 or command.y != 0 or command.width != width or command.height != height:
+        return false
+    if command.kind == "rect":
+        return command.computed_style.len() == 0 and ((command.color >> 24) & 0xFFu32) == 0xFFu32
+    if command.kind != "image":
+        return false
+    val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+    image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]) and _engine2d_draw_ir_image_is_opaque(images[image_index])
+
+fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> text:
+    var first_command = true
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        val right = embedding.x.to_i64() + embedding.width.to_i64()
+        val bottom = embedding.y.to_i64() + embedding.height.to_i64()
+        if (embedding.x < 0 or embedding.y < 0 or embedding.width <= 0 or embedding.height <= 0 or
+            right > width.to_i64() or bottom > height.to_i64() or
+            embedding.opacity_milli <= 0 or embedding.opacity_milli > 1000):
+            return "fresh-device-bounded-embedding-required"
+        val fills_target = embedding.x == 0 and embedding.y == 0 and embedding.width == width and embedding.height == height
+        if (not fills_target or embedding.opacity_milli < 1000) and embedding.surface_id == "":
+            return "fresh-device-embedded-surface-required"
+        if first_command and (not fills_target or embedding.opacity_milli != 1000):
+            return "fresh-device-opaque-full-target-first-command-required"
+        var command_index = 0
+        for command in batch.commands:
+            val allow_translucent_initializer = not fills_target and embedding.clip and command_index == 0
+            if not _engine2d_draw_ir_fresh_device_command_supported(command, images, embedding.width, embedding.height, not fills_target and embedding.clip, allow_translucent_initializer):
+                return "fresh-device-command-preflight-required"
+            if first_command and not _engine2d_draw_ir_fresh_device_initializes_target(command, images, width, height):
+                return "fresh-device-opaque-full-target-first-command-required"
+            first_command = false
+            command_index = command_index + 1
+    if first_command:
+        return "fresh-device-nonempty-composition-required"
+    ""
+
+fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: DrawIrComposition, width: i32, height: i32) -> (Engine2D, text):
+    var eng = engine
+    var pixel_work: i64 = 0
+    val max_pixel_work = width.to_i64() * height.to_i64()
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == "text":
+                val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+                if not eng.select_font_identity(identity):
+                    return (eng, "fresh-device-font-identity-unavailable")
+                val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+                val advances = _engine2d_draw_ir_text_advances(command)
+                if advances.len() == 0:
+                    return (eng, "fresh-device-font-advances-invalid")
+                val fonts = eng.fonts()
+                val shaped = _engine2d_draw_ir_shaping_requested(command)
+                if shaped and not _engine2d_draw_ir_shaped_payload_valid(command, advances):
+                    return (eng, "fresh-device-font-shaping-invalid")
+                val prepared = if shaped:
+                    fonts.prepare_selected_glyph_run(command.glyph_run, command.color, font_size)
+                else:
+                    fonts.prepare_text_with_advances(command.text_value, advances, command.color, font_size)
+                eng.font_renderer = fonts
+                if not prepared.valid or prepared.font_identity != identity:
+                    return (eng, if shaped: "fresh-device-font-shaping-invalid" else: "fresh-device-font-batch-invalid")
+                for quad in prepared.quads:
+                    val total = quad.width.to_i64() * quad.height.to_i64()
+                    val dst_x = font_destination_origin(command.x, quad.dst_x, quad.width)
+                    val dst_y = font_destination_origin(command.y, quad.dst_y, quad.height)
+                    if total <= 0 or total > max_pixel_work - pixel_work:
+                        return (eng, "fresh-device-font-work-limit-exceeded")
+                    pixel_work = pixel_work + total
+                    if (dst_x == nil or dst_y == nil or
+                        font_atlas_subrect_pixels(prepared.atlas_pixels, prepared.atlas_width, prepared.atlas_height,
+                            quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color).len() != total):
+                        return (eng, "fresh-device-font-quad-invalid")
+    (eng, "")
+
+# Append one diagnostic kind without unbounded duplicate string growth.
+fn _engine2d_draw_ir_note_unsupported_kind(kinds: text, kind: text) -> text:
+    if kinds == "":
+        return kind
+    if ("," + kinds + ",").contains("," + kind + ","):
+        return kinds
+    kinds + "," + kind
+
+fn _engine2d_draw_ir_unsupported_command_kinds(commands: [DrawIrCommand]) -> text:
+    var kinds = ""
+    for command in commands:
+        if command.? == false:
+            continue
+        if not _engine2d_draw_ir_supported_command(command.kind):
+            kinds = _engine2d_draw_ir_note_unsupported_kind(kinds, command.kind)
+    if kinds == "":
+        return "none"
+    kinds
+
+fn _engine2d_draw_ir_append_unsupported_reason(reason: text, unsupported_kinds: text) -> text:
+    if unsupported_kinds == "none":
+        return reason
+    val unsupported_reason = "unsupported Draw IR commands skipped: {unsupported_kinds}"
+    if reason == "":
+        return unsupported_reason
+    "{reason}; {unsupported_reason}"
+
+fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, unsupported_kinds: text, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
+    val has_unsupported = skipped > 0 and unsupported_kinds != "none"
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.batch_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required or has_unsupported,
+        fallback_reason: _engine2d_draw_ir_append_unsupported_reason(plan.fallback_reason, unsupported_kinds),
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        device_identity: readback.device_identity,
+        readback_checksum: readback.checksum
+    )
+
+fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, unsupported_kinds: text, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
+    val has_unsupported = skipped > 0 and unsupported_kinds != "none"
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.composition_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required or has_unsupported,
+        fallback_reason: _engine2d_draw_ir_append_unsupported_reason(plan.fallback_reason, unsupported_kinds),
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        device_identity: readback.device_identity,
+        readback_checksum: readback.checksum
+    )
+
+# Maximum embedded-surface nesting depth for _engine2d_draw_ir_render_batch_embedded.
+# The current DrawIrBatch/DrawIrComposition schema has no field that lets one
+# batch reference a nested child batch/composition directly, so a single
+# executor call never structurally recurses past depth 0 today — this cap is
+# forward-proofing the offscreen render path so that IF a future producer
+# feeds an embedded surface's own pixels back in (e.g. as a resolved
+# DRAW_IR_COMMAND_IMAGE built from another embedded render, composing surfaces
+# by hand across two executor calls), unbounded nesting still can't blow the
+# stack: past this depth the batch falls back to today's direct translate+clip
+# render instead of allocating another offscreen Engine2D.
+val ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH: i32 = 3
+
+# Single-slot reusable software offscreen for embedded (translucent) batches.
+# SimpleOS runs on a NON-reclaiming baremetal bump heap: Engine2D.create_offscreen
+# allocates a full ~8 MB surface per translucent window and offscreen.shutdown()
+# frees nothing, so ~12 per-window surfaces exhaust the 192 MB heap before the
+# first desktop frame completes ([PANIC] heap exhausted). Top-level embedded
+# batches render sequentially (one live at a time; depth is never incremented,
+# so there is no re-entrancy), so a single cached surface — cleared before each
+# reuse — serves them all, and is reused across frames too. Keyed by EXACT
+# (w, h) because draw_engine composites src.width() x src.height(); a size
+# change reallocates (bounded by the number of distinct window sizes).
+var _engine2d_embed_pool: Engine2D? = nil
+var _engine2d_embed_pool_w: i32 = 0
+var _engine2d_embed_pool_h: i32 = 0
+
+fn _engine2d_embed_offscreen_acquire(w: i32, h: i32) -> Engine2D:
+    # Reuse the cached surface only on an exact size match. The (w, h) sentinel
+    # (initial 0x0 never matches a real embedding, which is guarded > 0) makes
+    # the first call allocate. Robust to any Option/nil miscodegen on the
+    # freestanding path: a missed reuse only costs an extra allocation, never
+    # corruption. clear() restores the fully-transparent start state that a
+    # fresh create_offscreen() would have; clip/mask are reset so no state
+    # leaks between reuses.
+    if _engine2d_embed_pool_w == w and _engine2d_embed_pool_h == h:
+        if val Some(cached) = _engine2d_embed_pool:
+            cached.clear(0x00000000u32)
+            cached.clear_clip()
+            cached.clear_mask()
+            return cached
+    val fresh = Engine2D.create_offscreen(w, h)
+    _engine2d_embed_pool = Some(fresh)
+    _engine2d_embed_pool_w = w
+    _engine2d_embed_pool_h = h
+    fresh
+
+# Render one batch's flat command list onto `engine`, with every command's
+# local (x, y) shifted by (offset_x, offset_y). Shared by the direct
+# translate+clip path and the offscreen embedded-surface path (where
+# offset_x/offset_y are 0 since the surface origin IS the batch origin).
+# Engine2D is value-copied across this free-function boundary (see
+# _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool) -> Engine2dDrawIrRenderOutcome:
+    var eng = engine
+    var rendered = 0
+    var skipped = 0
+    var unsupported_kinds = ""
+    for command in commands:
+        # A nil display-list element must be skipped before any field access.
+        # Keep the explicit comparison: freestanding codegen has miscompiled
+        # `not` in this condition position.
+        if command.? == false:
+            skipped = skipped + 1
+            continue
+        val command_kind: text = command.kind
+        val x = offset_x + command.x
+        val y = offset_y + command.y
+        if command_kind == DRAW_IR_COMMAND_RECT:
+            eng = _engine2d_draw_ir_render_box(eng, command, x, y, command.width, command.height)
+            rendered = rendered + 1
+        elif command_kind == DRAW_IR_COMMAND_TEXT:
+            val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+            var font_ready = true
+            val shaped = _engine2d_draw_ir_shaping_requested(command)
+            var font_failure_kind = if shaped: "text-font-shaping" else: "text-font-identity"
+            if font_identity != "":
+                font_ready = eng.select_font_identity(font_identity)
+            else if shaped:
+                font_ready = false
+            if font_ready:
+                val encoded_advances = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
+                val advances = _engine2d_draw_ir_text_advances(command)
+                if advances.len() > 0:
+                    font_failure_kind = if shaped: "text-font-shaping" else: "text-font-batch"
+                    val payload_valid = not shaped or _engine2d_draw_ir_shaped_payload_valid(command, advances)
+                    val drawn = if shaped and payload_valid:
+                        eng.draw_shaped_text(x, y, command.glyph_run, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    else if not shaped:
+                        eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    else:
+                        false
+                    if drawn:
+                        rendered = rendered + 1
+                    else:
+                        font_ready = false
+                elif encoded_advances != "":
+                    font_ready = false
+                    font_failure_kind = if shaped: "text-font-shaping" else: "text-font-advances"
+                else:
+                    eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    rendered = rendered + 1
+            if not font_ready:
+                skipped = skipped + 1
+                unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, font_failure_kind)
+        elif command_kind == DRAW_IR_COMMAND_IMAGE:
+            val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+            if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
+                val image = images[image_index]
+                if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
+                    if command.width == image.width and command.height == image.height:
+                        eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                    else:
+                        eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                else:
+                    eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                rendered = rendered + 1
+            else:
+                skipped = skipped + 1
+                unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+        else:
+            skipped = skipped + 1
+            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+    _engine2d_draw_ir_render_outcome(eng, rendered, skipped, unsupported_kinds)
+
+# Render one batch onto `engine`, honoring a real embedded render target when
+# the batch declares a non-empty embedding.surface_id: the batch's commands
+# render into a fresh offscreen Engine2D sized embedding.width x
+# embedding.height (positioned relative to the SURFACE origin, i.e. WITHOUT
+# adding embedding.x/y — that offset applies exactly once, at composite time
+# below), then the finished surface is stitched into `engine` at
+# (embedding.x, embedding.y) honoring embedding.opacity_milli. The offscreen
+# buffer's own bounds enforce embedding.clip for free (commands can never
+# paint outside a canvas that small), so `clip` needs no extra handling here.
+#
+# Batches with an empty surface_id (or a degenerate/too-deep embedding) keep
+# today's exact direct translate+clip behavior — this is the load-bearing
+# backward-compatibility path: no regression for callers that never opted
+# into a real embedded surface.
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool) -> Engine2dDrawIrRenderOutcome:
+    var eng = engine
+    # Preserve the nested Draw IR struct layout across the native
+    # free-function boundary. Native inference has historically treated an
+    # unannotated field projection as a generic runtime value here.
+    val embedding: DrawIrEmbeddingConfig = batch.embedding
+    if batch.commands.len() == 0:
+        return _engine2d_draw_ir_render_outcome(eng, 0, 0, "")
+    # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
+    # EXACTLY the size of the target it renders onto composites as a plain 1:1
+    # copy with no cropping/offset/alpha effect — offscreen-then-blit would be
+    # provably identical pixels for strictly more work (an extra full-size
+    # buffer alloc/init/clear plus a second full-canvas read_pixels+blend
+    # pass). Root/full-page batches (e.g. widget_draw_ir.spl's "widget-root",
+    # window_scene_draw_ir.spl's desktop batch) hit this every render, so
+    # skipping the redundant round trip here matters under the interpreter
+    # (see doc/08_tracking/bug/engine2d_interpreted_mirror_dominates_render_2026-07-03.md
+    # for the same class of cost). Smaller/offset/sub-opaque batches (real
+    # windows, dialogs, thumbnails) are unaffected and still get a real
+    # offscreen surface.
+    # Keep the full-target decision in typed scalar locals. The native Metal
+    # path previously mis-evaluated the compact mixed field/method expression
+    # below for a browser-produced embedding even though the caller observed
+    # (0,0,320,240,1000) and the engine was 320x240. That incorrectly created
+    # a shared offscreen target for a root batch and corrupted its command
+    # decoding. Simple scalar comparisons preserve the intended fast path.
+    val target_width: i32 = eng.width()
+    val target_height: i32 = eng.height()
+    val embedding_x: i32 = embedding.x
+    val embedding_y: i32 = embedding.y
+    val embedding_width: i32 = embedding.width
+    val embedding_height: i32 = embedding.height
+    val embedding_opacity: i32 = embedding.opacity_milli
+    val origin_matches = embedding_x == 0 and embedding_y == 0
+    val size_matches = embedding_width == target_width and embedding_height == target_height
+    val fully_opaque = embedding_opacity >= 1000
+    val fills_target_exactly = origin_matches and size_matches and fully_opaque
+    # A sub-region batch only NEEDS a real offscreen surface when it either
+    # (a) requires alpha compositing (opacity < 100%), or (b) has its own
+    # dedicated device-shared-offscreen path (vulkan/metal, wired below).
+    # Everything else (opaque, CPU/baremetal-backed, wanting clip) is exactly
+    # equivalent to rendering directly onto the parent engine with its clip
+    # rect set to the embedding bounds -- same reasoning `fills_target_exactly`
+    # already applies to the full-page case, generalized to sub-regions.
+    # This also sidesteps `Engine2D.create_offscreen()`'s plain CPU/software
+    # offscreen path, whose `RenderBackend` trait-object dispatch
+    # (`self.backend.draw_rect_filled(...)`) has been observed to fault with
+    # a garbage instruction pointer on the freestanding cranelift codegen path
+    # for a `SoftwareBackend` boxed this way -- a compiler/codegen defect
+    # filed for follow-up, not something fixable at this call site.
+    val needs_real_offscreen = embedding.opacity_milli < 1000 or eng.backend_name() == "vulkan" or eng.backend_name() == "metal"
+    # Opaque baremetal batches can render directly into the MMIO parent: the
+    # command loop already applies embedding offsets, and no opacity surface
+    # or device-shared target is needed. This avoids one full-frame software
+    # allocation per desktop/chrome/taskbar batch on the bump-only OS heap.
+    val baremetal_direct = eng.backend_name() == "baremetal" and embedding.opacity_milli >= 1000
+    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
+    if not use_embedded_surface:
+        val apply_clip = embedding.clip and not fills_target_exactly
+        if apply_clip:
+            eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
+        val blend_images = allow_parent_image or (embedding.surface_id != "" and fills_target_exactly)
+        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images, blend_images)
+        eng = direct.engine
+        if apply_clip:
+            eng.clear_clip()
+        return _engine2d_draw_ir_render_outcome(eng, direct.rendered, direct.skipped, direct.unsupported_kinds)
+
+    var pending_offscreen: Engine2D? = nil
+    var offscreen_pooled = false
+    if eng.backend_name() == "vulkan":
+        val offscreen_result = eng.create_shared_vulkan_offscreen(embedding.width, embedding.height)
+        match offscreen_result:
+            Err(reason):
+                return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), reason)
+            Ok(created):
+                pending_offscreen = Some(created)
+    elif eng.backend_name() == "metal":
+        val offscreen_result = eng.create_shared_metal_offscreen(embedding.width, embedding.height)
+        match offscreen_result:
+            Err(reason):
+                return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), reason)
+            Ok(created):
+                pending_offscreen = Some(created)
+    else:
+        # Software/baremetal offscreen: borrow the shared single-slot pool at
+        # the (non-reentrant) top level so a fresh ~8 MB surface is not charged
+        # to the non-reclaiming bump heap per translucent window. Nested embeds
+        # (depth > 0, currently unreachable but kept correct) use a fresh
+        # surface so an in-flight parent buffer is never clobbered.
+        if depth == 0:
+            offscreen_pooled = true
+            pending_offscreen = Some(_engine2d_embed_offscreen_acquire(embedding.width, embedding.height))
+        else:
+            pending_offscreen = Some(Engine2D.create_offscreen(embedding.width, embedding.height))
+    var offscreen = pending_offscreen ?? return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-offscreen-not-created")
+    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, true)
+    offscreen = inner.engine
+    var composited = true
+    if eng.backend_name() == "vulkan":
+        val child = offscreen.read_pixels_with_source()
+        composited = (child.source == "device_readback" and child.backend_handle > 0 and
+            child.pixels.len() == embedding.width.to_i64() * embedding.height.to_i64() and
+            eng.draw_vulkan_image_blend_checked(embedding.x, embedding.y, embedding.width, embedding.height, child.pixels, embedding.opacity_milli))
+    elif eng.backend_name() == "metal":
+        val child = offscreen.read_pixels_with_source()
+        composited = (child.source == "device_readback" and child.backend_handle > 0 and
+            child.pixels.len() == embedding.width.to_i64() * embedding.height.to_i64() and
+            eng.draw_metal_image_blend_checked(embedding.x, embedding.y, embedding.width, embedding.height, child.pixels, embedding.opacity_milli))
+    elif embedding.opacity_milli >= 1000:
+        eng.draw_engine(embedding.x, embedding.y, offscreen)
+    else:
+        # Composite the translucent offscreen WITHOUT the two full-surface
+        # scratch arrays draw_engine_opacity() allocates (a read_pixels()
+        # snapshot + an engine2d_scale_pixel_alpha() copy) — both leak on the
+        # non-reclaiming bump heap. The offscreen is scratch (discarded or
+        # cleared before its next reuse), so its alpha is scaled in place and
+        # its buffer blended directly. Falls back for non-software offscreens.
+        if not eng.draw_software_offscreen_opacity_consume(embedding.x, embedding.y, offscreen, embedding.opacity_milli):
+            eng.draw_engine_opacity(embedding.x, embedding.y, offscreen, embedding.opacity_milli)
+    # A pooled offscreen is retained for the next same-size batch (and future
+    # frames); shutting it down would free its buffer and defeat the reuse.
+    if not offscreen_pooled:
+        offscreen.shutdown()
+    if not composited:
+        return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-device-composite-not-proven")
+    _engine2d_draw_ir_render_outcome(eng, inner.rendered, inner.skipped, inner.unsupported_kinds)
+
+fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    var images: [Engine2dResolvedDrawIrImage] = []
+    engine2d_draw_ir_adv_batch_with_images(engine, batch, gpu_available, images)
+
+fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val outcome = _engine2d_draw_ir_render_batch_embedded(engine, batch, images, 0, false)
+    val eng = outcome.engine
+    var unsupported_kinds = outcome.unsupported_kinds
+    if unsupported_kinds == "":
+        unsupported_kinds = "none"
+    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, outcome.rendered, outcome.skipped, unsupported_kinds, eng.read_pixels_with_source())
+
+fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    var images: [Engine2dResolvedDrawIrImage] = []
+    val result = engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images)
+    result
+
+fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    val result = _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, true)
+    result
+
+fn engine2d_draw_ir_adv_composition_present_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    """Render and present a composition without requesting a result readback."""
+    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false)
+
+fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    """Render/read back an exhaustively preflighted fresh device composition."""
+    val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height())
+    if reason != "":
+        val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
+        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
+    val prepared = _engine2d_draw_ir_prepare_fresh_device_text(engine, composition, engine.width(), engine.height())
+    if prepared.1 != "":
+        val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
+        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
+    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
+
+fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
+    # NOTE(2026-07-16): previously this preflight-scanned every batch and, if
+    # ANY command anywhere was unresolved (e.g. one missing taskbar icon on a
+    # degraded disk), bailed out with rendered=0 for the WHOLE composition.
+    # The per-command loop below (_engine2d_draw_ir_render_commands) already
+    # renders everything it can and accounts for the rest in skipped/
+    # unsupported_kinds, so the all-or-nothing preflight bail is removed:
+    # unresolved commands are now skipped individually and everything else
+    # still renders. This depended on backend_baremetal.spl's
+    # draw_rect_filled (and siblings) clamping unconditionally to the
+    # framebuffer bounds regardless of clip_enabled -- see that file for the
+    # fix that made this safe.
+    var eng = engine
+    var rendered = 0
+    var skipped = 0
+    var unsupported_kinds = ""
+    # NOTE(layer ordering): batches composite in array order, not re-sorted by
+    # embedding.layer. Every real producer (e.g. window_scene_draw_ir.spl)
+    # already emits batches desktop-first/chrome-next/windows-by-ascending-
+    # z_index, i.e. already in ascending layer order, so batch order is a
+    # faithful proxy for layer order today. Re-sorting here would need to
+    # restructure this loop (stable sort + re-derive rendered/skipped
+    # accounting) for no behavior change against any current producer, so it
+    # is left as a documented limitation rather than done speculatively.
+    for batch in composition.batches:
+        val outcome = _engine2d_draw_ir_render_batch_embedded(eng, batch, images, 0, allow_parent_image)
+        eng = outcome.engine
+        rendered = rendered + outcome.rendered
+        skipped = skipped + outcome.skipped
+        if outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
+            if unsupported_kinds != "":
+                unsupported_kinds = unsupported_kinds + ","
+            unsupported_kinds = unsupported_kinds + outcome.unsupported_kinds
+    if unsupported_kinds == "":
+        unsupported_kinds = "none"
+    if present_frame:
+        eng.present()
+    var readback = engine2d_readback([], "not_requested")
+    if readback_frame:
+        readback = eng.read_pixels_with_source()
+    val result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, readback)
+    result
+
+export Engine2dDrawIrAdvResult
+export Engine2dResolvedDrawIrImage
+export engine2d_draw_ir_adv_batch
+export engine2d_draw_ir_adv_batch_with_images
+export engine2d_draw_ir_adv_composition
+export engine2d_draw_ir_adv_composition_with_images
+export engine2d_draw_ir_adv_composition_present_with_images
+export engine2d_draw_ir_adv_fresh_device_composition_with_images
+export engine2d_resolved_draw_ir_image

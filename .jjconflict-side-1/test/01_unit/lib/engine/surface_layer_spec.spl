@@ -1,0 +1,66 @@
+"""
+Scene3DLayer pure-decision tests (interpreter-green).
+
+Covers the 3D↔compositor adapter's pure decision logic WITHOUT constructing a
+LayerTree or List: default/explicit z-index, geometry fields, z-index mutation
+via the me-method, the derived display entry, and the back-to-front z ordering
+oracle.
+
+LayerTree attach/composite integration (the List-backed path) is covered by the
+compiled GUI sanity lane, not here: interpreter List construction is broken
+(`List<T>()` returns nil in the seed interpreter). See bug doc
+`doc/08_tracking/bug/interpreter_list_generic_nil_2026-06-12.md`.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.render.surface_layer.{Scene3DLayer, z_paint_order}
+
+describe "Scene3DLayer.create":
+    it "defaults z_index to 0 and exposes target geometry":
+        val scene = Scene3DLayer.create(42, 1280, 720, 0)
+        expect(scene.target_id).to_equal(42)
+        expect(scene.z_index).to_equal(0)
+        expect(scene.width).to_equal(1280)
+        expect(scene.height).to_equal(720)
+
+    it "carries an explicit z-index":
+        val scene = Scene3DLayer.create(7, 640, 480, 3)
+        expect(scene.target_id).to_equal(7)
+        expect(scene.z_index).to_equal(3)
+        expect(scene.width).to_equal(640)
+        expect(scene.height).to_equal(480)
+
+    it "updates z_index via the me-method":
+        var scene = Scene3DLayer.create(7, 640, 480, 0)
+        scene.set_z_index(20)
+        expect(scene.z_index).to_equal(20)
+
+describe "Scene3DLayer.display_entry":
+    it "derives a display entry at the adapter's z-index using target_id when unattached":
+        val scene = Scene3DLayer.create(99, 800, 600, 5)
+        val entry = scene.display_entry()
+        expect(entry.id).to_equal(99)
+        expect(entry.z_index).to_equal(5)
+
+    it "tracks z-index changes in the derived entry":
+        var scene = Scene3DLayer.create(11, 320, 240, 0)
+        scene.set_z_index(-2)
+        val entry = scene.display_entry()
+        expect(entry.id).to_equal(11)
+        expect(entry.z_index).to_equal(-2)
+
+describe "z_paint_order":
+    it "sorts z-index values ascending = back-to-front":
+        val ordered = z_paint_order([10, -5, 0])
+        expect(ordered.len()).to_equal(3)
+        expect(ordered[0]).to_equal(-5)
+        expect(ordered[1]).to_equal(0)
+        expect(ordered[2]).to_equal(10)
+
+    it "leaves the input array unchanged (value-type copy)":
+        val src = [10, -5, 0]
+        val ordered = z_paint_order(src)
+        expect(ordered[0]).to_equal(-5)
+        expect(src[0]).to_equal(10)
+        expect(src[1]).to_equal(-5)
+        expect(src[2]).to_equal(0)

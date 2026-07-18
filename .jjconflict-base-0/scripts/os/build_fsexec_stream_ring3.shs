@@ -1,0 +1,81 @@
+#!/bin/sh
+# build_fsexec_stream_ring3.shs — Track 3b streaming-loader verification lane.
+#
+# Boots fs_exec_stream_ring3_entry.spl, which hands off through
+# x86_64_fs_exec_enter_stream_ring3 (use_stream=true): every PT_LOAD
+# segment is pulled straight off disk via simpleos_fat32_stream_read_at into
+# freshly allocated pmm frames, never through the old whole-file 4 MiB buffer.
+#
+# Env: SKIP_KERNEL=1 (reuse kernel), QEMU_MEM, QEMU_TIMEOUT, FSEXEC_DISK.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SEED="src/compiler_rust/target/release/simple"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_exec_stream_ring3_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+OUT_DIR="build/os/elfexec"
+KERNEL_OUTPUT="$OUT_DIR/fsexec_stream_ring3.elf"
+FSEXEC_DISK="${FSEXEC_DISK:-$OUT_DIR/fat32-fsexec.img}"
+NVME_SERIAL="fsexecstreamnvme0"
+NVME_DRIVE_ID="nvme0"
+SERIAL_LOG="$OUT_DIR/stream_ring3_run.log"
+QEMU_MEM="${QEMU_MEM:-512M}"
+QEMU_TIMEOUT="${QEMU_TIMEOUT:-40}"
+
+mkdir -p "$OUT_DIR" build/os/generated/generated
+
+[ -f "$FSEXEC_DISK" ] || { echo "[stream-ring3] missing FAT32 disk: $FSEXEC_DISK"; exit 1; }
+
+if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/local/opt/llvm/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    echo "[stream-ring3] building kernel -> $KERNEL_OUTPUT"
+    rm -f "$KERNEL_OUTPUT"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" 2>&1 | tail -30
+    [ -f "$KERNEL_OUTPUT" ] || { echo "[stream-ring3] KERNEL BUILD FAILED"; exit 1; }
+fi
+
+rm -f "$SERIAL_LOG"
+echo "[stream-ring3] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s disk=$FSEXEC_DISK)"
+set +e
+timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+    -no-user-config -monitor none -net none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -kernel "$KERNEL_OUTPUT" \
+    -serial "file:$SERIAL_LOG" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$FSEXEC_DISK,if=none,id=$NVME_DRIVE_ID,format=raw" \
+    -device nvme,drive="$NVME_DRIVE_ID",serial="$NVME_SERIAL"
+RC=$?
+set -e
+echo "[stream-ring3] qemu exit rc=$RC"
+echo "===== serial log ====="
+cat "$SERIAL_LOG" 2>/dev/null || echo "(no serial log)"
+echo "===== marker check ====="
+grep -q 'use_stream=1'    "$SERIAL_LOG" 2>/dev/null && echo "PASS streaming-mode" || echo "MISS streaming-mode"
+grep -q 'FDR'             "$SERIAL_LOG" 2>/dev/null && echo "PASS ring3-out (FDR)" || echo "MISS ring3-out (FDR)"
+grep -q 'FSEXEC_OK rc=42' "$SERIAL_LOG" 2>/dev/null && echo "PASS syscall60 (FSEXEC_OK)" || echo "MISS syscall60 (FSEXEC_OK)"

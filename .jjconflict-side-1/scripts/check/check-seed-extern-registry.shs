@@ -1,0 +1,79 @@
+#!/bin/sh
+# Guard against unregistered extern functions in the seed interpreter.
+#
+# The deployed bin/simple is a Rust seed that INTERPRETS pure-Simple compiler
+# source. When code the worker interprets calls `extern fn rt_something(...)` that
+# the seed's Rust registry does not know, native-build fails with
+# "semantic: unknown extern function: rt_something" (repo-wide outage, as with
+# rt_array_len_safe: 51 call sites, zero seed registration).
+# SCOPE: only src/compiler is load-bearing (the worker interprets a compiler slice).
+# src/app externs are informational — the worker interprets few app modules.
+#
+# OVER-APPROXIMATION: a plain declaration scan over-counts. At base 5f21f5ae401
+# (predates the incident) 177 src/compiler rt_* externs are unregistered yet the base
+# builds — they sit OFF the worker's narrow interpreted graph (130 are inputs to the
+# src/compiler/90.tools/sffi_gen code GENERATOR; rest in loader/tooling modules). So
+# section (a) RATCHETS against baseline
+# seed_extern_registry_baseline.txt (currently-accepted names): it fails only on NEW
+# unregistered externs (rt_array_len_safe would be new -> caught). A NEW name means an
+# extern the seed cannot interpret — REGISTER it in src/compiler_rust, or if it is a
+# generator-input/off-graph false positive add it to the baseline. No baseline
+# present -> informational (exit 0), never falsely red in CI.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${root}"
+BASELINE="scripts/check/seed_extern_registry_baseline.txt"
+tmp_comp=$(mktemp); tmp_app=$(mktemp); tmp_reg=$(mktemp)
+trap 'rm -f "$tmp_comp" "$tmp_app" "$tmp_reg"' EXIT INT TERM
+
+# Collect rt_* extern names (handles "extern fn" and "pub extern fn").
+collect() { grep -rhoE "(pub )?extern fn (rt_[a-z0-9_]+)" "$1" --include='*.spl' 2>/dev/null | awk '{print $NF}' | sort -u; }
+collect src/compiler >"$tmp_comp"
+collect src/app >"$tmp_app"
+
+# Registered set = every rt_* token that appears anywhere in the non-vendor Rust
+# seed (one pass). A candidate name absent from this set is unregistered. This is
+# the plain-string superset the seed uses (interpreter tables, sffi specs, codegen).
+grep -rhoE "rt_[a-z0-9_]+" src/compiler_rust --exclude-dir=vendor --exclude-dir=target 2>/dev/null | sort -u >"$tmp_reg"
+is_registered() { grep -qxF "$1" "$tmp_reg"; }
+loc() { grep -rn "extern fn $1" "$2" --include='*.spl' 2>/dev/null | head -1; }
+
+echo "== section (a): UNREGISTERED IN src/compiler (gate scope) =="
+comp_unreg=0; comp_new=0
+while IFS= read -r n; do
+  [ -n "$n" ] || continue
+  is_registered "$n" && continue
+  comp_unreg=$((comp_unreg + 1))
+  if [ -f "$BASELINE" ] && grep -qxF "$n" "$BASELINE"; then
+    echo "unregistered_compiler_baselined=$n"
+  else
+    echo "unregistered_compiler_NEW=$n ($(loc "$n" src/compiler))"
+    comp_new=$((comp_new + 1))
+  fi
+done <"$tmp_comp"
+
+echo "== section (b): UNREGISTERED IN src/app (informational only) =="
+app_unreg=0
+while IFS= read -r n; do
+  [ -n "$n" ] || continue
+  is_registered "$n" && continue
+  app_unreg=$((app_unreg + 1))
+  echo "unregistered_app=$n ($(loc "$n" src/app))"
+done <"$tmp_app"
+
+echo "compiler_extern_total=$(wc -l <"$tmp_comp" | tr -d ' ')"
+echo "compiler_extern_unregistered=$comp_unreg"
+echo "compiler_extern_unregistered_new=$comp_new"
+echo "app_extern_total=$(wc -l <"$tmp_app" | tr -d ' ')"
+echo "app_extern_unregistered=$app_unreg"
+
+if [ ! -f "$BASELINE" ]; then
+  echo "seed_extern_registry_mode=informational (no baseline; exit 0)"
+  exit 0
+fi
+if [ "$comp_new" -gt 0 ]; then
+  echo "seed_extern_registry_ok=false"
+  exit 1
+fi
+echo "seed_extern_registry_ok=true"
+exit 0

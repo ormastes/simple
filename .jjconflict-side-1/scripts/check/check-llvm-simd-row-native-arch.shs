@@ -1,0 +1,207 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/check/llvm-simd-row-native-arch}"
+PROBE="test/fixtures/compiler/llvm_simd_row_native_probe.spl"
+CROSSMODULE_PROBE="test/fixtures/native_crossmodule_result_u8/main.spl"
+RV32_HOSTED_PROBE="scripts/check/cert/redeploy_gate/fixtures/p2_add.spl"
+ENV_FILE="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR"
+: >"$ENV_FILE"
+
+for tool in "$SIMPLE_BIN" file objdump arm-linux-gnueabihf-readelf \
+    aarch64-linux-gnu-gcc aarch64-linux-gnu-ld \
+    aarch64-linux-gnu-objdump qemu-aarch64 riscv64-linux-gnu-gcc \
+    riscv64-linux-gnu-ld riscv64-linux-gnu-objdump \
+    riscv64-linux-gnu-readelf qemu-riscv64; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "llvm_simd_row_native_arch_status=fail" >>"$ENV_FILE"
+        echo "llvm_simd_row_native_arch_reason=missing-$tool" >>"$ENV_FILE"
+        exit 1
+    fi
+done
+
+build_object_arch() {
+    arch="$1"
+    target="$2"
+    out="$BUILD_DIR/$arch/probe.o"
+    cache="$BUILD_DIR/$arch/cache"
+    mkdir -p "$BUILD_DIR/$arch"
+    rm -rf "$cache" "$out"
+
+    # Exercise the configured default LLVM backend.
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --emit-object --target "$target" --source test/fixtures/compiler \
+        --entry-closure --entry "$PROBE" --cache-dir "$cache" --output "$out" \
+        >"$BUILD_DIR/$arch/build.log" 2>&1
+
+    header="$(LC_ALL=C arm-linux-gnueabihf-readelf -h "$out")"
+    printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF32'
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
+    printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+ARM([[:space:]]|$)'
+    echo "llvm_simd_row_native_arch_${arch}_object_status=pass" >>"$ENV_FILE"
+}
+
+build_arch() {
+    arch="$1"
+    target="$2"
+    out="$BUILD_DIR/$arch/probe"
+    cache="$BUILD_DIR/$arch/cache"
+    mkdir -p "$BUILD_DIR/$arch"
+    rm -rf "$cache" "$out"
+
+    if [ "$arch" = "riscv64_rvv" ]; then
+        SIMPLE_RUNTIME_RISCV64_VECTOR=1 timeout 300 "$SIMPLE_BIN" native-build \
+            --source test/fixtures/compiler --source src/lib --entry-closure \
+            --entry "$PROBE" --backend llvm --target "$target" --mode one-binary \
+            --cache-dir "$cache" --output "$out" >"$BUILD_DIR/$arch/build.log" 2>&1
+    else
+        timeout 300 "$SIMPLE_BIN" native-build \
+            --source test/fixtures/compiler --source src/lib --entry-closure \
+            --entry "$PROBE" --backend llvm --target "$target" --mode one-binary \
+            --cache-dir "$cache" --output "$out" >"$BUILD_DIR/$arch/build.log" 2>&1
+    fi
+
+    case "$arch" in
+        x86_64)
+            "$out"
+            file "$out" | grep -q "x86-64"
+            objdump -d "$out" | grep -Eq "movdqu|vmovdqu|punpck"
+            ;;
+        aarch64)
+            qemu-aarch64 -cpu max -L /usr/aarch64-linux-gnu "$out"
+            file "$out" | grep -q "ARM aarch64"
+            aarch64-linux-gnu-objdump -d "$out" | grep -Eq "dup[[:space:]]+v|str[[:space:]]+q"
+            ;;
+        riscv64_rvv)
+            qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 -L /usr/riscv64-linux-gnu "$out"
+            file "$out" | grep -q "RISC-V"
+            disasm="$(riscv64-linux-gnu-objdump -d "$out")"
+            printf '%s' "$disasm" | grep -q "vsetvli"
+            printf '%s' "$disasm" | grep -q "vle64\\.v"
+            printf '%s' "$disasm" | grep -q "vse64\\.v"
+            ;;
+    esac
+    echo "llvm_simd_row_native_arch_${arch}_status=pass" >>"$ENV_FILE"
+}
+
+build_crossmodule_arch() {
+    arch="$1"
+    target="$2"
+    out="$BUILD_DIR/$arch/result-u8"
+    cache="$BUILD_DIR/$arch/result-u8-cache"
+    rm -rf "$cache" "$out"
+
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --source test/fixtures --source src/lib --entry-closure \
+        --entry "$CROSSMODULE_PROBE" --backend llvm --target "$target" \
+        --mode one-binary --cache-dir "$cache" --output "$out" \
+        >"$BUILD_DIR/$arch/result-u8-build.log" 2>&1
+
+    case "$arch" in
+        aarch64)
+            actual="$(qemu-aarch64 -cpu max -L /usr/aarch64-linux-gnu "$out")"
+            ;;
+        riscv64_rvv)
+            actual="$(qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 \
+                -L /usr/riscv64-linux-gnu "$out")"
+            ;;
+    esac
+    [ "$actual" = "result-u8-ok" ]
+    echo "llvm_simd_row_native_arch_${arch}_crossmodule_status=pass" >>"$ENV_FILE"
+}
+
+check_unsupported_riscv32_hosted() {
+    target=riscv32-unknown-linux-gnu
+    out="$BUILD_DIR/riscv32-hosted/probe"
+    cache="$BUILD_DIR/riscv32-hosted/cache"
+    log="$BUILD_DIR/riscv32-hosted/build.log"
+    mkdir -p "$BUILD_DIR/riscv32-hosted"
+    rm -rf "$cache" "$out" "$log"
+
+    status=0
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --source scripts/check/cert/redeploy_gate/fixtures --entry-closure \
+        --entry "$RV32_HOSTED_PROBE" --target "$target" --mode one-binary \
+        --cache-dir "$cache" --output "$out" >"$log" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [ ! -e "$out" ]
+    grep -Fq "host C runtime/entry compilation unsupported: target '$target'" "$log"
+    echo "llvm_simd_row_native_arch_riscv32_hosted_rejection_status=pass" >>"$ENV_FILE"
+}
+
+check_riscv32_baremetal_object() {
+    checked_out="$1"
+    status_name="$2"
+    test -s "$checked_out"
+    object_desc="$(file "$checked_out")"
+    header="$(riscv64-linux-gnu-readelf -h "$checked_out")"
+    attrs="$(riscv64-linux-gnu-readelf -A "$checked_out")"
+    printf '%s\n' "$object_desc" | grep -Fq 'ELF 32-bit'
+    printf '%s\n' "$object_desc" | grep -Fq 'relocatable'
+    printf '%s\n' "$object_desc" | grep -Fq 'RISC-V'
+    printf '%s\n' "$object_desc" | grep -Fq 'soft-float ABI'
+    printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF32'
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
+    printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+RISC-V'
+    printf '%s\n' "$header" | grep -Eq 'Flags:.*RVC, soft-float ABI'
+    printf '%s\n' "$header" | grep -Eq 'single-float ABI|double-float ABI' && exit 1
+    printf '%s\n' "$attrs" | grep -Eq 'Tag_RISCV_arch:.*rv32i.*_m.*_a.*_c'
+    printf '%s\n' "$attrs" | grep -Eq '_f[0-9]|_d[0-9]' && exit 1
+    echo "llvm_simd_row_native_arch_${status_name}_status=pass" >>"$ENV_FILE"
+}
+
+build_riscv32_baremetal_object() {
+    target=riscv32-unknown-none-elf
+    out="$BUILD_DIR/riscv32-baremetal/probe.o"
+    cache="$BUILD_DIR/riscv32-baremetal/cache"
+    mkdir -p "$BUILD_DIR/riscv32-baremetal"
+    rm -rf "$cache" "$out"
+
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --emit-object --source scripts/check/cert/redeploy_gate/fixtures \
+        --entry-closure --entry "$RV32_HOSTED_PROBE" --target "$target" \
+        --cache-dir "$cache" --output "$out" \
+        >"$BUILD_DIR/riscv32-baremetal/build.log" 2>&1
+
+    check_riscv32_baremetal_object "$out" riscv32_baremetal_object
+}
+
+build_riscv32_crossmodule_object() {
+    target=riscv32-unknown-none-elf
+    out="$BUILD_DIR/riscv32-crossmodule/result-u8.o"
+    cache="$BUILD_DIR/riscv32-crossmodule/cache"
+    mkdir -p "$BUILD_DIR/riscv32-crossmodule"
+    rm -rf "$cache" "$out"
+
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --emit-object --source test/fixtures --source src/lib --entry-closure \
+        --entry "$CROSSMODULE_PROBE" --target "$target" \
+        --cache-dir "$cache" --output "$out" \
+        >"$BUILD_DIR/riscv32-crossmodule/build.log" 2>&1
+
+    check_riscv32_baremetal_object "$out" riscv32_crossmodule_object
+}
+
+check_unsupported_riscv32_hosted
+build_riscv32_baremetal_object
+build_riscv32_crossmodule_object
+build_object_arch arm32 armv7-unknown-linux-gnueabihf
+SIMPLE_BIN="$SIMPLE_BIN" BUILD_DIR="$BUILD_DIR/arm32-option-try" \
+    sh scripts/check/check-native-option-try-target-fail.shs \
+    armv7-unknown-linux-gnueabihf llvm
+echo "llvm_simd_row_native_arch_arm32_option_try_status=pass" >>"$ENV_FILE"
+build_arch x86_64 x86_64-unknown-linux-gnu
+build_arch aarch64 aarch64-unknown-linux-gnu
+build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu
+build_arch riscv64_rvv riscv64-unknown-linux-gnu
+build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu
+echo "llvm_simd_row_native_arch_status=pass" >>"$ENV_FILE"
+echo "llvm_simd_row_native_arch_reason=hosted-riscv32-rejected-plus-riscv32-baremetal-and-crossmodule-objects-plus-arm32-object-option-compile-plus-all-binaries-exact-vectorized-and-crossmodule-result-try" >>"$ENV_FILE"
+cat "$ENV_FILE"

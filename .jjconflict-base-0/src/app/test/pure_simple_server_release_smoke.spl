@@ -1,0 +1,196 @@
+use os.apps.sshd.ssh_auth.{sshd_create_default_users}
+use os.apps.sshd.ssh_channel.{SSH_MSG_CHANNEL_REQUEST, ssh_parse_channel_request}
+use os.apps.sshd.ssh_packet.{ssh_get_text, ssh_put_bool, ssh_put_text, ssh_put_u32}
+use os.apps.sshd.ssh_session.{SshShellLaunchReport}
+use os.apps.sshd.ssh_session_shell_test_ext.{ssh_shell_launch_report_for_test}
+use os.kernel.loader.app_registry.{app_registry_cache_bytes, app_registry_clear, app_registry_load_hardcoded_fallback}
+use std.nogc_async_mut.http_server.parser.{HttpRequestParser}
+use std.nogc_async_mut.http_server.router.{AsyncRouter}
+use std.nogc_async_mut.http_server.types.{LocationConfig}
+use std.nogc_async_mut.io.tls_io.{parse_record_hex}
+use std.nogc_sync_mut.io.tls_common_hooks.{tls_hook_aes_gcm_encrypt_hex, tls_hook_aes_gcm_decrypt_hex}
+use std.net.pure_server.{PureServerHostAccessAdapter, PureServerMode, PureServerProtocol, pure_server_hosted_linux_caps, pure_server_hosted_linux_https_preflight, pure_server_hosted_linux_https_release_plan, pure_server_hosted_linux_ssh_preflight, pure_server_hosted_linux_ssh_release_plan, pure_server_mode_name, pure_server_release_route_for_adapter, pure_server_route_decision, pure_server_simpleos_https_preflight, pure_server_simpleos_https_release_plan, pure_server_simpleos_ssh_preflight, pure_server_simpleos_ssh_release_plan}
+
+fn _emit_preflight(label: text, ready: bool, simple_protocol: bool, adapter: text) -> bool:
+    print label + " ready=" + ready.to_string() + " simple_protocol=" + simple_protocol.to_string() + " adapter=" + adapter
+    ready and simple_protocol
+
+fn _emit_ssh_plan(label: text, ready: bool, simple_protocol: bool, adapter: text, version: text, kex: text, auth: text, channel: text, command: text) -> bool:
+    print label + " ready=" + ready.to_string() + " simple_protocol=" + simple_protocol.to_string() + " adapter=" + adapter + " version=" + version + " kex=" + kex + " auth=" + auth + " channel=" + channel + " command=" + command
+    ready and simple_protocol and version == "simple-ssh-version-exchange" and kex == "simple-ssh-kex" and auth == "simple-ssh-auth" and channel == "simple-ssh-channel" and command == "simple-host-process-exec"
+
+fn _emit_https_plan(label: text, ready: bool, simple_protocol: bool, adapter: text, tls: text, http: text) -> bool:
+    print label + " ready=" + ready.to_string() + " simple_protocol=" + simple_protocol.to_string() + " adapter=" + adapter + " tls=" + tls + " http=" + http
+    ready and simple_protocol and tls == "simple-tls12-server" and http == "simple-http-response"
+
+fn _emit_mode(label: text, mode: PureServerMode, expected_bypass: bool) -> bool:
+    val route = pure_server_route_decision(PureServerProtocol.SSH, mode, pure_server_hosted_linux_caps())
+    if route.is_err():
+        print label + " mode=" + pure_server_mode_name(mode) + " route=error simple_protocol=false allows_native_protocol_bypass=false"
+        return false
+    val decision = route.unwrap()
+    print label + " mode=" + pure_server_mode_name(mode) + " simple_protocol=" + decision.uses_simple_protocol.to_string() + " allows_native_protocol_bypass=" + decision.allows_native_protocol_bypass.to_string()
+    decision.uses_simple_protocol and decision.allows_native_protocol_bypass == expected_bypass
+
+fn _emit_native_bypass_blocked(label: text, protocol: PureServerProtocol, expected_reason: text) -> bool:
+    val caps = pure_server_hosted_linux_caps()
+    val adapter = PureServerHostAccessAdapter(
+        name: "bad-native-protocol-wrapper",
+        target: caps.target,
+        caps: caps,
+        uses_native_protocol_bypass: true,
+        description: "native protocol bypass must not be a release host-access adapter"
+    )
+    val route = pure_server_release_route_for_adapter(protocol, adapter)
+    val blocked = route.is_err()
+    val reason = if blocked:
+        route.err().unwrap()
+    else:
+        "accepted"
+    print label + " native-bypass release-blocked=" + blocked.to_string() + " reason=" + reason
+    blocked and reason == expected_reason
+
+fn _emit_success_auth() -> bool:
+    val users = sshd_create_default_users()
+    val accepted = users.authenticate_password("root", "simpleos")
+    print "ssh success-auth simple_protocol=true accepted=" + accepted.to_string() + " method=password user=root"
+    accepted
+
+fn _emit_failed_auth() -> bool:
+    val users = sshd_create_default_users()
+    val rejected = not users.authenticate_password("root", "wrong-password")
+    print "ssh failed-auth simple_protocol=true rejected=" + rejected.to_string() + " method=password"
+    rejected
+
+fn _seed_ssh_exec_registry():
+    app_registry_clear()
+    app_registry_load_hardcoded_fallback()
+    app_registry_cache_bytes("/sys/apps/simple", [0x53u8, 0x4Du8, 0x46u8, 0x00u8, 0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])
+
+fn _ssh_exec_request_payload(command: text) -> [u8]:
+    var payload: [u8] = []
+    payload.push(SSH_MSG_CHANNEL_REQUEST)
+    payload = ssh_put_u32(payload, 0)
+    payload = ssh_put_text(payload, "exec")
+    payload = ssh_put_bool(payload, true)
+    ssh_put_text(payload, command)
+
+fn _emit_success_ssh_exec_request() -> bool:
+    _seed_ssh_exec_registry()
+    val payload = _ssh_exec_request_payload("simple --check")
+    val parsed = ssh_parse_channel_request(payload)
+    if parsed.is_err():
+        print "ssh channel-exec simple_protocol=true parsed=false launchable=false request=exec command=simple"
+        return false
+    val (recipient, request_type, want_reply, command_offset) = parsed.unwrap()
+    val command_text = ssh_get_text(payload, command_offset)
+    val command = if command_text.is_ok():
+        command_text.unwrap().value
+    else:
+        ""
+    val report: SshShellLaunchReport = ssh_shell_launch_report_for_test(command)
+    val ok = recipient == 0 and request_type == "exec" and want_reply and command == "simple --check" and report.command == "simple" and report.launchable and report.shell_exec_path
+    print "ssh channel-exec simple_protocol=true parsed=" + command_text.is_ok().to_string() + " launchable=" + report.launchable.to_string() + " request=" + request_type + " command=" + report.command + " path=" + report.resolved_path
+    ok
+
+fn _emit_success_https_response(response_wire: text) -> bool:
+    val accepted = response_wire.contains("HTTP/1.1 200 OK") and response_wire.contains("Content-Length: 13") and response_wire.contains("release smoke")
+    print "https success-response simple_protocol=true accepted=" + accepted.to_string() + " status=200 body=release-smoke"
+    accepted
+
+fn _emit_success_https_application_data() -> bool:
+    val key_hex = "000102030405060708090a0b0c0d0e0f"
+    val nonce_hex = "101112130000000000000000"
+    val plaintext_hex = "72656c6561736520736d6f6b65"
+    val aad_hex = "0000000000000000170303000d"
+    val encrypted_hex = tls_hook_aes_gcm_encrypt_hex(key_hex, nonce_hex, plaintext_hex, aad_hex)
+    val parsed = parse_record_hex("170303001d" + encrypted_hex)
+    if parsed.is_err():
+        print "https application-data simple_protocol=true encrypted=false decrypted=false reason=" + parsed.err().unwrap()
+        return false
+    val view = parsed.unwrap()
+    val decrypted_hex = tls_hook_aes_gcm_decrypt_hex(key_hex, nonce_hex, view.payload_hex, aad_hex)
+    val decrypted_text = if decrypted_hex == nil:
+        ""
+    else:
+        decrypted_hex.unwrap()
+    val encrypted = encrypted_hex != plaintext_hex and view.payload_len == 29
+    val decrypted = decrypted_text == plaintext_hex
+    val ok = encrypted and decrypted and view.content_type == 23 and view.version == 771
+    print "https application-data simple_protocol=true encrypted=" + encrypted.to_string() + " decrypted=" + decrypted.to_string() + " content_type=" + view.content_type.to_string() + " payload_len=" + view.payload_len.to_string()
+    ok
+
+fn _emit_success_https_request_route() -> bool:
+    var parser = HttpRequestParser.new()
+    val consumed = parser.feed("GET /release-smoke?ok=1 HTTP/1.1\r\nHost: hosted.local\r\n\r\n")
+    if consumed.is_err():
+        print "https request-route simple_protocol=true parsed=false routed=false method=GET path=/release-smoke handler=release-smoke"
+        return false
+    val request = parser.to_request("127.0.0.1:443")
+    val router = AsyncRouter.new([
+        LocationConfig(
+            pattern: "/release-smoke",
+            match_type: "exact",
+            handler_type: "release-smoke",
+            root: "",
+            proxy_pass: "",
+            middlewares: []
+        )
+    ])
+    val routed = router.route(request)
+    val route_ok = routed.is_ok()
+    val handler = if route_ok:
+        routed.unwrap().0.handler_type
+    else:
+        "none"
+    val ok = parser.is_complete() and route_ok and request.method == "GET" and request.path == "/release-smoke" and request.query == "ok=1" and handler == "release-smoke"
+    print "https request-route simple_protocol=true parsed=" + parser.is_complete().to_string() + " routed=" + route_ok.to_string() + " method=" + request.method + " path=" + request.path + " handler=" + handler
+    ok
+
+fn _emit_failed_handshake() -> bool:
+    val parsed = parse_record_hex("1603040003616263")
+    val rejected = parsed.is_err()
+    val reason = if rejected:
+        parsed.err().unwrap()
+    else:
+        "accepted"
+    print "https failed-handshake simple_protocol=true rejected=" + rejected.to_string() + " reason=" + reason
+    rejected and reason == "tls record version unsupported"
+
+fn main() -> i64:
+    val hosted_ssh = pure_server_hosted_linux_ssh_preflight()
+    val hosted_https = pure_server_hosted_linux_https_preflight()
+    val simpleos_ssh = pure_server_simpleos_ssh_preflight()
+    val simpleos_https = pure_server_simpleos_https_preflight()
+    val hosted_ssh_plan = pure_server_hosted_linux_ssh_release_plan()
+    val simpleos_ssh_plan = pure_server_simpleos_ssh_release_plan()
+    val hosted_https_plan = pure_server_hosted_linux_https_release_plan("release smoke")
+    val simpleos_https_plan = pure_server_simpleos_https_release_plan("release smoke")
+
+    var ok = true
+    ok = _emit_preflight("hosted-linux ssh release-preflight", hosted_ssh.release_ready, hosted_ssh.uses_simple_protocol, hosted_ssh.adapter_name) and ok
+    ok = _emit_preflight("hosted-linux https release-preflight", hosted_https.release_ready, hosted_https.uses_simple_protocol, hosted_https.adapter_name) and ok
+    ok = _emit_preflight("simpleos ssh release-preflight", simpleos_ssh.release_ready, simpleos_ssh.uses_simple_protocol, simpleos_ssh.adapter_name) and ok
+    ok = _emit_preflight("simpleos https release-preflight", simpleos_https.release_ready, simpleos_https.uses_simple_protocol, simpleos_https.adapter_name) and ok
+    ok = _emit_ssh_plan("hosted-linux ssh release-plan", hosted_ssh_plan.release_ready, hosted_ssh_plan.uses_simple_protocol, hosted_ssh_plan.adapter_name, hosted_ssh_plan.version_exchange_stage, hosted_ssh_plan.kex_stage, hosted_ssh_plan.auth_stage, hosted_ssh_plan.channel_stage, hosted_ssh_plan.command_stage) and ok
+    ok = _emit_ssh_plan("simpleos ssh release-plan", simpleos_ssh_plan.release_ready, simpleos_ssh_plan.uses_simple_protocol, simpleos_ssh_plan.adapter_name, simpleos_ssh_plan.version_exchange_stage, simpleos_ssh_plan.kex_stage, simpleos_ssh_plan.auth_stage, simpleos_ssh_plan.channel_stage, simpleos_ssh_plan.command_stage) and ok
+    ok = _emit_https_plan("hosted-linux https release-plan", hosted_https_plan.release_ready, hosted_https_plan.uses_simple_protocol, hosted_https_plan.adapter_name, hosted_https_plan.tls_stage, hosted_https_plan.http_stage) and ok
+    ok = _emit_https_plan("simpleos https release-plan", simpleos_https_plan.release_ready, simpleos_https_plan.uses_simple_protocol, simpleos_https_plan.adapter_name, simpleos_https_plan.tls_stage, simpleos_https_plan.http_stage) and ok
+    ok = _emit_mode("hosted-linux ssh mode-check", PureServerMode.Alpha, true) and ok
+    ok = _emit_mode("hosted-linux ssh mode-check", PureServerMode.Beta, true) and ok
+    ok = _emit_mode("hosted-linux ssh mode-check", PureServerMode.Release, false) and ok
+    ok = _emit_native_bypass_blocked("ssh", PureServerProtocol.SSH, "ssh release adapter cannot use native protocol bypass") and ok
+    ok = _emit_native_bypass_blocked("https", PureServerProtocol.HTTPS, "https release adapter cannot use native protocol bypass") and ok
+    ok = _emit_success_auth() and ok
+    ok = _emit_failed_auth() and ok
+    ok = _emit_success_ssh_exec_request() and ok
+    ok = _emit_success_https_response(hosted_https_plan.response_wire_preview) and ok
+    ok = _emit_success_https_application_data() and ok
+    ok = _emit_success_https_request_route() and ok
+    ok = _emit_failed_handshake() and ok
+
+    if ok:
+        print "status=pass"
+        return 0
+    print "status=fail"
+    1

@@ -1,0 +1,144 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Physics System — Debug Drawing
+#
+# Generates wireframe geometry for all physics colliders in the world.
+# Reads body positions directly from internal bodies (no FFI).
+# The caller can render these lines as an overlay for visual debugging.
+#
+# Usage:
+#   val debug = physics_debug_draw(world)
+#   for line in debug.lines:
+#       draw_line(line.start, line.end_point, color_green)
+
+use std.common.engine.math2d.{Vec2, _sin, _cos}
+use std.common.math.{MATH_PI}
+use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D}
+
+# ============================================================================
+# Debug Draw Types
+# ============================================================================
+
+struct DebugLine:
+    start: Vec2
+    end_point: Vec2
+
+impl DebugLine:
+    fn to_string() -> text:
+        "Line({self.start.x},{self.start.y} -> {self.end_point.x},{self.end_point.y})"
+
+struct PhysicsDebugData:
+    lines: [DebugLine]
+
+impl PhysicsDebugData:
+    fn line_count() -> i64:
+        self.lines.len()
+
+# ============================================================================
+# Debug Draw Generation
+# ============================================================================
+
+val _CIRCLE_SEGMENTS = 16
+
+fn physics_debug_draw(world: PhysicsWorld2D) -> PhysicsDebugData:
+    """Generate wireframe lines for all colliders in the physics world.
+
+    Box colliders produce 4 lines (rectangle outline).
+    Circle colliders produce a polygon approximation with 16 segments.
+    """
+    var lines: [DebugLine] = []
+
+    for pb in world.bodies:
+        val ib = world.internal_bodies[pb.body_index]
+        val bx = ib.position.x
+        val by = ib.position.y
+        val angle = ib.rotation
+
+        # Find colliders for this body
+        for col in world.colliders:
+            if col.node_id.eq(pb.node_id):
+                val shape = world.shapes[col.collider_index]
+
+                if shape.is_circle():
+                    val circle_lines = _draw_circle(bx, by, shape.circle.radius)
+                    for ln in circle_lines:
+                        lines.push(ln)
+                    # Draw a radius line to show rotation
+                    val rx = bx + shape.circle.radius * _cos(angle)
+                    val ry = by + shape.circle.radius * _sin(angle)
+                    val radius_line = DebugLine(
+                        start: Vec2(x: bx, y: by),
+                        end_point: Vec2(x: rx, y: ry)
+                    )
+                    lines.push(radius_line)
+
+                if shape.is_box():
+                    val box_lines = _draw_box(bx, by, angle, shape.box_shape.half_width, shape.box_shape.half_height)
+                    for ln in box_lines:
+                        lines.push(ln)
+
+    PhysicsDebugData(lines: lines)
+
+# ============================================================================
+# Shape Wireframe Generators
+# ============================================================================
+
+fn _draw_box(cx: f64, cy: f64, angle: f64, hx: f64, hy: f64) -> [DebugLine]:
+    """Generate 4 lines for a rotated box centered at (cx, cy)."""
+    var lines: [DebugLine] = []
+
+    # Corners in local space
+    val corners_x = [-hx, hx, hx, -hx]
+    val corners_y = [-hy, -hy, hy, hy]
+
+    # Precompute sin/cos
+    val cos_a = _cos(angle)
+    val sin_a = _sin(angle)
+
+    # Transform corners to world space
+    var wx: [f64] = []
+    var wy: [f64] = []
+    var i = 0
+    while i < 4:
+        val lx = corners_x[i]
+        val ly = corners_y[i]
+        val rx = lx * cos_a - ly * sin_a + cx
+        val ry = lx * sin_a + ly * cos_a + cy
+        wx.push(rx)
+        wy.push(ry)
+        i = i + 1
+
+    # Connect corners
+    var j = 0
+    while j < 4:
+        val next = (j + 1) % 4
+        val ln = DebugLine(
+            start: Vec2(x: wx[j], y: wy[j]),
+            end_point: Vec2(x: wx[next], y: wy[next])
+        )
+        lines.push(ln)
+        j = j + 1
+
+    lines
+
+fn _draw_circle(cx: f64, cy: f64, radius: f64) -> [DebugLine]:
+    """Generate line segments approximating a circle."""
+    var lines: [DebugLine] = []
+    val step = 2.0 * MATH_PI / _CIRCLE_SEGMENTS.to_f64()
+
+    var prev_x = cx + radius
+    var prev_y = cy
+    var i = 1
+    while i <= _CIRCLE_SEGMENTS:
+        val angle = step * i.to_f64()
+        val cur_x = cx + radius * _cos(angle)
+        val cur_y = cy + radius * _sin(angle)
+        val ln = DebugLine(
+            start: Vec2(x: prev_x, y: prev_y),
+            end_point: Vec2(x: cur_x, y: cur_y)
+        )
+        lines.push(ln)
+        prev_x = cur_x
+        prev_y = cur_y
+        i = i + 1
+
+    lines

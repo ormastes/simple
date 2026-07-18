@@ -1,0 +1,188 @@
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox, BeBoxKind}
+use std.gc_async_mut.gpu.browser_engine.css.{CssPx}
+
+export BeLayoutBox
+
+class RenderScene:
+    """Ordered list of paint commands produced by the layout+paint pass."""
+    width: f64
+    height: f64
+    commands: [text]   # simplified: real impl uses PaintOp enum
+
+impl RenderScene:
+    static fn empty(width: f64, height: f64) -> RenderScene:
+        RenderScene(width: width, height: height, commands: [])
+
+    fn add_command(cmd: text):
+        self.commands.push(cmd)
+
+fn layout_tree(root: BeDomNode, viewport_w: f64, viewport_h: f64) -> BeLayoutBox:
+    """Compute a block layout tree for the given DOM root.
+
+    Performs a simplified normal-flow block layout:
+    - Width is inherited from parent (viewport for root).
+    - Height accumulates children top-down.
+    """
+    layout_node(root, 0.0, 0.0, viewport_w, viewport_h)
+
+fn layout_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f64) -> BeLayoutBox:
+    """Recursively compute layout for a single node."""
+    if node.is_text():
+        # Estimate text box height as 1.5 × font-size, width as content length
+        val font_size = if node.style.font_size > 0.0: node.style.font_size else: 16.0
+        val est_w = node.data.len().to_f64() * font_size * 0.6
+        val w = if est_w < avail_w: est_w else: avail_w
+        return BeLayoutBox.text_box(node, node.data, x, y, w, font_size * 1.5)
+
+    # Element node
+    val style = node.style
+    val self_w = if style.width > 0.0: style.width else: avail_w
+    val px = style.padding_left + style.padding_right + style.border_width * 2.0
+    val py = style.padding_top + style.padding_bottom + style.border_width * 2.0
+
+    var box = BeLayoutBox.block_for(node, x, y, self_w, 0.0)
+
+    # Layout children top-down
+    val inner_x = x + style.padding_left + style.border_width
+    var cursor_y = y + style.padding_top + style.border_width
+    val inner_w = self_w - px
+
+    var i = 0
+    val child_count = node.children.len()
+    while i < child_count:
+        val child_box = layout_node(node.children[i], inner_x, cursor_y, inner_w, avail_h)
+        val child_h = child_box.height + child_box.margin_top + child_box.margin_bottom
+        cursor_y = cursor_y + child_h
+        box.children.push(child_box)
+        i = i + 1
+
+    # Determine self height
+    val content_h = cursor_y - y - style.padding_top - style.border_width
+    val self_h = if style.height > 0.0: style.height else: content_h + py
+    box.height = self_h
+    box
+
+fn layout_to_scene(root: BeDomNode, w: CssPx, h: CssPx) -> RenderScene:
+    """Run layout then generate paint commands into a RenderScene.
+
+    Inlines layout_tree + paint to avoid cross-module FieldGet issues
+    (see ADR-002 / Cranelift FieldGet bug note in engine_merge).
+    """
+    val box_tree = layout_tree(root, w.value, h.value)
+    val scene = RenderScene.empty(w.value, h.value)
+    paint_box(box_tree, scene)
+    scene
+
+fn paint_box(box: BeLayoutBox, scene: RenderScene):
+    """Recursively emit paint commands for a layout box."""
+    # Background
+    if box.style.background_color.len() > 0:
+        scene.add_command("fill_rect {box.x} {box.y} {box.width} {box.height} {box.style.background_color}")
+
+    # Border
+    if box.style.border_width > 0.0 and box.style.border_color.len() > 0:
+        scene.add_command("stroke_rect {box.x} {box.y} {box.width} {box.height} {box.style.border_width} {box.style.border_color}")
+
+    # Text content
+    if box.text_content.len() > 0:
+        scene.add_command("draw_text {box.x} {box.y} {box.style.font_size} {box.style.color} {box.text_content}")
+
+    # Recurse into children
+    var i = 0
+    val child_count = box.children.len()
+    while i < child_count:
+        paint_box(box.children[i], scene)
+        i = i + 1
+
+fn layout_get_x(box: BeLayoutBox) -> f64:
+    box.x
+
+fn layout_get_y(box: BeLayoutBox) -> f64:
+    box.y
+
+fn layout_get_width(box: BeLayoutBox) -> f64:
+    box.width
+
+fn layout_get_height(box: BeLayoutBox) -> f64:
+    box.height
+
+fn layout_get_node(box: BeLayoutBox) -> i64:
+    box.node_id
+
+fn layout_get_children(box: BeLayoutBox) -> [BeLayoutBox]:
+    box.children
+
+fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps, parent_ctx) -> BeLayoutBox:
+    container
+
+fn layout_text(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
+    container
+
+fn _box_contains(box: BeLayoutBox, x: f64, y: f64) -> bool:
+    """Point-in-box test in absolute layout coordinates."""
+    x >= box.x and y >= box.y and x <= box.x + box.width and y <= box.y + box.height
+
+fn _lockstep_count(box: BeLayoutBox, node: BeDomNode) -> i64:
+    """Child count shared by the layout box and its DOM node (layout_node
+    emits one child box per DOM child, in order)."""
+    var n = box.children.len()
+    if node.children.len() < n:
+        n = node.children.len()
+    n
+
+fn hit_test(box: BeLayoutBox, node: BeDomNode, x: f64, y: f64) -> BeDomNode?:
+    """Return the deepest DOM node whose layout box contains (x, y).
+
+    Walks the layout box tree and DOM tree in lockstep (layout_node builds
+    box.children[i] from node.children[i]), preferring the last (topmost)
+    matching child. Returns nil when the point falls outside `box`.
+    """
+    if not _box_contains(box, x, y):
+        return nil
+    val n = _lockstep_count(box, node)
+    var i = n - 1
+    while i >= 0:
+        val found = hit_test(box.children[i], node.children[i], x, y)
+        if found.?:
+            return found
+        i = i - 1
+    Some(node)
+
+fn hit_test_anchor(box: BeLayoutBox, node: BeDomNode, x: f64, y: f64) -> BeDomNode?:
+    """Return the innermost enclosing <a> node whose subtree contains the
+    deepest box at (x, y), or nil when the hit is not inside any anchor."""
+    if not _box_contains(box, x, y):
+        return nil
+    val n = _lockstep_count(box, node)
+    var i = n - 1
+    while i >= 0:
+        val found = hit_test_anchor(box.children[i], node.children[i], x, y)
+        if found.?:
+            return found
+        i = i - 1
+    if node.tag_name == "a":
+        return Some(node)
+    nil
+
+fn first_anchor_box(box: BeLayoutBox, node: BeDomNode) -> BeLayoutBox?:
+    """Return the layout box of the first <a> element in document order."""
+    if node.tag_name == "a":
+        return Some(box)
+    val n = _lockstep_count(box, node)
+    var i = 0
+    while i < n:
+        val found = first_anchor_box(box.children[i], node.children[i])
+        if found.?:
+            return found
+        i = i + 1
+    nil
+
+export layout_tree, layout_node, layout_to_scene, paint_box
+export layout_block
+export layout_flex
+export layout_text
+export hit_test, hit_test_anchor, first_anchor_box
+export layout_get_x, layout_get_y, layout_get_width, layout_get_height
+export layout_get_node, layout_get_children
+export RenderScene

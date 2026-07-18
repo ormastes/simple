@@ -1,0 +1,59 @@
+use std.io_runtime
+
+# Circuit breaker for gateway connectors.
+# Prevents cascading failures when a payment processor is down.
+# Refs: Hyperswitch intelligent routing, Netflix Hystrix pattern.
+
+enum CircuitState:
+    Closed
+    Open
+    HalfOpen
+
+struct CircuitBreaker:
+    connector_name: text
+    state: CircuitState
+    failure_count: int
+    failure_threshold: int
+    success_count: int
+    success_threshold: int
+    last_failure_time: int
+
+fn new_circuit_breaker(connector_name: text, failure_threshold: int, success_threshold: int) -> CircuitBreaker:
+    return CircuitBreaker {
+        connector_name: connector_name,
+        state: CircuitState.Closed,
+        failure_count: 0,
+        failure_threshold: failure_threshold,
+        success_count: 0,
+        success_threshold: success_threshold,
+        last_failure_time: 0
+    }
+
+fn circuit_allow_request(cb: CircuitBreaker) -> bool:
+    if cb.state == CircuitState.Closed:
+        return true
+    if cb.state == CircuitState.HalfOpen:
+        return true
+    return false
+
+fn circuit_record_success(cb: CircuitBreaker) -> CircuitBreaker:
+    if cb.state == CircuitState.HalfOpen:
+        val new_success = cb.success_count + 1
+        if new_success >= cb.success_threshold:
+            return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.Closed, failure_count: 0, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: 0 }
+        return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.HalfOpen, failure_count: cb.failure_count, failure_threshold: cb.failure_threshold, success_count: new_success, success_threshold: cb.success_threshold, last_failure_time: cb.last_failure_time }
+    return CircuitBreaker { connector_name: cb.connector_name, state: cb.state, failure_count: 0, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: 0 }
+
+fn circuit_record_failure(cb: CircuitBreaker, timestamp: int) -> CircuitBreaker:
+    val new_failures = cb.failure_count + 1
+    if new_failures >= cb.failure_threshold:
+        return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.Open, failure_count: new_failures, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: timestamp }
+    return CircuitBreaker { connector_name: cb.connector_name, state: cb.state, failure_count: new_failures, failure_threshold: cb.failure_threshold, success_count: cb.success_count, success_threshold: cb.success_threshold, last_failure_time: timestamp }
+
+fn circuit_try_half_open(cb: CircuitBreaker, current_time: int, cooldown_seconds: int) -> CircuitBreaker:
+    if cb.state != CircuitState.Open:
+        return cb
+    val elapsed = current_time - cb.last_failure_time
+    if elapsed >= cooldown_seconds:
+        return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.HalfOpen, failure_count: cb.failure_count, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: cb.last_failure_time }
+    return cb

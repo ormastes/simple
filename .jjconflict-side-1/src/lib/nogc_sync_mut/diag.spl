@@ -1,0 +1,417 @@
+# std.diag — Easy Debug Infrastructure (P0)
+#
+# Five recurring problem classes motivated this module (all from this repo's
+# real history): silent hangs (a browser first-frame hang was undiagnosable
+# until ad-hoc stage logs were hand-added — then lost uncommitted), quadratic
+# slow paths found only by wall-clock pain, silent GPU->software fallbacks,
+# event chains that vanish mid-flow, and cross-lane pixel diffs.
+#
+# Contract: doc/05_design/ui/testing/ui_test_infra_design.md §8.2 (UiTest
+# subprocess drivers parse the stderr line formats below — do not change
+# them without updating that design).
+#
+# Primitives:
+#   dbg_stage(component, stage)        "[<component>] stage <stage> +<delta>ms"
+#   dbg_deadline(label, budget_ms)     cooperative watchdog, no threads
+#   dbg_time_begin/end, dbg_count      aggregating timers/counters
+#   dbg_event_hop(chain_id, hop, ...)  "[event <chain_id>] <hop> <detail>"
+#   dbg_provenance(claimed, actual, context)  ALWAYS-ON anti-fakery assert
+#
+# Env gating: SIMPLE_DIAG, read ONCE at first use and cached. Value is
+# "all" or a comma list of facets: stage,watchdog,timers,events.
+# When SIMPLE_DIAG is unset, every dbg_* call costs one cached bool check.
+# dbg_provenance is deliberately NOT env-gated: a silent-fakery detector
+# that is itself silenceable would be pointless.
+#
+# Composition (no duplicate modules):
+#   - emits through lib.log's dispatch (log_dispatch_text) so registered
+#     ring/file backends observe diag lines; stderr write is direct because
+#     the facade only reaches stderr in panic mode.
+#   - the watchdog composes std.failsafe.timeout.Deadline for the budget
+#     (no second deadline type); armed-at timestamps are kept here.
+#
+# Interpreter landmine (verified in-session): Dict.get() returns the raw
+# value or nil, NOT a Some(..)-tagged Option — `if val Some(x) = d.get(k):`
+# silently never matches. Use `?? default` / `!= nil` instead. Same for
+# subscript-assign on module-global dicts from another function: use
+# `.set(k, v)`, not `d[k] = v`.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_stderr_write(s: text)
+extern fn rt_time_now_monotonic_ms() -> i64
+
+use lib.log.{log_dispatch_text, subsys_from_scope, LOG_INFO, LOG_WARN}
+use std.failsafe.timeout.{Deadline}
+use std.array.{array_sort_by}
+
+val _RING_CAP: i64 = 256
+
+# ---------------------------------------------------------------------------
+# Facet gating (SIMPLE_DIAG, read once)
+# ---------------------------------------------------------------------------
+
+var _g_env_read: bool = false
+var _g_facet_stage: bool = false
+var _g_facet_watchdog: bool = false
+var _g_facet_timers: bool = false
+var _g_facet_events: bool = false
+
+fn _read_env_once():
+    if _g_env_read:
+        return
+    _g_env_read = true
+    val raw = rt_env_get("SIMPLE_DIAG") ?? ""
+    if raw == "":
+        return
+    for part in raw.split(","):
+        val p = part.trim()
+        if p == "all" or p == "stage":
+            _g_facet_stage = true
+        if p == "all" or p == "watchdog":
+            _g_facet_watchdog = true
+        if p == "all" or p == "timers":
+            _g_facet_timers = true
+        if p == "all" or p == "events":
+            _g_facet_events = true
+
+fn dbg_stage_on() -> bool:
+    _read_env_once()
+    _g_facet_stage
+
+fn dbg_watchdog_on() -> bool:
+    _read_env_once()
+    _g_facet_watchdog
+
+fn dbg_timers_on() -> bool:
+    _read_env_once()
+    _g_facet_timers
+
+# Guard for expensive `detail` construction at call sites (cost rule §8.2).
+fn dbg_events_on() -> bool:
+    _read_env_once()
+    _g_facet_events
+
+# Test-only: forces a facet on at runtime. Specs run in the same process as
+# module load and the env decision is cached at first use, so setting
+# SIMPLE_DIAG mid-spec cannot be relied on — use this hook instead.
+# facet: "stage" | "watchdog" | "timers" | "events" | "all"
+fn dbg_force_facet(facet: text):
+    _read_env_once()
+    if facet == "all" or facet == "stage":
+        _g_facet_stage = true
+    if facet == "all" or facet == "watchdog":
+        _g_facet_watchdog = true
+    if facet == "all" or facet == "timers":
+        _g_facet_timers = true
+    if facet == "all" or facet == "events":
+        _g_facet_events = true
+
+# Test-only: turns all facets back off (env is not re-read; in specs
+# SIMPLE_DIAG is normally unset anyway).
+fn dbg_reset_facets():
+    _read_env_once()
+    _g_facet_stage = false
+    _g_facet_watchdog = false
+    _g_facet_timers = false
+    _g_facet_events = false
+
+# ---------------------------------------------------------------------------
+# Emission — stderr (direct) + lib.log dispatch (backends)
+# ---------------------------------------------------------------------------
+
+var _g_last_emit: text = ""
+
+fn _emit(level: i64, line: text):
+    rt_stderr_write(line + "\n")
+    _g_last_emit = line
+    log_dispatch_text(level, subsys_from_scope("diag"), line)
+
+# Test-only: last line diag actually emitted ("" if none).
+fn dbg_last_emit() -> text:
+    _g_last_emit
+
+# ---------------------------------------------------------------------------
+# Stage tracer
+# ---------------------------------------------------------------------------
+
+pub class StageEntry:
+    component: text
+    stage: text
+    t_ms: i64
+
+var _g_stage_ring: [StageEntry] = []
+var _g_stage_last_ms: Dict<text, i64> = {}   # component -> last stage timestamp
+
+fn dbg_stage(component: text, stage: text):
+    _read_env_once()
+    if not _g_facet_stage and not _g_facet_watchdog:
+        return
+    val now = rt_time_now_monotonic_ms()
+    val last = _g_stage_last_ms.get(component) ?? now
+    val delta = now - last
+    _g_stage_last_ms.set(component, now)
+
+    _g_stage_ring.push(StageEntry(component: component, stage: stage, t_ms: now))
+    if _g_stage_ring.len() > _RING_CAP:
+        _g_stage_ring.remove(0)
+
+    if _g_facet_watchdog:
+        _deadline_check_all(now)
+
+    if _g_facet_stage:
+        _emit(LOG_INFO, "[{component}] stage {stage} +{delta}ms")
+
+# Recorded stage ring (oldest first, cap 256).
+fn dbg_stage_history() -> [StageEntry]:
+    _g_stage_ring
+
+# Loud dump of the stage ring to stderr (multi-line).
+fn dbg_stage_dump():
+    rt_stderr_write("[diag] stage history ({_g_stage_ring.len()} entries):\n")
+    for e in _g_stage_ring:
+        rt_stderr_write("  [{e.component}] stage {e.stage} t={e.t_ms}ms\n")
+
+fn _stage_history_lines(max_entries: i64) -> [text]:
+    var lines: [text] = []
+    var start = _g_stage_ring.len() - max_entries
+    if start < 0:
+        start = 0
+    var i = start
+    while i < _g_stage_ring.len():
+        val e = _g_stage_ring[i]
+        lines.push("  [{e.component}] stage {e.stage} t={e.t_ms}ms")
+        i = i + 1
+    lines
+
+# ---------------------------------------------------------------------------
+# Cooperative watchdog (no threads — interpreter-safe)
+# ---------------------------------------------------------------------------
+
+# Budgets live in the existing failsafe Deadline type (no second deadline
+# type, per §8.4); armed-at timestamps and labels are diag's own state.
+var _g_deadline_budget: Dict<text, Deadline> = {}
+var _g_deadline_armed_at: Dict<text, i64> = {}
+var _g_deadline_labels: [text] = []
+var _g_breach_count: i64 = 0
+var _g_last_breach: text = ""
+
+# Arms (or re-arms) a cooperative deadline. Breach is detected on the next
+# dbg_stage() call (watchdog facet) or explicit dbg_deadline_check(label).
+# No-op when the watchdog facet is off (cost rule).
+fn dbg_deadline(label: text, budget_ms: i64):
+    if not dbg_watchdog_on():
+        return
+    _g_deadline_budget.set(label, Deadline.new(budget_ms))
+    _g_deadline_armed_at.set(label, rt_time_now_monotonic_ms())
+    if not _g_deadline_labels.contains(label):
+        _g_deadline_labels.push(label)
+
+# Disarms a deadline on the success path so it never fires.
+fn dbg_deadline_clear(label: text):
+    _g_deadline_budget.remove(label)
+    _g_deadline_armed_at.remove(label)
+    var kept: [text] = []
+    for l in _g_deadline_labels:
+        if l != label:
+            kept.push(l)
+    _g_deadline_labels = kept
+
+fn _breach(label: text, budget_ms: i64, elapsed_ms: i64):
+    # The one deliberately multi-line output in this module: a breach without
+    # the stage history is exactly the "silent hang" this exists to kill.
+    var lines: [text] = []
+    lines.push("[diag] DEADLINE EXCEEDED {label} budget={budget_ms}ms elapsed={elapsed_ms}ms")
+    lines.push("[diag] recent stage history:")
+    for h in _stage_history_lines(32):
+        lines.push(h)
+    val block = lines.join("\n")
+    _emit(LOG_WARN, block)
+    _g_last_breach = block
+    _g_breach_count = _g_breach_count + 1
+    dbg_deadline_clear(label)   # fire once
+
+# Checks one deadline now; returns true if it breached (and fired).
+fn dbg_deadline_check(label: text) -> bool:
+    if not dbg_watchdog_on():
+        return false
+    val armed = _g_deadline_armed_at.get(label)
+    if armed == nil:
+        return false
+    val d = _g_deadline_budget.get(label) ?? Deadline.new(0)
+    val elapsed = rt_time_now_monotonic_ms() - (armed ?? 0)
+    if elapsed > d.timeout_ms:
+        _breach(label, d.timeout_ms, elapsed)
+        return true
+    false
+
+fn _deadline_check_all(now_ms: i64):
+    if _g_deadline_labels.len() == 0:
+        return
+    # snapshot: _breach() mutates _g_deadline_labels via clear
+    var labels: [text] = []
+    for l in _g_deadline_labels:
+        labels.push(l)
+    for label in labels:
+        val armed = _g_deadline_armed_at.get(label)
+        if armed != nil:
+            val d = _g_deadline_budget.get(label) ?? Deadline.new(0)
+            val elapsed = now_ms - (armed ?? 0)
+            if elapsed > d.timeout_ms:
+                _breach(label, d.timeout_ms, elapsed)
+
+# Test-only introspection.
+fn dbg_deadline_breach_count() -> i64:
+    _g_breach_count
+
+fn dbg_last_breach() -> text:
+    _g_last_breach
+
+fn dbg_deadline_active_count() -> i64:
+    _g_deadline_labels.len()
+
+# ---------------------------------------------------------------------------
+# Aggregating timers / counters — the quadratic-path finder
+# ---------------------------------------------------------------------------
+
+class _TimerStat:
+    label: text
+    count: i64
+    total_ms: i64
+    max_ms: i64
+
+# Read-only view returned by dbg_timer_stats() (test/report consumers).
+pub class DiagTimerStats:
+    count: i64
+    total_ms: i64
+    max_ms: i64
+
+var _g_timer_begin: Dict<text, i64> = {}
+var _g_timer_stats: Dict<text, _TimerStat> = {}
+var _g_timer_labels: [text] = []
+var _g_counters: Dict<text, i64> = {}
+var _g_counter_labels: [text] = []
+
+fn dbg_time_begin(label: text):
+    if not dbg_timers_on():
+        return
+    _g_timer_begin.set(label, rt_time_now_monotonic_ms())
+
+fn dbg_time_end(label: text):
+    if not dbg_timers_on():
+        return
+    val start = _g_timer_begin.get(label)
+    if start == nil:
+        return
+    val elapsed = rt_time_now_monotonic_ms() - (start ?? 0)
+    _g_timer_begin.remove(label)
+    val prev = _g_timer_stats.get(label)
+    if prev == nil:
+        _g_timer_stats.set(label, _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed))
+        _g_timer_labels.push(label)
+    else:
+        val s = prev ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0)
+        var new_max = s.max_ms
+        if elapsed > new_max:
+            new_max = elapsed
+        _g_timer_stats.set(label, _TimerStat(label: label, count: s.count + 1, total_ms: s.total_ms + elapsed, max_ms: new_max))
+
+fn dbg_count(label: text, delta: i64):
+    if not dbg_timers_on():
+        return
+    val cur = _g_counters.get(label)
+    if cur == nil:
+        _g_counter_labels.push(label)
+    _g_counters.set(label, (cur ?? 0) + delta)
+
+fn dbg_timer_stats(label: text) -> DiagTimerStats:
+    val s = _g_timer_stats.get(label)
+    if s == nil:
+        return DiagTimerStats(count: 0, total_ms: 0, max_ms: 0)
+    val st = s ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0)
+    DiagTimerStats(count: st.count, total_ms: st.total_ms, max_ms: st.max_ms)
+
+fn dbg_counter_value(label: text) -> i64:
+    _g_counters.get(label) ?? 0
+
+fn _sorted_timer_stats() -> [_TimerStat]:
+    var stats: [_TimerStat] = []
+    for label in _g_timer_labels:
+        val s = _g_timer_stats.get(label)
+        if s != nil:
+            stats.push(s ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0))
+    # descending by total_ms (stdlib sort — no duplicate sort implementation)
+    array_sort_by(stats, \a, b: b.total_ms - a.total_ms)
+
+# One "label count=N total=Tms max=Mms" line per label, sorted by total
+# descending, plus one "counter <label> = N" line per counter.
+fn dbg_summary() -> text:
+    var lines: [text] = []
+    for s in _sorted_timer_stats():
+        lines.push("{s.label} count={s.count} total={s.total_ms}ms max={s.max_ms}ms")
+    for label in _g_counter_labels:
+        lines.push("counter {label} = {_g_counters.get(label) ?? 0}")
+    lines.join("\n")
+
+fn dbg_summary_dump():
+    if not dbg_timers_on():
+        return
+    val body = dbg_summary()
+    if body == "":
+        return
+    _emit(LOG_INFO, "[diag] timing summary:\n{body}")
+
+# ---------------------------------------------------------------------------
+# Event-chain tracer — one line per hop
+# ---------------------------------------------------------------------------
+
+fn dbg_event_hop(chain_id: text, hop: text, detail: text):
+    if not dbg_events_on():
+        return
+    _emit(LOG_INFO, "[event {chain_id}] {hop} {detail}")
+
+# ---------------------------------------------------------------------------
+# Provenance assert — anti-fakery, ALWAYS ON
+# ---------------------------------------------------------------------------
+
+var _g_provenance_mismatches: i64 = 0
+var _g_last_mismatch: text = ""
+
+# Returns true iff actual == claimed. On mismatch prints a loud warning
+# UNCONDITIONALLY (not gated by SIMPLE_DIAG) and bumps a counter — silent
+# fallbacks are the bug class this kills.
+fn dbg_provenance(claimed: text, actual: text, context: text) -> bool:
+    if claimed == actual:
+        return true
+    val line = "DIAG-PROVENANCE context={context} claimed={claimed} actual={actual}"
+    _emit(LOG_WARN, line)
+    _g_last_mismatch = line
+    _g_provenance_mismatches = _g_provenance_mismatches + 1
+    false
+
+fn dbg_provenance_mismatches() -> i64:
+    _g_provenance_mismatches
+
+fn dbg_last_mismatch() -> text:
+    _g_last_mismatch
+
+# ---------------------------------------------------------------------------
+# Test-only global reset (spec isolation)
+# ---------------------------------------------------------------------------
+
+fn dbg_diag_reset():
+    dbg_reset_facets()
+    _g_stage_ring = []
+    _g_stage_last_ms.clear()
+    _g_deadline_budget.clear()
+    _g_deadline_armed_at.clear()
+    _g_deadline_labels = []
+    _g_breach_count = 0
+    _g_last_breach = ""
+    _g_timer_begin.clear()
+    _g_timer_stats.clear()
+    _g_timer_labels = []
+    _g_counters.clear()
+    _g_counter_labels = []
+    _g_provenance_mismatches = 0
+    _g_last_mismatch = ""
+    _g_last_emit = ""

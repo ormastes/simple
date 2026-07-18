@@ -1,0 +1,151 @@
+use app.llm_runtime.manifest.{LlmRuntimeManifest}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+
+pub class LlmRuntimeLiveChatProbeResult:
+    status: text
+    reason: text
+    endpoint_status: text
+    http_status: i64
+    choice_count: i64
+    content_status: text
+    finish_reason_status: text
+    evidence_jsonl: text
+
+pub fn llm_runtime_probe_vllm_chat_response(manifest: LlmRuntimeManifest, http_status: i64, response_body: text) -> LlmRuntimeLiveChatProbeResult:
+    val endpoint_status = _endpoint_status(manifest.endpoint)
+    val choice_count = _choice_count(response_body)
+    val content_status = _content_status(response_body, choice_count)
+    val finish_status = _finish_reason_status(response_body, choice_count)
+    val status = _chat_status(endpoint_status, http_status, response_body, choice_count, content_status)
+    val reason = _chat_reason(status, endpoint_status, http_status, response_body, choice_count, content_status)
+    val result = LlmRuntimeLiveChatProbeResult(
+        status: status,
+        reason: reason,
+        endpoint_status: endpoint_status,
+        http_status: http_status,
+        choice_count: choice_count,
+        content_status: content_status,
+        finish_reason_status: finish_status,
+        evidence_jsonl: ""
+    )
+    result.evidence_jsonl = llm_runtime_live_chat_probe_jsonl_event(result)
+    result
+
+pub fn llm_runtime_live_chat_probe_jsonl_event(result: LlmRuntimeLiveChatProbeResult) -> text:
+    LB() +
+    jp("event", js("llm_runtime_vllm_chat_probe")) +
+    "," + jp("status", js(result.status)) +
+    "," + jp("reason", js(result.reason)) +
+    "," + jp("endpoint", js(result.endpoint_status)) +
+    "," + jp("http_status", str(result.http_status)) +
+    "," + jp("choice_count", str(result.choice_count)) +
+    "," + jp("content_status", js(result.content_status)) +
+    "," + jp("finish_reason", js(result.finish_reason_status)) +
+    RB() + "\n"
+
+fn _endpoint_status(endpoint: text) -> text:
+    val value = endpoint.trim()
+    if value == "":
+        return "missing"
+    if value.starts_with("http://") or value.starts_with("https://"):
+        if value.contains(" "):
+            return "invalid"
+        return "configured"
+    "invalid"
+
+fn _chat_status(endpoint_status: text, http_status: i64, body: text, choice_count: i64, content_status: text) -> text:
+    if endpoint_status != "configured":
+        return "missing"
+    if http_status == 401 or http_status == 403:
+        return "blocked"
+    if http_status < 200 or http_status >= 300:
+        return "error"
+    if not _looks_like_chat_response(body):
+        return "error"
+    if choice_count <= 0:
+        return "missing"
+    if content_status == "missing":
+        return "missing"
+    "ready"
+
+fn _chat_reason(status: text, endpoint_status: text, http_status: i64, body: text, choice_count: i64, content_status: text) -> text:
+    if endpoint_status == "missing":
+        return "missing_endpoint"
+    if endpoint_status == "invalid":
+        return "invalid_endpoint"
+    if http_status == 401 or http_status == 403:
+        return "auth_rejected"
+    if http_status < 200 or http_status >= 300:
+        return "http_error"
+    if not _looks_like_chat_response(body):
+        return "malformed_chat_response"
+    if choice_count <= 0:
+        return "no_choices_returned"
+    if content_status == "missing":
+        return "missing_assistant_content"
+    if status == "ready":
+        return "chat_completions_ready"
+    "chat_probe_unknown"
+
+fn _looks_like_chat_response(body: text) -> bool:
+    body.contains("\"choices\"") and body.contains("[") and body.contains("]")
+
+fn _choice_count(body: text) -> i64:
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < body.len():
+        val next = _find_from(body, "\"message\"", i)
+        if next < 0:
+            return count
+        count = count + 1
+        i = next + 9
+    count
+
+fn _content_status(body: text, choice_count: i64) -> text:
+    if choice_count <= 0:
+        return "missing"
+    if _string_field_value(body, "\"content\"") == "":
+        return "missing"
+    "present"
+
+fn _finish_reason_status(body: text, choice_count: i64) -> text:
+    if choice_count <= 0:
+        return "missing"
+    val finish = _string_field_value(body, "\"finish_reason\"")
+    if finish == "":
+        return "missing"
+    finish
+
+fn _find_from(source: text, needle: text, start: i64) -> i64:
+    if start < 0 or start >= source.len():
+        return -1
+    val rest = source.slice(start, source.len())
+    val found = rest.find(needle)
+    if found < 0:
+        return -1
+    start + found
+
+fn _string_field_value(source: text, key: text) -> text:
+    val key_start = source.find(key)
+    if key_start < 0:
+        return ""
+    var i = key_start + key.len()
+    while i < source.len() and source.char_at(i) == " ":
+        i = i + 1
+    if i >= source.len() or source.char_at(i) != ":":
+        return ""
+    i = i + 1
+    while i < source.len() and source.char_at(i) == " ":
+        i = i + 1
+    if i >= source.len() or source.char_at(i) != "\"":
+        return ""
+    i = i + 1
+    val start = i
+    while i < source.len():
+        if source.char_at(i) == "\"":
+            return source.slice(start, i)
+        i = i + 1
+    ""
+
+export LlmRuntimeLiveChatProbeResult
+export llm_runtime_probe_vllm_chat_response, llm_runtime_live_chat_probe_jsonl_event

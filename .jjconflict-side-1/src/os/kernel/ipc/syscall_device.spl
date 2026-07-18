@@ -1,0 +1,495 @@
+# Device Syscall Handlers — split from syscall.spl.
+# Contains PCI device cache state, _pci_scan_all, _pci_cache_function,
+# _handle_dev_enumerate, _handle_dev_get_info, _handle_device_grant,
+# _handle_map_bar, DMA helpers, _handle_alloc_dma, _handle_free_dma.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_NO_EXECUTE, VM_CACHE_DISABLE}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, PAGE_SIZE}
+use os.kernel.memory.pmm.{pmm_alloc_pages, pmm_free_page_range}
+use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_dma, memory_leveling_runtime_unregister_dma, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_dma_sync_for_cpu}
+use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
+use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
+use os.kernel.interrupts.irq_routing.{irq_route_register}
+use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
+use os.kernel.lifecycle.task_cleanup.{task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
+use os.kernel.ipc.notification.{notification_create}
+use os.kernel.ipc.notif_global.{g_notification_table}
+use os.kernel.ipc.syscall.{_next_mmap_addr, _is_userspace_ptr, _is_kernel_addr, PCI_MMIO_FLOOR}
+use os.kernel.types.device_mem_types.{device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id}
+
+val MAX_DMA_ALLOCS: u64 = 1024
+var dma_alloc_owner: [u64; 1024] = [0; 1024]
+var dma_alloc_virt: [u64; 1024] = [0; 1024]
+var dma_alloc_phys: [u64; 1024] = [0; 1024]
+var dma_alloc_size: [u64; 1024] = [0; 1024]
+var dma_alloc_device: [u64; 1024] = [0; 1024]
+var dma_alloc_cache_policy: [u8; 1024] = [0; 1024]
+var dma_alloc_id: [u64; 1024] = [0; 1024]
+var dma_alloc_active: [u8; 1024] = [0; 1024]
+
+# PCI device cache — lazy-initialized on first enumerate call
+val MAX_PCI_DEVICES: u64 = 256
+var _pci_devices_count: u64 = 0
+var _pci_scanned: bool = false
+
+# Flat arrays for cached PCI device info (primitive types for baremetal ABI)
+var _pci_dev_bus: [u8; 256] = [0; 256]
+var _pci_dev_device: [u8; 256] = [0; 256]
+var _pci_dev_func: [u8; 256] = [0; 256]
+var _pci_dev_vendor: [u16; 256] = [0; 256]
+var _pci_dev_devid: [u16; 256] = [0; 256]
+var _pci_dev_class: [u8; 256] = [0; 256]
+var _pci_dev_subclass: [u8; 256] = [0; 256]
+var _pci_dev_prog_if: [u8; 256] = [0; 256]
+var _pci_dev_irq: [u8; 256] = [0; 256]
+
+# ============================================================================
+# Device Handlers
+# ============================================================================
+
+fn _pci_scan_all():
+    """Scan PCI buses 0-255, devices 0-31, functions 0-7 and populate the cache."""
+    if _pci_scanned:
+        return
+    _pci_scanned = true
+    _pci_devices_count = 0
+    var bus: u16 = 0
+    while bus < 256:
+        var dev: u8 = 0
+        while dev < 32:
+            val bus_u8 = bus.to_u8()
+            val vendor = pci_read_vendor(bus_u8, dev, 0)
+            if vendor != 0xFFFF:
+                _pci_cache_function(bus_u8, dev, 0)
+                val header_type = pci_read_header_type(bus_u8, dev, 0)
+                if (header_type & 0x80) != 0:
+                    var func: u8 = 1
+                    while func < 8:
+                        val fv = pci_read_vendor(bus_u8, dev, func)
+                        if fv != 0xFFFF:
+                            _pci_cache_function(bus_u8, dev, func)
+                        func = func + 1
+            dev = dev + 1
+        bus = bus + 1
+
+fn _pci_cache_function(bus: u8, device: u8, func: u8):
+    """Read PCI config for one function and store in the flat cache arrays."""
+    if _pci_devices_count >= MAX_PCI_DEVICES:
+        return
+    val idx = _pci_devices_count
+    val vendor = pci_read_vendor(bus, device, func)
+    val devid = pci_read_device_id(bus, device, func)
+    val class_info = pci_read_class(bus, device, func)
+    val cc_raw = (class_info >> 24) & 0xFF
+    val class_code = cc_raw.to_u8()
+    val sc_raw = (class_info >> 16) & 0xFF
+    val subclass = sc_raw.to_u8()
+    val pi_raw = (class_info >> 8) & 0xFF
+    val prog_if = pi_raw.to_u8()
+    val irq = pci_read_irq(bus, device, func)
+    _pci_dev_bus[idx] = bus
+    _pci_dev_device[idx] = device
+    _pci_dev_func[idx] = func
+    _pci_dev_vendor[idx] = vendor
+    _pci_dev_devid[idx] = devid
+    _pci_dev_class[idx] = class_code
+    _pci_dev_subclass[idx] = subclass
+    _pci_dev_prog_if[idx] = prog_if
+    _pci_dev_irq[idx] = irq
+    _pci_devices_count = _pci_devices_count + 1
+
+fn _pci_write_device_info_buf(ptr: u64, idx: u64):
+    """Write cached device info at index `idx` into a DeviceInfoBuf at `ptr`."""
+    mmio_write8(ptr + 0, _pci_dev_bus[idx])
+    mmio_write8(ptr + 1, _pci_dev_device[idx])
+    mmio_write8(ptr + 2, _pci_dev_func[idx])
+    mmio_write16(ptr + 4, _pci_dev_vendor[idx])
+    mmio_write16(ptr + 6, _pci_dev_devid[idx])
+    mmio_write8(ptr + 8, _pci_dev_class[idx])
+    mmio_write8(ptr + 9, _pci_dev_subclass[idx])
+    mmio_write8(ptr + 10, _pci_dev_prog_if[idx])
+    mmio_write8(ptr + 11, _pci_dev_irq[idx])
+
+fn _handle_dev_enumerate(args: SyscallArgs) -> SyscallResult:
+    """Enumerate PCI devices."""
+    _pci_scan_all()
+    val mode = args.arg0
+    if mode == 0:
+        SyscallResult(value: _pci_devices_count as i64)
+    else if mode == 1:
+        val index = args.arg1
+        val buf_ptr = args.arg2
+        if index >= _pci_devices_count:
+            SyscallResult(value: -1)
+        else if not vmm_verify_user_write(buf_ptr, 12):
+            SyscallResult(value: -14)
+        else:
+            _pci_write_device_info_buf(buf_ptr, index)
+            SyscallResult(value: 0)
+    else if mode == 4:
+        val index = args.arg1
+        val field = args.arg2
+        if index >= _pci_devices_count:
+            SyscallResult(value: -1)
+        else:
+            val v: i64 = match field:
+                0: _pci_dev_bus[index] as i64
+                1: _pci_dev_device[index] as i64
+                2: _pci_dev_func[index] as i64
+                3: _pci_dev_class[index] as i64
+                4: _pci_dev_subclass[index] as i64
+                5: _pci_dev_vendor[index] as i64
+                6: _pci_dev_devid[index] as i64
+                _: -1
+            SyscallResult(value: v)
+    else:
+        SyscallResult(value: -1)
+
+fn _handle_dev_get_info(args: SyscallArgs) -> SyscallResult:
+    """Get info for a specific PCI device by BDF."""
+    val bdf = args.arg0
+    val buf_ptr = args.arg1
+
+    if not vmm_verify_user_write(buf_ptr, 12):
+        return SyscallResult(value: -14)
+
+    val bus = ((bdf >> 16) & 0xFF).to_u8()
+    val dev = ((bdf >> 8) & 0xFF).to_u8()
+    val func = (bdf & 0xFF).to_u8()
+    val vendor = pci_read_vendor(bus, dev, func)
+    if vendor == 0xFFFF:
+        SyscallResult(value: -1)
+    else:
+        val devid = pci_read_device_id(bus, dev, func)
+        val class_info = pci_read_class(bus, dev, func)
+        val cc_raw = (class_info >> 24) & 0xFF
+        val class_code = cc_raw.to_u8()
+        val sc_raw = (class_info >> 16) & 0xFF
+        val subclass = sc_raw.to_u8()
+        val pi_raw = (class_info >> 8) & 0xFF
+        val prog_if = pi_raw.to_u8()
+        val irq = pci_read_irq(bus, dev, func)
+        mmio_write8(buf_ptr + 0, bus)
+        mmio_write8(buf_ptr + 1, dev)
+        mmio_write8(buf_ptr + 2, func)
+        mmio_write16(buf_ptr + 4, vendor)
+        mmio_write16(buf_ptr + 6, devid)
+        mmio_write8(buf_ptr + 8, class_code)
+        mmio_write8(buf_ptr + 9, subclass)
+        mmio_write8(buf_ptr + 10, prog_if)
+        mmio_write8(buf_ptr + 11, irq)
+        SyscallResult(value: 0)
+
+# ============================================================================
+# Device Grant / BAR / DMA Handlers
+# ============================================================================
+
+fn _pci_bar_size(bus: u8, dev: u8, func: u8, bar_num: u8) -> u64:
+    """Detect the size of a PCI BAR by writing all-ones and reading back."""
+    val offset = (0x10 + bar_num * 4).to_u8()
+    val original = pci_read_bar(bus, dev, func, bar_num)
+    pci_write_config(bus, dev, func, offset, 0xFFFFFFFF)
+    val readback = pci_read_bar(bus, dev, func, bar_num)
+    pci_write_config(bus, dev, func, offset, original)
+    if readback == 0:
+        return 0
+    val mask = readback & 0xFFFFFFF0
+    val size = (~mask + 1) as u64
+    size
+
+fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler, caller: TaskId) -> SyscallResult:
+    """Build a DeviceGrant for a PCI device and write it to caller memory."""
+    val bdf = args.arg0
+    val grant_ptr = args.arg1 as u64
+
+    if not _is_userspace_ptr(grant_ptr):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(grant_ptr, 120):
+        return SyscallResult(value: -14)
+
+    val bus = ((bdf >> 16) & 0xFF).to_u8()
+    val dev = ((bdf >> 8) & 0xFF).to_u8()
+    val func = (bdf & 0xFF).to_u8()
+
+    val vendor = pci_read_vendor(bus, dev, func)
+    if vendor == 0xFFFF:
+        return SyscallResult(value: -1)
+
+    val devid = pci_read_device_id(bus, dev, func)
+    val class_info = pci_read_class(bus, dev, func)
+    val class_code = ((class_info >> 24) & 0xFF).to_u8()
+    val subclass = ((class_info >> 16) & 0xFF).to_u8()
+    val irq_line = pci_read_irq(bus, dev, func)
+    val irq_vector = (VEC_IRQ_BASE + irq_line as u32)
+
+    val bar0_raw = pci_read_bar(bus, dev, func, 0)
+    val bar0_phys = (bar0_raw & 0xFFFFFFF0) as u64
+    val bar0_size = _pci_bar_size(bus, dev, func, 0)
+
+    val notif_id = notification_create(g_notification_table)
+    val notif_bit: u64 = 1
+
+    irq_route_register(irq_vector, notif_id, notif_bit)
+
+    task_register_resource(caller.id, RES_NOTIFICATION, notif_id, 0)
+    task_register_resource(caller.id, RES_IRQ_ROUTE, irq_vector as u64, 0)
+    val token_base = device_grant_token_base(bus, dev, func, caller.id)
+
+    mmio_write16(grant_ptr + 0, vendor)
+    mmio_write16(grant_ptr + 2, devid)
+    mmio_write8(grant_ptr + 4, bus)
+    mmio_write8(grant_ptr + 5, dev)
+    mmio_write8(grant_ptr + 6, func)
+    mmio_write8(grant_ptr + 7, class_code)
+    mmio_write8(grant_ptr + 8, subclass)
+    mmio_write64(grant_ptr + 16, bar0_phys)
+    mmio_write64(grant_ptr + 24, bar0_size)
+    mmio_write64(grant_ptr + 32, device_grant_bar_token(token_base))
+    mmio_write32(grant_ptr + 40, irq_vector)
+    mmio_write64(grant_ptr + 48, notif_id)
+    mmio_write64(grant_ptr + 56, notif_bit)
+    mmio_write64(grant_ptr + 64, device_grant_irq_token(token_base))
+    mmio_write64(grant_ptr + 72, 0)
+    mmio_write64(grant_ptr + 80, 0)
+    mmio_write64(grant_ptr + 88, 0)
+    mmio_write64(grant_ptr + 96, device_grant_dma_token(token_base))
+    mmio_write32(grant_ptr + 104, device_grant_iommu_domain_id(bus, dev, func))
+    mmio_write64(grant_ptr + 112, device_grant_iommu_token(token_base))
+
+    SyscallResult(value: 0)
+
+fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
+    """Map a physical BAR into the caller's address space."""
+    val bar_phys = args.arg0 as u64
+    val size = args.arg1 as u64
+    val hint = args.arg2 as u64
+
+    if size == 0 or size > 0x10000000:
+        return SyscallResult(value: -22)
+
+    if bar_phys < PCI_MMIO_FLOOR:
+        return SyscallResult(value: -1)
+
+    if hint != 0 and _is_kernel_addr(hint):
+        return SyscallResult(value: -1)
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    var base_virt: u64 = hint
+    if base_virt == 0:
+        base_virt = _next_mmap_addr
+
+    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
+        val phys = PhysAddr(addr: bar_phys + offset * PAGE_SIZE)
+        val ok = vmm_map_page(virt, phys, flags)
+        if !ok:
+            return SyscallResult(value: -12)
+        offset = offset + 1
+
+    if hint == 0:
+        _next_mmap_addr = base_virt + page_count * PAGE_SIZE
+
+    SyscallResult(value: base_virt as i64)
+
+fn _dma_find_slot(virt_addr: u64) -> i64:
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] != 0 and dma_alloc_virt[i] == virt_addr:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _dma_find_allocation_id(allocation_id: u64) -> i64:
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] != 0 and dma_alloc_id[i] == allocation_id:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _dma_register_alloc(owner: TaskId, virt_addr: u64, phys_addr: u64, size: u64, owner_device: u64, cache_policy: u8, allocation_id: u64) -> bool:
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] == 0:
+            dma_alloc_active[i] = 1
+            dma_alloc_owner[i] = owner.id
+            dma_alloc_virt[i] = virt_addr
+            dma_alloc_phys[i] = phys_addr
+            dma_alloc_size[i] = size
+            dma_alloc_device[i] = owner_device
+            dma_alloc_cache_policy[i] = cache_policy
+            dma_alloc_id[i] = allocation_id
+            return true
+        i = i + 1
+    false
+
+fn _dma_unregister_alloc(virt_addr: u64):
+    val idx = _dma_find_slot(virt_addr)
+    if idx < 0:
+        return
+    val i = idx.to_u64()
+    dma_alloc_active[i] = 0
+    dma_alloc_owner[i] = 0
+    dma_alloc_virt[i] = 0
+    dma_alloc_phys[i] = 0
+    dma_alloc_size[i] = 0
+    dma_alloc_device[i] = 0
+    dma_alloc_cache_policy[i] = 0
+    dma_alloc_id[i] = 0
+
+fn _dma_free_pages(virt_addr: u64, phys_addr: u64, size: u64):
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    memory_dma_free_partial_pages(virt_addr, phys_addr, page_count, page_count, PAGE_SIZE)
+
+fn _dma_release_task_allocs(owner: TaskId):
+    """Release all live DMA records owned by a task before final cleanup."""
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] != 0 and dma_alloc_owner[i] == owner.id:
+            val virt_addr = dma_alloc_virt[i]
+            val phys_addr = dma_alloc_phys[i]
+            val size = dma_alloc_size[i]
+            val released = memory_leveling_runtime_unregister_dma(dma_alloc_id[i], owner.id)
+            if released.ok:
+                _dma_free_pages(virt_addr, phys_addr, size)
+                task_unregister_resource(owner.id, RES_DMA_BUFFER, virt_addr)
+                dma_alloc_active[i] = 0
+                dma_alloc_owner[i] = 0
+                dma_alloc_virt[i] = 0
+                dma_alloc_phys[i] = 0
+                dma_alloc_size[i] = 0
+                dma_alloc_device[i] = 0
+                dma_alloc_cache_policy[i] = 0
+                dma_alloc_id[i] = 0
+        i = i + 1
+
+fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
+    """Allocate a contiguous DMA buffer and map it into caller's address space."""
+    val size = args.arg0 as u64
+    val result_ptr = args.arg1 as u64
+    val owner_device = args.arg2 as u64
+    var cache_policy = args.arg3.to_u8()
+    if cache_policy > 3:
+        cache_policy = 0
+
+    if size == 0 or size > 0x10000000:
+        return SyscallResult(value: -22)
+
+    if not _is_userspace_ptr(result_ptr):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(result_ptr, 16):
+        return SyscallResult(value: -14)
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    val base_virt = _next_mmap_addr
+
+    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+
+    val opt_phys = pmm_alloc_pages(page_count)
+    if not opt_phys.?:
+        return SyscallResult(value: -12)
+    val base_phys = opt_phys.unwrap()
+    val first_phys = base_phys.addr
+    var offset: u64 = 0
+    while offset < page_count:
+        val phys = PhysAddr(addr: base_phys.addr + offset * PAGE_SIZE)
+        val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
+        val ok = vmm_map_page(virt, phys, flags)
+        if !ok:
+            memory_dma_free_partial_pages(base_virt, first_phys, offset, page_count, PAGE_SIZE)
+            return SyscallResult(value: -12)
+        offset = offset + 1
+
+    _next_mmap_addr = base_virt + page_count * PAGE_SIZE
+
+    val leveling_registered = memory_leveling_runtime_register_dma(0, caller.id, base_virt, first_phys, page_count * PAGE_SIZE, cache_policy == 0)
+    if not leveling_registered.ok:
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)
+    val allocation_id = leveling_registered.allocation_ids[0]
+
+    val registered = _dma_register_alloc(caller, base_virt, first_phys, page_count * PAGE_SIZE, owner_device, cache_policy, allocation_id)
+    if not registered:
+        memory_leveling_runtime_unregister_dma(allocation_id, caller.id)
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)
+
+    val cleanup_tracked = task_register_resource(caller.id, RES_DMA_BUFFER, base_virt, page_count * PAGE_SIZE)
+    if not cleanup_tracked:
+        memory_leveling_runtime_unregister_dma(allocation_id, caller.id)
+        _dma_unregister_alloc(base_virt)
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)
+
+    mmio_write64(result_ptr + 0, first_phys)
+    mmio_write64(result_ptr + 8, allocation_id)
+
+    SyscallResult(value: base_virt as i64)
+
+fn _handle_free_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
+    """Free a DMA buffer by unmapping its pages."""
+    val virt_addr = args.arg0 as u64
+    val size = args.arg1 as u64
+    val owner_device = args.arg2 as u64
+
+    if size == 0:
+        return SyscallResult(value: -22)
+
+    if not _is_userspace_ptr(virt_addr):
+        return SyscallResult(value: -1)
+
+    val idx = _dma_find_slot(virt_addr)
+    if idx < 0:
+        return SyscallResult(value: -22)
+    val slot = idx.to_u64()
+    if dma_alloc_owner[slot] != caller.id:
+        return SyscallResult(value: -1)
+    if owner_device != 0 and dma_alloc_device[slot] != owner_device:
+        return SyscallResult(value: -1)
+    if dma_alloc_size[slot] != ((size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE:
+        return SyscallResult(value: -22)
+
+    val leveling_released = memory_leveling_runtime_unregister_dma(dma_alloc_id[slot], caller.id)
+    if not leveling_released.ok:
+        return SyscallResult(value: -16)
+    _dma_free_pages(virt_addr, dma_alloc_phys[slot], dma_alloc_size[slot])
+    _dma_unregister_alloc(virt_addr)
+    task_unregister_resource(caller.id, RES_DMA_BUFFER, virt_addr)
+
+    SyscallResult(value: 0)
+
+fn _handle_sync_dma_for_device(args: SyscallArgs, caller: TaskId) -> SyscallResult:
+    val allocation_id = args.arg0
+    val owner_device = args.arg1
+    val idx = _dma_find_allocation_id(allocation_id)
+    if idx < 0:
+        return SyscallResult(value: -22)
+    val slot = idx.to_u64()
+    if dma_alloc_owner[slot] != caller.id or dma_alloc_device[slot] != owner_device:
+        return SyscallResult(value: -1)
+    val synchronized = memory_leveling_runtime_dma_sync_for_device(allocation_id, caller.id)
+    if not synchronized.ok:
+        return SyscallResult(value: -16)
+    SyscallResult(value: 0)
+
+fn _handle_sync_dma_for_cpu(args: SyscallArgs, caller: TaskId) -> SyscallResult:
+    val allocation_id = args.arg0
+    val owner_device = args.arg1
+    val idx = _dma_find_allocation_id(allocation_id)
+    if idx < 0:
+        return SyscallResult(value: -22)
+    val slot = idx.to_u64()
+    if dma_alloc_owner[slot] != caller.id or dma_alloc_device[slot] != owner_device:
+        return SyscallResult(value: -1)
+    val synchronized = memory_leveling_runtime_dma_sync_for_cpu(allocation_id, caller.id)
+    if not synchronized.ok:
+        return SyscallResult(value: -16)
+    SyscallResult(value: 0)

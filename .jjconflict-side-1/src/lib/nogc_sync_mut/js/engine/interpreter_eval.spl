@@ -1,0 +1,1856 @@
+# JsInterpreter — expression evaluation: eval_expression, eval_new, eval_binary, eval_unary, eval_call.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use std.js.types.ast_types.JsExpression
+use std.js.types.ast_types.JsStatement
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_SET_TIMEOUT, NATIVE_CLEAR_TIMEOUT, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
+use std.js.node.buffer_module.{buffer_byteLength}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
+use std.js.builtins.array.{array_isArray, array_from_values}
+
+impl JsInterpreter:
+    # ── JsExpression evaluation ────────────────────────────────────────────
+
+    me eval_expression(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
+        match expr:
+            JsExpression.Literal(value):
+                return Ok(value)
+            JsExpression.Identifier(name):
+                # Check for 'this' binding
+                if name == "this":
+                    if self.call_stack.len() > 0:
+                        val frame = self.call_stack.get(self.call_stack.len() - 1)
+                        return Ok(frame.this_value)
+                    return Ok(JsValue.Undefined)
+                if name == "window" and self.host_window_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_window_id))
+                if name == "self" and self.host_window_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_window_id))
+                if name == "document" and self.host_document_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_document_id))
+                if name == "location" and self.host_location_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_location_id))
+                if name == "navigator" and self.host_navigator_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_navigator_id))
+                if name == "chrome" and self.host_chrome_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_chrome_id))
+                if name == "sessionStorage" and self.host_session_storage_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_session_storage_id))
+                if name == "localStorage" and self.host_local_storage_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_local_storage_id))
+                if name == "Promise":
+                    return Ok(self._promise_global_object())
+                if name == "require":
+                    return Ok(self._native_node_require_function())
+                if name == "Buffer":
+                    return Ok(self._native_node_buffer_global())
+                if name == "process":
+                    return Ok(self._native_node_process_object())
+                if name == "setImmediate":
+                    val immediate_fn = JsValue.Function(id: self._register_native("setImmediate", NATIVE_SET_IMMEDIATE))
+                    self.define_global_value("setImmediate", immediate_fn)
+                    return Ok(immediate_fn)
+                if name == "clearImmediate":
+                    val clear_immediate_fn = JsValue.Function(id: self._register_native("clearImmediate", NATIVE_CLEAR_IMMEDIATE))
+                    self.define_global_value("clearImmediate", clear_immediate_fn)
+                    return Ok(clear_immediate_fn)
+                if name == "setTimeout":
+                    val set_timeout_fn = JsValue.Function(id: self._register_native("setTimeout", NATIVE_SET_TIMEOUT))
+                    self.define_global_value("setTimeout", set_timeout_fn)
+                    return Ok(set_timeout_fn)
+                if name == "clearTimeout":
+                    val clear_timeout_fn = JsValue.Function(id: self._register_native("clearTimeout", NATIVE_CLEAR_TIMEOUT))
+                    self.define_global_value("clearTimeout", clear_timeout_fn)
+                    return Ok(clear_timeout_fn)
+                if env == self.global_env:
+                    val cached = self.lookup_global_value(name)
+                    if val Some(v) = cached:
+                        return Ok(v)
+                val lookup = self.env_stack.get_var(env, name)
+                if val Some(v) = lookup:
+                    return Ok(v)
+                # Check global
+                val global_lookup = self.lookup_global_value(name)
+                if val Some(v) = global_lookup:
+                    return Ok(v)
+                self.logger.warn("ReferenceError: {name} is not defined")
+                return Ok(JsValue.Undefined)
+            JsExpression.Binary(op, left, right):
+                return self.eval_binary(op, left, right, env)
+            JsExpression.Unary(op, operand):
+                return self.eval_unary(op, operand, env)
+            JsExpression.Call(callee, args):
+                return self.eval_call(callee, args, env)
+            JsExpression.Member(object, property):
+                return self.eval_member(object, property, env)
+            JsExpression.Assignment(target, value):
+                return self.eval_assignment(target, value, env)
+            JsExpression.Array(elements):
+                return self.eval_array(elements, env)
+            JsExpression.ObjectExpr(properties):
+                return self.eval_object(properties, env)
+            JsExpression.Ternary(condition, consequent, alternate):
+                val cond_val = self.eval_expression(condition, env)?
+                if is_truthy(cond_val):
+                    return self.eval_expression(consequent, env)
+                return self.eval_expression(alternate, env)
+            JsExpression.ArrowFunction(params, body):
+                # Register arrow as a function
+                val fn_id = self.functions.len()
+                val js_fn = JsFunction(name: "__arrow__", params: params, body: body, closure_env: env, is_arrow: false)
+                self.functions.push(js_fn)
+                return Ok(JsValue.Function(id: fn_id))
+            JsExpression.SpreadElement(argument):
+                # Spread is handled at call sites; evaluate the argument
+                return self.eval_expression(argument, env)
+            JsExpression.TemplateLiteral(quasis, expressions):
+                return self.eval_template_literal(quasis, expressions, env)
+            JsExpression.Delete(del_expr):
+                return self.eval_delete(del_expr, env)
+            JsExpression.InstanceOf(left, right):
+                # Simplified instanceof: checks if right is a constructor function
+                val lv = self.eval_expression(left, env)?
+                val rv = self.eval_expression(right, env)?
+                # Basic: check if left is an object
+                match lv:
+                    JsValue.Object(id):
+                        return Ok(JsValue.Boolean(v: true))
+                    _:
+                        return Ok(JsValue.Boolean(v: false))
+            JsExpression.InExpr(left, right):
+                val key = self.eval_expression(left, env)?
+                val obj = self.eval_expression(right, env)?
+                val key_str = js_to_string(key)
+                match obj:
+                    JsValue.Object(id):
+                        match self.get_object_property(id, key_str):
+                            JsValue.Undefined: return Ok(JsValue.Boolean(v: false))
+                            _: return Ok(JsValue.Boolean(v: true))
+                    JsValue.Array(id):
+                        match self.get_object_property(id, key_str):
+                            JsValue.Undefined: return Ok(JsValue.Boolean(v: false))
+                            _: return Ok(JsValue.Boolean(v: true))
+                    _:
+                        return Ok(JsValue.Boolean(v: false))
+            JsExpression.NewExpr(callee, args):
+                return self.eval_new(callee, args, env)
+            JsExpression.ComputedMember(object, property):
+                val obj_val = self.eval_expression(object, env)?
+                val key_val = self.eval_expression(property, env)?
+                var key_str = js_to_string(key_val)
+                match key_val:
+                    JsValue.Number(n):
+                        key_str = "{f64_to_i64(n)}"
+                    _:
+                        pass_dn
+                match obj_val:
+                    JsValue.Object(id):
+                        return Ok(self.get_object_property(id, key_str))
+                    JsValue.Array(id):
+                        return Ok(self.get_object_property(id, key_str))
+                    _:
+                        return Ok(JsValue.Undefined)
+            JsExpression.ObjectPattern(props):
+                return Ok(JsValue.Undefined)
+            JsExpression.ArrayPattern(elements):
+                return Ok(JsValue.Undefined)
+
+    # new operator: new Foo(args)
+    me eval_new(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
+        val callee_val = self.eval_expression(callee, env)?
+        var arg_vals: [JsValue] = []
+        var i = 0
+        while i < args.len():
+            arg_vals.push(self.eval_expression(args.get(i), env)?)
+            i = i + 1
+        match callee_val:
+            JsValue.Function(fn_id):
+                var ni = 0
+                while ni < self.native_id_map.len():
+                    val mapping = self.native_id_map.get(ni)
+                    if mapping.first == fn_id:
+                        return Ok(self._dispatch_native_with_receiver(mapping.second, JsValue.Undefined, arg_vals, env))
+                    ni = ni + 1
+                val obj_id = self.create_object()
+                val this_val = JsValue.Object(id: obj_id)
+                # Set __proto__ to the class prototype for method lookup
+                val proto_id = self._find_class_proto(fn_id)
+                if proto_id >= 0:
+                    self.set_object_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
+                if fn_id >= 0 and fn_id < self.functions.len():
+                    val js_fn = self.functions.get(fn_id)
+                    val params = js_fn.params
+                    val fn_env = self.env_stack.create_env(js_fn.closure_env)
+                    var pi = 0
+                    while pi < params.len():
+                        var pv = JsValue.Undefined
+                        if pi < arg_vals.len():
+                            pv = arg_vals.get(pi)
+                        self.env_stack.define_var(fn_env, params.get(pi), pv)
+                        pi = pi + 1
+                    self.env_stack.define_var(fn_env, "this", this_val)
+                    val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
+                    self.call_stack.push(frame)
+                    val saved = self.control_return
+                    self.control_return = false
+                    var bi = 0
+                    while bi < js_fn.body.len():
+                        self.exec_statement(js_fn.body.get(bi), fn_env)?
+                        if self.control_return:
+                            break
+                        bi = bi + 1
+                    self.call_stack.pop()
+                    self.control_return = saved
+                return Ok(this_val)
+            _:
+                return Ok(JsValue.Undefined)
+
+    # Binary operators
+    me eval_binary(op: text, left: JsExpression, right: JsExpression, env: i64) -> BrowserResult<JsValue>:
+        # Comma operator — evaluate left for side effects, return right
+        if op == ",":
+            self.eval_expression(left, env)?
+            return self.eval_expression(right, env)
+
+        # Short-circuit logical operators
+        if op == "&&":
+            val lv = self.eval_expression(left, env)?
+            if not is_truthy(lv):
+                return Ok(lv)
+            return self.eval_expression(right, env)
+
+        if op == "||":
+            val lv = self.eval_expression(left, env)?
+            if is_truthy(lv):
+                return Ok(lv)
+            return self.eval_expression(right, env)
+
+        if op == "??":
+            val lv = self.eval_expression(left, env)?
+            match lv:
+                JsValue.Null: return self.eval_expression(right, env)
+                JsValue.Undefined: return self.eval_expression(right, env)
+                _: return Ok(lv)
+
+        val lv = self.eval_expression(left, env)?
+        val rv = self.eval_expression(right, env)?
+
+        # String concatenation with +
+        if op == "+":
+            val ls = typeof_value(lv)
+            val rs = typeof_value(rv)
+            if ls == "string" or rs == "string" or self._is_stringish(lv) or self._is_stringish(rv):
+                var left_text = js_to_string(lv)
+                var right_text = js_to_string(rv)
+                match lv:
+                    JsValue.Object(obj_id):
+                        match self.get_object_property(obj_id, "__simple_promise_host"):
+                            JsValue.Boolean(is_host):
+                                if is_host:
+                                    match self.get_object_property(obj_id, "__simple_state"):
+                                        JsValue.String(state):
+                                            if state == "fulfilled":
+                                                left_text = js_to_string(self.get_object_property(obj_id, "__simple_value"))
+                                        _:
+                                            pass_dn
+                            _:
+                                pass_dn
+                    _:
+                        pass_dn
+                match rv:
+                    JsValue.Object(obj_id):
+                        match self.get_object_property(obj_id, "__simple_promise_host"):
+                            JsValue.Boolean(is_host):
+                                if is_host:
+                                    match self.get_object_property(obj_id, "__simple_state"):
+                                        JsValue.String(state):
+                                            if state == "fulfilled":
+                                                right_text = js_to_string(self.get_object_property(obj_id, "__simple_value"))
+                                        _:
+                                            pass_dn
+                            _:
+                                pass_dn
+                    _:
+                        pass_dn
+                val result = left_text + right_text
+                return Ok(JsValue.String(v: result))
+            val ln = to_number(lv)
+            val rn = to_number(rv)
+            return Ok(JsValue.Number(v: ln + rn))
+
+        if op == "-":
+            return Ok(JsValue.Number(v: to_number(lv) - to_number(rv)))
+        if op == "*":
+            return Ok(JsValue.Number(v: to_number(lv) * to_number(rv)))
+        if op == "/":
+            val divisor = to_number(rv)
+            if divisor == 0.0:
+                return Ok(JsValue.Number(v: js_infinity()))  # Infinity
+            return Ok(JsValue.Number(v: to_number(lv) / divisor))
+        if op == "%":
+            val divisor = to_number(rv)
+            if divisor == 0.0:
+                return Ok(JsValue.Number(v: js_nan()))  # NaN
+            return Ok(JsValue.Number(v: to_number(lv) % divisor))
+        if op == "**":
+            val base = to_number(lv)
+            val exp = to_number(rv)
+            return Ok(JsValue.Number(v: base ** exp))
+
+        # Comparison
+        if op == "<":
+            return Ok(JsValue.Boolean(v: to_number(lv) < to_number(rv)))
+        if op == ">":
+            return Ok(JsValue.Boolean(v: to_number(lv) > to_number(rv)))
+        if op == "<=":
+            return Ok(JsValue.Boolean(v: to_number(lv) <= to_number(rv)))
+        if op == ">=":
+            return Ok(JsValue.Boolean(v: to_number(lv) >= to_number(rv)))
+
+        # Equality
+        if op == "==":
+            return Ok(JsValue.Boolean(v: abstract_equals(lv, rv)))
+        if op == "===":
+            return Ok(JsValue.Boolean(v: strict_equals(lv, rv)))
+        if op == "!=":
+            return Ok(JsValue.Boolean(v: not abstract_equals(lv, rv)))
+        if op == "!==":
+            return Ok(JsValue.Boolean(v: not strict_equals(lv, rv)))
+
+        # Bitwise
+        if op == "&":
+            val li = f64_to_i64(to_number(lv))
+            val ri = f64_to_i64(to_number(rv))
+            return Ok(JsValue.Number(v: (li & ri).to_f64()))
+        if op == "|":
+            val li = f64_to_i64(to_number(lv))
+            val ri = f64_to_i64(to_number(rv))
+            return Ok(JsValue.Number(v: (li | ri).to_f64()))
+        if op == "^":
+            val li = f64_to_i64(to_number(lv))
+            val ri = f64_to_i64(to_number(rv))
+            return Ok(JsValue.Number(v: (li ^ ri).to_f64()))
+
+        # Computed property access: obj[key]
+        if op == "[]":
+            match lv:
+                JsValue.Object(id):
+                    return Ok(self.get_object_property(id, js_to_string(rv)))
+                JsValue.Array(id):
+                    return Ok(self.get_object_property(id, js_to_string(rv)))
+                JsValue.String(sv):
+                    val idx = f64_to_i64(to_number(rv))
+                    if idx >= 0 and idx < sv.len():
+                        return Ok(JsValue.String(v: sv[idx]))
+                    return Ok(JsValue.Undefined)
+                _:
+                    return Ok(JsValue.Undefined)
+
+        self.logger.warn("Unknown binary operator: {op}")
+        Ok(JsValue.Undefined)
+
+    # Unary operators
+    me eval_unary(op: text, operand: JsExpression, env: i64) -> BrowserResult<JsValue>:
+        if op == "typeof":
+            match operand:
+                JsExpression.Identifier(name):
+                    if env == self.global_env:
+                        val cached = self.lookup_global_value(name)
+                        if val Some(v) = cached:
+                            return Ok(JsValue.String(v: typeof_value(v)))
+                        if name == "setImmediate":
+                            val immediate_fn = JsValue.Function(id: self._register_native("setImmediate", NATIVE_SET_IMMEDIATE))
+                            self.define_global_value("setImmediate", immediate_fn)
+                            return Ok(JsValue.String(v: typeof_value(immediate_fn)))
+                        if name == "clearImmediate":
+                            val clear_immediate_fn = JsValue.Function(id: self._register_native("clearImmediate", NATIVE_CLEAR_IMMEDIATE))
+                            self.define_global_value("clearImmediate", clear_immediate_fn)
+                            return Ok(JsValue.String(v: typeof_value(clear_immediate_fn)))
+                        return Ok(JsValue.String(v: "undefined"))
+                    val lookup = self.env_stack.get_var(env, name)
+                    if val Some(v) = lookup:
+                        return Ok(JsValue.String(v: typeof_value(v)))
+                    return Ok(JsValue.String(v: "undefined"))
+                _:
+                    val v = self.eval_expression(operand, env)?
+                    return Ok(JsValue.String(v: typeof_value(v)))
+
+        val v = self.eval_expression(operand, env)?
+
+        if op == "!":
+            return Ok(JsValue.Boolean(v: not is_truthy(v)))
+        if op == "-":
+            return Ok(JsValue.Number(v: 0.0 - to_number(v)))
+        if op == "+":
+            return Ok(JsValue.Number(v: to_number(v)))
+        if op == "~":
+            val n = f64_to_i64(to_number(v))
+            return Ok(JsValue.Number(v: (0 - n - 1).to_f64()))
+        if op == "void":
+            return Ok(JsValue.Undefined)
+
+        # Pre/post increment/decrement
+        if op == "++pre" or op == "++post":
+            val n = to_number(v)
+            val new_val = JsValue.Number(v: n + 1.0)
+            match operand:
+                JsExpression.Identifier(name):
+                    self.env_stack.set_var(env, name, new_val)
+                _: pass_dn
+            if op == "++pre":
+                return Ok(new_val)
+            return Ok(v)  # post returns old value
+
+        if op == "--pre" or op == "--post":
+            val n = to_number(v)
+            val new_val = JsValue.Number(v: n - 1.0)
+            match operand:
+                JsExpression.Identifier(name):
+                    self.env_stack.set_var(env, name, new_val)
+                _: pass_dn
+            if op == "--pre":
+                return Ok(new_val)
+            return Ok(v)
+
+        if op == "new":
+            # new Constructor(args) — allocate object, set prototype, call constructor, return
+            match operand:
+                JsExpression.Call(callee, args):
+                    val callee_val = self.eval_expression(callee, env)?
+                    var arg_vals: [JsValue] = []
+                    var ai = 0
+                    val alen = args.len()
+                    while ai < alen:
+                        val av = self.eval_expression(args.get(ai), env)?
+                        arg_vals.push(av)
+                        ai = ai + 1
+                    # Allocate new object
+                    val obj_id = self.create_object()
+                    val new_obj = JsValue.Object(id: obj_id)
+                    # Link prototype chain (for class methods)
+                    val ctor_fn_id = _get_fn_id(callee_val)
+                    if ctor_fn_id >= 0:
+                        val proto_id = self._find_class_proto(ctor_fn_id)
+                        if proto_id >= 0:
+                            self.set_object_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
+                    # Call constructor with 'this' bound to new object
+                    match callee_val:
+                        JsValue.Function(fn_id):
+                            if fn_id >= 0 and fn_id < self.functions.len():
+                                val js_fn = self.functions.get(fn_id)
+                                val fn_env = self.env_stack.create_env(js_fn.closure_env)
+                                # Bind parameters
+                                var pi = 0
+                                val plen = js_fn.params.len()
+                                while pi < plen:
+                                    val pname = js_fn.params.get(pi)
+                                    var pval = JsValue.Undefined
+                                    if pi < arg_vals.len():
+                                        pval = arg_vals.get(pi)
+                                    self.env_stack.define_var(fn_env, pname, pval)
+                                    pi = pi + 1
+                                self.env_stack.define_var(fn_env, "this", new_obj)
+                                val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: new_obj)
+                                self.call_stack.push(frame)
+                                val saved = self.control_return
+                                self.control_return = false
+                                var bi = 0
+                                val blen = js_fn.body.len()
+                                while bi < blen:
+                                    self.exec_statement(js_fn.body.get(bi), fn_env)?
+                                    if self.control_return:
+                                        break
+                                    bi = bi + 1
+                                self.call_stack.pop()
+                                self.control_return = saved
+                        _: pass_dn
+                    return Ok(new_obj)
+                _:
+                    # Simple new without call
+                    val obj_id = self.create_object()
+                    return Ok(JsValue.Object(id: obj_id))
+
+        self.logger.warn("Unknown unary operator: {op}")
+        Ok(JsValue.Undefined)
+
+    # Function call
+    me eval_call(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
+        # Array method dispatch — avoid nested match/return (interpreter mode issue)
+        var is_member = false
+        var member_method = ""
+        var member_obj_expr = JsExpression.Literal(value: JsValue.Undefined)
+        match callee:
+            JsExpression.Member(obj_expr, method_name):
+                is_member = true
+                member_method = method_name
+                member_obj_expr = obj_expr
+            JsExpression.ComputedMember(obj_expr, prop_expr):
+                is_member = true
+                match prop_expr:
+                    JsExpression.Literal(value):
+                        match value:
+                            JsValue.String(v):
+                                member_method = v
+                            _:
+                                member_method = js_to_string(value)
+                    _:
+                        member_method = js_to_string(self.eval_expression(prop_expr, env)?)
+                member_obj_expr = obj_expr
+            _: pass_dn
+
+        if is_member and member_method == "cwd":
+            match member_obj_expr:
+                JsExpression.Identifier(obj_name):
+                    if obj_name == "process":
+                        return Ok(JsValue.String(v: "/"))
+                _: pass_dn
+
+        if is_member and member_method == "byteLength":
+            var byte_length_global = false
+            match member_obj_expr:
+                JsExpression.Member(root_expr, root_prop):
+                    if root_prop == "Buffer":
+                        match root_expr:
+                            JsExpression.Identifier(root_name):
+                                if root_name == "globalThis":
+                                    byte_length_global = true
+                            _: pass_dn
+                _: pass_dn
+            if byte_length_global:
+                var arg_vals: [JsValue] = []
+                var ai_bl = 0
+                while ai_bl < args.len():
+                    arg_vals.push(self.eval_expression(args.get(ai_bl), env)?)
+                    ai_bl = ai_bl + 1
+                return Ok(buffer_byteLength(arg_vals))
+
+        if is_member and member_method == "slice":
+            val buffer_val = self.eval_expression(member_obj_expr, env)?
+            val buffer_id = _get_obj_id(buffer_val)
+            if buffer_id >= 0 and to_boolean(self.get_object_property(buffer_id, "__simple_array_buffer")):
+                var slice_args: [JsValue] = []
+                var slice_ai = 0
+                while slice_ai < args.len():
+                    slice_args.push(self.eval_expression(args.get(slice_ai), env)?)
+                    slice_ai = slice_ai + 1
+                return Ok(self._native_array_buffer_slice(buffer_val, slice_args))
+            if buffer_id >= 0 and to_boolean(self.get_object_property(buffer_id, "__simple_typed_array")):
+                var uint8_slice_args: [JsValue] = []
+                var uint8_slice_i = 0
+                while uint8_slice_i < args.len():
+                    uint8_slice_args.push(self.eval_expression(args.get(uint8_slice_i), env)?)
+                    uint8_slice_i = uint8_slice_i + 1
+                uint8_slice_args.push(JsValue.String(v: "__simple_uint8_slice_copy"))
+                return Ok(self._native_uint8_array_subarray(buffer_val, uint8_slice_args))
+
+        if is_member and _is_array_method(member_method):
+            val obj_val = self.eval_expression(member_obj_expr, env)?
+            var is_array = false
+            var arr_id = 0
+            match obj_val:
+                JsValue.Array(id):
+                    is_array = true
+                    arr_id = id
+                _: pass_dn
+            if is_array:
+                return self._dispatch_array_method(arr_id, member_method, args, env)
+
+        if is_member and _is_string_method(member_method):
+            val obj_val_s = self.eval_expression(member_obj_expr, env)?
+            var is_string = false
+            var str_val = ""
+            match obj_val_s:
+                JsValue.String(sv):
+                    is_string = true
+                    str_val = sv
+                _: pass_dn
+            if is_string:
+                return self._dispatch_string_method(str_val, member_method, args, env)
+
+        if is_member and member_method == "set":
+            val dst_val = self.eval_expression(member_obj_expr, env)?
+            val dst_id = _get_obj_id(dst_val)
+            if dst_id >= 0 and to_boolean(self.get_object_property(dst_id, "__simple_typed_array")) and args.len() > 0:
+                var set_arg_vals: [JsValue] = []
+                var set_ai = 0
+                while set_ai < args.len():
+                    set_arg_vals.push(self.eval_expression(args.get(set_ai), env)?)
+                    set_ai = set_ai + 1
+                return Ok(self._native_uint8_array_set(dst_val, set_arg_vals))
+
+        if is_member and (member_method == "fill" or member_method == "includes" or member_method == "indexOf" or member_method == "join" or member_method == "reverse" or member_method == "toReversed" or member_method == "toSorted" or member_method == "with" or member_method == "lastIndexOf" or member_method == "toString" or member_method == "at" or member_method == "copyWithin" or member_method == "sort" or member_method == "some" or member_method == "every" or member_method == "forEach" or member_method == "find" or member_method == "findIndex" or member_method == "findLast" or member_method == "findLastIndex" or member_method == "reduce" or member_method == "reduceRight" or member_method == "map" or member_method == "filter"):
+            val typed_val = self.eval_expression(member_obj_expr, env)?
+            val typed_id = _get_obj_id(typed_val)
+            if typed_id >= 0 and to_boolean(self.get_object_property(typed_id, "__simple_typed_array")):
+                if member_method == "some" or member_method == "every" or member_method == "forEach" or member_method == "find" or member_method == "findIndex" or member_method == "findLast" or member_method == "findLastIndex" or member_method == "reduce" or member_method == "reduceRight" or member_method == "map" or member_method == "filter":
+                    if args.len() == 0:
+                        if member_method == "forEach":
+                            return Ok(JsValue.Undefined)
+                        if member_method == "find":
+                            return Ok(JsValue.Undefined)
+                        if member_method == "findIndex":
+                            return Ok(JsValue.Number(v: -1.0))
+                        if member_method == "findLast":
+                            return Ok(JsValue.Undefined)
+                        if member_method == "findLastIndex":
+                            return Ok(JsValue.Number(v: -1.0))
+                        if member_method == "reduce":
+                            return Ok(JsValue.Undefined)
+                        if member_method == "reduceRight":
+                            return Ok(JsValue.Undefined)
+                        if member_method == "map":
+                            return Ok(JsValue.Undefined)
+                        if member_method == "filter":
+                            return Ok(JsValue.Undefined)
+                        return Ok(JsValue.Boolean(v: member_method == "every"))
+                    val cb_val = self.eval_expression(args.get(0), env)?
+                    match cb_val:
+                        JsValue.Function(fn_id):
+                            val typed_len = self._native_uint8_array_length(typed_id)
+                            if member_method == "reduce":
+                                var acc = JsValue.Undefined
+                                if args.len() > 1:
+                                    acc = self.eval_expression(args.get(1), env)?
+                                elif typed_len > 0:
+                                    acc = self._native_uint8_array_byte_at(typed_id, 0)
+                                var reduce_i = if args.len() > 1: 0 else: 1
+                                while reduce_i < typed_len:
+                                    val elem = self._native_uint8_array_byte_at(typed_id, reduce_i)
+                                    acc = self._invoke_function(fn_id, [acc, elem, JsValue.Number(v: reduce_i.to_f64()), typed_val], env)?
+                                    reduce_i = reduce_i + 1
+                                return Ok(acc)
+                            if member_method == "reduceRight":
+                                var acc = JsValue.Undefined
+                                if args.len() > 1:
+                                    acc = self.eval_expression(args.get(1), env)?
+                                elif typed_len > 0:
+                                    acc = self._native_uint8_array_byte_at(typed_id, typed_len - 1)
+                                var reduce_i = if args.len() > 1: typed_len - 1 else: typed_len - 2
+                                while reduce_i >= 0:
+                                    val elem = self._native_uint8_array_byte_at(typed_id, reduce_i)
+                                    acc = self._invoke_function(fn_id, [acc, elem, JsValue.Number(v: reduce_i.to_f64()), typed_val], env)?
+                                    reduce_i = reduce_i - 1
+                                return Ok(acc)
+                            if member_method == "map":
+                                var mapped_bytes: [u8] = []
+                                var map_i = 0
+                                while map_i < typed_len:
+                                    val elem = self._native_uint8_array_byte_at(typed_id, map_i)
+                                    val mapped = self._invoke_function(fn_id, [elem, JsValue.Number(v: map_i.to_f64()), typed_val], env)?
+                                    mapped_bytes.push(self._native_uint8_array_normalized_byte(mapped))
+                                    map_i = map_i + 1
+                                return Ok(self._native_uint8_array_from_bytes(mapped_bytes))
+                            if member_method == "filter":
+                                var filtered_bytes: [u8] = []
+                                var filter_i = 0
+                                while filter_i < typed_len:
+                                    val elem = self._native_uint8_array_byte_at(typed_id, filter_i)
+                                    val keep = self._invoke_function(fn_id, [elem, JsValue.Number(v: filter_i.to_f64()), typed_val], env)?
+                                    if is_truthy(keep):
+                                        filtered_bytes.push(self._native_uint8_array_normalized_byte(elem))
+                                    filter_i = filter_i + 1
+                                return Ok(self._native_uint8_array_from_bytes(filtered_bytes))
+                            var typed_i = 0
+                            var matched = false
+                            var all_match = true
+                            var found_value = JsValue.Undefined
+                            var found_index = -1
+                            if member_method == "findLast" or member_method == "findLastIndex":
+                                typed_i = typed_len - 1
+                                while typed_i >= 0:
+                                    val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+                                    val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), typed_val], env)?
+                                    if is_truthy(result):
+                                        found_value = elem
+                                        found_index = typed_i
+                                        break
+                                    typed_i = typed_i - 1
+                                if member_method == "findLast":
+                                    return Ok(found_value)
+                                return Ok(JsValue.Number(v: found_index.to_f64()))
+                            while typed_i < typed_len:
+                                val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+                                val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), typed_val], env)?
+                                if member_method == "forEach":
+                                    typed_i = typed_i + 1
+                                    continue
+                                if member_method == "find" or member_method == "findIndex":
+                                    if is_truthy(result):
+                                        found_value = elem
+                                        found_index = typed_i
+                                        break
+                                if member_method == "some":
+                                    if is_truthy(result):
+                                        matched = true
+                                        break
+                                if member_method == "every":
+                                    if not is_truthy(result):
+                                        all_match = false
+                                        break
+                                typed_i = typed_i + 1
+                            if member_method == "some":
+                                return Ok(JsValue.Boolean(v: matched))
+                            if member_method == "forEach":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "find":
+                                return Ok(found_value)
+                            if member_method == "findIndex":
+                                return Ok(JsValue.Number(v: found_index.to_f64()))
+                            return Ok(JsValue.Boolean(v: all_match))
+                        _:
+                            if member_method == "reduce":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "reduceRight":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "map":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "filter":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "forEach":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "find":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "findIndex":
+                                return Ok(JsValue.Number(v: -1.0))
+                            if member_method == "findLast":
+                                return Ok(JsValue.Undefined)
+                            if member_method == "findLastIndex":
+                                return Ok(JsValue.Number(v: -1.0))
+                            return Ok(JsValue.Boolean(v: member_method == "every"))
+                if member_method == "sort" and args.len() > 0:
+                    val compare_val = self.eval_expression(args.get(0), env)?
+                    match compare_val:
+                        JsValue.Function(compare_fn_id):
+                            val sort_len = self._native_uint8_array_length(typed_id)
+                            var sort_bytes: [i64] = []
+                            var sort_read_i = 0
+                            while sort_read_i < sort_len:
+                                sort_bytes.push(self._native_uint8_array_normalized_byte(self._native_uint8_array_byte_at(typed_id, sort_read_i)))
+                                sort_read_i = sort_read_i + 1
+                            var sort_outer = 1
+                            while sort_outer < sort_bytes.len():
+                                val current_byte = sort_bytes.get(sort_outer)
+                                var sort_inner = sort_outer - 1
+                                var keep_moving = true
+                                while sort_inner >= 0 and keep_moving:
+                                    val left_byte = sort_bytes.get(sort_inner)
+                                    val cmp = self._invoke_function(compare_fn_id, [JsValue.Number(v: left_byte.to_f64()), JsValue.Number(v: current_byte.to_f64())], env)?
+                                    if to_number(cmp) > 0.0:
+                                        sort_bytes[sort_inner + 1] = left_byte
+                                        sort_inner = sort_inner - 1
+                                    else:
+                                        keep_moving = false
+                                sort_bytes[sort_inner + 1] = current_byte
+                                sort_outer = sort_outer + 1
+                            var sort_write_i = 0
+                            while sort_write_i < sort_bytes.len():
+                                self.set_object_property(typed_id, sort_write_i.to_text(), JsValue.Number(v: sort_bytes.get(sort_write_i).to_f64()))
+                                sort_write_i = sort_write_i + 1
+                            return Ok(typed_val)
+                        _:
+                            pass_dn
+                if member_method == "toSorted" and args.len() > 0:
+                    val compare_val = self.eval_expression(args.get(0), env)?
+                    match compare_val:
+                        JsValue.Function(compare_fn_id):
+                            val sort_len = self._native_uint8_array_length(typed_id)
+                            var sort_bytes: [i64] = []
+                            var sort_read_i = 0
+                            while sort_read_i < sort_len:
+                                sort_bytes.push(self._native_uint8_array_normalized_byte(self._native_uint8_array_byte_at(typed_id, sort_read_i)))
+                                sort_read_i = sort_read_i + 1
+                            var sort_outer = 1
+                            while sort_outer < sort_bytes.len():
+                                val current_byte = sort_bytes.get(sort_outer)
+                                var sort_inner = sort_outer - 1
+                                var keep_moving = true
+                                while sort_inner >= 0 and keep_moving:
+                                    val left_byte = sort_bytes.get(sort_inner)
+                                    val cmp = self._invoke_function(compare_fn_id, [JsValue.Number(v: left_byte.to_f64()), JsValue.Number(v: current_byte.to_f64())], env)?
+                                    if to_number(cmp) > 0.0:
+                                        sort_bytes[sort_inner + 1] = left_byte
+                                        sort_inner = sort_inner - 1
+                                    else:
+                                        keep_moving = false
+                                sort_bytes[sort_inner + 1] = current_byte
+                                sort_outer = sort_outer + 1
+                            var sorted_bytes: [u8] = []
+                            var sorted_i = 0
+                            while sorted_i < sort_bytes.len():
+                                sorted_bytes.push(self._native_uint8_array_normalized_byte(JsValue.Number(v: sort_bytes.get(sorted_i).to_f64())))
+                                sorted_i = sorted_i + 1
+                            return Ok(self._native_uint8_array_from_bytes(sorted_bytes))
+                        _:
+                            pass_dn
+                var typed_arg_vals: [JsValue] = []
+                var typed_ai = 0
+                while typed_ai < args.len():
+                    typed_arg_vals.push(self.eval_expression(args.get(typed_ai), env)?)
+                    typed_ai = typed_ai + 1
+                if member_method == "fill":
+                    return Ok(self._native_uint8_array_fill(typed_val, typed_arg_vals))
+                if member_method == "includes":
+                    return Ok(self._native_uint8_array_includes(typed_val, typed_arg_vals))
+                if member_method == "join":
+                    return Ok(self._native_uint8_array_join(typed_val, typed_arg_vals))
+                if member_method == "reverse":
+                    return Ok(self._native_uint8_array_reverse(typed_val))
+                if member_method == "toReversed":
+                    return Ok(self._native_uint8_array_to_reversed(typed_val))
+                if member_method == "toSorted":
+                    return Ok(self._native_uint8_array_to_sorted(typed_val))
+                if member_method == "with":
+                    return Ok(self._native_uint8_array_with(typed_val, typed_arg_vals))
+                if member_method == "lastIndexOf":
+                    return Ok(self._native_uint8_array_last_index_of(typed_val, typed_arg_vals))
+                if member_method == "toString":
+                    return Ok(self._native_uint8_array_to_string(typed_val))
+                if member_method == "at":
+                    return Ok(self._native_uint8_array_at(typed_val, typed_arg_vals))
+                if member_method == "copyWithin":
+                    return Ok(self._native_uint8_array_copy_within(typed_val, typed_arg_vals))
+                if member_method == "sort":
+                    return Ok(self._native_uint8_array_sort(typed_val))
+                return Ok(self._native_uint8_array_index_of(typed_val, typed_arg_vals))
+
+        if is_member and member_method == "call":
+            val uint8_method = self._uint8_array_prototype_method_name(member_obj_expr)
+            if uint8_method != "":
+                if args.len() > 0:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    var call_args: [JsValue] = []
+                    var call_ai = 1
+                    while call_ai < args.len():
+                        call_args.push(self.eval_expression(args.get(call_ai), env)?)
+                        call_ai = call_ai + 1
+                    if uint8_method == "sort":
+                        return self._dispatch_uint8_array_sort_method(dst_val, call_args, env)
+                    if uint8_method == "toSorted":
+                        return self._dispatch_uint8_array_to_sorted_method(dst_val, call_args, env)
+                    if uint8_method == "map":
+                        return self._dispatch_uint8_array_map_method(dst_val, call_args, env)
+                    if uint8_method == "filter":
+                        return self._dispatch_uint8_array_filter_method(dst_val, call_args, env)
+                    if uint8_method == "reduce":
+                        return self._dispatch_uint8_array_reduce_method(dst_val, call_args, env, false)
+                    if uint8_method == "reduceRight":
+                        return self._dispatch_uint8_array_reduce_method(dst_val, call_args, env, true)
+                    if uint8_method == "some":
+                        return self._dispatch_uint8_array_predicate_method(dst_val, call_args, env, "some")
+                    if uint8_method == "every":
+                        return self._dispatch_uint8_array_predicate_method(dst_val, call_args, env, "every")
+                    if uint8_method == "find":
+                        return self._dispatch_uint8_array_search_method(dst_val, call_args, env, "find")
+                    if uint8_method == "findIndex":
+                        return self._dispatch_uint8_array_search_method(dst_val, call_args, env, "findIndex")
+                    if uint8_method == "findLast":
+                        return self._dispatch_uint8_array_search_method(dst_val, call_args, env, "findLast")
+                    if uint8_method == "findLastIndex":
+                        return self._dispatch_uint8_array_search_method(dst_val, call_args, env, "findLastIndex")
+                    if uint8_method == "forEach":
+                        return self._dispatch_uint8_array_for_each_method(dst_val, call_args, env)
+                    return Ok(self._dispatch_uint8_array_prototype_method(uint8_method, dst_val, call_args))
+            val data_view_method = self._data_view_prototype_method_name(member_obj_expr)
+            if data_view_method != "":
+                if args.len() > 0:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    var call_args: [JsValue] = []
+                    var call_ai = 1
+                    while call_ai < args.len():
+                        call_args.push(self.eval_expression(args.get(call_ai), env)?)
+                        call_ai = call_ai + 1
+                    return Ok(self._dispatch_data_view_prototype_method(data_view_method, dst_val, call_args))
+            val array_buffer_method = self._array_buffer_prototype_method_name(member_obj_expr)
+            if array_buffer_method != "":
+                if args.len() > 0:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    var call_args: [JsValue] = []
+                    var call_ai = 1
+                    while call_ai < args.len():
+                        call_args.push(self.eval_expression(args.get(call_ai), env)?)
+                        call_ai = call_ai + 1
+                    return Ok(self._dispatch_array_buffer_prototype_method(array_buffer_method, dst_val, call_args))
+            val call_fn_val = self.eval_expression(member_obj_expr, env)?
+            val call_fn_id = _get_fn_id(call_fn_val)
+            if call_fn_id >= 0:
+                var call_this = JsValue.Undefined
+                if args.len() > 0:
+                    call_this = self.eval_expression(args.get(0), env)?
+                var call_args_general: [JsValue] = []
+                var call_general_i = 1
+                while call_general_i < args.len():
+                    call_args_general.push(self.eval_expression(args.get(call_general_i), env)?)
+                    call_general_i = call_general_i + 1
+                return self._invoke_function_with_this(call_fn_id, call_args_general, env, call_this)
+
+        if is_member and member_method == "apply":
+            val uint8_method_apply = self._uint8_array_prototype_method_name(member_obj_expr)
+            if uint8_method_apply != "":
+                if args.len() > 1:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    val args_val = self.eval_expression(args.get(1), env)?
+                    val apply_args = self._indexed_arg_values(args_val)
+                    if uint8_method_apply == "sort":
+                        return self._dispatch_uint8_array_sort_method(dst_val, apply_args, env)
+                    if uint8_method_apply == "toSorted":
+                        return self._dispatch_uint8_array_to_sorted_method(dst_val, apply_args, env)
+                    if uint8_method_apply == "map":
+                        return self._dispatch_uint8_array_map_method(dst_val, apply_args, env)
+                    if uint8_method_apply == "filter":
+                        return self._dispatch_uint8_array_filter_method(dst_val, apply_args, env)
+                    if uint8_method_apply == "reduce":
+                        return self._dispatch_uint8_array_reduce_method(dst_val, apply_args, env, false)
+                    if uint8_method_apply == "reduceRight":
+                        return self._dispatch_uint8_array_reduce_method(dst_val, apply_args, env, true)
+                    if uint8_method_apply == "some":
+                        return self._dispatch_uint8_array_predicate_method(dst_val, apply_args, env, "some")
+                    if uint8_method_apply == "every":
+                        return self._dispatch_uint8_array_predicate_method(dst_val, apply_args, env, "every")
+                    if uint8_method_apply == "find":
+                        return self._dispatch_uint8_array_search_method(dst_val, apply_args, env, "find")
+                    if uint8_method_apply == "findIndex":
+                        return self._dispatch_uint8_array_search_method(dst_val, apply_args, env, "findIndex")
+                    if uint8_method_apply == "findLast":
+                        return self._dispatch_uint8_array_search_method(dst_val, apply_args, env, "findLast")
+                    if uint8_method_apply == "findLastIndex":
+                        return self._dispatch_uint8_array_search_method(dst_val, apply_args, env, "findLastIndex")
+                    if uint8_method_apply == "forEach":
+                        return self._dispatch_uint8_array_for_each_method(dst_val, apply_args, env)
+                    return Ok(self._dispatch_uint8_array_prototype_method(uint8_method_apply, dst_val, apply_args))
+            val data_view_method_apply = self._data_view_prototype_method_name(member_obj_expr)
+            if data_view_method_apply != "":
+                if args.len() > 1:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    val args_val = self.eval_expression(args.get(1), env)?
+                    val apply_args = self._indexed_arg_values(args_val)
+                    return Ok(self._dispatch_data_view_prototype_method(data_view_method_apply, dst_val, apply_args))
+            val array_buffer_method_apply = self._array_buffer_prototype_method_name(member_obj_expr)
+            if array_buffer_method_apply != "":
+                if args.len() > 1:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    val args_val = self.eval_expression(args.get(1), env)?
+                    val apply_args = self._indexed_arg_values(args_val)
+                    return Ok(self._dispatch_array_buffer_prototype_method(array_buffer_method_apply, dst_val, apply_args))
+            val apply_fn_val = self.eval_expression(member_obj_expr, env)?
+            val apply_fn_id = _get_fn_id(apply_fn_val)
+            if apply_fn_id >= 0:
+                var apply_this = JsValue.Undefined
+                if args.len() > 0:
+                    apply_this = self.eval_expression(args.get(0), env)?
+                var apply_args_general: [JsValue] = []
+                if args.len() > 1:
+                    val apply_args_val = self.eval_expression(args.get(1), env)?
+                    apply_args_general = self._indexed_arg_values(apply_args_val)
+                return self._invoke_function_with_this(apply_fn_id, apply_args_general, env, apply_this)
+
+        if is_member and member_method == "bind":
+            val bind_fn_val = self.eval_expression(member_obj_expr, env)?
+            val bind_fn_id = _get_fn_id(bind_fn_val)
+            if bind_fn_id >= 0:
+                var bind_this = JsValue.Undefined
+                if args.len() > 0:
+                    bind_this = self.eval_expression(args.get(0), env)?
+                val bound_args_id = self.create_object()
+                var bind_arg_i = 1
+                var bind_out_i = 0
+                while bind_arg_i < args.len():
+                    val bound_arg_value = self.eval_expression(args.get(bind_arg_i), env)?
+                    self.set_object_property(bound_args_id, bind_out_i.to_text(), bound_arg_value)
+                    bind_arg_i = bind_arg_i + 1
+                    bind_out_i = bind_out_i + 1
+                self.set_object_property(bound_args_id, "length", JsValue.Number(v: bind_out_i.to_f64()))
+                val bound_fn_id = self.functions.len()
+                self.functions.push(JsFunction(name: "__bound__", params: [], body: [], closure_env: env, is_arrow: false))
+                self.bound_function_ids.push(bound_fn_id)
+                self.bound_function_target_ids.push(bind_fn_id)
+                self.bound_function_this_values.push(bind_this)
+                self.bound_function_arg_array_ids.push(bound_args_id)
+                return Ok(JsValue.Function(id: bound_fn_id))
+
+        # Object.keys / Object.values / Object.entries
+        if is_member and member_method == "keys":
+            val callee_obj_name = self.ident_name(member_obj_expr)
+            if callee_obj_name == "Object":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val obj = self.object_store.get_object(arg_id)
+                        val result_id = self.create_object()
+                        var ki = 0
+                        while ki < obj.properties.len():
+                            val prop = obj.properties.get(ki)
+                            self.set_object_property(result_id, "{ki}", JsValue.String(v: prop.key))
+                            ki = ki + 1
+                        self.set_object_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        return Ok(JsValue.Array(id: result_id))
+                return Ok(JsValue.Array(id: self.create_object()))
+
+        if is_member and member_method == "values":
+            val callee_obj_name_v = self.ident_name(member_obj_expr)
+            if callee_obj_name_v == "Object":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val obj = self.object_store.get_object(arg_id)
+                        val result_id = self.create_object()
+                        var ki = 0
+                        while ki < obj.properties.len():
+                            val prop = obj.properties.get(ki)
+                            self.set_object_property(result_id, "{ki}", prop.value)
+                            ki = ki + 1
+                        self.set_object_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        return Ok(JsValue.Array(id: result_id))
+                return Ok(JsValue.Array(id: self.create_object()))
+
+        if is_member and member_method == "entries":
+            val callee_obj_name_e = self.ident_name(member_obj_expr)
+            if callee_obj_name_e == "Object":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val obj = self.object_store.get_object(arg_id)
+                        val result_id = self.create_object()
+                        var ki = 0
+                        while ki < obj.properties.len():
+                            val prop = obj.properties.get(ki)
+                            val entry_id = self.create_object()
+                            self.set_object_property(entry_id, "0", JsValue.String(v: prop.key))
+                            self.set_object_property(entry_id, "1", prop.value)
+                            self.set_object_property(entry_id, "length", JsValue.Number(v: 2.0))
+                            self.set_object_property(result_id, "{ki}", JsValue.Array(id: entry_id))
+                            ki = ki + 1
+                        self.set_object_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        return Ok(JsValue.Array(id: result_id))
+                return Ok(JsValue.Array(id: self.create_object()))
+
+        # Object.assign
+        if is_member and member_method == "assign":
+            val callee_obj_name_oa = self.ident_name(member_obj_expr)
+            if callee_obj_name_oa == "Object":
+                if args.len() >= 1:
+                    val target = self.eval_expression(args.get(0), env)?
+                    val target_id = _get_obj_id(target)
+                    if target_id >= 0:
+                        var ai = 1
+                        while ai < args.len():
+                            val source = self.eval_expression(args.get(ai), env)?
+                            val source_id = _get_obj_id(source)
+                            if source_id >= 0:
+                                val src_obj = self.object_store.get_object(source_id)
+                                var pi = 0
+                                while pi < src_obj.properties.len():
+                                    val prop = src_obj.properties.get(pi)
+                                    self.set_object_property(target_id, prop.key, prop.value)
+                                    pi = pi + 1
+                            ai = ai + 1
+                        return Ok(target)
+                return Ok(JsValue.Undefined)
+
+        # Object.freeze prevents future writes through the central property setter.
+        if is_member and member_method == "freeze":
+            val callee_obj_name_of = self.ident_name(member_obj_expr)
+            if callee_obj_name_of == "Object":
+                if args.len() > 0:
+                    val frozen_target = self.eval_expression(args.get(0), env)?
+                    val frozen_id = _get_obj_id(frozen_target)
+                    if frozen_id >= 0:
+                        self._mark_object_frozen(frozen_id)
+                    return Ok(frozen_target)
+                return Ok(JsValue.Undefined)
+
+        # Object.isFrozen
+        if is_member and member_method == "isFrozen":
+            val callee_obj_name_oif = self.ident_name(member_obj_expr)
+            if callee_obj_name_oif == "Object":
+                if args.len() > 0:
+                    val frozen_check_target = self.eval_expression(args.get(0), env)?
+                    val frozen_check_id = _get_obj_id(frozen_check_target)
+                    return Ok(JsValue.Boolean(v: frozen_check_id >= 0 and self._is_object_frozen(frozen_check_id)))
+                return Ok(JsValue.Boolean(v: false))
+
+        # Number.isInteger / Number.isFinite / Number.isNaN / Number.parseInt / Number.parseFloat
+        if is_member and (member_method == "isInteger" or member_method == "isFinite" or member_method == "isNaN" or member_method == "parseInt" or member_method == "parseFloat"):
+            val callee_obj_name_n = self.ident_name(member_obj_expr)
+            if callee_obj_name_n == "Number":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val n = to_number(arg)
+                    if member_method == "isInteger":
+                        val int_val = f64_to_i64(n)
+                        return Ok(JsValue.Boolean(v: int_val.to_f64() == n))
+                    if member_method == "isFinite":
+                        val is_inf = n == 9999999999.0
+                        val is_neg_inf = n == -9999999999.0
+                        val is_nan_val = n == -9999999999.999
+                        return Ok(JsValue.Boolean(v: not is_inf and not is_neg_inf and not is_nan_val))
+                    if member_method == "isNaN":
+                        return Ok(JsValue.Boolean(v: n == -9999999999.999))
+                    if member_method == "parseInt":
+                        val s = js_to_string(arg)
+                        val parsed = s.parse_float()
+                        if val Some(pv) = parsed:
+                            return Ok(JsValue.Number(v: f64_to_i64(pv).to_f64()))
+                        return Ok(JsValue.Number(v: -9999999999.999))
+                    if member_method == "parseFloat":
+                        val s = js_to_string(arg)
+                        val parsed = s.parse_float()
+                        if val Some(pv) = parsed:
+                            return Ok(JsValue.Number(v: pv))
+                        return Ok(JsValue.Number(v: -9999999999.999))
+                return Ok(JsValue.Boolean(v: false))
+
+        # JSON.stringify
+        if is_member and member_method == "stringify":
+            val callee_obj_name_js = self.ident_name(member_obj_expr)
+            if callee_obj_name_js == "JSON":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val json_str = self._json_stringify(arg)
+                    return Ok(JsValue.String(v: json_str))
+                return Ok(JsValue.String(v: "undefined"))
+
+        # JSON.parse
+        if is_member and member_method == "parse":
+            val callee_obj_name_jp = self.ident_name(member_obj_expr)
+            if callee_obj_name_jp == "JSON":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    return self._json_parse_allocated(js_to_string(arg), env)
+                return Ok(JsValue.Undefined)
+
+        # Promise.resolve / Promise.reject
+        if is_member and (member_method == "resolve" or member_method == "reject"):
+            val callee_obj_name_p = self.ident_name(member_obj_expr)
+            if callee_obj_name_p == "Promise":
+                var promise_arg_vals: [JsValue] = []
+                if args.len() > 0:
+                    promise_arg_vals.push(self.eval_expression(args.get(0), env)?)
+                if member_method == "resolve":
+                    return Ok(self._native_promise_resolve(promise_arg_vals))
+                return Ok(self._native_promise_reject(promise_arg_vals))
+
+        # Array.isArray / Array.from
+        if is_member and member_method == "isArray":
+            val callee_obj_name_a = self.ident_name(member_obj_expr)
+            if callee_obj_name_a == "Array":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    return Ok(JsValue.Boolean(v: array_isArray(arg)))
+                return Ok(JsValue.Boolean(v: false))
+
+        if is_member and member_method == "isView":
+            val callee_obj_name_ab = self.ident_name(member_obj_expr)
+            if callee_obj_name_ab == "ArrayBuffer":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        var is_view = false
+                        match self.get_object_property(arg_id, "__simple_typed_array"):
+                            JsValue.Boolean(v):
+                                if v:
+                                    is_view = true
+                            _:
+                                pass_dn
+                        match self.get_object_property(arg_id, "__simple_data_view"):
+                            JsValue.Boolean(v):
+                                if v:
+                                    is_view = true
+                            _:
+                                pass_dn
+                        if is_view:
+                            return Ok(JsValue.Boolean(v: true))
+                return Ok(JsValue.Boolean(v: false))
+
+        if is_member and member_method == "from":
+            val callee_obj_name_f = self.ident_name(member_obj_expr)
+            if callee_obj_name_f == "Uint8Array":
+                if args.len() > 0:
+                    val source = self.eval_expression(args.get(0), env)?
+                    val source_id = _get_obj_id(source)
+                    if source_id >= 0:
+                        val source_len = self._native_indexed_length(source_id)
+                        var bytes: [u8] = []
+                        var map_fn_id = -1
+                        if args.len() > 1:
+                            val map_fn = self.eval_expression(args.get(1), env)?
+                            map_fn_id = _get_fn_id(map_fn)
+                        var ui = 0
+                        while ui < source_len:
+                            var elem = self.get_object_property(source_id, ui.to_text())
+                            if map_fn_id >= 0:
+                                elem = self._invoke_function(map_fn_id, [elem, JsValue.Number(v: ui.to_f64())], env)?
+                            bytes.push(self._native_uint8_array_normalized_byte(elem))
+                            ui = ui + 1
+                        return Ok(self._native_uint8_array_from_bytes(bytes))
+                return Ok(self._native_uint8_array_from_bytes([]))
+            if callee_obj_name_f == "Array":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val arr_len = self.object_store.array_length(arg_id)
+                        val new_id = self.create_object()
+                        var ai = 0
+                        while ai < arr_len:
+                            val elem = self.object_store.get_by_index(arg_id, ai)
+                            self.set_object_property(new_id, "{ai}", elem)
+                            ai = ai + 1
+                        self.set_object_property(new_id, "length", JsValue.Number(v: arr_len.to_f64()))
+                        return Ok(JsValue.Array(id: new_id))
+                return Ok(JsValue.Array(id: self.create_object()))
+
+        if is_member and member_method == "of":
+            val callee_obj_name_o = self.ident_name(member_obj_expr)
+            if callee_obj_name_o == "Uint8Array":
+                var bytes: [u8] = []
+                var oi = 0
+                while oi < args.len():
+                    val elem = self.eval_expression(args.get(oi), env)?
+                    bytes.push(self._native_uint8_array_normalized_byte(elem))
+                    oi = oi + 1
+                return Ok(self._native_uint8_array_from_bytes(bytes))
+
+        var callee_val = JsValue.Undefined
+        var this_val_for_call = JsValue.Undefined
+        if is_member:
+            this_val_for_call = self.eval_expression(member_obj_expr, env)?
+            val member_obj_id = _get_obj_id(this_val_for_call)
+            if member_obj_id >= 0:
+                callee_val = self._proto_lookup(member_obj_id, member_method)
+            else:
+                callee_val = JsValue.Undefined
+        else:
+            callee_val = self.eval_expression(callee, env)?
+
+        # Evaluate arguments
+        var arg_vals: [JsValue] = []
+        var i = 0
+        val alen = args.len()
+        while i < alen:
+            val arg_val = self.eval_expression(args.get(i), env)?
+            arg_vals.push(arg_val)
+            i = i + 1
+
+        # Look up function
+        match callee_val:
+            JsValue.Function(fn_id):
+                if fn_id >= 0 and fn_id < self.functions.len():
+                    var bound_direct_i = 0
+                    while bound_direct_i < self.bound_function_ids.len():
+                        if self.bound_function_ids.get(bound_direct_i) == fn_id:
+                            return self._invoke_function_with_this(fn_id, arg_vals, env, this_val_for_call)
+                        bound_direct_i = bound_direct_i + 1
+                    # Check if this function index maps to a native function
+                    var ni = 0
+                    while ni < self.native_id_map.len():
+                        val mapping = self.native_id_map.get(ni)
+                        if mapping.first == fn_id:
+                            var this_val = JsValue.Undefined
+                            if is_member:
+                                this_val = this_val_for_call
+                            if mapping.second == NATIVE_WEBASSEMBLY_INSTANTIATE_THEN:
+                                var wasm_status = ""
+                                val wasm_result_id = _get_obj_id(this_val)
+                                if wasm_result_id >= 0:
+                                    match self.get_object_property(wasm_result_id, "status"):
+                                        JsValue.String(v): wasm_status = v
+                                        _: pass_dn
+                                var wasm_callback_id = -1
+                                if wasm_status == "instantiated" and arg_vals.len() > 0:
+                                    wasm_callback_id = _get_fn_id(arg_vals.get(0))
+                                if wasm_status != "instantiated" and arg_vals.len() > 1:
+                                    wasm_callback_id = _get_fn_id(arg_vals.get(1))
+                                if wasm_callback_id >= 0 and wasm_callback_id < self.functions.len():
+                                    val wasm_fn = self.functions.get(wasm_callback_id)
+                                    val wasm_env = self.env_stack.create_env(wasm_fn.closure_env)
+                                    var wpi = 0
+                                    while wpi < wasm_fn.params.len():
+                                        var wpv = JsValue.Undefined
+                                        if wpi == 0:
+                                            wpv = this_val
+                                        self.env_stack.define_var(wasm_env, wasm_fn.params.get(wpi), wpv)
+                                        wpi = wpi + 1
+                                    self.env_stack.define_var(wasm_env, "this", JsValue.Undefined)
+                                    val wasm_frame = CallFrame(function_name: wasm_fn.name, env_id: wasm_env, line: 0, this_value: JsValue.Undefined)
+                                    self.call_stack.push(wasm_frame)
+                                    val wasm_saved_return = self.control_return
+                                    self.control_return = false
+                                    var wasm_result = JsValue.Undefined
+                                    var wbi = 0
+                                    while wbi < wasm_fn.body.len():
+                                        wasm_result = self.exec_statement(wasm_fn.body.get(wbi), wasm_env)?
+                                        if self.control_return:
+                                            wasm_result = self.return_value
+                                            break
+                                        wbi = wbi + 1
+                                    self.call_stack.pop()
+                                    self.control_return = wasm_saved_return
+                                    return Ok(wasm_result)
+                            if mapping.second == NATIVE_WEBASSEMBLY_COMPILE_THEN or mapping.second == NATIVE_WEBASSEMBLY_COMPILE_CATCH:
+                                var compile_status = ""
+                                val compile_result_id = _get_obj_id(this_val)
+                                if compile_result_id >= 0:
+                                    match self.get_object_property(compile_result_id, "status"):
+                                        JsValue.String(v): compile_status = v
+                                        _: pass_dn
+                                var compile_callback_id = -1
+                                if mapping.second == NATIVE_WEBASSEMBLY_COMPILE_THEN:
+                                    if compile_status == "compiled" and arg_vals.len() > 0:
+                                        compile_callback_id = _get_fn_id(arg_vals.get(0))
+                                    if compile_status != "compiled" and arg_vals.len() > 1:
+                                        compile_callback_id = _get_fn_id(arg_vals.get(1))
+                                if mapping.second == NATIVE_WEBASSEMBLY_COMPILE_CATCH:
+                                    if compile_status != "compiled" and arg_vals.len() > 0:
+                                        compile_callback_id = _get_fn_id(arg_vals.get(0))
+                                if compile_callback_id >= 0 and compile_callback_id < self.functions.len():
+                                    val compile_fn = self.functions.get(compile_callback_id)
+                                    val compile_env = self.env_stack.create_env(compile_fn.closure_env)
+                                    var cpi = 0
+                                    while cpi < compile_fn.params.len():
+                                        var cpv = JsValue.Undefined
+                                        if cpi == 0:
+                                            if compile_status == "compiled":
+                                                cpv = self.get_object_property(compile_result_id, "module")
+                                            else:
+                                                cpv = this_val
+                                        self.env_stack.define_var(compile_env, compile_fn.params.get(cpi), cpv)
+                                        cpi = cpi + 1
+                                    self.env_stack.define_var(compile_env, "this", JsValue.Undefined)
+                                    val compile_frame = CallFrame(function_name: compile_fn.name, env_id: compile_env, line: 0, this_value: JsValue.Undefined)
+                                    self.call_stack.push(compile_frame)
+                                    val compile_saved_return = self.control_return
+                                    self.control_return = false
+                                    var compile_result = JsValue.Undefined
+                                    var cbi = 0
+                                    while cbi < compile_fn.body.len():
+                                        compile_result = self.exec_statement(compile_fn.body.get(cbi), compile_env)?
+                                        if self.control_return:
+                                            compile_result = self.return_value
+                                            break
+                                        cbi = cbi + 1
+                                    self.call_stack.pop()
+                                    self.control_return = compile_saved_return
+                                    return Ok(compile_result)
+                            if mapping.second == NATIVE_WEBASSEMBLY_EXPORT_FUNCTION:
+                                return Ok(self._native_webassembly_export_function(this_val, arg_vals, fn_id))
+                            if mapping.second == NATIVE_UINT8_ARRAY_SUBARRAY:
+                                val native_fn = self.functions.get(fn_id)
+                                if native_fn.name == "slice":
+                                    var uint8_slice_args: [JsValue] = []
+                                    var uint8_slice_i = 0
+                                    while uint8_slice_i < arg_vals.len():
+                                        uint8_slice_args.push(arg_vals.get(uint8_slice_i))
+                                        uint8_slice_i = uint8_slice_i + 1
+                                    uint8_slice_args.push(JsValue.String(v: "__simple_uint8_slice_copy"))
+                                    return Ok(self._dispatch_native_with_receiver(mapping.second, this_val, uint8_slice_args, env))
+                            return Ok(self._dispatch_native_with_receiver(mapping.second, this_val, arg_vals, env))
+                        ni = ni + 1
+                    val js_fn = self.functions.get(fn_id)
+                    # Create function scope from closure env
+                    val fn_env = self.env_stack.create_env(js_fn.closure_env)
+
+                    # Bind parameters
+                    var pi = 0
+                    val plen = js_fn.params.len()
+                    while pi < plen:
+                        val param_name = js_fn.params.get(pi)
+                        var param_val = JsValue.Undefined
+                        if pi < arg_vals.len():
+                            param_val = arg_vals.get(pi)
+                        self.env_stack.define_var(fn_env, param_name, param_val)
+                        pi = pi + 1
+
+                    # Bind 'arguments' object
+                    val args_obj_id = self.create_object()
+                    var ai = 0
+                    while ai < arg_vals.len():
+                        self.set_object_property(args_obj_id, "{ai}", arg_vals.get(ai))
+                        ai = ai + 1
+                    self.set_object_property(args_obj_id, "length", JsValue.Number(v: arg_vals.len().to_f64()))
+                    self.env_stack.define_var(fn_env, "arguments", JsValue.Object(id: args_obj_id))
+
+                    # Bind 'this' — for method calls, the receiver is tracked via callee
+                    var this_val = JsValue.Undefined
+                    if is_member:
+                        this_val = this_val_for_call
+                    self.env_stack.define_var(fn_env, "this", this_val)
+
+                    # Push call frame
+                    val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
+                    self.call_stack.push(frame)
+
+                    # Execute body
+                    val saved_control_return = self.control_return
+                    self.control_return = false
+                    var result = JsValue.Undefined
+                    var bi = 0
+                    val blen = js_fn.body.len()
+                    while bi < blen:
+                        result = self.exec_statement(js_fn.body.get(bi), fn_env)?
+                        if self.control_return:
+                            result = self.return_value
+                            break
+                        bi = bi + 1
+
+                    # Pop call frame and reset return flag
+                    self.call_stack.pop()
+                    self.control_return = saved_control_return
+
+                    return Ok(result)
+                self.logger.warn("Invalid function id: {fn_id}")
+                return Ok(JsValue.Undefined)
+            _:
+                # Trying to call a non-function
+                self.logger.warn("TypeError: {js_to_string(callee_val)} is not a function")
+                return Ok(JsValue.Undefined)
+
+    me _uint8_array_prototype_method_name(expr: JsExpression) -> text:
+        var resolved_method = ""
+        match expr:
+            JsExpression.Member(obj_expr, method_name):
+                match obj_expr:
+                    JsExpression.Member(root_expr, proto_name):
+                        if proto_name == "prototype":
+                            match root_expr:
+                                JsExpression.Identifier(root_name):
+                                    if root_name == "Uint8Array":
+                                        resolved_method = method_name
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+            JsExpression.ComputedMember(obj_expr, prop_expr):
+                var prop_name = ""
+                match prop_expr:
+                    JsExpression.Literal(value):
+                        match value:
+                            JsValue.String(v):
+                                prop_name = v
+                            _:
+                                prop_name = js_to_string(value)
+                    JsExpression.Member(symbol_expr, symbol_prop):
+                        match symbol_expr:
+                            JsExpression.Identifier(symbol_name):
+                                if symbol_name == "Symbol" and symbol_prop == "iterator":
+                                    prop_name = "Symbol.iterator"
+                            _:
+                                pass_dn
+                    _:
+                        pass_dn
+                if prop_name != "":
+                    match obj_expr:
+                        JsExpression.Member(root_expr, proto_name):
+                            if proto_name == "prototype":
+                                match root_expr:
+                                    JsExpression.Identifier(root_name):
+                                        if root_name == "Uint8Array":
+                                            resolved_method = prop_name
+                                    _:
+                                        pass_dn
+                        _:
+                            pass_dn
+            _:
+                pass_dn
+        resolved_method
+
+    me _indexed_arg_values(args_val: JsValue) -> [JsValue]:
+        val args_id = _get_obj_id(args_val)
+        var result: [JsValue] = []
+        if args_id >= 0:
+            var arg_len = self.object_store.array_length(args_id)
+            match self.get_object_property(args_id, "length"):
+                JsValue.Number(v):
+                    arg_len = f64_to_i64(v)
+                _:
+                    pass_dn
+            var ai = 0
+            while ai < arg_len:
+                result.push(self.get_object_property(args_id, ai.to_text()))
+                ai = ai + 1
+        result
+
+    me _data_view_prototype_method_name(expr: JsExpression) -> text:
+        var resolved_method = ""
+        match expr:
+            JsExpression.Member(obj_expr, method_name):
+                match obj_expr:
+                    JsExpression.Member(root_expr, proto_name):
+                        if proto_name == "prototype":
+                            match root_expr:
+                                JsExpression.Identifier(root_name):
+                                    if root_name == "DataView":
+                                        resolved_method = method_name
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        resolved_method
+
+    me _array_buffer_prototype_method_name(expr: JsExpression) -> text:
+        var resolved_method = ""
+        match expr:
+            JsExpression.Member(obj_expr, method_name):
+                match obj_expr:
+                    JsExpression.Member(root_expr, proto_name):
+                        if proto_name == "prototype":
+                            match root_expr:
+                                JsExpression.Identifier(root_name):
+                                    if root_name == "ArrayBuffer":
+                                        resolved_method = method_name
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        resolved_method
+
+    me _dispatch_uint8_array_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if method_name == "set":
+            return self._native_uint8_array_set(this_val, arg_vals)
+        if method_name == "subarray":
+            return self._native_uint8_array_subarray(this_val, arg_vals)
+        if method_name == "slice":
+            var slice_args: [JsValue] = []
+            var slice_i = 0
+            while slice_i < arg_vals.len():
+                slice_args.push(arg_vals.get(slice_i))
+                slice_i = slice_i + 1
+            slice_args.push(JsValue.String(v: "__simple_uint8_slice_copy"))
+            return self._native_uint8_array_subarray(this_val, slice_args)
+        if method_name == "fill":
+            return self._native_uint8_array_fill(this_val, arg_vals)
+        if method_name == "includes":
+            return self._native_uint8_array_includes(this_val, arg_vals)
+        if method_name == "indexOf":
+            return self._native_uint8_array_index_of(this_val, arg_vals)
+        if method_name == "join":
+            return self._native_uint8_array_join(this_val, arg_vals)
+        if method_name == "reverse":
+            return self._native_uint8_array_reverse(this_val)
+        if method_name == "toReversed":
+            return self._native_uint8_array_to_reversed(this_val)
+        if method_name == "toSorted":
+            return self._native_uint8_array_to_sorted(this_val)
+        if method_name == "with":
+            return self._native_uint8_array_with(this_val, arg_vals)
+        if method_name == "lastIndexOf":
+            return self._native_uint8_array_last_index_of(this_val, arg_vals)
+        if method_name == "toString":
+            return self._native_uint8_array_to_string(this_val)
+        if method_name == "toLocaleString":
+            return self._native_uint8_array_to_string(this_val)
+        if method_name == "at":
+            return self._native_uint8_array_at(this_val, arg_vals)
+        if method_name == "copyWithin":
+            return self._native_uint8_array_copy_within(this_val, arg_vals)
+        if method_name == "sort":
+            return self._native_uint8_array_sort(this_val)
+        if method_name == "keys":
+            return self._native_uint8_array_iterator(this_val, "keys")
+        if method_name == "values" or method_name == "Symbol.iterator":
+            return self._native_uint8_array_iterator(this_val, "values")
+        if method_name == "entries":
+            return self._native_uint8_array_iterator(this_val, "entries")
+        JsValue.Undefined
+
+    me _dispatch_uint8_array_sort_method(this_val: JsValue, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        var compare_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    compare_fn_id = fn_id
+                _:
+                    pass_dn
+        if compare_fn_id >= 0:
+            val typed_id = _get_obj_id(this_val)
+            if typed_id >= 0:
+                val sort_len = self._native_uint8_array_length(typed_id)
+                var sort_bytes: [i64] = []
+                var sort_read_i = 0
+                while sort_read_i < sort_len:
+                    sort_bytes.push(self._native_uint8_array_normalized_byte(self._native_uint8_array_byte_at(typed_id, sort_read_i)))
+                    sort_read_i = sort_read_i + 1
+                var sort_outer = 1
+                while sort_outer < sort_bytes.len():
+                    val current_byte = sort_bytes.get(sort_outer)
+                    var sort_inner = sort_outer - 1
+                    var keep_moving = true
+                    while sort_inner >= 0 and keep_moving:
+                        val left_byte = sort_bytes.get(sort_inner)
+                        val cmp = self._invoke_function(compare_fn_id, [JsValue.Number(v: left_byte.to_f64()), JsValue.Number(v: current_byte.to_f64())], env)?
+                        if to_number(cmp) > 0.0:
+                            sort_bytes[sort_inner + 1] = left_byte
+                            sort_inner = sort_inner - 1
+                        else:
+                            keep_moving = false
+                    sort_bytes[sort_inner + 1] = current_byte
+                    sort_outer = sort_outer + 1
+                var sort_write_i = 0
+                while sort_write_i < sort_bytes.len():
+                    self.set_object_property(typed_id, sort_write_i.to_text(), JsValue.Number(v: sort_bytes.get(sort_write_i).to_f64()))
+                    sort_write_i = sort_write_i + 1
+                return Ok(this_val)
+        Ok(self._native_uint8_array_sort(this_val))
+
+    me _dispatch_uint8_array_to_sorted_method(this_val: JsValue, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        var compare_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    compare_fn_id = fn_id
+                _:
+                    pass_dn
+        if compare_fn_id < 0:
+            return Ok(self._native_uint8_array_to_sorted(this_val))
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            return Ok(self._native_uint8_array_from_bytes([]))
+        val sort_len = self._native_uint8_array_length(typed_id)
+        var sort_bytes: [i64] = []
+        var sort_read_i = 0
+        while sort_read_i < sort_len:
+            sort_bytes.push(self._native_uint8_array_normalized_byte(self._native_uint8_array_byte_at(typed_id, sort_read_i)))
+            sort_read_i = sort_read_i + 1
+        var sort_outer = 1
+        while sort_outer < sort_bytes.len():
+            val current_byte = sort_bytes.get(sort_outer)
+            var sort_inner = sort_outer - 1
+            var keep_moving = true
+            while sort_inner >= 0 and keep_moving:
+                val left_byte = sort_bytes.get(sort_inner)
+                val cmp = self._invoke_function(compare_fn_id, [JsValue.Number(v: left_byte.to_f64()), JsValue.Number(v: current_byte.to_f64())], env)?
+                if to_number(cmp) > 0.0:
+                    sort_bytes[sort_inner + 1] = left_byte
+                    sort_inner = sort_inner - 1
+                else:
+                    keep_moving = false
+            sort_bytes[sort_inner + 1] = current_byte
+            sort_outer = sort_outer + 1
+        var sorted_bytes: [u8] = []
+        var sorted_i = 0
+        while sorted_i < sort_bytes.len():
+            sorted_bytes.push(self._native_uint8_array_normalized_byte(JsValue.Number(v: sort_bytes.get(sorted_i).to_f64())))
+            sorted_i = sorted_i + 1
+        Ok(self._native_uint8_array_from_bytes(sorted_bytes))
+
+    me _dispatch_uint8_array_map_method(this_val: JsValue, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        var cb_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    cb_fn_id = fn_id
+                _:
+                    pass_dn
+        if cb_fn_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_len = self._native_uint8_array_length(typed_id)
+        var mapped_bytes: [u8] = []
+        var map_i = 0
+        while map_i < typed_len:
+            val elem = self._native_uint8_array_byte_at(typed_id, map_i)
+            val mapped = self._invoke_function(cb_fn_id, [elem, JsValue.Number(v: map_i.to_f64()), this_val], env)?
+            mapped_bytes.push(self._native_uint8_array_normalized_byte(mapped))
+            map_i = map_i + 1
+        Ok(self._native_uint8_array_from_bytes(mapped_bytes))
+
+    me _dispatch_uint8_array_filter_method(this_val: JsValue, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        var cb_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    cb_fn_id = fn_id
+                _:
+                    pass_dn
+        if cb_fn_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_len = self._native_uint8_array_length(typed_id)
+        var filtered_bytes: [u8] = []
+        var filter_i = 0
+        while filter_i < typed_len:
+            val elem = self._native_uint8_array_byte_at(typed_id, filter_i)
+            val keep = self._invoke_function(cb_fn_id, [elem, JsValue.Number(v: filter_i.to_f64()), this_val], env)?
+            if is_truthy(keep):
+                filtered_bytes.push(self._native_uint8_array_normalized_byte(elem))
+            filter_i = filter_i + 1
+        Ok(self._native_uint8_array_from_bytes(filtered_bytes))
+
+    me _dispatch_uint8_array_reduce_method(this_val: JsValue, arg_vals: [JsValue], env: i64, from_right: bool) -> BrowserResult<JsValue>:
+        var cb_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    cb_fn_id = fn_id
+                _:
+                    pass_dn
+        if cb_fn_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_len = self._native_uint8_array_length(typed_id)
+        var acc = JsValue.Undefined
+        if from_right:
+            if arg_vals.len() > 1:
+                acc = arg_vals.get(1)
+            elif typed_len > 0:
+                acc = self._native_uint8_array_byte_at(typed_id, typed_len - 1)
+            var reduce_i = if arg_vals.len() > 1: typed_len - 1 else: typed_len - 2
+            while reduce_i >= 0:
+                val elem = self._native_uint8_array_byte_at(typed_id, reduce_i)
+                acc = self._invoke_function(cb_fn_id, [acc, elem, JsValue.Number(v: reduce_i.to_f64()), this_val], env)?
+                reduce_i = reduce_i - 1
+        else:
+            if arg_vals.len() > 1:
+                acc = arg_vals.get(1)
+            elif typed_len > 0:
+                acc = self._native_uint8_array_byte_at(typed_id, 0)
+            var reduce_i = if arg_vals.len() > 1: 0 else: 1
+            while reduce_i < typed_len:
+                val elem = self._native_uint8_array_byte_at(typed_id, reduce_i)
+                acc = self._invoke_function(cb_fn_id, [acc, elem, JsValue.Number(v: reduce_i.to_f64()), this_val], env)?
+                reduce_i = reduce_i + 1
+        Ok(acc)
+
+    me _dispatch_uint8_array_predicate_method(this_val: JsValue, arg_vals: [JsValue], env: i64, method_name: text) -> BrowserResult<JsValue>:
+        var cb_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    cb_fn_id = fn_id
+                _:
+                    pass_dn
+        if cb_fn_id < 0:
+            return Ok(JsValue.Boolean(v: method_name == "every"))
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            return Ok(JsValue.Boolean(v: method_name == "every"))
+        val typed_len = self._native_uint8_array_length(typed_id)
+        var typed_i = 0
+        while typed_i < typed_len:
+            val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+            val result = self._invoke_function(cb_fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), this_val], env)?
+            if method_name == "some" and is_truthy(result):
+                return Ok(JsValue.Boolean(v: true))
+            if method_name == "every" and not is_truthy(result):
+                return Ok(JsValue.Boolean(v: false))
+            typed_i = typed_i + 1
+        Ok(JsValue.Boolean(v: method_name == "every"))
+
+    me _dispatch_uint8_array_search_method(this_val: JsValue, arg_vals: [JsValue], env: i64, method_name: text) -> BrowserResult<JsValue>:
+        var cb_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    cb_fn_id = fn_id
+                _:
+                    pass_dn
+        if cb_fn_id < 0:
+            if method_name == "findIndex" or method_name == "findLastIndex":
+                return Ok(JsValue.Number(v: -1.0))
+            return Ok(JsValue.Undefined)
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            if method_name == "findIndex" or method_name == "findLastIndex":
+                return Ok(JsValue.Number(v: -1.0))
+            return Ok(JsValue.Undefined)
+        val typed_len = self._native_uint8_array_length(typed_id)
+        var typed_i = 0
+        if method_name == "findLast" or method_name == "findLastIndex":
+            typed_i = typed_len - 1
+            while typed_i >= 0:
+                val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+                val result = self._invoke_function(cb_fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), this_val], env)?
+                if is_truthy(result):
+                    if method_name == "findLastIndex":
+                        return Ok(JsValue.Number(v: typed_i.to_f64()))
+                    return Ok(elem)
+                typed_i = typed_i - 1
+            if method_name == "findLastIndex":
+                return Ok(JsValue.Number(v: -1.0))
+            return Ok(JsValue.Undefined)
+        while typed_i < typed_len:
+            val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+            val result = self._invoke_function(cb_fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), this_val], env)?
+            if is_truthy(result):
+                if method_name == "findIndex":
+                    return Ok(JsValue.Number(v: typed_i.to_f64()))
+                return Ok(elem)
+            typed_i = typed_i + 1
+        if method_name == "findIndex":
+            return Ok(JsValue.Number(v: -1.0))
+        Ok(JsValue.Undefined)
+
+    me _dispatch_uint8_array_for_each_method(this_val: JsValue, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        var cb_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    cb_fn_id = fn_id
+                _:
+                    pass_dn
+        if cb_fn_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_id = _get_obj_id(this_val)
+        if typed_id < 0:
+            return Ok(JsValue.Undefined)
+        val typed_len = self._native_uint8_array_length(typed_id)
+        var typed_i = 0
+        while typed_i < typed_len:
+            val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+            self._invoke_function(cb_fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), this_val], env)?
+            typed_i = typed_i + 1
+        Ok(JsValue.Undefined)
+
+    me _dispatch_data_view_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if method_name == "getInt8":
+            return self._native_data_view_get(this_val, arg_vals, 1, true)
+        if method_name == "getUint8":
+            return self._native_data_view_get(this_val, arg_vals, 1, false)
+        if method_name == "getInt16":
+            return self._native_data_view_get(this_val, arg_vals, 2, true)
+        if method_name == "getUint16":
+            return self._native_data_view_get(this_val, arg_vals, 2, false)
+        if method_name == "getInt32":
+            return self._native_data_view_get(this_val, arg_vals, 4, true)
+        if method_name == "getUint32":
+            return self._native_data_view_get(this_val, arg_vals, 4, false)
+        if method_name == "setInt8":
+            return self._native_data_view_set(this_val, arg_vals, 1)
+        if method_name == "setUint8":
+            return self._native_data_view_set(this_val, arg_vals, 1)
+        if method_name == "setInt16":
+            return self._native_data_view_set(this_val, arg_vals, 2)
+        if method_name == "setUint16":
+            return self._native_data_view_set(this_val, arg_vals, 2)
+        if method_name == "setInt32":
+            return self._native_data_view_set(this_val, arg_vals, 4)
+        if method_name == "setUint32":
+            return self._native_data_view_set(this_val, arg_vals, 4)
+        JsValue.Undefined
+
+    me _dispatch_array_buffer_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if method_name == "slice":
+            return self._native_array_buffer_slice(this_val, arg_vals)
+        JsValue.Undefined
+
+export use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}

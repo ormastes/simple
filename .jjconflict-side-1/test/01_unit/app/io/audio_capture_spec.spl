@@ -1,0 +1,63 @@
+# @cover src/runtime/runtime_audio.c 0%
+#
+# Audio capture (recording) FFI specification.
+#
+# Wraps miniaudio's capture device + WAV encoder (runtime_audio.c
+# rt_audio_capture_start/is_active/frame_count/stop, added alongside the
+# existing playback FFI). Fail-closed by contract: on a host/CI with no
+# capture device, rt_audio_capture_start must return 0 (not a handle) and
+# must not create a WAV file — audio_capture_start() below surfaces that as
+# `active: false` rather than pretending a recording started.
+#
+# STATUS: blocked on the in-flight toolchain redeploy (see
+# doc/03_plan/cert/redeploy_selfhost_plan.md) — these extern symbols are new
+# runtime_audio.c additions and are only resolvable once the deployed
+# bin/simple runtime is relinked against the updated .c/.o (verified via
+# `bin/simple run` against the currently-deployed seed: it reports "unknown
+# extern function: rt_audio_capture_start", the same class of gap as any new
+# rt_* extern per doc/00_llm_process — not a regression from this change).
+# The C side is verified today: `cc -c -fPIC -O2 -std=gnu11 -I.
+# runtime_audio.c` compiles clean with the new capture functions. Once
+# relinked, this spec is ready to run as-is.
+
+use std.spec.{describe, it, expect}
+use app.io.audio_sffi.{
+    audio_init, audio_shutdown,
+    audio_capture_start, audio_capture_is_active, audio_capture_frame_count, audio_capture_stop
+}
+use std.io_runtime.{file_exists, getpid}
+
+describe "audio capture (recording)":
+
+    it "fail-closed: on a host with no capture device, start() reports inactive and creates no file":
+        val engine = audio_init()
+        val tmp_path = "/tmp/simple_audio_capture_test_{getpid()}.wav"
+        val cap = audio_capture_start(tmp_path, 8000, 1)
+        if not cap.active:
+            # No capture device (expected in headless CI): no file, no active session.
+            expect(file_exists(tmp_path)).to_equal(false)
+            expect(audio_capture_is_active()).to_equal(false)
+        else:
+            # A real capture device is present: a session is active and can be stopped.
+            expect(audio_capture_is_active()).to_equal(true)
+            val frames = audio_capture_stop()
+            expect(frames).to_be_greater_than(-1)
+            expect(file_exists(tmp_path)).to_equal(true)
+        audio_shutdown(engine)
+
+    it "stop() without a prior start() is a safe no-op that returns 0":
+        val frames = audio_capture_stop()
+        expect(frames).to_equal(0)
+
+    it "a second start() while already active is rejected (single active-capture contract)":
+        val tmp_a = "/tmp/simple_audio_capture_a_{getpid()}.wav"
+        val tmp_b = "/tmp/simple_audio_capture_b_{getpid()}.wav"
+        val cap_a = audio_capture_start(tmp_a, 8000, 1)
+        if cap_a.active:
+            val cap_b = audio_capture_start(tmp_b, 8000, 1)
+            expect(cap_b.active).to_equal(false)
+            audio_capture_stop()
+        else:
+            # No device to prove the contract against on this host — the
+            # fail-closed case is already covered above.
+            expect(cap_a.active).to_equal(false)

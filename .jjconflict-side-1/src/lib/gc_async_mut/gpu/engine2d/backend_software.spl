@@ -1,0 +1,920 @@
+# 2D Engine — Optimized Software Backend with SIMD Hints
+#
+# Enhanced CPU rendering with:
+#   - Tile-based rendering for cache efficiency (64x64 tiles)
+#   - SIMD-friendly memory layout (4-byte aligned, contiguous)
+#   - Alpha blending support on all operations
+#   - Dirty-tile tracking to minimize present() work
+#
+# This backend is faster than the basic CpuBackend for large scenes
+# because it processes tiles that fit in L1/L2 cache.
+#
+# Usage:
+#   use std.gpu.engine2d.backend_software.{SoftwareBackend}
+
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, ReadbackSource, readback_source_label}
+use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
+use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
+use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
+use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32}
+use std.gpu.engine2d.backend_emu.{
+    emu_draw_ellipse, emu_draw_ellipse_filled,
+    emu_draw_arc, emu_draw_bezier,
+    emu_draw_polygon_filled, emu_draw_polyline,
+    emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect, emu_draw_rounded_rect_outline,
+    emu_draw_gradient_rect_h, emu_draw_radial_gradient,
+    emu_draw_rect_blend, emu_draw_image_blend,
+    emu_draw_image_scaled,
+    emu_draw_triangle_outline,
+    emu_draw_blur_rect, emu_draw_shadow_rect,
+    emu_draw_image_transform,
+    emu_draw_rect_blend_mode,
+    emu_draw_rect, emu_draw_gradient_rect
+}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
+
+# ============================================================================
+# Software Backend
+# ============================================================================
+
+class SoftwareBackend:
+    """Optimized software renderer with tile-based processing.
+
+    Memory layout: flat [u32] buffer, row-major, 4 bytes per pixel (ARGB).
+    Tiles: the framebuffer is logically divided into TILE_SIZE x TILE_SIZE
+    tiles. Draw operations mark affected tiles as dirty. present() can
+    use the dirty set to minimize work when compositing to a display.
+
+    All draw operations support alpha blending via the blend() function
+    from color.spl. Opaque colors (alpha=255) bypass the blend for speed.
+    """
+
+    buf: [u32]
+    w: i32
+    h: i32
+    tiles_x: i32              # Number of tiles horizontally
+    tiles_y: i32              # Number of tiles vertically
+    dirty_tiles: [bool]       # Per-tile dirty flag
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
+    mask_buf: [u8]
+    mask_w: i32
+    mask_h: i32
+    initialized: bool
+    native_simd_spans: bool
+
+    static fn create() -> SoftwareBackend:
+        """Create an uninitialized software backend."""
+        SoftwareBackend(
+            buf: [],
+            w: 0,
+            h: 0,
+            tiles_x: 0,
+            tiles_y: 0,
+            dirty_tiles: [],
+            clip_x: 0,
+            clip_y: 0,
+            clip_w: 0,
+            clip_h: 0,
+            clip_enabled: false,
+            mask_buf: [],
+            mask_w: 0,
+            mask_h: 0,
+            initialized: false,
+            native_simd_spans: false
+        )
+
+    static fn create_cpu_simd() -> SoftwareBackend:
+        var backend = SoftwareBackend.create()
+        backend.native_simd_spans = true
+        backend
+
+impl RenderBackend for SoftwareBackend:
+
+    fn name() -> text:
+        "software"
+
+    me init(width: i32, height: i32) -> bool:
+        self.w = width
+        self.h = height
+        val total = width * height
+        self.buf = [0; total]
+
+        # Initialize tile tracking
+        self.tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE
+        self.tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE
+        val tile_count = self.tiles_x * self.tiles_y
+        self.dirty_tiles = [false; tile_count]
+
+        # Fill with opaque black
+        val opaque_black = 0xff000000u32
+        var i = 0
+        while i < total:
+            self.buf[i] = opaque_black
+            i = i + 1
+
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.initialized = true
+        true
+
+    me shutdown():
+        self.buf = []
+        self.dirty_tiles = []
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
+        self.w = 0
+        self.h = 0
+        self.initialized = false
+
+    me clear(color: u32):
+        var row = 0
+        while row < self.h:
+            self.sw_fill_raw_span(row * self.w, self.w, color)
+            row = row + 1
+        val dirty_count = self.dirty_tiles.len()
+        var dirty = 0
+        while dirty < dirty_count:
+            self.dirty_tiles[dirty] = true
+            dirty = dirty + 1
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        # Outline: four edges, delegated to the canonical emu algorithm
+        # (backend_emu.spl:43) so CPU output is byte-identical to the shared
+        # emulation reference — same idiom as draw_rounded_rect. emu composes
+        # the edges from core.draw_rect_filled (trait dispatch, so self
+        # mutation persists), which ALSO gets us alpha-blended edges for free:
+        # the old hand-written sw_hline/sw_vline edges wrote raw color and
+        # never blended alpha, diverging from emu on alpha outlines.
+        # reconciled to canonical emu 2026-07-06 (D2)
+        # Degenerate-dim guard (w <= 0 or h <= 0) lives inside emu, matching
+        # Metal's _dispatch_metal_rect_outline guard.
+        emu_draw_rect(self, x, y, w, h, color)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val has_alpha = color_a(color) < 255
+        val row_end = y + h
+        val clip_y_end = self.clip_y + self.clip_h
+        val clip_x_end = self.clip_x + self.clip_w
+        val mask_active = self.mask_buf.len() > 0
+        if has_alpha:
+            var alpha_row = y
+            while alpha_row < row_end:
+                self.sw_hline_blend(x, alpha_row, w, color)
+                alpha_row = alpha_row + 1
+            return
+        var start_x = x
+        var end_x = x + w
+        if start_x < 0:
+            start_x = 0
+        if end_x > self.w:
+            end_x = self.w
+        var start_y = y
+        var end_y = row_end
+        if start_y < 0:
+            start_y = 0
+        if end_y > self.h:
+            end_y = self.h
+        if self.clip_enabled:
+            if start_x < self.clip_x:
+                start_x = self.clip_x
+            if end_x > clip_x_end:
+                end_x = clip_x_end
+            if start_y < self.clip_y:
+                start_y = self.clip_y
+            if end_y > clip_y_end:
+                end_y = clip_y_end
+        if end_x <= start_x or end_y <= start_y:
+            return
+        var row = start_y
+        while row < end_y:
+            var col = start_x
+            if mask_active:
+                while col < end_x:
+                    self.sw_set_pixel(col, row, color)
+                    col = col + 1
+            else:
+                val row_base = row * self.w
+                self.sw_fill_raw_span(row_base + start_x, end_x - start_x, color)
+                self.mark_span_dirty(start_x, row, end_x - start_x)
+            row = row + 1
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        # NOT consolidated onto emu (D2 group A review, 2026-07-06): thin lines
+        # are already byte-exact against emu_draw_line, but emu's per-point
+        # body re-enters core.draw_rect_filled(cx, cy, 1, 1, color) for every
+        # Bresenham step (full clip/mask/dirty-span overhead per pixel),
+        # whereas sw_bresenham's sw_set_pixel is the lean single-guard-set
+        # primitive. Delegating would multiply per-pixel cost on long lines
+        # for no behavior change, so this stays a documented exception.
+        if thickness <= 1:
+            self.sw_bresenham(x1, y1, x2, y2, color)
+        else:
+            val half = thickness / 2
+            var offset = -half
+            var adx = x2 - x1
+            if adx < 0: adx = -adx
+            var ady = y2 - y1
+            if ady < 0: ady = -ady
+            while offset <= half:
+                if adx >= ady:
+                    self.sw_bresenham(x1, y1 + offset, x2, y2 + offset, color)
+                else:
+                    self.sw_bresenham(x1 + offset, y1, x2 + offset, y2, color)
+                offset = offset + 1
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        # Degenerate radius is a no-op, matching Metal's
+        # _dispatch_metal_circle guard (r <= 0). This guard is sw-canonical
+        # and intentionally NOT unified with emu (emu stamps a stray center
+        # pixel for r <= 0) — see doc/05_design D2 roadmap.
+        if r <= 0:
+            return
+        var px = r
+        var py = 0
+        var d = 1 - r
+        while px >= py:
+            self.sw_set_pixel(cx + px, cy + py, color)
+            self.sw_set_pixel(cx - px, cy + py, color)
+            self.sw_set_pixel(cx + px, cy - py, color)
+            self.sw_set_pixel(cx - px, cy - py, color)
+            self.sw_set_pixel(cx + py, cy + px, color)
+            self.sw_set_pixel(cx - py, cy + px, color)
+            self.sw_set_pixel(cx + py, cy - px, color)
+            self.sw_set_pixel(cx - py, cy - px, color)
+            py = py + 1
+            # Decision-variable tie-break unified to emu's textbook `d < 0`
+            # (was `d <= 0`), matching backend_emu.spl:117 bit-for-bit at
+            # midpoint-tie radii. reconciled to canonical emu 2026-07-06 (D2)
+            if d < 0:
+                d = d + 2 * py + 1
+            else:
+                px = px - 1
+                d = d + 2 * py - 2 * px + 1
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        # Per-pixel disk: a pixel (dx, dy) is filled iff dx*dx + dy*dy <= r*r.
+        # Emitted as one horizontal span per row (half-width = floor(sqrt(r*r -
+        # dy*dy))) so it stays a fast hline fill while producing the identical
+        # pixel set as the Metal kernel_draw_circle_filled distance test — making
+        # CPU and GPU bit-exact for filled circles.
+        # Degenerate radius is a no-op, matching Metal's
+        # _dispatch_metal_circle guard (r <= 0).
+        if r <= 0:
+            return
+        val has_alpha = color_a(color) < 255
+        val r_sq = r * r
+        var dy = 0 - r
+        while dy <= r:
+            val half = _sw_isqrt(r_sq - dy * dy)
+            if has_alpha:
+                self.sw_hline_blend(cx - half, cy + dy, 2 * half + 1, color)
+            else:
+                self.sw_hline(cx - half, cy + dy, 2 * half + 1, color)
+            dy = dy + 1
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        # A FILLED rounded rectangle. Delegates to the canonical emu algorithm
+        # (backend_emu.spl:152) so CPU output is byte-identical to the shared
+        # emulation reference — same idiom as draw_ellipse/draw_ellipse_filled.
+        # emu composes the fill from core.draw_rect_filled (trait dispatch, so
+        # self mutation persists). Degenerate-dim guard lives inside emu.
+        # NOTE: this used to draw only a 1px OUTLINE (a bug); genuine outlines
+        # are draw_rounded_rect_outline. See
+        # doc/08_tracking/bug/engine2d_software_rounded_rect_draws_outline_not_fill_2026-07-06.md
+        emu_draw_rounded_rect(self, x, y, w, h, radius, color)
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        # Integer barycentric (edge-function / 2x-area) fill, identical to the
+        # Metal kernel_draw_triangle_filled so CPU and GPU produce the same pixel
+        # set. A pixel is inside when all three edge weights share the sign of the
+        # triangle determinant. Iterates the same bounding box as the GPU kernel.
+        val d = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+        if d == 0:
+            return
+        var min_x = x1
+        if x2 < min_x: min_x = x2
+        if x3 < min_x: min_x = x3
+        var max_x = x1
+        if x2 > max_x: max_x = x2
+        if x3 > max_x: max_x = x3
+        var min_y = y1
+        if y2 < min_y: min_y = y2
+        if y3 < min_y: min_y = y3
+        var max_y = y1
+        if y2 > max_y: max_y = y2
+        if y3 > max_y: max_y = y3
+
+        val has_alpha = color_a(color) < 255
+        var py = min_y
+        while py <= max_y:
+            var px = min_x
+            while px <= max_x:
+                val w1 = (y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)
+                val w2 = (y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)
+                val w3 = d - w1 - w2
+                var inside = false
+                if d > 0:
+                    inside = w1 >= 0 and w2 >= 0 and w3 >= 0
+                else:
+                    inside = w1 <= 0 and w2 <= 0 and w3 <= 0
+                if inside:
+                    if has_alpha:
+                        self.sw_set_pixel_blend(px, py, color)
+                    else:
+                        self.sw_set_pixel(px, py, color)
+                px = px + 1
+            py = py + 1
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        # Row-by-row integer lerp, delegated to the canonical emu algorithm
+        # (backend_emu.spl:250) so CPU output is byte-identical to the shared
+        # emulation reference — same idiom as draw_rounded_rect/draw_rect.
+        # Lerp formula (a + (b-a)*t/max_t, truncate toward zero) matches the
+        # Metal MSL kernel_draw_gradient_rect bit-for-bit; a float lerp would
+        # diverge by +/-1 per channel due to rounding and is not reproducible
+        # on the GPU. emu composes each row from core.draw_rect_filled (trait
+        # dispatch, so self mutation persists).
+        emu_draw_gradient_rect(self, x, y, w, h, top_color, bottom_color)
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        # Render glyph rows inline via the shared packed atlas. This avoids
+        # per-character row-array allocation while keeping byte-identical glyphs.
+        val metrics = text_metrics(text_val, font_size)
+        val gh = metrics.glyph_height_px
+        val scale = metrics.scale
+        val advance = metrics.advance
+        val text_len = text_val.len()
+        val fast_direct = not self.clip_enabled and self.mask_buf.len() == 0
+        var i: i64 = 0
+        var cursor_x = x
+        while i < text_len:
+            val code = text_val.char_code_at(i)
+            val glyph_index = glyph_index_for_char_code(code)
+            var gy = 0
+            while gy < gh:
+                val row_data = glyph_row_bits(glyph_index, gy)
+                var gx = 0
+                while gx < 5:
+                    val bit = (row_data >> (4 - gx)) & 1
+                    if bit != 0:
+                        val run_x = cursor_x + gx * scale
+                        val run_y = y + gy * scale
+                        if fast_direct:
+                            var sy = 0
+                            while sy < scale:
+                                val py = run_y + sy
+                                if py >= 0 and py < self.h:
+                                    var start_x = run_x
+                                    var count = scale
+                                    if start_x < 0:
+                                        count = count + start_x
+                                        start_x = 0
+                                    if start_x + count > self.w:
+                                        count = self.w - start_x
+                                    if count > 0:
+                                        val off = py * self.w + start_x
+                                        self.sw_fill_raw_span(off, count, color)
+                                        self.mark_span_dirty(start_x, py, count)
+                                sy = sy + 1
+                        else:
+                            var sy = 0
+                            while sy < scale:
+                                val py = run_y + sy
+                                var sx = 0
+                                while sx < scale:
+                                    self.sw_set_pixel(run_x + sx, py, color)
+                                    sx = sx + 1
+                                sy = sy + 1
+                    gx = gx + 1
+                gy = gy + 1
+            cursor_x = cursor_x + advance
+            i = i + 1
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        val pixels_len = pixels.len()
+        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        var row = 0
+        while row < h:
+            val py = y + row
+            if py >= 0 and py < self.h:
+                val src_row_base = row * w
+                var start_x = x
+                var src_x = 0
+                var count = w
+                if start_x < 0:
+                    src_x = -start_x
+                    count = count + start_x
+                    start_x = 0
+                if start_x + count > self.w:
+                    count = self.w - start_x
+                if count > 0 and src_row_base + src_x + count <= pixels_len:
+                    val src_off = src_row_base + src_x
+                    if slow_checked:
+                        var col = 0
+                        while col < count:
+                            self.sw_set_pixel(start_x + col, py, pixels[src_off + col])
+                            col = col + 1
+                    else:
+                        val dst_off = py * self.w + start_x
+                        self.sw_copy_raw_span(dst_off, pixels, src_off, count)
+                        self.mark_span_dirty(start_x, py, count)
+            row = row + 1
+
+    me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        """Compatibility alias used by SIMD integration tests."""
+        self.draw_image(x, y, w, h, pixels)
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
+
+    me clear_clip():
+        self.clip_enabled = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mask_buf = mask_pixels
+        self.mask_w = w
+        self.mask_h = h
+
+    me clear_mask():
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
+
+    me present():
+        # Reset dirty tiles for next frame
+        val dirty_count = self.dirty_tiles.len()
+        var i = 0
+        while i < dirty_count:
+            self.dirty_tiles[i] = false
+            i = i + 1
+
+    me read_pixels() -> [u32]:
+        val pixel_count = self.w * self.h
+        var copy: [u32] = [0; pixel_count]
+        var i = 0
+        while i < pixel_count:
+            copy[i] = self.buf[i]
+            i = i + 1
+        copy
+
+    me read_pixels_with_source() -> Engine2DReadback:
+        val pixel_count = self.w * self.h
+        var copy: [u32] = [0; pixel_count]
+        var i = 0
+        while i < pixel_count:
+            copy[i] = self.buf[i]
+            i = i + 1
+        engine2d_readback(copy, readback_source_label(ReadbackSource.CpuMirror))
+
+    me scale_alpha_in_place(opacity_milli: i32):
+        """Scale every pixel's alpha by opacity_milli/1000 IN PLACE.
+
+        Byte-identical to engine2d_scale_pixel_alpha() but mutates this
+        backend's own buffer instead of returning a fresh full-surface array,
+        so compositing a scratch offscreen at partial opacity does not allocate
+        a copy. Only valid on a buffer the caller is about to discard or
+        re-clear (the SimpleOS baremetal heap never reclaims, so every avoided
+        full-surface array matters).
+        """
+        if opacity_milli >= 1000:
+            return
+        val count = self.buf.len()
+        var i = 0
+        while i < count:
+            val p = self.buf[i]
+            val scaled_a = (color_a(p) * opacity_milli) / 1000
+            self.buf[i] = rgba(color_r(p), color_g(p), color_b(p), scaled_a)
+            i = i + 1
+
+    fn capability() -> BackendCapability:
+        """Honest self-description: pure-CPU software emulation, no device,
+        no GPU-accelerated ops (everything runs on the software path)."""
+        backend_capability_software()
+
+    me width() -> i32:
+        self.w
+
+    me height() -> i32:
+        self.h
+
+    me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        emu_draw_ellipse(self, cx, cy, rx, ry, color)
+
+    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        emu_draw_ellipse_filled(self, cx, cy, rx, ry, color)
+
+    me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
+        emu_draw_arc(self, cx, cy, r, start_deg, end_deg, color, thickness)
+
+    me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        emu_draw_bezier(self, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+
+    me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
+        emu_draw_polygon_filled(self, xs, ys, count, color)
+
+    me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
+        emu_draw_polyline(self, xs, ys, count, color, thickness)
+
+    me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
+        emu_draw_rect_thick(self, x, y, w, h, color, thickness)
+
+    me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
+        emu_draw_circle_thick(self, cx, cy, r, color, thickness)
+
+    me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
+        if w <= 0 or h <= 0 or thickness <= 0:
+            return
+        var r = radius
+        if r > w / 2:
+            r = w / 2
+        if r > h / 2:
+            r = h / 2
+        var t = thickness
+        if t > r + 1:
+            t = r + 1
+        var off = 0
+        while off < t:
+            self.sw_hline(x + r, y + off, w - 2 * r, color)
+            self.sw_hline(x + r, y + h - 1 - off, w - 2 * r, color)
+            self.sw_vline(x + off, y + r, h - 2 * r, color)
+            self.sw_vline(x + w - 1 - off, y + r, h - 2 * r, color)
+            self.sw_corner_arc(x + r, y + r, r - off, color, -1, -1)
+            self.sw_corner_arc(x + w - 1 - r, y + r, r - off, color, 1, -1)
+            self.sw_corner_arc(x + r, y + h - 1 - r, r - off, color, -1, 1)
+            self.sw_corner_arc(x + w - 1 - r, y + h - 1 - r, r - off, color, 1, 1)
+            off = off + 1
+
+    me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
+        emu_draw_gradient_rect_h(self, x, y, w, h, left_color, right_color)
+
+    me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
+        emu_draw_radial_gradient(self, cx, cy, r, center_color, edge_color)
+
+    me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
+        emu_draw_rect_blend(self, x, y, w, h, color)
+
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        val pixels_len = pixels.len()
+        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        var row = 0
+        while row < h:
+            val py = y + row
+            if py >= 0 and py < self.h:
+                val src_row_base = row * w
+                var start_x = x
+                var src_x = 0
+                var count = w
+                if start_x < 0:
+                    src_x = -start_x
+                    count = count + start_x
+                    start_x = 0
+                if start_x + count > self.w:
+                    count = self.w - start_x
+                if count > 0 and src_row_base + src_x + count <= pixels_len:
+                    var col = 0
+                    if slow_checked:
+                        while col < count:
+                            self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col])
+                            col = col + 1
+                    else:
+                        val dst_off = py * self.w + start_x
+                        val src_off = src_row_base + src_x
+                        while col < count:
+                            val src = pixels[src_off + col]
+                            if color_a(src) > 0:
+                                self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
+                            col = col + 1
+                        self.mark_span_dirty(start_x, py, count)
+            row = row + 1
+
+    me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+
+    me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
+        emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
+
+    me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
+        emu_draw_blur_rect(self, x, y, w, h, radius)
+
+    me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
+        emu_draw_image_transform(self, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+
+    me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
+        emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
+
+impl SoftwareBackend:
+    # Phase 1 fallback: paint the cell with `bg` first, then overlay the
+    # glyph via the shared 5x7 raster. Tile dirty-tracking is preserved
+    # because both calls route through the `self.*` helpers that already
+    # mark tiles dirty.
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        val text_buf = text_aa_blit_buffer(text_val, fg, bg, font_size)
+        if text_buf.is_empty():
+            return
+        self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
+
+    me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        emu_draw_ellipse(self, cx, cy, rx, ry, color)
+
+    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        emu_draw_ellipse_filled(self, cx, cy, rx, ry, color)
+
+# ============================================================================
+# Pixel and Line Helpers — me methods to avoid mutation-loss bug
+#
+# The compiler silently drops mutations when `self` or `self.field` is passed
+# to a free function. All helpers that write into `self.buf` or
+# `self.dirty_tiles` are therefore `me` methods so that writes persist.
+# Read-only helpers (_clip_span, _sw_mask_blocks, _sw_isqrt) remain free
+# functions since they never mutate.
+# See: doc/08_tracking/bug/self_pass_to_free_fn_mutation_loss_2026-05-29.md
+# ============================================================================
+
+impl SoftwareBackend:
+
+    # GPU-dict pilot (design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md
+    # §3/§4): the CPU-lane oracle for `indexed_fill`. `idx` is a row-major w*h
+    # byte buffer of palette indices; the body is a plain host array index
+    # `palette[idx]` per pixel — no per-pixel FFI, this IS the bulk/native
+    # CPU-lane idiom for a data-dependent gather (there is no memset-style bulk
+    # form for a per-pixel table lookup). Out-of-range indices resolve to the
+    # SAME 0xFFFFFFFF sentinel the Metal `lut_lookup` dense path returns on a
+    # miss (design §3.2/§3.4) so the CPU and GPU stay bit-exact on the edge
+    # case too — a defined, loud value, never a silent wrong pixel.
+    # The two per-pixel gather loops below carry the cpu-lane-loop-ok annotation
+    # on their HEADER lines — the hot-loop gate (design §6.1) exempts a loop only
+    # via its header/line-above, never a def-line comment.
+    me indexed_fill(x: i32, y: i32, w: i32, h: i32, idx: [u8], palette: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        val count = palette.len()
+        var ly = 0
+        while ly < h:  # cpu-lane-loop-ok: indexed_fill CPU-lane gather oracle (design §3/§4)
+            val py = y + ly
+            if py >= 0 and py < self.h:
+                var start_x = -1
+                var lx = 0
+                while lx < w:  # cpu-lane-loop-ok: indexed_fill CPU-lane gather oracle (design §3/§4)
+                    val px = x + lx
+                    if px >= 0 and px < self.w:
+                        val key = idx[ly * w + lx].to_i32()
+                        var c: u32 = 0xFFFFFFFFu32
+                        if key >= 0 and key < count:
+                            c = palette[key]
+                        self.buf[py * self.w + px] = c
+                        if start_x < 0:
+                            start_x = px
+                    lx = lx + 1
+                if start_x >= 0:
+                    self.mark_span_dirty(start_x, py, w)
+            ly = ly + 1
+
+    me sw_fill_raw_span(offset: i32, count: i32, color: u32):
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            record_simd_fill_hit()
+            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
+            return
+        _scalar_fill_row(self.buf, offset as i64, count as i64, color)
+
+    me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            record_simd_copy_hit()
+            self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, count as i64)
+            return
+        var i = 0
+        while i < count:
+            self.buf[dst_offset + i] = src[src_offset + i]
+            i = i + 1
+
+    me sw_blend_const_raw_span(offset: i32, count: i32, color: u32):
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            record_simd_alpha_hit()
+            var dst_row: [u32] = [0; count]
+            var src_row: [u32] = [color; count]
+            var j = 0
+            while j < count:
+                dst_row[j] = self.buf[offset + j]
+                j = j + 1
+            val row = engine2d_simd_blend_row_u32(dst_row, src_row)
+            j = 0
+            while j < count and j < row.len():
+                self.buf[offset + j] = row[j]
+                j = j + 1
+            while j < count:
+                self.buf[offset + j] = blend(color, self.buf[offset + j])
+                j = j + 1
+            return
+        var i = 0
+        while i < count:
+            self.buf[offset + i] = blend(color, self.buf[offset + i])
+            i = i + 1
+
+    me mark_dirty(tx: i32, ty: i32):
+        """Mark a tile as dirty."""
+        val idx = ty * self.tiles_x + tx
+        if idx >= 0 and idx < self.dirty_tiles.len():
+            self.dirty_tiles[idx] = true
+
+    me mark_pixel_dirty(x: i32, y: i32):
+        """Mark the tile containing pixel (x, y) as dirty."""
+        val tx = x / TILE_SIZE
+        val ty = y / TILE_SIZE
+        self.mark_dirty(tx, ty)
+
+    me mark_span_dirty(x: i32, y: i32, length: i32):
+        """Mark all tiles touched by a horizontal span."""
+        if length <= 0:
+            return
+        val tx0 = x / TILE_SIZE
+        val tx1 = (x + length - 1) / TILE_SIZE
+        val ty = y / TILE_SIZE
+        var tx = tx0
+        while tx <= tx1:
+            self.mark_dirty(tx, ty)
+            tx = tx + 1
+
+    me sw_set_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        if self.clip_enabled:
+            if (x < self.clip_x or x >= self.clip_x + self.clip_w or
+                y < self.clip_y or y >= self.clip_y + self.clip_h):
+                return
+        if _sw_mask_blocks(self, x, y):
+            return
+        val idx = y * self.w + x
+        self.buf[idx] = color
+        self.mark_pixel_dirty(x, y)
+
+    me sw_set_pixel_blend(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        if self.clip_enabled:
+            if (x < self.clip_x or x >= self.clip_x + self.clip_w or
+                y < self.clip_y or y >= self.clip_y + self.clip_h):
+                return
+        if _sw_mask_blocks(self, x, y):
+            return
+        val idx = y * self.w + x
+        self.buf[idx] = blend(color, self.buf[idx])
+        self.mark_pixel_dirty(x, y)
+
+    me sw_hline(x: i32, y: i32, length: i32, color: u32):
+        val clipped = _clip_span(self, x, y, length)
+        val count = clipped.2
+        if count <= 0:
+            return
+        val mask_active = self.mask_buf.len() > 0
+        if mask_active:
+            var xoff = 0
+            while xoff < count:
+                self.sw_set_pixel(clipped.0 + xoff, y, color)
+                xoff = xoff + 1
+            return
+        val off = y * self.w + clipped.0
+        self.sw_fill_raw_span(off, count, color)
+        self.mark_span_dirty(clipped.0, y, count)
+
+    me sw_hline_blend(x: i32, y: i32, length: i32, color: u32):
+        val clipped = _clip_span(self, x, y, length)
+        val count = clipped.2
+        if count <= 0:
+            return
+        val mask_active = self.mask_buf.len() > 0
+        if mask_active:
+            var xoff = 0
+            while xoff < count:
+                self.sw_set_pixel_blend(clipped.0 + xoff, y, color)
+                xoff = xoff + 1
+            return
+        val off = y * self.w + clipped.0
+        self.sw_blend_const_raw_span(off, count, color)
+        self.mark_span_dirty(clipped.0, y, count)
+
+    me sw_vline(x: i32, y: i32, length: i32, color: u32):
+        var i = 0
+        while i < length:
+            self.sw_set_pixel(x, y + i, color)
+            i = i + 1
+
+    me sw_bresenham(x1: i32, y1: i32, x2: i32, y2: i32, color: u32):
+        var dx = x2 - x1
+        var dy = y2 - y1
+        var sx: i32 = 1
+        var sy: i32 = 1
+        if dx < 0:
+            dx = -dx
+            sx = -1
+        if dy < 0:
+            dy = -dy
+            sy = -1
+        var err = dx - dy
+        var cx = x1
+        var cy = y1
+        while true:
+            self.sw_set_pixel(cx, cy, color)
+            if cx == x2 and cy == y2:
+                return
+            val e2 = 2 * err
+            if e2 > -dy:
+                err = err - dy
+                cx = cx + sx
+            if e2 < dx:
+                err = err + dx
+                cy = cy + sy
+
+    me sw_corner_arc(cx: i32, cy: i32, r: i32, color: u32, sx: i32, sy: i32):
+        var px = r
+        var py = 0
+        var d = 1 - r
+        while px >= py:
+            self.sw_set_pixel(cx + px * sx, cy + py * sy, color)
+            self.sw_set_pixel(cx + py * sx, cy + px * sy, color)
+            py = py + 1
+            if d <= 0:
+                d = d + 2 * py + 1
+            else:
+                px = px - 1
+                d = d + 2 * py - 2 * px + 1
+
+# ============================================================================
+# Read-only span helpers (no mutation — safe as free functions)
+# ============================================================================
+
+fn _clip_span(backend: SoftwareBackend, x: i32, y: i32, length: i32) -> (i32, i32, i32):
+    """Clip a horizontal span to framebuffer and active clip rectangle.
+
+    Returns (start_x, end_x_exclusive, count). A zero count means no pixels
+    should be touched.
+    """
+    if length <= 0 or y < 0 or y >= backend.h:
+        return (0, 0, 0)
+    var start = x
+    var end = x + length
+    if start < 0:
+        start = 0
+    if end > backend.w:
+        end = backend.w
+    if backend.clip_enabled:
+        if y < backend.clip_y or y >= backend.clip_y + backend.clip_h:
+            return (0, 0, 0)
+        if start < backend.clip_x:
+            start = backend.clip_x
+        val clip_end = backend.clip_x + backend.clip_w
+        if end > clip_end:
+            end = clip_end
+    if end <= start:
+        return (0, 0, 0)
+    (start, end, end - start)
+
+fn _sw_mask_blocks(backend: SoftwareBackend, x: i32, y: i32) -> bool:
+    if backend.mask_buf.len() == 0:
+        return false
+    val mi = y * backend.mask_w + x
+    if mi < 0 or mi >= backend.mask_buf.len():
+        return false
+    backend.mask_buf[mi] == 0u8
+
+# ============================================================================
+# Triangle Edge Interpolation
+# ============================================================================
+
+# Integer floor square root (Newton). Used by draw_circle_filled to compute the
+# per-row span half-width that matches the Metal distance test exactly.
+fn _sw_isqrt(n: i32) -> i32:
+    if n <= 0:
+        return 0
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x

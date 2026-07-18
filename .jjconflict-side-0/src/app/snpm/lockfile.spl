@@ -1,0 +1,91 @@
+# snpm lockfile — snpm-lock.sdn reading and writing
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text)
+extern fn rt_file_exists(path: text) -> bool
+
+class LockEntry:
+    name: text
+    version: text
+    resolved: text
+    integrity: text
+
+fn read_lockfile(path: text) -> [LockEntry]:
+    """Read snpm-lock.sdn and return lock entries."""
+    if not rt_file_exists(path):
+        var empty: [LockEntry] = []
+        return empty
+    val content = rt_file_read_text(path) ?? ""
+    if content == nil or content == "":
+        var empty: [LockEntry] = []
+        return empty
+    var entries: [LockEntry] = []
+    var current_name = ""
+    var current_version = ""
+    var current_resolved = ""
+    var current_integrity = ""
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val stripped = line.trim()
+        if stripped == "" or stripped.starts_with("#"):
+            i = i + 1
+            continue
+        # Top-level package name (no indent, ends with :)
+        if not line.starts_with(" ") and not line.starts_with("\t") and stripped.ends_with(":"):
+            if current_name != "":
+                entries.push(LockEntry(name: current_name, version: current_version, resolved: current_resolved, integrity: current_integrity))
+            val name_parts = stripped.split(":")
+            current_name = name_parts[0].trim()
+            current_version = ""
+            current_resolved = ""
+            current_integrity = ""
+        elif stripped.starts_with("version:"):
+            current_version = _extract_value(stripped)
+        elif stripped.starts_with("resolved:"):
+            current_resolved = _extract_value(stripped)
+        elif stripped.starts_with("integrity:"):
+            current_integrity = _extract_value(stripped)
+        i = i + 1
+    if current_name != "":
+        entries.push(LockEntry(name: current_name, version: current_version, resolved: current_resolved, integrity: current_integrity))
+    entries
+
+fn write_lockfile(entries: [LockEntry], path: text):
+    """Write snpm-lock.sdn."""
+    var content = "# snpm-lock.sdn — Auto-generated, do not edit\nlockfile_version: 2\n\npackages:\n"
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        content = content + "    {e.name}:\n"
+        content = content + "        version: \"{e.version}\"\n"
+        if e.resolved != "":
+            content = content + "        resolved: \"{e.resolved}\"\n"
+        if e.integrity != "":
+            content = content + "        integrity: \"{e.integrity}\"\n"
+        i = i + 1
+    rt_file_write_text(path, content)
+
+fn _extract_value(line: text) -> text:
+    val parts = line.split(":")
+    if parts.len() < 2:
+        return ""
+    # Rejoin parts after first colon (value may contain colons)
+    var value = parts[1]
+    var j = 2
+    while j < parts.len():
+        value = value + ":" + parts[j]
+        j = j + 1
+    value = value.trim()
+    if value.starts_with("\"") and value.ends_with("\""):
+        val quote_parts = value.split("\"")
+        if quote_parts.len() >= 3:
+            value = quote_parts[1]
+    value
+
+fn _find_first_colon(s: text) -> i64:
+    val parts = s.split(":")
+    if parts.len() < 2:
+        return -1
+    parts[0].len()

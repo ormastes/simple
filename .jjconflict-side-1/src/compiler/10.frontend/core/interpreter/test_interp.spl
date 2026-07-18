@@ -1,0 +1,386 @@
+# Core Interpreter — Integration Test
+#
+# Tests all core interpreter modules together.
+# Run via seed compilation:
+#   build/seed src/compiler/10.frontend/core/tokens.spl src/compiler/10.frontend/core/lexer.spl src/compiler/10.frontend/core/parser.spl \
+#     src/compiler/10.frontend/core/ast.spl src/compiler/10.frontend/core/interpreter/value.spl \
+#     src/compiler/10.frontend/core/interpreter/env.spl src/compiler/10.frontend/core/interpreter/ops.spl \
+#     src/compiler/10.frontend/core/interpreter/eval.spl src/compiler/10.frontend/core/interpreter/mod.spl \
+#     src/compiler/10.frontend/core/interpreter/test_interp.spl > /tmp/test_interp.cpp
+#   g++ -std=c++20 -o /tmp/test_interp /tmp/test_interp.cpp src/runtime/runtime.c -Isrc/runtime -w
+#   /tmp/test_interp
+#
+# Or via runtime interpreter:
+#   bin/simple run src/compiler/10.frontend/core/interpreter/test_interp.spl
+
+var test_pass: i64 = 0
+var test_fail: i64 = 0
+
+fn check_int(label: text, actual: i64, expected: i64):
+    if actual == expected:
+        test_pass = test_pass + 1
+    else:
+        test_fail = test_fail + 1
+        print "FAIL: {label} — expected {expected}, got {actual}"
+
+fn check_str(label: text, actual: text, expected: text):
+    if actual == expected:
+        test_pass = test_pass + 1
+    else:
+        test_fail = test_fail + 1
+        print "FAIL: {label} — expected '{expected}', got '{actual}'"
+
+fn check_bool(label: text, actual: bool, expected: bool):
+    if actual == expected:
+        test_pass = test_pass + 1
+    else:
+        test_fail = test_fail + 1
+        var actual_s = "false"
+        if actual: actual_s = "true"
+        var expected_s = "false"
+        if expected: expected_s = "true"
+        print "FAIL: {label} — expected {expected_s}, got {actual_s}"
+
+# ===== Test 1: Value Arena =====
+print "--- Value Arena ---"
+
+val_reset()
+val nil_id = val_make_nil()
+check_int("nil kind", val_get_kind(nil_id), VAL_NIL)
+check_bool("nil truthy", val_is_truthy(nil_id), false)
+check_str("nil text", val_to_text(nil_id), "nil")
+
+val bool_t = val_make_bool(true)
+val bool_f = val_make_bool(false)
+check_int("bool true kind", val_get_kind(bool_t), VAL_BOOL)
+check_bool("bool true get", val_get_bool(bool_t), true)
+check_bool("bool true truthy", val_is_truthy(bool_t), true)
+check_bool("bool false truthy", val_is_truthy(bool_f), false)
+check_str("bool true text", val_to_text(bool_t), "true")
+check_str("bool false text", val_to_text(bool_f), "false")
+
+val int_42 = val_make_int(42)
+val int_0 = val_make_int(0)
+check_int("int kind", val_get_kind(int_42), VAL_INT)
+check_int("int get", val_get_int(int_42), 42)
+check_bool("int 42 truthy", val_is_truthy(int_42), true)
+check_bool("int 0 truthy", val_is_truthy(int_0), false)
+check_str("int text", val_to_text(int_42), "42")
+
+val text_hello = val_make_text("hello")
+val text_empty = val_make_text("")
+check_int("text kind", val_get_kind(text_hello), VAL_TEXT)
+check_str("text get", val_get_text(text_hello), "hello")
+check_bool("text hello truthy", val_is_truthy(text_hello), true)
+check_bool("text empty truthy", val_is_truthy(text_empty), false)
+
+var arr_elems: [i64] = []
+arr_elems.push(val_make_int(1))
+arr_elems.push(val_make_int(2))
+arr_elems.push(val_make_int(3))
+val arr_id = val_make_array(arr_elems)
+check_int("array kind", val_get_kind(arr_id), VAL_ARRAY)
+check_bool("array truthy", val_is_truthy(arr_id), true)
+check_str("array text", val_to_text(arr_id), "[1, 2, 3]")
+
+var s_fields: [text] = []
+s_fields.push("x")
+s_fields.push("y")
+var s_values: [i64] = []
+s_values.push(val_make_int(10))
+s_values.push(val_make_int(20))
+val struct_id = val_make_struct("Point", s_fields, s_values)
+check_int("struct kind", val_get_kind(struct_id), VAL_STRUCT)
+check_str("struct name", val_get_struct_name(struct_id), "Point")
+val x_val = val_struct_get_field(struct_id, "x")
+check_int("struct field x", val_get_int(x_val), 10)
+val y_val = val_struct_get_field(struct_id, "y")
+check_int("struct field y", val_get_int(y_val), 20)
+
+val func_id = val_make_function("foo", 0)
+check_int("func kind", val_get_kind(func_id), VAL_FUNCTION)
+check_str("func name", val_get_func_name(func_id), "foo")
+
+# Equality
+check_bool("nil == nil", val_equals(val_make_nil(), val_make_nil()), true)
+check_bool("42 == 42", val_equals(val_make_int(42), val_make_int(42)), true)
+check_bool("42 != 43", val_equals(val_make_int(42), val_make_int(43)), false)
+check_bool("hello == hello", val_equals(val_make_text("hello"), val_make_text("hello")), true)
+check_bool("true == true", val_equals(val_make_bool(true), val_make_bool(true)), true)
+
+# ===== Test 2: Environment =====
+print "--- Environment ---"
+
+env_init()
+env_define("x", val_make_int(10))
+check_int("lookup x", val_get_int(env_lookup("x")), 10)
+
+env_assign("x", val_make_int(20))
+check_int("assign x", val_get_int(env_lookup("x")), 20)
+
+env_push_scope()
+env_define("y", val_make_int(30))
+check_int("inner y", val_get_int(env_lookup("y")), 30)
+check_int("inner x (outer)", val_get_int(env_lookup("x")), 20)
+
+env_pop_scope()
+check_int("outer x after pop", val_get_int(env_lookup("x")), 20)
+check_int("y gone after pop", env_lookup("y"), -1)
+
+env_define_global("g", val_make_int(100))
+check_int("global g", val_get_int(env_lookup_global("g")), 100)
+
+# ===== Test 3: Operations =====
+print "--- Operations ---"
+
+val_reset()
+val a10 = val_make_int(10)
+val b3 = val_make_int(3)
+
+val sum = val_add(a10, b3)
+check_int("10 + 3", val_get_int(sum), 13)
+
+val diff = val_sub(a10, b3)
+check_int("10 - 3", val_get_int(diff), 7)
+
+val prod = val_mul(a10, b3)
+check_int("10 * 3", val_get_int(prod), 30)
+
+val quot = val_div(a10, b3)
+check_int("10 / 3", val_get_int(quot), 3)
+
+val remainder = val_mod(a10, b3)
+check_int("10 % 3", val_get_int(remainder), 1)
+
+val neg = val_negate(a10)
+check_int("-10", val_get_int(neg), -10)
+
+# Comparison
+val lt_result = val_lt(b3, a10)
+check_bool("3 < 10", val_get_bool(lt_result), true)
+val gt_result = val_gt(a10, b3)
+check_bool("10 > 3", val_get_bool(gt_result), true)
+val eq_result = val_eq(a10, a10)
+check_bool("10 == 10", val_get_bool(eq_result), true)
+val neq_result = val_neq(a10, b3)
+check_bool("10 != 3", val_get_bool(neq_result), true)
+
+# Logical
+val and_result = val_and(val_make_bool(true), val_make_bool(false))
+check_bool("true and false", val_get_bool(and_result), false)
+val or_result = val_or(val_make_bool(true), val_make_bool(false))
+check_bool("true or false", val_get_bool(or_result), true)
+val not_result = val_not(val_make_bool(true))
+check_bool("not true", val_get_bool(not_result), false)
+
+# Text concat
+val hello = val_make_text("hello")
+val world = val_make_text(" world")
+val hw = val_add(hello, world)
+check_str("text +", val_get_text(hw), "hello world")
+
+# Division by zero
+val div0 = val_div(a10, val_make_int(0))
+check_int("div by zero returns -1", div0, -1)
+
+# ===== Test 4: Binary Op Dispatch =====
+print "--- Binary Op Dispatch ---"
+
+val_reset()
+val x = val_make_int(5)
+val y = val_make_int(3)
+check_int("binop +", val_get_int(val_binary_op(60, x, y)), 8)   # TOK_PLUS
+check_int("binop -", val_get_int(val_binary_op(61, x, y)), 2)   # TOK_MINUS
+check_int("binop *", val_get_int(val_binary_op(62, x, y)), 15)  # TOK_STAR
+check_int("binop /", val_get_int(val_binary_op(63, x, y)), 1)   # TOK_SLASH
+check_int("binop %", val_get_int(val_binary_op(64, x, y)), 2)   # TOK_PERCENT
+check_bool("binop ==", val_get_bool(val_binary_op(80, x, x)), true)  # TOK_EQ
+check_bool("binop !=", val_get_bool(val_binary_op(81, x, y)), true)  # TOK_NOT_EQ
+check_bool("binop <", val_get_bool(val_binary_op(82, y, x)), true)   # TOK_LT
+check_bool("binop >", val_get_bool(val_binary_op(83, x, y)), true)   # TOK_GT
+
+# ===== Test 5: Runtime Method Parity =====
+print "--- Runtime Method Parity ---"
+
+val chr_result = core_interpret("""
+val code = 65 as u8
+code.chr()
+""", "chr_test.spl")
+check_str("int chr after cast", val_get_text(chr_result), "A")
+
+val method_writeback_result = core_interpret("""
+struct Copier:
+    dummy: i64
+
+fn Copier__append_answer(self, dest, value):
+    dest.push(value)
+
+var out = []
+val copier = Copier(dummy: 0)
+copier.append_answer(out, 42)
+if out[0] == 42: 42 else: 0
+""", "method_writeback_test.spl")
+check_int("method arg array write-back", val_get_int(method_writeback_result), 42)
+
+val named_constructor_result = core_interpret("""
+struct Point:
+    x: i64
+    y: i64
+
+class Principal:
+    id: text
+    kind: i64
+
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+class NamedCodec:
+    static fn encode(a: i64, b: i64) -> i64:
+        return a * 10 + b
+
+struct NamedMethodCodec:
+    base: i64
+
+fn NamedMethodCodec__encode(self, a: i64, b: i64) -> i64:
+    return self.base + a * 10 + b
+
+val point = Point(y: 20, x: 10)
+val principal = Principal(kind: 7, id: "alice")
+val equals_point = Point(y = 22, x = 11)
+val mixed_point = Point(y: 40, 30)
+val piped_point = 50 |> Point(y: 60)
+val ordinary_call = add(b: 3, a: 2)
+val static_call = NamedCodec.encode(b: 2, a: 1)
+val indirect = add
+val indirect_call = indirect(b: 3, a: 2)
+val method_codec = NamedMethodCodec(base: 100)
+val method_call = method_codec.encode(b: 2, a: 1)
+if point.x == 10 and point.y == 20 and principal.id == "alice" and principal.kind == 7 and equals_point.x == 11 and equals_point.y == 22 and mixed_point.x == 30 and mixed_point.y == 40 and piped_point.x == 50 and piped_point.y == 60 and ordinary_call == 5 and static_call == 12 and indirect_call == 5 and method_call == 112: 1 else: 0
+""", "named_constructor_args_test.spl")
+check_int("named constructor and function args bind by declaration", val_get_int(named_constructor_result), 1)
+
+val zero_arg_static_new_result = core_interpret("""
+class Bucket<T>:
+    items: [T]
+
+    static fn new() -> Bucket<T>:
+        Bucket<T>(items: [41])
+
+val bucket = Bucket<i64>()
+
+class Recursive:
+    value: i64 = 7
+
+    static fn new() -> Recursive:
+        Recursive()
+
+val recursive = Recursive()
+if bucket.items[0] == 41: recursive.value else: 0
+""", "zero_arg_static_new_test.spl")
+check_int("zero-arg generic class call honors static new without recursion", val_get_int(zero_arg_static_new_result), 7)
+
+val list_iteration_result = core_interpret("""
+struct List:
+    items: [i64]
+
+val values = List(items: [1, 2, 3])
+var for_sum = 0
+for item in values:
+    for_sum = for_sum + item
+val doubled = [item * 2 for item in values]
+var static_sum = 0
+static_for item in values:
+    static_sum = static_sum + item
+if for_sum == 6 and doubled[0] == 2 and doubled[2] == 6 and static_sum == 6: 1 else: 0
+""", "list_iteration_test.spl")
+check_int("List items back all interpreter iteration forms", val_get_int(list_iteration_result), 1)
+
+val dict_literal_result = core_interpret("""
+val values = {"le" + "ft": 18 + 2, "right": 40 + 2}
+val empty_a = {}
+val empty_b = {}
+values["left"] = 21
+empty_a["only"] = 1
+empty_a.insert("second", 2)
+empty_a.set("only", 3)
+[values, empty_a, empty_b, values["left"], values.len(), values.keys(), values.values(), values.contains("left"), values.contains_key("right"), values.get("right"), values.get_or("missing", 9), values["missing"], values.get("missing")]
+""", "dict_literal_test.spl")
+val dict_literals = val_get_array(dict_literal_result)
+check_int("dict literal result count", dict_literals.len(), 13)
+val filled_dict = dict_literals[0]
+check_str("dict literal representation", val_get_struct_name(filled_dict), "__dict")
+val filled_fields = val_get_struct_fields(filled_dict)
+val filled_values = val_get_struct_values(filled_dict)
+check_int("dict literal field count", filled_fields.len(), 2)
+check_str("dict literal computed key", filled_fields[0], "left")
+check_int("dict index assignment", val_get_int(filled_values[0]), 21)
+check_int("dict literal second value", val_get_int(filled_values[1]), 42)
+check_int("dict index read", val_get_int(dict_literals[3]), 21)
+check_int("dict len", val_get_int(dict_literals[4]), 2)
+check_int("dict keys", val_get_array(dict_literals[5]).len(), 2)
+check_int("dict values", val_get_int(val_get_array(dict_literals[6])[1]), 42)
+check_bool("dict contains", val_get_bool(dict_literals[7]), true)
+check_bool("dict contains_key", val_get_bool(dict_literals[8]), true)
+check_int("dict get", val_get_int(dict_literals[9]), 42)
+check_int("dict get_or", val_get_int(dict_literals[10]), 9)
+check_bool("missing dict index returns nil", val_is_nil(dict_literals[11]), true)
+check_bool("missing dict get returns nil", val_is_nil(dict_literals[12]), true)
+val mutated_empty_fields = val_get_struct_fields(dict_literals[1])
+val mutated_empty_values = val_get_struct_values(dict_literals[1])
+check_int("dict insert field count", mutated_empty_fields.len(), 2)
+check_int("dict set updates value", val_get_int(mutated_empty_values[0]), 3)
+check_int("unmodified empty dict field count", val_get_struct_fields(dict_literals[2]).len(), 0)
+check_bool("empty dict literals allocate independently", dict_literals[1] != dict_literals[2], true)
+
+val unknown_constructor_result = core_interpret("""
+struct Point:
+    x: i64
+    y: i64
+Point(z: 1)
+""", "unknown_constructor_arg_test.spl")
+check_int("unknown constructor arg fails", unknown_constructor_result, -1)
+check_bool("unknown constructor arg error", eval_get_error().contains("unknown field 'z'"), true)
+
+val duplicate_constructor_result = core_interpret("""
+struct Point:
+    x: i64
+    y: i64
+Point(x: 1, x: 2)
+""", "duplicate_constructor_arg_test.spl")
+check_int("duplicate constructor arg fails", duplicate_constructor_result, -1)
+check_bool("duplicate constructor arg error", eval_get_error().contains("duplicate field 'x'"), true)
+
+val overflow_constructor_result = core_interpret("""
+struct Point:
+    x: i64
+    y: i64
+Point(1, 2, 3)
+""", "overflow_constructor_arg_test.spl")
+check_int("overflow constructor args fail", overflow_constructor_result, -1)
+check_bool("overflow constructor arg error", eval_get_error().contains("too many arguments"), true)
+
+val unknown_function_arg_result = core_interpret("""
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+add(c: 1, a: 2)
+""", "unknown_function_arg_test.spl")
+check_int("unknown function arg fails", unknown_function_arg_result, -1)
+check_bool("unknown function arg error", eval_get_error().contains("unknown argument 'c'"), true)
+
+val duplicate_function_arg_result = core_interpret("""
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+add(a: 1, a: 2)
+""", "duplicate_function_arg_test.spl")
+check_int("duplicate function arg fails", duplicate_function_arg_result, -1)
+check_bool("duplicate function arg error", eval_get_error().contains("duplicate argument 'a'"), true)
+
+# ===== Summary =====
+print ""
+print "--- Results ---"
+print "Pass: {test_pass}"
+print "Fail: {test_fail}"
+if test_fail == 0:
+    print "ALL TESTS PASSED"
+else:
+    print "SOME TESTS FAILED"

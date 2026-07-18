@@ -1,0 +1,124 @@
+# RISC-V 32 FPGA Boot Entry — M-Mode Bare-Metal (softcore)
+#
+# Direct M-mode entry for rv32 FPGA softcores (VexRiscv / LiteX / NaxRiscv), no SBI.
+# Also verifiable on QEMU virt with: -bios none -cpu rv32 -m 128M (FPGA softcore stand-in).
+#
+# Key differences from the qemu boot.spl entry:
+#   - .text.start section (M-mode FPGA linker), not .text.entry
+#   - mtvec installed FIRST: a fault traps to .Lrv32fpga_trap (captures mcause/mepc and
+#     halts) instead of looping forever at 0x0 with no handler. boot.spl lacked this, which
+#     is why an early load fault silently hung the whole OS (see
+#     doc/08_tracking/bug/rv32_rt_as_heap_low_pointer_fault_2026-06-30.md).
+#   - SMP hart census (shared _smp_online_count) so multi-core softcores report cores online.
+#
+# Reuses the proven rv32 no-alloc boot chain + QEMU-virt-compatible memory layout
+# (RAM 0x80000000, heap 0x87000000) so the firmware/OS runs unchanged on the softcore.
+
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.kernel.boot.os_main.{os_main}
+
+extern fn rt_riscv_uart_put(byte: u64)
+extern fn rt_riscv_qemu_heap_start() -> u64
+extern fn rt_riscv_qemu_heap_size() -> u64
+extern fn rt_riscv_noalloc_pmm_init_default() -> bool
+extern fn rt_rv32_smp_online_count() -> u64
+
+@section(".text.start")
+@naked
+fn _start():
+    asm volatile:
+        ".balign 4"
+        "mv      s0, a0"
+        "mv      s1, a1"
+        "csrw    mie, zero"
+        "csrw    mip, zero"
+        "la      t0, .Lrv32fpga_trap"
+        "csrw    mtvec, t0"
+        # SMP census: every hart checks in (outside the BSS-clear range).
+        "la      t2, _smp_online_count"
+        "li      t1, 1"
+        "amoadd.w zero, t1, (t2)"
+        # Only hart 0 boots; secondary harts park.
+        "csrr    t0, mhartid"
+        "bnez    t0, .Lrv32fpga_secondary"
+        "la      sp, _stack_top"
+        "la      t0, _sbss"
+        "la      t1, _ebss"
+        ".Lrv32fpga_bss_loop:"
+        "bgeu    t0, t1, .Lrv32fpga_bss_done"
+        "sw      zero, 0(t0)"
+        "addi    t0, t0, 4"
+        "j       .Lrv32fpga_bss_loop"
+        ".Lrv32fpga_bss_done:"
+        "mv      a0, s0"
+        "mv      a1, s1"
+        "call    os__kernel__arch__riscv32__fpga_boot__fpga_boot_main"
+        ".Lrv32fpga_halt:"
+        "wfi"
+        "j       .Lrv32fpga_halt"
+        ".Lrv32fpga_secondary:"
+        "wfi"
+        "j       .Lrv32fpga_secondary"
+        ".balign 4"
+        ".Lrv32fpga_trap:"
+        "csrr    a0, mcause"
+        "csrr    a1, mepc"
+        "wfi"
+        "j       .Lrv32fpga_trap"
+
+fn _uart_put(byte: u32):
+    rt_riscv_uart_put(byte as u64)
+
+fn _crlf():
+    _uart_put(13)
+    _uart_put(10)
+
+fn _fpga_banner():
+    _uart_put(70)   # F
+    _uart_put(80)   # P
+    _uart_put(71)   # G
+    _uart_put(65)   # A
+    _uart_put(45)   # -
+    _uart_put(82)   # R
+    _uart_put(86)   # V
+    _uart_put(51)   # 3
+    _uart_put(50)   # 2
+    _crlf()
+
+# Prints "FPGA SMP harts: N" — proves multi-core softcore boot.
+fn _fpga_smp(n: u64):
+    _uart_put(70)   # F
+    _uart_put(80)   # P
+    _uart_put(71)   # G
+    _uart_put(65)   # A
+    _uart_put(32)
+    _uart_put(83)   # S
+    _uart_put(77)   # M
+    _uart_put(80)   # P
+    _uart_put(58)   # :
+    _uart_put(32)
+    _uart_put((48 + (n as u32)))
+    _crlf()
+
+fn _fpga_smp_wait() -> u64:
+    var c: u64 = rt_rv32_smp_online_count()
+    var i: u64 = 0
+    while c < 3 and i < 2000000:
+        c = rt_rv32_smp_online_count()
+        i = i + 1
+    c
+
+fn fpga_boot_main(_hart_id: u32, _dtb_addr: u32):
+    _fpga_banner()
+    _fpga_smp(_fpga_smp_wait())
+    riscv_noalloc_log_init()
+    riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
+    rt_riscv_noalloc_pmm_init_default()
+    riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())
+    riscv_noalloc_services_init(true)
+    riscv_noalloc_log_boot_ok()
+    os_main()
+    riscv_noalloc_boot_idle()

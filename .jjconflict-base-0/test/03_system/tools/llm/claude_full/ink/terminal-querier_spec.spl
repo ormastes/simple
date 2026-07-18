@@ -1,0 +1,68 @@
+"""
+# Claude Full Terminal Querier
+
+Checks terminal query builders and DA1 sentinel queue draining.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.ink.terminal_querier.*
+
+describe "Claude full TerminalQuerier":
+    it "should build terminal query request sequences":
+        step("Build core terminal query escape sequences")
+        expect(decrqm(2026).request).to_equal("\u001B[?2026$p")
+        expect(da1().request).to_equal("\u001B[c")
+        expect(da2().request).to_equal("\u001B[>c")
+        expect(kittyKeyboard().request).to_equal("\u001B[?u")
+        expect(cursorPosition().request).to_equal("\u001B[?6n")
+        expect(oscColor(11).request).to_equal("\u001B]11;?\u0007")
+        expect(xtversion().request).to_equal("\u001B[>0q")
+
+    it "should match response types with mode and code constraints":
+        step("Check query matcher behavior")
+        expect(queryMatches(decrqm(2026), decrpmResponse(2026))).to_equal(true)
+        expect(queryMatches(decrqm(2026), decrpmResponse(2027))).to_equal(false)
+        expect(queryMatches(oscColor(11), oscResponse(11))).to_equal(true)
+        expect(queryMatches(oscColor(10), oscResponse(11))).to_equal(false)
+        expect(queryMatches(da1(), response("da1"))).to_equal(true)
+
+    it "should send queries and resolve matching responses out of queue order":
+        step("Resolve the first matching query even when not at the head")
+        val querier = TerminalQuerier.new()
+        querier.send(decrqm(2026))
+        querier.send(oscColor(11))
+        querier.onResponse(oscResponse(11))
+        expect(querier.pendingCount()).to_equal(1)
+        expect(querier.resolved[0]).to_equal("osc:osc")
+        expect(querier.writtenText()).to_equal("\u001B[?2026$p\u001B]11;?\u0007")
+
+    it "should flush with a DA1 sentinel and mark previous queries unsupported":
+        step("Flush a query batch and receive DA1")
+        val querier = TerminalQuerier.new()
+        querier.send(decrqm(2026))
+        querier.flush()
+        querier.send(kittyKeyboard())
+        querier.onResponse(response("da1"))
+        expect(querier.resolved).to_equal(["decrpm:undefined", "sentinel:resolved"])
+        expect(querier.pendingCount()).to_equal(1)
+        expect(querier.queue[0].query.matchType).to_equal("kittyKeyboard")
+
+    it "should let explicit DA1 queries consume the first DA1 before sentinel":
+        step("Send explicit DA1 and then flush")
+        val querier = TerminalQuerier.new()
+        querier.send(da1())
+        querier.flush()
+        querier.onResponse(response("da1"))
+        expect(querier.resolved[0]).to_equal("da1:da1")
+        expect(querier.pendingCount()).to_equal(1)
+        querier.onResponse(response("da1"))
+        expect(querier.resolved[1]).to_equal("sentinel:resolved")
+        expect(querier.pendingCount()).to_equal(0)
+
+    it "should ignore unsolicited non-sentinel responses":
+        step("Dispatch a response with no pending match")
+        val querier = TerminalQuerier.new()
+        querier.onResponse(response("xtversion"))
+        expect(querier.resolved.len()).to_equal(0)
+        expect(querier.pendingCount()).to_equal(0)
+        expect(terminalQuerierSourceLinesModeled()).to_equal(212)

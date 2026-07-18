@@ -1,0 +1,210 @@
+# Standalone lightweight implementation for `simple check`.
+#
+# Keep this entrypoint independent of app.cli.*; importing that package loads
+# broad tooling modules and can turn a single-file check into a killed process.
+
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
+use compiler.core.ast.{ast_reset}
+use app.check.sspec_source.{check_sspec_guidance}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn get_cli_args() -> [text]:
+    val raw_args = rt_cli_get_args()
+    var all_args: [text] = []
+    if raw_args != nil:
+        all_args = raw_args
+    var args: [text] = []
+    var start_idx = 1
+    var scan_idx = 0
+    var found_entry = false
+    while scan_idx < all_args.len():
+        if not found_entry and (all_args[scan_idx].ends_with("/app/check/main.spl") or all_args[scan_idx] == "src/app/check/main.spl"):
+            start_idx = scan_idx + 1
+            found_entry = true
+        scan_idx = scan_idx + 1
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn print_help():
+    print "Usage: simple check <file.spl> [file2.spl ...]"
+    print ""
+    print "Parse and validate Simple source files."
+    print ""
+    print "Options:"
+    print "  --human | --llm | --json     Select log rendering mode"
+    print "  --progress <summary|count|dot|none>"
+    print "  -h, --help                   Show this help"
+
+fn is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--quiet" or arg == "--verbose" or arg == "--dots" or
+        arg == "--count" or arg == "--no-progress" or
+        arg == "--log-mode" or arg == "--surface" or arg == "--progress" or
+        arg.starts_with("--log-mode=") or arg.starts_with("--surface=") or
+        arg.starts_with("--progress=")
+
+fn wants_json(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--json" or arg == "--log-mode=json":
+            return true
+        if arg == "--log-mode" and i + 1 < args.len() and args[i + 1] == "json":
+            return true
+        i = i + 1
+    false
+
+fn collect_files(args: [text]) -> [text]:
+    var files: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-h" or arg == "--help":
+            files.push(arg)
+        elif arg == "check":
+            val _skip = 0
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif is_log_option(arg):
+            val _skip = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+        i = i + 1
+    files
+
+fn import_line_has_symbol(trimmed: text, owner: text, symbol: text) -> bool:
+    if not trimmed.starts_with("use {owner}."):
+        return false
+    var normalized = trimmed.replace(" ", "")
+    normalized = normalized.replace("\t", "")
+    normalized = normalized.replace("{", ",")
+    normalized = normalized.replace("}", ",")
+    normalized.contains(",{symbol},")
+
+fn concurrency_import_error(owner: text, symbol: text, expected: text) -> text:
+    "error[E-PAR-003]: {symbol} belongs to {expected}, not {owner}. import {symbol} from {expected}"
+
+fn concurrency_api_lint_errors(source: text) -> [text]:
+    var msgs: [text] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("extern fn rt_pool_"):
+            msgs.push("error[E-PAR-005]: direct rt_pool_* access bypasses the public multicore_green facade")
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "thread_spawn2"):
+            msgs.push("error[E-PAR-002]: thread_spawn2 is a numbered name and is not a public API. use thread_spawn_with_args")
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "spawn_isolated2"):
+            msgs.push("error[E-PAR-002]: spawn_isolated2 is a numbered name and is not a public API. use spawn_isolated_with_args")
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "spawn_limited2"):
+            msgs.push("error[E-PAR-002]: spawn_limited2 is a numbered name and is not a public API. use spawn_limited_with_args")
+        if import_line_has_symbol(trimmed, "std.concurrent.cooperative_green", "thread_spawn_with_args"):
+            msgs.push(concurrency_import_error("std.concurrent.cooperative_green", "thread_spawn_with_args", "std.concurrent.thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.cooperative_green", "thread_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.cooperative_green", "thread_spawn", "std.concurrent.thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.multicore_green", "thread_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.multicore_green", "thread_spawn", "std.concurrent.thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "green_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "green_spawn", "std.concurrent.green_thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_spawn_value"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "cooperative_green_spawn_value", "std.concurrent.cooperative_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_run_all"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "cooperative_green_run_all", "std.concurrent.cooperative_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "cooperative_green_spawn", "std.concurrent.cooperative_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "multicore_green_spawn_sliced"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "multicore_green_spawn_sliced", "std.concurrent.multicore_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "multicore_green_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "multicore_green_spawn", "std.concurrent.multicore_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "task_spawn"):
+            msgs.push("error[E-PAR-001]: task_spawn is not part of the OS-thread facade. import task_spawn from std.nogc_async_mut.thread_pool")
+        if trimmed.contains("thread_spawn(42)") or trimmed.contains("thread_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: thread_spawn expects one zero-argument closure")
+        if trimmed.contains("green_spawn(42)") or trimmed.contains("green_spawn(\\: 1, \\: 2)") or trimmed.contains("green_spawn(do:"):
+            msgs.push("error[E-PAR-004]: green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("cooperative_green_spawn(42)") or trimmed.contains("cooperative_green_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: cooperative_green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("multicore_green_spawn(42)") or trimmed.contains("multicore_green_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("multicore_green_set_parallelism(\""):
+            msgs.push("error[E-PAR-004]: multicore_green_set_parallelism expects an integer worker count")
+        if trimmed.contains("multicore_green_spawn_sliced(0)") or trimmed.contains("multicore_green_spawn_sliced(\""):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn_sliced expects integer state and step function")
+        if trimmed.contains("multicore_green_spawn_sliced(0, 42)"):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn_sliced expects a step function as the second argument")
+    if source.contains("var shared_total") and source.contains("green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: green_spawn closure must not capture shared mutable state")
+    if source.contains("var local_count") and source.contains("cooperative_green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: cooperative_green_spawn closure must not capture shared mutable state")
+    if source.contains("var shared_sum") and source.contains("multicore_green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: multicore_green_spawn closure must not capture shared mutable state")
+    if source.contains("var shared_state") and source.contains("multicore_green_spawn_sliced(0, \\state:"):
+        msgs.push("error[E-PAR-006]: multicore_green_spawn_sliced closure must not capture shared mutable state")
+    msgs
+
+fn check_one(path: text, as_json: bool) -> i64:
+    if not rt_file_exists(path):
+        if not as_json:
+            print "ERROR: {path}: file not found"
+        return 1
+    val source = rt_file_read_text(path) ?? ""
+    val sspec_guidance = check_sspec_guidance(source, path)
+    if sspec_guidance != "":
+        if not as_json:
+            print sspec_guidance
+        return 1
+    ast_reset()
+    parse_module(source, path)
+    val errors = parser_get_errors()
+    val concurrency_errors = concurrency_api_lint_errors(source)
+    if errors.len() == 0 and concurrency_errors.len() == 0 and not parser_has_errors():
+        return 0
+    if not as_json:
+        for err in errors:
+            print "{path}: {err}"
+        for concurrency_err in concurrency_errors:
+            print "{path}: {concurrency_err}"
+        if errors.len() == 0 and concurrency_errors.len() == 0:
+            print "{path}: check failed"
+    val total = errors.len() + concurrency_errors.len()
+    if total > 0: total else: 1
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.contains("-h") or args.contains("--help"):
+        print_help()
+        return 0
+
+    val files = collect_files(args)
+    val as_json = wants_json(args)
+    if files.len() == 0:
+        if as_json:
+            print "{\"command\":\"check\",\"status\":\"error\",\"checked\":0,\"files\":0,\"errors\":1,\"files_with_errors\":0}"
+        else:
+            print_help()
+        return 1
+
+    var checked = 0
+    var errors = 0
+    var files_with_errors = 0
+    for file in files:
+        checked = checked + 1
+        val failed = check_one(file, as_json)
+        if failed != 0:
+            errors = errors + failed
+            files_with_errors = files_with_errors + 1
+
+    val status = if errors == 0: "ok" else: "error"
+    if as_json:
+        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
+    elif errors == 0:
+        print "All checks passed ({checked} file(s))"
+    else:
+        print "{errors} error(s) found in {files_with_errors} of {checked} file(s)"
+
+    if errors == 0: 0 else: 1

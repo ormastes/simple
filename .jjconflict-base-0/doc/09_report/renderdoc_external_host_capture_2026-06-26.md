@@ -1,0 +1,54 @@
+# RenderDoc External Host Capture
+
+- status: fail
+- reason: missing-rdc
+- setup status: ready
+- setup reason: ready
+- run capture: 1
+- capture env: build/renderdoc/html-external-host-capture/capture/html/evidence.env
+- capture status: fail
+- capture reason: missing-rdc
+- capture file: 
+- capture magic: 
+- capture file magic: 
+- capture HTML fixture: /home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- gate status: fail
+- gate reason: missing-rdc
+- gate scene: html-css-chrome
+- gate HTML fixture: /home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- gate capture file magic: 
+- gate requested API: vulkan
+- gate requested ANGLE: vulkan
+
+## Raw Evidence
+- rdoc_external_host_capture_status=fail
+- rdoc_external_host_capture_reason=missing-rdc
+- rdoc_external_host_setup_status=ready
+- rdoc_external_host_setup_reason=ready
+- rdoc_external_host_run_capture=1
+- rdoc_external_host_capture_env=build/renderdoc/html-external-host-capture/capture/html/evidence.env
+- rdoc_external_host_capture_status_raw=fail
+- rdoc_external_host_capture_reason_raw=missing-rdc
+- rdoc_external_host_capture_file=
+- rdoc_external_host_capture_magic=
+- rdoc_external_host_capture_file_magic=
+- rdoc_external_host_capture_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- rdoc_external_host_gate_status=fail
+- rdoc_external_host_gate_reason=missing-rdc
+- rdoc_external_host_gate_scene=html-css-chrome
+- rdoc_external_host_gate_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- rdoc_external_host_gate_capture_file_magic=
+- rdoc_external_host_gate_requested_api=vulkan
+- rdoc_external_host_gate_requested_angle=vulkan
+- rdoc_external_host_gate_requested_features=Vulkan
+- rdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
+- rdoc_external_host_required_backend=original
+- rdoc_external_host_required_scene=html-css-chrome
+- rdoc_external_host_required_status=pass
+- rdoc_external_host_required_magic=RDOC
+- rdoc_external_host_required_api=vulkan
+- rdoc_external_host_required_angle=vulkan
+- rdoc_external_host_required_features=Vulkan
+- rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- rdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan
+- rdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan

@@ -1,0 +1,106 @@
+# Generate real RV32I VHDL template modules already owned by the compiler
+# backend. This is not a full CPU core or bitstream handoff.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text) -> bool
+
+use compiler.backend.vhdl.{
+    render_rv32i_register_file_vhdl,
+    render_rv32i_opcode_package,
+    render_rv32i_field_extractor,
+    render_rv32i_alu_control
+}
+use std.hardware.fpga_linux.riscv_fpga_linux.{RiscvFpgaLane}
+
+fn rv32_top_vhdl() -> text:
+    var l = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.textio.all;\nuse ieee.std_logic_textio.all;\nlibrary unisim;\nuse unisim.vcomponents.all;\n\n"
+    l = l + "entity soc_top_rv32 is\n"
+    l = l + "  port (\n"
+    l = l + "    uart_tx : out std_logic\n"
+    l = l + "  );\n"
+    l = l + "end entity soc_top_rv32;\n\n"
+    l = l + "architecture rtl of soc_top_rv32 is\n"
+    l = l + "  signal cfgclk  : std_logic;\n"
+    l = l + "  signal cfgmclk : std_logic;\n"
+    l = l + "  signal di      : std_logic_vector(3 downto 0);\n"
+    l = l + "  signal eos     : std_logic;\n"
+    l = l + "  signal preq    : std_logic;\n"
+    l = l + "  signal pc_word : unsigned(11 downto 0) := (others => '0');\n"
+    l = l + "  signal instr_q : unsigned(31 downto 0) := x\"00000013\";\n"
+    l = l + "  signal rd_q    : unsigned(31 downto 0) := (others => '0');\n"
+    l = l + "  signal result  : unsigned(31 downto 0);\n"
+    l = l + "  type payload_t is array(0 to 4095) of std_logic_vector(31 downto 0);\n"
+    l = l + "  impure function init_payload return payload_t is\n"
+    l = l + "    file f : text open read_mode is \"rv32_payload.mem\";\n"
+    l = l + "    variable line_v : line;\n"
+    l = l + "    variable word_v : std_logic_vector(31 downto 0);\n"
+    l = l + "    variable mem_v : payload_t := (others => x\"00000013\");\n"
+    l = l + "    variable idx : natural := 0;\n"
+    l = l + "  begin\n"
+    l = l + "    while not endfile(f) loop\n"
+    l = l + "      readline(f, line_v);\n"
+    l = l + "      hread(line_v, word_v);\n"
+    l = l + "      if idx < 4096 then mem_v(idx) := word_v; end if;\n"
+    l = l + "      idx := idx + 1;\n"
+    l = l + "    end loop;\n"
+    l = l + "    return mem_v;\n"
+    l = l + "  end function;\n"
+    l = l + "  signal payload : payload_t := init_payload;\n"
+    l = l + "begin\n"
+    l = l + "  u_startup : STARTUPE3\n"
+    l = l + "    generic map (PROG_USR => \"FALSE\", SIM_CCLK_FREQ => 0.0)\n"
+    l = l + "    port map (\n"
+    l = l + "      CFGCLK => cfgclk, CFGMCLK => cfgmclk, DI => di, EOS => eos, PREQ => preq,\n"
+    l = l + "      DO => \"0000\", DTS => \"1111\", FCSBO => '1', FCSBTS => '1', GSR => '0', GTS => '0',\n"
+    l = l + "      KEYCLEARB => '1', PACK => '0', USRCCLKO => '0', USRCCLKTS => '1',\n"
+    l = l + "      USRDONEO => '1', USRDONETS => '1'\n"
+    l = l + "    );\n\n"
+    l = l + "  u_decode : entity work.simple_rv32i_core_decode_writeback\n"
+    l = l + "    port map (imem_rdata => instr_q, next_rd => rd_q, result_out => result);\n\n"
+    l = l + "  process(cfgmclk)\n"
+    l = l + "  begin\n"
+    l = l + "    if rising_edge(cfgmclk) then\n"
+    l = l + "      instr_q <= unsigned(payload(to_integer(pc_word)));\n"
+    l = l + "      pc_word <= pc_word + 1;\n"
+    l = l + "      rd_q    <= result;\n"
+    l = l + "    end if;\n"
+    l = l + "  end process;\n\n"
+    l = l + "  -- ponytail: internal oscillator liveness pin; replace with PS clock plus UART boot marker when RV32 executes payloads.\n"
+    l = l + "  uart_tx <= result(0) xor result(5) xor eos;\n"
+    l = l + "end architecture rtl;\n"
+    l
+
+fn write_vhd(out_dir: text, name: text, content: text) -> bool:
+    val path = "{out_dir}/{name}.vhd"
+    val ok = rt_file_write_text(path, content)
+    if ok:
+        print("OK {path} bytes={content.length()}")
+    else:
+        print("FAIL {path}")
+    ok
+
+fn write_text(out_dir: text, name: text, content: text) -> bool:
+    val path = "{out_dir}/{name}"
+    val ok = rt_file_write_text(path, content)
+    if ok:
+        print("OK {path} bytes={content.length()}")
+    else:
+        print("FAIL {path}")
+    ok
+
+fn main():
+    val out_dir = "build/vhdl/rv32"
+    rt_dir_create(out_dir)
+
+    write_vhd(out_dir, "rv32i_pkg", render_rv32i_opcode_package())
+    write_vhd(out_dir, "rv32i_decode", render_rv32i_field_extractor() + "\n\n" + render_rv32i_alu_control())
+    write_text(out_dir, "rv32_core.spl", RiscvFpgaLane.rv32_default().hardware_source_spl())
+
+    val regfile = render_rv32i_register_file_vhdl()
+    match regfile:
+        Ok(vhdl):
+            write_vhd(out_dir, "rv32i_regfile", vhdl)
+        Err(_):
+            print("FAIL rv32i_regfile")
+
+    write_vhd(out_dir, "soc_top_rv32", rv32_top_vhdl())

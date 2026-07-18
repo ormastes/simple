@@ -1,0 +1,150 @@
+use app.dashboard.assistant_collectors.{AssistantDashboardSnapshot}
+use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
+use app.dashboard.assistant_live_view.{
+    assistant_dashboard_live_view_from_snapshot,
+    assistant_dashboard_render_live_view
+}
+use app.mcp.assistant.{AssistantSessionRecord, AssistantChildTaskRecord}
+
+fn make_session(session_id: text, updated_at_ms: i64) -> AssistantSessionRecord:
+    AssistantSessionRecord(
+        session_id: session_id,
+        name: "Live Session",
+        summary: "Live Objective",
+        objective: "Live Objective",
+        prompt: "Live Objective",
+        mode: "proactive",
+        state: "running",
+        policy: "bounded",
+        parent_session_id: "",
+        parent_tool_use_id: "",
+        last_signal: "",
+        last_event_kind: "",
+        last_event_detail: "",
+        last_event_time_ms: updated_at_ms,
+        last_tick_at_ms: 0,
+        created_at_ms: updated_at_ms,
+        updated_at_ms: updated_at_ms,
+        event_count: 0,
+        error_count: 0,
+        model: "",
+        provider: "",
+        digest_checkpoint_id: "",
+        tool_use_ids: [],
+        children: ["child-1"],
+        child_tasks: [
+            AssistantChildTaskRecord(
+                task_id: "task-1",
+                session_id: session_id,
+                parent_session_id: session_id,
+                parent_task_id: "",
+                child_session_id: "child-1",
+                objective: "child work",
+                owner_kind: "assistant",
+                status: "running",
+                resource_policy: "bounded",
+                result_summary: "",
+                created_at_ms: updated_at_ms,
+                updated_at_ms: updated_at_ms,
+                started_at_ms: updated_at_ms,
+                ended_at_ms: 0
+            )
+        ],
+        warnings: []
+    )
+
+fn make_failed_session(session_id: text, updated_at_ms: i64) -> AssistantSessionRecord:
+    val session = make_session(session_id, updated_at_ms)
+    session.state = "failed"
+    session.last_event_kind = "error"
+    session.last_event_detail = "model process crashed"
+    session.error_count = 1
+    session
+
+fn make_snapshot(session: AssistantSessionRecord) -> AssistantDashboardSnapshot:
+    AssistantDashboardSnapshot(
+        selected_session_id: session.session_id,
+        total_sessions: 1,
+        sessions: [session],
+        timeline: [],
+        notifications: [],
+        source_root: ".build/llm_dashboard/assistant",
+        mode: "replay"
+    )
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+fn expect_absence_marker_hidden(value: text):
+    expect(value.split(absence_marker()).len()).to_equal(1)
+
+describe "assistant dashboard live view":
+    it "renders replay snapshots as read-only without internal absence marker text":
+        val policy = assistant_bridge_default_policy()
+        val snapshot = make_snapshot(make_session("session-replay", 1000))
+        val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 2_000_000, 1_000_000, false)
+        val lines = assistant_dashboard_render_live_view(view)
+        val rendered = lines.join("\n")
+
+        expect(view.read_only).to_equal(true)
+        expect(view.live_controls_enabled).to_equal(false)
+        expect(view.primary_action.route_target).to_equal("blocked")
+        expect_absence_marker_hidden(rendered)
+        expect(rendered).to_contain("replay snapshot is read-only")
+
+    it "routes fresh live snapshots to assistant_core and exposes task counts":
+        val policy = assistant_bridge_default_policy()
+        val snapshot = make_snapshot(make_session("session-live", 2000))
+        val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 2_000_100, 2_000_000, true)
+
+        expect(view.read_only).to_equal(false)
+        expect(view.live_controls_enabled).to_equal(true)
+        expect(view.freshness_state).to_equal("fresh")
+        expect(view.task_count).to_equal(1)
+        expect(view.primary_action.allowed).to_equal(true)
+        expect(view.primary_action.route_target).to_equal("assistant_core")
+
+    it "blocks stale live snapshots and asks the operator to refresh":
+        val policy = assistant_bridge_default_policy()
+        val snapshot = make_snapshot(make_session("session-stale", 3000))
+        val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 50_000_000, 1_000_000, true)
+        val lines = assistant_dashboard_render_live_view(view)
+
+        expect(view.read_only).to_equal(true)
+        expect(view.live_controls_enabled).to_equal(false)
+        expect(view.freshness_state).to_equal("stale")
+        expect(view.primary_action.allowed).to_equal(false)
+        expect(view.failure_state).to_equal("bridge_stale")
+        expect(lines.join("\n")).to_contain("refresh required before operator actions")
+
+    it "renders assistant crash evidence from failed session metadata":
+        val policy = assistant_bridge_default_policy()
+        val snapshot = make_snapshot(make_failed_session("session-crash", 4000))
+        val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 4_000_100, 4_000_000, true)
+        val lines = assistant_dashboard_render_live_view(view)
+        val rendered = lines.join("\n")
+
+        expect(view.failure_state).to_equal("error")
+        expect(view.failure_count).to_equal(1)
+        expect(view.failure_detail).to_equal("model process crashed")
+        expect(rendered).to_contain("failure error model process crashed")
+        expect_absence_marker_hidden(rendered)
+
+    it "renders missing selected-session evidence without internal absence marker text":
+        val policy = assistant_bridge_default_policy()
+        val snapshot = AssistantDashboardSnapshot(
+            selected_session_id: "missing-session",
+            total_sessions: 0,
+            sessions: [],
+            timeline: [],
+            notifications: [],
+            source_root: ".build/llm_dashboard/assistant",
+            mode: "replay"
+        )
+        val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 1_000_000, 1_000_000, false)
+        val lines = assistant_dashboard_render_live_view(view)
+        val rendered = lines.join("\n")
+
+        expect(view.failure_state).to_equal("missing")
+        expect(view.failure_detail).to_equal("selected session unavailable")
+        expect_absence_marker_hidden(rendered)

@@ -1,0 +1,87 @@
+# Regression guard for the @cfg duplicate-signature native-build misdispatch bug.
+#
+# When N private-or-public free functions share the SAME name and an IDENTICAL
+# signature but different `@cfg(<arch>)` gates (the pattern used for per-arch
+# dispatcher fns, e.g. `_fs_exec_spawn_ring3_active` in
+# src/os/kernel/loader/fs_exec_spawn.spl), the seed's HIR->MIR lowering
+# (src/compiler_rust/compiler/src/mir/lower/lowering_core.rs, the
+# `private_dup_overloads` block) explicitly skips `$dupN` mangling whenever all
+# co-declared signatures are identical ("last-write-wins stays observably
+# equivalent -- leave the name alone"). Cfg-pruning to the single active arch
+# variant is not applied ahead of that stage on this path, so the compiled
+# artifact silently binds whichever same-name variant appears FIRST in source
+# order -- not the one gated to the active target arch. This is distinct from
+# `strip_inactive_cfg_arch_fns` (src/compiler_rust/compiler/src/pipeline/
+# native_project/discovery.rs), which only prunes a whole-file leading `@cfg`
+# gate and does not cover this per-declaration duplicate-signature path.
+#
+# This spec drives the actual seed binary's `compile` pipeline (not the
+# self-hosted compiler, which has no `$dup` mangling logic at all) so it
+# exercises the real buggy code path end to end: write a source with 3
+# same-name/same-signature `@cfg(x86_64)` / `@cfg(arm64)` / `@cfg(riscv64)`
+# variants of `arch_sentinel`, each returning a distinct sentinel value,
+# compile it on an x86_64 host, run the compiled artifact, and assert the
+# x86_64 body is the one that actually ran.
+#
+# @cover src/compiler_rust/compiler/src/mir/lower/lowering_core.rs
+# @cover src/compiler_rust/compiler/src/pipeline/module_loader.rs
+
+use std.spec
+use std.io_runtime.{file_write, file_delete, file_exists, shell}
+
+fn _cfg_dup_seed_bin() -> text:
+    "src/compiler_rust/target/bootstrap/simple"
+
+fn _cfg_dup_source(first_arch: text, second_arch: text, third_arch: text, first_val: text, second_val: text, third_val: text) -> text:
+    "@cfg({first_arch})\nfn arch_sentinel(unused: i64) -> i64:\n    {first_val}\n\n@cfg({second_arch})\nfn arch_sentinel(unused: i64) -> i64:\n    {second_val}\n\n@cfg({third_arch})\nfn arch_sentinel(unused: i64) -> i64:\n    {third_val}\n\nfn main() -> i64:\n    val got = arch_sentinel(0)\n    print(\"got={{got}}\")\n    if got == 100:\n        print(\"PASS\")\n        return 0\n    print(\"FAIL\")\n    1\n"
+
+describe "seed native-build @cfg duplicate-signature arch dispatch":
+    it "binds the active x86_64 @cfg variant when it is declared LAST (regression order)":
+        val seed = _cfg_dup_seed_bin()
+        if file_exists(seed):
+            val src_path = "/tmp/cfg_dup_signature_dispatch_repro_b.spl"
+            val out_path = "/tmp/cfg_dup_signature_dispatch_repro_b.smf"
+            file_write(src_path, _cfg_dup_source("riscv64", "arm64", "x86_64", "300", "200", "100"))
+            file_delete(out_path)
+
+            val compiled = shell("SIMPLE_RUST_SEED_WARNING=0 {seed} compile {src_path} -o {out_path} 2>&1")
+            expect(compiled.exit_code).to_equal(0)
+
+            val ran = shell("SIMPLE_RUST_SEED_WARNING=0 {seed} {out_path} 2>&1")
+
+            # BUG: with riscv64 declared first, the seed's identical-signature
+            # last-write-wins fallback binds the riscv64 body (got=300, FAIL)
+            # on an x86_64 host instead of the active x86_64 body (got=100,
+            # PASS) -- this assertion is expected to be RED until the fix
+            # applies cfg-pruning ahead of this lowering path.
+            expect(ran.stdout).to_contain("got=100")
+            expect(ran.stdout).to_contain("PASS")
+
+            file_delete(src_path)
+            file_delete(out_path)
+        else:
+            print("SKIP: seed binary not found at {seed} -- build via `cargo build --release --manifest-path src/compiler_rust/Cargo.toml` (see .claude/rules/bootstrap.md)")
+
+    it "binds the active x86_64 @cfg variant when it is declared FIRST (control order)":
+        val seed = _cfg_dup_seed_bin()
+        if file_exists(seed):
+            val src_path = "/tmp/cfg_dup_signature_dispatch_repro_a.spl"
+            val out_path = "/tmp/cfg_dup_signature_dispatch_repro_a.smf"
+            file_write(src_path, _cfg_dup_source("x86_64", "arm64", "riscv64", "100", "200", "300"))
+            file_delete(out_path)
+
+            val compiled = shell("SIMPLE_RUST_SEED_WARNING=0 {seed} compile {src_path} -o {out_path} 2>&1")
+            expect(compiled.exit_code).to_equal(0)
+
+            val ran = shell("SIMPLE_RUST_SEED_WARNING=0 {seed} {out_path} 2>&1")
+
+            # Control: this order already passes today (first-declared happens
+            # to coincide with the active arch), proving the harness itself is
+            # sound and the failure above is order-dependent, not a broken test.
+            expect(ran.stdout).to_contain("got=100")
+            expect(ran.stdout).to_contain("PASS")
+
+            file_delete(src_path)
+            file_delete(out_path)
+        else:
+            print("SKIP: seed binary not found at {seed} -- build via `cargo build --release --manifest-path src/compiler_rust/Cargo.toml` (see .claude/rules/bootstrap.md)")

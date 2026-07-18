@@ -1,0 +1,122 @@
+# Markdown Visual Editor Model
+#
+# Obsidian-style note model: markdown source, visual outline, and wiki links.
+
+struct MarkdownVisualBlock:
+    kind: text
+    level: i32
+    text: text
+
+struct MarkdownVisualNote:
+    path: text
+    title: text
+    source: text
+    blocks: [MarkdownVisualBlock]
+    wiki_links: [text]
+
+fn markdown_visual_note(path: text, source: text) -> MarkdownVisualNote:
+    MarkdownVisualNote(
+        path: path,
+        title: markdown_visual_title(path, source),
+        source: source,
+        blocks: markdown_visual_blocks(source),
+        wiki_links: markdown_visual_wiki_links(source)
+    )
+
+fn markdown_visual_is_markdown_path(path: text) -> bool:
+    path.ends_with(".md") or path.ends_with(".markdown")
+
+fn markdown_visual_title(path: text, source: text) -> text:
+    for line in source.split("\n"):
+        # Strip trailing CR for CRLF input
+        val stripped = if line.ends_with("\r"): line.slice(0, line.len() - 1) else: line
+        if stripped.starts_with("# "):
+            return stripped.slice(2, stripped.len())
+    _markdown_visual_basename(path)
+
+fn markdown_visual_blocks(source: text) -> [MarkdownVisualBlock]:
+    var blocks: [MarkdownVisualBlock] = []
+    for line in source.split("\n"):
+        blocks = blocks.push(_markdown_visual_block(line))
+    if blocks.len() == 0:
+        blocks = blocks.push(MarkdownVisualBlock(kind: "paragraph", level: 0, text: ""))
+    blocks
+
+fn markdown_visual_preview_lines(source: text) -> [text]:
+    var rows: [text] = []
+    for block in markdown_visual_blocks(source):
+        if block.kind == "heading":
+            rows = rows.push(block.text)
+        elif block.kind == "bullet":
+            rows = rows.push("* " + block.text)
+        else:
+            rows = rows.push(block.text)
+    rows
+
+fn markdown_visual_wiki_links(source: text) -> [text]:
+    if source.len() == 0:
+        return []
+    var links: [text] = []
+    var i = 0
+    val n = source.len()
+    while i < n:
+        val ch = source.char_at(i)
+        # Detect opening [[
+        if ch == "[" and i + 1 < n and source.char_at(i + 1) == "[":
+            # Find the closing ]]
+            var j = i + 2
+            var found = false
+            while j + 1 < n:
+                if source.char_at(j) == "]" and source.char_at(j + 1) == "]":
+                    found = true
+                    break
+                j = j + 1
+            if found:
+                val target = source.slice(i + 2, j)
+                # Only push non-empty targets
+                if target.len() > 0:
+                    links = links.push(target)
+                i = j + 2
+            else:
+                # Unterminated [[ — skip past the opening pair, no push
+                i = i + 2
+        else:
+            i = i + 1
+    links
+
+fn _markdown_visual_block(line: text) -> MarkdownVisualBlock:
+    if line.starts_with("#"):
+        val level = _markdown_visual_heading_level(line)
+        val prefix_len = level + 1
+        val text = if line.len() > prefix_len: line.slice(prefix_len, line.len()) else: ""
+        return MarkdownVisualBlock(kind: "heading", level: level, text: text)
+    if line.starts_with("- "):
+        return MarkdownVisualBlock(kind: "bullet", level: 0, text: line.slice(2, line.len()))
+    MarkdownVisualBlock(kind: "paragraph", level: 0, text: line)
+
+fn _markdown_visual_heading_level(line: text) -> i32:
+    var level = 0
+    for ch in line:
+        if ch == "#":
+            level = level + 1
+        else:
+            break
+    if level < 1:
+        return 1
+    if level > 6:
+        return 6
+    level
+
+fn _markdown_visual_basename(path: text) -> text:
+    var last_slash = -1
+    var i = 0
+    for ch in path:
+        if ch == "/":
+            last_slash = i
+        i = i + 1
+    val name = if last_slash >= 0: path.slice(last_slash + 1, path.len()) else: path
+    if name.ends_with(".markdown"):
+        return name.slice(0, name.len() - 9)
+    if name.ends_with(".md"):
+        return name.slice(0, name.len() - 3)
+    name

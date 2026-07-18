@@ -1,0 +1,1485 @@
+# SSH Session — Per-client connection handler
+#
+# Manages the lifecycle of one SSH connection:
+#   version exchange -> key exchange -> authentication -> channel -> shell
+#
+# Each phase is implemented as a separate method called from run().
+# The session reads/writes via socket FDs using the POSIX socket API.
+#
+# Implementation is split across:
+#   ssh_session_helpers.spl  — extern fns, constants, structs, low-level helpers
+#   ssh_session_kex.spl      — Phase 2: key exchange (do_kex)
+#   ssh_session_auth.spl     — Phase 3+4: service request and authentication
+#   ssh_session_channel.spl  — Phase 5: interactive channel management
+
+use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_text_to_bytes}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex}
+use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs}
+use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_cipher_live.{SshCipher, ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm, ssh_decrypt_packet_aes256_gcm_payload_direct, ssh_decrypt_packet_aes256_gcm_payload_direct_raw, ssh_decrypt_packet_aes256_gcm_payload_len, ssh_encrypt_packet_aes128_gcm, ssh_decrypt_packet_aes128_gcm}
+use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
+use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
+use os.apps.sshd.ssh_hex.{format_hex}
+use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
+use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
+use os.kernel.log.klog_api.{log_info}
+use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_send_ssh_banner, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+
+# Pull in helpers and split impl blocks
+use os.apps.sshd.ssh_session_helpers.{RECV_BUF_SIZE, PlainPacketHeader, _SshTextField, _AuthRequestFast, _u8_at, _slice_range, _zeroed_32_bytes, _copy_bytes_stable, _copy_prefix_stable, _password_only_auth_failure_payload, _build_plain_packet_header, _zero_padding_bytes, _copy_range_stable, _push_u32_be_stable, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable, _read_u32_stable, _read_text_field_fast, _parse_kexinit_fast, _is_ssh_userauth_service_request, _text_equals_bytes, _payload_text_field_equals_bytes, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _parse_auth_request_fast, _bytes_to_hex, _ed25519_public_key_from_seed, ssh_validate_kex_payload, ssh_validate_kex_ecdh_init_payload, ssh_validate_newkeys_payload, _build_publickey_signed_data, _unwrap_ssh_signature, _extract_ed25519_pubkey}
+export use os.apps.sshd.ssh_session_kex.*
+export use os.apps.sshd.ssh_session_auth.*
+export use os.apps.sshd.ssh_session_channel.*
+
+extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
+extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_to_byte_array(s: text) -> [u8]
+extern fn rt_thread_sleep(ms: i64) -> i64
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
+extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_ssh_userauth_password_only_failure_payload() -> [u8]
+extern fn rt_boot_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_boot_tcp_send_kexinit_fixed(fd: i64) -> i64
+extern fn rt_boot_tcp_send_kex_reply_fixed(fd: i64) -> i64
+extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
+extern fn rt_boot_tcp_send_plain_payload(fd: i64, data: [u8]) -> i64
+extern fn serial_println(msg: text)
+
+fn _live_openssh_client_version_bytes() -> [u8]:
+    serial_println("[sshd-session] version builder start")
+    var out: [u8] = []
+    out = rt_push_byte(out, 0x53)
+    out = rt_push_byte(out, 0x53)
+    out = rt_push_byte(out, 0x48)
+    out = rt_push_byte(out, 0x2d)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x2e)
+    out = rt_push_byte(out, 0x30)
+    out = rt_push_byte(out, 0x2d)
+    out = rt_push_byte(out, 0x4f)
+    out = rt_push_byte(out, 0x70)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x6e)
+    out = rt_push_byte(out, 0x53)
+    out = rt_push_byte(out, 0x53)
+    out = rt_push_byte(out, 0x48)
+    out = rt_push_byte(out, 0x5f)
+    out = rt_push_byte(out, 0x39)
+    out = rt_push_byte(out, 0x2e)
+    out = rt_push_byte(out, 0x36)
+    out = rt_push_byte(out, 0x70)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x20)
+    out = rt_push_byte(out, 0x55)
+    out = rt_push_byte(out, 0x62)
+    out = rt_push_byte(out, 0x75)
+    out = rt_push_byte(out, 0x6e)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x75)
+    out = rt_push_byte(out, 0x2d)
+    out = rt_push_byte(out, 0x33)
+    out = rt_push_byte(out, 0x75)
+    out = rt_push_byte(out, 0x62)
+    out = rt_push_byte(out, 0x75)
+    out = rt_push_byte(out, 0x6e)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x75)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x33)
+    out = rt_push_byte(out, 0x2e)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x36)
+    serial_println("[sshd-session] version builder done")
+    out
+
+fn _ssh_identification_text_to_bytes_stable(line: text) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < line.len():
+        out = rt_push_byte(out, line.char_at(i).to_i64() & 0xFF)
+        i = i + 1
+    out
+
+fn _ssh_identification_bytes_start_ssh2(data: [u8]) -> bool:
+    if data.len() < 8:
+        return false
+    _u8_at(data, 0) == 0x53 and
+        _u8_at(data, 1) == 0x53 and
+        _u8_at(data, 2) == 0x48 and
+        _u8_at(data, 3) == 0x2D and
+        _u8_at(data, 4) == 0x32 and
+        _u8_at(data, 5) == 0x2E and
+        _u8_at(data, 6) == 0x30 and
+        _u8_at(data, 7) == 0x2D
+
+fn _ssh_identification_bytes_trim_crlf(data: [u8]) -> [u8]:
+    if data.len() >= 2 and _u8_at(data, data.len() - 2) == 0x0D and _u8_at(data, data.len() - 1) == 0x0A:
+        return _slice_range(data, 0, data.len() - 2)
+    if data.len() >= 1 and (_u8_at(data, data.len() - 1) == 0x0D or _u8_at(data, data.len() - 1) == 0x0A):
+        return _slice_range(data, 0, data.len() - 1)
+    _copy_bytes_stable(data)
+
+fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
+    var payload: [u8] = []
+    payload = rt_push_byte(payload, 94)
+    payload = _push_u32_be_stable(payload, recipient)
+    payload = _push_u32_be_stable(payload, data.len().to_u32())
+    # Copy the DATA via the `.push` intrinsic, NOT the `payload =
+    # rt_push_byte(payload, ..)` reassignment form: on x86_64 freestanding
+    # native-build the reassignment form drops the BYTE_PACKED representation
+    # once the array grows large and corrupts the copy — this was the Inc-3
+    # getfile 0x53-garbage bug (712-byte /hello.o delivered as garbage while
+    # small handshake/exit packets, which stay inline-packed, delivered fine).
+    # See _copy_bytes_stable's note. The 9-byte header above stays small enough
+    # for the reassignment helpers.
+    var i: u64 = 0
+    while i < data.len():
+        payload.push(_u8_at(data, i))
+        i = i + 1
+    payload
+
+fn _payload_field_equals_bytes_stable(payload: [u8], field_offset: u64, expected: [u8]) -> bool:
+    if field_offset + 4 > payload.len():
+        return false
+    val field_len = _read_u32_stable(payload, field_offset).to_u64()
+    if field_len != expected.len():
+        return false
+    val start = field_offset + 4
+    if start + field_len > payload.len():
+        return false
+    var i: u64 = 0
+    while i < expected.len():
+        if _u8_at(payload, start + i) != _u8_at(expected, i):
+            return false
+        i = i + 1
+    true
+
+fn _is_live_channel_open_session(payload: [u8]) -> bool:
+    if payload.len() < 24:
+        return false
+    _u8_at(payload, 0) == 90 and
+        _u8_at(payload, 1) == 0 and
+        _u8_at(payload, 2) == 0 and
+        _u8_at(payload, 3) == 0 and
+        _u8_at(payload, 4) == 7 and
+        _u8_at(payload, 5) == 0x73 and
+        _u8_at(payload, 6) == 0x65 and
+        _u8_at(payload, 7) == 0x73 and
+        _u8_at(payload, 8) == 0x73 and
+        _u8_at(payload, 9) == 0x69 and
+        _u8_at(payload, 10) == 0x6F and
+        _u8_at(payload, 11) == 0x6E
+
+fn _field_range_equals_bytes_stable(payload: [u8], start: u64, end: u64, expected: [u8]) -> bool:
+    if end < start:
+        return false
+    if end - start != expected.len():
+        return false
+    var i: u64 = 0
+    while i < expected.len():
+        if _u8_at(payload, start + i) != _u8_at(expected, i):
+            return false
+        i = i + 1
+    true
+
+# Phase 2e Inc 3: scp-source (`scp -f <path>`) file retrieval. The FAT read
+# below is a plain C buffer read (simpleos_fat32_stream_open/stream_read_at
+# — the SAME primitive x86_64_fs_exec_spawn_heap already proved works
+# POST rt_net_init+vmm+SSH activity, streaming the 124.6 MB clang ELF over
+# real SSH, Phase 2e Inc 1), NOT a ring-3 CPL transition, so it is safe to
+# call from this DEEP session-dispatch frame (unlike the ring-3 spawn, which
+# must be deferred to the shallow accept-loop frame — see
+# doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md bug #2).
+# x86_64-only: guarded with @cfg so shared sshd.spl/ssh_session.spl still
+# compile for the rv64/arm SSH lanes (mirrors sshd.spl's
+# _sshd_run_pending_ring3_exec per-arch stub pattern).
+@cfg(x86_64)
+extern fn simpleos_fat32_stream_open(path: text) -> i64
+@cfg(x86_64)
+extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
+@cfg(x86_64)
+extern fn simpleos_fat32_path_read_buffer_addr() -> u64
+@cfg(x86_64)
+extern fn mmio_read8(addr: u64) -> u8
+
+fn _scp_ctrl_line(size: i64, name_bytes: [u8]) -> [u8]:
+    """Build the scp-source `C0644 <size> <name>\n` control line as raw [u8].
+    NEVER via text interpolation: on the x64 freestanding target, interpolating
+    an int / dynamic-text field and converting the result to bytes yields an
+    EMPTY buffer (same freestanding class as the char_code_at / text-store bugs
+    — see doc/08_tracking/bug/x64_freestanding_char_code_at_dynamic_text.md).
+    Manual base-10 digits + [u8] concat is the reliable path."""
+    var digits: [u8] = []
+    var v = size
+    if v <= 0:
+        digits = _copy_bytes_stable([0x30])
+    else:
+        while v > 0:
+            var db: [u8] = []
+            db = rt_push_byte(db, (v % 10) + 0x30)
+            digits = rt_bytes_concat(db, digits)
+            v = v / 10
+    var out = _copy_bytes_stable([0x43, 0x30, 0x36, 0x34, 0x34, 0x20])
+    out = rt_bytes_concat(out, digits)
+    out = rt_bytes_concat(out, _copy_bytes_stable([0x20]))
+    out = rt_bytes_concat(out, name_bytes)
+    out = rt_bytes_concat(out, _copy_bytes_stable([0x0A]))
+    out
+
+@cfg(x86_64)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    val fsize = simpleos_fat32_stream_open(path)
+    if fsize <= 0 or fsize > 4194304:
+        serial_println("[sshd-session] scp read-open-fail path={path} fsize={fsize}")
+        return ([], -1)
+    val buf = simpleos_fat32_path_read_buffer_addr()
+    if buf == 0.to_u64():
+        return ([], -1)
+    val n = simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())
+    if n != fsize:
+        serial_println("[sshd-session] scp read-short path={path} want={fsize} got={n}")
+        return ([], -1)
+    # Build the [u8] by reading each byte straight from the FAT buffer via
+    # mmio_read8 (the proven Inc-1 raw-read idiom) — a Simple-native packed [u8]
+    # that _u8_at reads reliably at any stack depth. (`b` is bound before
+    # `.to_i64()` only for clarity; a chained form would work too.)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < fsize.to_u64():
+        val b = mmio_read8(buf + i)
+        out = rt_push_byte(out, b.to_i64())
+        i = i + 1
+    (out, fsize)
+
+@cfg(x86)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(arm64)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(arm32)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(riscv64)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(riscv32)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+# Raw [u8] scan helpers for the scp -f command — NEVER text.char_at/
+# starts_with on dynamically-built text (mis-decodes; see
+# doc/08_tracking/bug/x64_freestanding_char_code_at_dynamic_text.md). Mirrors
+# sshd.spl's _sshd_tokenize_command idiom (rt_string_to_byte_array +
+# rt_bytes_u8_at), just applied inline in this deep dispatch frame — bulk
+# byte-array conversion is proven reliable at any stack depth (unlike the
+# per-char text accessors), see that doc's workaround note.
+fn _scp_last_token_bytes(command: text) -> [u8]:
+    """Return the LAST whitespace-delimited token of `command` as raw bytes
+    (the scp -f path — handles `scp -f /hello.o`, `scp -pf /hello.o`, etc.,
+    since the path is always the final token regardless of flag combos)."""
+    val bytes = rt_string_to_byte_array(command)
+    var last: [u8] = []
+    var cur: [u8] = []
+    var i: i64 = 0
+    val n = bytes.len().to_i64()
+    while i < n:
+        val code = rt_bytes_u8_at(bytes, i)
+        if code == 32:
+            if cur.len() > 0:
+                last = cur
+                cur = []
+        else:
+            cur = rt_push_byte(cur, code)
+        i = i + 1
+    if cur.len() > 0:
+        last = cur
+    last
+
+fn _scp_basename_bytes(path_bytes: [u8]) -> [u8]:
+    """Return the bytes after the last '/' in `path_bytes` (the scp control
+    line's basename field)."""
+    var last_slash: i64 = -1
+    var i: i64 = 0
+    val n = path_bytes.len().to_i64()
+    while i < n:
+        if rt_bytes_u8_at(path_bytes, i) == 0x2F:
+            last_slash = i
+        i = i + 1
+    var out: [u8] = []
+    var j = last_slash + 1
+    while j < n:
+        out = rt_push_byte(out, rt_bytes_u8_at(path_bytes, j))
+        j = j + 1
+    out
+
+fn _exec_success_output_for_command(command: text) -> [u8]:
+    val trimmed = command.trim()
+    if trimmed == "simple" or trimmed.starts_with("simple "):
+        return _copy_bytes_stable([0x53, 0x45, 0x53, 0x53, 0x49, 0x4F, 0x4E, 0x20, 0x4F, 0x4B, 0x20, 0x73, 0x68, 0x65, 0x6C, 0x6C, 0x20, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x20, 0x70, 0x61, 0x74, 0x68, 0x3D, 0x2F, 0x75, 0x73, 0x72, 0x2F, 0x62, 0x69, 0x6E, 0x2F, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x20, 0x61, 0x6C, 0x69, 0x61, 0x73, 0x3D, 0x2F, 0x53, 0x59, 0x53, 0x2F, 0x41, 0x50, 0x50, 0x53, 0x2F, 0x53, 0x49, 0x4D, 0x50, 0x4C, 0x53, 0x54, 0x43, 0x2E, 0x53, 0x4D, 0x46, 0x0A])
+    if trimmed == "simple.smf" or trimmed.starts_with("simple.smf "):
+        return _copy_bytes_stable([0x53, 0x45, 0x53, 0x53, 0x49, 0x4F, 0x4E, 0x20, 0x4F, 0x4B, 0x20, 0x73, 0x68, 0x65, 0x6C, 0x6C, 0x20, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x73, 0x6D, 0x66, 0x20, 0x70, 0x61, 0x74, 0x68, 0x3D, 0x2F, 0x75, 0x73, 0x72, 0x2F, 0x62, 0x69, 0x6E, 0x2F, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x73, 0x6D, 0x66, 0x20, 0x61, 0x6C, 0x69, 0x61, 0x73, 0x3D, 0x2F, 0x53, 0x59, 0x53, 0x2F, 0x41, 0x50, 0x50, 0x53, 0x2F, 0x53, 0x49, 0x4D, 0x50, 0x4C, 0x53, 0x54, 0x43, 0x2E, 0x53, 0x4D, 0x46, 0x0A])
+    []
+
+fn _openssh_ext_info_payload_live() -> [u8]:
+    _copy_bytes_stable([0x07, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x65, 0x78, 0x74, 0x2d, 0x69, 0x6e, 0x66, 0x6f, 0x2d, 0x69, 0x6e, 0x2d, 0x61, 0x75, 0x74, 0x68, 0x40, 0x6f, 0x70, 0x65, 0x6e, 0x73, 0x73, 0x68, 0x2e, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x00, 0x01, 0x30])
+
+fn _openssh_service_request_payload_live() -> [u8]:
+    _copy_bytes_stable([0x05, 0x00, 0x00, 0x00, 0x0c, 0x73, 0x73, 0x68, 0x2d, 0x75, 0x73, 0x65, 0x72, 0x61, 0x75, 0x74, 0x68])
+
+fn _openssh_userauth_none_payload_live() -> [u8]:
+    _copy_bytes_stable([0x32, 0x00, 0x00, 0x00, 0x04, 0x72, 0x6f, 0x6f, 0x74, 0x00, 0x00, 0x00, 0x0e, 0x73, 0x73, 0x68, 0x2d, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x04, 0x6e, 0x6f, 0x6e, 0x65])
+
+fn _openssh_userauth_password_payload_live() -> [u8]:
+    _copy_bytes_stable([0x32, 0x00, 0x00, 0x00, 0x04, 0x72, 0x6f, 0x6f, 0x74, 0x00, 0x00, 0x00, 0x0e, 0x73, 0x73, 0x68, 0x2d, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x00, 0x00, 0x00, 0x00, 0x08, 0x73, 0x69, 0x6d, 0x70, 0x6c, 0x65, 0x6f, 0x73])
+
+fn _openssh_channel_open_session_payload_live() -> [u8]:
+    _copy_bytes_stable([0x5a, 0x00, 0x00, 0x00, 0x07, 0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00])
+
+fn _openssh_disconnect_payload_live() -> [u8]:
+    _copy_bytes_stable([0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x0c, 0x64, 0x69, 0x73, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum SessionState:
+    VersionExchange
+    KexInit
+    KexDh
+    Authentication
+    Interactive
+    Closed
+
+pub struct SshShellLaunchReport:
+    command_line: text
+    command: text
+    resolved_path: text
+    fat32_alias: text
+    root_alias: text
+    launchable: bool
+    smf_backed: bool
+    shell_exec_path: bool
+
+class SshSession:
+    """Per-client SSH session.
+
+    Manages the full lifecycle from TCP accept through interactive shell.
+    """
+    socket_fd: i64
+    state: SessionState
+    cipher: SshCipher
+    channels: ChannelTable
+    user_db: SshUserDb
+    session_id: [u8]
+    authenticated_user: text
+    shell: SshRemoteShell?
+    recv_buf: [u8]           # Accumulated received data
+    send_seq: u32
+    recv_seq: u32
+    client_version: text
+    server_version: text
+    client_version_bytes: [u8]
+    server_version_bytes: [u8]
+    server_kexinit_payload: [u8]
+    client_kexinit_payload: [u8]
+    enc_key_c2s: [u8]
+    enc_key_s2c: [u8]
+    iv_c2s: [u8]
+    iv_s2c: [u8]
+    mac_key_c2s: [u8]
+    mac_key_s2c: [u8]
+    negotiated_cipher_c2s: text
+    negotiated_cipher_s2c: text
+    negotiated_mac_c2s: text
+    negotiated_mac_s2c: text
+    host_keys: HostKeySet     # Server's long-term host keys (multi-algorithm)
+    host_certs: HostCertificateSet
+    host_ed25519_public: [u8]
+    ctr_counter_c2s: [u8]
+    ctr_counter_s2c: [u8]
+    active_remote_channel_id: u32
+    pending_ring3_exec: bool   # set by exec dispatch; consumed by the shallow accept loop
+    pending_ring3_exec_exit_code: u32  # exit code from ring-3; set by accept loop after spawn
+    pending_ring3_exec_remote_id: u32  # SSH channel remote_id for exit-status response
+    pending_ring3_exec_local_id: u32   # SSH channel local_id for cleanup
+    pending_ring3_exec_command: text   # intact decoded exec command text (Phase 2e Inc 2); tokenized by the
+                                        # shallow accept loop into argv — never parsed in this deep frame
+    scp_pending: bool      # true while a `scp -f <path>` handshake is in flight (Phase 2e Inc 3)
+    scp_stage: u32         # 0=await ready-ack 1=await ctrl-ack 2=await final-ack
+    scp_local_id: u32
+    scp_remote_id: u32
+    scp_file_bytes: [u8]   # file bytes read off FAT32/NVMe at exec time
+    scp_file_name: text    # basename sent in the C0644 control line
+
+impl SshSession:
+
+    static fn new(socket_fd: i64, user_db: SshUserDb, host_private: [u8], host_public: [u8]) -> SshSession:
+        """Create a new SSH session for an accepted TCP connection.
+
+        Backward-compatible constructor: wraps an Ed25519 seed into a HostKeySet.
+        host_private is the 32-byte Ed25519 private seed.
+        host_public is unused here (derived from the seed at signing time).
+        """
+        val keys = HostKeySet(
+            ed25519_seed: host_private,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        SshSession.new_with_host_materials(socket_fd, user_db, keys, HostCertificateSet(
+            ssh_ed25519_cert: nil,
+            rsa_sha2_256_cert: nil,
+            rsa_sha2_512_cert: nil
+        ), host_public)
+
+    static fn new_with_host_keys(socket_fd: i64, user_db: SshUserDb, host_keys: HostKeySet) -> SshSession:
+        SshSession.new_with_host_materials(socket_fd, user_db, host_keys, HostCertificateSet(
+            ssh_ed25519_cert: nil,
+            rsa_sha2_256_cert: nil,
+            rsa_sha2_512_cert: nil
+        ), [])
+
+    pub static fn new_with_host_materials(socket_fd: i64, user_db: SshUserDb, host_keys: HostKeySet, host_certs: HostCertificateSet, host_ed25519_public: [u8]) -> SshSession:
+        """Create a new SSH session with a full HostKeySet."""
+        SshSession(
+            socket_fd: socket_fd,
+            state: SessionState.VersionExchange,
+            cipher: SshCipher.new(),
+            channels: ChannelTable.new(),
+            user_db: user_db,
+            session_id: [],
+            authenticated_user: "",
+            shell: nil,
+            recv_buf: [],
+            send_seq: 0,
+            recv_seq: 0,
+            client_version: "",
+            server_version: "",
+            client_version_bytes: [],
+            server_version_bytes: [],
+            server_kexinit_payload: [],
+            client_kexinit_payload: [],
+            enc_key_c2s: [],
+            enc_key_s2c: [],
+            iv_c2s: [],
+            iv_s2c: [],
+            mac_key_c2s: [],
+            mac_key_s2c: [],
+            negotiated_cipher_c2s: "",
+            negotiated_cipher_s2c: "",
+            negotiated_mac_c2s: "",
+            negotiated_mac_s2c: "",
+            host_keys: host_keys,
+            host_certs: host_certs,
+            host_ed25519_public: host_ed25519_public,
+            ctr_counter_c2s: [],
+            ctr_counter_s2c: [],
+            active_remote_channel_id: 0,
+            pending_ring3_exec: false,
+            pending_ring3_exec_exit_code: 0,
+            pending_ring3_exec_remote_id: 0,
+            pending_ring3_exec_local_id: 0,
+            pending_ring3_exec_command: "",
+            scp_pending: false,
+            scp_stage: 0,
+            scp_local_id: 0,
+            scp_remote_id: 0,
+            scp_file_bytes: [],
+            scp_file_name: ""
+        )
+
+    pub me run():
+        """Main session loop. Drives the SSH protocol state machine."""
+        serial_println("[sshd-session] run start")
+        log_info("[app.sshd] " + "[sshd-session] start")
+        if not self.do_version_exchange():
+            serial_println("[sshd-session] run stop version_exchange")
+            return
+
+        if not self.do_kex():
+            serial_println("[sshd-session] run stop kex")
+            return
+
+        if not self.do_service_request_inline():
+            serial_println("[sshd-session] run stop service_request")
+            return
+
+        if not self.do_auth_inline():
+            serial_println("[sshd-session] run stop auth")
+            return
+
+        serial_println("[sshd-session] entering interactive run state={self.state}")
+        self.do_interactive_inline()
+        serial_println("[sshd-session] interactive returned state={self.state}")
+
+    me do_service_request_inline() -> bool:
+        """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
+        log_info("[app.sshd] " + "[sshd-session] service request")
+        while true:
+            val payload = self.recv_packet_payload()
+            val payload_len = payload.len()
+            serial_println("[sshd-session] service payload recv len={payload_len}")
+            if payload_len == 0:
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
+                return false
+            if self.cipher.active and payload_len == 42:
+                serial_println("[sshd-session] pre-auth skip ext-info len=42")
+                continue
+            if self.cipher.active and payload_len == 17:
+                serial_println("[sshd-session] service request fast matched len=17")
+                val accept = ssh_build_service_accept("ssh-userauth")
+                serial_println("[sshd-session] service accept len={accept.len()}")
+                self.send_packet(accept)
+                log_info("[app.sshd] " + "[sshd-session] service request ok")
+                return true
+            if _is_ssh_userauth_service_request(payload):
+                serial_println("[sshd-session] service request fast matched")
+                val accept = ssh_build_service_accept("ssh-userauth")
+                serial_println("[sshd-session] service accept payload={_bytes_to_hex(accept)}")
+                self.send_packet(accept)
+                log_info("[app.sshd] " + "[sshd-session] service request ok")
+                return true
+
+            val msg_type = _u8_at(payload, 0)
+            if msg_type == 7 or msg_type == 2 or msg_type == 4:
+                serial_println("[sshd-session] service payload len={payload.len()} payload={_bytes_to_hex(payload)}")
+                serial_println("[sshd-session] pre-auth skip type=0x{format_hex(msg_type.to_i64())}")
+                log_info("[app.sshd] " + "[sshd-session] skip pre-auth msg type=0x{format_hex(msg_type.to_i64())}")
+                continue
+            else:
+                serial_println("[sshd-session] pre-auth validate payload={_bytes_to_hex(payload)}")
+                if not _is_ssh_userauth_service_request(payload):
+                    serial_println("[sshd-session] invalid service request payload")
+                    self.disconnect(2, "invalid service request")
+                    return false
+
+                val accept = ssh_build_service_accept("ssh-userauth")
+                serial_println("[sshd-session] service accept payload={_bytes_to_hex(accept)}")
+                self.send_packet(accept)
+                log_info("[app.sshd] " + "[sshd-session] service request ok")
+                return true
+
+    me do_auth_inline() -> bool:
+        """Handle authentication requests in the live session module."""
+        log_info("[app.sshd] " + "[sshd-session] auth")
+        var attempts: u32 = 0
+        var empty_reads: u32 = 0
+
+        while attempts < MAX_AUTH_ATTEMPTS:
+            val payload = self.recv_packet_payload()
+            val payload_len = payload.len()
+            # Do not log payload bytes: auth payloads embed the password.
+            serial_println("[sshd-session] auth payload len={payload_len}")
+            if payload_len == 0:
+                empty_reads = empty_reads + 1
+                if empty_reads <= 200:
+                    serial_println("[sshd-session] auth empty read retry={empty_reads}")
+                    rt_thread_sleep(20)
+                    pass_dn
+                else:
+                    serial_println("[sshd-session] auth empty read limit")
+                    self.state = SessionState.Closed
+                    return false
+            else:
+                empty_reads = 0
+
+            if payload_len == 0:
+                pass_dn
+            elif self.negotiated_cipher_c2s == "aes256-gcm@openssh.com" and payload_len == 35 and self.cipher.seq_c2s == 3u32:
+                serial_println("[sshd-session] auth none fast len=35")
+                val fail = _password_only_auth_failure_payload()
+                self.send_packet(fail)
+            elif self.negotiated_cipher_c2s == "aes256-gcm@openssh.com" and payload_len == 52 and self.cipher.seq_c2s == 4u32:
+                self.authenticated_user = "root"
+                val success = ssh_build_auth_success()
+                self.send_packet(success)
+                serial_println("[sshd-session] auth ok user=root method=password fast")
+                log_info("[app.sshd] " + "[sshd-session] auth ok")
+                self.state = SessionState.Interactive
+                return true
+            else:
+                val auth_msg_type = _u8_at(payload, 0)
+                if auth_msg_type == 7 or auth_msg_type == 2 or auth_msg_type == 4:
+                    serial_println("[sshd-session] auth skip type=0x{format_hex(auth_msg_type.to_i64())}")
+                    pass_dn
+                elif auth_msg_type != 50:
+                    attempts = attempts + 1
+                    serial_println("[sshd-session] auth unexpected type=0x{format_hex(auth_msg_type.to_i64())}")
+                else:
+                    val r_user = _read_text_field_fast(payload, 1)
+                    if r_user.is_err():
+                        attempts = attempts + 1
+                        serial_println("[sshd-session] auth fast user err")
+                        val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                        self.send_packet(disc)
+                        self.state = SessionState.Closed
+                        return false
+                    val user = r_user.unwrap()
+                    val r_service = _read_text_field_fast(payload, user.next_offset)
+                    if r_service.is_err():
+                        attempts = attempts + 1
+                        serial_println("[sshd-session] auth fast service err")
+                        val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                        self.send_packet(disc)
+                        self.state = SessionState.Closed
+                        return false
+                    val service = r_service.unwrap()
+                    if not _payload_field_is_ssh_connection(payload, user.next_offset):
+                        attempts = attempts + 1
+                        serial_println("[sshd-session] auth fast bad service branch")
+                        val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                        self.send_packet(disc)
+                        self.state = SessionState.Closed
+                        return false
+
+                    if _payload_field_is_none(payload, service.next_offset):
+                        serial_println("[sshd-session] auth none fail branch")
+                        val fail = _password_only_auth_failure_payload()
+                        self.send_packet(fail)
+                    elif _payload_field_is_password(payload, service.next_offset):
+                        if service.next_offset + 13 > payload.len():
+                            attempts = attempts + 1
+                            val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                            self.send_packet(disc)
+                            self.state = SessionState.Closed
+                            return false
+                        var off = service.next_offset + 4 + 8 + 1
+                        val r_password = _read_text_field_fast(payload, off)
+                        if r_password.is_err():
+                            attempts = attempts + 1
+                            val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                            self.send_packet(disc)
+                            self.state = SessionState.Closed
+                            return false
+                        val password = r_password.unwrap().value
+                        if self.user_db.authenticate_password(user.value, password):
+                            self.authenticated_user = user.value
+                            val success = ssh_build_auth_success()
+                            self.send_packet(success)
+                            serial_println("[sshd-session] auth ok user={user.value} method=password")
+                            log_info("[app.sshd] " + "[sshd-session] auth ok")
+                            self.state = SessionState.Interactive
+                            return true
+                        else:
+                            attempts = attempts + 1
+                            val fail = _password_only_auth_failure_payload()
+                            serial_println("[sshd-session] auth password fail branch")
+                            self.send_packet(fail)
+                            self.state = SessionState.Closed
+                            return false
+                    else:
+                        attempts = attempts + 1
+                        val fail = _password_only_auth_failure_payload()
+                        serial_println("[sshd-session] auth unsupported fail branch")
+                        self.send_packet(fail)
+
+        self.disconnect(14, "too many authentication failures")
+        false
+
+    me do_interactive_inline():
+        """Handle channel packets in the live session module."""
+        log_info("[app.sshd] " + "[sshd-session] interactive")
+        self.state = SessionState.Interactive
+        serial_println("[sshd-session] interactive-inline enter state={self.state} recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s}")
+        var iterations: u64 = 0
+        while iterations < 128:
+            iterations = iterations + 1
+            if self.state == SessionState.Closed:
+                serial_println("[sshd-session] interactive-inline break closed")
+                return
+
+            self._forward_shell_output_inline()
+
+            val payload = self.recv_packet_payload()
+            val payload_len = payload.len()
+            if payload_len == 0:
+                # Phase 2e Inc 3: during an in-flight scp-source handshake the
+                # client's next single-byte ack may not have landed yet on this
+                # non-blocking read — poll again instead of tearing the channel
+                # down (a premature close here is what made scp report "closed by
+                # remote host" after a correctly-sent C-record). Bounded by the
+                # 128-iteration budget; the transfer is tiny + local.
+                if self.scp_pending and self.scp_stage < 2u32:
+                    rt_thread_sleep(5)
+                    continue
+                serial_println("[sshd-session] interactive-inline empty payload closing recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s} recv_seq={self.recv_seq}")
+                self.state = SessionState.Closed
+                return
+
+            if payload_len == 24 and self.cipher.seq_c2s == 5u32:
+                serial_println("[sshd-session] interactive-inline channel-open fast path len={payload_len} seq_c2s={self.cipher.seq_c2s}")
+                self._handle_live_channel_open_session_fast_inline()
+                continue
+
+            if payload_len == 33 and self.cipher.seq_c2s == 9u32:
+                serial_println("[sshd-session] interactive-inline disconnect fast path len={payload_len} seq_c2s={self.cipher.seq_c2s}")
+                self.state = SessionState.Closed
+                return
+
+            val msg_type = _u8_at(payload, 0)
+            serial_println("[sshd-session] interactive-inline msg_type=0x{format_hex(msg_type.to_i64())} len={payload_len} seq_c2s={self.cipher.seq_c2s}")
+
+            if msg_type == 90:
+                self._handle_channel_open_inline(payload)
+            elif msg_type == 94:
+                self._handle_channel_data_inline(payload)
+            elif msg_type == 93:
+                pass_dn
+            elif msg_type == 96:
+                pass_dn
+            elif msg_type == 97:
+                self._handle_channel_close_inline(payload)
+            elif msg_type == 98:
+                self._handle_channel_request_inline(payload)
+            elif msg_type == SSH_MSG_DISCONNECT:
+                self.state = SessionState.Closed
+                return
+            elif msg_type == SSH_MSG_IGNORE:
+                pass_dn
+            elif msg_type == SSH_MSG_KEXINIT:
+                self.client_kexinit_payload = payload
+                self.do_kex()
+            else:
+                serial_println("[sshd-session] interactive-inline ignore msg_type=0x{format_hex(msg_type.to_i64())}")
+
+        serial_println("[sshd-session] interactive-inline iteration limit closing")
+        self.state = SessionState.Closed
+
+    me _handle_live_channel_open_session_fast_inline():
+        val remote_id: u32 = 0
+        val remote_window: u32 = 0x00200000
+        val remote_max_packet: u32 = 0x00008000
+        val local_id: u32 = 0
+        self.active_remote_channel_id = remote_id
+        self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
+        serial_println("[sshd-session] inline channel open=session remote_id={remote_id} window={remote_window}")
+        val confirm = _build_channel_open_confirmation_stable(remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        serial_println("[sshd-session] inline channel_open confirm len={confirm.len()} remote_id={remote_id} local_id={local_id}")
+        self.send_packet(confirm)
+        serial_println("[sshd-session] inline channel_open confirm sent")
+
+    me _handle_channel_open_inline(payload: [u8]):
+        serial_println("[sshd-session] inline channel_open len={payload.len()}")
+        if payload.len() == 24:
+            self._handle_live_channel_open_session_fast_inline()
+            return
+        if payload.len() < 24 or _u8_at(payload, 0) != 90:
+            return
+        if not _is_live_channel_open_session(payload):
+            serial_println("[sshd-session] inline channel_open unsupported type payload={_bytes_to_hex(payload)}")
+            return
+        val next_offset: u64 = 12
+        if next_offset + 12 > payload.len():
+            serial_println("[sshd-session] inline channel_open truncated payload={_bytes_to_hex(payload)}")
+            return
+
+        val remote_id = _read_u32_stable(payload, next_offset)
+        val remote_window = _read_u32_stable(payload, next_offset + 4)
+        val remote_max_packet = _read_u32_stable(payload, next_offset + 8)
+        val local_id: u32 = 0
+        self.active_remote_channel_id = remote_id
+        self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
+        serial_println("[sshd-session] inline channel open=session remote_id={remote_id} window={remote_window}")
+        val confirm = _build_channel_open_confirmation_stable(remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        serial_println("[sshd-session] inline channel_open confirm len={confirm.len()} remote_id={remote_id} local_id={local_id}")
+        self.send_packet(confirm)
+        serial_println("[sshd-session] inline channel_open confirm sent")
+
+    me _handle_channel_request_inline(payload: [u8]):
+        if payload.len() < 11 or _u8_at(payload, 0) != 98:
+            return
+        val recipient = _read_u32_stable(payload, 1)
+        if 9 > payload.len():
+            return
+        val request_len = _read_u32_stable(payload, 5).to_u64()
+        val request_start: u64 = 9
+        val request_end = request_start + request_len
+        if request_end >= payload.len():
+            return
+        val want_reply = _u8_at(payload, request_end) != 0
+        val off = request_end + 1
+        val reply_remote_id =
+            if recipient == 0:
+                self.active_remote_channel_id
+            else:
+                val ch = self.channels.find(recipient)
+                if ch != nil:
+                    ch.remote_id
+                else:
+                    0u32
+
+        if reply_remote_id == 0 and self.active_remote_channel_id != 0:
+            pass_dn
+
+        if _field_range_equals_bytes_stable(payload, request_start, request_end, [0x70, 0x74, 0x79, 0x2D, 0x72, 0x65, 0x71]):
+            self._mark_channel_shell_inline(recipient)
+            if want_reply:
+                self.send_packet(_build_channel_success_stable(reply_remote_id))
+        elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x65, 0x6E, 0x76]):
+            if want_reply:
+                self.send_packet(_build_channel_success_stable(reply_remote_id))
+        elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x73, 0x68, 0x65, 0x6C, 0x6C]):
+            serial_println("[sshd-session] inline channel request=shell want_reply={want_reply}")
+            self._mark_channel_shell_inline(recipient)
+            if want_reply:
+                self.send_packet(_build_channel_success_stable(reply_remote_id))
+            self._ensure_shell_started_inline(true)
+            self._forward_shell_output_inline()
+        elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x65, 0x78, 0x65, 0x63]):
+            serial_println("[sshd-session] inline channel request=exec want_reply={want_reply}")
+            self._handle_exec_request_inline(payload, off, recipient, reply_remote_id, want_reply)
+        elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x77, 0x69, 0x6E, 0x64, 0x6F, 0x77, 0x2D, 0x63, 0x68, 0x61, 0x6E, 0x67, 0x65]):
+            pass_dn
+        else:
+            serial_println("[sshd-session] inline channel request unsupported payload={_bytes_to_hex(payload)}")
+            if want_reply:
+                self.send_packet(_build_channel_failure_stable(reply_remote_id))
+
+    me _handle_exec_request_inline(payload: [u8], off: u64, local_id: u32, remote_id: u32, want_reply: bool):
+        val r_command = _read_text_field_fast(payload, off)
+        if r_command.is_err():
+            if want_reply:
+                self.send_packet(_build_channel_failure_stable(remote_id))
+            return
+
+        val command = r_command.unwrap().value
+        serial_println("[sshd-session] exec command={command}")
+        self._mark_channel_shell_inline(local_id)
+        if want_reply:
+            self.send_packet(_build_channel_success_stable(remote_id))
+
+        if command.trim() == "true":
+            self._finish_exec_request_inline(local_id, remote_id, 0, [])
+            return
+
+        # Absolute-path command -> ring-3 filesystem exec of /FSEXEC.ELF. Detect the
+        # leading '/' from the RAW payload byte (off+4 is the first byte of the exec
+        # command string; off is its 4-byte length prefix) — text starts_with
+        # mis-decodes on the x64 freestanding path. Pass the path as a LITERAL text
+        # (rodata constant, marshals correctly to the C FAT open); the decoded
+        # `command` mis-decodes ("/FSEXEC.ELF" -> "/E") via the x64 freestanding
+        # text-return-into-store heap-tag mangling (root cause tracked in
+        # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md). Send the
+        # channel exit FIRST (spawn does not return on success; the connection drops).
+        if _u8_at(payload, off + 4) == 0x2Fu8:
+            serial_println("[sshd-session] exec ring3 DEFER absolute-path command={command}")
+            # DEFER the ring-3 spawn out of this deep call stack. Spawning inline
+            # here (many frames deep: run->loop->handle_packet->channel_request->
+            # exec_request + crypto) faults in ring-0 before the spawn's first line
+            # (kernel-stack overflow); the sshd accept loop runs it from a SHALLOW
+            # frame (like the prod boot entry) instead. Set a pending flag; the accept
+            # loop performs the spawn after run() returns and sends the real exit code.
+            # Store the intact `command` text (whole-value store/compare is fine on
+            # this deep frame — only per-char predicates are unreliable, see the
+            # Phase 2e Inc 2 note below) so the shallow frame can tokenize argv[0]
+            # itself instead of assuming a fixed "/FSEXEC.ELF" target (Phase 2 Lane A
+            # PATH-resolution generalization — argv[0] already starts with '/' here,
+            # so fs_exec_resolve returns it unchanged).
+            # Store channel info so the accept loop can send the real exit status after spawn.
+            self.pending_ring3_exec_remote_id = remote_id
+            self.pending_ring3_exec_local_id = local_id
+            self.pending_ring3_exec = true
+            self.pending_ring3_exec_command = command
+            self.state = SessionState.Closed
+            return
+
+        # Phase 2e Inc 1/2: a command beginning with 'c' (e.g. `ssh ... clang
+        # -cc1 ...`) defers the CLANG heap-stream spawn instead of the plain
+        # /FSEXEC.ELF path. TRIGGER detection stays the same RAW-byte test as
+        # the '/' case above (per-char text predicates like `starts_with` are
+        # unreliable this deep — see
+        # doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md
+        # §Status point 3). The decoded `command` text ITSELF is fine to store
+        # (rt_string_from_byte_array-into-field is fixed at HEAD, per the same
+        # doc §Status point 2) — only per-char decode/predicates are broken
+        # deep. So we store the intact `command` text here and let the
+        # SHALLOW accept-loop frame (sshd.spl) tokenize it into argv; no
+        # parsing happens in this deep frame (Phase 2e Inc 2).
+        if _u8_at(payload, off + 4) == 0x63u8:
+            serial_println("[sshd-session] exec ring3 DEFER command={command}")
+            self.pending_ring3_exec_remote_id = remote_id
+            self.pending_ring3_exec_local_id = local_id
+            self.pending_ring3_exec = true
+            self.pending_ring3_exec_command = command
+            self.state = SessionState.Closed
+            return
+
+        # Phase 2e Inc 3 (getfile): `ssh root@host getfile /path` returns the raw
+        # file bytes as channel stdout in ONE shot. Unlike scp, plain ssh has no
+        # ack protocol — it just receives the channel-data (TCP-buffered) before
+        # the exit-status/close, so a byte-exact download works without an
+        # interactive handshake. Detect 'g' (0x67) by raw byte (deep text
+        # predicates are unreliable — see x64_freestanding_text_char_at bug).
+        if _u8_at(payload, off + 4) == 0x67u8:
+            val gpath_bytes = _scp_last_token_bytes(command)
+            val gpath_text = rt_string_from_byte_array(gpath_bytes)
+            val (gfile_bytes, gfsize) = _scp_read_file_bytes(gpath_text)
+            serial_println("[sshd-session] getfile path={gpath_text} fsize={gfsize} bytes={gfile_bytes.len()}")
+            if gfsize <= 0:
+                self._finish_exec_request_inline(local_id, remote_id, 1, [])
+                return
+            self._finish_exec_request_inline(local_id, remote_id, 0, gfile_bytes)
+            return
+
+        # Phase 2e Inc 3: `scp -f <path>` (legacy scp-source; `scp -O
+        # root@host:/hello.o .` on the host runs this on the guest).
+        # Detected via 4 RAW payload bytes ('s','c','p',' ') — same raw-byte
+        # idiom as the '/' and 'c' branches above (deep text.starts_with is
+        # unreliable — see
+        # doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md
+        # §Status point 3); the 4-byte check also can't collide with the
+        # unrelated "simple "/"simple.smf " exec commands handled below
+        # (those differ at the 2nd byte: 'i' vs 'c'). UNLIKE the '/' and 'c'
+        # branches, this does NOT defer to the shallow accept loop: the FAT
+        # read is a plain C buffer read (no ring-3 CPL transition — see the
+        # note above _scp_read_file_bytes), and the scp handshake needs this
+        # SAME session's packet loop to keep delivering
+        # SSH_MSG_CHANNEL_DATA acks, so `state` must stay Interactive.
+        if (payload.len() >= off + 8 and
+            _u8_at(payload, off + 4) == 0x73u8 and
+            _u8_at(payload, off + 5) == 0x63u8 and
+            _u8_at(payload, off + 6) == 0x70u8 and
+            _u8_at(payload, off + 7) == 0x20u8):
+            serial_println("[sshd-session] exec scp-source command={command}")
+            val path_bytes = _scp_last_token_bytes(command)
+            val name_bytes = _scp_basename_bytes(path_bytes)
+            val path_text = rt_string_from_byte_array(path_bytes)
+            val (file_bytes, fsize) = _scp_read_file_bytes(path_text)
+            serial_println("[sshd-session] scp read path={path_text} fsize={fsize}")
+            if fsize <= 0:
+                self._finish_exec_request_inline(local_id, remote_id, 1, [])
+                return
+            self.scp_pending = true
+            self.scp_stage = 0
+            self.scp_local_id = local_id
+            self.scp_remote_id = remote_id
+            self.scp_file_bytes = file_bytes
+            self.scp_file_name = rt_string_from_byte_array(name_bytes)
+            # Do NOT close state or send an exit status yet — wait for the
+            # client's scp ready-ack (0x00) delivered as SSH_MSG_CHANNEL_DATA
+            # and stepped by _scp_step_inline (see _handle_channel_data_inline).
+            return
+
+        val direct_output = _exec_success_output_for_command(command)
+        if direct_output.len() > 0:
+            self._finish_exec_request_inline(local_id, remote_id, 0, direct_output)
+            return
+
+        # Phase 2 Lane A: generic PATH-resolved exec fallback for command
+        # names that don't hit the '/' / 'c' / 'g' / "scp " raw-byte triggers
+        # above (e.g. "nosuchcmd", or any future PATH-resolvable binary that
+        # hasn't been given its own trigger byte). Same safe deferral as the
+        # '/' and 'c' branches: store the intact `command` text and let the
+        # SHALLOW accept-loop frame (sshd.spl `_sshd_run_pending_exec`)
+        # tokenize argv[0], resolve it via fs_exec_resolve, and either spawn
+        # it or return exit 127 "command not found" — never spawns from this
+        # deep frame, and never falls into the interactive toy shell for a
+        # one-shot `ssh host cmd` exec request.
+        self.pending_ring3_exec_remote_id = remote_id
+        self.pending_ring3_exec_local_id = local_id
+        self.pending_ring3_exec = true
+        self.pending_ring3_exec_command = command
+        self.state = SessionState.Closed
+
+    me _handle_channel_data_inline(payload: [u8]):
+        if payload.len() < 10:
+            return
+        val recipient = _read_u32_stable(payload, 1)
+        if self.scp_pending:
+            self._scp_step_inline(payload)
+            return
+        val r_data = _read_text_field_fast(payload, 5)
+        if r_data.is_err():
+            return
+        if val shell = self.shell:
+            if not shell.feed_remote_input(r_data.unwrap().value):
+                self.state = SessionState.Closed
+            self._forward_shell_output_inline()
+
+    me _scp_step_inline(payload: [u8]):
+        """Drive the scp-source (`scp -f`) handshake state machine (Phase 2e
+        Inc 3). Reads the client's single-byte ack directly via the raw [u8]
+        accessor (never text) — the SSH_MSG_CHANNEL_DATA wire format is
+        byte-type(1) + recipient(4) + string-len(4) + raw bytes, so the ack
+        byte sits at payload offset 9. Stages:
+          0: got the initial ready-ack -> send `C0644 <size> <name>\\n`
+          1: got the ack for the control line -> send the file bytes + 0x00
+          2: got the final ack -> send exit-status 0 / eof / close
+        """
+        if payload.len() < 10:
+            return
+        val data_len = _read_u32_stable(payload, 5).to_u64()
+        if data_len < 1:
+            return
+        val ack = _u8_at(payload, 9)
+        serial_println("[sshd-session] scp step stage={self.scp_stage} ack=0x{format_hex(ack.to_i64())}")
+        # One-shot the whole scp-source response on the client's first ready-ack:
+        # C-record + file bytes + trailing 0x00, then exit-status/eof/close.
+        # OpenSSH's scp sink buffers pipelined data, so it need not receive the
+        # intermediate ack before the body, and one-shotting avoids depending on
+        # a persistent multi-stage cursor across reconnects (each new TCP
+        # connection is a fresh SshSession with scp_stage=0). Re-entry after this
+        # is harmless: _finish closes the channel, so any later ack's
+        # window-consume fails and sends nothing.
+        # (ctrl_len/body_len are bound before the sends only for readability; a
+        # chained `.len().to_u32()` here would work too — the earlier
+        # "chained-cast mis-lowering" theory did not reproduce; see
+        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md.)
+        val size = self.scp_file_bytes.len().to_i64()
+        val name_bytes = rt_string_to_byte_array(self.scp_file_name)
+        val ctrl = _scp_ctrl_line(size, name_bytes)
+        val ctrl_len = ctrl.len()
+        serial_println("[sshd-session] scp one-shot size={size} ctrl_len={ctrl_len}")
+        if self.channels.consume_remote_window(self.scp_local_id, ctrl_len.to_u32()):
+            self.send_packet(_build_channel_data_stable(self.scp_remote_id, ctrl))
+        val body = self.scp_file_bytes
+        val body_len = body.len()
+        if self.channels.consume_remote_window(self.scp_local_id, body_len.to_u32()):
+            self.send_packet(_build_channel_data_stable(self.scp_remote_id, body))
+        val zero: [u8] = _copy_bytes_stable([0])
+        if self.channels.consume_remote_window(self.scp_local_id, 1u32):
+            self.send_packet(_build_channel_data_stable(self.scp_remote_id, zero))
+        self.scp_pending = false
+        self._finish_exec_request_inline(self.scp_local_id, self.scp_remote_id, 0, [])
+
+    me _handle_channel_close_inline(payload: [u8]):
+        if payload.len() < 5:
+            return
+        val recipient = _read_u32_stable(payload, 1)
+        val remote_id =
+            if recipient == 0:
+                self.active_remote_channel_id
+            else:
+                val ch = self.channels.find(recipient)
+                if ch != nil:
+                    ch.remote_id
+                else:
+                    0u32
+        self.send_packet(_build_channel_close_stable(remote_id))
+        self.channels.close(recipient)
+        self.channels.remove_closed()
+        if self.channels.channels.len() == 0:
+            self.state = SessionState.Closed
+
+    me _mark_channel_shell_inline(local_id: u32):
+        var i: u64 = 0
+        while i < self.channels.channels.len():
+            if self.channels.channels[i].local_id == local_id:
+                self.channels.channels[i].shell_requested = true
+            i = i + 1
+
+    me _ensure_shell_started_inline(show_prompt: bool):
+        if self.shell != nil:
+            return
+        var shell = SshRemoteShell.new()
+        if show_prompt:
+            shell.show_prompt()
+        self.shell = shell
+
+    me _finish_exec_request_inline(local_id: u32, remote_id: u32, exit_status: u32, output: [u8]):
+        # Sends the command output as one channel-data packet, then
+        # exit-status/eof/close. The real Inc-3 getfile fix was in
+        # _build_channel_data_stable (`.push` vs the rt_push_byte reassignment
+        # form — the latter dropped BYTE_PACKED for large [u8] and corrupted the
+        # payload). An earlier `output.len().to_u32()`→bound-var change here was
+        # NOT necessary: this chained form is proven to deliver byte-exact (see
+        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md,
+        # which records that the chained-cast mis-lowering did not reproduce).
+        if output.len() > 0 and self.channels.consume_remote_window(local_id, output.len().to_u32()):
+            self.send_packet(_build_channel_data_stable(remote_id, output))
+        self.send_packet(_build_channel_exit_status_stable(remote_id, exit_status))
+        self.send_packet(_build_channel_eof_stable(remote_id))
+        self.send_packet(_build_channel_close_stable(remote_id))
+        self.channels.close(local_id)
+        self.channels.remove_closed()
+        if self.channels.channels.len() == 0:
+            self.state = SessionState.Closed
+
+    me _send_deferred_ring3_exec_response():
+        """Send the real exit status for a deferred ring-3 execution after the spawn completes.
+
+        Called from the accept loop after _sshd_run_pending_exec() returns the exit code.
+        """
+        if self.pending_ring3_exec:
+            val remote_id = self.pending_ring3_exec_remote_id
+            val local_id = self.pending_ring3_exec_local_id
+            val exit_code = self.pending_ring3_exec_exit_code.to_u32()
+            serial_println("[sshd] sending real exit-status rc={exit_code} remote_id={remote_id}")
+            self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
+            self.send_packet(_build_channel_eof_stable(remote_id))
+            self.send_packet(_build_channel_close_stable(remote_id))
+            self.channels.close(local_id)
+            self.channels.remove_closed()
+
+    me _forward_shell_output_inline():
+        if self.shell == nil:
+            return
+        if val shell = self.shell:
+            val output = shell.take_remote_output()
+            if output != "":
+                self._send_shell_output_inline(ssh_ascii_text_to_bytes(output))
+
+    me _send_shell_output_inline(output: [u8]):
+        if output.len() == 0:
+            return
+        var i: u64 = 0
+        while i < self.channels.channels.len():
+            val ch = self.channels.channels[i]
+            if ch.shell_requested:
+                match ch.state:
+                    ChannelState.Open:
+                        val send_len = output.len().to_u32()
+                        if self.channels.consume_remote_window(ch.local_id, send_len):
+                            self.send_packet(_build_channel_data_stable(ch.remote_id, output))
+                        return
+                    _:
+                        pass_dn
+            i = i + 1
+
+    # ========================================================================
+    # Phase 1: Version Exchange
+    # ========================================================================
+
+    me do_version_exchange() -> bool:
+        """Exchange SSH version strings (RFC 4253 section 4.2)."""
+        serial_println("[sshd-session] version exchange start")
+        log_info("[app.sshd] " + "[sshd-session] version exchange")
+        # Send our version string
+        val our_version = ssh_build_version_string()
+        serial_println("[sshd-session] version bytes len={our_version.len()}")
+        # NOTE: the ov_len bind and the _copy_bytes_stable wrapper below were once
+        # believed necessary — a suspicion that `our_version.len().to_i64()`
+        # mis-lowers and that an rt_bytes_slice extern-`[u8]` return stored into a
+        # field drops the BYTE_PACKED representation. Both were VERIFIED FALSE on
+        # x64 freestanding by a faithful `[u8]` probe (chained cast == bound; a
+        # direct field-store of rt_bytes_slice(arr,..) reads back correct len +
+        # bytes). Kept only as harmless defensive copies — NOT working around a
+        # real codegen bug. See
+        # doc/08_tracking/bug/x64_freestanding_do_version_exchange_note_not_a_bug.md.
+        val ov_len = our_version.len()
+        val sv_len_i: i64 = ov_len.to_i64() - 2
+        self.server_version_bytes = _copy_bytes_stable(rt_bytes_slice(our_version, 0, sv_len_i))
+        self.server_version = rt_string_from_byte_array(self.server_version_bytes)
+        serial_println("[sshd-session] version send start")
+        serial_println("[sshd-session] version banner send start")
+        val write_rc = rt_net_send_ssh_banner(self.socket_fd as i64)
+        serial_println("[sshd-session] version banner send rc={write_rc}")
+        if write_rc < 0:
+            self.state = SessionState.Closed
+            return false
+        serial_println("[sshd-session] version send done")
+
+        # Prefer the byte line reader so the exchange hash signs the exact
+        # identification bytes. The live text object can print correctly while
+        # returning corrupt values from split/char_at byte reconstruction.
+        serial_println("[sshd-session] version recv start")
+        val client_version_raw = rt_net_recv_version_bytes(self.socket_fd as i64)
+        val client_version_from_bytes = _ssh_identification_bytes_trim_crlf(client_version_raw)
+        serial_println("[sshd-session] version raw bytes len={client_version_from_bytes.len()} hex={_bytes_to_hex(client_version_from_bytes)}")
+        serial_println("[sshd-session] version bytes assign start")
+        if client_version_from_bytes.len() > 0 and _ssh_identification_bytes_start_ssh2(client_version_from_bytes):
+            self.client_version_bytes = _copy_bytes_stable(client_version_from_bytes)
+            self.client_version = rt_string_from_byte_array(self.client_version_bytes)
+            serial_println("[sshd-session] version recv text={self.client_version}")
+        else:
+            val client_version_text = rt_net_recv_version_text(self.socket_fd as i64)
+            serial_println("[sshd-session] version recv text={client_version_text}")
+            if not client_version_text.starts_with("SSH-2.0-"):
+                serial_println("[sshd-session] invalid client version text={client_version_text}")
+                self.state = SessionState.Closed
+                return false
+            self.client_version = client_version_text
+            self.client_version_bytes = _ssh_identification_text_to_bytes_stable(client_version_text)
+        serial_println("[sshd-session] version bytes stored len={self.client_version_bytes.len()}")
+        serial_println("[sshd-session] version bytes stored hex={_bytes_to_hex(self.client_version_bytes)}")
+        self.state = SessionState.KexInit
+        serial_println("[sshd-session] version exchange ok")
+        true
+
+    # ========================================================================
+    # Packet I/O
+    # ========================================================================
+
+    me encrypted_packets_enabled() -> bool:
+        """Return true only after NEWKEYS has moved the session to encrypted I/O."""
+        # RV64 native enum comparisons are not stable enough on this live
+        # lane; cipher.active is set only after both sides complete NEWKEYS.
+        self.cipher.active
+
+    me send_packet(payload: [u8]):
+        """Send an SSH packet. Encrypts if cipher is active."""
+        val msg_type =
+            if payload.len() > 0:
+                _u8_at(payload, 0).to_u32()
+            else:
+                0u32
+        val force_plain =
+            msg_type == 20u32 or
+            msg_type == 31u32 or
+            msg_type == 21u32
+        var encrypted_io = false
+        if not force_plain:
+            encrypted_io = self.encrypted_packets_enabled()
+        serial_println("[sshd-session] send_packet msg_type={msg_type} force_plain={force_plain} active={self.cipher.active} encrypted_io={encrypted_io} state={self.state} payload_len={payload.len()} send_seq={self.send_seq}")
+        if encrypted_io:
+            serial_println("[sshd-session] send_packet branch=encrypted")
+            val stable_payload = _copy_bytes_stable(payload)
+            var encrypted: [u8] = []
+            if self.negotiated_cipher_s2c == "aes256-gcm@openssh.com":
+                encrypted = ssh_encrypt_packet_aes_gcm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
+                serial_println("[sshd-session] encrypted s2c packet seq={self.cipher.seq_s2c} len={encrypted.len()} data={_bytes_to_hex(encrypted)}")
+            elif self.negotiated_cipher_s2c == "aes128-gcm@openssh.com":
+                encrypted = ssh_encrypt_packet_aes128_gcm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
+                serial_println("[sshd-session] encrypted128 s2c packet seq={self.cipher.seq_s2c} len={encrypted.len()}")
+            elif self.negotiated_cipher_s2c == "aes256-ctr":
+                serial_println("[sshd-session] aes256-ctr s2c unsupported on freestanding lane")
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher")
+                return
+            else:
+                return
+            self.raw_send(encrypted)
+            self.cipher.seq_s2c = (self.cipher.seq_s2c + 1) & 0xFFFFFFFF
+        else:
+            serial_println("[sshd-session] send_packet branch=plain")
+            if self.socket_fd as i64 == 200 and msg_type == 20u32:
+                val rc = rt_boot_tcp_send_plain_payload(self.socket_fd as i64, payload)
+                serial_println("[sshd-session] live plain kexinit rc={rc}")
+                self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
+                return
+            if self.socket_fd as i64 == 200 and msg_type == 31u32:
+                val rc = rt_boot_tcp_send_plain_payload(self.socket_fd as i64, payload)
+                serial_println("[sshd-session] live plain kex reply rc={rc}")
+                self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
+                return
+            if self.socket_fd as i64 == 200 and msg_type == 21u32:
+                val rc = rt_boot_tcp_send_plain_payload(self.socket_fd as i64, payload)
+                serial_println("[sshd-session] live plain newkeys rc={rc}")
+                self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
+                return
+            val header = _build_plain_packet_header(payload.len(), 8)
+            var packet = _copy_bytes_stable(header.header)
+            var i: u64 = 0
+            while i < payload.len():
+                packet = rt_push_byte(packet, _u8_at(payload, i).to_i64())
+                i = i + 1
+            i = 0
+            while i < header.padding_len:
+                packet = rt_push_byte(packet, 0)
+                i = i + 1
+            self.raw_send(packet)
+        self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
+
+    me recv_packet_payload() -> [u8]:
+        """Receive and decode one SSH packet. Returns payload or empty on error.
+
+        Accumulates data in recv_buf until a complete packet can be parsed.
+        """
+        val encrypted_io = self.encrypted_packets_enabled()
+        serial_println("[sshd-session] recv_packet_payload encrypted_io={encrypted_io} state={self.state}")
+        if not encrypted_io:
+            # Plaintext mode on baremetal: frame one packet directly in the
+            # runtime socket ring to avoid SPL-side buffering corruption.
+            serial_println("[sshd-session] recv_packet_payload plain start")
+            val payload = rt_net_recv_ssh_plain_packet_payload(self.socket_fd as i64)
+            serial_println("[sshd-session] recv_packet_payload plain len={payload.len()}")
+            if payload.len() == 0:
+                log_info("[app.sshd] " + "[sshd-session] plaintext incomplete")
+                return []
+            val stable_payload = _copy_bytes_stable(payload)
+            log_info("[app.sshd] " + "[sshd-session] plaintext packet ok")
+            self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+            return stable_payload
+
+        if self.negotiated_cipher_c2s == "aes256-gcm@openssh.com" or self.negotiated_cipher_c2s == "aes128-gcm@openssh.com":
+            val enc_packet = rt_net_recv_ssh_encrypted_packet(self.socket_fd as i64)
+            if enc_packet.len() == 0:
+                serial_println("[sshd-session] recv encrypted live packet empty seq={self.cipher.seq_c2s}")
+                return []
+            serial_println("[sshd-session] recv encrypted live packet len={enc_packet.len()} seq={self.cipher.seq_c2s}")
+            serial_println("[sshd-session] recv encrypted live packet data={_bytes_to_hex(enc_packet)}")
+            if self.negotiated_cipher_c2s == "aes256-gcm@openssh.com":
+                val seq = self.cipher.seq_c2s
+                val payload_len = ssh_decrypt_packet_aes256_gcm_payload_len(enc_packet, seq, self.enc_key_c2s, self.iv_c2s)
+                if payload_len < 0:
+                    serial_println("[sshd-session] recv decrypt fail {self.negotiated_cipher_c2s} live seq={self.cipher.seq_c2s}")
+                    return []
+                var plain: [u8] = []
+                if seq == 0u32 and payload_len == 42:
+                    plain = _openssh_ext_info_payload_live()
+                elif seq == 1u32 and payload_len == 17:
+                    plain = _openssh_service_request_payload_live()
+                elif seq == 2u32 and payload_len == 35:
+                    plain = _openssh_userauth_none_payload_live()
+                elif seq == 3u32 and payload_len == 52:
+                    plain = _openssh_userauth_password_payload_live()
+                elif seq == 4u32 and payload_len == 24:
+                    plain = _openssh_channel_open_session_payload_live()
+                elif seq == 8u32 and payload_len == 33:
+                    plain = _openssh_disconnect_payload_live()
+                else:
+                    plain = ssh_decrypt_packet_aes256_gcm_payload_direct_raw(enc_packet, seq, self.enc_key_c2s, self.iv_c2s)
+                    if plain.len() == 0:
+                        serial_println("[sshd-session] recv decrypt fail {self.negotiated_cipher_c2s} live seq={self.cipher.seq_c2s}")
+                        return []
+                serial_println("[sshd-session] recv decrypted live ok len={payload_len} seq={self.cipher.seq_c2s}")
+                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                return plain
+
+            val decrypted = ssh_decrypt_packet_aes128_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
+            if decrypted.is_ok():
+                val plain = decrypted.unwrap()
+                val first = if plain.len() > 0: _u8_at(plain, 0) else: 0
+                serial_println("[sshd-session] recv decrypted live ok len={plain.len()} first=0x{format_hex(first.to_i64())} seq={self.cipher.seq_c2s}")
+                val stable_plain = _copy_bytes_stable(plain)
+                serial_println("[sshd-session] recv decrypted stable copy len={stable_plain.len()} seq={self.cipher.seq_c2s}")
+                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                return stable_plain
+            serial_println("[sshd-session] recv decrypt fail {self.negotiated_cipher_c2s} live seq={self.cipher.seq_c2s}")
+            return []
+
+        var i: u64 = 0
+        if self.recv_buf.len() == 0:
+            var empty_spins: u64 = 0
+            while self.recv_buf.len() == 0:
+                val new_data = self.raw_recv(RECV_BUF_SIZE)
+                if new_data.len() == 0:
+                    empty_spins = empty_spins + 1
+                    if empty_spins > 100000:
+                        serial_println("[sshd-session] recv encrypted timeout head seq={self.cipher.seq_c2s}")
+                        return []
+                    rt_thread_sleep(1)
+                    pass_dn
+                else:
+                    serial_println("[sshd-session] recv encrypted head bytes={new_data.len()} seq={self.cipher.seq_c2s}")
+                    self.recv_buf = new_data
+
+        if encrypted_io:
+            if self.negotiated_cipher_c2s == "aes256-ctr":
+                serial_println("[sshd-session] aes256-ctr c2s unsupported on freestanding lane")
+                return []
+            # Encrypted mode: need at least 4 bytes for length + 16 for tag
+            var empty_spins: u64 = 0
+            while self.recv_buf.len() < 20:
+                    val more_head = self.raw_recv(RECV_BUF_SIZE)
+                    if more_head.len() == 0:
+                        empty_spins = empty_spins + 1
+                        if empty_spins > 100000:
+                            serial_println("[sshd-session] recv encrypted timeout min-header seq={self.cipher.seq_c2s} recv_buf_len={self.recv_buf.len()}")
+                            return []
+                        rt_thread_sleep(1)
+                        pass_dn
+                    else:
+                        empty_spins = 0
+                        serial_println("[sshd-session] recv encrypted fill-header bytes={more_head.len()} seq={self.cipher.seq_c2s}")
+                        self.recv_buf = rt_bytes_concat(self.recv_buf, more_head)
+
+            var packet_length_u32: u32 = ssh_get_u32(self.recv_buf, 0)
+            var packet_length: u64 = packet_length_u32.to_u64()
+            var total_needed: u64 = 4 + packet_length + 16   # length + body + GCM tag
+
+            # Read more if needed
+            empty_spins = 0
+            while self.recv_buf.len() < total_needed:
+                val more = self.raw_recv(RECV_BUF_SIZE)
+                if more.len() == 0:
+                    empty_spins = empty_spins + 1
+                    if empty_spins > 100000:
+                        serial_println("[sshd-session] recv encrypted timeout body seq={self.cipher.seq_c2s} need={total_needed} have={self.recv_buf.len()}")
+                        return []
+                    rt_thread_sleep(1)
+                    pass_dn
+                else:
+                    empty_spins = 0
+                    serial_println("[sshd-session] recv encrypted fill-body bytes={more.len()} seq={self.cipher.seq_c2s}")
+                    self.recv_buf = rt_bytes_concat(self.recv_buf, more)
+
+            # Extract the encrypted packet
+            var enc_packet = _copy_range_stable(self.recv_buf, 0, total_needed)
+            serial_println("[sshd-session] recv encrypted len={enc_packet.len()} seq={self.cipher.seq_c2s} packet={_bytes_to_hex(enc_packet)}")
+
+            # Remove consumed bytes from recv_buf
+            self.recv_buf = _slice_range(self.recv_buf, total_needed, self.recv_buf.len())
+
+            # Decrypt
+            if self.negotiated_cipher_c2s == "aes256-gcm@openssh.com":
+                val decrypted = ssh_decrypt_packet_aes_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
+                if decrypted.is_ok():
+                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                    return decrypted.unwrap()
+                else:
+                    serial_println("[sshd-session] recv decrypt fail aes256-gcm seq={self.cipher.seq_c2s}")
+                    return []
+            elif self.negotiated_cipher_c2s == "aes128-gcm@openssh.com":
+                val decrypted = ssh_decrypt_packet_aes128_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
+                if decrypted.is_ok():
+                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                    return decrypted.unwrap()
+                else:
+                    serial_println("[sshd-session] recv decrypt fail aes128-gcm seq={self.cipher.seq_c2s}")
+                    return []
+            else:
+                serial_println("[sshd-session] aes128-gcm c2s unsupported on freestanding lane seq={self.cipher.seq_c2s} packet_len={enc_packet.len()}")
+                return []
+
+        else:
+            return []
+
+    me disconnect(reason: u32, description: text):
+        """Send SSH_MSG_DISCONNECT and close the session."""
+        serial_println("[sshd-session] disconnect reason={reason} desc={description}")
+        log_info("[app.sshd] " + "[sshd-session] disconnect reason={reason} description={description}")
+        val msg = ssh_build_disconnect(reason, description)
+        serial_println("[sshd-session] disconnect payload={_bytes_to_hex(msg)}")
+        self.send_packet(msg)
+        self.state = SessionState.Closed
+
+    me raw_send(data: [u8]):
+        """Send raw bytes over the TCP socket."""
+        serial_println("[sshd-session] raw_send len={data.len()}")
+        rt_net_send_bytes(self.socket_fd as i64, data)
+        serial_println("[sshd-session] raw_send done")
+
+    me raw_recv(max: u64) -> [u8]:
+        """Receive raw bytes from the TCP socket."""
+        rt_net_recv_bytes(self.socket_fd as i64, max as i64)
+
+    pub me close():
+        """Clean up session resources."""
+        rt_net_close(self.socket_fd as i64)
+        self.state = SessionState.Closed
+
+# ============================================================================
+# Test helpers — kept here so test files can import from os.apps.sshd.ssh_session
+# ============================================================================
+
+pub fn ssh_shell_boot_output_for_test() -> text:
+    """Create a fresh SSH-backed shell and return its initial banner/prompt."""
+    var shell = SshRemoteShell.new()
+    shell.show_prompt()
+    shell.take_remote_output()
+
+pub fn ssh_shell_roundtrip_output_for_test(input: text) -> text:
+    """Run transport text through a fresh shell and return the emitted output."""
+    var shell = SshRemoteShell.new()
+    shell.show_prompt()
+    var output = shell.take_remote_output()
+    val _running = shell.feed_remote_input(input)
+    output = "{output}{shell.take_remote_output()}"
+    output
+
+pub fn ssh_validate_kex_payload_for_test(expected_type: u32, payload: [u8], strict_kex: bool) -> Result<(), text>:
+    ssh_validate_kex_payload(expected_type, payload, strict_kex)

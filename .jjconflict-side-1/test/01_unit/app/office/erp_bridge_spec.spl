@@ -1,0 +1,193 @@
+"""ERP <-> office bridge spec.
+
+ERP schema findings (cited, from a reference clone of the standalone
+Simple-ERP repo, not vendored here — see app.office.erp_bridge module
+docstring for the full writeup):
+  - Record: `struct Sale` (src/lanes/sale.spl) / `class Sale`
+    (src/catalog.spl) — id, channel, subtotal, tax, paid, status,
+    audit_note. Closest ERP analog to an "invoice" line.
+  - Persistence: `src/kernel/durable_log.spl` ubslog v1 line format is the
+    ONLY on-disk format in the reference repo (no CSV/SDN table exists).
+    This bridge reimplements its escape/checksum/header contract exactly
+    and defines a positional-CSV payload sub-encoding for `sale.write`
+    events (the ERP's own payload is "opaque ... owned by the emitting
+    dimension" per src/kernel/event_log.spl, so it constrains nothing here).
+
+Fixture (hand-computed, scratchpad-verified before writing this spec):
+  id=1 retail  subtotal=10000 tax=800 paid=TRUE  status=paid    audit=checkout-alice
+  id=2 online  subtotal=5000  tax=400 paid=FALSE status=pending audit=checkout-bob
+  id=3 retail  subtotal=7500  tax=600 paid=TRUE  status=paid    audit=checkout-carol
+
+SUMIFS(subtotal where channel="retail") = 10000 + 7500 = 17500.
+Pivot by channel SUM(subtotal): retail=17500, online=5000, Grand Total=22500
+(first-seen row-key order: retail then online, per pivot_build's docstring
+in src/app/office/sheets/pivot.spl)."""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file, write_file, file_exists}
+use app.office.mod.{run_office}
+use app.office.erp_bridge.{erp_sale_header, erp_records_to_sheet, sheet_to_erp_records, default_invoice_template, erp_invoice_to_document, erp_invoice_from_sheet}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells, document_to_markdown}
+use app.office.sheets.pivot.{pivot_build}
+
+val _scratch = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/de80534b-2c68-466d-a211-9ec2529fed18/scratchpad"
+
+fn _fixture_sheet() -> Sheet:
+    """Three sale.write rows built directly via set_value (the schema this
+    bridge reads/writes; see erp_sale_header)."""
+    var sh = Sheet.new("sales_fixture")
+    sh.set_value("A1", "id")
+    sh.set_value("B1", "channel")
+    sh.set_value("C1", "subtotal")
+    sh.set_value("D1", "tax")
+    sh.set_value("E1", "paid")
+    sh.set_value("F1", "status")
+    sh.set_value("G1", "audit_note")
+    sh.set_value("A2", "1")
+    sh.set_value("B2", "retail")
+    sh.set_value("C2", "10000")
+    sh.set_value("D2", "800")
+    sh.set_value("E2", "TRUE")
+    sh.set_value("F2", "paid")
+    sh.set_value("G2", "checkout-alice")
+    sh.set_value("A3", "2")
+    sh.set_value("B3", "online")
+    sh.set_value("C3", "5000")
+    sh.set_value("D3", "400")
+    sh.set_value("E3", "FALSE")
+    sh.set_value("F3", "pending")
+    sh.set_value("G3", "checkout-bob")
+    sh.set_value("A4", "3")
+    sh.set_value("B4", "retail")
+    sh.set_value("C4", "7500")
+    sh.set_value("D4", "600")
+    sh.set_value("E4", "TRUE")
+    sh.set_value("F4", "paid")
+    sh.set_value("G4", "checkout-carol")
+    sh
+
+fn _fixture_records_text() -> text:
+    """A representative ERP records file: the fixture sheet serialized to
+    the ERP's ubslog v1 format via sheet_to_erp_records."""
+    sheet_to_erp_records(_fixture_sheet())
+
+describe "erp_sale_header: schema":
+    it "matches the ERP Sale struct field order (src/lanes/sale.spl)":
+        val header = erp_sale_header()
+        expect(header.len()).to_equal(7)
+        expect(header.get(0)).to_equal("id")
+        expect(header.get(1)).to_equal("channel")
+        expect(header.get(6)).to_equal("audit_note")
+
+describe "sheet_to_erp_records: ERP ubslog v1 serialization":
+    it "produces a ubslog v1 header with the correct event count":
+        val text = _fixture_records_text()
+        assert_true(text.starts_with("ubslog v1 count=3 checksum="))
+
+    it "encodes each row as a sale.write event with entity = id":
+        val text = _fixture_records_text()
+        expect(text).to_contain("|sale.write|1|retail,10000,800,TRUE,paid,checkout-alice")
+        expect(text).to_contain("|sale.write|2|online,5000,400,FALSE,pending,checkout-bob")
+        expect(text).to_contain("|sale.write|3|retail,7500,600,TRUE,paid,checkout-carol")
+
+describe "erp_records_to_sheet: ERP records -> Sheet":
+    it "parses header + 3 data rows exactly":
+        val sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
+        expect(cell_display_text(sheet.get_cell("A1"))).to_equal("id")
+        expect(cell_display_text(sheet.get_cell("G1"))).to_equal("audit_note")
+        expect(cell_display_text(sheet.get_cell("A2"))).to_equal("1")
+        expect(cell_display_text(sheet.get_cell("B2"))).to_equal("retail")
+        expect(cell_display_text(sheet.get_cell("C3"))).to_equal("5000")
+        expect(cell_display_text(sheet.get_cell("E4"))).to_equal("TRUE")
+        expect(cell_display_text(sheet.get_cell("G4"))).to_equal("checkout-carol")
+
+    it "fails closed (header-only Sheet) on a tampered checksum":
+        val text = _fixture_records_text()
+        val bad = text + "9"
+        val sheet = erp_records_to_sheet(bad, "sales")
+        expect(cell_display_text(sheet.get_cell("A1"))).to_equal("id")
+        expect(cell_display_text(sheet.get_cell("A2"))).to_equal("")
+
+    it "skips non-sale.write event kinds, keeping only sale.write rows (documented ceiling)":
+        """Mixed-kind file (checksum computed in scratchpad/checksum_probe.spl,
+        same algorithm as _erp_log_checksum): a crm.write event followed by
+        a sale.write event. Only the sale.write row should appear."""
+        val raw = "ubslog v1 count=2 checksum=706678\n0|crm.write|9|lead-data\n1|sale.write|1|retail,10000,800,TRUE,paid,checkout-alice"
+        val sheet = erp_records_to_sheet(raw, "mixed")
+        expect(cell_display_text(sheet.get_cell("A2"))).to_equal("1")
+        expect(cell_display_text(sheet.get_cell("B2"))).to_equal("retail")
+        expect(cell_display_text(sheet.get_cell("A3"))).to_equal("")
+
+describe "round trip: Sheet -> ERP records -> Sheet -> ERP records":
+    it "is byte-exact for the representative fixture":
+        val text1 = _fixture_records_text()
+        val sheet2 = erp_records_to_sheet(text1, "sales2")
+        val text2 = sheet_to_erp_records(sheet2)
+        expect(text2).to_equal(text1)
+
+describe "SUMIFS over the imported ledger columns":
+    it "sums subtotal for channel=retail (hand-computed 10000+7500=17500)":
+        var sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
+        sheet.set_value("H1", "=SUMIFS(C2:C4,B2:B4,\"retail\")")
+        sheet = recalculate_formula_cells(sheet)
+        expect(cell_display_text(sheet.get_cell("H1"))).to_equal("17500")
+
+describe "pivot_build over the imported sheet":
+    it "groups subtotal by channel (hand-computed retail=17500, online=5000, grand=22500)":
+        val sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
+        val result = pivot_build(sheet, "A2:G4", 1, -1, 2, "sum")
+        expect(result.len()).to_equal(4)
+        expect(result[0][0]).to_equal("Row")
+        expect(result[1][0]).to_equal("retail")
+        expect(result[1][1]).to_equal("17500")
+        expect(result[2][0]).to_equal("online")
+        expect(result[2][1]).to_equal("5000")
+        expect(result[3][0]).to_equal("Grand Total")
+        expect(result[3][1]).to_equal("22500")
+
+describe "default_invoice_template + erp_invoice_to_document: mail merge":
+    it "renders an invoice with the expected merged lines":
+        val doc = erp_invoice_to_document("1", "retail", "10000", "800", "TRUE", "paid", "checkout-alice", default_invoice_template())
+        val md = document_to_markdown(doc)
+        expect(md).to_contain("# Invoice 1")
+        expect(md).to_contain("Channel: retail")
+        expect(md).to_contain("Subtotal: 10000")
+        expect(md).to_contain("Tax: 800")
+        expect(md).to_contain("Paid: TRUE")
+        expect(md).to_contain("Status: paid")
+        expect(md).to_contain("Note: checkout-alice")
+
+describe "erp_invoice_from_sheet: invoice directly from an ERP-imported Sheet":
+    it "merges row 2 (id=2, online/pending) matching the sheet's own data":
+        val sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
+        val doc = erp_invoice_from_sheet(sheet, 2, default_invoice_template())
+        val md = document_to_markdown(doc)
+        expect(md).to_contain("# Invoice 2")
+        expect(md).to_contain("Channel: online")
+        expect(md).to_contain("Status: pending")
+
+describe "CLI: erp-to-sheet (E2E)":
+    it "writes an ERP records file to CSV via the office CLI":
+        val in_path = "{_scratch}/erp_bridge_spec_records.ubslog"
+        val out_path = "{_scratch}/erp_bridge_spec_out.csv"
+        write_file(in_path, _fixture_records_text())
+        val code = run_office(["erp-to-sheet", in_path, out_path])
+        expect(code).to_equal(0)
+        assert_true(file_exists(out_path))
+        val csv = read_file(out_path)
+        expect(csv).to_contain("retail")
+        expect(csv).to_contain("checkout-carol")
+
+describe "CLI: erp-invoice (E2E)":
+    it "writes one ERP row as a markdown invoice via the office CLI":
+        val in_path = "{_scratch}/erp_bridge_spec_records.ubslog"
+        val out_path = "{_scratch}/erp_bridge_spec_invoice.md"
+        write_file(in_path, _fixture_records_text())
+        val code = run_office(["erp-invoice", in_path, "1", out_path])
+        expect(code).to_equal(0)
+        assert_true(file_exists(out_path))
+        val md = read_file(out_path)
+        expect(md).to_contain("# Invoice 1")
+        expect(md).to_contain("Channel: retail")

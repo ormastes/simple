@@ -1,0 +1,78 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn lower_source_function(src: text, target_name: text) -> text:
+    val module = parse_full_frontend(src, "logic.spl", "logic.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("logic.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with(".{target_name}"):
+            return serialize_mir_function(function)
+    ""
+
+fn lower_logic_function(expr: text) -> text:
+    val src = "fn rhs() -> bool:\n    true\n\nfn check(flag: bool, other: bool) -> bool:\n    {expr}\n"
+    lower_source_function(src, "check")
+
+fn expect_conditional_rhs(mir: text):
+    val if_pos = mir.index_of("\"terminator\":{\"If\"") ?? -1
+    val rhs_pos = mir.index_of("\"label\":\"logic_rhs\"") ?? -1
+    val call_pos = mir.index_of("\"value\":\"rhs\"") ?? -1
+    val short_pos = mir.index_of("\"label\":\"logic_short\"") ?? -1
+    val merge_pos = mir.index_of("\"label\":\"logic_merge\"") ?? -1
+    val load_pos = mir.index_of("\"Load\"") ?? -1
+    expect(if_pos).to_be_greater_than(-1)
+    expect(rhs_pos).to_be_greater_than(if_pos)
+    expect(call_pos).to_be_greater_than(rhs_pos)
+    expect(short_pos).to_be_greater_than(call_pos)
+    expect(merge_pos).to_be_greater_than(short_pos)
+    expect(load_pos).to_be_greater_than(merge_pos)
+    expect(mir.split("\"Alloc\"").len()).to_equal(2)
+    expect(mir.split("\"Store\"").len()).to_equal(3)
+    expect(mir.split("\"Load\"").len()).to_equal(2)
+    expect(mir.contains("\"BitAnd\"")).to_equal(false)
+    expect(mir.contains("\"BitOr\"")).to_equal(false)
+
+describe "MIR logical short-circuit lowering", tag: ["only-compiled"]:
+    it "branches to the RHS only when an and-left value is true":
+        val mir = lower_logic_function("flag and rhs()")
+        expect_conditional_rhs(mir)
+        expect(mir).to_contain("\"then\":1,\"else\":2")
+
+    it "branches to the RHS only when an or-left value is false":
+        val mir = lower_logic_function("flag or rhs()")
+        expect_conditional_rhs(mir)
+        expect(mir).to_contain("\"then\":2,\"else\":1")
+
+    it "uses independent slots for nested short-circuit expressions":
+        val mir = lower_logic_function("flag and (other or rhs())")
+        expect(mir.split("\"Alloc\"").len()).to_equal(3)
+        expect(mir.split("\"Store\"").len()).to_equal(5)
+        expect(mir.split("\"Load\"").len()).to_equal(3)
+
+    it "hoists a loop-body logical merge slot to function entry":
+        val src = "fn rhs() -> bool:\n    true\n\nfn check(flag: bool) -> bool:\n    var result = false\n    while flag:\n        result = flag and rhs()\n        break\n    result\n"
+        val mir = lower_source_function(src, "check")
+        val alloc_pos = mir.index_of("\"Alloc\"") ?? -1
+        val cond_pos = mir.index_of("\"label\":\"while_cond\"") ?? -1
+        val body_pos = mir.index_of("\"label\":\"while_body\"") ?? -1
+        expect(alloc_pos).to_be_greater_than(-1)
+        expect(cond_pos).to_be_greater_than(alloc_pos)
+        expect(body_pos).to_be_greater_than(cond_pos)
+        expect(mir.split("\"Alloc\"").len()).to_equal(2)
+
+describe "MIR block terminator lowering", tag: ["only-compiled"]:
+    it "does not lower a Dict traversal after return":
+        val source = "fn check(values: Dict<text, i64>) -> i64:\n    return 7\n    values.values()\n"
+        val mir = lower_source_function(source, "check")
+
+        expect(mir).to_contain("\"terminator\":{\"Return\"")
+        expect(mir.contains("rt_dict_values")).to_equal(false)
+        expect(mir.contains("Map.values")).to_equal(false)
+        expect(mir.contains("Dict.values")).to_equal(false)
+        expect(mir.contains("MethodCallStatic")).to_equal(false)

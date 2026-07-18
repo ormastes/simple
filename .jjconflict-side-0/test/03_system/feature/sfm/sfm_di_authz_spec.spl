@@ -1,0 +1,199 @@
+# @cover src/lib/nogc_sync_mut/sfm/di_bridge.spl 80%
+# @cover src/lib/nogc_sync_mut/sfm/authz.spl 80%
+"""
+# SFM Dependency Injection & AOP Authorization
+
+**Feature IDs:** #SFM
+**Category:** Infrastructure
+**Status:** Draft
+**Requirements:** doc/04_architecture/language/simple_feature_module.md
+**Design:** doc/05_design/simple_feature_module.md
+
+## Overview
+
+Exposed layers are linked to an app through data-driven dependency injection
+(`register_layers` loops the manifest — no hard-coded wiring) and resolved by role
+(`resolve_layer`). Layer access is guarded by an AOP Around interceptor that enforces
+the module's security level: `Trusted`/privileged layers require a granted context,
+otherwise resolution is denied. This spec covers AC-3 (resolve-by-role, data-driven),
+AC-4 (AOP allow/deny), and AC-5 (the special `Trusted` security level gating).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| register_layers | Binds every manifest layer to its role-keyed factory (data-driven) |
+| resolve_layer | Resolves a layer by role, applying the authorization aspect |
+| AuthzContext | Caller identity: principal + whether trusted access is granted |
+| make_authz_aspect | Around advice enforcing the module's security level |
+| SfmSecurityLevel | `Ordinary` vs the special `Trusted` privileged marker |
+
+## Related Specifications
+
+- [sfm_codec_spec.spl](sfm_codec_spec.spl) — manifest model these layers come from
+"""
+
+use std.spec.*
+use std.sfm.manifest.{
+    FeatureManifest,
+    LayerDescriptor,
+    LayerKind,
+    SfmSecurityLevel
+}
+use std.sfm.di_bridge.{register_layers, resolve_layer, new_sfm_container}
+use std.sfm.authz.{AuthzContext, make_authz_aspect, authorize}
+
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+
+# @step: Build an ordinary manifest with an arg-parser layer
+fn ordinary_manifest() -> FeatureManifest:
+    val cli = LayerDescriptor(
+        role: "cli",
+        kind: LayerKind.FrontArgParser,
+        entry_symbol: "arg_parse_main",
+        privileged: false
+    )
+    return FeatureManifest(
+        name: "ordinary-sfm",
+        version: "1.0.0",
+        security_level: SfmSecurityLevel.Ordinary,
+        layers: [cli]
+    )
+
+# @step: Build a trusted manifest exposing a privileged hardware layer
+fn trusted_manifest() -> FeatureManifest:
+    val hw = LayerDescriptor(
+        role: "device",
+        kind: LayerKind.BackHw,
+        entry_symbol: "hw_open",
+        privileged: true
+    )
+    return FeatureManifest(
+        name: "trusted-sfm",
+        version: "1.0.0",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: [hw]
+    )
+
+# @step: Register the manifest layers into a fresh container
+fn register(m: FeatureManifest) -> Any:
+    val c = new_sfm_container(m)
+    register_layers(c, m)
+    return c
+
+# @step: A caller with no trusted grant
+fn untrusted_ctx() -> AuthzContext:
+    return AuthzContext(principal: "guest", granted_trusted: false)
+
+# @step: A caller granted trusted access
+fn trusted_ctx() -> AuthzContext:
+    return AuthzContext(principal: "root", granted_trusted: true)
+
+
+# ============================================================================
+# AC-3: data-driven DI resolve-by-role
+# ============================================================================
+
+describe "SFM dependency injection":
+    describe "AC-3: resolve a layer by role from a loaded manifest":
+        # @capture(api)
+        it "should resolve a registered ordinary layer by its role":
+            val m = ordinary_manifest()
+            val c = register(m)
+            match resolve_layer(c, "cli", untrusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("resolve failed: " + e).to_equal("ok")
+
+        # @capture(api)
+        it "should fail to resolve a role that is not in the manifest":
+            val m = ordinary_manifest()
+            val c = register(m)
+            match resolve_layer(c, "missing", untrusted_ctx()):
+                Ok(_):  expect("should not resolve unknown role").to_equal("ok")
+                Err(_): assert_true(true)
+
+        # @capture(api)
+        it "should wire layers data-driven from the manifest (count matches)":
+            # Manifest with two distinct roles -> both resolvable, no hard-coding.
+            val cli = LayerDescriptor(role: "cli", kind: LayerKind.FrontArgParser, entry_symbol: "a", privileged: false)
+            val tui = LayerDescriptor(role: "ui", kind: LayerKind.FrontTui, entry_symbol: "b", privileged: false)
+            val m = FeatureManifest(name: "two", version: "1.0.0", security_level: SfmSecurityLevel.Ordinary, layers: [cli, tui])
+            val c = register(m)
+            match resolve_layer(c, "cli", untrusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("cli failed: " + e).to_equal("ok")
+            match resolve_layer(c, "ui", untrusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("ui failed: " + e).to_equal("ok")
+
+
+# ============================================================================
+# AC-4: AOP authorization interceptor allow / deny
+# ============================================================================
+
+describe "SFM AOP authorization":
+    describe "AC-4: interceptor enforces access (allow / deny)":
+        # @capture(api)
+        it "should allow access to an ordinary layer without a trusted grant":
+            match authorize(SfmSecurityLevel.Ordinary,
+                            LayerDescriptor(role: "cli", kind: LayerKind.FrontArgParser, entry_symbol: "a", privileged: false),
+                            untrusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("should allow: " + e).to_equal("ok")
+
+        # @capture(api)
+        it "should deny access to a privileged layer without a trusted grant":
+            match authorize(SfmSecurityLevel.Trusted,
+                            LayerDescriptor(role: "device", kind: LayerKind.BackHw, entry_symbol: "hw_open", privileged: true),
+                            untrusted_ctx()):
+                Ok(_):  expect("should have denied").to_equal("ok")
+                Err(_): assert_true(true)
+
+        # @capture(api)
+        it "should allow access to a privileged layer with a trusted grant":
+            match authorize(SfmSecurityLevel.Trusted,
+                            LayerDescriptor(role: "device", kind: LayerKind.BackHw, entry_symbol: "hw_open", privileged: true),
+                            trusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("should allow: " + e).to_equal("ok")
+
+        # @capture(api)
+        it "should deny resolve_layer of a privileged layer for an untrusted caller":
+            val m = trusted_manifest()
+            val c = register(m)
+            match resolve_layer(c, "device", untrusted_ctx()):
+                Ok(_):  expect("should have been denied by aspect").to_equal("ok")
+                Err(_): assert_true(true)
+
+        # @capture(api)
+        it "should resolve a privileged layer for a trusted caller":
+            val m = trusted_manifest()
+            val c = register(m)
+            match resolve_layer(c, "device", trusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("should allow trusted: " + e).to_equal("ok")
+
+
+# ============================================================================
+# AC-5: special security level gating
+# ============================================================================
+
+describe "SFM special security level":
+    describe "AC-5: Trusted is distinct from Ordinary and gates privilege":
+        # @capture(api)
+        it "should build an authz aspect bound to the trusted level":
+            # Constructing the aspect must succeed; it is the gate for AC-4.
+            val aspect = make_authz_aspect(SfmSecurityLevel.Trusted)
+            expect(aspect.name).to_contain("authz")
+
+        it "should treat an ordinary module's privileged claim as ungated":
+            # An Ordinary module cannot enforce trusted gating: a privileged
+            # layer under Ordinary level resolves for any caller (no marker).
+            match authorize(SfmSecurityLevel.Ordinary,
+                            LayerDescriptor(role: "x", kind: LayerKind.BackHw, entry_symbol: "x", privileged: true),
+                            untrusted_ctx()):
+                Ok(_):  assert_true(true)
+                Err(e): expect("ordinary should not gate: " + e).to_equal("ok")

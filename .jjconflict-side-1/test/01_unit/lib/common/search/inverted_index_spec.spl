@@ -1,0 +1,229 @@
+# inverted_index_spec.spl — inverted index + positional postings (Phase 2)
+#
+# ABSOLUTE-ORACLE tests (no self-comparison): a hand-written 5-document corpus
+# with KNOWN expected doc-id sets for term / AND / OR / NOT, and KNOWN phrase
+# matches. AND/OR are additionally cross-checked against an INDEPENDENT inline
+# brute-force per-doc `contains` scan implemented in this file.
+use std.spec
+use lib.common.search.inverted_index.{IndexedDoc, InvertedIndex}
+use lib.common.search.types.{PostingList}
+
+# ----------------------------------------------------------------------------
+# Hand-written corpus (doc ids strictly ascending, as add_doc requires).
+#   1: "the quick brown fox"
+#   2: "the lazy dog"
+#   3: "quick brown dog runs"
+#   4: "the fox jumps quick"          (has quick + fox, but NOT "quick brown")
+#   5: "lazy lazy cat"                (term repeated -> dedup test)
+# ----------------------------------------------------------------------------
+fn corpus() -> [IndexedDoc]:
+    var docs: [IndexedDoc] = []
+    docs.push(IndexedDoc.new(1, ["the", "quick", "brown", "fox"]))
+    docs.push(IndexedDoc.new(2, ["the", "lazy", "dog"]))
+    docs.push(IndexedDoc.new(3, ["quick", "brown", "dog", "runs"]))
+    docs.push(IndexedDoc.new(4, ["the", "fox", "jumps", "quick"]))
+    docs.push(IndexedDoc.new(5, ["lazy", "lazy", "cat"]))
+    docs
+
+fn build_index() -> InvertedIndex:
+    var idx: InvertedIndex = InvertedIndex.new()
+    val docs = corpus()
+    var i = 0
+    while i < docs.len():
+        idx.add_doc(docs[i])
+        i = i + 1
+    idx
+
+# Materialize a PostingList<i64> as a plain [i64] for assertions.
+fn ids_of(pl: PostingList<i64>) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < pl.len():
+        out.push(pl.at(i))
+        i = i + 1
+    out
+
+# --- INDEPENDENT brute-force oracle (no index, raw token scan) --------------
+fn doc_has_term(doc: IndexedDoc, term: text) -> bool:
+    var i = 0
+    while i < doc.token_count():
+        if doc.token_at(i) == term:
+            return true
+        i = i + 1
+    false
+
+fn brute_and(term_a: text, term_b: text) -> [i64]:
+    var out: [i64] = []
+    val docs = corpus()
+    var i = 0
+    while i < docs.len():
+        val d = docs[i]
+        if doc_has_term(d, term_a):
+            if doc_has_term(d, term_b):
+                out.push(d.doc_id())
+        i = i + 1
+    out
+
+fn brute_or(term_a: text, term_b: text) -> [i64]:
+    var out: [i64] = []
+    val docs = corpus()
+    var i = 0
+    while i < docs.len():
+        val d = docs[i]
+        var hit = false
+        if doc_has_term(d, term_a):
+            hit = true
+        if doc_has_term(d, term_b):
+            hit = true
+        if hit:
+            out.push(d.doc_id())
+        i = i + 1
+    out
+
+fn lists_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "InvertedIndex build":
+    it "indexes every doc and tracks the universe":
+        val idx = build_index()
+        expect(idx.doc_count()).to_equal(5)
+
+    it "distinct terms are interned once (dedup within a doc)":
+        # corpus distinct terms: the,quick,brown,fox,lazy,dog,runs,jumps,cat = 9
+        val idx = build_index()
+        expect(idx.term_count()).to_equal(9)
+
+describe "term lookup (absolute oracle)":
+    it "returns the sorted doc-id set for a common term":
+        # "the" appears in docs 1,2,4
+        val idx = build_index()
+        val r = ids_of(idx.postings_for("the"))
+        expect(r.len()).to_equal(3)
+        expect(r[0]).to_equal(1)
+        expect(r[1]).to_equal(2)
+        expect(r[2]).to_equal(4)
+
+    it "single-doc term yields a one-element posting":
+        # "runs" appears only in doc 3
+        val idx = build_index()
+        val r = ids_of(idx.postings_for("runs"))
+        expect(r.len()).to_equal(1)
+        expect(r[0]).to_equal(3)
+
+    it "repeated term within a doc is deduped to one posting entry":
+        # "lazy" -> docs 2 and 5 (doc 5 has it TWICE; must appear once)
+        val idx = build_index()
+        val r = ids_of(idx.postings_for("lazy"))
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal(2)
+        expect(r[1]).to_equal(5)
+
+    it "absent term returns an explicit empty posting (no sentinel)":
+        val idx = build_index()
+        val r = idx.postings_for("zebra")
+        expect(r.is_empty()).to_equal(true)
+        expect(r.len()).to_equal(0)
+
+describe "Boolean AND (intersect)":
+    it "matches the hand-computed oracle":
+        # quick: 1,3,4 ; brown: 1,3 ; AND -> 1,3
+        val idx = build_index()
+        val r = ids_of(idx.and_query("quick", "brown"))
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal(1)
+        expect(r[1]).to_equal(3)
+
+    it "agrees with independent brute-force contains scan":
+        val idx = build_index()
+        val got = ids_of(idx.and_query("the", "quick"))
+        val oracle = brute_and("the", "quick")
+        expect(lists_equal(got, oracle)).to_equal(true)
+        # absolute: "the"={1,2,4}, "quick"={1,3,4} -> {1,4}
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal(1)
+        expect(got[1]).to_equal(4)
+
+    it "disjoint terms produce an empty result":
+        # cat: 5 ; fox: 1,4 -> empty
+        val idx = build_index()
+        val r = idx.and_query("cat", "fox")
+        expect(r.is_empty()).to_equal(true)
+
+describe "Boolean OR (union)":
+    it "matches the hand-computed oracle, sorted + deduped":
+        # fox: 1,4 ; dog: 2,3 ; OR -> 1,2,3,4
+        val idx = build_index()
+        val r = ids_of(idx.or_query("fox", "dog"))
+        expect(r.len()).to_equal(4)
+        expect(r[0]).to_equal(1)
+        expect(r[1]).to_equal(2)
+        expect(r[2]).to_equal(3)
+        expect(r[3]).to_equal(4)
+
+    it "agrees with independent brute-force contains scan":
+        val idx = build_index()
+        val got = ids_of(idx.or_query("brown", "lazy"))
+        val oracle = brute_or("brown", "lazy")
+        expect(lists_equal(got, oracle)).to_equal(true)
+        # absolute: brown={1,3}, lazy={2,5} -> {1,2,3,5}
+        expect(got.len()).to_equal(4)
+        expect(got[0]).to_equal(1)
+        expect(got[3]).to_equal(5)
+
+describe "Boolean NOT (difference vs tracked universe)":
+    it "returns universe minus the term's docs":
+        # universe={1,2,3,4,5}, "the"={1,2,4} -> {3,5}
+        val idx = build_index()
+        val r = ids_of(idx.not_query("the"))
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal(3)
+        expect(r[1]).to_equal(5)
+
+    it "NOT of an absent term is the whole universe":
+        val idx = build_index()
+        val r = ids_of(idx.not_query("zebra"))
+        expect(r.len()).to_equal(5)
+        expect(r[0]).to_equal(1)
+        expect(r[4]).to_equal(5)
+
+describe "phrase query (positional adjacency)":
+    it "matches a phrase whose words are adjacent and in order":
+        # "quick brown": adjacent in doc 1 (quick@1,brown@2) and doc 3
+        # (quick@0,brown@1). NOT doc 4 (quick@3, no brown).
+        val idx = build_index()
+        val r = ids_of(idx.phrase_query("quick", "brown"))
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal(1)
+        expect(r[1]).to_equal(3)
+
+    it "excludes docs where both words exist but are NOT adjacent":
+        # doc 4 = "the fox jumps quick": has BOTH "fox"(idx1) and "quick"(idx3)
+        # so AND matches it, but they are not adjacent in order -> phrase empty.
+        val idx = build_index()
+        val both = ids_of(idx.and_query("fox", "quick"))
+        # AND includes doc 4 (and doc 1: fox@3,quick@1)
+        expect(both).to_contain(4)
+        expect(both.len()).to_equal(2)
+        val phrase = idx.phrase_query("fox", "quick")
+        expect(phrase.is_empty()).to_equal(true)
+
+    it "order matters: brown quick is not a phrase here":
+        # "quick brown" matches; reversed "brown quick" never adjacent-in-order
+        val idx = build_index()
+        val r = idx.phrase_query("brown", "quick")
+        expect(r.is_empty()).to_equal(true)
+
+    it "single-doc phrase: the quick (only doc 1)":
+        # "the quick": doc1 the@0,quick@1 adjacent. doc2/doc4 have "the" but the
+        # next token is not "quick".
+        val idx = build_index()
+        val r = ids_of(idx.phrase_query("the", "quick"))
+        expect(r.len()).to_equal(1)
+        expect(r[0]).to_equal(1)

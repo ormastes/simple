@@ -1,0 +1,129 @@
+use std.spec
+use os.kernel.arch.x86_64.per_cpu.{
+    simulate_gs_write_baremetal,
+    read_gs_base_test,
+    simulate_gs_write_hosted,
+    simulate_fs_write_baremetal,
+    read_fs_base_test,
+    simulate_fs_write_hosted
+}
+
+# x86_64 per-CPU GS_BASE/FS_BASE register wiring
+# Acceptance criteria:
+#   - GS_BASE is set to per_cpu_base + (cpu_id << per_cpu_shift) at boot
+#   - FS_BASE follows the same convention
+#   - Hosted build leaves GS/FS unchanged (no-op)
+#   - Per-CPU isolation: different cpu_ids produce different base addresses
+#
+# Production module: src/os/kernel/arch/x86_64/per_cpu.spl
+# The spec imports simulation helpers directly from the production module.
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "x86_64 Per-CPU GS_BASE Register Convention":
+
+    describe "GS_BASE write at boot — baremetal path":
+        it "GS_BASE is set to per_cpu_base for cpu 0 (shift has no effect)":
+            val cpu_id = 0u32
+            val per_cpu_base = 0xFFFF800000100000u64
+            val per_cpu_shift = 12u32
+            simulate_gs_write_baremetal(cpu_id, per_cpu_base, per_cpu_shift)
+            val gs = read_gs_base_test()
+            val expected = per_cpu_base + (0u64 << per_cpu_shift)
+            expect(gs).to_equal(expected)
+
+        it "GS_BASE is set correctly for cpu 1 (one slot up)":
+            val cpu_id = 1u32
+            val per_cpu_base = 0xFFFF800000100000u64
+            val per_cpu_shift = 12u32
+            simulate_gs_write_baremetal(cpu_id, per_cpu_base, per_cpu_shift)
+            val gs = read_gs_base_test()
+            val expected = per_cpu_base + (1u64 << per_cpu_shift)
+            expect(gs).to_equal(expected)
+
+        it "GS_BASE differs across cpu IDs (no aliasing)":
+            val base = 0xFFFF800000100000u64
+            val shift = 12u32
+            simulate_gs_write_baremetal(0u32, base, shift)
+            val gs_cpu0 = read_gs_base_test()
+            simulate_gs_write_baremetal(1u32, base, shift)
+            val gs_cpu1 = read_gs_base_test()
+            expect(gs_cpu0).to_equal(base)
+            expect(gs_cpu1).to_equal(base + 4096u64)
+
+        it "GS_BASE uses the per_cpu_shift for slot sizing":
+            val base = 0xFFFF800000200000u64
+            val shift = 16u32
+            simulate_gs_write_baremetal(2u32, base, shift)
+            val gs = read_gs_base_test()
+            val expected = base + (2u64 << shift)
+            expect(gs).to_equal(expected)
+
+    describe "GS_BASE NOT written in hosted (non-baremetal) build":
+        it "simulate_gs_write_hosted does NOT modify GS_BASE":
+            val per_cpu_base = 0xFFFF800000300000u64
+            simulate_gs_write_baremetal(0u32, per_cpu_base, 12u32)
+            val before = read_gs_base_test()
+            simulate_gs_write_hosted()
+            val after = read_gs_base_test()
+            expect(after).to_equal(before)
+
+describe "x86_64 Per-CPU FS_BASE Register Convention":
+
+    describe "FS_BASE write at boot — baremetal path":
+        it "FS_BASE is set to per_cpu_base for cpu 0":
+            val cpu_id = 0u32
+            val per_cpu_base = 0xFFFF800000400000u64
+            val per_cpu_shift = 12u32
+            simulate_fs_write_baremetal(cpu_id, per_cpu_base, per_cpu_shift)
+            val fs = read_fs_base_test()
+            expect(fs).to_equal(per_cpu_base)
+
+        it "FS_BASE is set correctly for cpu 1":
+            val cpu_id = 1u32
+            val per_cpu_base = 0xFFFF800000400000u64
+            val per_cpu_shift = 12u32
+            simulate_fs_write_baremetal(cpu_id, per_cpu_base, per_cpu_shift)
+            val fs = read_fs_base_test()
+            val expected = per_cpu_base + 4096u64
+            expect(fs).to_equal(expected)
+
+        it "FS_BASE differs across cpu IDs (no aliasing)":
+            val base = 0xFFFF800000400000u64
+            val shift = 12u32
+            simulate_fs_write_baremetal(0u32, base, shift)
+            val fs_cpu0 = read_fs_base_test()
+            simulate_fs_write_baremetal(1u32, base, shift)
+            val fs_cpu1 = read_fs_base_test()
+            expect(fs_cpu0).to_equal(base)
+            expect(fs_cpu1).to_equal(base + 4096u64)
+
+    describe "FS_BASE NOT written in hosted (non-baremetal) build":
+        it "simulate_fs_write_hosted does NOT modify FS_BASE":
+            val per_cpu_base = 0xFFFF800000500000u64
+            simulate_fs_write_baremetal(0u32, per_cpu_base, 12u32)
+            val before = read_fs_base_test()
+            simulate_fs_write_hosted()
+            val after = read_fs_base_test()
+            expect(after).to_equal(before)
+
+    describe "GS and FS are independent state":
+        it "writing GS does not affect FS":
+            val gs_base = 0xFFFF800000600000u64
+            val fs_base = 0xFFFF800000700000u64
+            simulate_fs_write_baremetal(0u32, fs_base, 12u32)
+            val fs_before = read_fs_base_test()
+            simulate_gs_write_baremetal(3u32, gs_base, 12u32)
+            val fs_after = read_fs_base_test()
+            expect(fs_before).to_equal(fs_after)
+
+        it "writing FS does not affect GS":
+            val gs_base = 0xFFFF800000800000u64
+            val fs_base = 0xFFFF800000900000u64
+            simulate_gs_write_baremetal(0u32, gs_base, 12u32)
+            val gs_before = read_gs_base_test()
+            simulate_fs_write_baremetal(3u32, fs_base, 12u32)
+            val gs_after = read_gs_base_test()
+            expect(gs_before).to_equal(gs_after)

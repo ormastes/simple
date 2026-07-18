@@ -1,0 +1,149 @@
+# AOP logging policy for compiler-inserted observability join points.
+#
+# Hardware and external-access joins are audit signals and stay weaveable in
+# production. Debug/trace joins are optional instrumentation and should be
+# omitted from production output unless the build explicitly enables them.
+
+use compiler.frontend.core.aop.{AdviceForm, WeavingConfig, WeavingRule}
+
+const AOP_LOG_LEVEL_TRACE = "trace"
+const AOP_LOG_LEVEL_DEBUG = "debug"
+const AOP_LOG_LEVEL_INFO = "info"
+const AOP_LOG_LEVEL_WARN = "warn"
+const AOP_LOG_LEVEL_ERROR = "error"
+const AOP_LOG_LEVEL_OFF = "off"
+
+struct AopLogInstrumentationConfig:
+    enabled: bool
+    log_function_calls: bool
+    log_variable_assignments: bool
+    compile_log_level: text
+    runtime_log_level: text
+
+impl AopLogInstrumentationConfig:
+    static fn disabled() -> AopLogInstrumentationConfig:
+        AopLogInstrumentationConfig(
+            enabled: false,
+            log_function_calls: false,
+            log_variable_assignments: false,
+            compile_log_level: "debug",
+            runtime_log_level: "info"
+        )
+
+    static fn for_debug(function_calls: bool, variable_assignments: bool) -> AopLogInstrumentationConfig:
+        AopLogInstrumentationConfig(
+            enabled: function_calls or variable_assignments,
+            log_function_calls: function_calls,
+            log_variable_assignments: variable_assignments,
+            compile_log_level: "debug",
+            runtime_log_level: "debug"
+        )
+
+fn aop_log_normalize_level(level: text) -> text:
+    val lowered = (level ?? "").to_lower()
+    if lowered == "trace": return "trace"
+    if lowered == "debug": return "debug"
+    if lowered == "info": return "info"
+    if lowered == "warn" or lowered == "warning": return "warn"
+    if lowered == "error": return "error"
+    if lowered == "off" or lowered == "none": return "off"
+    "debug"
+
+fn aop_log_with_compile_level(config: AopLogInstrumentationConfig, level: text) -> AopLogInstrumentationConfig:
+    AopLogInstrumentationConfig(
+        enabled: config.enabled,
+        log_function_calls: config.log_function_calls,
+        log_variable_assignments: config.log_variable_assignments,
+        compile_log_level: aop_log_normalize_level(level),
+        runtime_log_level: config.runtime_log_level
+    )
+
+fn aop_log_with_runtime_level(config: AopLogInstrumentationConfig, level: text) -> AopLogInstrumentationConfig:
+    AopLogInstrumentationConfig(
+        enabled: config.enabled,
+        log_function_calls: config.log_function_calls,
+        log_variable_assignments: config.log_variable_assignments,
+        compile_log_level: config.compile_log_level,
+        runtime_log_level: aop_log_normalize_level(level)
+    )
+
+fn aop_log_should_instrument_function_call(config: AopLogInstrumentationConfig) -> bool:
+    if not config.enabled:
+        return false
+    if config.compile_log_level == "off":
+        return false
+    config.log_function_calls
+
+fn aop_log_should_instrument_variable_assignment(config: AopLogInstrumentationConfig) -> bool:
+    if not config.enabled:
+        return false
+    if config.compile_log_level == "off":
+        return false
+    config.log_variable_assignments
+
+fn aop_log_weaving_rules(config: AopLogInstrumentationConfig) -> [WeavingRule]:
+    var rules: [WeavingRule] = []
+    if aop_log_should_instrument_function_call(config):
+        rules.push(WeavingRule(
+            predicate_text: "join:call",
+            advice_function: "__spl_aop_log_function_call",
+            form: AdviceForm.Before,
+            priority: 100
+        ))
+    if aop_log_should_instrument_variable_assignment(config):
+        rules.push(WeavingRule(
+            predicate_text: "join:assignment",
+            advice_function: "__spl_aop_log_variable_assignment",
+            form: AdviceForm.AfterSuccess,
+            priority: 100
+        ))
+    rules
+
+fn aop_log_weaving_config(config: AopLogInstrumentationConfig) -> WeavingConfig:
+    WeavingConfig.from_rules(aop_log_weaving_rules(config))
+
+fn _contains_any(value: text, needles: [text]) -> bool:
+    val lowered = value.to_lower()
+    var i: i32 = 0
+    while i < needles.len() as i32:
+        if lowered.contains(needles[i]):
+            return true
+        i = i + 1
+    false
+
+fn _list_contains_any(values: [text], needles: [text]) -> bool:
+    var i: i32 = 0
+    while i < values.len() as i32:
+        if _contains_any(values[i], needles):
+            return true
+        i = i + 1
+    false
+
+fn aop_log_join_kind(module_path: text, function_name: text, attributes: [text], effects: [text]) -> text:
+    val hardware_terms = ["hardware", "driver", "mmio", "uart", "gpio", "spi", "i2c", "register"]
+    val external_terms = ["external", "ffi", "sffi", "socket", "network", "http", "process", "file"]
+    val trace_terms = ["trace", "replay", "span"]
+    val joined = module_path + "." + function_name
+    if _contains_any(joined, hardware_terms) or _list_contains_any(attributes, hardware_terms) or _list_contains_any(effects, hardware_terms):
+        return "hardware"
+    if _contains_any(joined, external_terms) or _list_contains_any(attributes, external_terms) or _list_contains_any(effects, external_terms):
+        return "external_access"
+    if _contains_any(joined, trace_terms) or _list_contains_any(attributes, trace_terms) or _list_contains_any(effects, trace_terms):
+        return "trace"
+    "debug"
+
+fn aop_log_should_weave(join_kind: text, build_mode: text, debug_enabled: bool) -> bool:
+    if join_kind == "hardware" or join_kind == "external_access":
+        return true
+    if debug_enabled:
+        return true
+    build_mode.to_lower() != "release" and join_kind != "trace"
+
+fn aop_log_pointcut_for_kind(join_kind: text) -> text:
+    if join_kind == "hardware":
+        return "module:*hardware* or module:*driver* or effect:hardware or @hardware"
+    if join_kind == "external_access":
+        return "effect:external or effect:ffi or effect:network or @external"
+    if join_kind == "trace":
+        return "module:*trace* or effect:trace or @trace"
+    "module:* or @debug"

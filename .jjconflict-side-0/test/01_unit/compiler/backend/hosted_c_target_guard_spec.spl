@@ -1,0 +1,274 @@
+use std.spec.*
+use compiler.backend.backend.llvm_native_link.{hosted_c_target_matches_host}
+use compiler.backend.backend.runtime_compiler.{hosted_c_compiler_plan, hosted_cross_c_compiler_name}
+use compiler.backend.linker.linker_wrapper.{hosted_native_link_arch_supported, hosted_cross_cc_required}
+use compiler.backend.backend.llvm_cross_target.{toolchain_for_target, toolchain_x86_64_native, toolchain_aarch64, toolchain_armv7, toolchain_riscv64}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use std.io_runtime.{rt_file_read_text}
+
+describe "hosted C target guard":
+    it "allows implicit and explicit host targets":
+        expect(hosted_c_target_matches_host("", "linux", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("host", "windows", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("native", "freebsd", "x86_64")).to_be(true)
+
+    it "allows same-host architecture aliases":
+        expect(hosted_c_target_matches_host("x86_64", "macos", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("x64", "windows", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("arm64", "windows", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("rv64", "linux", "riscv64")).to_be(true)
+        val x64_plan = hosted_c_compiler_plan("x64", "windows", "x86_64")
+        expect(x64_plan.supported).to_be(true)
+        expect(x64_plan.requires_cross).to_be(false)
+
+    it "allows matching Linux architectures":
+        expect(hosted_c_target_matches_host("x86_64-unknown-linux-gnu", "linux", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("aarch64-unknown-linux-gnu", "linux", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("riscv64-unknown-linux-gnu", "linux", "riscv64")).to_be(true)
+        expect(hosted_c_target_matches_host("riscv64gc-unknown-linux-gnu", "linux", "riscv64")).to_be(true)
+
+    it "allows matching macOS Windows and FreeBSD targets":
+        expect(hosted_c_target_matches_host("x86_64-apple-darwin", "macos", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("aarch64-apple-darwin", "macos", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("arm64-apple-darwin", "macos", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("x86_64-pc-windows-msvc", "windows", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("x64-pc-windows-msvc", "windows", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("x86_64-unknown-freebsd", "freebsd", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("aarch64-unknown-freebsd", "freebsd", "aarch64")).to_be(true)
+
+    it "keeps every supported native compiler plan out of the cross-capsule guard":
+        val plans = [
+            hosted_c_compiler_plan("x86_64-unknown-linux-gnu", "linux", "x86_64"),
+            hosted_c_compiler_plan("aarch64-unknown-linux-gnu", "linux", "aarch64"),
+            hosted_c_compiler_plan("riscv64-unknown-linux-gnu", "linux", "riscv64"),
+            hosted_c_compiler_plan("x86_64-apple-darwin", "macos", "x86_64"),
+            hosted_c_compiler_plan("aarch64-apple-darwin", "macos", "aarch64"),
+            hosted_c_compiler_plan("x86_64-pc-windows-msvc", "windows", "x86_64"),
+            hosted_c_compiler_plan("x86_64-unknown-freebsd", "freebsd", "x86_64"),
+            hosted_c_compiler_plan("aarch64-unknown-freebsd", "freebsd", "aarch64")
+        ]
+        for plan in plans:
+            expect(plan.supported).to_be(true)
+            expect(plan.requires_cross).to_be(false)
+
+    it "admits only hosted architectures with implemented linker and CRT ownership":
+        expect(hosted_native_link_arch_supported("linux", "x86_64")).to_be(true)
+        expect(hosted_native_link_arch_supported("linux", "aarch64")).to_be(true)
+        expect(hosted_native_link_arch_supported("linux", "riscv64")).to_be(true)
+        expect(hosted_native_link_arch_supported("linux", "rv64gc")).to_be(false)
+        expect(hosted_native_link_arch_supported("linux", "armv7")).to_be(false)
+        expect(hosted_native_link_arch_supported("windows", "x86_64")).to_be(true)
+        expect(hosted_native_link_arch_supported("windows", "i686")).to_be(false)
+        expect(hosted_native_link_arch_supported("windows", "aarch64")).to_be(false)
+        expect(hosted_native_link_arch_supported("windows", "arm64")).to_be(false)
+        expect(hosted_native_link_arch_supported("macos", "x86_64")).to_be(true)
+        expect(hosted_native_link_arch_supported("macos", "aarch64")).to_be(true)
+        expect(hosted_native_link_arch_supported("macos", "armv7l")).to_be(false)
+        expect(hosted_native_link_arch_supported("macos", "riscv64")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "x86_64")).to_be(true)
+        expect(hosted_native_link_arch_supported("freebsd", "aarch64")).to_be(true)
+        expect(hosted_native_link_arch_supported("freebsd", "arm")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "armv7")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "armv7l")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "riscv64")).to_be(false)
+
+    it "uses exact native x86_64 descriptors for each supported desktop OS":
+        val freebsd = toolchain_x86_64_native("freebsd")
+        expect(freebsd.triple).to_equal("x86_64-unknown-freebsd")
+        expect(freebsd.linker).to_equal("ld")
+        expect(freebsd.crt_dir).to_equal("/usr/lib")
+        expect(freebsd.install_hint).to_equal("FreeBSD base system toolchain")
+
+        val windows = toolchain_x86_64_native("windows")
+        expect(windows.triple).to_equal("x86_64-pc-windows-msvc")
+        expect(windows.linker).to_equal("link.exe")
+        expect(windows.default_flags.contains("/MACHINE:X64")).to_be(true)
+
+        val macos = toolchain_x86_64_native("macos")
+        expect(macos.triple).to_equal("x86_64-apple-darwin")
+        expect(macos.linker_flavor).to_equal("macho")
+        expect(macos.default_flags.contains("-arch")).to_be(true)
+
+    it "uses native AArch64 descriptors only on supported hosts":
+        val freebsd = toolchain_aarch64("freebsd", "aarch64")
+        expect(freebsd.triple).to_equal("aarch64-unknown-freebsd")
+        expect(freebsd.linker).to_equal("ld")
+        expect(freebsd.linker_flavor).to_equal("gnu")
+        expect(freebsd.crt_dir).to_equal("/usr/lib")
+        expect(freebsd.requires_external).to_be(false)
+        expect(freebsd.install_hint).to_equal("FreeBSD base system toolchain")
+
+        val macos = toolchain_aarch64("macos", "aarch64")
+        expect(macos.triple).to_equal("aarch64-apple-darwin")
+        expect(macos.linker_flavor).to_equal("macho")
+        expect(macos.default_flags.contains("arm64")).to_be(true)
+
+        val windows = toolchain_aarch64("windows", "aarch64")
+        expect(windows.triple).to_equal("aarch64-pc-windows-msvc")
+        expect(windows.linker).to_equal("")
+        expect(windows.requires_external).to_be(true)
+        expect(windows.is_available()).to_be(false)
+        expect(windows.install_hint).to_contain("unsupported")
+
+    it "fails every hosted ARMv7 descriptor closed":
+        val linux = toolchain_armv7("linux", "armv7")
+        val macos = toolchain_armv7("macos", "armv7l")
+        val windows = toolchain_armv7("windows", "arm")
+        val freebsd = toolchain_armv7("freebsd", "armv7")
+        expect(linux.linker).to_equal("")
+        expect(macos.linker).to_equal("")
+        expect(windows.linker).to_equal("")
+        expect(freebsd.linker).to_equal("")
+        expect(linux.triple).to_equal("armv7-unknown-linux-gnueabihf")
+        expect(macos.triple).to_equal("armv7-apple-darwin")
+        expect(windows.triple).to_equal("armv7-pc-windows-msvc")
+        expect(freebsd.triple).to_equal("armv7-unknown-freebsd")
+        expect(linux.is_available()).to_be(false)
+        expect(macos.is_available()).to_be(false)
+        expect(windows.is_available()).to_be(false)
+        expect(freebsd.is_available()).to_be(false)
+
+    it "routes RV64 only through Linux descriptors":
+        val linux_native = toolchain_riscv64("linux", "riscv64")
+        expect(linux_native.triple).to_equal("riscv64-unknown-linux-gnu")
+        expect(linux_native.linker).to_equal("ld")
+        expect(linux_native.requires_external).to_be(false)
+
+        val linux_cross = toolchain_riscv64("linux", "x86_64")
+        expect(linux_cross.triple).to_equal("riscv64-unknown-linux-gnu")
+        expect(linux_cross.linker).to_equal("riscv64-linux-gnu-ld")
+        expect(linux_cross.requires_external).to_be(true)
+
+        val macos = toolchain_riscv64("macos", "riscv64")
+        val windows = toolchain_riscv64("windows", "riscv64")
+        val freebsd = toolchain_riscv64("freebsd", "riscv64")
+        expect(macos.linker).to_equal("")
+        expect(windows.linker).to_equal("")
+        expect(freebsd.linker).to_equal("")
+        expect(macos.triple).to_equal("riscv64-apple-darwin")
+        expect(windows.triple).to_equal("riscv64-pc-windows-msvc")
+        expect(freebsd.triple).to_equal("riscv64-unknown-freebsd")
+        expect(macos.is_available()).to_be(false)
+        expect(windows.is_available()).to_be(false)
+        expect(freebsd.is_available()).to_be(false)
+
+    it "fails hosted RV32 closed without borrowing an RV64 toolchain":
+        val toolchain = toolchain_for_target(CodegenTarget.Riscv32)
+        expect(toolchain.triple).to_equal("riscv32-unknown-linux-gnu")
+        expect(toolchain.linker).to_equal("")
+        expect(toolchain.sysroot).to_equal("")
+        expect(toolchain.crt_dir).to_equal("")
+        expect(toolchain.default_flags.len()).to_equal(0)
+        expect(toolchain.is_available()).to_be(false)
+        expect(toolchain.diagnostic()).to_contain("No linker configured")
+        expect(toolchain.install_hint).to_contain("riscv32-unknown-none-elf")
+
+        val full = hosted_c_compiler_plan("riscv32-unknown-linux-gnu", "linux", "x86_64")
+        val alias = hosted_c_compiler_plan("rv32", "linux", "x86_64")
+        expect(full.supported).to_be(false)
+        expect(alias.supported).to_be(false)
+        expect(hosted_cross_c_compiler_name("riscv32-unknown-linux-gnu", "linux", "x86_64")).to_equal("")
+
+    it "uses a cross C compiler only for a Linux architecture mismatch":
+        expect(hosted_cross_cc_required("aarch64-apple-darwin", "macos", "aarch64")).to_be(false)
+        expect(hosted_cross_cc_required("aarch64-unknown-freebsd", "freebsd", "aarch64")).to_be(false)
+        expect(hosted_cross_cc_required("aarch64-unknown-linux-gnu", "linux", "aarch64")).to_be(false)
+        expect(hosted_cross_cc_required("aarch64-unknown-linux-gnu", "linux", "x86_64")).to_be(true)
+        expect(hosted_cross_cc_required("riscv64-unknown-linux-gnu", "linux", "riscv64")).to_be(false)
+        expect(hosted_cross_cc_required("riscv64-unknown-linux-gnu", "linux", "x86_64")).to_be(true)
+        expect(hosted_cross_cc_required("", "freebsd", "aarch64")).to_be(false)
+
+    it "selects only supported Linux GNU AArch64 and RISC-V cross drivers":
+        expect(hosted_cross_c_compiler_name("aarch64", "linux", "x86_64")).to_equal("aarch64-linux-gnu-gcc")
+        expect(hosted_cross_c_compiler_name("rv64", "linux", "x86_64")).to_equal("riscv64-linux-gnu-gcc")
+        expect(hosted_cross_c_compiler_name("aarch64-unknown-linux-gnu", "linux", "x86_64")).to_equal("aarch64-linux-gnu-gcc")
+        expect(hosted_cross_c_compiler_name("arm64-linux-gnu", "linux", "x86_64")).to_equal("aarch64-linux-gnu-gcc")
+        expect(hosted_cross_c_compiler_name("riscv64gc-unknown-linux-gnu", "linux", "x86_64")).to_equal("riscv64-linux-gnu-gcc")
+        expect(hosted_cross_c_compiler_name("rv64-linux-gnu", "linux", "aarch64")).to_equal("riscv64-linux-gnu-gcc")
+        expect(hosted_cross_c_compiler_name("aarch64-unknown-linux-gnu", "linux", "arm64")).to_equal("")
+        expect(hosted_cross_c_compiler_name("riscv64-unknown-linux-gnu", "linux", "riscv64")).to_equal("")
+        expect(hosted_cross_c_compiler_name("aarch64-apple-darwin", "linux", "x86_64")).to_equal("")
+        expect(hosted_cross_c_compiler_name("aarch64-unknown-freebsd", "freebsd", "x86_64")).to_equal("")
+        expect(hosted_cross_c_compiler_name("aarch64-unknown-linux-musl", "linux", "x86_64")).to_equal("")
+
+        val reverse = hosted_c_compiler_plan("x86_64-unknown-linux-gnu", "linux", "aarch64")
+        expect(reverse.requires_cross).to_be(true)
+        expect(reverse.supported).to_be(false)
+        val wrong_os = hosted_c_compiler_plan("aarch64-apple-darwin", "linux", "x86_64")
+        expect(wrong_os.supported).to_be(false)
+
+    it "rejects architecture mismatches":
+        expect(hosted_c_target_matches_host("aarch64-unknown-linux-gnu", "linux", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("riscv64-unknown-linux-gnu", "linux", "aarch64")).to_be(false)
+        expect(hosted_c_target_matches_host("x86_64-pc-windows-msvc", "windows", "aarch64")).to_be(false)
+
+    it "rejects operating-system mismatches":
+        expect(hosted_c_target_matches_host("x86_64-apple-darwin", "linux", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("aarch64-unknown-linux-gnu", "macos", "aarch64")).to_be(false)
+        expect(hosted_c_target_matches_host("x86_64-unknown-freebsd", "windows", "x86_64")).to_be(false)
+
+    it "rejects ABI mismatches and unsupported hosted widths":
+        expect(hosted_c_target_matches_host("x86_64-unknown-linux-musl", "linux", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("x86_64-pc-windows-gnu", "windows", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("riscv64-unknown-freebsd", "freebsd", "riscv64")).to_be(false)
+        expect(hosted_c_target_matches_host("rv64i-unknown-linux-gnu", "linux", "riscv64")).to_be(false)
+        expect(hosted_c_compiler_plan("riscv64be-unknown-linux-gnu", "linux", "x86_64").supported).to_be(false)
+        expect(hosted_c_target_matches_host("armv7-unknown-linux-gnueabihf", "linux", "armv7")).to_be(false)
+
+    it "guards before host C runtime and entry compilation":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val simpleos_guard = source.index_of("if is_simpleos_riscv32_link") ?? -1
+        val hosted_plan = source.index_of("val hosted_plan = hosted_c_compiler_plan") ?? -1
+        val hosted_guard = source.index_of("if not hosted_plan.supported") ?? -1
+        val arch_guard = source.index_of("if not hosted_native_link_arch_supported") ?? -1
+        val stage4_cross_guard = source.index_of("if stage4_requested and hosted_plan.requires_cross:") ?? -1
+        val compiler_discovery = source.index_of("val hosted_cc = find_c_compiler()") ?? -1
+        val runtime_compile = source.index_of("val rt_result = compile_runtime_objects") ?? -1
+        val entry_compile = source.index_of("val c_result = compile_entry_point_c") ?? -1
+        expect(simpleos_guard).to_be_greater_than(-1)
+        expect(hosted_plan).to_be_greater_than(simpleos_guard)
+        expect(hosted_guard).to_be_greater_than(hosted_plan)
+        expect(arch_guard).to_be_greater_than(hosted_guard)
+        expect(stage4_cross_guard).to_be_greater_than(arch_guard)
+        expect(compiler_discovery).to_be_greater_than(stage4_cross_guard)
+        expect(runtime_compile).to_be_greater_than(compiler_discovery)
+        expect(entry_compile).to_be_greater_than(runtime_compile)
+        expect(source).to_contain("Stage4 strict profile requires a native host target; cross-target compiler capsules are unavailable")
+
+    it "preserves explicit bare-metal mode in both direct LLVM paths":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_codegen_adapter.spl") ?? ""
+        val predicate_start = source.index_of("fn llvm_codegen_bare_metal_requested") ?? -1
+        val translate_start = source.index_of("pub fn llvm_translate_module_direct_ir") ?? -1
+        val direct_start = source.index_of("pub fn llvm_compile_module_direct(") ?? -1
+        val compiled_start = source.index_of("pub fn llvm_compile_module_direct_compiled") ?? -1
+        val impl_start = source.index_of("impl Codegen for LlvmCodegenAdapter") ?? -1
+        expect(predicate_start).to_be_greater_than(-1)
+        expect(translate_start).to_be_greater_than(predicate_start)
+        expect(direct_start).to_be_greater_than(translate_start)
+        expect(compiled_start).to_be_greater_than(direct_start)
+        expect(impl_start).to_be_greater_than(compiled_start)
+
+        val helpers = source.substring(predicate_start, translate_start)
+        val translate = source.substring(translate_start, direct_start)
+        val direct = source.substring(direct_start, compiled_start)
+        val compiled = source.substring(compiled_start, impl_start)
+        expect(helpers).to_contain("mir_target_context_os_from(requested_target, \"\") == \"baremetal\"")
+        expect(helpers).to_contain("LlvmTargetConfig.for_target_portable_numeric_baremetal")
+        expect(helpers).to_contain("LlvmTargetConfig.for_target_portable_numeric(options.target")
+        expect(helpers).to_contain("MirToLlvm.create_baremetal")
+        expect(helpers).to_contain("MirToLlvm.create(module_name")
+        expect(translate).to_contain("llvm_codegen_translator(module.name, options.target)")
+        expect(direct).to_contain("llvm_codegen_target_config(options)")
+        expect(compiled).to_contain("llvm_codegen_target_config(options)")
+        expect(compiled).to_contain("llvm_codegen_translator(\"app.cli.bootstrap_main\", options.target)")
+
+    it "guards every shared native linker caller before bundle or platform dispatch":
+        val source = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+        val os_guard = source.index_of("if not hosted_native_link_os_supported") ?? -1
+        val arch_guard = source.index_of("if not hosted_native_link_arch_supported") ?? -1
+        val bundle_dispatch = source.index_of("val smf_inputs = filter_smf_inputs") ?? -1
+        val platform_dispatch = source.index_of("# Platform-specific linking") ?? -1
+        expect(os_guard).to_be_greater_than(-1)
+        expect(arch_guard).to_be_greater_than(os_guard)
+        expect(bundle_dispatch).to_be_greater_than(arch_guard)
+        expect(platform_dispatch).to_be_greater_than(bundle_dispatch)

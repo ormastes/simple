@@ -1,0 +1,1231 @@
+# Parser — Expression Module
+#
+# Expression parsing: parse_expr through parse_primary_expr, plus
+# asm match/assert parsing and helper expression functions.
+# Extracted from parser.spl.
+
+use compiler.core.tokens.{tok_kind_name, tok_precedence, tok_is_right_assoc, keyword_lookup}
+use compiler.core.tokens.{TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_BOOL_LIT, TOK_NIL_LIT, TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR}
+use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
+use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN}
+use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
+use compiler.core.tokens.{TOK_KW_RETURN, TOK_KW_BREAK, TOK_KW_CONTINUE}
+use compiler.core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
+use compiler.core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
+use compiler.core.tokens.{TOK_KW_PASS, TOK_KW_PASS_TODO, TOK_KW_PASS_DO_NOTHING, TOK_KW_PASS_DN, TOK_KW_IS}
+use compiler.core.tokens.{TOK_KW_SELF, TOK_KW_CLASS}
+use compiler.core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
+use compiler.core.tokens.{TOK_KW_ASM}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
+use compiler.core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ, TOK_LT_GENERIC}
+use compiler.core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN, TOK_WALRUS}
+use compiler.core.tokens.{TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN}
+use compiler.core.tokens.{TOK_AND, TOK_OR, TOK_NOT}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
+use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
+use compiler.core.tokens.{TOK_QUESTION, TOK_QUESTION_DOT, TOK_DOUBLE_QUESTION, TOK_DOT_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
+use compiler.core.tokens.{TOK_DOTDOT_EQ, TOK_DOUBLE_STAR, TOK_UNDERSCORE}
+use compiler.core.tokens.{TOK_PIPE_FORWARD, TOK_SEMICOLON, TOK_SHR}
+use compiler.core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
+use compiler.core.tokens.{TOK_KW_DO, TOK_KW_CE}
+use compiler.core.tokens.{TOK_BACKTICK_IDENT}
+use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
+use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
+use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX}
+use compiler.core.ast.{EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
+use compiler.core.ast.{EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE}
+use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE}
+use compiler.core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_UNIT, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN}
+use compiler.core.ast.{EXPR_NULL_COALESCE, EXPR_SLICE, EXPR_INTERPOLATED_STRING}
+use compiler.core.ast.{EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_DO_BLOCK, EXPR_ATOM}
+use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
+use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
+use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_call_named, expr_index}
+use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_array_lit}
+use compiler.core.ast.{expr_struct_lit}
+use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
+use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
+use compiler.core.ast.{expr_range, expr_assign, expr_compound_assign}
+use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn, expr_null_coalesce, expr_slice}
+use compiler.core.ast.{expr_dict_lit}
+use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
+use compiler.core.ast.{expr_match_expr, expr_block, expr_lambda}
+use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert, EXPR_SPREAD, expr_exists_check, EXPR_EXISTS_CHECK, expr_force_unwrap, EXPR_FORCE_UNWRAP, expr_try, EXPR_TRY}
+use compiler.core.ast.{expr_cast, EXPR_CAST}
+use compiler.core.tokens.{TOK_KW_AS}
+use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_args, expr_get_arg_names, expr_call_args_set}
+use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
+use compiler.core.parser.{parser_has_errors}
+use compiler.core.parser.{parser_parse_type, parser_parse_cast_type}
+use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+fn parser_expr_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn parser_expr_trace_line_enabled() -> bool:
+    parser_expr_trace_enabled() and par_line_get() >= 60
+
+fn parser_expr_trace_step(name: text):
+    if parser_expr_trace_line_enabled():
+        eprint("[parser-expr] {name}:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
+
+# Forward declarations for mutual recursion with parser_stmts
+use compiler.frontend.core.parser_stmts.{parse_block, parse_match_stmt, parse_if_expr}
+use compiler.frontend.core.parser_primary.{parse_primary_expr}
+
+# ===== Expression Parsing =====
+
+# Recursion-depth guard for nested expressions. Every structurally nested
+# sub-expression (parens, brackets, slices, call args, dict/array elements)
+# re-enters parse_expr, and each level costs ~14 native frames down the
+# precedence chain. Without a bound, ~175 nested parens overflows the native
+# stack and aborts `check` with a core dump (graceful diagnostic is required
+# instead). 128 is far beyond any real or machine-generated expression and
+# stays well under the measured crash threshold. ponytail: single choke-point
+# guard covers all downstream recursive passes; raise the limit if real code
+# ever legitimately nests deeper.
+var g_expr_nest_depth: i64 = 0
+val MAX_EXPR_NEST_DEPTH: i64 = 128
+
+fn parse_expr() -> i64:
+    if parser_expr_trace_line_enabled():
+        eprint("[parser-expr] expr:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
+    g_expr_nest_depth = g_expr_nest_depth + 1
+    if g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
+        parser_error("expression nesting too deep (max 128 levels)")
+        g_expr_nest_depth = g_expr_nest_depth - 1
+        return expr_int_lit(0, 0)
+    val result = parse_pipe()
+    g_expr_nest_depth = g_expr_nest_depth - 1
+    if parser_expr_trace_line_enabled():
+        eprint("[parser-expr] expr:done result={result}")
+    result
+
+fn bracket_expr_is_invalid(eid: i64) -> bool:
+    # G38: numeric tag literals, not imported EXPR_* consts — the imported
+    # const comparisons misevaluate in the compiled stage4 parser (plain
+    # string-literal indexes like m["k"] were flagged invalid while the
+    # interpreted parser behaved correctly). Numeric kinds match the
+    # parser's pervasive convention (par_kind_get() == 161 etc.).
+    # 23=EXPR_ASSIGN 24=EXPR_COMPOUND_ASSIGN 7=EXPR_BINARY 8=EXPR_UNARY
+    if eid < 0: return false
+    val tag = expr_get_tag(eid)
+    if tag == 23 or tag == 24:
+        return true
+    if tag == 7:
+        val op = expr_get_int(eid)
+        if op == 80 or op == 81 or op == 82 or op == 83 or op == 84 or op == 85:
+            return true
+        if op == 55 or op == 56:
+            return true
+    if tag == 8 and expr_get_int(eid) == 57:
+        return true
+    false
+
+fn validate_bracket_expr(eid: i64, context: text) -> bool:
+    if bracket_expr_is_invalid(eid):
+        parser_error(context + " cannot be an assignment, comparison, or logical expression inside []")
+        return false
+    true
+
+fn parse_pipe() -> i64:
+    parser_expr_trace_step("pipe")
+    var left = parse_compose()
+    for i in 0..1000:
+        if par_kind_get() != 175:
+            break
+        parser_advance()
+        # Parse RHS: could be `f` or `f(a, b)` — use parse_postfix to get calls
+        val right = parse_postfix()
+        if expr_get_tag(right) == EXPR_CALL:
+            # x |> f(a) → f(x, a) — prepend left as first arg
+            val old_args = expr_get_args(right)
+            val old_names = expr_get_arg_names(right)
+            var new_args: [i64] = [left]
+            var new_names: [text] = [""]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
+                j = j + 1
+            expr_call_args_set(right, new_args, new_names)
+            left = right
+        elif expr_get_tag(right) == EXPR_METHOD_CALL:
+            # x |> obj.method(a) → obj.method(x, a) — prepend
+            val old_args = expr_get_args(right)
+            val old_names = expr_get_arg_names(right)
+            var new_args: [i64] = [left]
+            var new_names: [text] = [""]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
+                j = j + 1
+            expr_call_args_set(right, new_args, new_names)
+            left = right
+        else:
+            # x |> f → f(x), also handles placeholder: x |> (_1 * 3) → transform first
+            left = expr_call(transform_placeholder_lambda(right), [left], 0)
+    left
+
+fn parse_compose() -> i64:
+    parser_expr_trace_step("compose")
+    var left = parse_assignment()
+    for i in 0..1000:
+        if par_kind_get() != 67:
+            break
+        parser_advance()
+        val right = parse_assignment()
+        # f >> g → \__c0: g(f(__c0))
+        val param = expr_ident("__c0", 0)
+        val inner_call = expr_call(left, [param], 0)
+        val outer_call = expr_call(right, [inner_call], 0)
+        var param_names: [i64] = [expr_ident("__c0", 0)]
+        var body_stmts: [i64] = [outer_call]
+        left = expr_lambda(param_names, body_stmts, 0)
+    left
+
+fn parse_assignment() -> i64:
+    parser_expr_trace_step("assignment")
+    val left = parse_or()
+    if par_kind_get() == 106:
+        parser_advance()
+        val right = parse_assignment()
+        # Walrus is treated as assignment for now
+        # Semantically it means "val" instead of reassignment
+        return expr_assign(left, right, 0)
+    if par_kind_get() == 100:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_assign(left, right, 0)
+    if par_kind_get() == 101:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(60, left, right, 0)
+    if par_kind_get() == 102:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(61, left, right, 0)
+    if par_kind_get() == 103:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(62, left, right, 0)
+    if par_kind_get() == 104:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(63, left, right, 0)
+    if par_kind_get() == 105:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(64, left, right, 0)
+    left
+
+fn parse_or() -> i64:
+    parser_expr_trace_step("or")
+    var left = parse_and()
+    for i in 0..1000:
+        val is_or = par_kind_get() == 56
+        val is_or2 = par_kind_get() == 56
+        val match_or = is_or or is_or2
+        if not match_or:
+            break
+        parser_advance()
+        val right = parse_and()
+        left = expr_binary(56, left, right, 0)
+    left
+
+fn parse_and() -> i64:
+    parser_expr_trace_step("and")
+    var left = parse_not()
+    for i in 0..1000:
+        val is_and = par_kind_get() == 55
+        val is_and2 = par_kind_get() == 55
+        val match_and = is_and or is_and2
+        if not match_and:
+            break
+        parser_advance()
+        val right = parse_not()
+        left = expr_binary(55, left, right, 0)
+    left
+
+fn parse_not() -> i64:
+    parser_expr_trace_step("not")
+    val is_not = par_kind_get() == 57
+    val is_not2 = par_kind_get() == 57
+    val match_not = is_not or is_not2
+    if match_not:
+        parser_advance()
+        val operand = parse_not()
+        return expr_unary(57, operand, 0)
+    parse_comparison()
+
+fn parse_comparison() -> i64:
+    parser_expr_trace_step("comparison")
+    var left = parse_null_coalesce()
+    for i in 0..100:
+        if par_kind_get() == 80:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(80, left, right, 0)
+        elif par_kind_get() == 81:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(81, left, right, 0)
+        elif par_kind_get() == 82:
+            parser_advance()
+            # G24: `<<` arrives as two 82 tokens (lexer splits for generics)
+            if par_kind_get() == 82:
+                parser_advance()
+                val lshift_right = parse_null_coalesce()
+                left = expr_binary(66, left, lshift_right, 0)
+            else:
+                val right = parse_null_coalesce()
+                left = expr_binary(82, left, right, 0)
+        elif par_kind_get() == 83:
+            parser_advance()
+            # G24: `>>` arrives as two 83 tokens
+            if par_kind_get() == 83:
+                parser_advance()
+                val rshift_right = parse_null_coalesce()
+                left = expr_binary(67, left, rshift_right, 0)
+            else:
+                val right = parse_null_coalesce()
+                left = expr_binary(83, left, right, 0)
+        elif par_kind_get() == 84:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(84, left, right, 0)
+        elif par_kind_get() == 85:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(85, left, right, 0)
+        elif par_kind_get() == 50:
+            # `a in b` → b.contains(a)
+            parser_advance()
+            val in_right = parse_null_coalesce()
+            left = expr_method_call(in_right, "contains", [left], 0)
+        elif par_kind_get() == 57 and par_text_get() == "not":
+            # `a not in b` → not b.contains(a). Postfix `!` shares kind 57
+            # but has text "!". Textual `not` after an operand is only
+            # `not in` when the NEXT token is `in` — otherwise it belongs
+            # to an outer context (e.g. `assert not x` with `assert`
+            # parsed as an ident), so backtrack and break.
+            val (nn_snap_nums, nn_snap_txts) = lex_snapshot_save()
+            val (nn_tok_nums, nn_tok_text) = parser_tok_save()
+            parser_advance()
+            if par_kind_get() != 50:
+                lex_snapshot_restore(nn_snap_nums, nn_snap_txts)
+                parser_tok_restore(nn_tok_nums, nn_tok_text)
+                break
+            parser_advance()
+            val ni_right = parse_null_coalesce()
+            val ni_contains = expr_method_call(ni_right, "contains", [left], 0)
+            left = expr_unary(57, ni_contains, 0)
+        else:
+            break
+    left
+
+fn parse_null_coalesce() -> i64:
+    parser_expr_trace_step("null-coalesce")
+    var left = parse_range()
+    for i in 0..100:
+        if par_kind_get() == 132:
+            parser_advance()
+            val right = parse_range()
+            left = expr_null_coalesce(left, right, 0)
+        else:
+            break
+    left
+
+fn parse_range() -> i64:
+    parser_expr_trace_step("range")
+    val left = parse_addition()
+    if par_kind_get() == 165:
+        parser_advance()
+        # G43: open-ended range `start..` (e.g. `arr[1..]`). If `..` is followed
+        # by a token that cannot start an expression, there is no upper bound;
+        # emit end = -1, the parser's established "to end" sentinel (same one the
+        # colon-slice `[start:]` path uses at expr_slice neg1).
+        val rk = par_kind_get()
+        val no_upper: bool = (rk == 145 or rk == 141 or rk == 160 or
+            rk == 143 or rk == 180 or rk == 182 or rk == 190)
+        if no_upper:
+            return expr_range(left, expr_int_lit(-1, 0), 0, 0)
+        val right = parse_addition()
+        return expr_range(left, right, 0, 0)
+    if par_kind_get() == 166:
+        parser_advance()
+        val right = parse_addition()
+        return expr_range(left, right, 1, 0)
+    left
+
+fn parse_addition() -> i64:
+    parser_expr_trace_step("addition")
+    var left = parse_multiplication()
+    for i in 0..1000:
+        if par_kind_get() == 60:
+            parser_advance()
+            val right = parse_multiplication()
+            left = expr_binary(60, left, right, 0)
+        elif par_kind_get() == 61:
+            parser_advance()
+            val right = parse_multiplication()
+            left = expr_binary(61, left, right, 0)
+        else:
+            break
+    left
+
+fn parse_multiplication() -> i64:
+    parser_expr_trace_step("multiplication")
+    var left = parse_unary()
+    for i in 0..1000:
+        if par_kind_get() == 62:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(62, left, right, 0)
+        elif par_kind_get() == 63:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(63, left, right, 0)
+        elif par_kind_get() == 64:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(64, left, right, 0)
+        elif par_kind_get() == 65:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(65, left, right, 0)
+        elif par_kind_get() == 120:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(120, left, right, 0)
+        elif par_kind_get() == 121:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(121, left, right, 0)
+        elif par_kind_get() == 122:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(122, left, right, 0)
+        else:
+            break
+    left
+
+fn parse_unary() -> i64:
+    parser_expr_trace_step("unary")
+    if par_kind_get() == 61:
+        parser_advance()
+        val operand = parse_unary()
+        return expr_unary(61, operand, 0)
+    if par_kind_get() == 60:
+        parser_advance()
+        return parse_unary()
+    if par_kind_get() == 57:
+        parser_advance()
+        val operand = parse_unary()
+        return expr_unary(57, operand, 0)
+    if par_kind_get() == 123:
+        parser_advance()
+        val operand = parse_unary()
+        return expr_unary(123, operand, 0)
+    var cast_base = parse_postfix()
+    # `expr as Type` — as is TOK_KW_AS (221); cast can chain: x as T1 as T2
+    for _ci in 0..20:
+        if par_kind_get() == TOK_KW_AS:
+            parser_advance()
+            val cast_type = parser_parse_cast_type()
+            cast_base = expr_cast(cast_base, cast_type, 0)
+        else:
+            break
+    cast_base
+
+fn parse_binary_from(base: i64) -> i64:
+    # Continue binary expression parsing from an already-parsed base.
+    # Used by parse_call_arg when ident is already consumed.
+    # Handles: *, /, %, **, +, -, .., ..=, ??, comparisons, and, or
+    var left = base
+    # G14: as-cast at unary level (tighter than mul) — apply before multiplication loop
+    for _cas in 0..20:
+        if par_kind_get() == TOK_KW_AS:
+            parser_advance()
+            val cast_type = parser_parse_cast_type()
+            left = expr_cast(left, cast_type, 0)
+        else:
+            break
+    # Multiplication level
+    for i in 0..1000:
+        if par_kind_get() == 62:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(62, left, right, 0)
+        elif par_kind_get() == 63:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(63, left, right, 0)
+        elif par_kind_get() == 64:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(64, left, right, 0)
+        elif par_kind_get() == 65:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(65, left, right, 0)
+        elif par_kind_get() == 120:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(120, left, right, 0)
+        elif par_kind_get() == 121:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(121, left, right, 0)
+        elif par_kind_get() == 122:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(122, left, right, 0)
+        else:
+            break
+    # Addition level
+    var add_left = left
+    for i in 0..1000:
+        if par_kind_get() == 60:
+            parser_advance()
+            val right = parse_multiplication()
+            add_left = expr_binary(60, add_left, right, 0)
+        elif par_kind_get() == 61:
+            parser_advance()
+            val right = parse_multiplication()
+            add_left = expr_binary(61, add_left, right, 0)
+        else:
+            break
+    left = add_left
+    # Range
+    if par_kind_get() == 165:
+        parser_advance()
+        val right = parse_addition()
+        left = expr_range(left, right, 0, 0)
+    if par_kind_get() == 166:
+        parser_advance()
+        val right = parse_addition()
+        left = expr_range(left, right, 1, 0)
+    # Null coalesce
+    for i in 0..100:
+        if par_kind_get() == 132:
+            parser_advance()
+            val right = parse_range()
+            left = expr_null_coalesce(left, right, 0)
+        else:
+            break
+    # Comparisons
+    for i in 0..100:
+        if par_kind_get() == 80:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(80, left, right, 0)
+        elif par_kind_get() == 81:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(81, left, right, 0)
+        elif par_kind_get() == 82:
+            parser_advance()
+            if par_kind_get() == 82:
+                parser_advance()
+                val lshift_right = parse_null_coalesce()
+                left = expr_binary(66, left, lshift_right, 0)
+            else:
+                val right = parse_null_coalesce()
+                left = expr_binary(82, left, right, 0)
+        elif par_kind_get() == 83:
+            parser_advance()
+            if par_kind_get() == 83:
+                parser_advance()
+                val rshift_right = parse_null_coalesce()
+                left = expr_binary(67, left, rshift_right, 0)
+            else:
+                val right = parse_null_coalesce()
+                left = expr_binary(83, left, right, 0)
+        elif par_kind_get() == 84:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(84, left, right, 0)
+        elif par_kind_get() == 85:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(85, left, right, 0)
+        elif par_kind_get() == 50:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_method_call(right, "contains", [left], 0)
+        elif par_kind_get() == 57 and par_text_get() == "not":
+            # `a not in b` — only when the next token is `in`; see parse_comparison.
+            val (nb_snap_nums, nb_snap_txts) = lex_snapshot_save()
+            val (nb_tok_nums, nb_tok_text) = parser_tok_save()
+            parser_advance()
+            if par_kind_get() != 50:
+                lex_snapshot_restore(nb_snap_nums, nb_snap_txts)
+                parser_tok_restore(nb_tok_nums, nb_tok_text)
+                break
+            parser_advance()
+            val ni_right = parse_null_coalesce()
+            val ni_contains = expr_method_call(ni_right, "contains", [left], 0)
+            left = expr_unary(57, ni_contains, 0)
+        elif par_kind_get() == 39:
+            parser_advance()
+            val cast_type = parser_parse_type()
+            val dummy_bf = cast_type
+        else:
+            break
+    # And
+    for i in 0..1000:
+        val is_and = par_kind_get() == 55
+        val is_and2 = par_kind_get() == 55
+        val match_and = is_and or is_and2
+        if not match_and:
+            break
+        parser_advance()
+        val right = parse_not()
+        left = expr_binary(55, left, right, 0)
+    # Or
+    for i in 0..1000:
+        val is_or = par_kind_get() == 56
+        val is_or2 = par_kind_get() == 56
+        val match_or = is_or or is_or2
+        if not match_or:
+            break
+        parser_advance()
+        val right = parse_and()
+        left = expr_binary(56, left, right, 0)
+    # Pipe forward (lowest precedence in binary context)
+    for i in 0..1000:
+        if par_kind_get() != 175:
+            break
+        parser_advance()
+        val pipe_right = parse_postfix()
+        if expr_get_tag(pipe_right) == EXPR_CALL:
+            val old_args = expr_get_args(pipe_right)
+            val old_names = expr_get_arg_names(pipe_right)
+            var new_args: [i64] = [left]
+            var new_names: [text] = [""]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
+                j = j + 1
+            expr_call_args_set(pipe_right, new_args, new_names)
+            left = pipe_right
+        elif expr_get_tag(pipe_right) == EXPR_METHOD_CALL:
+            val old_args = expr_get_args(pipe_right)
+            val old_names = expr_get_arg_names(pipe_right)
+            var new_args: [i64] = [left]
+            var new_names: [text] = [""]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
+                j = j + 1
+            expr_call_args_set(pipe_right, new_args, new_names)
+            left = pipe_right
+        else:
+            left = expr_call(transform_placeholder_lambda(pipe_right), [left], 0)
+    left
+
+fn parse_call_arg() -> (i64, text):
+    val (raw, name) = parse_call_arg_raw()
+    (transform_placeholder_lambda(raw), name)
+
+fn parse_call_arg_raw() -> (i64, text):
+    # Struct update spread: ..base_expr
+    if par_kind_get() == 165:
+        parser_advance()
+        val spread_inner = parse_expr()
+        return (expr_spread(spread_inner, 0), "")
+    # Check for bool-suffixed identifiers: true_abs, false_mut
+    if par_kind_get() == 6:
+        val ident = par_text_get()
+        val ident_len = ident.len()
+        if ident_len > 5:
+            val prefix5 = ident[0:5]
+            if prefix5 == "true_":
+                val suffix = ident[5:]
+                parser_advance()
+                return (expr_suffixed_bool(1, suffix, 0), "")
+        if ident_len > 6:
+            val prefix6 = ident[0:6]
+            if prefix6 == "false_":
+                val suffix = ident[6:]
+                parser_advance()
+                return (expr_suffixed_bool(0, suffix, 0), "")
+        # Named argument: retain the name beside the value in the call node.
+        parser_advance()
+        if par_kind_get() == 161 or par_kind_get() == 100:
+            parser_advance()
+            return (parse_expr(), ident)
+        # Not a named arg: already consumed ident, continue with postfix+binary
+        val ident_node = expr_ident(ident, 0)
+        val postfix_result = parse_postfix_on(ident_node)
+        return (parse_binary_from(postfix_result), "")
+    # Keyword used as named arg name: keyword falls through pe_is_kw to EXPR_IDENT,
+    # then ':' follows. Detect post-hoc: if parse_expr() produced EXPR_IDENT and
+    # next token is ':', consume ':' and return the value expression.
+    val ca_kw_result = parse_expr()
+    if par_kind_get() == 161 or par_kind_get() == 100:
+        # numeric tag 6 = EXPR_IDENT — imported-const compares misevaluate in
+        # compiled stage4 (doc/08_tracking/bug/stage4_imported_const_compare_2026-06-12.md)
+        if expr_get_tag(ca_kw_result) == 6:
+            val arg_name = expr_get_str(ca_kw_result)
+            parser_advance()
+            return (parse_expr(), arg_name)
+    (ca_kw_result, "")
+
+fn extract_dotted_path(eid: i64) -> text:
+    val ep_tag = expr_get_tag(eid)
+    # numeric tags 6/11 = EXPR_IDENT/EXPR_FIELD_ACCESS — imported-const compares
+    # misevaluate in compiled stage4 (stage4_imported_const_compare_2026-06-12.md)
+    if ep_tag == 6:
+        return expr_get_str(eid)
+    if ep_tag == 11:
+        val ep_base_path = extract_dotted_path(expr_get_left(eid))
+        if ep_base_path != "":
+            return ep_base_path + "." + expr_get_str(eid)
+    ""
+
+# Lookahead disambiguation for Ident<TypeArgs>.method() and Ident<TypeArgs>(args).
+#
+# Called when the primary expression is a bare Identifier and the current token
+# is TOK_LT (82) or TOK_LT_GENERIC (86).  Speculatively advances past <TypeArgs>
+# using a bracket-depth counter.  Commits (leaves the parser positioned after >)
+# only if the token following the closing > is TOK_DOT (164) or TOK_LPAREN (140).
+# Backtracks transparently otherwise, so < is left for the binary-expression layer
+# to parse as less-than.
+#
+# Uses lex_snapshot_save / lex_snapshot_restore for full state save/restore.
+# Parity target: Rust src/compiler_rust/parser/src/expressions/postfix.rs
+#                try_skip_ident_generic_args()
+fn try_skip_ident_generic_args():
+    # Only trigger on < or <-in-generic-context
+    val cur = par_kind_get()
+    if cur != 82 and cur != 86:
+        return
+
+    # Save full lexer + current-token state
+    val (snap_nums, snap_txts) = lex_snapshot_save()
+    val (saved_tok_nums, saved_tok_text) = parser_tok_save()
+
+    parser_advance()  # consume '<'
+
+    # Walk through tokens counting bracket depth.
+    # depth starts at 1 because we just consumed one '<'.
+    # Accepted inner tokens: idents, keywords that are valid type names, comma,
+    # punctuation used in type expressions (*, &, [, ], ?, (, ), ., ::).
+    # Any other token (newline, {, :, =, operators) means this is NOT a generic
+    # arg list — break immediately.
+    var depth = 1
+    var ok = false
+    for _tsi in 0..200:
+        val k = par_kind_get()
+        if k == 83:
+            # TOK_GT '>' — depth decreases
+            depth = depth - 1
+            if depth == 0:
+                parser_advance()  # consume '>'
+                val after = par_kind_get()
+                if after == 164 or after == 140:
+                    # DOT or LPAREN — this really is generic args
+                    ok = true
+                break
+            parser_advance()
+        elif k == 67:
+            # TOK_SHR '>>' — only valid as two closing '>' when depth == 2 exactly.
+            # depth < 2 means we don't have 2 open levels; this is a binary >>
+            # (e.g. a < b >> c) and we must NOT consume it — break and backtrack.
+            if depth == 2:
+                depth = 0
+                parser_advance()  # consume '>>'
+                val after2 = par_kind_get()
+                if after2 == 164 or after2 == 140:
+                    ok = true
+                break
+            elif depth > 2:
+                depth = depth - 2
+                parser_advance()
+            else:
+                # depth < 2 — binary shift operator, not generic close
+                break
+        elif k == 82 or k == 86:
+            # TOK_LT / TOK_LT_GENERIC — nested generic opens
+            depth = depth + 1
+            parser_advance()
+        elif k == 6:
+            # TOK_IDENT — type name
+            parser_advance()
+        elif k == 160:
+            # TOK_COMMA
+            parser_advance()
+        elif (k == 62 or k == 120 or k == 144 or k == 145 or
+              k == 130 or k == 140 or k == 141 or k == 164 or k == 162):
+            # TOK_STAR(62), TOK_AND(120), TOK_LBRACKET(144), TOK_RBRACKET(145),
+            # TOK_QUESTION(130), TOK_LPAREN(140), TOK_RPAREN(141),
+            # TOK_DOT(164), TOK_COLON_COLON(162)
+            parser_advance()
+        elif (k == 20 or k == 21 or k == 22 or k == 23 or k == 24 or
+              k == 25 or k == 26 or k == 27 or k == 28 or k == 29 or
+              k == 30 or k == 31 or k == 32 or k == 33 or k == 34 or
+              k == 35 or k == 36 or k == 37 or k == 38 or k == 39 or
+              k == 40 or k == 41 or k == 42 or k == 43 or k == 44 or
+              k == 45 or k == 46 or k == 47 or k == 48 or k == 49 or
+              k == 50 or k == 51 or k == 52 or k == 53 or k == 54 or
+              k == 55 or k == 56 or k == 57 or k == 58 or k == 59):
+            # Keyword tokens (20-59) that can appear as type names (e.g. built-in types)
+            parser_advance()
+        else:
+            # Not a valid type-argument token — this < is a comparison
+            break
+
+    if not ok:
+        # Backtrack: restore full lexer state and current parser token
+        lex_snapshot_restore(snap_nums, snap_txts)
+        parser_tok_restore(saved_tok_nums, saved_tok_text)
+
+# Struct literal tail: parse `{ field: value, ... }` after a type-path base
+# (bare ident or dotted path).  Simple blocks are colon+indent, never brace, so
+# `Ident {` in expression position is unambiguously a struct literal (a dict
+# literal starts with a bare `{`, with no preceding ident).  Field entries are
+# built via expr_field_access(value, name) — a carrier node whose str=field name
+# and left=value, the exact layout _FlatAstBridge/convert_nodes reads for EXPR_STRUCT_LIT.
+# Fields may be comma- and/or newline-separated (multi-line literals); keyword
+# tokens are accepted as field names (G25), e.g. `type:` / `match:`.
+fn parse_struct_lit_tail(base: i64) -> i64:
+    var sl_type = ""
+    if expr_get_tag(base) == 6:
+        sl_type = expr_get_str(base)
+    else:
+        sl_type = extract_dotted_path(base)
+    parser_advance()  # consume '{'
+    var sl_entries: [i64] = []
+    for sl_i in 0..100000:
+        parser_skip_newlines()
+        # tolerate indent/dedent inside braces for multi-line literals
+        if par_kind_get() == 181 or par_kind_get() == 182:
+            parser_advance()
+            continue
+        if par_kind_get() == 143:
+            parser_advance()  # consume '}'
+            break
+        if par_kind_get() == 190:
+            parser_error("unterminated struct literal")
+            break
+        # field name: ident, or keyword token (G25)
+        var sl_field = par_text_get()
+        val sl_kw_name = tok_kind_name(par_kind_get())
+        val sl_is_kw = keyword_lookup(sl_kw_name) == par_kind_get()
+        if par_kind_get() != 6 and not sl_is_kw:
+            parser_error("expected field name in struct literal")
+            break
+        if sl_is_kw and par_kind_get() != 6:
+            sl_field = sl_kw_name
+        parser_advance()
+        parser_expect(161)  # ':'
+        val sl_value = parse_expr()
+        sl_entries.push(expr_field_access(sl_value, sl_field, 0))
+        if parser_has_errors():
+            break
+        parser_skip_newlines()
+        if par_kind_get() == 160:
+            parser_advance()  # consume ','
+    return expr_struct_lit(sl_type, sl_entries, [], 0)
+
+fn parse_postfix_on(base_expr: i64) -> i64:
+    # Continue postfix parsing from an already-parsed base expression
+    # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
+    if (expr_get_tag(base_expr) == EXPR_IDENT and
+        (par_kind_get() == 82 or par_kind_get() == 86)):
+        try_skip_ident_generic_args()
+    var base = base_expr
+    for i in 0..1000:
+        val kind = par_kind_get()
+        if kind == 164 or kind == 162:
+            # G34: kind 162 (::) is treated identically to kind 164 (.) for member/variant access
+            parser_advance()
+            val member_kind = par_kind_get()
+            val member_text = par_text_get()
+
+            # --- .FILE -> __traits("module_file", "dotted.path") ---
+            if member_kind == 6 and member_text == "FILE":
+                val ppo_dotted = extract_dotted_path(base)
+                if ppo_dotted != "":
+                    parser_advance()
+                    var ppo_mf_args: [i64] = []
+                    ppo_mf_args.push(expr_string_lit("module_file", 0))
+                    ppo_mf_args.push(expr_string_lit(ppo_dotted, 0))
+                    val ppo_mf_callee = expr_ident("__traits", 0)
+                    base = expr_call(ppo_mf_callee, ppo_mf_args, 0)
+                    continue
+
+            # --- .class -> __traits("class_info", "TypeName") ---
+            if member_kind == 31:
+                val ppo_type_name = extract_dotted_path(base)
+                if ppo_type_name != "":
+                    parser_advance()
+                    var ppo_ci_args: [i64] = []
+                    ppo_ci_args.push(expr_string_lit("class_info", 0))
+                    ppo_ci_args.push(expr_string_lit(ppo_type_name, 0))
+                    val ppo_ci_callee = expr_ident("__traits", 0)
+                    base = expr_call(ppo_ci_callee, ppo_ci_args, 0)
+                    continue
+
+            # --- .* -> __traits("module_wildcard", "dotted.prefix") ---
+            if member_kind == 62:
+                val ppo_prefix = extract_dotted_path(base)
+                if ppo_prefix != "":
+                    parser_advance()
+                    var ppo_mw_args: [i64] = []
+                    ppo_mw_args.push(expr_string_lit("module_wildcard", 0))
+                    ppo_mw_args.push(expr_string_lit(ppo_prefix, 0))
+                    val ppo_mw_callee = expr_ident("__traits", 0)
+                    base = expr_call(ppo_mw_callee, ppo_mw_args, 0)
+                    continue
+
+            # Numeric tuple-field access: pair.0, pair.1
+            if member_kind == 1:
+                val ppo_idx_name = member_text
+                parser_advance()
+                base = expr_field_access(base, ppo_idx_name, 0)
+                continue
+            # G25: accept keyword tokens as member names (e.g. .new, .type)
+            var field_name = member_text
+            val ppo_kw_name = tok_kind_name(member_kind)
+            val ppo_is_kw = keyword_lookup(ppo_kw_name) == member_kind
+            if member_kind != 6 and not ppo_is_kw:
+                parser_error("expected field name after '.'")
+                break
+            if ppo_is_kw and member_kind != 6:
+                field_name = ppo_kw_name
+            parser_advance()
+            var ppo_after_member = par_kind_get()
+            if ppo_after_member == 140:
+                parser_advance()
+                var call_args: [i64] = []
+                var call_arg_names: [text] = []
+                var ppo_after_lparen = par_kind_get()
+                if ppo_after_lparen != 141:
+                    val first_arg = parse_call_arg()
+                    call_args.push(first_arg.0)
+                    call_arg_names.push(first_arg.1)
+                    ppo_after_lparen = par_kind_get()
+                    for j in 0..10000:
+                        if ppo_after_lparen != 160:
+                            break
+                        parser_advance()
+                        ppo_after_lparen = par_kind_get()
+                        if ppo_after_lparen == 141:
+                            break
+                        val next_arg = parse_call_arg()
+                        call_args.push(next_arg.0)
+                        call_arg_names.push(next_arg.1)
+                        ppo_after_lparen = par_kind_get()
+                parser_expect(141)
+                base = expr_method_call_named(base, field_name, call_args, call_arg_names, 0)
+            else:
+                base = expr_field_access(base, field_name, 0)
+        elif (kind == 142 and
+              (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
+            # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
+            # EXPR_IDENT/EXPR_FIELD_ACCESS dodge stage4 imported-const compares)
+            base = parse_struct_lit_tail(base)
+        elif kind == 144:
+            parser_advance()
+            val ppo_after_lbracket = par_kind_get()
+            if ppo_after_lbracket == 161:
+                parser_advance()
+                val end_idx = parse_expr()
+                if not validate_bracket_expr(end_idx, "slice end"): return base
+                parser_expect(145)
+                val zero = expr_int_lit(0, 0)
+                base = expr_slice(base, zero, end_idx, 0)
+            else:
+                val index_expr = parse_expr()
+                val ppo_after_idx = par_kind_get()
+                if ppo_after_idx == 161:
+                    if not validate_bracket_expr(index_expr, "slice start"): return base
+                    parser_advance()
+                    val ppo_after_slice_colon = par_kind_get()
+                    if ppo_after_slice_colon == 145:
+                        parser_advance()
+                        val neg1 = expr_int_lit(-1, 0)
+                        base = expr_slice(base, index_expr, neg1, 0)
+                    else:
+                        val end_idx = parse_expr()
+                        if not validate_bracket_expr(end_idx, "slice end"): return base
+                        parser_expect(145)
+                        base = expr_slice(base, index_expr, end_idx, 0)
+                else:
+                    if not validate_bracket_expr(index_expr, "index expression"): return base
+                    parser_expect(145)
+                    base = expr_index(base, index_expr, 0)
+        elif kind == 140:
+            parser_advance()
+            var call_args: [i64] = []
+            var call_arg_names: [text] = []
+            var ppo_after_lparen = par_kind_get()
+            if ppo_after_lparen != 141:
+                val first_arg = parse_call_arg()
+                call_args.push(first_arg.0)
+                call_arg_names.push(first_arg.1)
+                ppo_after_lparen = par_kind_get()
+                for j in 0..10000:
+                    if ppo_after_lparen != 160:
+                        break
+                    parser_advance()
+                    ppo_after_lparen = par_kind_get()
+                    if ppo_after_lparen == 141:
+                        break
+                    val next_arg = parse_call_arg()
+                    call_args.push(next_arg.0)
+                    call_arg_names.push(next_arg.1)
+                    ppo_after_lparen = par_kind_get()
+            parser_expect(141)
+            base = expr_call_named(base, call_args, call_arg_names, 0)
+        elif kind == 131:
+            parser_advance()
+            val field_name = par_text_get()
+            parser_expect(6)
+            base = expr_field_access(base, field_name, 0)
+        elif kind == 130:
+            # Try/unwrap operator: expr? — propagate Err / None
+            parser_advance()
+            base = expr_try(base, 0)
+        elif kind == 133:
+            # Standalone existence check: expr.?
+            parser_advance()
+            base = expr_exists_check(base, 0)
+        elif kind == 57 and par_text_get() == "!":
+            # G44: postfix `!` force-unwrap (expr!, expr!.field). Pervasive
+            # (loc!./func!. etc.). In postfix position a `!` after a primary is
+            # always force-unwrap (prefix-not is handled before the primary).
+            # Distinct EXPR_FORCE_UNWRAP node (panic-on-nil) vs .? exists-check
+            # (nil-on-absent); lowers to HirExprKind.Unwrap. Panic codegen = M12.
+            # Text guard: kind 57 is shared with textual `not` (e.g. `a not in b`),
+            # which must be left for the comparison layer.
+            parser_advance()
+            base = expr_force_unwrap(base, 0)
+        else:
+            break
+    # Continue with assignment operators
+    if par_kind_get() == 100:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_assign(base, right, 0)
+    if par_kind_get() == 101:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(60, base, right, 0)
+    if par_kind_get() == 102:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(61, base, right, 0)
+    base
+
+fn parse_postfix() -> i64:
+    parser_expr_trace_step("postfix")
+    var base = parse_primary_expr()
+    # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
+    if (expr_get_tag(base) == EXPR_IDENT and
+        (par_kind_get() == 82 or par_kind_get() == 86)):
+        try_skip_ident_generic_args()
+    for i in 0..1000:
+        val kind = par_kind_get()
+        if kind == 164 or kind == 162:
+            # G34: kind 162 (::) is treated identically to kind 164 (.) for member/variant access
+            parser_advance()
+            val member_kind = par_kind_get()
+            val member_text = par_text_get()
+
+            # --- .FILE -> __traits("module_file", "dotted.path") ---
+            if member_kind == 6 and member_text == "FILE":
+                val pp_dotted = extract_dotted_path(base)
+                if pp_dotted != "":
+                    parser_advance()
+                    var pp_mf_args: [i64] = []
+                    pp_mf_args.push(expr_string_lit("module_file", 0))
+                    pp_mf_args.push(expr_string_lit(pp_dotted, 0))
+                    val pp_mf_callee = expr_ident("__traits", 0)
+                    base = expr_call(pp_mf_callee, pp_mf_args, 0)
+                    continue
+
+            # --- .class -> __traits("class_info", "TypeName") ---
+            if member_kind == 31:
+                val pp_type_name = extract_dotted_path(base)
+                if pp_type_name != "":
+                    parser_advance()
+                    var pp_ci_args: [i64] = []
+                    pp_ci_args.push(expr_string_lit("class_info", 0))
+                    pp_ci_args.push(expr_string_lit(pp_type_name, 0))
+                    val pp_ci_callee = expr_ident("__traits", 0)
+                    base = expr_call(pp_ci_callee, pp_ci_args, 0)
+                    continue
+
+            # --- .* -> __traits("module_wildcard", "dotted.prefix") ---
+            if member_kind == 62:
+                val pp_prefix = extract_dotted_path(base)
+                if pp_prefix != "":
+                    parser_advance()
+                    var pp_mw_args: [i64] = []
+                    pp_mw_args.push(expr_string_lit("module_wildcard", 0))
+                    pp_mw_args.push(expr_string_lit(pp_prefix, 0))
+                    val pp_mw_callee = expr_ident("__traits", 0)
+                    base = expr_call(pp_mw_callee, pp_mw_args, 0)
+                    continue
+
+            # Numeric tuple-field access: pair.0, pair.1
+            if member_kind == 1:
+                val pp_idx_name = member_text
+                parser_advance()
+                base = expr_field_access(base, pp_idx_name, 0)
+                continue
+            # G25: accept keyword tokens as member names (e.g. .new, .type)
+            var field_name = member_text
+            val pp_kw_name = tok_kind_name(member_kind)
+            val pp_is_kw = keyword_lookup(pp_kw_name) == member_kind
+            if member_kind != 6 and not pp_is_kw:
+                parser_error("expected field name after '.'")
+                break
+            if pp_is_kw and member_kind != 6:
+                field_name = pp_kw_name
+            parser_advance()
+            # Check for method call: obj.method(args)
+            var pp_after_member = par_kind_get()
+            if pp_after_member == 140:
+                parser_advance()
+                var call_args: [i64] = []
+                var call_arg_names: [text] = []
+                var pp_after_lparen = par_kind_get()
+                if pp_after_lparen != 141:
+                    val first_arg = parse_call_arg()
+                    call_args.push(first_arg.0)
+                    call_arg_names.push(first_arg.1)
+                    pp_after_lparen = par_kind_get()
+                    for j in 0..10000:
+                        if pp_after_lparen != 160:
+                            break
+                        parser_advance()
+                        pp_after_lparen = par_kind_get()
+                        if pp_after_lparen == 141:
+                            break
+                        val next_arg = parse_call_arg()
+                        call_args.push(next_arg.0)
+                        call_arg_names.push(next_arg.1)
+                        pp_after_lparen = par_kind_get()
+                parser_expect(141)
+                base = expr_method_call_named(base, field_name, call_args, call_arg_names, 0)
+            else:
+                base = expr_field_access(base, field_name, 0)
+        elif (kind == 142 and
+              (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
+            # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
+            # EXPR_IDENT/EXPR_FIELD_ACCESS dodge stage4 imported-const compares)
+            base = parse_struct_lit_tail(base)
+        elif kind == 144:
+            parser_advance()
+            # Check for slice: a[start:end]
+            val pp_after_lbracket = par_kind_get()
+            if pp_after_lbracket == 161:
+                parser_advance()
+                val end_idx = parse_expr()
+                if not validate_bracket_expr(end_idx, "slice end"): return base
+                parser_expect(145)
+                val zero = expr_int_lit(0, 0)
+                base = expr_slice(base, zero, end_idx, 0)
+            else:
+                val index_expr = parse_expr()
+                val pp_after_idx = par_kind_get()
+                if pp_after_idx == 161:
+                    # Slice: a[start:end]
+                    if not validate_bracket_expr(index_expr, "slice start"): return base
+                    parser_advance()
+                    val pp_after_slice_colon = par_kind_get()
+                    if pp_after_slice_colon == 145:
+                        # a[start:] -- open-ended
+                        parser_advance()
+                        val neg1 = expr_int_lit(-1, 0)
+                        base = expr_slice(base, index_expr, neg1, 0)
+                    else:
+                        val end_idx = parse_expr()
+                        if not validate_bracket_expr(end_idx, "slice end"): return base
+                        parser_expect(145)
+                        base = expr_slice(base, index_expr, end_idx, 0)
+                else:
+                    if not validate_bracket_expr(index_expr, "index expression"): return base
+                    parser_expect(145)
+                    base = expr_index(base, index_expr, 0)
+        elif kind == 140:
+            # Function call: f(args)
+            if parser_expr_trace_line_enabled():
+                eprint("[parser-expr] call:start callee={expr_get_str(base)} line={par_line_get()} col={par_col_get()}")
+            parser_advance()
+            var call_args: [i64] = []
+            var call_arg_names: [text] = []
+            var pp_after_lparen = par_kind_get()
+            if pp_after_lparen != 141:
+                val first_arg = parse_call_arg()
+                call_args.push(first_arg.0)
+                call_arg_names.push(first_arg.1)
+                pp_after_lparen = par_kind_get()
+                for j in 0..10000:
+                    if pp_after_lparen != 160:
+                        break
+                    parser_advance()
+                    pp_after_lparen = par_kind_get()
+                    if pp_after_lparen == 141:
+                        break
+                    val next_arg = parse_call_arg()
+                    call_args.push(next_arg.0)
+                    call_arg_names.push(next_arg.1)
+                    pp_after_lparen = par_kind_get()
+            parser_expect(141)
+            base = expr_call_named(base, call_args, call_arg_names, 0)
+            if parser_expr_trace_line_enabled():
+                eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
+        elif kind == 131:
+            # Optional chaining: x?.field
+            parser_advance()
+            val field_name = par_text_get()
+            parser_expect(6)
+            base = expr_field_access(base, field_name, 0)
+        elif kind == 130:
+            # Try/unwrap operator: expr? — propagate Err / None
+            parser_advance()
+            base = expr_try(base, 0)
+        elif kind == 57 and par_text_get() == "!":
+            # G44: postfix `!` force-unwrap (expr!, expr!.field) — see parse_postfix.
+            parser_advance()
+            base = expr_force_unwrap(base, 0)
+        elif kind == 133:
+            # Standalone existence check: expr.?
+            parser_advance()
+            base = expr_exists_check(base, 0)
+        else:
+            break
+    base
+
+# Re-export primary and ASM parsing (extracted to parser_primary.spl)
+use compiler.core.parser_primary.*
+
+# ===== Exports =====
+export parse_expr, parse_assignment, parse_or, parse_and, parse_not
+export parse_comparison, parse_null_coalesce, parse_range
+export parse_addition, parse_multiplication, parse_unary, parse_postfix
+export parse_call_arg, parse_postfix_on, parse_binary_from
+export parse_int_text

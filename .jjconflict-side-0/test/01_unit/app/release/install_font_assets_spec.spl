@@ -1,0 +1,84 @@
+use std.spec.*
+use std.io_runtime.{rt_file_read_text}
+
+describe "release installer font assets":
+    it "should install only the preflighted immutable font bundle through one share root":
+        val source = rt_file_read_text("src/app/release/install.spl") ?? ""
+        val font_copy = source.slice(source.index_of("fn copy_font_tree"), source.index_of("fn copy_file_unchanged"))
+
+        expect(source).to_contain("copy_font_tree(src: script_dir + \"/assets/fonts\"")
+        expect(source.index_of("copy_font_tree(src: script_dir + \"/assets/fonts\"") < source.index_of("# Install runtime binary")).to_be(true)
+        expect(source).to_contain("prefix + \"/share/simple/assets/fonts\"")
+        expect(source).to_contain("export SIMPLE_ASSET_ROOT=\\\"$SHARE_DIR\\\"")
+        expect(font_copy).to_contain("selected_font_bundle_asset_pins()")
+        expect(font_copy).to_contain("pins.len() != 57 or files.len() != pins.len()")
+        expect(font_copy).to_contain("pin.path == \"assets/fonts/\" + rel")
+        expect(font_copy).to_contain("if not pinned: return false")
+        expect(font_copy).to_contain("if not rt_file_exists(source_path): return false")
+        expect(font_copy).to_contain("sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256")
+        expect(font_copy).to_contain("rt_file_copy(source_path, dst_file)")
+        expect(font_copy).to_contain("sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256")
+        expect(font_copy.index_of("rt_file_read_bytes(source_path)") < font_copy.index_of("rt_dir_create(get_parent(dst_file)")).to_be(true)
+        expect(font_copy.contains("rt_file_copy(f, dst_file)")).to_be(false)
+        expect(source).to_contain("bundled font installation incomplete")
+        expect(source).to_contain("return 1")
+        expect(source).to_contain("if not rt_file_copy(runtime_src, runtime_dst)")
+        expect(source).to_contain("if not rt_file_write_text(wrapper_path, wrapper)")
+        expect(source).to_contain("if wrapper_chmod.2 != 0")
+        expect(source).to_contain("THIRD_PARTY_NOTICES.md")
+        expect(source).to_contain("/share/simple/LICENSE")
+
+    it "should stage fonts and root notices in every host release package":
+        val workflow = rt_file_read_text(".github/workflows/release.yml") ?? ""
+        val nsis = rt_file_read_text("config/packaging/windows/simple.nsi") ?? ""
+
+        expect(workflow).to_contain("cp -r assets \"${PKG_DIR}/\"")
+        expect(workflow).to_contain("cp -r assets \"$PKG_ROOT/\"")
+        expect(workflow).to_contain("cp -r assets/fonts staging-deb/usr/local/share/simple/assets/")
+        expect(workflow).to_contain("cp LICENSE THIRD_PARTY_NOTICES.md staging-deb/usr/local/share/simple/")
+        expect(workflow).to_contain("cp -r assets/fonts staging-win/assets/")
+        expect(workflow).to_contain("cp LICENSE THIRD_PARTY_NOTICES.md staging-win/")
+        expect(workflow).to_contain("BIN_NAME=\"simple-runtime\"")
+        expect(workflow).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
+        expect(workflow).to_contain("set \"SIMPLE_ASSET_ROOT=%~dp0..\"")
+        expect(workflow).to_contain("$LINUX_PKG_ROOT/bin/simple-runtime")
+        expect(workflow.contains("if [ -f bin/simple-runtime ]; then")).to_be(false)
+        expect(workflow).to_contain("export SIMPLE_ASSET_ROOT=/usr/local/share/simple")
+        expect(nsis).to_contain("File /r \"${SOURCE_DIR}\\assets\\fonts\\*.*\"")
+        expect(nsis).to_contain("File \"${SOURCE_DIR}\\THIRD_PARTY_NOTICES.md\"")
+        expect(nsis).to_contain("\"SIMPLE_ASSET_ROOT\" \"$INSTDIR\"")
+
+        val dist = rt_file_read_text("src/lib/nogc_sync_mut/package/dist.spl") ?? ""
+        expect(dist).to_contain("[\"-r\", \"assets\", \"\{pkg_dir\}/\"]")
+        expect(dist).to_contain("[\"LICENSE\", \"THIRD_PARTY_NOTICES.md\", \"\{pkg_dir\}/\"]")
+        expect(dist).to_contain("else: \"simple-runtime\"")
+        expect(dist).to_contain("set SIMPLE_ASSET_ROOT=%SCRIPT_DIR%..")
+        expect(dist).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
+
+        for path in [
+            "src/lib/nogc_sync_mut/package/build.spl",
+            "src/lib/nogc_async_mut/package/build.spl",
+            "src/lib/gc_async_mut/package/build.spl"
+        ]:
+            val build = rt_file_read_text(path) ?? ""
+            expect(build).to_contain("val assets_result = process_run(\"cp\", [\"-r\", \"assets\", tmp_dir])")
+            expect(build).to_contain("file_copy(\"THIRD_PARTY_NOTICES.md\", tmp_dir + \"/THIRD_PARTY_NOTICES.md\")")
+            expect(build).to_contain("if platform.starts_with(\"windows\"): \"simple.exe\" else: \"simple\"")
+            expect(build).to_contain("bin/release/\{platform\}/\{runtime_name\}")
+            expect(build).to_contain("val is_windows = platform.starts_with(\"windows\")")
+            expect(build).to_contain("if is_windows: \"/bin/simple.exe\" else: \"/bin/simple-runtime\"")
+            expect(build).to_contain("tmp_dir + \"/bin/simple.bat\"")
+            expect(build).to_contain("set \"SIMPLE_ASSET_ROOT=%~dp0..\"")
+            expect(build).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
+
+        for path in [
+            "src/lib/nogc_sync_mut/package/installer/staging.spl",
+            "src/lib/nogc_async_mut/package/installer/staging.spl",
+            "src/lib/gc_async_mut/package/installer/staging.spl"
+        ]:
+            val staging = rt_file_read_text(path) ?? ""
+            expect(staging).to_contain("\{staging\}/usr/local/share/simple/assets/fonts/")
+            expect(staging).to_contain("\{staging\}/usr/local/share/simple/THIRD_PARTY_NOTICES.md")
+            expect(staging).to_contain("\{staging\}/assets/fonts/")
+            expect(staging).to_contain("\{staging\}/THIRD_PARTY_NOTICES.md")
+            expect(staging).to_contain("export SIMPLE_ASSET_ROOT=/usr/local/share/simple")

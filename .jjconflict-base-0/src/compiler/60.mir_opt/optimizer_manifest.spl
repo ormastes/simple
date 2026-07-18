@@ -1,0 +1,967 @@
+# Versioned Dynamic Optimizer Manifest — Skeleton Implementation
+#
+# Provides types and load/validate logic for external pass plugins.
+# See: doc/05_design/optimizer_manifest_versioned_design.md
+#
+# Built-in passes (registered in mir_opt/mod.spl) always take precedence.
+# Dynamic passes are loaded into a per-session DynamicPassRegistry and
+# dispatched after the built-in PassKind match in run_pass_on_module.
+#
+# ABI contract: "simple.opt.mir.v1"
+
+use std.json.parser.{json_parse}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir_opt.mir_opt.mod.{
+    PassScope, mir_pass_descriptor_registry
+}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    OptimizationBackendPolicy, OptimizerBackendKind,
+    optimization_backend_policy_all,
+    optimization_backend_policy_only,
+    optimization_backend_policy_skip,
+    optimization_backend_kind_from_text,
+    optimization_rule_provider_applies_to_backend_name,
+    optimization_rule_provider_builtin_with_contract,
+    optimization_rule_provider_with_backend_policy
+}
+use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
+    PatternRule, PatternRuleSet, MirPattern, MirPatternSlot, MirRewrite, pattern_rule_set_new,
+    pattern_rule_pass_new, pattern_rule_pass_add_rule_set, pattern_rule_pass_run
+}
+
+# ============================================================================
+# Manifest Schema Version
+# ============================================================================
+
+enum ManifestSchemaVersion:
+    """Supported manifest schema versions."""
+    V1
+
+fn manifest_schema_version_from_int(n: i64) -> ManifestSchemaVersion?:
+    if n == 1:
+        Some(ManifestSchemaVersion.V1)
+    else:
+        nil
+
+fn manifest_schema_version_to_int(v: ManifestSchemaVersion) -> i64:
+    match v:
+        case V1: 1
+
+# ============================================================================
+# Manifest Error
+# ============================================================================
+
+enum ManifestError:
+    """Errors that can occur when loading or validating a manifest."""
+    ParseError(msg: text)
+    UnsupportedSchemaVersion(found: i64)
+    IncompatibleCompilerAbi(found: text)
+    MissingField(field: text)
+    StableNameConflict(name: text)
+    AliasConflict(alias: text)
+    DuplicateInManifest(name: text)
+
+fn manifest_error_message(err: ManifestError) -> text:
+    match err:
+        case ParseError(msg):
+            "manifest parse error: {msg}"
+        case UnsupportedSchemaVersion(found):
+            "unsupported manifest schema version: {found} (supported: 1)"
+        case IncompatibleCompilerAbi(found):
+            "incompatible compiler ABI in manifest: '{found}' (expected: simple.opt.mir.v1)"
+        case MissingField(field):
+            "manifest missing required field: '{field}'"
+        case StableNameConflict(name):
+            "dynamic pass stable_name conflicts with built-in: '{name}'"
+        case AliasConflict(alias):
+            "dynamic pass alias conflicts with built-in alias: '{alias}'"
+        case DuplicateInManifest(name):
+            "duplicate stable_name within manifest: '{name}'"
+
+# ============================================================================
+# Per-pass contract (mirrors OptimizationRuleProvider fields)
+# ============================================================================
+
+struct ManifestPassContract:
+    inputs: [text]
+    outputs: [text]
+    purity: text
+
+fn manifest_pass_contract_default() -> ManifestPassContract:
+    ManifestPassContract(
+        inputs: ["typed_mir"],
+        outputs: ["canonical_mir"],
+        purity: "pure"
+    )
+
+# ============================================================================
+# Per-pass entry parsed from manifest
+# ============================================================================
+
+struct ManifestPassEntry:
+    stable_name: text
+    aliases: [text]
+    scope: PassScope
+    capability_requires: [text]
+    contract: ManifestPassContract
+    backend_policy: OptimizationBackendPolicy
+    cost_class: text
+    entry_symbol: text
+
+# ============================================================================
+# Loaded, validated manifest
+# ============================================================================
+
+struct OptimizerManifest:
+    schema_version: ManifestSchemaVersion
+    compiler_abi: text
+    name: text
+    version: text
+    min_compiler_version: text
+    passes: [ManifestPassEntry]
+    rules:  [PatternRule]
+
+# ============================================================================
+# Dynamic pass descriptor (used after manifest is registered)
+# ============================================================================
+
+struct DynamicPassDescriptor:
+    name: text
+    aliases: [text]
+    scope: PassScope
+    capability_requires: [text]
+    provider: OptimizationRuleProvider
+    cost_class: text
+    entry_symbol: text
+
+struct DynamicPassBackendDecision:
+    pass_name: text
+    backend_name: text
+    max_cost_class: text
+    cost_class: text
+    applies: bool
+    reason: text
+
+fn manifest_cost_rank(cost_class: text) -> i64:
+    if cost_class == "free":
+        0
+    elif cost_class == "low":
+        1
+    elif cost_class == "medium":
+        2
+    elif cost_class == "high":
+        3
+    else:
+        99
+
+fn manifest_cost_allowed(cost_class: text, max_cost_class: text) -> bool:
+    manifest_cost_rank(cost_class) <= manifest_cost_rank(max_cost_class)
+
+fn dynamic_pass_provider(entry: ManifestPassEntry, plugin_name: text) -> OptimizationRuleProvider:
+    val provider = optimization_rule_provider_builtin_with_contract(
+        "simple.opt.mir.dynamic." + plugin_name + "." + entry.stable_name,
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        false,
+        entry.contract.inputs,
+        entry.contract.outputs,
+        entry.contract.purity
+    )
+    optimization_rule_provider_with_backend_policy(provider, entry.backend_policy)
+
+fn manifest_pass_entry_new(
+    stable_name: text,
+    aliases: [text],
+    scope: PassScope,
+    capability_requires: [text],
+    contract: ManifestPassContract,
+    entry_symbol: text
+) -> ManifestPassEntry:
+    ManifestPassEntry(
+        stable_name: stable_name,
+        aliases: aliases,
+        scope: scope,
+        capability_requires: capability_requires,
+        contract: contract,
+        backend_policy: optimization_backend_policy_all(),
+        cost_class: "medium",
+        entry_symbol: entry_symbol
+    )
+
+fn manifest_pass_entry_with_backend_policy(
+    entry: ManifestPassEntry,
+    backend_policy: OptimizationBackendPolicy
+) -> ManifestPassEntry:
+    ManifestPassEntry(
+        stable_name: entry.stable_name,
+        aliases: entry.aliases,
+        scope: entry.scope,
+        capability_requires: entry.capability_requires,
+        contract: entry.contract,
+        backend_policy: backend_policy,
+        cost_class: entry.cost_class,
+        entry_symbol: entry.entry_symbol
+    )
+
+fn manifest_pass_entry_with_cost_class(
+    entry: ManifestPassEntry,
+    cost_class: text
+) -> ManifestPassEntry:
+    ManifestPassEntry(
+        stable_name: entry.stable_name,
+        aliases: entry.aliases,
+        scope: entry.scope,
+        capability_requires: entry.capability_requires,
+        contract: entry.contract,
+        backend_policy: entry.backend_policy,
+        cost_class: cost_class,
+        entry_symbol: entry.entry_symbol
+    )
+
+fn manifest_pass_entry_new_with_backend_policy(
+    stable_name: text,
+    aliases: [text],
+    scope: PassScope,
+    capability_requires: [text],
+    contract: ManifestPassContract,
+    backend_policy: OptimizationBackendPolicy,
+    entry_symbol: text
+) -> ManifestPassEntry:
+    manifest_pass_entry_with_backend_policy(
+        manifest_pass_entry_new(stable_name, aliases, scope, capability_requires, contract, entry_symbol),
+        backend_policy
+    )
+
+fn manifest_pass_entry_new_with_backend_policy_and_cost(
+    stable_name: text,
+    aliases: [text],
+    scope: PassScope,
+    capability_requires: [text],
+    contract: ManifestPassContract,
+    backend_policy: OptimizationBackendPolicy,
+    cost_class: text,
+    entry_symbol: text
+) -> ManifestPassEntry:
+    manifest_pass_entry_with_cost_class(
+        manifest_pass_entry_new_with_backend_policy(stable_name, aliases, scope, capability_requires, contract, backend_policy, entry_symbol),
+        cost_class
+    )
+
+fn dynamic_pass_descriptor_from_entry(entry: ManifestPassEntry, plugin_name: text) -> DynamicPassDescriptor:
+    DynamicPassDescriptor(
+        name: entry.stable_name,
+        aliases: entry.aliases,
+        scope: entry.scope,
+        capability_requires: entry.capability_requires,
+        provider: dynamic_pass_provider(entry, plugin_name),
+        cost_class: entry.cost_class,
+        entry_symbol: entry.entry_symbol
+    )
+
+# ============================================================================
+# Dynamic Pass Registry — session-scoped
+# ============================================================================
+
+struct DynamicPassRegistry:
+    """Holds dynamic pass descriptors loaded from manifests for this session."""
+    descriptors: [DynamicPassDescriptor]
+
+impl DynamicPassRegistry:
+    static fn new() -> DynamicPassRegistry:
+        DynamicPassRegistry(descriptors: [])
+
+    fn register(desc: DynamicPassDescriptor) -> Result<DynamicPassRegistry, ManifestError>:
+        """Register a single descriptor, checking for name conflicts."""
+        for existing in self.descriptors:
+            if existing.name == desc.name:
+                return Err(ManifestError.StableNameConflict(desc.name))
+        Ok(DynamicPassRegistry(descriptors: self.descriptors.push(desc)))
+
+fn dynamic_pass_registry_new() -> DynamicPassRegistry:
+    DynamicPassRegistry(descriptors: [])
+
+fn dynamic_pass_registry_lookup(registry: DynamicPassRegistry, name: text) -> DynamicPassDescriptor?:
+    """Look up a dynamic pass by name or alias."""
+    for desc in registry.descriptors:
+        if desc.name == name:
+            return Some(desc)
+        for alias in desc.aliases:
+            if alias == name:
+                return Some(desc)
+    nil
+
+fn dynamic_pass_descriptor_applies_to_backend(desc: DynamicPassDescriptor, backend_name: text) -> bool:
+    optimization_rule_provider_applies_to_backend_name(desc.provider, backend_name)
+
+fn dynamic_pass_descriptor_cost_allowed(desc: DynamicPassDescriptor, max_cost_class: text) -> bool:
+    manifest_cost_allowed(desc.cost_class, max_cost_class)
+
+fn dynamic_pass_descriptor_backend_decision(desc: DynamicPassDescriptor, backend_name: text, max_cost_class: text) -> DynamicPassBackendDecision:
+    if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+        return DynamicPassBackendDecision(desc.name, backend_name, max_cost_class, desc.cost_class, false, desc.provider.backend_policy.reason)
+    if not dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
+        return DynamicPassBackendDecision(desc.name, backend_name, max_cost_class, desc.cost_class, false, "cost budget exceeded")
+    DynamicPassBackendDecision(desc.name, backend_name, max_cost_class, desc.cost_class, true, "ready")
+
+fn dynamic_pass_registry_for_backend(registry: DynamicPassRegistry, backend_name: text) -> DynamicPassRegistry:
+    """Return a registry containing only descriptors that apply to backend_name."""
+    var selected: [DynamicPassDescriptor] = []
+    for desc in registry.descriptors:
+        if dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+            selected = selected.push(desc)
+    DynamicPassRegistry(descriptors: selected)
+
+fn dynamic_pass_registry_names_for_backend(registry: DynamicPassRegistry, backend_name: text) -> [text]:
+    var names: [text] = []
+    val filtered = dynamic_pass_registry_for_backend(registry, backend_name)
+    for desc in filtered.descriptors:
+        names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_skipped_names_for_backend(registry: DynamicPassRegistry, backend_name: text) -> [text]:
+    var names: [text] = []
+    for desc in registry.descriptors:
+        if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+            names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> DynamicPassRegistry:
+    """Return descriptors that match backend policy and compile-cost budget."""
+    var selected: [DynamicPassDescriptor] = []
+    for desc in registry.descriptors:
+        if dynamic_pass_descriptor_applies_to_backend(desc, backend_name) and dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
+            selected = selected.push(desc)
+    DynamicPassRegistry(descriptors: selected)
+
+fn dynamic_pass_registry_names_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [text]:
+    var names: [text] = []
+    val filtered = dynamic_pass_registry_for_backend_budget(registry, backend_name, max_cost_class)
+    for desc in filtered.descriptors:
+        names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_skipped_names_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [text]:
+    var names: [text] = []
+    for desc in registry.descriptors:
+        if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name) or not dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
+            names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_decisions_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [DynamicPassBackendDecision]:
+    var decisions: [DynamicPassBackendDecision] = []
+    for desc in registry.descriptors:
+        decisions = decisions.push(dynamic_pass_descriptor_backend_decision(desc, backend_name, max_cost_class))
+    decisions
+
+fn dynamic_pass_registry_skipped_decisions_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [DynamicPassBackendDecision]:
+    var skipped: [DynamicPassBackendDecision] = []
+    for decision in dynamic_pass_registry_decisions_for_backend_budget(registry, backend_name, max_cost_class):
+        if not decision.applies:
+            skipped = skipped.push(decision)
+    skipped
+
+# ============================================================================
+# Built-in name conflict guard
+# ============================================================================
+
+fn builtin_stable_names() -> [text]:
+    var names: [text] = []
+    for desc in mir_pass_descriptor_registry():
+        names = names.push(desc.stable_name)
+    names
+
+fn builtin_alias_set() -> [text]:
+    var aliases: [text] = []
+    for desc in mir_pass_descriptor_registry():
+        for alias in desc.aliases:
+            aliases = aliases.push(alias)
+    aliases
+
+fn is_builtin_stable_name(name: text) -> bool:
+    for n in builtin_stable_names():
+        if n == name:
+            return true
+    false
+
+fn is_builtin_alias(alias: text) -> bool:
+    for a in builtin_alias_set():
+        if a == alias:
+            return true
+    false
+
+# ============================================================================
+# Manifest validation
+# ============================================================================
+
+fn validate_manifest_pass(entry: ManifestPassEntry) -> ManifestError?:
+    """Validate a single pass entry against the built-in registry."""
+    if is_builtin_stable_name(entry.stable_name):
+        return Some(ManifestError.StableNameConflict(entry.stable_name))
+    for alias in entry.aliases:
+        if is_builtin_alias(alias):
+            return Some(ManifestError.AliasConflict(alias))
+    nil
+
+fn validate_manifest(manifest: OptimizerManifest) -> ManifestError?:
+    """Validate an entire manifest (cross-pass uniqueness + built-in conflicts)."""
+    var seen_names: [text] = []
+    for entry in manifest.passes:
+        # Check built-in conflicts
+        val err = validate_manifest_pass(entry)
+        if err.?:
+            return err
+        # Check intra-manifest duplicates
+        for seen in seen_names:
+            if seen == entry.stable_name:
+                return Some(ManifestError.DuplicateInManifest(entry.stable_name))
+        seen_names = seen_names.push(entry.stable_name)
+    nil
+
+# ============================================================================
+# Manifest loading (v1)
+# ============================================================================
+
+fn parse_scope(scope_text: text) -> PassScope:
+    if scope_text == "module":
+        PassScope.Module
+    elif scope_text == "fs_driver":
+        PassScope.FsDriver
+    else:
+        PassScope.Function
+
+fn manifest_json_type(value: any) -> text:
+    if value == nil:
+        return "null"
+    val type_part = value.0
+    if type_part == nil:
+        return "null"
+    type_part
+
+fn manifest_json_to_string(value: any) -> any:
+    if manifest_json_type(value) == "string":
+        return value.1
+    nil
+
+fn manifest_json_to_number(value: any) -> any:
+    if manifest_json_type(value) == "number":
+        return value.1
+    nil
+
+fn manifest_json_to_array(value: any) -> any:
+    if manifest_json_type(value) == "array":
+        return value.1
+    nil
+
+fn manifest_json_to_object(value: any) -> any:
+    if manifest_json_type(value) == "object":
+        return value.1
+    nil
+
+fn manifest_json_object_get(obj: any, key: text) -> any:
+    val map = manifest_json_to_object(obj)
+    if map == nil:
+        return nil
+    if map.has(key):
+        return map[key]
+    nil
+
+fn manifest_json_required(root: any, field: text) -> Result<any, ManifestError>:
+    val value = manifest_json_object_get(root, field)
+    if value == nil:
+        return Err(ManifestError.MissingField(field))
+    Ok(value)
+
+fn manifest_json_required_text(root: any, field: text) -> Result<text, ManifestError>:
+    val value_result = manifest_json_required(root, field)
+    match value_result:
+        case Err(err):
+            Err(err)
+        case Ok(value):
+            val text_value = manifest_json_to_string(value)
+            if text_value == nil:
+                return Err(ManifestError.MissingField(field))
+            Ok(text_value)
+
+fn manifest_json_optional_text(root: any, field: text, default_value: text) -> text:
+    val value = manifest_json_object_get(root, field)
+    if value == nil:
+        return default_value
+    val text_value = manifest_json_to_string(value)
+    if text_value == nil:
+        return default_value
+    text_value
+
+fn manifest_json_optional_text_opt(root: any, field: text) -> text?:
+    val value = manifest_json_object_get(root, field)
+    if value == nil:
+        return nil
+    val text_value = manifest_json_to_string(value)
+    if text_value == nil:
+        return nil
+    Some(text_value)
+
+fn manifest_json_required_i64(root: any, field: text) -> Result<i64, ManifestError>:
+    val value_result = manifest_json_required(root, field)
+    match value_result:
+        case Err(err):
+            Err(err)
+        case Ok(value):
+            val number_value = manifest_json_to_number(value)
+            if number_value == nil:
+                return Err(ManifestError.MissingField(field))
+            Ok(number_value as i64)
+
+fn manifest_json_required_array(root: any, field: text) -> Result<[any], ManifestError>:
+    val value_result = manifest_json_required(root, field)
+    match value_result:
+        case Err(err):
+            Err(err)
+        case Ok(value):
+            val array_value = manifest_json_to_array(value)
+            if array_value == nil:
+                return Err(ManifestError.MissingField(field))
+            Ok(array_value)
+
+fn manifest_json_optional_text_array(root: any, field: text) -> [text]:
+    val value = manifest_json_object_get(root, field)
+    if value == nil:
+        return []
+    val array_value = manifest_json_to_array(value)
+    if array_value == nil:
+        return []
+    var items: [text] = []
+    for item in array_value:
+        val text_value = manifest_json_to_string(item)
+        if text_value != nil:
+            items = items.push(text_value)
+    items
+
+fn manifest_backend_kinds_from_json_array(value: any) -> [OptimizerBackendKind]:
+    val array_value = manifest_json_to_array(value)
+    if array_value == nil:
+        return []
+    var kinds: [OptimizerBackendKind] = []
+    for item in array_value:
+        val name = manifest_json_to_string(item)
+        if name != nil:
+            kinds = kinds.push(optimization_backend_kind_from_text(name))
+    kinds
+
+fn manifest_backend_policy_from_json(pass_json: any) -> OptimizationBackendPolicy:
+    val policy = manifest_json_object_get(pass_json, "backend_policy")
+    if policy == nil:
+        return optimization_backend_policy_all()
+    val reason = manifest_json_optional_text(policy, "reason", "manifest_backend_policy")
+    val only_value = manifest_json_object_get(policy, "only")
+    if only_value != nil:
+        return optimization_backend_policy_only(manifest_backend_kinds_from_json_array(only_value), reason)
+    val allowed_value = manifest_json_object_get(policy, "allowed_backends")
+    if allowed_value != nil:
+        return optimization_backend_policy_only(manifest_backend_kinds_from_json_array(allowed_value), reason)
+    val skip_value = manifest_json_object_get(policy, "skip")
+    if skip_value != nil:
+        return optimization_backend_policy_skip(manifest_backend_kinds_from_json_array(skip_value), reason)
+    val skipped_value = manifest_json_object_get(policy, "skipped_backends")
+    if skipped_value != nil:
+        return optimization_backend_policy_skip(manifest_backend_kinds_from_json_array(skipped_value), reason)
+    optimization_backend_policy_all()
+
+fn manifest_contract_from_json(pass_json: any) -> ManifestPassContract:
+    val contract = manifest_json_object_get(pass_json, "contract")
+    if contract == nil:
+        return manifest_pass_contract_default()
+    ManifestPassContract(
+        inputs: manifest_json_optional_text_array(contract, "inputs"),
+        outputs: manifest_json_optional_text_array(contract, "outputs"),
+        purity: manifest_json_optional_text(contract, "purity", "pure")
+    )
+
+fn manifest_pass_entry_from_json(pass_json: any) -> Result<ManifestPassEntry, ManifestError>:
+    val stable_name_result = manifest_json_required_text(pass_json, "stable_name")
+    match stable_name_result:
+        case Err(err):
+            return Err(err)
+        case Ok(stable_name):
+            val entry_symbol_result = manifest_json_required_text(pass_json, "entry_symbol")
+            match entry_symbol_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(entry_symbol):
+                    Ok(ManifestPassEntry(
+                        stable_name: stable_name,
+                        aliases: manifest_json_optional_text_array(pass_json, "aliases"),
+                        scope: parse_scope(manifest_json_optional_text(pass_json, "scope", "function")),
+                        capability_requires: manifest_json_optional_text_array(pass_json, "capability_requires"),
+                        contract: manifest_contract_from_json(pass_json),
+                        backend_policy: manifest_backend_policy_from_json(pass_json),
+                        cost_class: manifest_json_optional_text(pass_json, "cost_class", "medium"),
+                        entry_symbol: entry_symbol
+                    ))
+
+fn manifest_pass_entries_from_json(pass_values: [any]) -> Result<[ManifestPassEntry], ManifestError>:
+    var entries: [ManifestPassEntry] = []
+    for pass_json in pass_values:
+        val entry_result = manifest_pass_entry_from_json(pass_json)
+        match entry_result:
+            case Err(err):
+                return Err(err)
+            case Ok(entry):
+                entries = entries.push(entry)
+    Ok(entries)
+
+fn manifest_pattern_slot_from_json(slot_json: any) -> Result<MirPatternSlot, ManifestError>:
+    val kind_result = manifest_json_required_text(slot_json, "kind_tag")
+    match kind_result:
+        case Err(err):
+            Err(err)
+        case Ok(kind_tag):
+            Ok(MirPatternSlot(
+                kind_tag: kind_tag,
+                operand_0: manifest_json_optional_text_opt(slot_json, "operand_0"),
+                operand_1: manifest_json_optional_text_opt(slot_json, "operand_1"),
+                dest: manifest_json_optional_text_opt(slot_json, "dest")
+            ))
+
+fn manifest_pattern_slots_from_json(slot_values: [any]) -> Result<[MirPatternSlot], ManifestError>:
+    var slots: [MirPatternSlot] = []
+    for slot_json in slot_values:
+        val slot_result = manifest_pattern_slot_from_json(slot_json)
+        match slot_result:
+            case Err(err):
+                return Err(err)
+            case Ok(slot):
+                slots = slots.push(slot)
+    Ok(slots)
+
+fn manifest_pattern_from_json(rule_json: any) -> Result<MirPattern, ManifestError>:
+    val pattern_result = manifest_json_required(rule_json, "pattern")
+    match pattern_result:
+        case Err(err):
+            return Err(err)
+        case Ok(pattern_json):
+            val inst_count_result = manifest_json_required_i64(pattern_json, "inst_count")
+            match inst_count_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(inst_count):
+                    val slots_result = manifest_json_required_array(pattern_json, "slots")
+                    match slots_result:
+                        case Err(err):
+                            return Err(err)
+                        case Ok(slot_values):
+                            val parsed_slots = manifest_pattern_slots_from_json(slot_values)
+                            match parsed_slots:
+                                case Err(err):
+                                    Err(err)
+                                case Ok(slots):
+                                    Ok(MirPattern(inst_count: inst_count, slots: slots))
+
+fn manifest_rewrite_from_json(rule_json: any) -> Result<MirRewrite, ManifestError>:
+    val rewrite_result = manifest_json_required(rule_json, "rewrite")
+    match rewrite_result:
+        case Err(err):
+            return Err(err)
+        case Ok(rewrite_json):
+            val kind_result = manifest_json_required_text(rewrite_json, "kind_tag")
+            match kind_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(kind_tag):
+                    Ok(MirRewrite(
+                        kind_tag: kind_tag,
+                        dest: manifest_json_optional_text(rewrite_json, "dest", ""),
+                        operands: manifest_json_optional_text_array(rewrite_json, "operands")
+                    ))
+
+fn manifest_pattern_rule_from_json(rule_json: any) -> Result<PatternRule, ManifestError>:
+    val name_result = manifest_json_required_text(rule_json, "name")
+    match name_result:
+        case Err(err):
+            return Err(err)
+        case Ok(name):
+            val pattern_result = manifest_pattern_from_json(rule_json)
+            match pattern_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(pattern):
+                    val rewrite_result = manifest_rewrite_from_json(rule_json)
+                    match rewrite_result:
+                        case Err(err):
+                            return Err(err)
+                        case Ok(rewrite):
+                            val cost_delta_result = manifest_json_required_i64(rule_json, "cost_delta")
+                            match cost_delta_result:
+                                case Err(err):
+                                    return Err(err)
+                                case Ok(cost_delta):
+                                    Ok(PatternRule(
+                                        name: name,
+                                        pattern: pattern,
+                                        rewrite: rewrite,
+                                        cost_delta: cost_delta,
+                                        safety: manifest_json_optional_text(rule_json, "safety", "experimental")
+                                    ))
+
+fn manifest_pattern_rules_from_json(rule_values: [any]) -> Result<[PatternRule], ManifestError>:
+    var rules: [PatternRule] = []
+    for rule_json in rule_values:
+        val rule_result = manifest_pattern_rule_from_json(rule_json)
+        match rule_result:
+            case Err(err):
+                return Err(err)
+            case Ok(rule):
+                rules = rules.push(rule)
+    Ok(rules)
+
+fn manifest_optional_pattern_rules_from_json(root: any) -> Result<[PatternRule], ManifestError>:
+    val rule_value = manifest_json_object_get(root, "rules")
+    if rule_value == nil:
+        return Ok([])
+    val rule_values = manifest_json_to_array(rule_value)
+    if rule_values == nil:
+        return Err(ManifestError.MissingField("rules"))
+    manifest_pattern_rules_from_json(rule_values)
+
+fn load_manifest_v1_from_parsed(
+    schema_version: i64,
+    compiler_abi: text,
+    name: text,
+    version: text,
+    min_compiler_version: text,
+    passes: [ManifestPassEntry]
+) -> Result<OptimizerManifest, ManifestError>:
+    """Validate header fields and construct an OptimizerManifest (no rules)."""
+    load_manifest_v1_from_parsed_with_rules(schema_version, compiler_abi, name, version, min_compiler_version, passes, [])
+
+fn load_manifest_v1_from_parsed_with_rules(
+    schema_version: i64,
+    compiler_abi: text,
+    name: text,
+    version: text,
+    min_compiler_version: text,
+    passes: [ManifestPassEntry],
+    rules: [PatternRule]
+) -> Result<OptimizerManifest, ManifestError>:
+    """Validate header fields and construct an OptimizerManifest with rules."""
+    val version_opt = manifest_schema_version_from_int(schema_version)
+    val manifest_schema_version = match version_opt:
+        Some(parsed_schema_version):
+            parsed_schema_version
+        nil:
+            return Err(ManifestError.UnsupportedSchemaVersion(schema_version))
+    if compiler_abi != "simple.opt.mir.v1":
+        return Err(ManifestError.IncompatibleCompilerAbi(compiler_abi))
+    val manifest = OptimizerManifest(
+        schema_version: manifest_schema_version,
+        compiler_abi: compiler_abi,
+        name: name,
+        version: version,
+        min_compiler_version: min_compiler_version,
+        passes: passes,
+        rules: rules
+    )
+    val validation_err = validate_manifest(manifest)
+    match validation_err:
+        Some(err):
+            return Err(err)
+        nil:
+            pass
+    Ok(manifest)
+
+fn load_manifest_v1(json_text: text) -> Result<OptimizerManifest, ManifestError>:
+    """Parse a v1 optimizer manifest from JSON text.
+
+    Validates schema_version, compiler_abi, and all pass entries against
+    the built-in pass registry before returning a usable OptimizerManifest.
+    """
+    val parse_result = json_parse(json_text)
+    if parse_result == nil:
+        return Err(ManifestError.ParseError("invalid JSON"))
+    val root = parse_result
+
+    val schema_result = manifest_json_required_i64(root, "schema_version")
+    match schema_result:
+        case Err(err):
+            return Err(err)
+        case Ok(schema_version):
+            val abi_result = manifest_json_required_text(root, "compiler_abi")
+            match abi_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(compiler_abi):
+                    val name_result = manifest_json_required_text(root, "name")
+                    match name_result:
+                        case Err(err):
+                            return Err(err)
+                        case Ok(name):
+                            val version_result = manifest_json_required_text(root, "version")
+                            match version_result:
+                                case Err(err):
+                                    return Err(err)
+                                case Ok(version):
+                                    val min_version_result = manifest_json_required_text(root, "min_compiler_version")
+                                    match min_version_result:
+                                        case Err(err):
+                                            return Err(err)
+                                        case Ok(min_compiler_version):
+                                            val passes_result = manifest_json_required_array(root, "passes")
+                                            match passes_result:
+                                                case Err(err):
+                                                    return Err(err)
+                                                case Ok(pass_values):
+                                                    val entries_result = manifest_pass_entries_from_json(pass_values)
+                                                    match entries_result:
+                                                        case Err(err):
+                                                            return Err(err)
+                                                        case Ok(entries):
+                                                            val rules_result = manifest_optional_pattern_rules_from_json(root)
+                                                            match rules_result:
+                                                                case Err(err):
+                                                                    return Err(err)
+                                                                case Ok(rules):
+                                                                    load_manifest_v1_from_parsed_with_rules(
+                                                                        schema_version,
+                                                                        compiler_abi,
+                                                                        name,
+                                                                        version,
+                                                                        min_compiler_version,
+                                                                        entries,
+                                                                        rules
+                                                                    )
+
+# ============================================================================
+# Rule set helper
+# ============================================================================
+
+fn manifest_to_pattern_rule_set(manifest: OptimizerManifest) -> PatternRuleSet:
+    """Extract the PatternRuleSet from a loaded manifest (may be empty)."""
+    pattern_rule_set_new(manifest.name, manifest.rules)
+
+fn manifest_registered_pass_applies_to_backend(
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text
+) -> bool:
+    """Return true when at least one registered manifest pass applies to backend_name.
+
+    Rules-only manifests have no pass policy anchor, so they remain
+    backend-neutral and are allowed to run.
+    """
+    if manifest.passes.len() == 0:
+        return true
+    val filtered = dynamic_pass_registry_for_backend(registry, backend_name)
+    for entry in manifest.passes:
+        for desc in filtered.descriptors:
+            if desc.name == entry.stable_name:
+                return true
+    false
+
+fn manifest_registered_pass_applies_to_backend_budget(
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text,
+    max_cost_class: text
+) -> bool:
+    """Return true when at least one registered manifest pass applies to backend_name within max_cost_class.
+
+    Rules-only manifests have no pass policy anchor, so they remain
+    backend-neutral and are allowed to run.
+    """
+    if manifest.passes.len() == 0:
+        return true
+    val filtered = dynamic_pass_registry_for_backend_budget(registry, backend_name, max_cost_class)
+    for entry in manifest.passes:
+        for desc in filtered.descriptors:
+            if desc.name == entry.stable_name:
+                return true
+    false
+
+fn run_manifest_pattern_rules_for_backend(
+    module: MirModule,
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text
+) -> MirModule:
+    """Run a manifest's pattern rules only when its registered passes apply to the backend."""
+    if manifest.rules.len() == 0:
+        return module
+    if not manifest_registered_pass_applies_to_backend(registry, manifest, backend_name):
+        return module
+    val rule_set = manifest_to_pattern_rule_set(manifest)
+    val rule_pass = pattern_rule_pass_add_rule_set(pattern_rule_pass_new(), rule_set)
+    pattern_rule_pass_run(rule_pass, module)
+
+fn run_manifest_pattern_rules_for_backend_budget(
+    module: MirModule,
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text,
+    max_cost_class: text
+) -> MirModule:
+    """Run a manifest's pattern rules only when registered passes match backend and compile-cost budget."""
+    if manifest.rules.len() == 0:
+        return module
+    if not manifest_registered_pass_applies_to_backend_budget(registry, manifest, backend_name, max_cost_class):
+        return module
+    val rule_set = manifest_to_pattern_rule_set(manifest)
+    val rule_pass = pattern_rule_pass_add_rule_set(pattern_rule_pass_new(), rule_set)
+    pattern_rule_pass_run(rule_pass, module)
+
+# ============================================================================
+# Registry registration
+# ============================================================================
+
+fn dynamic_pass_registry_register(
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest
+) -> Result<DynamicPassRegistry, ManifestError>:
+    """Register all passes from a validated manifest into the registry.
+
+    Returns the updated registry on success, or an error if a conflict is found
+    at registration time (second-pass guard).
+    """
+    var updated = registry
+    for entry in manifest.passes:
+        # Check conflicts against already-registered dynamic passes
+        for existing in updated.descriptors:
+            if existing.name == entry.stable_name:
+                return Err(ManifestError.StableNameConflict(entry.stable_name))
+        val desc = dynamic_pass_descriptor_from_entry(entry, manifest.name)
+        updated = DynamicPassRegistry(descriptors: updated.descriptors.push(desc))
+    Ok(updated)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ManifestSchemaVersion, manifest_schema_version_from_int, manifest_schema_version_to_int
+export ManifestError, manifest_error_message
+export ManifestPassContract, manifest_pass_contract_default
+export ManifestPassEntry, manifest_pass_entry_new
+export manifest_pass_entry_with_backend_policy, manifest_pass_entry_new_with_backend_policy
+export manifest_pass_entry_with_cost_class, manifest_pass_entry_new_with_backend_policy_and_cost
+export OptimizerManifest
+export DynamicPassDescriptor, DynamicPassBackendDecision, dynamic_pass_descriptor_from_entry
+export DynamicPassRegistry, dynamic_pass_registry_new
+export dynamic_pass_registry_lookup, dynamic_pass_registry_register
+export dynamic_pass_descriptor_applies_to_backend
+export dynamic_pass_descriptor_cost_allowed
+export dynamic_pass_descriptor_backend_decision
+export dynamic_pass_registry_for_backend
+export dynamic_pass_registry_names_for_backend
+export dynamic_pass_registry_skipped_names_for_backend
+export dynamic_pass_registry_for_backend_budget
+export dynamic_pass_registry_names_for_backend_budget
+export dynamic_pass_registry_skipped_names_for_backend_budget
+export dynamic_pass_registry_decisions_for_backend_budget
+export dynamic_pass_registry_skipped_decisions_for_backend_budget
+export manifest_cost_allowed
+export load_manifest_v1, load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules
+export validate_manifest, validate_manifest_pass
+export is_builtin_stable_name, is_builtin_alias
+export manifest_to_pattern_rule_set
+export manifest_registered_pass_applies_to_backend
+export manifest_registered_pass_applies_to_backend_budget
+export run_manifest_pattern_rules_for_backend
+export run_manifest_pattern_rules_for_backend_budget

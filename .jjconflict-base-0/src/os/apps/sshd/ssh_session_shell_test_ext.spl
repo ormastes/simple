@@ -1,0 +1,118 @@
+use os.apps.sshd.ssh_session.{SshShellLaunchReport}
+use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_fat32_alias, app_registry_root_alias}
+
+fn _ssh_shell_command_token(command_line: text) -> text:
+    val trimmed = command_line.trim()
+    if trimmed == "":
+        return ""
+    val parts = trimmed.split(" ")
+    if parts.len() == 0:
+        return ""
+    parts[0]
+
+fn _ssh_shell_command_args(command_line: text) -> text:
+    """Return the whitespace-split argv tail (argv[1:]) re-joined by a single space.
+
+    Guest-side split only — no shell metacharacter interpretation (no quoting,
+    globbing, `;`/`&&`/`|`). Matches the board-runnable v1 constraint: the
+    FS-ELF loader receives full argv, not just argv[0].
+    """
+    val trimmed = command_line.trim()
+    if trimmed == "":
+        return ""
+    val parts = trimmed.split(" ")
+    if parts.len() <= 1:
+        return ""
+    var rest = ""
+    var i: u64 = 1
+    while i < parts.len():
+        if parts[i] != "":
+            if rest == "":
+                rest = parts[i]
+            else:
+                rest = rest + " " + parts[i]
+        i = i + 1
+    rest
+
+fn _ssh_shell_candidate_launchable(path: text) -> bool:
+    app_registry_cached_bytes(path).len() > 4
+
+fn _ssh_shell_resolve_launch_path(command: text) -> text:
+    if command.starts_with("/"):
+        if _ssh_shell_candidate_launchable(command):
+            return command
+        return ""
+    val usr_bin = "/usr/bin/{command}"
+    if _ssh_shell_candidate_launchable(usr_bin):
+        return usr_bin
+    val sys_apps = "/sys/apps/{command}"
+    if _ssh_shell_candidate_launchable(sys_apps):
+        return sys_apps
+    val bin_path = "/bin/{command}"
+    if _ssh_shell_candidate_launchable(bin_path):
+        return bin_path
+    ""
+
+pub fn ssh_exec_fat_launch_line(command_line: text) -> text:
+    """Resolve an SSH exec command to a launchable filesystem ELF/SMF path.
+
+    Returns an empty string when the command does not resolve to a launchable
+    filesystem binary (the caller then falls back to the built-in shell REPL).
+    On a match it returns a real, non-fabricated resolution proof line built
+    from the app registry so the SSH exec channel can report which on-disk
+    binary the loader would spawn (path + FAT32 short-name alias), plus the
+    full argv[1:] the loader would receive (guest-side whitespace split, no
+    shell metacharacters).
+    """
+    val command = _ssh_shell_command_token(command_line)
+    if command == "":
+        return ""
+    val path = _ssh_shell_resolve_launch_path(command)
+    if path == "":
+        return ""
+    val fat32 = app_registry_fat32_alias(path)
+    val fat32_text = if fat32 == nil: "" else: fat32.unwrap()
+    val args = _ssh_shell_command_args(command_line)
+    val args_suffix = if args == "": "" else: " args={args}"
+    "EXEC {command} path={path} fat32={fat32_text}{args_suffix}\n"
+
+pub fn ssh_shell_launch_report_for_test(command_line: text) -> SshShellLaunchReport:
+    """Resolve an SSH shell/exec command through the shell filesystem launch path."""
+    val command = _ssh_shell_command_token(command_line)
+    if command == "":
+        return SshShellLaunchReport(
+            command_line: command_line,
+            command: "",
+            resolved_path: "",
+            fat32_alias: "",
+            root_alias: "",
+            launchable: false,
+            smf_backed: false,
+            shell_exec_path: false
+        )
+    val path = _ssh_shell_resolve_launch_path(command)
+    if path == "":
+        return SshShellLaunchReport(
+            command_line: command_line,
+            command: command,
+            resolved_path: "",
+            fat32_alias: "",
+            root_alias: "",
+            launchable: false,
+            smf_backed: false,
+            shell_exec_path: true
+        )
+    val fat32 = app_registry_fat32_alias(path)
+    val root = app_registry_root_alias(path)
+    val fat32_text = if fat32 == nil: "" else: fat32.unwrap()
+    val root_text = if root == nil: "" else: root.unwrap()
+    SshShellLaunchReport(
+        command_line: command_line,
+        command: command,
+        resolved_path: path,
+        fat32_alias: fat32_text,
+        root_alias: root_text,
+        launchable: true,
+        smf_backed: fat32_text.ends_with(".SMF"),
+        shell_exec_path: true
+    )

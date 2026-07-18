@@ -1,0 +1,481 @@
+# Scheduler Class Queues — per-CPU priority-class run queues and multi-CPU dispatcher.
+#
+# Provides SchedClass (priority class metadata), SchedTask (extended task
+# descriptor), ClassQueue (flat fixed-size sorted queue for one class on one
+# CPU), PerCpuScheduler (four ClassQueues per CPU), and MultiCpuScheduler
+# (up to 4 CPUs with load rebalancing).
+
+# ============================================================================
+# SchedClass
+# ============================================================================
+
+struct SchedClass:
+    """Priority class descriptor carrying scheduling policy parameters."""
+    class_name: text
+    class_level: i64
+    base_time_slice_ms: i64
+    preemptible: bool
+
+    static fn realtime() -> SchedClass:
+        SchedClass(
+            class_name: "realtime",
+            class_level: 0,
+            base_time_slice_ms: 1,
+            preemptible: false
+        )
+
+    static fn normal() -> SchedClass:
+        SchedClass(
+            class_name: "normal",
+            class_level: 1,
+            base_time_slice_ms: 10,
+            preemptible: true
+        )
+
+    static fn batch() -> SchedClass:
+        SchedClass(
+            class_name: "batch",
+            class_level: 2,
+            base_time_slice_ms: 50,
+            preemptible: true
+        )
+
+    static fn idle() -> SchedClass:
+        SchedClass(
+            class_name: "idle",
+            class_level: 3,
+            base_time_slice_ms: 100,
+            preemptible: true
+        )
+
+    static fn from_name(name: text) -> SchedClass:
+        if name == "realtime":
+            return SchedClass.realtime()
+        if name == "normal":
+            return SchedClass.normal()
+        if name == "batch":
+            return SchedClass.batch()
+        SchedClass.idle()
+
+    fn summary() -> text:
+        "SchedClass(" + self.class_name + " level=" + self.class_level.to_text() + " slice=" + self.base_time_slice_ms.to_text() + "ms preemptible=" + self.preemptible.to_text() + ")"
+
+# ============================================================================
+# SchedTask
+# ============================================================================
+
+struct SchedTask:
+    """Extended task descriptor with scheduling class, affinity, and isolation."""
+    pid: i64
+    name: text
+    sched_class: SchedClass
+    priority: i64
+    affinity_mask: i64
+    time_slice_ms: i64
+    time_used_ms: i64
+    isolation_level: text
+    deadline_us: i64
+    state: text
+    cpu_id: i64
+
+    static fn create(pid: i64, name: text, cls: SchedClass, prio: i64) -> SchedTask:
+        SchedTask(
+            pid: pid,
+            name: name,
+            sched_class: cls,
+            priority: prio,
+            affinity_mask: 0,
+            time_slice_ms: cls.base_time_slice_ms,
+            time_used_ms: 0,
+            isolation_level: "none",
+            deadline_us: 0,
+            state: "ready",
+            cpu_id: -1
+        )
+
+    me fn assign_cpu(cpu: i64) -> text:
+        self.cpu_id = cpu
+        "task " + self.pid.to_text() + " assigned to cpu " + cpu.to_text()
+
+    me fn consume_time(ms: i64) -> bool:
+        self.time_used_ms = self.time_used_ms + ms
+        self.time_used_ms >= self.time_slice_ms
+
+    me fn reset_slice() -> text:
+        self.time_used_ms = 0
+        "slice reset for pid " + self.pid.to_text()
+
+    fn is_runnable() -> bool:
+        self.state == "ready"
+
+    fn is_higher_priority(other_level: i64, other_prio: i64) -> bool:
+        if self.sched_class.class_level < other_level:
+            return true
+        if self.sched_class.class_level == other_level and self.priority > other_prio:
+            return true
+        false
+
+    fn summary() -> text:
+        "SchedTask(pid=" + self.pid.to_text() + " name=" + self.name + " class=" + self.sched_class.class_name + " prio=" + self.priority.to_text() + " state=" + self.state + " cpu=" + self.cpu_id.to_text() + ")"
+
+# ============================================================================
+# ClassQueue
+# ============================================================================
+
+struct ClassQueue:
+    """Fixed-size sorted run queue for one priority class on one CPU (max 8 tasks)."""
+    cpu_id: i64
+    class_name: text
+    count: i64
+    t0_pid: i64
+    t1_pid: i64
+    t2_pid: i64
+    t3_pid: i64
+    t4_pid: i64
+    t5_pid: i64
+    t6_pid: i64
+    t7_pid: i64
+    t0_prio: i64
+    t1_prio: i64
+    t2_prio: i64
+    t3_prio: i64
+    t4_prio: i64
+    t5_prio: i64
+    t6_prio: i64
+    t7_prio: i64
+    t0_state: text
+    t1_state: text
+    t2_state: text
+    t3_state: text
+    t4_state: text
+    t5_state: text
+    t6_state: text
+    t7_state: text
+
+    static fn create(cpu: i64, cls: text) -> ClassQueue:
+        ClassQueue(
+            cpu_id: cpu,
+            class_name: cls,
+            count: 0,
+            t0_pid: -1, t1_pid: -1, t2_pid: -1, t3_pid: -1,
+            t4_pid: -1, t5_pid: -1, t6_pid: -1, t7_pid: -1,
+            t0_prio: 0, t1_prio: 0, t2_prio: 0, t3_prio: 0,
+            t4_prio: 0, t5_prio: 0, t6_prio: 0, t7_prio: 0,
+            t0_state: "empty", t1_state: "empty", t2_state: "empty", t3_state: "empty",
+            t4_state: "empty", t5_state: "empty", t6_state: "empty", t7_state: "empty"
+        )
+
+    fn _pid_at(idx: i64) -> i64:
+        if idx == 0: self.t0_pid
+        elif idx == 1: self.t1_pid
+        elif idx == 2: self.t2_pid
+        elif idx == 3: self.t3_pid
+        elif idx == 4: self.t4_pid
+        elif idx == 5: self.t5_pid
+        elif idx == 6: self.t6_pid
+        elif idx == 7: self.t7_pid
+        else: -1
+
+    fn _prio_at(idx: i64) -> i64:
+        if idx == 0: self.t0_prio
+        elif idx == 1: self.t1_prio
+        elif idx == 2: self.t2_prio
+        elif idx == 3: self.t3_prio
+        elif idx == 4: self.t4_prio
+        elif idx == 5: self.t5_prio
+        elif idx == 6: self.t6_prio
+        elif idx == 7: self.t7_prio
+        else: 0
+
+    me fn _set_slot(idx: i64, pid: i64, prio: i64, state: text):
+        if idx == 0:
+            self.t0_pid = pid
+            self.t0_prio = prio
+            self.t0_state = state
+        elif idx == 1:
+            self.t1_pid = pid
+            self.t1_prio = prio
+            self.t1_state = state
+        elif idx == 2:
+            self.t2_pid = pid
+            self.t2_prio = prio
+            self.t2_state = state
+        elif idx == 3:
+            self.t3_pid = pid
+            self.t3_prio = prio
+            self.t3_state = state
+        elif idx == 4:
+            self.t4_pid = pid
+            self.t4_prio = prio
+            self.t4_state = state
+        elif idx == 5:
+            self.t5_pid = pid
+            self.t5_prio = prio
+            self.t5_state = state
+        elif idx == 6:
+            self.t6_pid = pid
+            self.t6_prio = prio
+            self.t6_state = state
+        elif idx == 7:
+            self.t7_pid = pid
+            self.t7_prio = prio
+            self.t7_state = state
+
+    me fn enqueue(pid: i64, prio: i64) -> text:
+        if self.count >= 8:
+            return "queue full"
+        # Insert sorted descending by priority (highest prio first)
+        var insert_at = self.count
+        var i = 0
+        while i < self.count:
+            if prio > self._prio_at(i):
+                insert_at = i
+                i = self.count  # break
+            else:
+                i = i + 1
+        # Shift slots right from insert_at..count
+        var j = self.count
+        while j > insert_at:
+            self._set_slot(j, self._pid_at(j - 1), self._prio_at(j - 1), "ready")
+            j = j - 1
+        self._set_slot(insert_at, pid, prio, "ready")
+        self.count = self.count + 1
+        ""
+
+    me fn dequeue() -> i64:
+        if self.count == 0:
+            return -1
+        val pid = self._pid_at(0)
+        # Shift left
+        var i = 0
+        while i < self.count - 1:
+            self._set_slot(i, self._pid_at(i + 1), self._prio_at(i + 1), "ready")
+            i = i + 1
+        self._set_slot(self.count - 1, -1, 0, "empty")
+        self.count = self.count - 1
+        pid
+
+    me fn remove(pid: i64) -> bool:
+        var found = -1
+        var i = 0
+        while i < self.count:
+            if self._pid_at(i) == pid:
+                found = i
+                i = self.count  # break
+            else:
+                i = i + 1
+        if found == -1:
+            return false
+        var j = found
+        while j < self.count - 1:
+            self._set_slot(j, self._pid_at(j + 1), self._prio_at(j + 1), "ready")
+            j = j + 1
+        self._set_slot(self.count - 1, -1, 0, "empty")
+        self.count = self.count - 1
+        true
+
+    fn peek() -> i64:
+        if self.count == 0:
+            return -1
+        self._pid_at(0)
+
+    fn is_empty() -> bool:
+        self.count == 0
+
+    fn stats() -> text:
+        "ClassQueue(cpu=" + self.cpu_id.to_text() + " class=" + self.class_name + " count=" + self.count.to_text() + " head=" + self._pid_at(0).to_text() + ")"
+
+# ============================================================================
+# PerCpuScheduler
+# ============================================================================
+
+struct PerCpuScheduler:
+    """Per-CPU scheduler holding four class queues (realtime/normal/batch/idle)."""
+    cpu_id: i64
+    rt_queue: ClassQueue
+    normal_queue: ClassQueue
+    batch_queue: ClassQueue
+    idle_queue: ClassQueue
+    current_pid: i64
+    current_class: text
+    context_switches: i64
+
+    static fn create(cpu: i64) -> PerCpuScheduler:
+        PerCpuScheduler(
+            cpu_id: cpu,
+            rt_queue: ClassQueue.create(cpu, "realtime"),
+            normal_queue: ClassQueue.create(cpu, "normal"),
+            batch_queue: ClassQueue.create(cpu, "batch"),
+            idle_queue: ClassQueue.create(cpu, "idle"),
+            current_pid: -1,
+            current_class: "none",
+            context_switches: 0
+        )
+
+    me fn enqueue_task(pid: i64, prio: i64, cls: text) -> text:
+        if cls == "realtime":
+            return self.rt_queue.enqueue(pid, prio)
+        elif cls == "normal":
+            return self.normal_queue.enqueue(pid, prio)
+        elif cls == "batch":
+            return self.batch_queue.enqueue(pid, prio)
+        self.idle_queue.enqueue(pid, prio)
+
+    me fn schedule_next() -> i64:
+        var pid = -1
+        if self.rt_queue.is_empty() == false:
+            pid = self.rt_queue.dequeue()
+            self.current_class = "realtime"
+        elif self.normal_queue.is_empty() == false:
+            pid = self.normal_queue.dequeue()
+            self.current_class = "normal"
+        elif self.batch_queue.is_empty() == false:
+            pid = self.batch_queue.dequeue()
+            self.current_class = "batch"
+        elif self.idle_queue.is_empty() == false:
+            pid = self.idle_queue.dequeue()
+            self.current_class = "idle"
+        if pid != -1:
+            self.current_pid = pid
+            self.context_switches = self.context_switches + 1
+        pid
+
+    fn preempt_check(running_class: text, running_prio: i64) -> bool:
+        # Realtime always preempts non-realtime
+        if self.rt_queue.is_empty() == false and running_class != "realtime":
+            return true
+        # Same class: check if higher priority task is waiting
+        if running_class == "realtime" and self.rt_queue.is_empty() == false:
+            return self.rt_queue.peek() > running_prio  # peek returns pid; prio not available here — conservative false
+        if running_class == "normal" and self.normal_queue.is_empty() == false:
+            return false
+        if running_class == "batch" and self.normal_queue.is_empty() == false:
+            return true
+        if running_class == "idle" and (self.rt_queue.is_empty() == false or self.normal_queue.is_empty() == false or self.batch_queue.is_empty() == false):
+            return true
+        false
+
+    me fn remove_task(pid: i64) -> bool:
+        if self.rt_queue.remove(pid):
+            return true
+        if self.normal_queue.remove(pid):
+            return true
+        if self.batch_queue.remove(pid):
+            return true
+        self.idle_queue.remove(pid)
+
+    fn total_tasks() -> i64:
+        self.rt_queue.count + self.normal_queue.count + self.batch_queue.count + self.idle_queue.count
+
+    fn stats() -> text:
+        "PerCpuScheduler(cpu=" + self.cpu_id.to_text() + " total=" + self.total_tasks().to_text() + " switches=" + self.context_switches.to_text() + " current=" + self.current_pid.to_text() + ")"
+
+# ============================================================================
+# MultiCpuScheduler
+# ============================================================================
+
+struct MultiCpuScheduler:
+    """Multi-CPU scheduler managing up to 4 per-CPU schedulers with load rebalancing."""
+    cpu_count: i64
+    c0: PerCpuScheduler
+    c1: PerCpuScheduler
+    c2: PerCpuScheduler
+    c3: PerCpuScheduler
+    rebalance_count: i64
+
+    static fn create(cpus: i64) -> MultiCpuScheduler:
+        val count = if cpus < 1: 1 elif cpus > 4: 4 else: cpus
+        MultiCpuScheduler(
+            cpu_count: count,
+            c0: PerCpuScheduler.create(0),
+            c1: PerCpuScheduler.create(1),
+            c2: PerCpuScheduler.create(2),
+            c3: PerCpuScheduler.create(3),
+            rebalance_count: 0
+        )
+
+    fn _cpu_tasks(cpu: i64) -> i64:
+        if cpu == 0: self.c0.total_tasks()
+        elif cpu == 1: self.c1.total_tasks()
+        elif cpu == 2: self.c2.total_tasks()
+        elif cpu == 3: self.c3.total_tasks()
+        else: 0
+
+    fn _pick_cpu(affinity: i64) -> i64:
+        # Find least-loaded CPU allowed by affinity mask (0 = any)
+        var best_cpu = 0
+        var best_load = self._cpu_tasks(0)
+        var i = 1
+        while i < self.cpu_count:
+            val allowed = affinity == 0 or (affinity & (1 << i)) != 0
+            if allowed:
+                val load = self._cpu_tasks(i)
+                if load < best_load:
+                    best_load = load
+                    best_cpu = i
+            i = i + 1
+        best_cpu
+
+    me fn enqueue(pid: i64, prio: i64, cls: text, affinity: i64) -> text:
+        val cpu = self._pick_cpu(affinity)
+        if cpu == 0:
+            return self.c0.enqueue_task(pid, prio, cls)
+        elif cpu == 1:
+            return self.c1.enqueue_task(pid, prio, cls)
+        elif cpu == 2:
+            return self.c2.enqueue_task(pid, prio, cls)
+        self.c3.enqueue_task(pid, prio, cls)
+
+    me fn schedule_on(cpu: i64) -> i64:
+        if cpu == 0: self.c0.schedule_next()
+        elif cpu == 1: self.c1.schedule_next()
+        elif cpu == 2: self.c2.schedule_next()
+        elif cpu == 3: self.c3.schedule_next()
+        else: -1
+
+    me fn rebalance() -> i64:
+        # Move one task from the most-loaded CPU to the least-loaded
+        var max_cpu = 0
+        var max_load = self._cpu_tasks(0)
+        var min_cpu = 0
+        var min_load = self._cpu_tasks(0)
+        var i = 1
+        while i < self.cpu_count:
+            val load = self._cpu_tasks(i)
+            if load > max_load:
+                max_load = load
+                max_cpu = i
+            if load < min_load:
+                min_load = load
+                min_cpu = i
+            i = i + 1
+        if max_load - min_load < 2:
+            return 0
+        # Dequeue one task from max_cpu idle queue and re-enqueue on min_cpu
+        var pid = -1
+        if max_cpu == 0:
+            pid = self.c0.idle_queue.dequeue()
+        elif max_cpu == 1:
+            pid = self.c1.idle_queue.dequeue()
+        elif max_cpu == 2:
+            pid = self.c2.idle_queue.dequeue()
+        elif max_cpu == 3:
+            pid = self.c3.idle_queue.dequeue()
+        if pid == -1:
+            return 0
+        if min_cpu == 0:
+            self.c0.idle_queue.enqueue(pid, 0)
+        elif min_cpu == 1:
+            self.c1.idle_queue.enqueue(pid, 0)
+        elif min_cpu == 2:
+            self.c2.idle_queue.enqueue(pid, 0)
+        elif min_cpu == 3:
+            self.c3.idle_queue.enqueue(pid, 0)
+        self.rebalance_count = self.rebalance_count + 1
+        1
+
+    fn total_tasks() -> i64:
+        self._cpu_tasks(0) + self._cpu_tasks(1) + self._cpu_tasks(2) + self._cpu_tasks(3)
+
+    fn stats() -> text:
+        "MultiCpuScheduler(cpus=" + self.cpu_count.to_text() + " total=" + self.total_tasks().to_text() + " rebalances=" + self.rebalance_count.to_text() + ")"

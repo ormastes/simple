@@ -1,0 +1,1147 @@
+#!/bin/sh
+# Normalize and compare macOS Metal Simple/Chrome/Electron render logs, with
+# optional Tauri iOS WKWebView Metal render-log diagnostics.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+. "$ROOT_DIR/scripts/lib/render-log-common.shs"
+
+BUILD_DIR="${BUILD_DIR:-build/macos-metal-render-log-compare}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+METAL_GENERATED_2D_READBACK_ENV="${METAL_GENERATED_2D_READBACK_ENV:-build/metal_generated_2d_readback/evidence.env}"
+METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV="${METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV:-build/metal_engine2d_framebuffer_readback_evidence/evidence.env}"
+MACOS_METAL_BROWSER_ENV="${MACOS_METAL_BROWSER_ENV:-build/macos-metal-browser-backing/evidence.env}"
+MACOS_METAL_CAPTURE_ENV="${MACOS_METAL_CAPTURE_ENV:-build/macos-metal-gpu-capture/evidence.env}"
+TAURI_MOBILE_RENDERER_PARITY_ENV="${TAURI_MOBILE_RENDERER_PARITY_ENV:-build/tauri_mobile_renderer_parity_evidence/evidence.env}"
+
+OUT_ENV="$BUILD_DIR/evidence.env"
+SIMPLE_LOG="$BUILD_DIR/simple.srl.env"
+CHROME_LOG="$BUILD_DIR/chrome.srl.env"
+ELECTRON_LOG="$BUILD_DIR/electron.srl.env"
+TAURI_IOS_LOG="$BUILD_DIR/tauri-ios.srl.env"
+COMPARE_LOG="$BUILD_DIR/compare.srl.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$SIMPLE_LOG" "$CHROME_LOG" "$ELECTRON_LOG" "$TAURI_IOS_LOG" "$COMPARE_LOG" "$REPORT_PATH"
+
+compare_status="pass"
+simple_argb_reason=""
+chrome_argb_reason=""
+electron_argb_reason=""
+simple_argb_artifact_reason=""
+chrome_argb_artifact_reason=""
+electron_argb_artifact_reason=""
+argb_viewport_reason=""
+argb_checksum_reason=""
+metal_generated_checksum_reason="pass"
+reason_parts=""
+add_reason() {
+    reason="$1"
+    if [ -z "$reason_parts" ]; then reason_parts="$reason"; else reason_parts="$reason_parts;$reason"; fi
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -c '%h' "$path" 2>/dev/null || stat -f '%l' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) printf '%s\n' "" ;;
+            *) printf '%s\n' "$count" ;;
+        esac
+    else
+        printf '%s\n' ""
+    fi
+}
+
+file_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        printf '%s\n' "missing"
+    elif [ -L "$path" ]; then
+        printf '%s\n' "symlink"
+    elif [ ! -f "$path" ]; then
+        if [ -e "$path" ]; then
+            printf '%s\n' "not-regular"
+        else
+            printf '%s\n' "missing"
+        fi
+    elif [ ! -s "$path" ]; then
+        printf '%s\n' "empty"
+    else
+        link_count="$(file_link_count "$path")"
+        if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+            printf '%s\n' "hardlink"
+        else
+            printf '%s\n' "pass"
+        fi
+    fi
+}
+
+artifact_status_from_file_status() {
+    status="$1"
+    if [ "$status" = "pass" ]; then
+        printf '%s\n' "pass"
+    elif [ "$status" = "unavailable" ]; then
+        printf '%s\n' "unavailable"
+    else
+        printf '%s\n' "fail"
+    fi
+}
+
+browser_source_file_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        printf '%s\n' "missing"
+    elif [ -L "$path" ]; then
+        printf '%s\n' "symlink"
+    elif [ ! -f "$path" ]; then
+        if [ -e "$path" ]; then
+            printf '%s\n' "not-regular"
+        else
+            printf '%s\n' "missing"
+        fi
+    elif [ ! -s "$path" ]; then
+        printf '%s\n' "empty"
+    else
+        link_count="$(file_link_count "$path")"
+        if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+            printf '%s\n' "hardlink"
+        else
+            printf '%s\n' "pass"
+        fi
+    fi
+}
+
+capture_artifact_path() {
+    artifact="$1"
+    env_file="$2"
+    env_dir="$(dirname -- "$env_file")"
+    if [ -z "$artifact" ]; then
+        printf '%s\n' ""
+        return
+    fi
+    case "$artifact" in
+        /*)
+            printf '%s\n' "$artifact"
+            ;;
+        "$env_dir"/*)
+            printf '%s\n' "$artifact"
+            ;;
+        *)
+            printf '%s\n' "$env_dir/$artifact"
+            ;;
+    esac
+}
+
+file_magic_prefix() {
+    path="$1"
+    bytes="$2"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        dd if="$path" bs="$bytes" count=1 2>/dev/null || true
+    fi
+}
+
+argb_artifact_probe() {
+    prefix="$1"
+    source_name="$2"
+    source_env="$3"
+    if ! command -v node >/dev/null 2>&1; then
+        {
+            render_log_append_kv "reason" "${source_name}-argb-artifact-reader-missing"
+            render_log_append_kv "path" ""
+            render_log_append_kv "resolved_path" ""
+            render_log_append_kv "file_status" "unavailable"
+            render_log_append_kv "artifact_status" "unavailable"
+            render_log_append_kv "format" ""
+            render_log_append_kv "producer" ""
+            render_log_append_kv "width" ""
+            render_log_append_kv "height" ""
+            render_log_append_kv "pixel_count" "0"
+            render_log_append_kv "nonblank_pixel_count" "0"
+            render_log_append_kv "checksum" ""
+        }
+        return 0
+    fi
+    node - "$prefix" "$source_name" "$source_env" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const prefix = process.argv[2] || "";
+const sourceName = process.argv[3] || "";
+const sourceEnv = process.argv[4] || "";
+
+function emit(key, value) {
+  const clean = value === undefined || value === null ? "" : String(value).replace(/[\r\n]/g, " ");
+  console.log(`${key}=${clean}`);
+}
+
+function readEnv(file) {
+  const rows = new Map();
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      if (!line || !line.includes("=")) continue;
+      const index = line.indexOf("=");
+      rows.set(line.slice(0, index), line.slice(index + 1));
+    }
+  } catch (_err) {
+    // Missing source env is reported as a missing artifact below.
+  }
+  return rows;
+}
+
+function unsignedIntegerText(value) {
+  return typeof value === "string" && /^[0-9]+$/.test(value) ? value : "";
+}
+
+function safeInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function resolveArtifact(rawPath, envPath, fallbackName) {
+  const raw = rawPath || fallbackName;
+  if (!raw) return { raw: "", resolved: "" };
+  const envDir = envPath ? path.dirname(envPath) : ".";
+  const resolvedEnvDir = path.resolve(envDir);
+  const candidates = path.isAbsolute(raw) ? [raw] : [raw, path.join(envDir, raw)];
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    if (resolved === resolvedEnvDir || resolved.startsWith(`${resolvedEnvDir}${path.sep}`)) {
+      return { raw, resolved: candidate };
+    }
+  }
+  return { raw, resolved: path.join(envDir, raw) };
+}
+
+function finish(reason, artifact, fileStatus, payload = {}, pixels = []) {
+  const artifactStatus = fileStatus === "pass" ? "pass" : (fileStatus === "unavailable" ? "unavailable" : "fail");
+  emit("reason", reason);
+  emit("path", artifact.raw);
+  emit("resolved_path", artifact.resolved);
+  emit("file_status", fileStatus);
+  emit("artifact_status", artifactStatus);
+  emit("format", payload.format || "");
+  emit("producer", payload.producer || "");
+  emit("width", safeInteger(payload.width) ? payload.width : "");
+  emit("height", safeInteger(payload.height) ? payload.height : "");
+  emit("pixel_count", Array.isArray(pixels) ? pixels.length : 0);
+  let nonblank = 0;
+  let checksum = 0n;
+  if (Array.isArray(pixels)) {
+    for (const pixel of pixels) {
+      if (typeof pixel !== "number" || !Number.isInteger(pixel) || pixel < 0 || pixel > 0xffffffff) {
+        continue;
+      }
+      const value = BigInt(pixel >>> 0);
+      if (value !== 0n) nonblank += 1;
+      checksum += value;
+    }
+  }
+  emit("nonblank_pixel_count", nonblank);
+  emit("checksum", Array.isArray(pixels) ? checksum.toString() : "");
+}
+
+const rows = readEnv(sourceEnv);
+const keyBase = `${prefix}_${sourceName}_argb`;
+const artifact = resolveArtifact(rows.get(`${keyBase}_path`) || "", sourceEnv, `${sourceName}.argb.json`);
+let stat = null;
+try {
+  stat = fs.lstatSync(artifact.resolved);
+} catch (_err) {
+  finish(`${sourceName}-argb-artifact-missing`, artifact, "missing");
+  process.exit(0);
+}
+if (stat.isSymbolicLink()) {
+  finish(`${sourceName}-argb-artifact-symlink`, artifact, "symlink");
+  process.exit(0);
+}
+if (!stat.isFile()) {
+  finish(`${sourceName}-argb-artifact-missing`, artifact, "missing");
+  process.exit(0);
+}
+if (stat.nlink > 1) {
+  finish(`${sourceName}-argb-artifact-hardlink`, artifact, "hardlink");
+  process.exit(0);
+}
+if (stat.size <= 0) {
+  finish(`${sourceName}-argb-artifact-empty`, artifact, "empty");
+  process.exit(0);
+}
+
+let payload;
+try {
+  payload = JSON.parse(fs.readFileSync(artifact.resolved, "utf8"));
+} catch (_err) {
+  finish(`${sourceName}-argb-artifact-invalid-json`, artifact, "pass");
+  process.exit(0);
+}
+
+const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+const width = safeInteger(payload.width) ? payload.width : 0;
+const height = safeInteger(payload.height) ? payload.height : 0;
+const expectedPixelCount = width > 0 && height > 0 ? width * height : 0;
+const expectedWidth = unsignedIntegerText(rows.get(`${keyBase}_width`) || "");
+const expectedHeight = unsignedIntegerText(rows.get(`${keyBase}_height`) || "");
+const expectedNonblank = unsignedIntegerText(rows.get(`${keyBase}_nonblank_pixel_count`) || "");
+const expectedChecksum = unsignedIntegerText(rows.get(`${keyBase}_checksum`) || "");
+
+let reason = "pass";
+if (payload.format !== "argb-u32") {
+  reason = `${sourceName}-argb-artifact-format-mismatch`;
+} else if (width <= 0 || height <= 0) {
+  reason = `${sourceName}-argb-artifact-missing-viewport`;
+} else if (!Number.isSafeInteger(expectedPixelCount) || pixels.length !== expectedPixelCount) {
+  reason = `${sourceName}-argb-artifact-pixel-count-mismatch`;
+} else if (!pixels.every((pixel) => typeof pixel === "number" && Number.isInteger(pixel) && pixel >= 0 && pixel <= 0xffffffff)) {
+  reason = `${sourceName}-argb-artifact-pixel-type-mismatch`;
+}
+
+let nonblank = 0;
+let checksum = 0n;
+if (reason === "pass") {
+  for (const pixel of pixels) {
+    const value = BigInt(pixel >>> 0);
+    if (value !== 0n) nonblank += 1;
+    checksum += value;
+  }
+  if (nonblank <= 0) {
+    reason = `${sourceName}-argb-artifact-blank`;
+  } else if (expectedWidth && String(width) !== expectedWidth) {
+    reason = `${sourceName}-argb-artifact-width-mismatch`;
+  } else if (expectedHeight && String(height) !== expectedHeight) {
+    reason = `${sourceName}-argb-artifact-height-mismatch`;
+  } else if (expectedNonblank && String(nonblank) !== expectedNonblank) {
+    reason = `${sourceName}-argb-artifact-nonblank-mismatch`;
+  } else if (expectedChecksum && checksum.toString() !== expectedChecksum) {
+    reason = `${sourceName}-argb-artifact-checksum-mismatch`;
+  }
+}
+
+finish(reason, artifact, "pass", payload, pixels);
+NODE
+}
+
+generated_readback_env_file_status="$(file_status "$METAL_GENERATED_2D_READBACK_ENV")"
+framebuffer_readback_env_file_status="$(file_status "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+browser_env_file_status="$(file_status "$MACOS_METAL_BROWSER_ENV")"
+gpu_capture_env_file_status="$(file_status "$MACOS_METAL_CAPTURE_ENV")"
+tauri_mobile_env_file_status="$(file_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+generated_readback_env_file_reason="$generated_readback_env_file_status"
+framebuffer_readback_env_file_reason="$framebuffer_readback_env_file_status"
+browser_env_file_reason="$browser_env_file_status"
+gpu_capture_env_file_reason="$gpu_capture_env_file_status"
+tauri_mobile_env_file_reason="$tauri_mobile_env_file_status"
+generated_readback_env_artifact_status="$(artifact_status_from_file_status "$generated_readback_env_file_status")"
+framebuffer_readback_env_artifact_status="$(artifact_status_from_file_status "$framebuffer_readback_env_file_status")"
+browser_env_artifact_status="$(artifact_status_from_file_status "$browser_env_file_status")"
+gpu_capture_env_artifact_status="$(artifact_status_from_file_status "$gpu_capture_env_file_status")"
+tauri_mobile_env_artifact_status="$(artifact_status_from_file_status "$tauri_mobile_env_file_status")"
+
+if [ "$generated_readback_env_file_status" = "missing" ]; then
+    compare_status="unavailable"
+    add_reason "missing-metal-generated-2d-readback-env"
+fi
+if [ "$framebuffer_readback_env_file_status" = "missing" ]; then
+    compare_status="unavailable"
+    add_reason "missing-metal-engine2d-framebuffer-env"
+fi
+if [ "$browser_env_file_status" = "missing" ]; then
+    compare_status="unavailable"
+    add_reason "missing-macos-metal-browser-env"
+fi
+if [ "$generated_readback_env_file_status" != "pass" ] && [ "$generated_readback_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-generated-readback-env-file-$generated_readback_env_file_status"
+fi
+if [ "$framebuffer_readback_env_file_status" != "pass" ] && [ "$framebuffer_readback_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-framebuffer-readback-env-file-$framebuffer_readback_env_file_status"
+fi
+if [ "$browser_env_file_status" != "pass" ] && [ "$browser_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "macos-metal-browser-env-file-$browser_env_file_status"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] &&
+    [ "$gpu_capture_env_file_status" != "pass" ] && [ "$gpu_capture_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "macos-metal-gpu-capture-env-file-$gpu_capture_env_file_status"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS:-0}" = "1" ]; then
+    if [ "$tauri_mobile_env_file_status" = "missing" ]; then
+        compare_status="unavailable"
+        add_reason "missing-tauri-mobile-renderer-parity-env"
+    elif [ "$tauri_mobile_env_file_status" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "tauri-mobile-renderer-parity-env-file-$tauri_mobile_env_file_status"
+    fi
+fi
+
+metal_status="$(render_log_value_of metal_generated_2d_readback_status "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_module="$(render_log_value_of metal_generated_2d_readback_module_verified "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_submit="$(render_log_value_of metal_generated_2d_readback_submit_attempted "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_readback="$(render_log_value_of metal_generated_2d_readback_readback_available "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_actual="$(render_log_value_of metal_generated_2d_readback_actual_checksum "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_expected="$(render_log_value_of metal_generated_2d_readback_expected_checksum "$METAL_GENERATED_2D_READBACK_ENV")"
+framebuffer_status="$(render_log_value_of metal_engine2d_framebuffer_readback_status "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+framebuffer_readback="$(render_log_value_of metal_engine2d_framebuffer_gpu_readback_available "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+framebuffer_blur="$(render_log_value_of metal_engine2d_framebuffer_blur_or_tolerance_used "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+electron_backing="$(render_log_value_of macos_metal_electron_browser_backing_status "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing="$(render_log_value_of macos_metal_chrome_browser_backing_status "$MACOS_METAL_BROWSER_ENV")"
+browser_backing="$(render_log_value_of macos_metal_browser_backing_status "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_reason="$(render_log_value_of macos_metal_electron_browser_backing_reason "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_gpu_compositing="$(render_log_value_of macos_metal_electron_browser_backing_gpu_compositing "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_display_type="$(render_log_value_of macos_metal_electron_browser_backing_display_type "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_gl_implementation_parts="$(render_log_value_of macos_metal_electron_browser_backing_gl_implementation_parts "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_skia_backend_type="$(render_log_value_of macos_metal_electron_browser_backing_skia_backend_type "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_gl_renderer="$(render_log_value_of macos_metal_electron_browser_backing_gl_renderer "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_source="$(render_log_value_of macos_metal_electron_browser_backing_source "$MACOS_METAL_BROWSER_ENV")"
+electron_backing_source_file_status="$(browser_source_file_status "$electron_backing_source")"
+electron_backing_source_file_reason="$electron_backing_source_file_status"
+electron_backing_source_artifact_status="$(artifact_status_from_file_status "$electron_backing_source_file_status")"
+chrome_backing_reason="$(render_log_value_of macos_metal_chrome_browser_backing_reason "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_gpu_compositing="$(render_log_value_of macos_metal_chrome_browser_backing_gpu_compositing "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_display_type="$(render_log_value_of macos_metal_chrome_browser_backing_display_type "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_gl_implementation_parts="$(render_log_value_of macos_metal_chrome_browser_backing_gl_implementation_parts "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_skia_backend_type="$(render_log_value_of macos_metal_chrome_browser_backing_skia_backend_type "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_gl_renderer="$(render_log_value_of macos_metal_chrome_browser_backing_gl_renderer "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_source="$(render_log_value_of macos_metal_chrome_browser_backing_source "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing_source_file_status="$(browser_source_file_status "$chrome_backing_source")"
+chrome_backing_source_file_reason="$chrome_backing_source_file_status"
+chrome_backing_source_artifact_status="$(artifact_status_from_file_status "$chrome_backing_source_file_status")"
+pixel_status="$(render_log_value_of macos_metal_pixel_comparison_status "$MACOS_METAL_BROWSER_ENV")"
+pixel_mode="$(render_log_value_of macos_metal_pixel_comparison_mode "$MACOS_METAL_BROWSER_ENV")"
+ec_diff="$(render_log_value_of macos_metal_electron_chrome_pairwise_diff_status "$MACOS_METAL_BROWSER_ENV")"
+es_diff="$(render_log_value_of macos_metal_electron_simple_pairwise_diff_status "$MACOS_METAL_BROWSER_ENV")"
+cs_diff="$(render_log_value_of macos_metal_chrome_simple_pairwise_diff_status "$MACOS_METAL_BROWSER_ENV")"
+capture_status="$(render_log_value_of macos_metal_gpu_capture_status "$MACOS_METAL_CAPTURE_ENV")"
+capture_tool="$(render_log_value_of macos_metal_gpu_capture_tool "$MACOS_METAL_CAPTURE_ENV")"
+gpu_capture_tool="$capture_tool"
+capture_artifact="$(render_log_value_of macos_metal_gpu_capture_artifact "$MACOS_METAL_CAPTURE_ENV")"
+capture_artifact_claimed_magic="$(render_log_value_of macos_metal_gpu_capture_artifact_magic "$MACOS_METAL_CAPTURE_ENV")"
+capture_artifact_resolved="$(capture_artifact_path "$capture_artifact" "$MACOS_METAL_CAPTURE_ENV")"
+capture_artifact_file_status="$(file_status "$capture_artifact_resolved")"
+capture_artifact_file_reason="$capture_artifact_file_status"
+capture_artifact_artifact_status="$(artifact_status_from_file_status "$capture_artifact_file_status")"
+capture_artifact_magic="$(file_magic_prefix "$capture_artifact_resolved" 14)"
+capture_tool_reason="not-required"
+capture_artifact_claimed_magic_reason="not-required"
+tauri_ios_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_reason="$(render_log_value_of tauri_mobile_renderer_parity_ios_reason "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_backend="$(render_log_value_of tauri_mobile_renderer_parity_ios_tauri_backend "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_expected_gpu_backend="$(render_log_value_of tauri_mobile_renderer_parity_ios_expected_gpu_backend "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_validation_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_validation_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_validation_reason="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_validation_reason "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_marker_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_marker_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_metal_marker_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_metal_marker_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_tauri_context_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_tauri_context_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_metal_context_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_metal_context_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_fallback_marker_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_failure_marker_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_failure_marker_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_html_len="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_html_len "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_source_coherence_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_source_coherence_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_coherent_source_file_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_coherent_source_file_reason="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_render_log_coherent_source_artifact_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_render_log_coherent_source_artifact_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+tauri_ios_metal_log_status="$(render_log_value_of tauri_mobile_renderer_parity_ios_metal_log_status "$TAURI_MOBILE_RENDERER_PARITY_ENV")"
+if [ "$tauri_mobile_env_file_status" = "missing" ]; then
+    tauri_ios_status="missing"
+    tauri_ios_reason="missing-tauri-mobile-renderer-parity-evidence"
+    tauri_ios_backend="tauri2-wkwebview"
+    tauri_ios_expected_gpu_backend="metal"
+    tauri_ios_render_log_status="missing"
+    tauri_ios_render_log_validation_status="missing"
+    tauri_ios_render_log_validation_reason="missing-tauri-mobile-renderer-parity-evidence"
+    tauri_ios_render_log_marker_status="missing"
+    tauri_ios_render_log_metal_marker_status="missing"
+    tauri_ios_render_log_tauri_context_status="missing"
+    tauri_ios_render_log_metal_context_status="missing"
+    tauri_ios_render_log_fallback_marker_status="missing"
+    tauri_ios_render_log_failure_marker_status="missing"
+    tauri_ios_render_log_source_coherence_status="missing"
+    tauri_ios_render_log_coherent_source_file_status="missing"
+    tauri_ios_render_log_coherent_source_file_reason="missing-tauri-mobile-renderer-parity-evidence"
+    tauri_ios_render_log_coherent_source_artifact_status="missing"
+    tauri_ios_metal_log_status="missing"
+fi
+
+browser_metal_detail_reason() {
+    source_name="$1"
+    reason="$2"
+    gpu_compositing="$3"
+    display_type="$4"
+    gl_parts="$5"
+    skia_backend="$6"
+    gl_renderer="$7"
+    source_file_status="$8"
+    expected_reason="${source_name}-metal-backed"
+    metadata="$display_type $gl_parts $skia_backend $gl_renderer"
+
+    if [ "$reason" != "$expected_reason" ]; then
+        printf '%s\n' "${source_name}-metal-reason-missing"
+    elif [ "$source_file_status" = "symlink" ]; then
+        printf '%s\n' "${source_name}-metal-source-symlink"
+    elif [ "$source_file_status" = "hardlink" ]; then
+        printf '%s\n' "${source_name}-metal-source-hardlink"
+    elif [ "$source_file_status" = "empty" ]; then
+        printf '%s\n' "${source_name}-metal-source-empty"
+    elif [ "$source_file_status" = "not-regular" ]; then
+        printf '%s\n' "${source_name}-metal-source-not-regular"
+    elif [ "$source_file_status" != "pass" ]; then
+        printf '%s\n' "${source_name}-metal-source-missing"
+    elif ! printf '%s\n' "$gpu_compositing" | grep -Eiq 'enabled'; then
+        printf '%s\n' "${source_name}-metal-gpu-compositing-missing"
+    elif printf '%s\n' "$metadata" | grep -Eiq 'swiftshader|llvmpipe|opengl|vulkan|direct3d|d3d|software|disabled'; then
+        printf '%s\n' "${source_name}-metal-gpu-fallback-metadata"
+    elif ! printf '%s\n' "$metadata" | grep -Eiq 'metal|mtl|apple gpu|apple m[0-9]|agx'; then
+        printf '%s\n' "${source_name}-metal-gpu-metadata-missing"
+    else
+        printf '%s\n' "pass"
+    fi
+}
+
+browser_metal_source_reason() {
+    source_name="$1"
+    source_path="$2"
+    if [ -z "$source_path" ]; then
+        printf '%s\n' "${source_name}-metal-source-missing"
+        return
+    fi
+    if [ -L "$source_path" ]; then
+        printf '%s\n' "${source_name}-metal-source-symlink"
+        return
+    fi
+    if [ ! -f "$source_path" ]; then
+        if [ -e "$source_path" ]; then
+            printf '%s\n' "${source_name}-metal-source-not-regular"
+        else
+            printf '%s\n' "${source_name}-metal-source-missing"
+        fi
+        return
+    fi
+    if [ ! -s "$source_path" ]; then
+        printf '%s\n' "${source_name}-metal-source-empty"
+        return
+    fi
+    link_count="$(file_link_count "$source_path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        printf '%s\n' "${source_name}-metal-source-hardlink"
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        printf '%s\n' "${source_name}-metal-source-reader-missing"
+        return
+    fi
+    node - "$source_name" "$source_path" <<'NODE'
+const fs = require("fs");
+
+const sourceName = process.argv[2] || "";
+const sourcePath = process.argv[3] || "";
+const text = fs.readFileSync(sourcePath, "utf8");
+
+function finish(reason) {
+  process.stdout.write(`${reason}\n`);
+}
+
+function flattenJson(value, prefix, rows) {
+  if (value === null || value === undefined) return;
+  if (typeof value !== "object") {
+    rows.push([prefix, String(value)]);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => flattenJson(item, `${prefix}.${index}`, rows));
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    flattenJson(child, prefix ? `${prefix}.${key}` : key, rows);
+  }
+}
+
+function envRows(raw) {
+  const rows = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const index = line.indexOf("=");
+    if (index <= 0) continue;
+    rows.push([line.slice(0, index), line.slice(index + 1)]);
+  }
+  return rows;
+}
+
+let rows = envRows(text);
+if (rows.length === 0) {
+  try {
+    rows = [];
+    flattenJson(JSON.parse(text), "", rows);
+  } catch (_err) {
+    finish(`${sourceName}-metal-source-proof-invalid`);
+    process.exit(0);
+  }
+}
+
+const canonicalPrefix = `macos_metal_${sourceName}_browser_backing_`;
+function normalizedKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function canonicalKey(expected) {
+  return normalizedKey(`${canonicalPrefix}${expected}`);
+}
+
+function firstCanonicalValue(expectedNames) {
+  const expected = new Set(expectedNames.map(canonicalKey));
+  for (const [key, value] of rows) {
+    if (expected.has(normalizedKey(key))) {
+      return String(value || "");
+    }
+  }
+  return "";
+}
+
+const gpuCompositing = firstCanonicalValue(["gpu_compositing", "gpuCompositing"]);
+const displayType = firstCanonicalValue(["display_type", "displayType"]);
+const glParts = firstCanonicalValue(["gl_implementation_parts", "glImplementationParts"]);
+const skiaBackend = firstCanonicalValue(["skia_backend_type", "skiaBackendType"]);
+const glRenderer = firstCanonicalValue(["gl_renderer", "glRenderer"]);
+const metadata = `${displayType} ${glParts} ${skiaBackend} ${glRenderer}`;
+
+if (!/enabled/i.test(gpuCompositing)) {
+  finish(`${sourceName}-metal-source-gpu-compositing-missing`);
+} else if (/swiftshader|llvmpipe|opengl|vulkan|direct3d|d3d|software|disabled/i.test(metadata)) {
+  finish(`${sourceName}-metal-source-fallback-metadata`);
+} else if (!/metal|mtl|apple gpu|apple m[0-9]|agx/i.test(metadata)) {
+  finish(`${sourceName}-metal-source-metadata-missing`);
+} else {
+  finish("pass");
+}
+NODE
+}
+
+canonical_regular_file_path() {
+    path="$1"
+    if [ -z "$path" ] || [ -L "$path" ] || [ ! -f "$path" ]; then
+        printf '%s\n' ""
+        return
+    fi
+    dir="$(dirname -- "$path")"
+    base="$(basename -- "$path")"
+    real_dir="$(cd "$dir" 2>/dev/null && pwd -P || true)"
+    if [ -n "$real_dir" ]; then
+        printf '%s/%s\n' "$real_dir" "$base"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+duplicate_regular_file_pair_reason() {
+    label="$1"
+    left_path="$2"
+    right_path="$3"
+    left_real="$(canonical_regular_file_path "$left_path")"
+    right_real="$(canonical_regular_file_path "$right_path")"
+    if [ -n "$left_real" ] && [ -n "$right_real" ] && [ "$left_real" = "$right_real" ]; then
+        printf '%s\n' "$label-duplicate"
+    else
+        printf '%s\n' "pass"
+    fi
+}
+
+electron_backing_detail_reason="$(browser_metal_detail_reason electron "$electron_backing_reason" "$electron_backing_gpu_compositing" "$electron_backing_display_type" "$electron_backing_gl_implementation_parts" "$electron_backing_skia_backend_type" "$electron_backing_gl_renderer" "$electron_backing_source_file_status")"
+chrome_backing_detail_reason="$(browser_metal_detail_reason chrome "$chrome_backing_reason" "$chrome_backing_gpu_compositing" "$chrome_backing_display_type" "$chrome_backing_gl_implementation_parts" "$chrome_backing_skia_backend_type" "$chrome_backing_gl_renderer" "$chrome_backing_source_file_status")"
+electron_backing_source_reason="$(browser_metal_source_reason electron "$electron_backing_source")"
+chrome_backing_source_reason="$(browser_metal_source_reason chrome "$chrome_backing_source")"
+browser_backing_source_duplicate_reason="$(duplicate_regular_file_pair_reason browser-metal-source "$electron_backing_source" "$chrome_backing_source")"
+
+if [ "$metal_status" != "pass" ] || [ "$metal_module" != "true" ] || [ "$metal_submit" != "true" ] || [ "$metal_readback" != "true" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-generated-readback-${metal_status:-missing}"
+fi
+if ! render_log_is_unsigned_int "$metal_expected"; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    metal_generated_checksum_reason="metal-generated-expected-checksum-missing"
+    add_reason "$metal_generated_checksum_reason"
+elif ! render_log_is_unsigned_int "$metal_actual"; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    metal_generated_checksum_reason="metal-generated-actual-checksum-missing"
+    add_reason "$metal_generated_checksum_reason"
+elif [ "$metal_expected" != "$metal_actual" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    metal_generated_checksum_reason="metal-generated-checksum-mismatch"
+    add_reason "$metal_generated_checksum_reason"
+fi
+# Per-op collision-resistant gate: the per-op fields carry position-mixing
+# FNV-1a hashes over (pixel, index) computed by
+# scripts/check/metal_generated_2d_readback_harness.spl, so a swapped or
+# shifted pixel fails the gate (the old order-independent sum could not
+# detect that). Evidence files without per-op keys are still gated by the
+# aggregate comparison above.
+if [ "$metal_generated_checksum_reason" = "pass" ]; then
+    for metal_generated_op in fill copy alpha scroll; do
+        metal_generated_op_actual="$(render_log_value_of "metal_generated_2d_readback_${metal_generated_op}_checksum" "$METAL_GENERATED_2D_READBACK_ENV")"
+        metal_generated_op_expected="$(render_log_value_of "metal_generated_2d_readback_${metal_generated_op}_expected" "$METAL_GENERATED_2D_READBACK_ENV")"
+        if [ -z "$metal_generated_op_actual" ] && [ -z "$metal_generated_op_expected" ]; then
+            continue
+        fi
+        if ! render_log_is_unsigned_int "$metal_generated_op_expected"; then
+            metal_generated_checksum_reason="metal-generated-${metal_generated_op}-hash-expected-missing"
+        elif ! render_log_is_unsigned_int "$metal_generated_op_actual"; then
+            metal_generated_checksum_reason="metal-generated-${metal_generated_op}-hash-missing"
+        elif [ "$metal_generated_op_actual" != "$metal_generated_op_expected" ]; then
+            metal_generated_checksum_reason="metal-generated-${metal_generated_op}-hash-mismatch"
+        fi
+        if [ "$metal_generated_checksum_reason" != "pass" ]; then
+            [ "$compare_status" = "unavailable" ] || compare_status="fail"
+            add_reason "$metal_generated_checksum_reason"
+            break
+        fi
+    done
+fi
+if [ "$framebuffer_status" != "pass" ] || [ "$framebuffer_readback" != "true" ] || [ "$framebuffer_blur" != "false" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-framebuffer-readback-${framebuffer_status:-missing}"
+fi
+if [ "$electron_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "electron-metal-backing-${electron_backing:-missing}"; fi
+if [ "$chrome_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "chrome-metal-backing-${chrome_backing:-missing}"; fi
+if [ "$browser_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "browser-metal-backing-${browser_backing:-missing}"; fi
+if [ "$electron_backing" = "pass" ] && [ "$electron_backing_detail_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$electron_backing_detail_reason"; fi
+if [ "$chrome_backing" = "pass" ] && [ "$chrome_backing_detail_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$chrome_backing_detail_reason"; fi
+if [ "$electron_backing" = "pass" ] && [ "$electron_backing_source_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$electron_backing_source_reason"; fi
+if [ "$chrome_backing" = "pass" ] && [ "$chrome_backing_source_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$chrome_backing_source_reason"; fi
+if [ "$electron_backing" = "pass" ] && [ "$chrome_backing" = "pass" ] && [ "$browser_backing_source_duplicate_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$browser_backing_source_duplicate_reason"; fi
+if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pixel-comparison-${pixel_status:-missing}"; fi
+if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pairwise-diff-incomplete-or-fail"; fi
+simple_argb_reason="$(render_log_argb_source_reason macos_metal simple "$MACOS_METAL_BROWSER_ENV")"
+chrome_argb_reason="$(render_log_argb_source_reason macos_metal chrome "$MACOS_METAL_BROWSER_ENV")"
+electron_argb_reason="$(render_log_argb_source_reason macos_metal electron "$MACOS_METAL_BROWSER_ENV")"
+SIMPLE_ARGB_ARTIFACT_ENV="$BUILD_DIR/simple-argb-artifact.env"
+CHROME_ARGB_ARTIFACT_ENV="$BUILD_DIR/chrome-argb-artifact.env"
+ELECTRON_ARGB_ARTIFACT_ENV="$BUILD_DIR/electron-argb-artifact.env"
+argb_artifact_probe macos_metal simple "$MACOS_METAL_BROWSER_ENV" >"$SIMPLE_ARGB_ARTIFACT_ENV"
+argb_artifact_probe macos_metal chrome "$MACOS_METAL_BROWSER_ENV" >"$CHROME_ARGB_ARTIFACT_ENV"
+argb_artifact_probe macos_metal electron "$MACOS_METAL_BROWSER_ENV" >"$ELECTRON_ARGB_ARTIFACT_ENV"
+simple_argb_artifact_reason="$(render_log_value_of reason "$SIMPLE_ARGB_ARTIFACT_ENV")"
+chrome_argb_artifact_reason="$(render_log_value_of reason "$CHROME_ARGB_ARTIFACT_ENV")"
+electron_argb_artifact_reason="$(render_log_value_of reason "$ELECTRON_ARGB_ARTIFACT_ENV")"
+simple_argb_artifact_file_status="$(render_log_value_of file_status "$SIMPLE_ARGB_ARTIFACT_ENV")"
+chrome_argb_artifact_file_status="$(render_log_value_of file_status "$CHROME_ARGB_ARTIFACT_ENV")"
+electron_argb_artifact_file_status="$(render_log_value_of file_status "$ELECTRON_ARGB_ARTIFACT_ENV")"
+simple_argb_artifact_file_reason="$simple_argb_artifact_file_status"
+chrome_argb_artifact_file_reason="$chrome_argb_artifact_file_status"
+electron_argb_artifact_file_reason="$electron_argb_artifact_file_status"
+simple_argb_artifact_status="$(render_log_value_of artifact_status "$SIMPLE_ARGB_ARTIFACT_ENV")"
+chrome_argb_artifact_status="$(render_log_value_of artifact_status "$CHROME_ARGB_ARTIFACT_ENV")"
+electron_argb_artifact_status="$(render_log_value_of artifact_status "$ELECTRON_ARGB_ARTIFACT_ENV")"
+simple_argb_artifact_resolved_path="$(render_log_value_of resolved_path "$SIMPLE_ARGB_ARTIFACT_ENV")"
+chrome_argb_artifact_resolved_path="$(render_log_value_of resolved_path "$CHROME_ARGB_ARTIFACT_ENV")"
+electron_argb_artifact_resolved_path="$(render_log_value_of resolved_path "$ELECTRON_ARGB_ARTIFACT_ENV")"
+simple_chrome_argb_artifact_duplicate_reason="$(duplicate_regular_file_pair_reason simple-chrome-argb-artifact "$simple_argb_artifact_resolved_path" "$chrome_argb_artifact_resolved_path")"
+simple_electron_argb_artifact_duplicate_reason="$(duplicate_regular_file_pair_reason simple-electron-argb-artifact "$simple_argb_artifact_resolved_path" "$electron_argb_artifact_resolved_path")"
+chrome_electron_argb_artifact_duplicate_reason="$(duplicate_regular_file_pair_reason chrome-electron-argb-artifact "$chrome_argb_artifact_resolved_path" "$electron_argb_artifact_resolved_path")"
+argb_artifact_duplicate_reason="pass"
+for duplicate_reason in "$simple_chrome_argb_artifact_duplicate_reason" "$simple_electron_argb_artifact_duplicate_reason" "$chrome_electron_argb_artifact_duplicate_reason"; do
+    if [ "$duplicate_reason" != "pass" ]; then
+        if [ "$argb_artifact_duplicate_reason" = "pass" ]; then
+            argb_artifact_duplicate_reason="$duplicate_reason"
+        else
+            argb_artifact_duplicate_reason="$argb_artifact_duplicate_reason,$duplicate_reason"
+        fi
+    fi
+done
+for argb_reason in "$simple_argb_reason" "$chrome_argb_reason" "$electron_argb_reason"; do
+    if [ "$argb_reason" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$argb_reason"
+    fi
+done
+for argb_artifact_reason in "$simple_argb_artifact_reason" "$chrome_argb_artifact_reason" "$electron_argb_artifact_reason"; do
+    if [ "$argb_artifact_reason" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$argb_artifact_reason"
+    fi
+done
+if [ "$simple_argb_artifact_reason" = "pass" ] && [ "$chrome_argb_artifact_reason" = "pass" ] &&
+    [ "$electron_argb_artifact_reason" = "pass" ] && [ "$argb_artifact_duplicate_reason" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "$argb_artifact_duplicate_reason"
+fi
+argb_viewport_reason="$(render_log_argb_viewport_match_reason macos_metal "$MACOS_METAL_BROWSER_ENV")"
+if [ "$argb_viewport_reason" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "$argb_viewport_reason"
+fi
+argb_checksum_reason="$(render_log_argb_checksum_reason macos_metal "$MACOS_METAL_BROWSER_ENV")"
+if [ "$argb_checksum_reason" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "$argb_checksum_reason"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] && [ "$capture_status" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "macos-metal-gpu-capture-${capture_status:-missing}"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ]; then
+    if [ "$capture_tool" = "xcode-gpu-frame-capture" ]; then
+        capture_tool_reason="pass"
+    elif [ -z "$capture_tool" ]; then
+        capture_tool_reason="macos-metal-gpu-capture-tool-missing"
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$capture_tool_reason"
+    else
+        capture_tool_reason="macos-metal-gpu-capture-tool-$capture_tool"
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$capture_tool_reason"
+    fi
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] && [ "$capture_status" = "pass" ]; then
+    if [ -z "$capture_artifact" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "macos-metal-gpu-capture-artifact-missing"
+    fi
+    if [ "$capture_artifact_file_status" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "macos-metal-gpu-capture-artifact-file-${capture_artifact_file_status:-missing}"
+    fi
+    if [ "$capture_artifact_magic" != "XCODE-GPUTRACE" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "macos-metal-gpu-capture-magic-${capture_artifact_magic:-missing}"
+    fi
+    if [ "$capture_artifact_claimed_magic" = "XCODE-GPUTRACE" ]; then
+        capture_artifact_claimed_magic_reason="pass"
+    else
+        capture_artifact_claimed_magic_reason="macos-metal-gpu-capture-claimed-magic-${capture_artifact_claimed_magic:-missing}"
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$capture_artifact_claimed_magic_reason"
+    fi
+fi
+[ -n "$reason_parts" ] || reason_parts="pass"
+
+metal_generated_gate_status="pass"
+if [ "$metal_status" != "pass" ] || [ "$metal_module" != "true" ] ||
+    [ "$metal_submit" != "true" ] || [ "$metal_readback" != "true" ]; then
+    metal_generated_gate_status="fail"
+fi
+if [ "$metal_generated_checksum_reason" != "pass" ]; then
+    metal_generated_gate_status="fail"
+fi
+if [ "$generated_readback_env_file_status" != "pass" ] || [ "$generated_readback_env_artifact_status" != "pass" ]; then
+    metal_generated_gate_status="fail"
+fi
+
+metal_framebuffer_gate_status="pass"
+if [ "$framebuffer_status" != "pass" ] || [ "$framebuffer_readback" != "true" ] ||
+    [ "$framebuffer_blur" != "false" ]; then
+    metal_framebuffer_gate_status="fail"
+fi
+if [ "$framebuffer_readback_env_file_status" != "pass" ] || [ "$framebuffer_readback_env_artifact_status" != "pass" ]; then
+    metal_framebuffer_gate_status="fail"
+fi
+
+browser_backing_gate_status="pass"
+if [ "$electron_backing" != "pass" ] || [ "$chrome_backing" != "pass" ] ||
+    [ "$browser_backing" != "pass" ] ||
+    [ "$electron_backing_detail_reason" != "pass" ] ||
+    [ "$chrome_backing_detail_reason" != "pass" ] ||
+    [ "$electron_backing_source_reason" != "pass" ] ||
+    [ "$chrome_backing_source_reason" != "pass" ] ||
+    [ "$electron_backing_source_artifact_status" != "pass" ] ||
+    [ "$chrome_backing_source_artifact_status" != "pass" ] ||
+    [ "$browser_backing_source_duplicate_reason" != "pass" ]; then
+    browser_backing_gate_status="fail"
+fi
+if [ "$browser_env_file_status" != "pass" ] || [ "$browser_env_artifact_status" != "pass" ]; then
+    browser_backing_gate_status="fail"
+fi
+
+pixel_gate_status="pass"
+if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ] ||
+    [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then
+    pixel_gate_status="fail"
+fi
+
+argb_source_gate_status="pass"
+if [ "$simple_argb_reason" != "pass" ] || [ "$chrome_argb_reason" != "pass" ] ||
+    [ "$electron_argb_reason" != "pass" ] || [ "$argb_viewport_reason" != "pass" ] ||
+    [ "$argb_checksum_reason" != "pass" ] ||
+    [ "$simple_argb_artifact_reason" != "pass" ] ||
+    [ "$chrome_argb_artifact_reason" != "pass" ] ||
+    [ "$electron_argb_artifact_reason" != "pass" ] ||
+    [ "$simple_argb_artifact_status" != "pass" ] ||
+    [ "$chrome_argb_artifact_status" != "pass" ] ||
+    [ "$electron_argb_artifact_status" != "pass" ] ||
+    [ "$argb_artifact_duplicate_reason" != "pass" ]; then
+    argb_source_gate_status="fail"
+fi
+
+gpu_capture_gate_status="not-required"
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ]; then
+    gpu_capture_gate_status="pass"
+    if [ "$capture_status" != "pass" ] || [ -z "$capture_artifact" ] ||
+        [ "$gpu_capture_env_file_status" != "pass" ] ||
+        [ "$capture_artifact_file_status" != "pass" ] ||
+        [ "$gpu_capture_env_artifact_status" != "pass" ] ||
+        [ "$capture_artifact_artifact_status" != "pass" ] ||
+        [ "$capture_artifact_magic" != "XCODE-GPUTRACE" ] ||
+        [ "$capture_artifact_claimed_magic_reason" != "pass" ] ||
+        [ "$capture_tool_reason" != "pass" ]; then
+        gpu_capture_gate_status="fail"
+    fi
+fi
+
+tauri_ios_gate_status="not-required"
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS:-0}" = "1" ]; then
+    tauri_ios_gate_status="pass"
+    if [ "$tauri_mobile_env_file_status" != "pass" ] ||
+        [ "$tauri_mobile_env_artifact_status" != "pass" ] ||
+        [ "$tauri_ios_status" != "pass" ] ||
+        [ "$tauri_ios_backend" != "tauri2-wkwebview" ] ||
+        [ "$tauri_ios_expected_gpu_backend" != "metal" ] ||
+        [ "$tauri_ios_render_log_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_validation_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_marker_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_metal_marker_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_tauri_context_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_metal_context_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_fallback_marker_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_failure_marker_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_source_coherence_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_coherent_source_file_status" != "pass" ] ||
+        [ "$tauri_ios_render_log_coherent_source_artifact_status" != "pass" ] ||
+        [ "$tauri_ios_metal_log_status" != "pass" ]; then
+        tauri_ios_gate_status="fail"
+    fi
+fi
+
+blocked_gates=""
+blocked_gate_count=0
+add_blocked_gate() {
+    gate="$1"
+    if [ "$compare_status" = "pass" ]; then
+        return
+    fi
+    if [ -z "$blocked_gates" ]; then
+        blocked_gates="$gate"
+    else
+        blocked_gates="$blocked_gates,$gate"
+    fi
+    blocked_gate_count=$((blocked_gate_count + 1))
+}
+
+if [ "$generated_readback_env_file_status" != "pass" ]; then
+    add_blocked_gate "metal-generated-readback-env"
+fi
+if [ "$framebuffer_readback_env_file_status" != "pass" ]; then
+    add_blocked_gate "metal-framebuffer-readback-env"
+fi
+if [ "$browser_env_file_status" != "pass" ]; then
+    add_blocked_gate "macos-metal-browser-env"
+fi
+[ "$metal_generated_gate_status" = "pass" ] || add_blocked_gate "metal-generated-readback"
+[ "$metal_framebuffer_gate_status" = "pass" ] || add_blocked_gate "metal-framebuffer-readback"
+[ "$browser_backing_gate_status" = "pass" ] || add_blocked_gate "browser-metal-backing"
+[ "$pixel_gate_status" = "pass" ] || add_blocked_gate "pairwise-argb-diff"
+[ "$argb_source_gate_status" = "pass" ] || add_blocked_gate "argb-source-evidence"
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ]; then
+    [ "$gpu_capture_gate_status" = "pass" ] || add_blocked_gate "xcode-gpu-capture"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS:-0}" = "1" ]; then
+    [ "$tauri_ios_gate_status" = "pass" ] || add_blocked_gate "tauri-ios-wkwebview-metal-render-log"
+fi
+
+render_log_write_native_log "$SIMPLE_LOG" "macos" "metal" "simple" "${gpu_capture_tool:-xcode-gpu-frame-capture}" "$METAL_GENERATED_2D_READBACK_ENV" "$metal_status" "metal" "$(render_log_value_of macos_metal_simple_argb_width "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_simple_argb_height "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_simple_argb_nonblank_pixel_count "$MACOS_METAL_BROWSER_ENV")" "$capture_artifact_resolved" "$capture_artifact_magic" "$metal_actual" "generated-readback=$metal_status;framebuffer-readback=$framebuffer_status"
+render_log_write_native_log "$CHROME_LOG" "macos" "metal" "chrome" "browser-gpu-metadata" "$MACOS_METAL_BROWSER_ENV" "$chrome_backing" "metal" "$(render_log_value_of macos_metal_chrome_argb_width "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_chrome_argb_height "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_chrome_argb_nonblank_pixel_count "$MACOS_METAL_BROWSER_ENV")" "" "" "$(render_log_value_of macos_metal_chrome_argb_checksum "$MACOS_METAL_BROWSER_ENV")" "browser-backing=$chrome_backing"
+render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-gpu-metadata" "$MACOS_METAL_BROWSER_ENV" "$electron_backing" "metal" "$(render_log_value_of macos_metal_electron_argb_width "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_electron_argb_height "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_electron_argb_nonblank_pixel_count "$MACOS_METAL_BROWSER_ENV")" "" "" "$(render_log_value_of macos_metal_electron_argb_checksum "$MACOS_METAL_BROWSER_ENV")" "browser-backing=$electron_backing"
+render_log_write_native_log "$TAURI_IOS_LOG" "ios" "metal" "tauri-ios-wkwebview" "tauri-mobile-renderer-parity" "$TAURI_MOBILE_RENDERER_PARITY_ENV" "$tauri_ios_render_log_validation_status" "$tauri_ios_expected_gpu_backend" "" "" "" "" "" "" "backend=$tauri_ios_backend;render-log=$tauri_ios_render_log_status;html_len=$tauri_ios_render_log_html_len;metal-log=$tauri_ios_metal_log_status"
+
+{
+    render_log_append_kv "simple_render_log_format" "simple-render-log-v1"
+    render_log_append_kv "simple_render_log_platform" "macos"
+    render_log_append_kv "simple_render_log_native_api" "metal"
+    render_log_append_kv "simple_render_log_source" "compare"
+    render_log_append_kv "simple_render_log_capture_tool" "aggregate"
+    render_log_append_kv "simple_render_log_scene" "gui-web-2d-native"
+    render_log_append_kv "simple_render_log_status" "$compare_status"
+    render_log_append_kv "simple_render_log_pairwise_reference" "$MACOS_METAL_BROWSER_ENV"
+    render_log_append_kv "simple_render_log_pairwise_electron_chrome_status" "$ec_diff"
+    render_log_append_kv "simple_render_log_pairwise_electron_simple_status" "$es_diff"
+    render_log_append_kv "simple_render_log_pairwise_chrome_simple_status" "$cs_diff"
+    render_log_append_kv "simple_render_log_tauri_ios_reference" "$TAURI_MOBILE_RENDERER_PARITY_ENV"
+    render_log_append_kv "simple_render_log_tauri_ios_gate_status" "$tauri_ios_gate_status"
+    render_log_append_kv "simple_render_log_native_info" "$reason_parts"
+} >"$COMPARE_LOG"
+
+{
+    render_log_append_kv "macos_metal_render_log_compare_status" "$compare_status"
+    render_log_append_kv "macos_metal_render_log_compare_reason" "$reason_parts"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env" "$METAL_GENERATED_2D_READBACK_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env_file_status" "$generated_readback_env_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env_file_reason" "$generated_readback_env_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env_artifact_status" "$generated_readback_env_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env" "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env_file_status" "$framebuffer_readback_env_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env_file_reason" "$framebuffer_readback_env_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env_artifact_status" "$framebuffer_readback_env_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env" "$MACOS_METAL_BROWSER_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env_file_status" "$browser_env_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env_file_reason" "$browser_env_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env_artifact_status" "$browser_env_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env" "$MACOS_METAL_CAPTURE_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env_file_status" "$gpu_capture_env_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env_file_reason" "$gpu_capture_env_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env_artifact_status" "$gpu_capture_env_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_env" "$TAURI_MOBILE_RENDERER_PARITY_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_env_file_status" "$tauri_mobile_env_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_env_file_reason" "$tauri_mobile_env_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_env_artifact_status" "$tauri_mobile_env_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_status" "$tauri_ios_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_reason" "$tauri_ios_reason"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_backend" "$tauri_ios_backend"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_expected_gpu_backend" "$tauri_ios_expected_gpu_backend"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_status" "$tauri_ios_render_log_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_validation_status" "$tauri_ios_render_log_validation_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_validation_reason" "$tauri_ios_render_log_validation_reason"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_marker_status" "$tauri_ios_render_log_marker_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_metal_marker_status" "$tauri_ios_render_log_metal_marker_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_tauri_context_status" "$tauri_ios_render_log_tauri_context_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_metal_context_status" "$tauri_ios_render_log_metal_context_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_fallback_marker_status" "$tauri_ios_render_log_fallback_marker_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_failure_marker_status" "$tauri_ios_render_log_failure_marker_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_html_len" "$tauri_ios_render_log_html_len"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_source_coherence_status" "$tauri_ios_render_log_source_coherence_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_coherent_source_file_status" "$tauri_ios_render_log_coherent_source_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_coherent_source_file_reason" "$tauri_ios_render_log_coherent_source_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_render_log_coherent_source_artifact_status" "$tauri_ios_render_log_coherent_source_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_metal_log_status" "$tauri_ios_metal_log_status"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_gate_status" "$tauri_ios_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_blocked_gate_count" "$blocked_gate_count"
+    render_log_append_kv "macos_metal_render_log_compare_blocked_gates" "$blocked_gates"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_gate_status" "$metal_generated_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_generated_checksum_reason" "$metal_generated_checksum_reason"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_gate_status" "$metal_framebuffer_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_browser_backing_gate_status" "$browser_backing_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_status" "$electron_backing"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_reason" "$electron_backing_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_detail_reason" "$electron_backing_detail_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source_reason" "$electron_backing_source_reason"
+    render_log_append_kv "macos_metal_render_log_compare_browser_backing_source_duplicate_reason" "$browser_backing_source_duplicate_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gpu_compositing" "$electron_backing_gpu_compositing"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_display_type" "$electron_backing_display_type"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gl_implementation_parts" "$electron_backing_gl_implementation_parts"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_skia_backend_type" "$electron_backing_skia_backend_type"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gl_renderer" "$electron_backing_gl_renderer"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source" "$electron_backing_source"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source_file_status" "$electron_backing_source_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source_file_reason" "$electron_backing_source_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source_artifact_status" "$electron_backing_source_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_status" "$chrome_backing"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_reason" "$chrome_backing_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_detail_reason" "$chrome_backing_detail_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_source_reason" "$chrome_backing_source_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_gpu_compositing" "$chrome_backing_gpu_compositing"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_display_type" "$chrome_backing_display_type"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_gl_implementation_parts" "$chrome_backing_gl_implementation_parts"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_skia_backend_type" "$chrome_backing_skia_backend_type"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_gl_renderer" "$chrome_backing_gl_renderer"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_source" "$chrome_backing_source"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_source_file_status" "$chrome_backing_source_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_source_file_reason" "$chrome_backing_source_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status" "$chrome_backing_source_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_browser_backing_status" "$browser_backing"
+    render_log_append_kv "macos_metal_render_log_compare_pixel_comparison_status" "$pixel_status"
+    render_log_append_kv "macos_metal_render_log_compare_pixel_comparison_mode" "$pixel_mode"
+    render_log_append_kv "macos_metal_render_log_compare_electron_chrome_pairwise_diff_status" "$ec_diff"
+    render_log_append_kv "macos_metal_render_log_compare_electron_simple_pairwise_diff_status" "$es_diff"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_simple_pairwise_diff_status" "$cs_diff"
+    render_log_append_kv "macos_metal_render_log_compare_pairwise_gate_status" "$pixel_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_argb_source_gate_status" "$argb_source_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_reason" "$simple_argb_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_reason" "$chrome_argb_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_reason" "$electron_argb_reason"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_reason" "$simple_argb_artifact_reason"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_path" "$(render_log_value_of path "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_resolved_path" "$simple_argb_artifact_resolved_path"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_file_status" "$simple_argb_artifact_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_file_reason" "$simple_argb_artifact_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_status" "$simple_argb_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_format" "$(render_log_value_of format "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_width" "$(render_log_value_of width "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_height" "$(render_log_value_of height "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_pixel_count" "$(render_log_value_of pixel_count "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_nonblank_pixel_count" "$(render_log_value_of nonblank_pixel_count "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_checksum" "$(render_log_value_of checksum "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_reason" "$chrome_argb_artifact_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_path" "$(render_log_value_of path "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_resolved_path" "$chrome_argb_artifact_resolved_path"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_file_status" "$chrome_argb_artifact_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_file_reason" "$chrome_argb_artifact_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_status" "$chrome_argb_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_format" "$(render_log_value_of format "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_width" "$(render_log_value_of width "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_height" "$(render_log_value_of height "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_pixel_count" "$(render_log_value_of pixel_count "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_nonblank_pixel_count" "$(render_log_value_of nonblank_pixel_count "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_checksum" "$(render_log_value_of checksum "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_reason" "$electron_argb_artifact_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_path" "$(render_log_value_of path "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_resolved_path" "$electron_argb_artifact_resolved_path"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_file_status" "$electron_argb_artifact_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_file_reason" "$electron_argb_artifact_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_status" "$electron_argb_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_format" "$(render_log_value_of format "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_width" "$(render_log_value_of width "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_height" "$(render_log_value_of height "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_pixel_count" "$(render_log_value_of pixel_count "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_nonblank_pixel_count" "$(render_log_value_of nonblank_pixel_count "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_checksum" "$(render_log_value_of checksum "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_argb_viewport_reason" "$argb_viewport_reason"
+    render_log_append_kv "macos_metal_render_log_compare_argb_checksum_reason" "$argb_checksum_reason"
+    render_log_append_kv "macos_metal_render_log_compare_argb_artifact_duplicate_reason" "$argb_artifact_duplicate_reason"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_gate_status" "$gpu_capture_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_required_api" "metal"
+    render_log_append_kv "macos_metal_render_log_compare_simple_log" "$SIMPLE_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_log" "$CHROME_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_electron_log" "$ELECTRON_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_tauri_ios_log" "$TAURI_IOS_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_compare_log" "$COMPARE_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_pairwise_status" "$pixel_gate_status"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_status" "${capture_status:-unavailable}"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_tool" "$gpu_capture_tool"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_tool_reason" "$capture_tool_reason"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact" "$capture_artifact"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_resolved" "$capture_artifact_resolved"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_file_status" "$capture_artifact_file_status"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_file_reason" "$capture_artifact_file_reason"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_status" "$capture_artifact_artifact_status"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_magic" "$capture_artifact_magic"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic" "$capture_artifact_claimed_magic"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason" "$capture_artifact_claimed_magic_reason"
+    render_log_append_kv "macos_metal_render_log_compare_require_gpu_capture" "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}"
+    render_log_append_kv "macos_metal_render_log_compare_require_tauri_ios" "${MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS:-0}"
+} >"$OUT_ENV"
+
+{
+    echo "# macOS Metal Render Log Compare"
+    echo
+    echo "- status: $compare_status"
+    echo "- reason: $reason_parts"
+    echo "- simple log: $SIMPLE_LOG"
+    echo "- chrome log: $CHROME_LOG"
+    echo "- electron log: $ELECTRON_LOG"
+    echo "- gate summary: generated=$metal_generated_gate_status framebuffer=$metal_framebuffer_gate_status browser=$browser_backing_gate_status pairwise=$pixel_gate_status argb=$argb_source_gate_status gpu_capture=$gpu_capture_gate_status"
+    echo "- blocked gates: $blocked_gate_count / $blocked_gates"
+    echo "- Electron Metal backing: $electron_backing detail=$electron_backing_detail_reason source=$electron_backing_source_reason artifact=$electron_backing_source_file_status/$electron_backing_source_artifact_status gpu=$electron_backing_gpu_compositing display=$electron_backing_display_type skia=$electron_backing_skia_backend_type"
+    echo "- Chrome Metal backing: $chrome_backing detail=$chrome_backing_detail_reason source=$chrome_backing_source_reason artifact=$chrome_backing_source_file_status/$chrome_backing_source_artifact_status gpu=$chrome_backing_gpu_compositing display=$chrome_backing_display_type skia=$chrome_backing_skia_backend_type"
+    echo "- Tauri iOS WKWebView Metal render-log: $tauri_ios_render_log_validation_status ($tauri_ios_render_log_validation_reason; backend=$tauri_ios_backend expected_gpu=$tauri_ios_expected_gpu_backend gate=$tauri_ios_gate_status)"
+    echo "- browser source duplicate guard: $browser_backing_source_duplicate_reason"
+    echo "- pairwise ARGB: mode=$pixel_mode electron_chrome=$ec_diff electron_simple=$es_diff chrome_simple=$cs_diff viewport=$argb_viewport_reason checksum=$argb_checksum_reason"
+    echo "- Simple ARGB artifact: $simple_argb_artifact_file_status/$simple_argb_artifact_status reason=$simple_argb_artifact_reason format=$(render_log_value_of format "$SIMPLE_ARGB_ARTIFACT_ENV") size=$(render_log_value_of width "$SIMPLE_ARGB_ARTIFACT_ENV")x$(render_log_value_of height "$SIMPLE_ARGB_ARTIFACT_ENV") nonblank=$(render_log_value_of nonblank_pixel_count "$SIMPLE_ARGB_ARTIFACT_ENV") checksum=$(render_log_value_of checksum "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    echo "- Chrome ARGB artifact: $chrome_argb_artifact_file_status/$chrome_argb_artifact_status reason=$chrome_argb_artifact_reason format=$(render_log_value_of format "$CHROME_ARGB_ARTIFACT_ENV") size=$(render_log_value_of width "$CHROME_ARGB_ARTIFACT_ENV")x$(render_log_value_of height "$CHROME_ARGB_ARTIFACT_ENV") nonblank=$(render_log_value_of nonblank_pixel_count "$CHROME_ARGB_ARTIFACT_ENV") checksum=$(render_log_value_of checksum "$CHROME_ARGB_ARTIFACT_ENV")"
+    echo "- Electron ARGB artifact: $electron_argb_artifact_file_status/$electron_argb_artifact_status reason=$electron_argb_artifact_reason format=$(render_log_value_of format "$ELECTRON_ARGB_ARTIFACT_ENV") size=$(render_log_value_of width "$ELECTRON_ARGB_ARTIFACT_ENV")x$(render_log_value_of height "$ELECTRON_ARGB_ARTIFACT_ENV") nonblank=$(render_log_value_of nonblank_pixel_count "$ELECTRON_ARGB_ARTIFACT_ENV") checksum=$(render_log_value_of checksum "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    echo "- Xcode GPU capture: status=${capture_status:-unavailable} tool=$gpu_capture_tool tool_reason=$capture_tool_reason artifact=$capture_artifact_file_status/$capture_artifact_artifact_status magic=$capture_artifact_magic claimed=$capture_artifact_claimed_magic claimed_reason=$capture_artifact_claimed_magic_reason"
+    echo
+    echo "## Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+[ "$compare_status" = "pass" ]

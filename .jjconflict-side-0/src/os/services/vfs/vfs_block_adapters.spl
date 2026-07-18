@@ -1,0 +1,702 @@
+# VFS Block Adapters — pure-Simple NVMe adapter
+#
+# MDSOC: feature dimension, vfs layer
+#
+# Provides the production pure-Simple NVMe BlockDevice implementation.
+# The development C bridge lives in c_nvme_block_adapter.spl.
+
+use os.services.block_device.{BlockDevice}
+use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeFilesystemLease, NvmeFilesystemConsumer,
+    nvme_filesystem_lease_reason, nvme_filesystem_lease_absolute_lba,
+    nvme_filesystem_lease_sector_count, nvme_filesystem_consumer_name
+}
+use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
+use std.io.dma.{SharedDmaBuffer}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.extension.{DirectIoExt}
+use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, DIRECT_IO_READ, DIRECT_IO_WRITE, DIRECT_IO_TIMEOUT_CODE, direct_io_validate_batch}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read8, mmio_write8}
+extern fn unsafe_addr_of(ref: any) -> u64
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+
+val SYS_ALLOC_DMA: u64 = 84
+
+# DMA page size for sector I/O buffers
+val DMA_PAGE_SIZE: u64 = 4096
+
+# ============================================================================
+# Legacy NVMe-to-BlockDevice Adapter (Pure Simple — kept for non-baremetal)
+# ============================================================================
+#
+# The NVMe driver uses DMA-based sector I/O (physical addresses), while the
+# FAT32 driver expects the BlockDevice trait with byte-buffer read/write.
+# This adapter bridges the two by allocating a DMA bounce buffer and copying
+# data between user-space byte arrays and DMA memory.
+
+class NvmeBlockAdapter:
+    """Wraps NvmeDriver to implement the filesystem BlockDevice contract."""
+    nvme: NvmeDriver
+    consumer_name: text
+    bounce_virt: u64    # Virtual address of DMA bounce buffer
+    bounce_phys: u64    # Physical address of DMA bounce buffer
+    lease_base_lba: u64
+    lease_lba_count: u64
+    lease_nsid: u32
+    lease_sector_size: u32
+    lease_queue_id: u16
+    lease_queue_depth: u16
+    ready: bool
+    lease_enabled: bool
+
+impl NvmeBlockAdapter:
+    static fn new(nvme: NvmeDriver) -> NvmeBlockAdapter:
+        NvmeBlockAdapter(
+            nvme: nvme,
+            bounce_virt: 0,
+            bounce_phys: 0,
+            ready: false,
+            lease_enabled: false,
+            lease_nsid: nvme.get_namespace_id(),
+            lease_queue_id: 1u16,
+            lease_queue_depth: nvme.io_queue.depth,
+            lease_base_lba: 0u64,
+            lease_lba_count: nvme.sector_count,
+            lease_sector_size: nvme.get_sector_size(),
+            consumer_name: "whole-device"
+        )
+
+    static fn for_filesystem_lease(nvme: NvmeDriver, lease: NvmeFilesystemLease, consumer: NvmeFilesystemConsumer) -> Result<NvmeBlockAdapter, text>:
+        val reason = nvme_filesystem_lease_reason(lease, consumer)
+        if reason != "ready":
+            return Err(reason)
+        val identified_sector_count = nvme.namespace_sector_count(lease.namespace_identity.nsid)
+        if identified_sector_count.is_err():
+            return Err("NvmeBlockAdapter: namespace not identified by driver")
+        val identified_sector_size = nvme.namespace_sector_size(lease.namespace_identity.nsid)
+        if identified_sector_size.is_err():
+            return Err("NvmeBlockAdapter: namespace not identified by driver")
+        if identified_sector_count.unwrap() != lease.namespace_identity.lba_count:
+            return Err("NvmeBlockAdapter: lease namespace sector count mismatch")
+        if identified_sector_size.unwrap() != lease.namespace_identity.lba_size:
+            return Err("NvmeBlockAdapter: lease namespace sector size mismatch")
+        Ok(NvmeBlockAdapter(
+            nvme: nvme,
+            bounce_virt: 0,
+            bounce_phys: 0,
+            ready: false,
+            lease_enabled: true,
+            lease_nsid: lease.namespace_identity.nsid,
+            lease_queue_id: lease.queue.queue_id,
+            lease_queue_depth: lease.queue.max_depth,
+            lease_base_lba: lease.base_lba,
+            lease_lba_count: nvme_filesystem_lease_sector_count(lease),
+            lease_sector_size: lease.namespace_identity.lba_size,
+            consumer_name: nvme_filesystem_consumer_name(consumer)
+        ))
+
+    static fn for_identified_namespace_unchecked(
+        nvme: NvmeDriver,
+        nsid: u32,
+        queue_id: u16,
+        base_lba: u64,
+        lba_count: u64,
+        sector_size: u32,
+        consumer_name: text
+    ) -> NvmeBlockAdapter:
+        NvmeBlockAdapter(
+            nvme: nvme,
+            bounce_virt: 0,
+            bounce_phys: 0,
+            ready: false,
+            lease_enabled: true,
+            lease_nsid: nsid,
+            lease_queue_id: queue_id,
+            lease_queue_depth: nvme.io_queue.depth,
+            lease_base_lba: base_lba,
+            lease_lba_count: lba_count,
+            lease_sector_size: sector_size,
+            consumer_name: consumer_name
+        )
+
+    fn translate_lba(lba: u64) -> Result<u64, text>:
+        if not self.lease_enabled:
+            if lba >= self.nvme.sector_count:
+                return Err("NvmeBlockAdapter: lba beyond device")
+            return Ok(lba)
+        if lba >= self.lease_lba_count:
+            return Err("NvmeBlockAdapter: lba beyond filesystem lease")
+        Ok(self.lease_base_lba + lba)
+
+    fn sector_count() -> u64:
+        if self.lease_enabled:
+            return self.lease_lba_count
+        self.nvme.sector_count
+
+    fn filesystem_consumer() -> text:
+        self.consumer_name
+
+    static fn translate_lease_lba_for_test(lease: NvmeFilesystemLease, relative_lba: u64) -> Result<u64, text>:
+        nvme_filesystem_lease_absolute_lba(lease, relative_lba)
+
+    static fn lease_sector_count_for_test(lease: NvmeFilesystemLease) -> u64:
+        nvme_filesystem_lease_sector_count(lease)
+
+    fn sector_io_absolute_lba_for_test(lba: u64) -> Result<u64, text>:
+        """Expose the same lease translation used by BlockDevice sector I/O."""
+        self.translate_lba(lba)
+
+    fn direct_4k_relative_lba(offset: i64) -> Result<u64, FsError>:
+        """Map a file offset to a lease-relative LBA and prove the full 4KiB fits."""
+        if offset < 0:
+            return Err(FsError.InvalidArg)
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Err(FsError.InvalidArg)
+        val sector_size = self.lease_sector_size.to_u64()
+        val offset_u = offset as u64
+        if (offset_u % sector_size) != 0u64:
+            return Err(FsError.InvalidArg)
+        val relative_lba = offset_u / sector_size
+        val sectors_per_4k = 4096u64 / sector_size
+        if relative_lba + sectors_per_4k > self.lease_lba_count:
+            return Err(FsError.InvalidArg)
+        Ok(relative_lba)
+
+    fn direct_4k_relative_lba_for_test(offset: i64) -> Result<u64, FsError>:
+        """Expose DirectIo lease-window validation for unit tests."""
+        self.direct_4k_relative_lba(offset)
+
+    me init_bounce_buffer() -> Result<bool, text>:
+        """Allocate a DMA bounce buffer for sector transfers.
+
+        Routes through NvmeDriver.alloc_dma so the phys==0 fallback
+        (rt_dma_alloc/rt_dma_phys_of) applies. The raw SYS_ALLOC_DMA syscall
+        can return a zero physical address under the freestanding boot; the
+        old code accepted it silently, so every sector DMA landed at physical
+        address 0 and read back zeros -- read_boot_sector then never saw the
+        0x55AA signature and mount() returned Err. alloc_dma recovers a real
+        physical address in that case (proven by the direct scalar boot path,
+        which uses it and reads the boot sector correctly on the same image).
+        """
+        val dma = self.nvme.alloc_dma(DMA_PAGE_SIZE)
+        if dma.is_err():
+            return Result.Err(dma.unwrap_err())
+        val addrs = dma.unwrap()
+        if addrs.phys == 0u64 or addrs.virt == 0u64:
+            return Result.Err("NvmeBlockAdapter: DMA bounce buffer returned zero address")
+        self.bounce_phys = addrs.phys
+        self.bounce_virt = addrs.virt
+        self.ready = true
+        log_raw_println("[nvme-adapter] Bounce buffer allocated: virt=0x{self.bounce_virt}, phys=0x{self.bounce_phys}")
+        Result.Ok(true)
+
+    me read_4k_shared_dma(relative_lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Read 4KiB from the lease using caller-owned DMA memory."""
+        if buf.byte_len < 4096u64:
+            return Result.Err("NvmeBlockAdapter: shared DMA buffer smaller than 4K")
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Result.Err("NvmeBlockAdapter: lease sector size not 4K divisible")
+        val absolute_lba = self.translate_lba(relative_lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
+        self.nvme.read_4k_shared_dma_burst_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba.unwrap(), buf)
+
+    me write_4k_shared_dma(relative_lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Write 4KiB to the lease using caller-owned DMA memory."""
+        if buf.byte_len < 4096u64:
+            return Result.Err("NvmeBlockAdapter: shared DMA buffer smaller than 4K")
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Result.Err("NvmeBlockAdapter: lease sector size not 4K divisible")
+        val absolute_lba = self.translate_lba(relative_lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
+        self.nvme.write_4k_shared_dma_burst_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba.unwrap(), buf)
+
+    me read_4k_shared_dma_batch(relative_lbas: [u64], buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Read multiple 4KiB lease-relative LBAs into contiguous DMA slots."""
+        if relative_lbas.len() == 0:
+            return Result.Err("NvmeBlockAdapter: empty shared DMA batch")
+        if buf.byte_len < relative_lbas.len().to_u64() * 4096u64:
+            return Result.Err("NvmeBlockAdapter: shared DMA batch buffer too small")
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Result.Err("NvmeBlockAdapter: lease sector size not 4K divisible")
+        var lbas: [u64] = []
+        for relative_lba in relative_lbas:
+            val absolute_lba = self.translate_lba(relative_lba)
+            if absolute_lba.is_err():
+                return Result.Err(absolute_lba.unwrap_err())
+            lbas.push(absolute_lba.unwrap())
+        self.nvme.read_4k_shared_dma_batch_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, lbas, self.lease_sector_size, self.lease_base_lba + self.lease_lba_count, buf)
+
+    me write_4k_shared_dma_batch(relative_lbas: [u64], buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Write multiple 4KiB lease-relative LBAs from contiguous DMA slots."""
+        if relative_lbas.len() == 0:
+            return Result.Err("NvmeBlockAdapter: empty shared DMA batch")
+        if buf.byte_len < relative_lbas.len().to_u64() * 4096u64:
+            return Result.Err("NvmeBlockAdapter: shared DMA batch buffer too small")
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Result.Err("NvmeBlockAdapter: lease sector size not 4K divisible")
+        var lbas: [u64] = []
+        for relative_lba in relative_lbas:
+            val absolute_lba = self.translate_lba(relative_lba)
+            if absolute_lba.is_err():
+                return Result.Err(absolute_lba.unwrap_err())
+            lbas.push(absolute_lba.unwrap())
+        self.nvme.write_4k_shared_dma_batch_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, lbas, self.lease_sector_size, self.lease_base_lba + self.lease_lba_count, buf)
+
+    me flush_lease_queue() -> Result<bool, text>:
+        """Flush the same namespace queue used by this filesystem lease."""
+        if not self.ready:
+            return Result.Err("NvmeBlockAdapter: not initialized")
+        self.nvme.flush_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id)
+
+    fn direct_4k_extension() -> DirectIoExt:
+        """Expose the adapter's zero-copy 4KiB random I/O capability."""
+        DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k",
+            bounce_allowed: false
+        )
+
+    fn direct_4k_batch_extension() -> DirectIoExt:
+        """Expose the adapter's bounded zero-copy 4KiB random batch capability."""
+        var max_ops = 1u64
+        if self.lease_queue_depth > 1u16:
+            max_ops = (self.lease_queue_depth.to_u32() - 1u32).to_u64()
+        DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: max_ops * 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k-batch",
+            bounce_allowed: false
+        )
+
+    me submit_direct_4k_shared_dma(req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
+        """Route a common DirectIoRequest to the lease queue without per-I/O allocation."""
+        if not self.ready:
+            return Err(FsError.Busy)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        val ext = self.direct_4k_extension()
+        val valid = ext.validate_shared_buffer(req.file_offset, req.buffer)
+        if val Err(e) = valid:
+            return Err(e)
+        val relative_lba = self.direct_4k_relative_lba(req.file_offset)
+        if relative_lba.is_err():
+            return Err(relative_lba.unwrap_err())
+        val io_result = if req.op == DIRECT_IO_READ:
+            self.read_4k_shared_dma(relative_lba.unwrap(), req.buffer)
+        else:
+            self.write_4k_shared_dma(relative_lba.unwrap(), req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: 4096u64,
+            backend_tag: ext.backend_tag,
+            status: "submitted",
+            durable: false,
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
+
+    me submit_direct_4k_shared_dma_write_through(req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
+        """Submit one direct 4KiB write and flush the same lease queue."""
+        if req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        val result = self.submit_direct_4k_shared_dma(req)
+        if result.is_err():
+            return result
+        val flush = self.flush_lease_queue()
+        if flush.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        val submitted = result.unwrap()
+        Ok(DirectIoResult(
+            submitted: submitted.submitted,
+            bytes: submitted.bytes,
+            backend_tag: submitted.backend_tag,
+            status: "submitted-flushed",
+            durable: true,
+            buffered_copy_bytes: submitted.buffered_copy_bytes,
+            direct_dma_copy_bytes: submitted.direct_dma_copy_bytes,
+            cleanup_required: submitted.cleanup_required
+        ))
+
+    me submit_direct_4k_shared_dma_batch(req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
+        """Route a common batched DirectIoRequest to the lease queue without per-I/O allocation."""
+        if not self.ready:
+            return Err(FsError.Busy)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        if req.file_offsets.len() == 0:
+            return Err(FsError.InvalidArg)
+        val ext = self.direct_4k_batch_extension()
+        val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
+        if expected_bytes.is_err():
+            return Err(expected_bytes.unwrap_err())
+        var relative_lbas: [u64] = []
+        for offset in req.file_offsets:
+            val relative_lba = self.direct_4k_relative_lba(offset)
+            if relative_lba.is_err():
+                return Err(relative_lba.unwrap_err())
+            relative_lbas.push(relative_lba.unwrap())
+        val io_result = if req.op == DIRECT_IO_READ:
+            self.read_4k_shared_dma_batch(relative_lbas, req.buffer)
+        else:
+            self.write_4k_shared_dma_batch(relative_lbas, req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: expected_bytes.unwrap(),
+            backend_tag: ext.backend_tag,
+            status: "submitted",
+            durable: false,
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
+
+    me submit_direct_4k_shared_dma_batch_write_through(req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
+        """Submit a direct 4KiB write batch and flush the same lease queue."""
+        if req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        val result = self.submit_direct_4k_shared_dma_batch(req)
+        if result.is_err():
+            return result
+        val flush = self.flush_lease_queue()
+        if flush.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        val submitted = result.unwrap()
+        Ok(DirectIoResult(
+            submitted: submitted.submitted,
+            bytes: submitted.bytes,
+            backend_tag: submitted.backend_tag,
+            status: "submitted-flushed",
+            durable: true,
+            buffered_copy_bytes: submitted.buffered_copy_bytes,
+            direct_dma_copy_bytes: submitted.direct_dma_copy_bytes,
+            cleanup_required: submitted.cleanup_required
+        ))
+
+    static fn submit_direct_4k_shared_dma_batch_for_lease(
+        mut nvme: NvmeDriver,
+        lease: NvmeFilesystemLease,
+        consumer: NvmeFilesystemConsumer,
+        req: DirectIoBatchRequest
+    ) -> Result<DirectIoResult, FsError>:
+        """Route a DirectIo batch through an explicit filesystem lease."""
+        val reason = nvme_filesystem_lease_reason(lease, consumer)
+        if reason != "ready":
+            return Err(FsError.InvalidArg)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        if req.file_offsets.len() == 0:
+            return Err(FsError.InvalidArg)
+        if lease.namespace_identity.lba_size == 0u32:
+            return Err(FsError.InvalidArg)
+        val ext = DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: req.file_offsets.len().to_u64() * 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k-batch",
+            bounce_allowed: false
+        )
+        val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
+        if expected_bytes.is_err():
+            return Err(expected_bytes.unwrap_err())
+        var lbas: [u64] = []
+        for offset in req.file_offsets:
+            val relative_lba = (offset as u64) / lease.namespace_identity.lba_size.to_u64()
+            val absolute_lba = nvme_filesystem_lease_absolute_lba(lease, relative_lba)
+            if absolute_lba.is_err():
+                return Err(FsError.InvalidArg)
+            lbas.push(absolute_lba.unwrap())
+        val io_result = if req.op == DIRECT_IO_READ:
+            nvme.read_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id, lbas, lease.namespace_identity.lba_size, lease.base_lba + lease.lba_count, req.buffer)
+        else:
+            nvme.write_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id, lbas, lease.namespace_identity.lba_size, lease.base_lba + lease.lba_count, req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: expected_bytes.unwrap(),
+            backend_tag: ext.backend_tag,
+            status: "submitted",
+            durable: false,
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
+
+    static fn submit_direct_4k_shared_dma_batch_write_through_for_lease(
+        mut nvme: NvmeDriver,
+        lease: NvmeFilesystemLease,
+        consumer: NvmeFilesystemConsumer,
+        req: DirectIoBatchRequest
+    ) -> Result<DirectIoResult, FsError>:
+        """Route a DirectIo write batch through an explicit filesystem lease and flush it."""
+        if req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        val reason = nvme_filesystem_lease_reason(lease, consumer)
+        if reason != "ready":
+            return Err(FsError.InvalidArg)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        if req.file_offsets.len() == 0:
+            return Err(FsError.InvalidArg)
+        if lease.namespace_identity.lba_size == 0u32:
+            return Err(FsError.InvalidArg)
+        val ext = DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: req.file_offsets.len().to_u64() * 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k-batch",
+            bounce_allowed: false
+        )
+        val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
+        if expected_bytes.is_err():
+            return Err(expected_bytes.unwrap_err())
+        var lbas: [u64] = []
+        for offset in req.file_offsets:
+            val relative_lba = (offset as u64) / lease.namespace_identity.lba_size.to_u64()
+            val absolute_lba = nvme_filesystem_lease_absolute_lba(lease, relative_lba)
+            if absolute_lba.is_err():
+                return Err(FsError.InvalidArg)
+            lbas.push(absolute_lba.unwrap())
+        val io_result = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id, lbas, lease.namespace_identity.lba_size, lease.base_lba + lease.lba_count, req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        val flush = nvme.flush_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id)
+        if flush.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: expected_bytes.unwrap(),
+            backend_tag: ext.backend_tag,
+            status: "submitted-flushed",
+            durable: true,
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
+
+    static fn submit_direct_4k_shared_dma_batch_for_lease_window(
+        mut nvme: NvmeDriver,
+        nsid: u32,
+        queue_id: u16,
+        consumer: NvmeFilesystemConsumer,
+        base_lba: u64,
+        lba_count: u64,
+        sector_size: u32,
+        req: DirectIoBatchRequest
+    ) -> Result<DirectIoResult, FsError>:
+        """Freestanding-safe lease-window variant used by the q35 proof lane."""
+        if nvme_filesystem_consumer_name(consumer) == "":
+            return Err(FsError.InvalidArg)
+        if queue_id == 0u16:
+            return Err(FsError.InvalidArg)
+        if lba_count == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        if req.file_offsets.len() == 0:
+            return Err(FsError.InvalidArg)
+        if sector_size == 0u32:
+            return Err(FsError.InvalidArg)
+        val ext = DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: req.file_offsets.len().to_u64() * 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k-batch",
+            bounce_allowed: false
+        )
+        val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
+        if expected_bytes.is_err():
+            return Err(expected_bytes.unwrap_err())
+        var lbas: [u64] = []
+        for offset in req.file_offsets:
+            val relative_lba = (offset as u64) / sector_size.to_u64()
+            if relative_lba >= lba_count:
+                return Err(FsError.InvalidArg)
+            lbas.push(base_lba + relative_lba)
+        val io_result = if req.op == DIRECT_IO_READ:
+            nvme.read_4k_shared_dma_batch_in_namespace_on_queue(nsid, queue_id, lbas, sector_size, base_lba + lba_count, req.buffer)
+        else:
+            nvme.write_4k_shared_dma_batch_in_namespace_on_queue(nsid, queue_id, lbas, sector_size, base_lba + lba_count, req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: expected_bytes.unwrap(),
+            backend_tag: ext.backend_tag,
+            status: "submitted",
+            durable: false,
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
+
+    static fn submit_direct_4k_shared_dma_batch_write_through_for_lease_window(
+        mut nvme: NvmeDriver,
+        nsid: u32,
+        queue_id: u16,
+        consumer: NvmeFilesystemConsumer,
+        base_lba: u64,
+        lba_count: u64,
+        sector_size: u32,
+        req: DirectIoBatchRequest
+    ) -> Result<DirectIoResult, FsError>:
+        """Freestanding-safe lease-window write-through variant used by proof lanes."""
+        if req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        if nvme_filesystem_consumer_name(consumer) == "":
+            return Err(FsError.InvalidArg)
+        if queue_id == 0u16:
+            return Err(FsError.InvalidArg)
+        if lba_count == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        if req.file_offsets.len() == 0:
+            return Err(FsError.InvalidArg)
+        if sector_size == 0u32:
+            return Err(FsError.InvalidArg)
+        val ext = DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: req.file_offsets.len().to_u64() * 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k-batch",
+            bounce_allowed: false
+        )
+        val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
+        if expected_bytes.is_err():
+            return Err(expected_bytes.unwrap_err())
+        var lbas: [u64] = []
+        for offset in req.file_offsets:
+            val relative_lba = (offset as u64) / sector_size.to_u64()
+            if relative_lba >= lba_count:
+                return Err(FsError.InvalidArg)
+            lbas.push(base_lba + relative_lba)
+        val io_result = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(nsid, queue_id, lbas, sector_size, base_lba + lba_count, req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        val flush = nvme.flush_in_namespace_on_queue(nsid, queue_id)
+        if flush.is_err():
+            return Err(FsError.IoError(code: 6u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: expected_bytes.unwrap(),
+            backend_tag: ext.backend_tag,
+            status: "submitted-flushed",
+            durable: true,
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
+
+    me read_sector_direct(lba: u64) -> Result<[u8], text>:
+        """Read one sector without BlockDevice trait dispatch."""
+        if not self.ready:
+            return Result.Err("NvmeBlockAdapter: not initialized")
+        if self.lease_lba_count > 0u64 and lba >= self.lease_lba_count:
+            return Result.Err("NvmeBlockAdapter: lba beyond filesystem lease")
+        val sector_size = self.nvme.namespace_sector_size(self.lease_nsid)
+        if sector_size.is_err():
+            return Result.Err(sector_size.unwrap_err())
+        val absolute_lba = self.lease_base_lba + lba
+        var offset: u64 = 0
+        val ss = sector_size.unwrap().to_u64()
+        while offset < ss:
+            mmio_write32(self.bounce_virt + offset, 0)
+            offset = offset + 4
+        val result = self.nvme.read_sectors_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba, 1, self.bounce_phys)
+        if result.is_err():
+            return Result.Err(result.unwrap_err())
+        var buffer: [u8] = []
+        var i: u64 = 0
+        while i < ss:
+            buffer.push(mmio_read8(self.bounce_virt + i))
+            i = i + 1
+        Result.Ok(buffer)
+
+    me read_system_sector_direct(lba: u64) -> Result<[u8], text>:
+        """Read one boot-system namespace sector without stored lease metadata."""
+        if not self.ready:
+            return Result.Err("NvmeBlockAdapter: not initialized")
+        val nsid = 1u32
+        val sector_size = self.nvme.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err(sector_size.unwrap_err())
+        val ss = sector_size.unwrap().to_u64()
+        var offset: u64 = 0
+        while offset < ss:
+            mmio_write32(self.bounce_virt + offset, 0)
+            offset = offset + 4
+        val result = self.nvme.read_sectors_in_namespace_on_queue(nsid, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, 1, self.bounce_phys)
+        if result.is_err():
+            return Result.Err(result.unwrap_err())
+        var buffer: [u8] = []
+        var i: u64 = 0
+        while i < ss:
+            buffer.push(mmio_read8(self.bounce_virt + i))
+            i = i + 1
+        Result.Ok(buffer)
+
+impl BlockDevice for NvmeBlockAdapter:
+    me read_sector(lba: u64) -> Result<[u8], text>:
+        """Read one sector from NVMe into byte buffer via DMA bounce."""
+        self.read_sector_direct(lba)
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        """Write one sector to NVMe from byte buffer via DMA bounce."""
+        if not self.ready:
+            return Result.Err("NvmeBlockAdapter: not initialized")
+        val absolute_lba = self.translate_lba(lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
+        # Clear the whole bounce sector, then copy caller bytes into it.
+        val ss = self.lease_sector_size.to_u64()
+        var i: u64 = 0
+        while i < ss:
+            mmio_write8(self.bounce_virt + i, 0u8)
+            i = i + 1
+        i = 0
+        while i < ss and i.to_i32() < data.len():
+            mmio_write8(self.bounce_virt + i, data[i.to_i32()])
+            i = i + 1
+
+        # Issue NVMe write (1 sector)
+        val result = self.nvme.write_sectors_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba.unwrap(), 1, self.bounce_phys)
+        if result.is_err():
+            return Result.Err(result.unwrap_err())
+        Result.Ok(true)
+
+    me fn sector_size() -> u32:
+        if self.lease_enabled:
+            return self.lease_sector_size
+        self.nvme.get_sector_size()

@@ -1,0 +1,56 @@
+# MIR Call Ownership
+#
+# MIR represents a source-level named call and a compiler-synthesized
+# runtime-helper call with the SAME string-shaped callee operand
+# (MirConstValue.Str(name)) -- see
+# doc/08_tracking/bug/mir_runtime_call_origin_ambiguity_2026-07-17.md.
+#
+# For most runtime helper names this is harmless: no legitimate `.spl`
+# program defines a same-named local function, so "whichever symbol wins"
+# never matters in practice. `rt_array_new`/`rt_array_push` are the one
+# CONFIRMED exception: the array-literal lowering path
+# (`AggregateKind.Array`, see aggregate_intrinsics.spl / the Cranelift
+# adapter's Aggregate case) emits a hardcoded call to the bare runtime
+# symbol OUTSIDE the normal MirInstKind.Call/MirOperand machinery, so it
+# can never be redirected by an ordinary local-function-wins lookup -- but
+# a same-named LOCAL function definition, emitted under that same bare
+# symbol, collides with it (LLVM: conflicting declare/define of one global;
+# Cranelift: two module-level declarations for one name).
+#
+# The fix is call-SITE-scoped, not name-scoped: an ordinary named call
+# (`fn rt_array_new(...)` defined and called from source) must still reach
+# its own body. Only the LOCAL DEFINITION's backend symbol is renamed
+# (mangled) when its bare name is runtime-owned, so the compiler-generated
+# hardcoded call keeps sole ownership of the bare symbol while ordinary
+# named-call resolution is redirected to the mangled symbol instead.
+#
+# KNOWN OPEN GAP (deliberately not closed here): `.push()`/`.map()`/
+# `.filter()` on a runtime array ALSO emit a compiler-generated call to
+# rt_array_push/rt_array_new, but via an ORDINARY MirInstKind.Call whose
+# callee is a plain Const(Str("rt_array_push")) -- byte-identical to a
+# genuine source-level `rt_array_push(...)` call
+# (`rt_array_push_operand()` and two inline `rt_array_new` builders in
+# `_MirLoweringExpr/method_calls_literals.spl`). An earlier version of this
+# fix routed those four construction sites through a reserved marker
+# prefix so backends could unconditionally resolve them to the runtime
+# symbol. That marker is emitted into MIR that EVERY backend consumes
+# (interpreter, C backend, native isel, wasm, ...), but only LLVM and
+# Cranelift were taught to strip it -- any other Const(Str)-by-name
+# resolver would silently (interpreter: "unknown function" -> dest=0) or
+# loudly (C backend: undefined symbol) break on ordinary `.push()`. That
+# is a worse regression than the narrow gap it closed (local collision +
+# `.push()`/`.map()`/`.filter()` in the SAME module -- already blocked in
+# `src/compiler`/`src/app`/`src/lib` by `check-bootstrap-portability.shs`),
+# so the marker was reverted. `.push()`/`.map()`/`.filter()` calls remain
+# indistinguishable from a same-named source call; if a program (outside
+# the portability-guarded tree) defines a local `rt_array_push` AND uses
+# `.push()`, LLVM/Cranelift will send BOTH to the mangled local body. Full
+# closure requires either a change every backend's Call-resolution routes
+# through (audited, none confirmed to exist) or the real per-instruction
+# origin field the bug doc's "Required fix" describes.
+
+fn mir_runtime_owned_call_name(name: text) -> bool:
+    name == "rt_array_new" or name == "rt_array_push"
+
+fn mir_runtime_owned_local_symbol(name: text) -> text:
+    "__simple_local_{name}"

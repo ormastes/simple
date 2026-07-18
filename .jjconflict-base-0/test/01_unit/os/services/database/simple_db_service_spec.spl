@@ -1,0 +1,80 @@
+# @cover src/os/services/database/simple_db_service.spl 90%
+# @req REQ-002
+
+use std.spec.*
+use os.services.database.simple_db_service.{SimpleDbService, simple_db_execute_http_request}
+
+describe "SimpleOS database command core":
+    it "keeps boot database state across bounded HTTP service requests":
+        step("Create a table through POST /db")
+        val create = simple_db_execute_http_request("POST /db HTTP/1.1\r\nContent-Length: 15\r\n\r\nCREATE settings")
+        expect(create).to_contain("HTTP/1.1 200 OK")
+
+        step("Insert a value through the module-owned boot service")
+        val insert = simple_db_execute_http_request("POST /db HTTP/1.1\r\nContent-Length: 26\r\n\r\nINSERT settings theme dark")
+        expect(insert).to_contain("HTTP/1.1 200 OK")
+
+        step("Select the persisted value through POST /db")
+        val select = simple_db_execute_http_request("POST /db HTTP/1.1\r\nContent-Length: 21\r\n\r\nSELECT settings theme")
+        expect(select).to_end_with("\r\n\r\ndark")
+        expect(select).to_contain("Connection: close")
+        expect(select.find("Content-Length:")).to_equal(-1)
+
+    it "creates a table, stores a value, selects it, and bounds input":
+        var db = SimpleDbService.new()
+
+        step("Create the settings table")
+        expect(db.execute("CREATE settings")).to_equal("OK CREATE")
+
+        step("Insert a known setting")
+        expect(db.execute("INSERT settings theme dark")).to_equal("OK INSERT")
+
+        step("Read the stored value from service state")
+        expect(db.execute("SELECT settings theme")).to_equal("dark")
+        expect(db.table_count()).to_equal(1)
+        expect(db.row_count()).to_equal(1)
+
+        step("Reject input beyond the service boundary")
+        val oversized = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        expect(db.execute(oversized)).to_equal("ERR command too long")
+        expect(db.row_count()).to_equal(1)
+
+    it "rejects invalid state transitions without changing stored data":
+        var db = SimpleDbService.new()
+
+        step("Reject commands before a table exists")
+        expect(db.execute("")).to_equal("ERR empty command")
+        expect(db.execute("INSERT missing key value")).to_equal("ERR table not found")
+        expect(db.execute("SELECT missing key")).to_equal("ERR table not found")
+
+        step("Reject duplicate and missing keys")
+        expect(db.execute("CREATE settings")).to_equal("OK CREATE")
+        expect(db.execute("CREATE settings")).to_equal("ERR table exists")
+        expect(db.execute("INSERT settings theme dark")).to_equal("OK INSERT")
+        expect(db.execute("INSERT settings theme light")).to_equal("ERR key exists")
+        expect(db.execute("SELECT settings missing")).to_equal("ERR key not found")
+
+        step("Reject malformed commands")
+        expect(db.execute("CREATE ")).to_equal("ERR invalid table")
+        expect(db.execute("INSERT settings key")).to_equal("ERR invalid command")
+        expect(db.execute("DROP settings")).to_equal("ERR invalid command")
+        expect(db.row_count()).to_equal(1)
+
+    it "enforces bounded table and row capacity":
+        var db = SimpleDbService.new()
+
+        step("Fill the bounded table catalog")
+        var table_index = 0
+        while table_index < 16:
+            expect(db.execute("CREATE table{table_index}")).to_equal("OK CREATE")
+            table_index = table_index + 1
+        expect(db.execute("CREATE overflow")).to_equal("ERR table limit")
+
+        step("Fill the bounded row store")
+        var row_index = 0
+        while row_index < 128:
+            expect(db.execute("INSERT table0 key{row_index} value{row_index}")).to_equal("OK INSERT")
+            row_index = row_index + 1
+        expect(db.execute("INSERT table0 overflow value")).to_equal("ERR row limit")
+        expect(db.table_count()).to_equal(16)
+        expect(db.row_count()).to_equal(128)

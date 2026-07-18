@@ -1,0 +1,117 @@
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "HIR statement dispatch source":
+    it "uses runtime discriminants before struct-shadowed Expr dispatch":
+        val source = read_source("src/compiler/20.hir/hir_lowering/statements.spl")
+        expect(source).to_contain("fn hir_stmt_kind_disc(k: StmtKind) -> i64:\n    rt_enum_discriminant(k)")
+        expect(source.contains("fn hir_stmt_kind_disc(k: StmtKind) -> i64:\n    match k:")).to_equal(false)
+
+    it "compares runtime tags for bootstrap statement predispatch":
+        val source = read_source("src/compiler/20.hir/hir_lowering/statements.spl")
+
+        expect(source).to_contain("hir_stmt_kind_disc(StmtKind.Val(\"\", nil, sk_dummy))")
+        expect(source).to_contain("hir_stmt_kind_disc(StmtKind.Var(\"\", nil, nil))")
+        expect(source).to_contain("hir_stmt_kind_disc(StmtKind.Return(nil))")
+        expect(source).to_contain("hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy))")
+        expect(source).to_contain("hir_stmt_kind_disc(StmtKind.Expr(sk_dummy))")
+
+    it "unwraps initialized Var before local shape registration":
+        val source = read_source("src/compiler/20.hir/hir_lowering/statements.spl")
+
+        expect(source).to_contain("if vr_init.?:\n                val vr_init_present = vr_init ?? sk_dummy")
+        expect(source.contains("if val vr_init_present = vr_init:")).to_equal(false)
+
+    it "unwraps HIR symbol lookups without pattern binding":
+        val types_source = read_source("src/compiler/20.hir/hir_types.spl")
+        val module_source = read_source("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val declaration_source = read_source("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl")
+
+        expect(types_source.contains("if val sym = found:")).to_equal(false)
+        expect(module_source.contains("if val found_symbol = found:")).to_equal(false)
+        expect(declaration_source.contains("if val found_symbol = fn_symbol_lookup:")).to_equal(false)
+        expect(declaration_source).to_contain("if fn_symbol_lookup.?:\n                fn_symbol_id = fn_symbol_lookup.unwrap()")
+
+    it "unwraps optional SymbolIds without compact pattern binding":
+        val expr_source = read_source("src/compiler/20.hir/hir_lowering/expressions.spl")
+        val stmt_source = read_source("src/compiler/20.hir/hir_lowering/statements.spl")
+        val async_source = read_source("src/compiler/20.hir/hir_lowering/async.spl")
+        val mir_fn_source = read_source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        val mir_expr_source = read_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        val mir_stmt_source = read_source("src/compiler/50.mir/mir_lowering_stmts.spl")
+        val inline_policy_source = read_source("src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl")
+        val inline_driver_source = read_source("src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl")
+        val symbol_source = read_source("src/compiler/20.hir/hir_types.spl")
+
+        expect(expr_source.contains("if val fld_tb_sym3 = fld_tuple_base_sym:")).to_equal(false)
+        expect(expr_source.contains("if val fld_base_sym = fld_base_sym_opt:")).to_equal(false)
+        expect(stmt_source.contains("if val td_bs = td_base_sym:")).to_equal(false)
+        expect(async_source.contains("if val future_symbol = future_symbol_opt:")).to_equal(false)
+        expect(stmt_source).to_contain("val expr_assign_disc = hir_expr_kind_disc(ExprKind.Assign(sk_dummy, nil, sk_dummy))")
+        expect(stmt_source).to_contain("val assign_payload: [Any] = rt_enum_payload(expr_kind)")
+        expect(stmt_source).to_contain("val target_t: Expr = assign_payload[0]")
+        expect(stmt_source).to_contain("val value_t: Expr = assign_payload[2]")
+        expect(mir_fn_source.contains("if val found_symbol = param.symbol:")).to_equal(false)
+        expect(mir_fn_source).to_contain("val found_symbol: SymbolId = param.symbol\n            self.local_map[found_symbol.id] = pli + parameter_local_offset")
+        expect(mir_expr_source).to_contain("extern fn rt_enum_payload(value: Any) -> Any")
+        expect(mir_expr_source).to_contain("extern fn rt_value_as_int(value: i64) -> i64")
+        expect(mir_expr_source).to_contain("val namedvar_payload: [Any] = rt_enum_payload(expr_value.kind)")
+        expect(mir_expr_source).to_contain("val symbol_t: SymbolId = namedvar_payload[0]")
+        expect(mir_expr_source).to_contain("val name_t: text = namedvar_payload[1]")
+        expect(mir_expr_source).to_contain("val pre_sym_id = rt_value_as_int(symbol_t.id)")
+        expect(inline_policy_source).to_contain("case Const(value, _):\n                match value:")
+        expect(inline_policy_source.contains("match type_.kind:")).to_equal(false)
+        expect(inline_driver_source.contains("match type_.kind:")).to_equal(false)
+        expect(inline_driver_source).to_contain("case Int(id): Some(id)")
+        expect(symbol_source.contains("if val found = sym:")).to_equal(false)
+        expect(symbol_source.contains("if val found_type_symbol = type_sym:")).to_equal(false)
+        expect(symbol_source).to_contain("val found: Symbol = sym.unwrap()")
+        expect(mir_expr_source.contains("if expr_disc == namedvar_pre_disc:\n            match expr_value.kind:")).to_equal(false)
+        expect(mir_expr_source.contains("if val binop_left_ty = self.local_mir_type_of(left_local):")).to_equal(false)
+        expect(mir_expr_source.contains("if val binop_right_ty = self.local_mir_type_of(right_local):")).to_equal(false)
+        expect(mir_expr_source.contains("if val left_arr_ty = self.local_mir_type_of(left_local):")).to_equal(false)
+        expect(mir_expr_source.contains("if val right_arr_ty = self.local_mir_type_of(right_local):")).to_equal(false)
+        expect(mir_expr_source.contains("if val left_type = self.local_mir_type_of(left_local):")).to_equal(false)
+        expect(mir_expr_source.contains("if val right_type = self.local_mir_type_of(right_local):")).to_equal(false)
+        expect(mir_expr_source).to_contain("val binop_left_ty = binop_left_ty_opt.unwrap()")
+        expect(mir_expr_source).to_contain("val binop_right_ty = binop_right_ty_opt.unwrap()")
+        expect(mir_expr_source.contains("if val found_base_type = base_type:")).to_equal(false)
+        expect(mir_expr_source).to_contain("if base_type != nil:\n            len_symbol = self.len_runtime_symbol_for_hir_type(base_type)")
+        expect(mir_stmt_source).to_contain("val expr_disc = mir_hir_stmt_kind_disc(HirStmtKind.Expr(fallback_expr))")
+        expect(mir_stmt_source).to_contain("if mir_hir_stmt_kind_disc(stmt_kind_value) == expr_disc:")
+        expect(mir_stmt_source).to_contain("val assign_disc = mir_hir_stmt_kind_disc(HirStmtKind.Assign(fallback_expr, nil, fallback_expr))")
+        expect(mir_stmt_source).to_contain("val target_t: HirExpr = assign_target")
+        expect(mir_stmt_source).to_contain("val value_t: HirExpr = assign_value")
+        expect(mir_stmt_source).to_contain("val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, \"\", nil))")
+        expect(mir_stmt_source).to_contain("if rt_enum_discriminant(target_kind) == field_disc:")
+        expect(mir_stmt_source.contains("case Field(base, field, resolved):")).to_equal(false)
+
+    it "predispatches struct-shadowed variants in return inference":
+        val source = read_source("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val mir_source = read_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+
+        expect(source).to_contain("if rt_enum_discriminant(expr_kind) == 1138084884:  # hash(\"Block\")")
+        expect(source).to_contain("if rt_enum_discriminant(expr_kind) == 21232742:  # hash(\"Field\")")
+        expect(source).to_contain("hir_module_phase_probe(\"return-scan:function:\" + fn_decl.name)")
+        expect(source).to_contain("hir_module_phase_probe(\"return-scan:ExprKind.Block\")")
+        expect(source).to_contain("hir_module_phase_probe(\"return-scan:ExprKind.Field\")")
+        expect(source).to_contain("hir_module_phase_probe(\"return-scan:ExprKind.If\")")
+        expect(source).to_contain("hir_module_phase_probe(\"return-scan:StmtKind.Expr\")")
+        expect(source).to_contain("if rt_enum_discriminant(stmt_kind) == expr_disc:")
+        expect(source).to_contain("val expr_t: Expr = expr")
+        expect(source).to_contain("case ExprKind.If(cond, then_, else_):")
+        expect(source).to_contain("return self.scan_ast_block_for_returns(block, params)")
+        expect(source).to_contain("return self.scan_ast_expr_for_returns(base, params)")
+        expect(source).to_contain("val then_t: Block = then_")
+        expect(source).to_contain("val else_t: Block? = else_")
+        expect(source).to_contain("val cond_t: Expr = cond")
+        expect(source).to_contain("merge_return_scan(self.scan_ast_expr_for_returns(cond_t, params), self.scan_ast_block_for_returns(then_t, params))")
+        expect(source.contains("match e.kind:\n            case ExprKind.Return(value):")).to_equal(false)
+        expect(mir_source).to_contain("val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(nil_expr))")
+        expect(mir_source).to_contain("if rt_enum_discriminant(stmt_kind) == expr_stmt_disc:")
+        expect(mir_source).to_contain("eprint(\"[mir-prescan] HirStmtKind.Expr\")")
+        expect(mir_source).to_contain("val expr_t: HirExpr = expr")
+        expect(mir_source).to_contain("val block_disc = rt_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))")
+        expect(mir_source).to_contain("eprint(\"[mir-prescan] HirExprKind.Block\")")

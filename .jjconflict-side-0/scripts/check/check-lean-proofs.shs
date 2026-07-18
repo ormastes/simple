@@ -1,0 +1,156 @@
+#!/bin/sh
+set -eu
+
+# Lean Proof Integrity Check
+#
+# Usage:
+#   sh scripts/check/check-lean-proofs.shs
+#   sh scripts/check/check-lean-proofs.shs --self-test
+#   sh scripts/check/check-lean-proofs.shs --project <lake-project-dir> [label]
+#
+# Iterates all Lake projects under src/verification/ and the std proofs
+# project under src/compiler_rust/lib/std/src/, runs `lake build` in each,
+# greps sources for Lean proof-trust bypasses (excluding comments),
+# exits nonzero on any failure, and prints a per-project PASS/FAIL table.
+#
+# Env knobs:
+#   LAKE_BIN    lake binary (default: auto-detected via elan or PATH)
+#   BUILD_TIMEOUT  seconds before a build is killed as TIMEOUT (default: 300)
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
+TRUST_RE='(^|[^A-Za-z0-9_])(sorry|admit)($|[^A-Za-z0-9_])|^[[:space:]]*((private|protected|noncomputable|partial)[[:space:]]+)*(axiom|constant|opaque|unsafe|set_option[[:space:]]+autoImplicit[[:space:]]+true|set_option[[:space:]]+maxHeartbeats[[:space:]]+0)\b'
+
+pass()  { printf '  PASS  %s\n' "$1"; }
+fail()  { printf '  FAIL  %s  --  %s\n' "$1" "$2"; }
+info()  { printf '  ...   %s\n' "$1"; }
+
+OVERALL=0
+
+count_trust_hits() {
+    proj_dir="$1"
+    find "$proj_dir" -name '*.lean' -not -path '*/.lake/*' 2>/dev/null \
+        -exec sed 's/--.*//' {} + 2>/dev/null \
+        | grep -Eh "$TRUST_RE" \
+        | grep -cv 'without .sorry.\|zero sorry\|no sorry\|No sorry' || true
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    tmp="${TMPDIR:-/tmp}/lean-proof-check-selftest.$$"
+    rm -rf "$tmp"
+    mkdir -p "$tmp"
+    {
+        echo 'theorem ok : True := by'
+        echo '  exact True.intro'
+        echo 'theorem badSorry : True := by'
+        echo '  exact (by sorry)'
+        echo 'theorem badAdmit : True := by'
+        echo '  exact admit,'
+        echo 'axiom trustedFact : True'
+        echo 'private axiom privateTrustedFact : True'
+        echo 'private unsafe def unsafeTrustedFact : True := True.intro'
+        echo '-- sorry in a comment is ignored'
+    } >"$tmp/SelfTest.lean"
+    hits="$(count_trust_hits "$tmp")"
+    rm -rf "$tmp"
+    if [ "$hits" = 5 ]; then
+        echo "STATUS: PASS lean-proof-check self-test"
+        exit 0
+    fi
+    echo "STATUS: FAIL lean-proof-check self-test expected=5 actual=$hits" >&2
+    exit 1
+fi
+
+# Detect lake binary
+if [ -n "${LAKE_BIN:-}" ]; then
+    LAKE="$LAKE_BIN"
+elif [ -x "$HOME/.elan/bin/lake" ]; then
+    LAKE="$HOME/.elan/bin/lake"
+elif command -v lake >/dev/null 2>&1; then
+    LAKE="lake"
+else
+    printf 'error: lake not found; install via elan or set LAKE_BIN\n' >&2
+    exit 1
+fi
+
+# Check a single lake project directory.
+# Prints PASS, FAIL, or TIMEOUT and sets OVERALL=1 on any non-pass result.
+check_project() {
+    proj_dir="$1"
+    label="$2"
+
+    if [ ! -f "$proj_dir/lakefile.toml" ] && [ ! -f "$proj_dir/lakefile.lean" ]; then
+        fail "$label" "no lakefile found"
+        OVERALL=1
+        return
+    fi
+
+    info "building $label"
+    build_out=$(cd "$proj_dir" && timeout "$BUILD_TIMEOUT" "$LAKE" build 2>&1) && build_rc=0 || build_rc=$?
+
+    if [ "$build_rc" -eq 124 ]; then
+        fail "$label" "TIMEOUT (>${BUILD_TIMEOUT}s)"
+        OVERALL=1
+        return
+    fi
+
+    if [ "$build_rc" -ne 0 ]; then
+        first_err=$(printf '%s' "$build_out" | grep -m1 'error:' || true)
+        fail "$label" "${first_err:-build exited $build_rc}"
+        OVERALL=1
+        return
+    fi
+
+    # Grep for real proof-trust bypasses: whole project tree (srcDir varies per
+    # project), excluding the .lake build dir, comment lines, and doc-text
+    # mentions like "without sorry".
+    trust_hits=$(count_trust_hits "$proj_dir")
+
+    if [ "${trust_hits:-0}" -gt 0 ]; then
+        fail "$label" "contains $trust_hits proof trust bypass(es) outside comments"
+        OVERALL=1
+        return
+    fi
+
+    pass "$label"
+}
+
+if [ "${1:-}" = "--project" ]; then
+    test -n "${2:-}" || {
+        echo "usage: sh scripts/check/check-lean-proofs.shs --project <lake-project-dir> [label]" >&2
+        exit 2
+    }
+    check_project "$2" "${3:-$2}"
+    if [ "$OVERALL" -eq 0 ]; then
+        echo "STATUS: PASS lean-proof-check project"
+        exit 0
+    fi
+    echo "STATUS: FAIL lean-proof-check project" >&2
+    exit 1
+fi
+
+printf '\n=== Lean Proof Integrity Check ===\n\n'
+
+# Verification sub-projects: auto-discover every Lake project under
+# src/verification (any depth) so newly added models are never silently
+# skipped by a stale hardcoded list.
+VDIR="$ROOT_DIR/src/verification"
+for lakefile in $(find "$VDIR" -maxdepth 3 \( -name 'lakefile.toml' -o -name 'lakefile.lean' \) -not -path '*/.lake/*' | sort); do
+    proj_dir="$(dirname "$lakefile")"
+    label="verification/${proj_dir#$VDIR/}"
+    check_project "$proj_dir" "$label"
+done
+
+# L3 std proofs project
+check_project "$ROOT_DIR/src/compiler_rust/lib/std/src" "compiler_rust/lib/std"
+
+printf '\n'
+if [ "$OVERALL" -eq 0 ]; then
+    printf 'All projects: PASS\n'
+    exit 0
+else
+    printf 'One or more projects FAILED\n' >&2
+    exit 1
+fi

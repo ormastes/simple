@@ -1,0 +1,101 @@
+use app.io.mod (cwd, file_exists)
+
+fn projectIsInGitRepo(startPath: text) -> bool:
+    projectIsInGitRepoFrom(startPath, cwd(), \path: file_exists(path))
+
+fn projectIsInGitRepoWithMarker(cwd: text, markerExists: fn(text) -> bool) -> bool:
+    projectIsInGitRepoFrom(cwd, "/", markerExists)
+
+fn projectIsInGitRepoFrom(startPath: text, currentDir: text, markerExists: fn(text) -> bool) -> bool:
+    findGitRootWithMarker(startPath, currentDir, markerExists) != ""
+
+fn findGitRootWithMarker(startPath: text, currentDir: text, markerExists: fn(text) -> bool) -> text:
+    var current = resolveGitRootStartPath(startPath, currentDir)
+    val root = gitRootPathRoot(current)
+    while true:
+        if markerExists(joinGitRootPath(current, ".git")):
+            return current
+        if current == root:
+            return ""
+        val parent = gitRootPathParent(current)
+        if parent == current:
+            return ""
+        current = parent
+
+fn normalizeGitRootStartPath(path: text) -> text:
+    var out = path.replace("\\", "/")
+    while out.len() > 1 and out.ends_with("/") and not gitRootPathIsDriveRootText(out):
+        out = out.slice(0, out.len() - 1)
+    if out == "":
+        "."
+    else:
+        out
+
+fn resolveGitRootStartPath(path: text, currentDir: text) -> text:
+    val normalized = normalizeGitRootStartPath(path)
+    if gitRootPathIsAbsolute(normalized):
+        return collapseGitRootPath(normalized)
+    collapseGitRootPath(joinGitRootPath(normalizeGitRootStartPath(currentDir), normalized))
+
+fn collapseGitRootPath(path: text) -> text:
+    val normalized = normalizeGitRootStartPath(path)
+    val root = gitRootPathRoot(normalized)
+    var rest = if root == "/":
+        normalized.slice(1, normalized.len())
+    elif root.ends_with("/") and root.len() == 3:
+        normalized.slice(3, normalized.len())
+    else:
+        normalized
+    var parts: [text] = []
+    for part in rest.split("/"):
+        if part == "..":
+            if parts.len() > 0:
+                parts = parts.slice(0, parts.len() - 1)
+        elif part != "" and part != ".":
+            parts.push(part)
+    if root == ".":
+        if parts.len() == 0:
+            return "."
+        return parts.join("/")
+    if parts.len() == 0:
+        return root
+    if root == "/":
+        return "/" + parts.join("/")
+    root + parts.join("/")
+
+fn gitRootPathIsAbsolute(path: text) -> bool:
+    path.starts_with("/") or gitRootPathHasDriveRoot(path)
+
+fn gitRootPathHasDriveRoot(path: text) -> bool:
+    path.len() >= 3 and path.slice(1, 2) == ":" and path.slice(2, 3) == "/"
+
+fn gitRootPathIsDriveRootText(path: text) -> bool:
+    path.len() == 3 and path.slice(1, 2) == ":" and path.slice(2, 3) == "/"
+
+fn gitRootPathRoot(path: text) -> text:
+    if path.starts_with("/"):
+        "/"
+    elif gitRootPathHasDriveRoot(path):
+        path.slice(0, 3)
+    else:
+        "."
+
+fn gitRootPathParent(path: text) -> text:
+    val normalized = normalizeGitRootStartPath(path)
+    if normalized == "/" or normalized == "." or gitRootPathHasDriveRoot(normalized) and normalized.len() == 3:
+        return normalized
+    val slash = normalized.rfind("/")
+    if slash < 0:
+        return "."
+    if slash == 0:
+        return "/"
+    if gitRootPathHasDriveRoot(normalized) and slash == 2:
+        return normalized.slice(0, 3)
+    normalized.slice(0, slash)
+
+fn joinGitRootPath(left: text, right: text) -> text:
+    if left == "" or left == ".":
+        return right
+    if left.ends_with("/"):
+        return left + right
+    left + "/" + right

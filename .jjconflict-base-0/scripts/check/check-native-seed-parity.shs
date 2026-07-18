@@ -1,0 +1,2168 @@
+#!/bin/sh
+# check-native-seed-parity.shs — dual-backend parity regression harness.
+#
+# Purpose: this is the regression guard for the 2026-07-14 native-build
+# bug-fix batch (~29 bugs fixed in the pure-Simple self-hosted native
+# codegen path this session: nested struct fields, struct/array-of-struct
+# value semantics, `mut`/`me` receivers, tuple access, dict iteration,
+# match or-patterns, sized ints, text methods, and loud-fail diagnostics
+# for constructs unsupported by design). Every case here runs the SAME
+# tiny .spl program through BOTH compilers and asserts they agree (or,
+# where the seed oracle is known-broken, that native alone matches ground
+# truth) so none of these fixes silently regress.
+#
+# Both backends are the SAME deployed self-hosted bin/simple
+# (bin/simple -> bin/release/<triple>/simple):
+#   SEED ORACLE:         env -u SIMPLE_BOOTSTRAP bin/simple run prog.spl
+#   PURE-SIMPLE NATIVE:   env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH \
+#                         bin/simple native-build \
+#                         --entry prog.spl -o out --clean && ./out
+# SIMPLE_BOOTSTRAP is unset so both invocations exercise the Rust-seed
+# interpreter (`run`) vs the pure-Simple native codegen (`native-build`).
+#
+# NORMALIZATION: native `print()` emits NO trailing newline (Rust-style
+# print, not println), while the seed's `run` adds a newline after every
+# print — the seed's own quirk, not a bug on either side. So stdout is
+# never byte-compared. stdout is captured on its own file descriptor
+# (stderr — banners/diagnostics — is captured separately and never enters
+# the compared value) and normalized via `tr -d '\n' | tr -d ' '` to a
+# canonical, whitespace-insensitive character sequence before comparing.
+# A parity case may also supply a fixed expected value; then both normalized
+# outputs must match that value as well as each other.
+#
+# Every seed and native run is wrapped in `timeout` (see SEED_TIMEOUT_S /
+# NATIVE_RUN_TIMEOUT_S below): while authoring this harness the seed
+# interpreter was found to genuinely HANG (infinite loop, confirmed via a
+# 10+ minute 98%-CPU spin) on `continue` inside a `for i in a..b:` range
+# loop (see the `range_for` case) — an unbounded seed run must never be
+# allowed to wedge this gate.
+#
+# FIVE CASE MODES:
+#   1. PARITY               — the seed oracle is sound for this construct.
+#      Assert normalize(native_stdout) == normalize(seed_stdout).
+#   2. NATIVE-AUTHORITATIVE — the seed oracle is PROVABLY BROKEN, hangs,
+#      or cannot even parse the construct (documented per-case below,
+#      empirically verified during authoring — not guessed). Assert
+#      normalize(native_stdout) == a fixed EXPECTED literal; the seed run
+#      is executed only to log its (broken) behavior for documentation,
+#      never asserted on.
+#   3. STRICT-DUAL          — both LLVM and Cranelift native builds must
+#      run and match a fixed expected value. Used where the seed is not a
+#      dependable oracle and backend parity is the contract.
+#   4. LOUD-FAIL            — native-build MUST refuse to build the
+#      construct (unsupported-by-design, e.g. match guards, out-of-range
+#      integer literals) with a nonzero exit and no binary produced,
+#      rather than silently miscompiling. Assert build rc != 0 AND no
+#      binary exists AND the build log contains the expected diagnostic.
+#   5. RUNTIME-FAIL         — native-build must succeed, then the program
+#      must exit nonzero with the expected runtime diagnostic.
+#
+# Every original case's mode was decided by actually running its required
+# backends during authoring. The nine cases added on 2026-07-15 have bounded
+# source review and await execution with the expanded matrix. Three original
+# cases were reclassified after empirical testing disagreed:
+#   - `mut_param` and `option_nil_check` were expected PARITY but the seed
+#     proved to diverge (mut-capability propagation and `.?` if-let are
+#     both silently broken in the seed's JIT-fallback interpreter path)
+#     -> reclassified NATIVE-AUTHORITATIVE.
+#   - `dict_get` was split out of a would-be parity `dict_methods` case
+#     for the same reason (seed's Dict.get() returns a bogus `0.0` on a
+#     present key — a known landmine, see
+#     reference_interpreter_dict_and_value_quirks).
+#   - `some0` was expected NATIVE-AUTHORITATIVE (spec assumed the seed
+#     prints a `<special:...>` marker for `nil ?? default`) but both
+#     backends actually agree (`0`) -> reclassified PARITY.
+# Two more were reclassified 2026-07-16 after empirical dual-runs showed the
+# NATIVE output correct and the SEED oracle broken (seed is Rust — not
+# fixable from pure-Simple source):
+#   - `nested_enum_struct_match`: seed binds x=0/y=0 for a nested struct
+#     pattern inside an enum payload -> NATIVE-AUTHORITATIVE.
+#   - `float_edges`: seed prints 1e-18 as the non-round-tripping
+#     `0.00000000000000000` -> NATIVE-AUTHORITATIVE.
+#
+# Usage: sh scripts/check/check-native-seed-parity.shs
+# Env:   SIMPLE_BINARY (default bin/simple), PARITY_WORK_DIR (default
+#        /tmp/check-native-seed-parity.$$), NATIVE_PARITY_CASES (optional
+#        space-separated case IDs), NATIVE_PARITY_BACKEND (llvm default or
+#        cranelift for backend-selected loud-fail/native-authoritative cases),
+#        NATIVE_OPEN_BUG_REPROS=1 (opt in to strict known-red repro cases),
+#        NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional strict gate),
+#        SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S (default 20)
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${PARITY_WORK_DIR:-/tmp/check-native-seed-parity.$$}"
+SEED_TIMEOUT_S="${SEED_TIMEOUT_S:-20}"
+NATIVE_RUN_TIMEOUT_S="${NATIVE_RUN_TIMEOUT_S:-20}"
+NATIVE_PARITY_BACKEND="${NATIVE_PARITY_BACKEND:-llvm}"
+case "$NATIVE_PARITY_BACKEND" in
+    llvm|cranelift) ;;
+    *) echo "unsupported NATIVE_PARITY_BACKEND: $NATIVE_PARITY_BACKEND" >&2; exit 2 ;;
+esac
+mkdir -p "$WORK_DIR"
+
+STAMP="$(date +%s)_$$"
+RESULTS_FILE="$WORK_DIR/results.tsv"
+: >"$RESULTS_FILE"
+
+TOTAL=0
+PASS_N=0
+FAIL_N=0
+XFAIL_N=0
+MATCHED_PARITY_CASES=""
+
+norm() {
+    # Canonicalize stdout: strip newlines and spaces so seed's added
+    # newlines (vs native's newline-less print) never cause a mismatch.
+    tr -d '\n' | tr -d ' '
+}
+
+# ---------------------------------------------------------------------------
+# Case source writers — one tiny .spl program per fixed bug / construct.
+# ---------------------------------------------------------------------------
+
+write_case_struct_nested_field() {
+    cat >"$1" <<'EOF'
+struct Inner:
+    v: i64
+
+struct Outer:
+    inner: Inner
+
+fn main() -> i64:
+    var o = Outer(inner: Inner(v: 7))
+    print(o.inner.v)
+    o.inner.v = 42
+    print(o.inner.v)
+    return 0
+EOF
+}
+
+write_case_nested_struct_value_copy() {
+    cat >"$1" <<'EOF'
+struct InnerCopy:
+    n: i64
+
+class SharedRef:
+    n: i64
+
+struct OuterCopy:
+    inner: InnerCopy
+    shared: SharedRef
+
+fn mutate_copy(value: OuterCopy):
+    value.inner.n = 9
+    value.shared.n = 5
+
+fn main() -> i64:
+    var original = OuterCopy(inner: InnerCopy(n: 1), shared: SharedRef(n: 3))
+    var local_copy = original
+    local_copy.inner.n = 2
+    local_copy.shared.n = 4
+    print("local=")
+    print(original.inner.n)
+    print(",class=")
+    print(original.shared.n)
+    mutate_copy(original)
+    print(",param=")
+    print(original.inner.n)
+    print(",class=")
+    print(original.shared.n)
+    return 0
+EOF
+}
+
+write_case_crossmodule_field_index_collision() {
+    cat >"$1" <<'EOF'
+use test.fixtures.native_crossmodule_field_index.provider.{DisplayState, make_display_state}
+
+struct LargerDecoy:
+    width: i64
+    height: i64
+    pad0: i64
+    pad1: i64
+    pad2: i64
+    pad3: i64
+
+fn main() -> i64:
+    val state: DisplayState = make_display_state()
+    val decoy = LargerDecoy(width: 1, height: 2, pad0: 3, pad1: 4, pad2: 5, pad3: 6)
+    if decoy.width == -1:
+        print(decoy.height)
+    print(state.driver.width)
+    print("/")
+    print(state.driver.height)
+    return 0
+EOF
+}
+
+write_case_struct_return_byval() {
+    cat >"$1" <<'EOF'
+struct P:
+    x: i64
+    y: i64
+
+fn make(n: i64) -> P:
+    return P(x: n, y: n + 1)
+
+fn main() -> i64:
+    print(make(5).y)
+    val p = make(5)
+    print(p.x)
+    print(p.y)
+    return 0
+EOF
+}
+
+write_case_method_owner_dispatch_i64() {
+    # Regression for native method-cleanup global misresolution (bug doc
+    # native_method_cleanup_global_misresolution_2026-07-13): two UNRELATED
+    # owners expose the same method name; each receiver must dispatch to its
+    # OWN owner's method (`m.cleanup()` must never bind the other owner's
+    # `cleanup`). Verified fixed 2026-07-16 at c8f4b62261a (owner-qualified
+    # HIR/MIR method identity, 2026-07-15 pure-Simple root fix).
+    cat >"$1" <<'EOF'
+struct JitMgr:
+    id: i64
+
+impl JitMgr:
+    fn cleanup(self) -> i64:
+        return 222
+
+struct CompiledMod:
+    name: i64
+
+impl CompiledMod:
+    fn cleanup(self) -> i64:
+        return 111 + self.name
+
+fn make_mod(n: i64) -> CompiledMod:
+    return CompiledMod(name: n)
+
+fn main() -> i64:
+    val m = make_mod(1)
+    val j = JitMgr(id: 7)
+    print(m.cleanup())
+    print(j.cleanup())
+    return 0
+EOF
+}
+
+write_case_static_ctor_field() {
+    cat >"$1" <<'EOF'
+struct Point:
+    x: i64
+    y: i64
+
+    static fn new() -> Point:
+        Point(x: 3, y: 7)
+
+fn main() -> i64:
+    print(Point.new().y)
+    return 0
+EOF
+}
+
+write_case_static_ctor_ambiguous_loud() {
+    cat >"$1" <<'EOF'
+struct A:
+    x: i64
+    static fn new() -> A: A(x: 1)
+
+struct B:
+    x: i64
+    static fn new() -> B: B(x: 2)
+
+fn main() -> i64:
+    print(A.new().x)
+    print(B.new().x)
+    return 0
+EOF
+}
+
+write_case_toplevel_array_len() {
+    cat >"$1" <<'EOF'
+val xs = [1, 2, 3]
+print(xs.len())
+EOF
+}
+
+write_case_result_cross_fn_text() {
+    cat >"$1" <<'EOF'
+fn text_error() -> Result<i64, text>:
+    Err("boom")
+
+fn int_error() -> Result<i64, i64>:
+    Err(41)
+
+fn print_text_result(r: Result<i64, text>):
+    match r:
+        case Ok(value): print(value)
+        case Err(message): print(message)
+
+fn print_int_result(r: Result<i64, i64>):
+    match r:
+        case Ok(value): print(value)
+        case Err(code): print(code)
+
+fn main() -> i64:
+    print_text_result(text_error())
+    match text_error():
+        case Ok(value): print(value)
+        case Err(message): print(message)
+    match int_error():
+        case Ok(value): print(value)
+        case Err(code): print(code)
+    return 0
+EOF
+}
+
+write_case_result_unwrap() {
+    cat >"$1" <<'EOF'
+fn ok_num() -> Result<i64, text>: Ok(7)
+fn err_num() -> Result<i64, text>: Err("boom")
+fn ok_text() -> Result<text, i64>: Ok("yes")
+fn option_fallback() -> text:
+    print("F")
+    return "fallback"
+
+fn main() -> i64:
+    print(ok_num().unwrap())
+    print(ok_num().unwrap_or(9))
+    print(err_num().unwrap_or(9))
+    print(ok_text().unwrap())
+    val some_num: i64? = 0
+    val none_num: i64? = nil
+    print(some_num.unwrap())
+    print(none_num.unwrap_or(8))
+    val present_text: text? = "opt"
+    val absent_text: text? = nil
+    print(present_text.unwrap())
+    print(present_text.unwrap_or(option_fallback()))
+    print(absent_text.unwrap_or(option_fallback()))
+    return 0
+EOF
+}
+
+write_case_result_unwrap_err_runtime() {
+    cat >"$1" <<'EOF'
+fn err_num() -> Result<i64, text>: Err("boom")
+fn main() -> i64:
+    print(err_num().unwrap())
+    return 0
+EOF
+}
+
+write_case_result_unwrap_u64_loud() {
+    cat >"$1" <<'EOF'
+fn wide() -> Result<u64, text>: Ok(1)
+fn main() -> i64:
+    print(wide().unwrap())
+    return 0
+EOF
+}
+
+write_case_option_text_unwrap_nil_runtime() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val absent_text: text? = nil
+    print(absent_text.unwrap())
+    return 0
+EOF
+}
+
+write_case_struct_array_field() {
+    cat >"$1" <<'EOF'
+struct S:
+    arr: [i64]
+
+fn main() -> i64:
+    var s = S(arr: [1, 2, 3])
+    print(s.arr[1])
+    s.arr[1] = 99
+    print(s.arr[1])
+    return 0
+EOF
+}
+
+write_case_class_array_field_mutation() {
+    # A class array field must remain the same live runtime-array handle when
+    # mutated through a parameter: push and index-set must both be visible
+    # through an alias captured before the call.
+    cat >"$1" <<'EOF'
+class Container:
+    var marker: i64
+    var items: [i64]
+
+fn mutate(c: Container):
+    c.items.push(42)
+    c.items[0] = 7
+
+fn main() -> i64:
+    var c = Container(marker: 99, items: [11])
+    val alias = c.items
+    mutate(c)
+    print(c.items.len())
+    print(c.items[0])
+    print(c.items[1])
+    print(alias.len())
+    print(alias[0])
+    print(alias[1])
+    print(c.marker)
+    return 0
+EOF
+}
+
+write_case_array_of_structs() {
+    cat >"$1" <<'EOF'
+struct Pt:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    var pts = [Pt(x: 1, y: 2), Pt(x: 10, y: 20), Pt(x: 100, y: 200)]
+    print(pts[1].y)
+    pts[1].y = 77
+    print(pts[1].y)
+    return 0
+EOF
+}
+
+write_case_array_2d() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var m = [[1, 2], [3, 4]]
+    print(m[0][1])
+    m[0][1] = 99
+    print(m[0][1])
+    return 0
+EOF
+}
+
+write_case_tuple_access() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val t = (7, 9)
+    print(t.0 + t.1)
+    return 0
+EOF
+}
+
+write_case_tuple_destructure() {
+    cat >"$1" <<'EOF'
+fn mkpair() -> (i64, i64):
+    return (3, 13)
+
+fn main() -> i64:
+    val (a, b) = mkpair()
+    print(a)
+    print(b)
+    return 0
+EOF
+}
+
+write_case_tuple_for() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val pairs = [(1, 10), (2, 20), (3, 30)]
+    var s = 0
+    for (k, v) in pairs:
+        s = s + k + v
+    print(s)
+    return 0
+EOF
+}
+
+write_case_dict_has() {
+    cat >"$1" <<'EOF'
+fn has_key(d: Dict<text, i64>, key: text) -> bool:
+    d.has(key)
+
+fn main() -> i64:
+    val d = {"a": 1, "b": 2}
+    print(d.has("a"))
+    print(d.has("z"))
+    print(has_key(d, "b"))
+    print(has_key(d, "z"))
+    return 0
+EOF
+}
+
+write_case_dict_keys_iter() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val d = {"a": 1, "b": 2, "c": 3}
+    var s = 0
+    for k in d.keys():
+        s = s + d[k]
+    print(s)
+    return 0
+EOF
+}
+
+write_case_value_match() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    return match n:
+        case 1: 10
+        case _: 99
+
+fn main() -> i64:
+    print(classify(9))
+    return 0
+EOF
+}
+
+write_case_text_match() {
+    cat >"$1" <<'EOF'
+fn classify(s: text) -> i64:
+    return match s:
+        case "red": 1
+        case "green": 2
+        case _: 0
+
+fn main() -> i64:
+    print(classify("green"))
+    return 0
+EOF
+}
+
+write_case_or_pattern() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    return match n:
+        case 1 | 2 | 3: 100
+        case _: 0
+
+fn main() -> i64:
+    print(classify(2))
+    return 0
+EOF
+}
+
+write_case_bool_match() {
+    cat >"$1" <<'EOF'
+fn classify(b: bool) -> i64:
+    return match b:
+        case true: 1
+        case false: 0
+
+fn main() -> i64:
+    print(classify(true))
+    return 0
+EOF
+}
+
+write_case_bool_print() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(3 < 5)
+    return 0
+EOF
+}
+
+write_case_sized_int() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a: i32 = -5
+    print(a)
+    val b: u8 = 200
+    print(b)
+    return 0
+EOF
+}
+
+write_case_text_int_len_methods() {
+    # NOTE: deliberately excludes "x".starts_with(y) and "x".contains(y) —
+    # both were found broken on native during authoring (see header) and
+    # are tracked as separate bugs, not folded into this passing case.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(int("42") + 1)
+    print("hi".len())
+    return 0
+EOF
+}
+
+write_case_split_text_elements() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val parts = "aa,bb,cc".split(",")
+    print(parts.len())
+    print(parts[0])
+    print(parts[1].len())
+    print(parts[2] == "cc")
+    var joined = ""
+    for part in parts:
+        joined = joined + part
+    print(joined)
+    val lines = "x\ny".split_lines()
+    print(lines[1])
+    return 0
+EOF
+}
+
+write_case_text_lines_semantics() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val empty_long = "".split_lines()
+    val empty_short = "".lines()
+    val newline_long = "\n".split_lines()
+    val newline_short = "\n".lines()
+    val trailing = "a\n".lines()
+    val double_trailing = "a\n\n".lines()
+    val crlf = "a\r\nb".lines()
+    val lone_cr = "a\rb".split_lines()
+    print(empty_long.len())
+    print(empty_short.len())
+    print(newline_long.len())
+    print(newline_short.len())
+    print(trailing.len())
+    print(trailing[0] == "a")
+    print(double_trailing.len())
+    print(double_trailing[1] == "")
+    print(crlf.len())
+    print(crlf[0] == "a")
+    print(crlf[1] == "b")
+    print(lone_cr.len())
+    print(lone_cr[0] == "a\rb")
+    return 0
+EOF
+}
+
+write_case_some0() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val x: i64? = 0
+    print(x ?? 3)
+    return 0
+EOF
+}
+
+write_case_me_receiver() {
+    cat >"$1" <<'EOF'
+struct Counter:
+    x: i64
+
+    fn selfset(me):
+        me.x = 41
+
+fn main() -> i64:
+    var c = Counter(x: 1)
+    c.selfset()
+    print(c.x)
+    return 0
+EOF
+}
+
+write_case_float_print() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(2.0)
+    print(0.5)
+    print(0.1)
+    print(3.5)
+    return 0
+EOF
+}
+
+write_case_mut_param() {
+    cat >"$1" <<'EOF'
+struct S:
+    x: i64
+
+fn withmut(mut s: S):
+    s.x = 41
+
+fn plain(s: S):
+    s.x = 999
+
+fn main() -> i64:
+    var a = S(x: 7)
+    withmut(a)
+    print(a.x)
+    var b = S(x: 7)
+    plain(b)
+    print(b.x)
+    return 0
+EOF
+}
+
+write_case_option_nil_check() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val x: i64? = 7
+    if val v = x.?:
+        print(v)
+    return 0
+EOF
+}
+
+write_case_dict_get() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val d = {"a": 1, "b": 2}
+    print(d.get("b"))
+    return 0
+EOF
+}
+
+write_case_range_for() {
+    # Also the seed-hang fixture: `continue` inside a range for-loop spins
+    # the seed interpreter forever (see header). Never run this source
+    # against the seed without a timeout.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var total = 0
+    for i in 0..5:
+        if i == 2:
+            continue
+        if i == 4:
+            break
+        total = total + i
+    print(total)
+    return 0
+EOF
+}
+
+write_case_int_overflow_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = 99999999999999999999
+    print(a)
+    return 0
+EOF
+}
+
+write_case_match_guard_loud() {
+    cat >"$1" <<'EOF'
+fn classify(x: i64) -> i64:
+    return match x:
+        case n if n > 0: 1
+        case _: 0
+
+fn main() -> i64:
+    print(classify(5))
+    return 0
+EOF
+}
+
+# --- 2026-07-14 second batch (6 more landed native-build fixes) -------------
+
+write_case_rt_is_none_payload9() {
+    # `rt_is_none` fix (04255754a71): `if val x = a.?:` on an i64? whose
+    # payload aliases the HEAP tag used to SIGSEGV native-build's runtime.
+    # Same `.?` if-let landmine as option_nil_check makes the seed diverge.
+    cat >"$1" <<'EOF'
+fn get(v: i64) -> i64?:
+    return v
+
+fn main() -> i64:
+    val a = get(9)
+    if val x = a.?:
+        print(x)
+    return 0
+EOF
+}
+
+write_case_str_method_var_arg() {
+    # `starts_with`/`contains` with a *variable* argument (3cbe3293561):
+    # previously crashed llc / always returned false on native. Bool results
+    # are funneled through if/else to explicit int literals so the seed's
+    # `true`/`false` vs native's `1`/`0` print formatting never diverges —
+    # the construct under test is the method call, not bool stringification.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val s = "hello"
+    val p = "he"
+    val sub = "ell"
+    if s.starts_with(p):
+        print(1)
+    else:
+        print(0)
+    if s.contains(sub):
+        print(1)
+    else:
+        print(0)
+    if s.contains("zzz"):
+        print(1)
+    else:
+        print(0)
+    return 0
+EOF
+}
+
+write_case_compound_assign() {
+    # Compound assignment += -= *= (61bce1b3357): the seed's frontend
+    # SILENTLY DROPS the arithmetic and just rebinds to the RHS operand, so
+    # `x += 5` stores 5 (not 15), etc. — see $seed_note. Native applies the
+    # op correctly, so this is native-authoritative.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var x = 10
+    x += 5
+    print(x)
+    x -= 3
+    print(x)
+    x *= 2
+    print(x)
+    var s = 0
+    for i in [1, 2, 3]:
+        s += i
+    print(s)
+    return 0
+EOF
+}
+
+write_case_float_struct_field() {
+    # Float struct fields (13e6f9d63ae): reading an f64 struct field used to
+    # be fptosi-truncated to an int on native (1.5 -> 1). Now bit-preserved
+    # and correctly typed; the seed was already sound here -> parity.
+    cat >"$1" <<'EOF'
+struct Point:
+    x: f64
+    y: f64
+
+fn main() -> i64:
+    val p = Point(x: 1.5, y: 3.5)
+    print(p.x)
+    print(p.y)
+    print(p.x + p.y)
+    return 0
+EOF
+}
+
+write_case_text_num_concat() {
+    # text + number/bool/float auto-stringify (3434196a876): `"n=" + 5` used
+    # to SIGSEGV native-build. Now the non-text operand is stringified; the
+    # seed already did this -> parity.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print("n=" + 5)
+    print("b=" + true)
+    print("f=" + 3.5)
+    print("a" + 1 + "b")
+    return 0
+EOF
+}
+
+write_case_text_ordering() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val raw_a = "abc"
+    val raw_b = "abd"
+    val tagged_a = "ab" + "c"
+    val tagged_b = "ab" + "d"
+    print(raw_a < raw_b)
+    print(tagged_a < raw_b)
+    print(raw_a < tagged_b)
+    print(tagged_a < tagged_b)
+    print(raw_b > raw_a)
+    print(tagged_b > tagged_a)
+    print(raw_a <= tagged_a)
+    print(raw_a >= tagged_a)
+    print(raw_a < tagged_a)
+    print(tagged_a > raw_a)
+    print(raw_b <= tagged_a)
+    print(raw_a >= tagged_b)
+    return 0
+EOF
+}
+
+write_case_text_bracket_index() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val raw_ch = "hello"[1]
+    val tagged = "wo" + "rld"
+    val tagged_ch = tagged[3]
+    print(raw_ch == "e")
+    print(tagged_ch == "l")
+    print("raw={raw_ch}/{raw_ch.len()};tagged={tagged_ch}/{tagged_ch.len()}")
+    return 0
+EOF
+}
+
+write_case_raw_string_interpolation_contract() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val name = "world"
+    print("double={name}")
+    print('single={name}')
+    print("""triple={name}""")
+    print(r"raw={name}")
+    print(r"""raw-triple={name}""")
+    return 0
+EOF
+}
+
+write_case_new_keyword_identifier() {
+    cat >"$1" <<'EOF'
+fn show(x: text) -> text:
+    return x
+
+fn main() -> i64:
+    val new = "L"
+    val a = "hello"
+    print("interp={new};")
+    print("arg=" + show(new) + ";")
+    print("replace=" + a.replace("l", new))
+    return 0
+EOF
+}
+
+write_case_bare_main() {
+    # A main without a declared return type must still return process status 0.
+    cat >"$1" <<'EOF'
+fn main():
+    print("ok")
+EOF
+}
+
+write_case_iife() {
+    # IIFE (bc33ade0120): a raw lambda-literal callee `(\x: x+1)(5)` used to
+    # loud-fail native-build; now beta-reduces in the live scope. Seed evaluates
+    # it too -> parity (expect 6, 15). (A curried `(\a: \b: ..)(4)(9)` is left
+    # out on purpose: the inner lambda escapes+captures, which correctly
+    # loud-fails native codegen -- not an IIFE the fix targets.)
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print((\x: x + 1)(5))
+    val n = 9
+    print((\x: x + n)(6))
+    return 0
+EOF
+}
+
+write_case_local_lambda_value() {
+    # A non-capturing lambda remains callable after storage and can be passed
+    # through an ordinary fn-typed parameter.
+    cat >"$1" <<'EOF'
+fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+    return f(x)
+
+fn main() -> i64:
+    val f = \x: x + 1
+    print(f(5))
+    print(apply(f, 10))
+    return 0
+EOF
+}
+
+write_case_method_owner_dispatch() {
+    cat >"$1" <<'EOF'
+struct CodegenCompiledModule:
+    handle: i64
+
+impl CodegenCompiledModule:
+    fn cleanup(self) -> i64: 17
+    static fn code() -> i64: 18
+
+struct TieredJitManager:
+    handle: i64
+
+impl TieredJitManager:
+    fn cleanup(self) -> i64: 99
+    static fn code() -> i64: 100
+
+fn main() -> i64:
+    val compiled = CodegenCompiledModule(handle: 1)
+    val jit = TieredJitManager(handle: 2)
+    print(compiled.cleanup())
+    print(jit.cleanup())
+    print(CodegenCompiledModule.code())
+    print(TieredJitManager.code())
+    0
+EOF
+}
+
+write_case_method_text_return() {
+    cat >"$1" <<'EOF'
+struct Widget:
+    name: text
+
+impl Widget:
+    fn describe(self) -> text: "widget:" + self.name
+    static fn category() -> text: "static"
+
+fn main() -> i64:
+    val widget = Widget(name: "w1")
+    print(widget.describe())
+    print("/")
+    print(Widget.category())
+    return 0
+EOF
+}
+
+write_case_module_global_static_init() {
+    # First reads must observe both nonzero and zero static initialization;
+    # compound writes must then persist through StoreGlobal/LoadGlobal.
+    cat >"$1" <<'EOF'
+var g_nonzero: i64 = 17
+var g_zero: i64 = 0
+
+fn main() -> i64:
+    print(g_nonzero)
+    print("/")
+    print(g_zero)
+    g_nonzero += 5
+    g_zero += 5
+    print("|")
+    print(g_nonzero)
+    print("/")
+    print(g_zero)
+    return 0
+EOF
+}
+
+write_case_module_global_false_first_read() {
+    # A zero-valued bool global must be initialized before either its first
+    # direct read or a read through a function. A read followed by a write in
+    # the same function must keep resolving to the module slot, including
+    # when the read is embedded in string interpolation.
+    cat >"$1" <<'EOF'
+var flag = false
+var state = 7
+
+fn read_flag() -> bool:
+    return flag
+
+fn take_state() -> i64:
+    val before = state
+    state = 3
+    return before * 10 + state
+
+fn bit(value: bool) -> i64:
+    if value:
+        return 1
+    return 0
+
+fn main() -> i64:
+    print(bit(flag))
+    print(bit(read_flag()))
+    print("|")
+    print(take_state())
+    print("|state={state}")
+    return 0
+EOF
+}
+
+write_case_enum_text_callback() {
+    # Preserve the declared text payload through callback delivery, pattern
+    # binding, and assignment to another text field.
+    cat >"$1" <<'EOF'
+enum UiEvent:
+    Action(text)
+
+struct Capture:
+    value: text
+
+fn handle(event: UiEvent) -> text:
+    var capture = Capture(value: "")
+    match event:
+        case UiEvent.Action(name):
+            capture.value = name
+    return capture.value
+
+fn deliver(callback: fn(UiEvent) -> text, event: UiEvent) -> text:
+    return callback(event)
+
+fn main() -> i64:
+    print(deliver(handle, UiEvent.Action("run")))
+    return 0
+EOF
+}
+
+write_case_any_forwarding() {
+    # Any is a one-word handle. Forward it unchanged to an existing runtime
+    # extern and compare against a non-forwarded text handle.
+    cat >"$1" <<'EOF'
+extern fn rt_native_eq(a: Any, b: Any) -> bool
+
+fn forwarded_eq(value: Any) -> bool:
+    return rt_native_eq(value, "forwarded")
+
+fn bit(value: bool) -> i64:
+    if value:
+        return 1
+    return 0
+
+fn main() -> i64:
+    print(bit(forwarded_eq("forwarded")))
+    print(bit(forwarded_eq("other")))
+    return 0
+EOF
+}
+
+write_case_logical_short_circuit() {
+    cat >"$1" <<'EOF'
+fn rhs_true() -> bool:
+    print "R"
+    return true
+
+fn rhs_false() -> bool:
+    print "R"
+    return false
+
+fn main() -> i64:
+    print(false and rhs_true())
+    print(true or rhs_false())
+    print(true and rhs_true())
+    print(false or rhs_true())
+    return 0
+EOF
+}
+
+write_case_interp_logical_bool() {
+    # A short-circuit expression makes the SSA alloca rewrite slot the
+    # interpolation accumulator. Its fresh string-constant def must retain
+    # pointer type through the generated Store (bug found 2026-07-16).
+    cat >"$1" <<'EOF'
+fn t() -> bool:
+    return true
+
+fn main() -> i64:
+    print("v={t() and t()}")
+    return 0
+EOF
+}
+
+write_case_brace_literal_scope_exact() {
+    # Exact June 2026 cross-function repro: unmatched literal braces must stay
+    # literal and must not poison HIR scope or make the entry point disappear.
+    # Keep the trailing call: it exercises the `_expr_N` restoration path and
+    # the `functions.contains("main")` decision that participated in the bug.
+    cat >"$1" <<'EOF'
+fn open_brace(x: text) -> text:
+    " { "
+
+fn main():
+    val ob = open_brace("unused")
+    val rule = ".a" + ob + "color: red" + " } "
+    print("RULE: [" + rule + "]")
+
+main()
+EOF
+}
+
+write_case_brace_literal_scope() {
+    # Native-entry supporting case. The exact historical source, including its
+    # top-level call, remains opt-in below while the scope-corruption bug is red.
+    cat >"$1" <<'EOF'
+fn open_brace(x: text) -> text:
+    " { "
+
+fn main() -> i64:
+    val ob = open_brace("unused")
+    val rule = ".a" + ob + "color: red" + " } "
+    print("RULE: [" + rule + "]")
+    return 0
+EOF
+}
+
+write_case_dict_from_call_keys() {
+    # dict returned from a function, keys()-iter index (abde1838e3e): the call
+    # -result dict's string keys came back un-decoded so every d[k] returned 0;
+    # now they round-trip. Seed handles it too -> parity (expect 3).
+    cat >"$1" <<'EOF'
+fn mk() -> Dict<text, i64>:
+    var d = {}
+    d["a"] = 1
+    d["b"] = 2
+    return d
+fn main() -> i64:
+    val d = mk()
+    var t = 0
+    for k in d.keys():
+        t = t + d[k]
+    print(t)
+    return 0
+EOF
+}
+
+write_case_array_concat() {
+    # array `+` concat (e9165c53a66): `a + [x]` used to integer-add two
+    # SplArray* pointers -> SIGSEGV; now routes to rt_array_concat. Seed
+    # concatenates too -> parity (expect 4, 1, 4, 5).
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = [1, 2]
+    val c = a + [3, 4]
+    print(c.len())
+    print(c[0])
+    print(c[3])
+    val e = a + [3, 4] + [5]
+    print(e.len())
+    return 0
+EOF
+}
+
+write_case_interp_bool_float() {
+    # bool/float in string interpolation (e9165c53a66): operands used to route
+    # through rt_raw_i64_to_string, misrendering bools and floats; now use the
+    # bool/f64 dispatch. Seed renders them the same -> parity.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print("n={5} b={true} f={1.5}")
+    print("{3 < 5}")
+    return 0
+EOF
+}
+
+write_case_bool_array_element_interp() {
+    # Bool array element interpolation: preserve the element type both for a
+    # direct index expression and after val/var bindings, so interpolation
+    # selects rt_raw_bool_to_string instead of rendering tagged-value bits.
+    cat >"$1" <<'EOF'
+struct FlagBox:
+    bits: [bool]
+
+class NameBox:
+    var marker: i64
+    var values: [text]
+
+fn main() -> i64:
+    val flags: [bool] = [true, false]
+    print("{flags[0]}/{flags[1]}")
+    val val_true = flags[0]
+    val val_false = flags[1]
+    print(val_true)
+    print(val_false)
+    print("{val_true}/{val_false}")
+    var var_true = flags[0]
+    var var_false = flags[1]
+    print(var_true)
+    print(var_false)
+    print("{var_true}/{var_false}")
+
+    val box = FlagBox(bits: [false, true])
+    val field_bool = box.bits[1]
+    print("{box.bits[0]}/{field_bool}")
+
+    var names = NameBox(marker: 99, values: ["left", "right"])
+    val field_text = names.values[1]
+    print("{names.values[0]}/{field_text}/{names.marker}")
+    return 0
+EOF
+}
+
+write_case_const_pattern_refutable() {
+    # `case Inst.Const(..)` must stay a REFUTABLE enum-variant pattern even
+    # when an unrelated class named `Const` exists (bug
+    # native_const_pattern_lowers_irrefutably_2026-07-13, fixed 2026-07-16:
+    # enum_variant_names precedence guard in HIR lower_pattern). Native must
+    # print CONST_ARM then OTHER_ARM; the seed takes the const arm for BOTH.
+    cat >"$1" <<'EOF'
+enum Inst:
+    Const(i64, i64, i64)
+    Other
+
+class Const:
+    x: i64
+
+fn classify(inst: Inst) -> text:
+    return match inst:
+        case Inst.Const(dest, _, _): "CONST_ARM"
+        case _: "OTHER_ARM"
+
+fn main() -> i64:
+    print(classify(Inst.Const(42, 1, 2)))
+    print(classify(Inst.Other))
+    return 0
+EOF
+}
+
+write_case_tuple_pattern_match() {
+    # Destructuring tuple match pattern (99c7f3516b0): `case (a, b):` binds
+    # the tuple elements. The seed does NOT bind them (prints 0); native
+    # binds correctly (a=3,b=5 -> 3*10+5=35) -> native-authoritative.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val p = (3, 5)
+    match p:
+        case (a, b):
+            print(a * 10 + b)
+    return 0
+EOF
+}
+
+write_case_nested_enum_struct_match() {
+    cat >"$1" <<'EOF'
+struct Point:
+    x: i64
+    y: i64
+
+enum Shape:
+    Circle(Point)
+    Empty
+
+fn main() -> i64:
+    val s = Shape.Circle(Point(x: 3, y: 5))
+    match s:
+        case Shape.Circle(Point(x, y)): print(x * 10 + y)
+        case Shape.Empty: print(0)
+    return 0
+EOF
+}
+
+write_case_nonarray_iterable_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val s = "ab"
+    for ch in s:
+        print(ch)
+    return 0
+EOF
+}
+
+write_case_float_tuple_field() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val t = (1.5, 3.5)
+    print(t.0)
+    print(t.1)
+    print(t.0 + t.1)
+    return 0
+EOF
+}
+
+write_case_option_is_none_map() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val some: i64? = 5
+    val none: i64? = nil
+    if some.is_none():
+        print(1)
+    else:
+        print(0)
+    if none.is_none():
+        print(1)
+    else:
+        print(0)
+    print(some.map(\x: x * 2).unwrap_or(99))
+    print(none.map(\x: x * 2).unwrap_or(99))
+    print(some.map(fn(x: i64) -> text: "v").unwrap_or("d") == "v")
+    print(none.map(fn(x: i64) -> text: "bad").unwrap_or("d") == "d")
+    val some_text: text? = "a"
+    print(some_text.map(fn(x: text) -> i64: x.len()).unwrap_or(0))
+    val bias = 0.5
+    val some_float: f64? = 1.5
+    print(some_float.map(fn(x: f64) -> f64: x + bias).unwrap_or(0.0) == 2.0)
+    val some_bool: bool? = true
+    print(some_bool.map(fn(x: bool) -> bool: not x).unwrap_or(true))
+    val filtered = [1, 2, 3].filter(fn(x: i64) -> bool: x > 1)
+    print(filtered.len())
+    return 0
+EOF
+}
+
+write_case_option_try_annotated_loud() {
+    cp test/fixtures/compiler/native_option_try_annotated_loud.spl "$1"
+}
+
+write_case_option_try_direct_loud() {
+    cp test/fixtures/compiler/native_option_try_direct_loud.spl "$1"
+}
+
+write_case_option_try_unresolved_method_loud() {
+    cp test/fixtures/compiler/native_option_try_unresolved_method_loud.spl "$1"
+}
+
+write_case_result_try() {
+    cat >"$1" <<'EOF'
+fn leaf_ok() -> Result<i64, text>:
+    Ok(7)
+
+fn leaf_err() -> Result<i64, text>:
+    Err("boom")
+
+fn forward_ok() -> Result<i64, text>:
+    val value = leaf_ok()?
+    Ok(value + 1)
+
+fn forward_err() -> Result<i64, text>:
+    val value = leaf_err()?
+    Ok(value)
+
+fn main() -> i64:
+    match forward_ok():
+        case Ok(value): print(value)
+        case Err(message): print(message)
+    match forward_err():
+        case Ok(value): print(value)
+        case Err(message): print(message)
+    0
+EOF
+}
+
+write_case_float_edges() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(-0.0)
+    print(0.0 / 0.0)
+    print(0.000000000000000001)
+    return 0
+EOF
+}
+
+write_case_mixed_numeric_comparison() {
+    cat >"$1" <<'EOF'
+fn bit(value: bool) -> i64:
+    if value: return 1
+    return 0
+
+fn main() -> i64:
+    val nan = 0.0 / 0.0
+    print(bit(41 < 41.5))
+    print(bit(41.5 < 41))
+    print(bit(41 <= 41.5))
+    print(bit(41.5 <= 41))
+    print(bit(41 > 41.5))
+    print(bit(41.5 > 41))
+    print(bit(41 >= 41.5))
+    print(bit(41.5 >= 41))
+    print(bit(42 < 42.0))
+    print(bit(42.0 < 42))
+    print(bit(42 <= 42.0))
+    print(bit(42.0 <= 42))
+    print(bit(42 > 42.0))
+    print(bit(42.0 > 42))
+    print(bit(42 >= 42.0))
+    print(bit(42.0 >= 42))
+    print(bit(0 < -0.0))
+    print(bit(-0.0 < 0))
+    print(bit(0 <= -0.0))
+    print(bit(-0.0 <= 0))
+    print(bit(0 > -0.0))
+    print(bit(-0.0 > 0))
+    print(bit(0 >= -0.0))
+    print(bit(-0.0 >= 0))
+    print(bit(nan < 0))
+    print(bit(0 < nan))
+    print(bit(nan <= 0))
+    print(bit(0 <= nan))
+    print(bit(nan > 0))
+    print(bit(0 > nan))
+    print(bit(nan >= 0))
+    print(bit(0 >= nan))
+    print(bit(42 == 42.0))
+    print(bit(42.0 == 42))
+    print(bit(42 != 42.0))
+    print(bit(42.0 != 42))
+    return 0
+EOF
+}
+
+write_case_mixed_unsigned_float_comparison() {
+    cat >"$1" <<'EOF'
+fn bit(value: bool) -> i64:
+    if value: return 1
+    return 0
+
+fn main() -> i64:
+    val u8v: u8 = 255u8
+    val u16v: u16 = 65535u16
+    val u32v: u32 = 4294967295u32
+    val u64v: u64 = 0x8000000000000000u64
+    print(bit(u8v > 254.5f32))
+    print(bit(u8v >= 254.5f32))
+    print(bit(254.5f32 < u8v))
+    print(bit(254.5f32 <= u8v))
+    print(bit(u16v > 65534.5))
+    print(bit(u16v >= 65534.5))
+    print(bit(65534.5 < u16v))
+    print(bit(65534.5 <= u16v))
+    print(bit(u32v > 4294967294.5))
+    print(bit(u32v >= 4294967294.5))
+    print(bit(4294967294.5 < u32v))
+    print(bit(4294967294.5 <= u32v))
+    print(bit(u64v > 0.0))
+    print(bit(u64v >= 0.0))
+    print(bit(0.0 < u64v))
+    print(bit(0.0 <= u64v))
+    print(bit(u64v < 9223372036854775808.0))
+    print(bit(u64v <= 9223372036854775808.0))
+    print(bit(9223372036854775808.0 > u64v))
+    print(bit(9223372036854775808.0 >= u64v))
+    return 0
+EOF
+}
+
+write_case_mixed_signed_unsigned_ordering() {
+    cat >"$1" <<'EOF'
+fn bit(value: bool) -> i64:
+    if value: return 1
+    return 0
+
+fn main() -> i64:
+    val small: i64 = 1
+    val high: u64 = 0x8000000000000000u64
+    print(bit(small < high))
+    print(bit(high < small))
+    print(bit(small <= high))
+    print(bit(high <= small))
+    print(bit(small > high))
+    print(bit(high > small))
+    print(bit(small >= high))
+    print(bit(high >= small))
+    return 0
+EOF
+}
+
+write_case_unsigned_div_rem_shift() {
+    cat >"$1" <<'EOF'
+fn bit(value: bool) -> i64:
+    if value: return 1
+    return 0
+
+fn main() -> i64:
+    val high: u64 = 0x8000000000000000u64
+    val negative: i64 = -2
+    val signed_count: u64 = 1u64
+    val signed_expected: i64 = -1
+    val signed_dividend: i64 = -9
+    val shifted: i64 = negative >> signed_count
+    print(bit(high / 2u64 == 0x4000000000000000u64))
+    print(bit(high % 3u64 == 2u64))
+    print(bit(high >> 63u64 == 1u64))
+    print(bit(shifted == signed_expected))
+    print(bit(signed_dividend / 2 == -4))
+    print(bit(signed_dividend % 2 == -1))
+    return 0
+EOF
+}
+
+write_case_narrow_signed_shift_unsigned_count() {
+    cat >"$1" <<'EOF'
+fn bit(value: bool) -> i64:
+    if value: return 1
+    return 0
+
+fn main() -> i64:
+    val negative: i32 = -2
+    val count: u32 = 1u32
+    val expected: i32 = -1
+    val shifted: i32 = negative >> count
+    print(bit(shifted == expected))
+    return 0
+EOF
+}
+
+write_case_payloadless_enum_equality() {
+    cat >"$1" <<'EOF'
+enum Color:
+    Red
+    Green
+
+fn bit(v: bool) -> i64:
+    if v: return 1
+    return 0
+
+fn main() -> i64:
+    print(bit(Color.Red == Color.Red))
+    print(bit(Color.Red == Color.Green))
+    return 0
+EOF
+}
+
+write_case_range_pattern_match() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    return match n:
+        case 0..10: 1
+        case 10..=20: 2
+        case _: 3
+
+fn main() -> i64:
+    print(classify(9))
+    print(classify(10))
+    print(classify(20))
+    print(classify(21))
+    return 0
+EOF
+}
+
+write_case_array_contains_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = [10, 20, 30]
+    print(a.contains(30))
+    return 0
+EOF
+}
+
+write_case_array_slice_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = [10, 20, 30]
+    print(a[1:3])
+    return 0
+EOF
+}
+
+write_case_process_run_timeout() {
+    cat >"$1" <<'EOF'
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn main() -> i64:
+    val (arg_out, _, arg_code) = rt_process_run_timeout("/bin/sh", ["-c", "printf '%s' \"$1\"", "sh", "a b"], 2000)
+    print(arg_out)
+    print(arg_code)
+    val (out, err, code) = rt_process_run_timeout("/bin/sh", ["-c", "printf out; printf err >&2; exit 7"], 2000)
+    print(out)
+    print(err)
+    print(code)
+    val (large_out, large_err, large_code) = rt_process_run_timeout("/bin/sh", ["-c", "(i=0; while [ $i -lt 25000 ]; do printf 0123456789; i=$((i+1)); done) & (i=0; while [ $i -lt 25000 ]; do printf 9876543210 >&2; i=$((i+1)); done) & wait"], 5000)
+    print(large_out.len())
+    print(large_err.len())
+    print(large_code)
+    val (partial_out, partial_err, timeout_code) = rt_process_run_timeout("/bin/sh", ["-c", "printf partial; printf problem >&2; sleep 2"], 500)
+    print(partial_out)
+    print(partial_err.contains("problem"))
+    print(partial_err.contains("TIMEOUT"))
+    print(timeout_code)
+    val (_, _, orphan_code) = rt_process_run_timeout("/bin/sh", ["-c", "sleep 5 & echo $! > /tmp/simple_timeout_descendant_$PPID; exit 0"], 2000)
+    print(orphan_code)
+    val (descendant_state, _, descendant_check_code) = rt_process_run_timeout("/bin/sh", ["-c", "sleep 0.1; pid=$(cat /tmp/simple_timeout_descendant_$PPID); state=$(ps -o stat= -p \"$pid\" 2>/dev/null | tr -d ' '); case \"$state\" in ''|Z*) printf gone ;; *) printf alive ;; esac; rm -f /tmp/simple_timeout_descendant_$PPID"], 2000)
+    print(descendant_state)
+    print(descendant_check_code)
+    0
+EOF
+}
+
+write_case_dynload_tagged_text() {
+    # OS detection deliberately uses the rt_platform_name extern, NOT
+    # std.nogc_sync_mut.env.platform.detect_os: that import transitively
+    # drags the whole std.env/std.path closure, which still contains
+    # methods native codegen loud-refuses (find/join/last/pop — see bug
+    # native_env_closure_unsupported_methods_2026-07-16.md). This case is
+    # about hosted dynload of tagged text values, not the env stack.
+    cat >"$1" <<'EOF'
+extern fn rt_platform_name() -> text
+
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_dlclose(handle: i64) -> i64
+
+fn main() -> i64:
+    val os = rt_platform_name()
+    var library_left = ""
+    var library_right = ""
+    var symbol_left = ""
+    var symbol_right = ""
+    if os == "linux":
+        library_left = "libc."
+        library_right = "so.6"
+        symbol_left = "str"
+        symbol_right = "len"
+    elif os == "macos":
+        library_left = "/usr/lib/libSystem."
+        library_right = "B.dylib"
+        symbol_left = "str"
+        symbol_right = "len"
+    elif os == "freebsd":
+        library_left = "/lib/libc."
+        library_right = "so.7"
+        symbol_left = "str"
+        symbol_right = "len"
+    elif os == "windows":
+        library_left = "kernel"
+        library_right = "32.dll"
+        symbol_left = "GetCurrentProcess"
+        symbol_right = "Id"
+    else:
+        return 2
+
+    val library = library_left + library_right
+    val symbol = symbol_left + symbol_right
+    val handle = spl_dlopen(library)
+    if handle == 0:
+        return 3
+    if spl_dlsym(0, symbol) != 0:
+        spl_dlclose(handle)
+        return 4
+    if spl_dlsym(handle, symbol) == 0:
+        spl_dlclose(handle)
+        return 5
+    if spl_dlsym(handle, "simple_missing_" + "dynload_symbol") != 0:
+        spl_dlclose(handle)
+        return 6
+    if spl_dlclose(handle) != 0:
+        return 7
+    if spl_dlclose(0) != 0:
+        return 8
+    print "dynload-ok"
+    0
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Runner: shared helpers.
+# ---------------------------------------------------------------------------
+
+record() {
+    record_id="$1"; record_mode="$2"; record_status="$3"; record_detail="$4"
+    TOTAL=$((TOTAL + 1))
+    case "$record_status" in
+        PASS) PASS_N=$((PASS_N + 1)) ;;
+        FAIL) FAIL_N=$((FAIL_N + 1)) ;;
+        XFAIL) XFAIL_N=$((XFAIL_N + 1)) ;;
+    esac
+    printf '%s\t%s\t%s\t%s\n' "$record_id" "$record_mode" "$record_status" "$record_detail" >>"$RESULTS_FILE"
+    echo "[$record_id] mode=$record_mode -> $record_status ($record_detail)"
+}
+
+case_selected() {
+    [ -z "${NATIVE_PARITY_CASES:-}" ] && return 0
+    for wanted in $NATIVE_PARITY_CASES; do
+        if [ "$1" = "$wanted" ]; then
+            MATCHED_PARITY_CASES="$MATCHED_PARITY_CASES $1"
+            return 0
+        fi
+    done
+    return 1
+}
+
+run_seed() {
+    # $1 = src, writes stdout to $2. Timeout-guarded: the seed interpreter
+    # is known to hang on some constructs (see `range_for`) — never let an
+    # oracle run block the gate. rc is ignored; callers treat the seed as
+    # a best-effort oracle only.
+    src="$1"; out="$2"
+    timeout "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$src" \
+        >"$out" 2>"$out.stderr" || true
+}
+
+build_native() {
+    # $1 = src, $2 = out bin, $3 = build log, optional $4 = strict backend,
+    # optional $5 = native-build mode.
+    src="$1"; bin="$2"; log="$3"
+    if [ "$#" -ge 5 ]; then
+        backend="$4"; mode="$5"
+        env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --backend="$backend" --mode="$mode" --entry "$src" -o "$bin" --clean >"$log" 2>&1
+    elif [ "$#" -ge 4 ]; then
+        backend="$4"
+        env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --backend="$backend" --entry "$src" -o "$bin" --clean >"$log" 2>&1
+    else
+        env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --entry "$src" -o "$bin" --clean >"$log" 2>&1
+    fi
+}
+
+build_native_fixture() {
+    # Checked-in fixtures may import sibling fixture modules and stdlib code.
+    src="$1"; bin="$2"; log="$3"; backend="$4"
+    env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+        --backend="$backend" --source test/fixtures --source src/lib --entry-closure \
+        --entry "$src" -o "$bin" --clean >"$log" 2>&1
+}
+
+# Memoized capability probe for the strict-cranelift leg. The cranelift
+# adapter (src/compiler/70.backend/backend/cranelift_codegen_adapter.spl) is
+# interpreted live and calls rt_cranelift_* SFFI externs that must be exported
+# by the deployed seed binary. Seeds older than the SFFI surface (e.g. missing
+# rt_cranelift_declare_string_data / rt_cranelift_declare_global_data) fail
+# EVERY cranelift build at interpretation time with "unknown extern function"
+# regardless of the case under test. That is a seed-deployment gap, not a
+# per-case regression: record those legs as XFAIL, referencing
+# $CRANELIFT_XFAIL_BUG, instead of 9 misleading per-construct FAILs. The probe
+# only downgrades on the exact missing-extern signature; any other cranelift
+# build failure still runs the cases and FAILs loudly.
+CRANELIFT_SEED_SUPPORT=""
+CRANELIFT_XFAIL_BUG="doc/08_tracking/bug/cranelift_seed_missing_sffi_externs_2026-07-16.md"
+
+cranelift_seed_supported() {
+    if [ -z "$CRANELIFT_SEED_SUPPORT" ]; then
+        probe_src="$WORK_DIR/cranelift_probe_${STAMP}.spl"
+        probe_bin="$WORK_DIR/cranelift_probe_${STAMP}_bin"
+        probe_log="$WORK_DIR/cranelift_probe_${STAMP}.build.log"
+        printf 'fn main():\n    print("probe")\n' >"$probe_src"
+        if build_native "$probe_src" "$probe_bin" "$probe_log" cranelift; then
+            CRANELIFT_SEED_SUPPORT="yes"
+        elif grep -q "unknown extern function: rt_cranelift_" "$probe_log"; then
+            CRANELIFT_SEED_SUPPORT="no"
+        else
+            CRANELIFT_SEED_SUPPORT="yes"
+        fi
+    fi
+    [ "$CRANELIFT_SEED_SUPPORT" = "yes" ]
+}
+
+run_strict_dual_backend_case() {
+    id="$1"; writer="$2"; expected="$3"; mode="${4:-}"
+    case_selected "$id" || return 0
+    checked_in=0
+    if [ -f "$writer" ]; then
+        src="$writer"
+        checked_in=1
+    else
+        src="$WORK_DIR/case_${id}_${STAMP}.spl"
+        "$writer" "$src"
+    fi
+
+    for backend in llvm cranelift; do
+        if [ "$backend" = "cranelift" ] && ! cranelift_seed_supported; then
+            record "${id}_${backend}" "strict-$backend" "XFAIL" \
+                "seed binary lacks rt_cranelift_* SFFI externs; see $CRANELIFT_XFAIL_BUG"
+            continue
+        fi
+        bin="$WORK_DIR/case_${id}_${backend}_${STAMP}_bin"
+        build_log="$WORK_DIR/case_${id}_${backend}_${STAMP}.build.log"
+        build_ok=0
+        if [ "$checked_in" -eq 1 ]; then
+            if build_native_fixture "$src" "$bin" "$build_log" "$backend"; then
+                build_ok=1
+            fi
+        elif [ "$backend" = "llvm" ] && [ "$mode" != "" ]; then
+            if env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+                --mode="$mode" --entry "$src" -o "$bin" --clean >"$build_log" 2>&1; then
+                build_ok=1
+            fi
+        elif [ "$backend" = "llvm" ]; then
+            if build_native "$src" "$bin" "$build_log"; then
+                build_ok=1
+            fi
+        elif [ "$mode" != "" ]; then
+            if build_native "$src" "$bin" "$build_log" "$backend" "$mode"; then
+                build_ok=1
+            fi
+        else
+            if build_native "$src" "$bin" "$build_log" "$backend"; then
+                build_ok=1
+            fi
+        fi
+        if [ "$build_ok" -eq 1 ]; then
+            native_rc=0
+            native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+            native_norm="$(printf '%s' "$native_raw" | norm)"
+            if [ "$native_rc" -ne 0 ]; then
+                record "${id}_${backend}" "strict-$backend" "FAIL" \
+                    "native run rc=$native_rc; stderr=$build_log.run.stderr"
+            elif [ "$native_norm" = "$expected" ]; then
+                record "${id}_${backend}" "strict-$backend" "PASS" \
+                    "native=[$native_norm] want=[$expected]"
+            else
+                record "${id}_${backend}" "strict-$backend" "FAIL" \
+                    "native=[$native_norm] want=[$expected] REGRESSION"
+            fi
+        else
+            record "${id}_${backend}" "strict-$backend" "FAIL" \
+                "native build failed; log=$build_log"
+        fi
+    done
+}
+
+run_parity_case() {
+    id="$1"; writer="$2"
+    expected="${3:-}"
+    case_selected "$id" || return 0
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    seed_out="$WORK_DIR/case_${id}_${STAMP}.seed.out"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+    run_seed "$src" "$seed_out"
+    seed_norm="$(norm <"$seed_out")"
+
+    if build_native "$src" "$bin" "$build_log"; then
+        native_rc=0
+        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+        native_norm="$(printf '%s' "$native_raw" | norm)"
+        if [ "$native_rc" -ne 0 ]; then
+            record "$id" "parity" "FAIL" "native run rc=$native_rc; stderr=$build_log.run.stderr"
+        elif [ -n "$expected" ] && [ "$seed_norm" != "$expected" ]; then
+            record "$id" "parity" "FAIL" "seed=[$seed_norm] want=[$expected] REGRESSION"
+        elif [ -n "$expected" ] && [ "$native_norm" != "$expected" ]; then
+            record "$id" "parity" "FAIL" "native=[$native_norm] want=[$expected] REGRESSION"
+        elif [ "$native_norm" = "$seed_norm" ]; then
+            record "$id" "parity" "PASS" "seed=[$seed_norm] native=[$native_norm]"
+        else
+            record "$id" "parity" "FAIL" "seed=[$seed_norm] native=[$native_norm] MISMATCH"
+        fi
+    else
+        record "$id" "parity" "FAIL" "native build failed unexpectedly; log=$build_log"
+    fi
+}
+
+run_native_authoritative_case() {
+    id="$1"; writer="$2"; expected="$3"; seed_note="$4"
+    case_selected "$id" || return 0
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    seed_out="$WORK_DIR/case_${id}_${STAMP}.seed.out"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+    # Seed run is best-effort/logged only — never asserted on. It may fail
+    # to parse entirely (e.g. `me`), hang (e.g. `continue` in range_for —
+    # guarded by the timeout in run_seed), or run and silently produce
+    # wrong output (documented per-case as $seed_note).
+    run_seed "$src" "$seed_out"
+    seed_norm="$(norm <"$seed_out" 2>/dev/null || echo '')"
+
+    build_ok=0
+    if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then
+        if build_native "$src" "$bin" "$build_log" cranelift; then
+            build_ok=1
+        fi
+    elif build_native "$src" "$bin" "$build_log"; then
+        build_ok=1
+    fi
+    if [ "$build_ok" -eq 1 ]; then
+        native_rc=0
+        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+        native_norm="$(printf '%s' "$native_raw" | norm)"
+        if [ "$native_rc" -ne 0 ]; then
+            record "$id" "native-authoritative" "FAIL" \
+                "native run rc=$native_rc; stderr=$build_log.run.stderr"
+        elif [ "$native_norm" = "$expected" ]; then
+            record "$id" "native-authoritative" "PASS" \
+                "native=[$native_norm] want=[$expected] (seed diverges: $seed_note; seed_out=[$seed_norm])"
+        else
+            record "$id" "native-authoritative" "FAIL" \
+                "native=[$native_norm] want=[$expected] REGRESSION (seed_out=[$seed_norm])"
+        fi
+    else
+        record "$id" "native-authoritative" "FAIL" "native build failed; log=$build_log"
+    fi
+}
+
+run_loud_fail_case() {
+    id="$1"; writer="$2"; expected_diag="$3"
+    case_selected "$id" || return 0
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+    build_rc=0
+    if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then
+        build_native "$src" "$bin" "$build_log" cranelift || build_rc=$?
+    else
+        build_native "$src" "$bin" "$build_log" || build_rc=$?
+    fi
+
+    if [ "$build_rc" -eq 0 ]; then
+        record "$id" "loud-fail" "FAIL" "native build UNEXPECTEDLY SUCCEEDED (was supposed to refuse loudly) — REGRESSION"
+        return
+    fi
+    if [ -e "$bin" ]; then
+        record "$id" "loud-fail" "FAIL" "build rc!=0 but binary exists at $bin — silent partial output, not a loud fail"
+        return
+    fi
+    if grep -qF "$expected_diag" "$build_log"; then
+        record "$id" "loud-fail" "PASS" "build rc=$build_rc, no binary, diagnostic matched: $expected_diag"
+    else
+        record "$id" "loud-fail" "FAIL" "build rc=$build_rc, no binary, but expected diagnostic not found: $expected_diag (log=$build_log)"
+    fi
+}
+
+run_runtime_fail_case() {
+    id="$1"; writer="$2"; expected_diag="$3"
+    case_selected "$id" || return 0
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+    run_out="$WORK_DIR/case_${id}_${STAMP}.run.out"
+    run_err="$WORK_DIR/case_${id}_${STAMP}.run.err"
+
+    "$writer" "$src"
+    if ! build_native "$src" "$bin" "$build_log"; then
+        record "$id" "runtime-fail" "FAIL" "native build failed unexpectedly; log=$build_log"
+        return
+    fi
+    run_rc=0
+    timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" >"$run_out" 2>"$run_err" || run_rc=$?
+    if [ "$run_rc" -eq 0 ]; then
+        record "$id" "runtime-fail" "FAIL" "native run unexpectedly succeeded"
+    elif grep -qF "$expected_diag" "$run_err"; then
+        record "$id" "runtime-fail" "PASS" "run rc=$run_rc, diagnostic matched: $expected_diag"
+    else
+        record "$id" "runtime-fail" "FAIL" "run rc=$run_rc, expected diagnostic not found: $expected_diag"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Case table.
+# ---------------------------------------------------------------------------
+
+# --- PARITY: seed oracle sound, both backends must agree -------------------
+run_parity_case struct_nested_field write_case_struct_nested_field
+run_strict_dual_backend_case nested_struct_value_copy write_case_nested_struct_value_copy "local=1,class=4,param=1,class=5"
+run_parity_case struct_return_byval write_case_struct_return_byval
+run_parity_case static_ctor_field write_case_static_ctor_field
+run_parity_case method_owner_dispatch_i64 write_case_method_owner_dispatch_i64
+run_parity_case toplevel_array_len write_case_toplevel_array_len
+run_parity_case result_cross_fn_text write_case_result_cross_fn_text
+run_parity_case struct_array_field write_case_struct_array_field
+run_strict_dual_backend_case class_array_field_mutation write_case_class_array_field_mutation "2742274299"
+run_strict_dual_backend_case class_array_param_field_mutation test/fixtures/compiler/native_class_array_param_field_mutation.spl "1"
+if [ "${NATIVE_OPEN_BUG_REPROS:-0}" = 1 ]; then
+    run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl "3377777700"
+    run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"
+fi
+run_strict_dual_backend_case nested_struct_array_text_projection test/fixtures/native_nested_struct_array_text_projection/main.spl "result=5"
+run_strict_dual_backend_case draw_ir_command_text_projection test/fixtures/native_draw_ir_command_text_projection/main.spl "result=1"
+run_strict_dual_backend_case engine2d_draw_ir_param_projection test/fixtures/native_engine2d_draw_ir_param_projection/main.spl "direct=1batch_rendered=1batch_skipped=0composition_rendered=1composition_skipped=0"
+run_parity_case array_of_structs write_case_array_of_structs
+run_parity_case array_2d write_case_array_2d
+run_parity_case tuple_access write_case_tuple_access
+run_parity_case tuple_destructure write_case_tuple_destructure
+run_parity_case tuple_for write_case_tuple_for
+run_parity_case dict_has write_case_dict_has
+run_parity_case dict_keys_iter write_case_dict_keys_iter
+run_parity_case value_match write_case_value_match
+run_parity_case text_match write_case_text_match
+run_parity_case or_pattern write_case_or_pattern
+run_parity_case range_pattern_match write_case_range_pattern_match
+run_parity_case bool_match write_case_bool_match
+run_parity_case bool_print write_case_bool_print
+run_parity_case sized_int write_case_sized_int
+run_parity_case text_int_len_methods write_case_text_int_len_methods
+run_strict_dual_backend_case split_text_elements write_case_split_text_elements "3aa2trueaabbccy"
+run_strict_dual_backend_case text_lines_semantics write_case_text_lines_semantics "00111true2true2truetrue1true"
+run_parity_case some0 write_case_some0
+run_parity_case str_method_var_arg write_case_str_method_var_arg
+run_parity_case float_struct_field write_case_float_struct_field
+run_parity_case float_tuple_field write_case_float_tuple_field
+run_parity_case text_num_concat write_case_text_num_concat
+run_strict_dual_backend_case text_ordering write_case_text_ordering "truetruetruetruetruetruetruetruefalsefalsefalsefalse"
+run_strict_dual_backend_case text_bracket_index write_case_text_bracket_index "truetrueraw=e/1;tagged=l/1"
+run_strict_dual_backend_case raw_string_interpolation_contract write_case_raw_string_interpolation_contract "double=worldsingle={name}triple={name}raw={name}raw-triple={name}"
+run_strict_dual_backend_case new_keyword_identifier write_case_new_keyword_identifier "interp=L;arg=L;replace=heLLo"
+run_strict_dual_backend_case bare_main write_case_bare_main "ok"
+run_strict_dual_backend_case crossmodule_field_index_collision write_case_crossmodule_field_index_collision "640/480"
+run_parity_case iife write_case_iife
+run_strict_dual_backend_case local_lambda_value write_case_local_lambda_value "611"
+run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispatch "179918100"
+run_strict_dual_backend_case method_text_return write_case_method_text_return "widget:w1/static"
+run_strict_dual_backend_case module_global_static_init write_case_module_global_static_init "17/0|22/5" dynload
+run_strict_dual_backend_case module_global_false_first_read write_case_module_global_false_first_read "00|73|state=3"
+run_strict_dual_backend_case enum_text_callback write_case_enum_text_callback "run"
+run_strict_dual_backend_case option_is_none_map write_case_option_is_none_map "011099truetrue1truefalse2"
+run_strict_dual_backend_case result_try write_case_result_try "8boom"
+run_strict_dual_backend_case any_forwarding write_case_any_forwarding "10"
+run_strict_dual_backend_case logical_short_circuit write_case_logical_short_circuit "falsetrueRtrueRtrue"
+run_strict_dual_backend_case interp_logical_bool write_case_interp_logical_bool "v=true"
+run_parity_case brace_literal_scope write_case_brace_literal_scope "RULE:[.a{color:red}]"
+run_strict_dual_backend_case process_run_timeout write_case_process_run_timeout "ab0outerr72500002500000partialtruetrue-10gone0"
+run_strict_dual_backend_case dynload_tagged_text write_case_dynload_tagged_text "dynload-ok"
+run_strict_dual_backend_case mixed_numeric_comparison write_case_mixed_numeric_comparison "101001010011001100110011000000000011"
+run_strict_dual_backend_case mixed_unsigned_float_comparison write_case_mixed_unsigned_float_comparison "11111111111111110101"
+run_strict_dual_backend_case mixed_signed_unsigned_ordering write_case_mixed_signed_unsigned_ordering "10100101"
+run_strict_dual_backend_case unsigned_div_rem_shift write_case_unsigned_div_rem_shift "111111"
+run_parity_case narrow_signed_shift_unsigned_count write_case_narrow_signed_shift_unsigned_count "1"
+run_parity_case dict_from_call_keys write_case_dict_from_call_keys
+run_parity_case array_concat write_case_array_concat
+run_parity_case interp_bool_float write_case_interp_bool_float
+run_strict_dual_backend_case bool_array_element_interp write_case_bool_array_element_interp "true/falsetruefalsetrue/falsetruefalsetrue/falsefalse/trueleft/right/99"
+run_parity_case payloadless_enum_equality write_case_payloadless_enum_equality
+
+# --- NATIVE-AUTHORITATIVE: seed oracle broken/unparseable for these --------
+run_native_authoritative_case me_receiver write_case_me_receiver "41" \
+    "seed cannot even PARSE 'me' (Unexpected token: expected identifier, found Me)"
+run_native_authoritative_case float_print write_case_float_print "2.00.50.13.5" \
+    "seed prints 0.1 as the non-round-tripping '0.09999999999999998'"
+run_native_authoritative_case float_edges write_case_float_edges "-0.0NaN0.000000000000000001" \
+    "seed prints 1e-18 as the non-round-tripping '0.00000000000000000' (the value collapses to 0.0; -0.0 and NaN agree; reclassified from PARITY 2026-07-16 after empirical dual-run — native's positional 0.000000000000000001 round-trips to exactly 1e-18)"
+run_native_authoritative_case nested_enum_struct_match write_case_nested_enum_struct_match "35" \
+    "seed does not bind the fields of a NESTED struct pattern inside an enum payload: 'case Shape.Circle(Point(x, y)):' takes the arm but binds x=0/y=0, printing 0 instead of 35 (binding the payload whole via 'case Shape.Circle(p):' works — same bind-zeros landmine class as tuple_pattern_match; reclassified from PARITY 2026-07-16 after empirical dual-run)"
+run_native_authoritative_case mut_param write_case_mut_param "417" \
+    "seed's JIT falls back to its interpreter on a mutation-capability HIR error and the fallback ignores 'mut' entirely, printing 77 (both unmutated)"
+run_native_authoritative_case option_nil_check write_case_option_nil_check "7" \
+    "seed's 'if val v = x.?:' pattern-bind is broken: it prints a bogus 'false' and never runs either branch body, regardless of x's value"
+run_native_authoritative_case dict_get write_case_dict_get "2" \
+    "seed's Dict.get() returns a bogus 0.0 on a present key (known landmine: Dict.get()-nil on present keys)"
+run_native_authoritative_case range_for write_case_range_for "4" \
+    "seed HANGS forever on 'continue' inside a for-i-in-a..b range loop (confirmed via 10+ minute 98%-CPU spin, killed under timeout) -- this is why every seed run in this harness is timeout-guarded"
+run_native_authoritative_case rt_is_none_payload9 write_case_rt_is_none_payload9 "9" \
+    "seed's 'if val x = a.?:' pattern-bind is broken (same landmine as option_nil_check): it prints a bogus 'false' and never runs the branch body"
+run_native_authoritative_case compound_assign write_case_compound_assign "1512246" \
+    "seed's frontend silently drops the arithmetic in compound assignment and rebinds to the RHS operand, printing 5/3/2/3 instead of 15/12/24/6"
+run_native_authoritative_case tuple_pattern_match write_case_tuple_pattern_match "35" \
+    "seed does not bind the elements of a 'case (a, b):' destructuring tuple pattern, printing 0 instead of 35"
+run_native_authoritative_case result_unwrap write_case_result_unwrap "779yes08optoptFfallback" \
+    "seed's Result.unwrap_or does not preserve Result payload/tag semantics (observed raw value marker and Err payload)"
+run_native_authoritative_case const_pattern_refutable write_case_const_pattern_refutable "CONST_ARMOTHER_ARM" \
+    "seed reinterprets a bare 'case Const(..)' enum-variant pattern as an irrefutable Struct pattern when a same-named class exists, taking the const arm for Inst.Other too (prints CONST_ARM twice)"
+
+# --- LOUD-FAIL: native-build must refuse these constructs, not miscompile --
+run_loud_fail_case int_overflow_loud write_case_int_overflow_loud \
+    "integer literal out of range for i64"
+run_loud_fail_case match_guard_loud write_case_match_guard_loud \
+    "match guards (case x if cond:) are not supported by native codegen yet"
+# static_ctor upgraded loud-fail -> parity: static impl/struct-body methods
+# are now owner-qualified at HIR symbol definition (two `static fn new()` on
+# different types get distinct symbols instead of colliding on one bare-name
+# symbol), so `A.new()` / `B.new()` resolve unambiguously and no longer need
+# the "ambiguous static method call" refusal. Seed agrees (prints 12).
+run_parity_case static_ctor_disambiguated write_case_static_ctor_ambiguous_loud
+run_loud_fail_case result_unwrap_u64_loud write_case_result_unwrap_u64_loud \
+    "unsupported Result unwrap payload type"
+# Option `?` (q_optiontry_dynload lane, 2026-07-17): the flat-nullable Option
+# try lowering is now implemented (switch_operators_calls.spl lower_try_expr),
+# so these cases upgrade from loud-fail to real builds -- but NOT to
+# run_parity_case: the seed oracle itself silently produces ZERO stdout bytes
+# for ANY `i64?` `.unwrap_or()` call (confirmed independent of `?` via minimal
+# reproductions with no try operator involved at all -- a pre-existing seed
+# defect, out of scope per "Fix .spl not Rust"). Native is authoritative here.
+# Use ordinary present payloads here: payload `3` still collides with the flat
+# ABI nil sentinel and remains an open tagged-Option bug, so accepting `0` for
+# that input would encode the known defect as a green result.
+run_native_authoritative_case option_try_annotated_loud write_case_option_try_annotated_loud "5" \
+    "seed's Option .unwrap_or() silently prints zero bytes for any i64? receiver (confirmed independent of '?'); native must preserve the annotated present payload 5"
+run_native_authoritative_case option_try_direct_loud write_case_option_try_direct_loud "4" \
+    "seed's Option .unwrap_or() silently prints zero bytes for any i64? receiver (confirmed independent of '?'); native's payload 4 does not collide with the sentinel, so 4 is correct"
+run_native_authoritative_case option_try_unresolved_method_loud write_case_option_try_unresolved_method_loud "6" \
+    "seed's Option .unwrap_or() silently prints zero bytes for any i64? receiver; native must preserve the unresolved method return type through '?' and print payload 6"
+run_loud_fail_case nonarray_iterable_loud write_case_nonarray_iterable_loud \
+    "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while"
+run_loud_fail_case array_contains_loud write_case_array_contains_loud \
+    "unresolved method call: contains"
+run_loud_fail_case array_slice_loud write_case_array_slice_loud \
+    "unresolved method call: slice"
+run_runtime_fail_case result_unwrap_err_runtime write_case_result_unwrap_err_runtime \
+    'called `.unwrap()` on an Err Result'
+run_runtime_fail_case option_text_unwrap_nil_runtime write_case_option_text_unwrap_nil_runtime \
+    'called `.unwrap()` on a nil Option'
+
+echo ""
+echo "===== check-native-seed-parity summary ====="
+printf '%-24s %-22s %-6s %s\n' "ID" "MODE" "STATUS" "DETAIL"
+while IFS="$(printf '\t')" read -r id mode status detail; do
+    printf '%-24s %-22s %-6s %s\n' "$id" "$mode" "$status" "$detail"
+done <"$RESULTS_FILE"
+
+echo ""
+echo "total=$TOTAL pass=$PASS_N fail=$FAIL_N xfail=$XFAIL_N"
+echo "results_file=$RESULTS_FILE"
+
+if [ -n "${NATIVE_PARITY_CASES:-}" ]; then
+    for wanted in $NATIVE_PARITY_CASES; do
+        matched=false
+        for found in $MATCHED_PARITY_CASES; do
+            [ "$wanted" = "$found" ] && matched=true
+        done
+        if [ "$matched" != true ]; then
+            echo "native_seed_parity=false (unknown requested case: $wanted)"
+            exit 1
+        fi
+    done
+fi
+
+if [ "${NATIVE_PARITY_FAIL_ON_XFAIL:-0}" = 1 ] && [ "$XFAIL_N" -gt 0 ]; then
+    echo "native_seed_parity=false (xfail is forbidden by NATIVE_PARITY_FAIL_ON_XFAIL)"
+    exit 1
+fi
+
+if [ "$FAIL_N" -gt 0 ]; then
+    echo "native_seed_parity=false"
+    exit 1
+fi
+
+echo "native_seed_parity=true"

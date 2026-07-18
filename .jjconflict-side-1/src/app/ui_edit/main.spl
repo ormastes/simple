@@ -1,0 +1,368 @@
+# ui_edit — HTML/CSS pair editor CLI
+#
+# Usage: bin/simple run src/app/ui_edit/main.spl -- <subcommand> [args]
+#
+# Subcommands:
+#   new <dir>/<name>            Create <name>.html + <name>.css
+#   list <page.html>            List elements in the HTML file
+#   add-element <page.html> <tag> [--id=X] [--parent=TAG] [--text=...]
+#   add-css <page.html> <css>   Add a CSS file reference to the HTML
+#   set-css <page.html> <css> <selector> <prop> <value>
+#   help                        Show usage and exit 0
+
+use std.cli.cli_util (get_cli_args)
+use std.io.{file_exists, file_read, file_write}
+use std.common.ui.html_ui.catalog.{catalog_supports, catalog_tags}
+use std.common.ui.html_ui.doc_ops.{list_elements, add_element}
+
+fn main() -> i64:
+    val raw = get_cli_args()
+    # get_cli_args may return [script.spl, --, sub, ...] depending on launcher.
+    # Strip leading .spl script path and/or "--" separator.
+    var start = 0
+    if raw.len() > 0:
+        val first = raw[0]
+        if first.ends_with(".spl"):
+            start = 1
+    if start < raw.len():
+        val maybe_sep = raw[start]
+        if maybe_sep == "--":
+            start = start + 1
+    var args: [text] = []
+    var raw_i = start
+    while raw_i < raw.len():
+        args = args + [raw[raw_i]]
+        raw_i = raw_i + 1
+
+    if args.len() == 0:
+        print_usage()
+        return 0
+
+    val sub = args[0]
+
+    if sub == "help" or sub == "--help" or sub == "-h":
+        print_usage()
+        return 0
+    elif sub == "new":
+        return cmd_new(args)
+    elif sub == "list":
+        return cmd_list(args)
+    elif sub == "add-element":
+        return cmd_add_element(args)
+    elif sub == "add-css":
+        return cmd_add_css(args)
+    elif sub == "set-css":
+        return cmd_set_css(args)
+    else:
+        print "ui_edit: unknown subcommand: {sub}"
+        print "Run with 'help' for usage."
+        return 1
+
+# ---------------------------------------------------------------------------
+# new <dir>/<name>
+# ---------------------------------------------------------------------------
+
+fn cmd_new(args: [text]) -> i64:
+    if args.len() < 2:
+        print "ui_edit new: missing argument <dir>/<name>"
+        return 1
+    val path = args[1]
+
+    # Extract base name (last path component)
+    val parts = path.split("/")
+    val name = parts[parts.len() - 1]
+
+    val html_path = path + ".html"
+    val css_path = path + ".css"
+
+    if file_exists(html_path):
+        print "ui_edit new: file already exists: {html_path}"
+        return 1
+
+    val dq = "\""
+    val link_tag = "<link rel=" + dq + "stylesheet" + dq + " href=" + dq + name + ".css" + dq + ">"
+
+    val html_content = "<!DOCTYPE html>\n<html lang=" + dq + "en" + dq + ">\n<head>\n  <meta charset=" + dq + "UTF-8" + dq + ">\n  <title>" + name + "</title>\n  " + link_tag + "\n</head>\n<body>\n</body>\n</html>\n"
+
+    file_write(html_path, html_content)
+
+    val css_content = "/* :root - " + name + " styles */\n"
+    file_write(css_path, css_content)
+
+    print "Created: {html_path}"
+    print "Created: {css_path}"
+    return 0
+
+# ---------------------------------------------------------------------------
+# list <page.html>
+# ---------------------------------------------------------------------------
+
+fn cmd_list(args: [text]) -> i64:
+    if args.len() < 2:
+        print "ui_edit list: missing argument <page.html>"
+        return 1
+    val html_path = args[1]
+    if not file_exists(html_path):
+        print "ui_edit list: file not found: {html_path}"
+        return 1
+    val html = file_read(html_path)
+    val elements = list_elements(html)
+    var i = 0
+    while i < elements.len():
+        print elements[i]
+        i = i + 1
+    return 0
+
+# ---------------------------------------------------------------------------
+# add-element <page.html> <tag> [--id=X] [--parent=TAG] [--text=...]
+# ---------------------------------------------------------------------------
+
+fn cmd_add_element(args: [text]) -> i64:
+    if args.len() < 3:
+        print "ui_edit add-element: missing arguments <page.html> <tag>"
+        return 1
+
+    val html_path = args[1]
+    val tag = args[2]
+
+    if not catalog_supports(tag):
+        print "ui_edit add-element: unknown tag: {tag}"
+        print "Valid tags:"
+        val tags = catalog_tags()
+        var t = 0
+        while t < tags.len():
+            print "  {tags[t]}"
+            t = t + 1
+        return 1
+
+    if not file_exists(html_path):
+        print "ui_edit add-element: file not found: {html_path}"
+        return 1
+
+    var elem_id = ""
+    var parent = "body"
+    var inner_text = ""
+
+    var i = 3
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--id="):
+            elem_id = arg.slice(5, arg.len())
+        elif arg.starts_with("--parent="):
+            parent = arg.slice(9, arg.len())
+        elif arg.starts_with("--text="):
+            inner_text = arg.slice(7, arg.len())
+        i = i + 1
+
+    val html = file_read(html_path)
+    val updated = add_element(html, parent, tag, elem_id, inner_text)
+    file_write(html_path, updated)
+    print "Added <{tag}> to {html_path}"
+    return 0
+
+# ---------------------------------------------------------------------------
+# add-css <page.html> <styles.css>
+# ---------------------------------------------------------------------------
+
+fn cmd_add_css(args: [text]) -> i64:
+    if args.len() < 3:
+        print "ui_edit add-css: missing arguments <page.html> <styles.css>"
+        return 1
+    val html_path = args[1]
+    val css_path = args[2]
+
+    if not file_exists(html_path):
+        print "ui_edit add-css: file not found: {html_path}"
+        return 1
+
+    # Create CSS file if missing
+    if not file_exists(css_path):
+        file_write(css_path, "")
+
+    # Compute href relative to the HTML file's directory
+    val href = _css_href_for(html_path, css_path)
+
+    # Check if link already present
+    val html = file_read(html_path)
+    if _has_link(html, href):
+        print "Already linked: {css_path}"
+        return 0
+
+    # Inject <link> before </head>
+    val updated = _inject_link_tag(html, href)
+    file_write(html_path, updated)
+    print "Linked {css_path} to {html_path}"
+    return 0
+
+# Compute CSS href: if css_path is in same dir as html_path, use basename only
+fn _css_href_for(html_path: text, css_path: text) -> text:
+    val html_parts = html_path.split("/")
+    val css_parts = css_path.split("/")
+    # If css is an absolute path starting with / or looks relative, use as-is
+    # If css shares same directory as html, use just the filename
+    val html_dir = _dir_of_path(html_path)
+    val css_dir = _dir_of_path(css_path)
+    if html_dir == css_dir:
+        return css_parts[css_parts.len() - 1]
+    return css_path
+
+fn _dir_of_path(path: text) -> text:
+    val last = _last_slash(path)
+    if last < 0:
+        return ""
+    return path.slice(0, last)
+
+fn _last_slash(s: text) -> i64:
+    var i = s.len() - 1
+    while i >= 0:
+        val ch = s.slice(i, i + 1)
+        if ch == "/":
+            return i
+        i = i - 1
+    -1
+
+# Check if HTML text already has a link for this href
+fn _has_link(html: text, href: text) -> bool:
+    val needle = "href=" + "\"" + href + "\""
+    val pos = _css_index_of(html, needle, 0)
+    pos >= 0
+
+# Inject <link rel="stylesheet" href="..."> before </head> (or at end)
+fn _inject_link_tag(html: text, href: text) -> text:
+    val dq = "\""
+    val tag = "<link rel=" + dq + "stylesheet" + dq + " href=" + dq + href + dq + ">"
+    val head_close = _css_index_of(html, "</head>", 0)
+    if head_close >= 0:
+        return html.slice(0, head_close) + "  " + tag + "\n" + html.slice(head_close, html.len())
+    return html + "  " + tag + "\n"
+
+# ---------------------------------------------------------------------------
+# set-css <page.html> <styles.css> <selector> <property> <value>
+# ---------------------------------------------------------------------------
+
+fn cmd_set_css(args: [text]) -> i64:
+    if args.len() < 6:
+        print "ui_edit set-css: missing arguments <page.html> <css> <selector> <property> <value>"
+        return 1
+
+    val html_path = args[1]
+    val css_path = args[2]
+    val selector = args[3]
+    val prop = args[4]
+    val value = args[5]
+
+    # Create CSS file if missing
+    if not file_exists(css_path):
+        file_write(css_path, "")
+
+    val css = file_read(css_path)
+    val updated = set_css_rule(css, selector, prop, value)
+    file_write(css_path, updated)
+    val ob = "{"
+    val cb = "}"
+    print "Set {selector} " + ob + " {prop}: {value}; " + cb + " in {css_path}"
+    return 0
+
+# ---------------------------------------------------------------------------
+# CSS rule manipulation — pure text
+# ---------------------------------------------------------------------------
+
+# Find needle in haystack from start. Returns -1 if not found.
+fn _css_index_of(haystack: text, needle: text, start: i64) -> i64:
+    val hlen = haystack.len()
+    val nlen = needle.len()
+    if nlen == 0:
+        return start
+    var i = start
+    while i <= hlen - nlen:
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+# Set or append a CSS property inside a selector block.
+# If the selector block exists, replace/insert the property line.
+# Otherwise append a new block at EOF. Preserves all unrelated content.
+fn set_css_rule(css: text, selector: text, prop: text, value: text) -> text:
+    val ob = "{"
+    val cb = "}"
+
+    # Try "selector {" then "selector{"
+    var block_start = _css_index_of(css, selector + " " + ob, 0)
+    var brace_pos = -1
+    if block_start >= 0:
+        brace_pos = block_start + selector.len() + 1
+    else:
+        block_start = _css_index_of(css, selector + ob, 0)
+        if block_start >= 0:
+            brace_pos = block_start + selector.len()
+
+    if brace_pos < 0:
+        # Selector not found — append new block
+        var nl = ""
+        if css.len() > 0 and not css.ends_with("\n"):
+            nl = "\n"
+        val new_block = nl + selector + " " + ob + "\n  " + prop + ": " + value + ";\n" + cb + "\n"
+        return css + new_block
+
+    # Find the closing brace of this block
+    val close_pos = _css_index_of(css, cb, brace_pos + 1)
+    if close_pos < 0:
+        # Malformed CSS — just append
+        var nl2 = ""
+        if css.len() > 0 and not css.ends_with("\n"):
+            nl2 = "\n"
+        val new_block2 = nl2 + selector + " " + ob + "\n  " + prop + ": " + value + ";\n" + cb + "\n"
+        return css + new_block2
+
+    val before_close = css.slice(0, close_pos)
+    val after_close = css.slice(close_pos, css.len())
+
+    # Look for existing "prop:" inside the block
+    val prop_colon = prop + ":"
+    val prop_pos = _css_index_of(before_close, prop_colon, brace_pos + 1)
+
+    if prop_pos >= 0:
+        # Replace the existing property line (includes trailing newline)
+        val line_end = _find_line_end(before_close, prop_pos)
+        val replaced = before_close.slice(0, prop_pos) + "  " + prop + ": " + value + ";\n" + before_close.slice(line_end, before_close.len())
+        return replaced + after_close
+    else:
+        # Insert property before the closing brace
+        val inserted = before_close + "  " + prop + ": " + value + ";\n"
+        return inserted + after_close
+
+# Find position after end of line starting at pos
+fn _find_line_end(s: text, pos: i64) -> i64:
+    var i = pos
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "\n":
+            return i + 1
+        i = i + 1
+    s.len()
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+fn print_usage():
+    print "ui_edit - HTML/CSS pair editor"
+    print ""
+    print "Usage: bin/simple run src/app/ui_edit/main.spl -- <subcommand> [args]"
+    print ""
+    print "Subcommands:"
+    print "  new <dir>/<name>"
+    print "      Create <dir>/<name>.html and <dir>/<name>.css"
+    print "  list <page.html>"
+    print "      Print one line per element in the HTML file"
+    print "  add-element <page.html> <tag> [--id=X] [--parent=TAG] [--text=...]"
+    print "      Add an HTML element (tag must be in catalog)"
+    print "  add-css <page.html> <styles.css>"
+    print "      Link a CSS file to the HTML (creates css if missing)"
+    print "  set-css <page.html> <styles.css> <selector> <property> <value>"
+    print "      Set/update a CSS property in a selector block"
+    print "  help"
+    print "      Show this message"
+
+export main

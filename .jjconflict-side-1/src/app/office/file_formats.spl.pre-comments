@@ -1,0 +1,559 @@
+# Office File Formats
+#
+# Real open/save round-trip for the office surfaces, targeting the *current*
+# document models the HTML renderers consume:
+#   - Writer  <-> Markdown  (attributed_text.RichDocument, BlockKind enum)
+#   - Calc    <-> CSV        (spreadsheet.Sheet)
+#
+# These turn the suite's demos into genuine documents: open a file from disk,
+# edit/render it, save it back. Parsers mirror the markdown subset the WYSIWYG
+# and word surfaces already speak, but produce the BlockKind model (not the
+# stale word_app DocBlock variant), so parsed docs feed render_document_html.
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, CommentDef, spans_to_plain_text, comment_def_for}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellStyle, CellValue, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref, default_style}
+use app.office.sheets.formula.{evaluate_formula, evaluate_formula_array, set_formula_origin}
+use common.office.number.{office_parse_signed_decimal_f64}
+
+# =========================================================================
+# Markdown <-> RichDocument (Writer)
+# =========================================================================
+
+fn _span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "")
+
+fn _find_marker(s: text, marker: text, from: i32) -> i32:
+    """Index of the next occurrence of marker at or after `from`, or -1."""
+    var i = from
+    val mlen = marker.len()
+    while i + mlen <= s.len():
+        if s.slice(i, i + mlen) == marker:
+            return i
+        i = i + 1
+    -1
+
+fn _replace_last_span(spans: [TextSpan], updated: TextSpan) -> [TextSpan]:
+    """Copy `spans` with its last element replaced by `updated`. Rebuilds via
+    push rather than index-assigning a local array element (the established
+    copy-return idiom elsewhere in this codebase — see `recalculate_formula_cells`
+    in this same file — used here for reliability under this interpreter)."""
+    var out: [TextSpan] = []
+    var j = 0
+    while j < spans.len() - 1:
+        out.push(spans[j])
+        j = j + 1
+    out.push(updated)
+    out
+
+fn parse_inline_spans(s: text, comment_start: i32) -> (spans: [TextSpan], comments: [CommentDef]):
+    """Parse markdown inline styling — **bold**, *italic*, `code`,
+    [text](url) links, `[^id]` footnote references, and `[>>author: text<<]`
+    word comments — into styled spans. A link span carries style=Normal plus
+    a non-empty link_url; a footnote reference span carries an empty visible
+    text plus a non-empty footnote_id (there is no inline text to preserve —
+    the marker is replaced by an auto-numbered superscript on render, same
+    idea as a link carrying its url separately from its visible text).
+
+    A `[>>author: text<<]` comment token ATTACHES to the immediately
+    preceding span (mutating a copy of it to carry a fresh numeric
+    comment_id, via `_replace_last_span`) rather than becoming its own
+    marker span — unlike a footnote, a comment's author/text live inline at
+    the point of use, with no separate `[^id]:`-style definition line
+    elsewhere in the document, so there is no "reference" to point at
+    anything but the commented span itself. `comment_start` is the next free
+    numeric comment id: unlike `[^id]` (user-chosen, so never collides), a
+    comment token carries no id at all in the source, so the CALLER
+    (`_md_block` / `parse_markdown_document`) must hand out document-wide
+    unique ids across every line — the returned `comments` list holds one
+    CommentDef per token found here, in order, numbered
+    `comment_start, comment_start + 1, ...`. A comment token with no
+    preceding span/text to attach to, or a malformed body (no ": " author
+    separator), is left as literal text, same as any other unterminated
+    marker here.
+
+    A leading `!` before `[` (image markdown, `![alt](src)`) is left as
+    literal text here — images stay a whole-block convention handled by the
+    html renderer / docx writer, not an inline span kind. Unterminated
+    markers/links/references stay literal text."""
+    var spans: [TextSpan] = []
+    var comments: [CommentDef] = []
+    var plain = ""
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 2) == "[^":
+            val close_bracket = _find_marker(s, "]", i + 2)
+            if close_bracket > i + 1:
+                if plain != "":
+                    spans.push(_span(plain))
+                    plain = ""
+                val fn_id = s.slice(i + 2, close_bracket)
+                spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fn_id, comment_id: ""))
+                i = close_bracket + 1
+                continue
+        if s.slice(i, i + 3) == "[>>":
+            val close_marker = _find_marker(s, "<<]", i + 3)
+            if close_marker > i + 2:
+                val inner = s.slice(i + 3, close_marker)
+                val colon = _find_marker(inner, ": ", 0)
+                if colon > 0:
+                    if plain != "":
+                        spans.push(_span(plain))
+                        plain = ""
+                    if spans.len() > 0:
+                        val author = inner.slice(0, colon)
+                        val ctext = inner.slice(colon + 2, inner.len())
+                        val cid = "{comment_start + comments.len()}"
+                        val target = spans[spans.len() - 1]
+                        spans = _replace_last_span(spans, TextSpan(text: target.text, style: target.style, link_url: target.link_url, footnote_id: target.footnote_id, comment_id: cid))
+                        comments.push(CommentDef(id: cid, author: author, text: ctext))
+                        i = close_marker + 3
+                        continue
+        if s.slice(i, i + 1) == "[" and not (i > 0 and s.slice(i - 1, i) == "!"):
+            val close_bracket = _find_marker(s, "]", i + 1)
+            if close_bracket > i and close_bracket + 1 < s.len() and s.slice(close_bracket + 1, close_bracket + 2) == "(":
+                val close_paren = _find_marker(s, ")", close_bracket + 2)
+                if close_paren > close_bracket + 1:
+                    if plain != "":
+                        spans.push(_span(plain))
+                        plain = ""
+                    val link_text = s.slice(i + 1, close_bracket)
+                    val url = s.slice(close_bracket + 2, close_paren)
+                    spans.push(TextSpan(text: link_text, style: InlineStyle.Normal, link_url: url, footnote_id: "", comment_id: ""))
+                    i = close_paren + 1
+                    continue
+        var marker = ""
+        var style = InlineStyle.Normal
+        if i + 2 <= s.len() and s.slice(i, i + 2) == "**":
+            marker = "**"
+            style = InlineStyle.Bold
+        elif s.slice(i, i + 1) == "*":
+            marker = "*"
+            style = InlineStyle.Italic
+        elif s.slice(i, i + 1) == "`":
+            marker = "`"
+            style = InlineStyle.Code
+        if marker != "":
+            val close = _find_marker(s, marker, i + marker.len())
+            if close > i + marker.len() - 1:
+                if plain != "":
+                    spans.push(_span(plain))
+                    plain = ""
+                spans.push(TextSpan(text: s.slice(i + marker.len(), close), style: style, link_url: "", footnote_id: "", comment_id: ""))
+                i = close + marker.len()
+                continue
+        plain = "{plain}{s.slice(i, i + 1)}"
+        i = i + 1
+    if plain != "":
+        spans.push(_span(plain))
+    if spans.len() == 0:
+        spans.push(_span(""))
+    (spans: spans, comments: comments)
+
+fn _ff_is_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
+     c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+fn _ordered_marker_len(line: text) -> i32:
+    """Length of a leading `<digits>. ` ordered-list marker (e.g. "1. ",
+    "10. "), or -1 if the line doesn't start with one."""
+    var i = 0
+    while i < line.len() and _ff_is_digit(line.slice(i, i + 1)):
+        i = i + 1
+    if i == 0:
+        return -1
+    if i + 1 < line.len() and line.slice(i, i + 1) == "." and line.slice(i + 1, i + 2) == " ":
+        return i + 2
+    -1
+
+fn _footnote_def_parts(line: text) -> (is_def: bool, id: text, content: text):
+    """Match a `[^id]: note text` footnote definition line. The standard form
+    has exactly one space after the colon; that single space is consumed
+    (not part of the content) so round-tripping reproduces it exactly."""
+    if not line.starts_with("[^"):
+        return (is_def: false, id: "", content: "")
+    val close = _find_marker(line, "]", 2)
+    if close < 2:
+        return (is_def: false, id: "", content: "")
+    if close + 1 >= line.len() or line.slice(close + 1, close + 2) != ":":
+        return (is_def: false, id: "", content: "")
+    val fn_id = line.slice(2, close)
+    var rest = line.slice(close + 2, line.len())
+    if rest.starts_with(" "):
+        rest = rest.slice(1, rest.len())
+    (is_def: true, id: fn_id, content: rest)
+
+fn _md_block(line: text, comment_start: i32) -> (block: DocBlock, comments: [CommentDef]):
+    """Classify a single non-fence, non-blank markdown line into a DocBlock.
+    `comment_start` is the next free numeric comment id, threaded document-
+    wide by `parse_markdown_document` (see `parse_inline_spans`)."""
+    val fd = _footnote_def_parts(line)
+    if fd.is_def:
+        return (block: DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: fd.content, style: InlineStyle.Normal, link_url: "", footnote_id: fd.id, comment_id: "")]), comments: [])
+    if line.starts_with("### "):
+        val r = parse_inline_spans(line.slice(4, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Heading3, spans: r.spans), comments: r.comments)
+    if line.starts_with("## "):
+        val r = parse_inline_spans(line.slice(3, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Heading2, spans: r.spans), comments: r.comments)
+    if line.starts_with("# "):
+        val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Heading1, spans: r.spans), comments: r.comments)
+    val ordered_len = _ordered_marker_len(line)
+    if ordered_len > 0:
+        val r = parse_inline_spans(line.slice(ordered_len, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.OrderedItem, spans: r.spans), comments: r.comments)
+    if line.starts_with("- ") or line.starts_with("* "):
+        val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.BulletItem, spans: r.spans), comments: r.comments)
+    if line.starts_with("> "):
+        val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Quote, spans: r.spans), comments: r.comments)
+    val r = parse_inline_spans(line.trim(), comment_start)
+    (block: DocBlock(kind: BlockKind.Paragraph, spans: r.spans), comments: r.comments)
+
+fn parse_markdown_document(content: text, title: text) -> RichDocument:
+    """Parse a markdown subset (#/##/### headings, -/* bullets, `1.` ordered
+    items, > quote, ``` code fences, `[^id]`/`[^id]: text` footnotes,
+    `[>>author: text<<]` word comments, and paragraphs) into a RichDocument
+    the HTML renderer can style."""
+    var doc = RichDocument.new(title)
+    val lines = content.split("\n")
+    var in_code = false
+    var code_buf = ""
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_code:
+                doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
+                code_buf = ""
+                in_code = false
+            else:
+                in_code = true
+            continue
+        if in_code:
+            code_buf = if code_buf == "": line else: "{code_buf}\n{line}"
+            continue
+        if trimmed == "":
+            continue
+        val r = _md_block(trimmed, doc.comments.len() + 1)
+        doc.blocks.push(r.block)
+        for c in r.comments:
+            doc.comments.push(c)
+    if in_code:
+        doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
+    doc
+
+fn _span_to_markdown(span: TextSpan, comments: [CommentDef]) -> text:
+    var out = ""
+    if span.footnote_id != "":
+        out = "[^{span.footnote_id}]"
+    elif span.link_url != "":
+        out = "[{span.text}]({span.link_url})"
+    else:
+        match span.style:
+            case Bold: out = "**{span.text}**"
+            case Italic: out = "*{span.text}*"
+            case Code: out = "`{span.text}`"
+            _: out = span.text
+    if span.comment_id != "":
+        val cd = comment_def_for(comments, span.comment_id)
+        out = "{out}[>>{cd.author}: {cd.text}<<]"
+    out
+
+fn _spans_to_markdown(spans: [TextSpan], comments: [CommentDef]) -> text:
+    var out = ""
+    for span in spans:
+        out = "{out}{_span_to_markdown(span, comments)}"
+    out
+
+fn _footnote_def_block_id(block: DocBlock) -> text:
+    if block.spans.len() > 0:
+        return block.spans[0].footnote_id
+    ""
+
+fn _block_to_markdown(block: DocBlock, ordinal: i64, comments: [CommentDef]) -> text:
+    """Serialize one block back to its markdown line. `ordinal` is the
+    1-based position of this block within its run of consecutive
+    OrderedItem blocks (ignored by every other kind). `comments` resolves
+    any `TextSpan.comment_id` back to its `[>>author: text<<]` form."""
+    match block.kind:
+        case Heading1: return "# {_spans_to_markdown(block.spans, comments)}"
+        case Heading2: return "## {_spans_to_markdown(block.spans, comments)}"
+        case Heading3: return "### {_spans_to_markdown(block.spans, comments)}"
+        case BulletItem: return "- {_spans_to_markdown(block.spans, comments)}"
+        case OrderedItem: return "{ordinal}. {_spans_to_markdown(block.spans, comments)}"
+        case Quote: return "> {_spans_to_markdown(block.spans, comments)}"
+        case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
+        case Paragraph: return _spans_to_markdown(block.spans, comments)
+        case FootnoteDef: return "[^{_footnote_def_block_id(block)}]: {spans_to_plain_text(block.spans)}"
+
+fn _md_is_tight_list_kind(kind: BlockKind) -> bool:
+    """List-like kinds that join consecutive same-kind blocks with a single
+    newline (a "tight" list/footnote-block run) instead of a blank line."""
+    kind == BlockKind.BulletItem or kind == BlockKind.OrderedItem or kind == BlockKind.FootnoteDef
+
+fn document_to_markdown(doc: RichDocument) -> text:
+    """Serialize a RichDocument back to markdown text for saving. Consecutive
+    blocks of the same list-like kind (bullets, ordered items, footnote
+    definitions) join with a single newline (a tight run); every other
+    transition keeps a blank line between blocks, as before."""
+    var out = ""
+    var first = true
+    var ordinal: i64 = 0
+    var prev_kind = BlockKind.Paragraph
+    var has_prev = false
+    for block in doc.blocks:
+        if block.kind == BlockKind.OrderedItem:
+            ordinal = ordinal + 1
+        else:
+            ordinal = 0
+        val line = _block_to_markdown(block, ordinal, doc.comments)
+        if first:
+            out = line
+        else:
+            val tight = has_prev and block.kind == prev_kind and _md_is_tight_list_kind(block.kind)
+            val sep = if tight: "\n" else: "\n\n"
+            out = "{out}{sep}{line}"
+        first = false
+        has_prev = true
+        prev_kind = block.kind
+    out
+
+# =========================================================================
+# CSV <-> Sheet (Calc)
+# =========================================================================
+
+fn _split_csv_line(line: text) -> [text]:
+    """Split one CSV line into fields, honoring double-quoted fields with commas.
+    ponytail: no escaped-quote ("") unescaping; add if real CSV files need it."""
+    var fields: [text] = []
+    var cur = ""
+    var in_quotes = false
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "\"":
+            in_quotes = not in_quotes
+        elif ch == "," and not in_quotes:
+            fields.push(cur)
+            cur = ""
+        else:
+            cur = "{cur}{ch}"
+        i = i + 1
+    fields.push(cur)
+    fields
+
+fn parse_csv_sheet(content: text, name: text) -> Sheet:
+    """Parse CSV text into a Sheet, one row per line, cells left-to-right."""
+    var sheet = Sheet.new(name)
+    val lines = content.split("\n")
+    var row = 0
+    for line in lines:
+        if line.trim() == "" and row >= lines.len() - 1:
+            row = row + 1
+            continue
+        val fields = _split_csv_line(line)
+        var col = 0
+        for field in fields:
+            val value = field.trim()
+            if value != "":
+                val ref_str = "{col_to_letter(col)}{row + 1}"
+                sheet.set_value(ref_str, value)
+            col = col + 1
+        row = row + 1
+    recalculate_formula_cells(sheet)
+
+struct SpillSpec:
+    origin: text          # origin cell key, e.g. "A1"
+    agrid: [[text]]        # row-major display strings
+    blocked: bool         # true -> origin shows #SPILL!, nothing spills
+
+fn _scalar_display(result: CellValue) -> text:
+    """Render a scalar formula result to its cached display string."""
+    match result:
+        CellValue.NumberVal(value):
+            val int_val = value.to_i64()
+            if value - int_val.to_f64() == 0.0:
+                return "{int_val}"
+            return "{value}"
+        CellValue.BoolVal(value):
+            return if value: "TRUE" else: "FALSE"
+        CellValue.TextVal(value):
+            return value
+        CellValue.ErrorVal(message):
+            return "#ERR: {message}"
+        _:
+            return ""
+
+fn _ff_text_is_number(s: text) -> bool:
+    """Whether a display string is a plain (optionally signed/decimal) number."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-":
+        if s.len() == 1:
+            return false
+        i = 1
+    var has_digit = false
+    var has_dot = false
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == ".":
+            if has_dot:
+                return false
+            has_dot = true
+        elif _ff_is_digit(c):
+            has_digit = true
+        else:
+            return false
+        i = i + 1
+    has_digit
+
+fn _spill_cell_value(display: text) -> CellValue:
+    """Wrap a spilled display string as a numeric cell when it parses as a
+    number, else as text, so downstream numeric formulas still see numbers."""
+    if _ff_text_is_number(display):
+        return CellValue.NumberVal(value: office_parse_signed_decimal_f64(display))
+    CellValue.TextVal(value: display)
+
+fn _spill_blocked(sheet: Sheet, origin_key: text, agrid: [[text]]) -> bool:
+    """A spill is blocked when any target cell (other than the origin) is
+    non-empty AND its current display differs from the value about to be
+    written there. Because a prior spill of the *same* origin writes exactly
+    those values, re-running recalc never blocks a spill against itself — this
+    is what makes recalculation idempotent without persistent provenance."""
+    val origin = parse_cell_ref(origin_key)
+    if origin == nil:
+        return false
+    val rows = agrid.len()
+    if rows == 0:
+        return false
+    val cols = agrid[0].len()
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            if not (i == 0 and j == 0):
+                val ref_str = cell_ref_to_string(CellRef(col: origin.col + j, row: origin.row + i))
+                val cur = cell_display_text(sheet.get_cell(ref_str))
+                if cur != "" and cur != agrid[i][j]:
+                    return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn _write_spill(sheet: Sheet, origin_key: text, expr: text, agrid: [[text]], style: CellStyle) -> Sheet:
+    """Write the top-left value into the origin (kept as a formula, caching the
+    value) and spill the remaining values into the adjacent rectangle."""
+    var work = sheet
+    val origin = parse_cell_ref(origin_key)
+    if origin == nil:
+        return work
+    val rows = agrid.len()
+    val cols = agrid[0].len()
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            val disp = agrid[i][j]
+            if i == 0 and j == 0:
+                work.set_cell(origin_key, Cell(
+                    value: CellValue.FormulaVal(expr: expr, cached_display: disp),
+                    style: style
+                ))
+            else:
+                val ref_str = cell_ref_to_string(CellRef(col: origin.col + j, row: origin.row + i))
+                work.set_cell(ref_str, Cell(value: _spill_cell_value(disp), style: default_style()))
+            j = j + 1
+        i = i + 1
+    work
+
+fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
+    """Recalculate every formula cell, caching its display value, so `=A1+B1`
+    shows its computed result instead of the raw formula text. Returns the
+    recalculated sheet — callers must use the return value, because the
+    interpreter can pass aggregates by copy, silently dropping mutations made
+    through a parameter. Keys are snapshotted first because set_cell mutates
+    the Dict being iterated.
+
+    Dynamic-array formulas (SEQUENCE/TRANSPOSE/UNIQUE/SORT/FILTER) evaluate to a
+    2D grid: the top-left value stays in the formula's own cell and the rest
+    spills into the adjacent rectangle. If any target cell is occupied by a
+    value that is not the one about to be written, the origin shows #SPILL! and
+    nothing spills. Blockage is decided against the sheet as it stands before
+    any spills are written in this pass, so overlapping spills and the
+    intended-value rule together keep a second recalculation identical to the
+    first (idempotent)."""
+    var work = sheet
+    var keys: [text] = []
+    for key in work.cells.keys():
+        keys.push(key)
+
+    # Phase 1: compute array grids and blockage against the pre-spill sheet.
+    var specs: [SpillSpec] = []
+    for key in keys:
+        val cell = work.get_cell(key)
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                set_formula_origin(key)
+                val agrid = evaluate_formula_array(expr, work)
+                if agrid.len() > 0 and agrid[0].len() > 0:
+                    val is_blocked = _spill_blocked(work, key, agrid)
+                    specs.push(SpillSpec(origin: key, agrid: agrid, blocked: is_blocked))
+            _:
+                pass_do_nothing("non-formula cells are not array origins")
+
+    # Phase 2: write scalar results and array spills.
+    for key in keys:
+        val cell = work.get_cell(key)
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                var spec_idx = -1
+                var si = 0
+                while si < specs.len():
+                    if specs[si].origin == key:
+                        spec_idx = si
+                    si = si + 1
+                if spec_idx >= 0:
+                    val spec = specs[spec_idx]
+                    if spec.blocked:
+                        work.set_cell(key, Cell(
+                            value: CellValue.FormulaVal(expr: expr, cached_display: "#SPILL!"),
+                            style: cell.style
+                        ))
+                    else:
+                        work = _write_spill(work, key, expr, spec.agrid, cell.style)
+                else:
+                    set_formula_origin(key)
+                    val result = evaluate_formula(expr, work)
+                    work.set_cell(key, Cell(
+                        value: CellValue.FormulaVal(expr: expr, cached_display: _scalar_display(result)),
+                        style: cell.style
+                    ))
+            _:
+                pass_do_nothing("non-formula cells keep their value")
+    set_formula_origin("")
+    work
+
+fn sheet_to_csv(sheet: Sheet) -> text:
+    """Serialize a Sheet's used range back to CSV text."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return ""
+    var out = ""
+    var r = start.row
+    while r <= end_ref.row:
+        var cells: [text] = []
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            cells.push(cell_display_text(sheet.get_cell(ref_str)))
+            c = c + 1
+        val line = cells.join(",")
+        out = if r == start.row: line else: "{out}\n{line}"
+        r = r + 1
+    out

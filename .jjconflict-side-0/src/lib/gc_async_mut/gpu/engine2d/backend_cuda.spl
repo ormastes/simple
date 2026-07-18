@@ -1,0 +1,907 @@
+# 2D Engine — CUDA backend facade.
+#
+# CUDA shares the same RenderBackend contract as CPU and Metal. When CUDA is
+# unavailable, init() returns false and leaves a typed probe result for strict
+# callers instead of reporting a CPU fallback as CUDA rendering.
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gpu.engine2d.backend_cuda_kernels.{cuda_2d_ptx_source}
+use std.gpu.engine2d.backend_cuda_launch_args.{CUDA_FONT_ARG_BYTES, _i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_font_atlas_composite_launch_args, _write_u32_pixels_to_host}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin}
+use std.gpu.engine2d.helpers_text.{text_transparent_blit_buffer}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+
+fn cuda_backend_alloc(size: i64) -> i64:
+    rt_alloc(size)
+
+fn cuda_backend_free(ptr: i64, size: i64):
+    rt_free(ptr, size)
+
+fn cuda_backend_write_i64(addr: i64, offset: i64, value: i64):
+    cuda_launch_args_write_i64(addr, offset, value)
+
+fn cuda_backend_read_i32(addr: i64, offset: i64) -> i32:
+    cuda_launch_args_read_i32(addr, offset)
+
+val CUDA_2D_BLOCK_SIZE: i64 = 256
+val CUDA_2D_CLEAR_ARG_BYTES: i64 = 32
+
+fn _cuda_2d_kernel_gap(device_name: text) -> BackendProbeResult:
+    var missing_render = BackendProbeResult.failed("cuda", "CUDA 2D render kernels unavailable: simple_2d_fill_u32, kernel_clear, kernel_draw_rect_filled, kernel_draw_rect_outline, kernel_draw_image, kernel_draw_gradient_rect, kernel_draw_line, kernel_draw_circle, kernel_draw_circle_filled, kernel_draw_rounded_rect")
+    missing_render.api_name = "cuda"
+    missing_render.feature_gate = "cuda_2d_render"
+    missing_render.shader_format = "ptx"
+    missing_render.device_name = _cuda_device_label(device_name)
+    missing_render.has_compute = true
+    missing_render.has_graphics = false
+    missing_render.has_present = false
+    missing_render
+
+fn _cuda_2d_kernel_ready(device_name: text) -> BackendProbeResult:
+    var ready = BackendProbeResult.success("cuda", "CUDA 2D render kernels loaded and self-tested")
+    ready.api_name = "cuda"
+    ready.feature_gate = "cuda_2d_render"
+    ready.shader_format = "ptx"
+    ready.device_name = _cuda_device_label(device_name)
+    ready.has_compute = true
+    ready.has_graphics = true
+    ready.has_present = true
+    ready
+
+fn _cuda_2d_self_test_failed(device_name: text, message: text) -> BackendProbeResult:
+    var failed = BackendProbeResult.failed("cuda", "CUDA 2D render self-test failed: " + message)
+    failed.api_name = "cuda"
+    failed.feature_gate = "cuda_2d_render_self_test"
+    failed.shader_format = "ptx"
+    failed.device_name = _cuda_device_label(device_name)
+    failed.has_compute = true
+    failed.has_graphics = false
+    failed.has_present = false
+    failed
+
+fn _cuda_device_label(device_name: text) -> text:
+    if device_name != "":
+        return device_name
+    "cuda"
+
+fn _cuda_context_failure(message: text) -> BackendProbeResult:
+    var failed = BackendProbeResult.failed("cuda", message)
+    failed.api_name = "cuda"
+    failed.feature_gate = "cuda_context"
+    failed.shader_format = "ptx"
+    failed
+
+
+fn _cuda_2d_verify_pixels(host_ptr: i64) -> text:
+    val bg = 0x11223344 as u32
+    val fg = 0xAABBCCDD as u32
+    val edge = 0x55667788 as u32
+    val img_a = 0x01020304 as u32
+    val img_b = 0x05060708 as u32
+    val grad_top = 0x10203040 as u32
+    val grad_bottom = 0x20304050 as u32
+    val line = 0x31415926 as u32
+    val circle = 0x27182818 as u32
+    val filled_circle = 0xFEEDC0DE as u32
+    var idx = 0
+    while idx < 16:
+        val x = idx % 4
+        val y = idx / 4
+        val border = x == 0 or x == 3 or y == 0 or y == 3
+        var expected = if border: edge else: fg
+        if x == 1 and y == 1:
+            expected = img_a
+        if x == 2 and y == 1:
+            expected = img_b
+        if (x == 1 or x == 2) and y == 2:
+            expected = grad_top
+        if (x == 1 or x == 2) and y == 3:
+            expected = grad_bottom
+        if y == 0:
+            expected = line
+        val circle_dx = x - 1
+        val circle_dy = y - 1
+        val circle_distance = circle_dx * circle_dx + circle_dy * circle_dy
+        if circle_distance <= 4 and circle_distance >= 1:
+            expected = circle
+        val filled_dx = x - 2
+        val filled_dy = y - 2
+        val filled_distance = filled_dx * filled_dx + filled_dy * filled_dy
+        if filled_distance <= 1:
+            expected = filled_circle
+        val actual = cuda_backend_read_i32(host_ptr, _i64(idx) * 4) as u32
+        if actual != expected:
+            return "readback mismatch at pixel " + idx.to_text()
+        idx = idx + 1
+    ""
+
+fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) -> BackendProbeResult:
+    val bytes = 64
+    val image_bytes = 8
+    val d_framebuffer = session.alloc(bytes)
+    if d_framebuffer == 0:
+        return _cuda_2d_self_test_failed(device_name, "device allocation failed")
+    val d_image = session.alloc(image_bytes)
+    if d_image == 0:
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "image device allocation failed")
+    val clear_val_ptr = cuda_backend_alloc(CUDA_2D_CLEAR_ARG_BYTES)
+    val clear_args_ptr = cuda_backend_alloc(CUDA_2D_CLEAR_ARG_BYTES)
+    val rect_val_ptr = cuda_backend_alloc(72)
+    val rect_args_ptr = cuda_backend_alloc(72)
+    val image_host_ptr = cuda_backend_alloc(image_bytes)
+    val readback_ptr = cuda_backend_alloc(bytes)
+    if clear_val_ptr == 0 or clear_args_ptr == 0 or rect_val_ptr == 0 or rect_args_ptr == 0 or image_host_ptr == 0 or readback_ptr == 0:
+        if clear_val_ptr != 0:
+            cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        if clear_args_ptr != 0:
+            cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        if rect_val_ptr != 0:
+            cuda_backend_free(rect_val_ptr, 72)
+        if rect_args_ptr != 0:
+            cuda_backend_free(rect_args_ptr, 72)
+        if image_host_ptr != 0:
+            cuda_backend_free(image_host_ptr, image_bytes)
+        if readback_ptr != 0:
+            cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "host staging allocation failed")
+    val bg = 0x11223344 as u32
+    val fg = 0xAABBCCDD as u32
+    val edge = 0x55667788 as u32
+    val grad_top = 0x10203040 as u32
+    val grad_bottom = 0x20304050 as u32
+    val line = 0x31415926 as u32
+    val circle = 0x27182818 as u32
+    val filled_circle = 0xFEEDC0DE as u32
+    _write_clear_launch_args(clear_val_ptr, clear_args_ptr, d_framebuffer, bg, 4, 4)
+    val clear_rc = session.fill_kernel(4, 4, clear_args_ptr)
+    if clear_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "simple_2d_fill_u32 launch failed with rc " + clear_rc.to_text())
+    _write_rect_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 1, 1, 2, 2, fg, 4, 4)
+    val rect_rc = cuda_launch_kernel(module, "kernel_draw_rect_filled", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if rect_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_rect_filled launch failed with rc " + rect_rc.to_text())
+    _write_rect_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 0, 0, 4, 4, edge, 4, 4)
+    val outline_rc = cuda_launch_kernel(module, "kernel_draw_rect_outline", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if outline_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_rect_outline launch failed with rc " + outline_rc.to_text())
+    _write_u32_pixels_to_host(image_host_ptr, [0x01020304 as u32, 0x05060708 as u32], 2)
+    val upload_rc = cuda_memcpy_htod(d_image, image_host_ptr, image_bytes)
+    if upload_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "image upload failed with rc " + upload_rc.to_text())
+    _write_image_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, d_image, 1, 1, 2, 1, 4, 4)
+    val image_rc = cuda_launch_kernel(module, "kernel_draw_image", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if image_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_image launch failed with rc " + image_rc.to_text())
+    _write_gradient_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 1, 2, 2, 2, grad_top, grad_bottom, 4, 4)
+    val gradient_rc = cuda_launch_kernel(module, "kernel_draw_gradient_rect", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if gradient_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_gradient_rect launch failed with rc " + gradient_rc.to_text())
+    _write_line_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 0, 0, 3, 0, line, 1, 4, 4)
+    val line_rc = cuda_launch_kernel(module, "kernel_draw_line", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if line_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_line launch failed with rc " + line_rc.to_text())
+    _write_circle_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 1, 1, 2, circle, 4, 4, 0)
+    val circle_rc = cuda_launch_kernel(module, "kernel_draw_circle", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if circle_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_circle launch failed with rc " + circle_rc.to_text())
+    _write_circle_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 2, 2, 1, filled_circle, 4, 4, 1)
+    val filled_circle_rc = cuda_launch_kernel(module, "kernel_draw_circle_filled", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if filled_circle_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_circle_filled launch failed with rc " + filled_circle_rc.to_text())
+    val sync_rc = session.sync()
+    if sync_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "device sync failed with rc " + sync_rc.to_text())
+    val copy_rc = cuda_memcpy_dtoh(readback_ptr, d_framebuffer, bytes)
+    if copy_rc != CUDA_SUCCESS:
+        cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+        cuda_backend_free(rect_val_ptr, 72)
+        cuda_backend_free(rect_args_ptr, 72)
+        cuda_backend_free(image_host_ptr, image_bytes)
+        cuda_backend_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "device readback failed with rc " + copy_rc.to_text())
+    val mismatch = _cuda_2d_verify_pixels(readback_ptr)
+    cuda_backend_free(clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+    cuda_backend_free(clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+    cuda_backend_free(rect_val_ptr, 72)
+    cuda_backend_free(rect_args_ptr, 72)
+    cuda_backend_free(image_host_ptr, image_bytes)
+    cuda_backend_free(readback_ptr, bytes)
+    session.free(d_image)
+    session.free(d_framebuffer)
+    if mismatch != "":
+        return _cuda_2d_self_test_failed(device_name, mismatch)
+    _cuda_2d_kernel_ready(device_name)
+
+fn probe_cuda_2d() -> BackendProbeResult:
+    if not cuda_available():
+        var unavailable = BackendProbeResult.unavailable("cuda", "CUDA runtime unavailable")
+        unavailable.api_name = "cuda"
+        unavailable.feature_gate = "cuda_runtime"
+        unavailable.shader_format = "ptx"
+        return unavailable
+    val init_result = cuda_init()
+    if init_result != CUDA_SUCCESS:
+        var failed = BackendProbeResult.failed("cuda", "CUDA init failed")
+        failed.api_name = "cuda"
+        failed.feature_gate = "cuda_init"
+        failed.shader_format = "ptx"
+        return failed
+    if cuda_device_count() < 1:
+        var no_device = BackendProbeResult.unavailable("cuda", "no CUDA device")
+        no_device.api_name = "cuda"
+        no_device.feature_gate = "cuda-device-unavailable"
+        no_device.shader_format = "ptx"
+        return no_device
+    var session = CudaSession.create()
+    val session_status = session.init()
+    if session_status != CUDA_SUCCESS:
+        return _cuda_context_failure("CUDA context creation failed before 2D render kernel load")
+    val device_name = cuda_device_name(0)
+    val module = session.load_module(cuda_2d_ptx_source())
+    if module == 0:
+        session.release()
+        return _cuda_2d_kernel_gap(device_name)
+    session.module_cache = module
+    val self_test = _cuda_2d_run_self_test(session, module, device_name)
+    session.release()
+    self_test
+
+fn probe_cuda() -> BackendProbeResult:
+    probe_cuda_2d()
+
+# probe_cuda_processing: processing-lane probe.
+# Calls probe_cuda_2d() and returns its result. When no NVIDIA device is
+# present the feature_gate is "cuda-device-unavailable" — callers must assert
+# this evidence string rather than treating absence as a silent pass.
+fn probe_cuda_processing() -> BackendProbeResult:
+    probe_cuda_2d()
+
+class CudaBackend:
+    mirror: SoftwareBackend
+    session: CudaSession
+    owns_session: bool
+    initialized: bool
+    d_framebuffer: i64
+    framebuffer_bytes: i64
+    clear_val_ptr: i64
+    clear_args_ptr: i64
+    rect_val_ptr: i64
+    rect_args_ptr: i64
+    font_val_ptr: i64
+    font_args_ptr: i64
+    d_font_atlas: i64
+    font_atlas_bytes: i64
+    font_atlas_generation: i64
+    font_atlas_owner_identity: text
+    readback_ptr: i64
+    last_probe: BackendProbeResult
+
+    static fn create() -> CudaBackend:
+        CudaBackend(
+            mirror: SoftwareBackend.create(),
+            session: CudaSession.create(),
+            owns_session: false,
+            initialized: false,
+            d_framebuffer: 0,
+            framebuffer_bytes: 0,
+            clear_val_ptr: 0,
+            clear_args_ptr: 0,
+            rect_val_ptr: 0,
+            rect_args_ptr: 0,
+            font_val_ptr: 0,
+            font_args_ptr: 0,
+            d_font_atlas: 0,
+            font_atlas_bytes: 0,
+            font_atlas_generation: -1,
+            font_atlas_owner_identity: "",
+            readback_ptr: 0,
+            last_probe: BackendProbeResult.unavailable("cuda", "not probed")
+        )
+
+    me init_with_session(width: i32, height: i32, session: CudaSession) -> bool:
+        if self.initialized or self.owns_session:
+            self.last_probe = _cuda_context_failure("CUDA backend already owns an active session")
+            return false
+        if width <= 0 or height <= 0:
+            self.last_probe = _cuda_context_failure("invalid CUDA framebuffer dimensions")
+            self.initialized = false
+            return false
+        if not session.is_valid():
+            self.last_probe = _cuda_context_failure("CUDA shared session is not initialized")
+            self.initialized = false
+            return false
+        self._cleanup_cuda_surface()
+        self.session = session.retain()
+        self.owns_session = true
+        if self.session.module_cache == 0:
+            val loaded = self.session.load_module(cuda_2d_ptx_source())
+            if loaded == 0:
+                self.last_probe = _cuda_2d_kernel_gap(cuda_device_name(0))
+                self.session.release()
+                self.owns_session = false
+                self.initialized = false
+                return false
+            self.session.module_cache = loaded
+            self.last_probe = _cuda_2d_run_self_test(self.session, loaded, cuda_device_name(0))
+            if self.last_probe.status != BackendStatus.Initialized:
+                self.session.release()
+                self.owns_session = false
+                self.initialized = false
+                return false
+        else:
+            self.last_probe = _cuda_2d_run_self_test(self.session, self.session.module_cache, cuda_device_name(0))
+            if self.last_probe.status != BackendStatus.Initialized:
+                self.session.release()
+                self.owns_session = false
+                self.initialized = false
+                return false
+        val bytes = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = self.session.alloc(bytes)
+        if self.d_framebuffer == 0:
+            self.last_probe = _cuda_context_failure("CUDA device framebuffer allocation failed")
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        self.framebuffer_bytes = bytes
+        if not self._alloc_launch_buffers(bytes):
+            self.last_probe = _cuda_context_failure("CUDA launch argument buffer allocation failed")
+            self._cleanup_cuda_surface()
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        if not self.mirror.init(width, height):
+            self.last_probe = BackendProbeResult.failed("cuda", "CUDA host mirror surface allocation failed")
+            self.last_probe.api_name = "cuda"
+            self.last_probe.feature_gate = "cuda_surface"
+            self.last_probe.shader_format = "ptx"
+            self._cleanup_cuda_surface()
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        self.last_probe = _cuda_2d_kernel_ready(cuda_device_name(0))
+        self.initialized = true
+        true
+
+    me _alloc_launch_buffers(bytes: i64) -> bool:
+        self.clear_val_ptr = cuda_backend_alloc(CUDA_2D_CLEAR_ARG_BYTES)
+        self.clear_args_ptr = cuda_backend_alloc(CUDA_2D_CLEAR_ARG_BYTES)
+        self.rect_val_ptr = cuda_backend_alloc(72)
+        self.rect_args_ptr = cuda_backend_alloc(72)
+        self.font_val_ptr = cuda_backend_alloc(CUDA_FONT_ARG_BYTES)
+        self.font_args_ptr = cuda_backend_alloc(CUDA_FONT_ARG_BYTES)
+        self.readback_ptr = cuda_backend_alloc(bytes)
+        if self.clear_val_ptr == 0 or self.clear_args_ptr == 0 or self.rect_val_ptr == 0 or self.rect_args_ptr == 0 or self.font_val_ptr == 0 or self.font_args_ptr == 0 or self.readback_ptr == 0:
+            self._free_launch_buffers()
+            return false
+        cuda_backend_write_i64(self.clear_args_ptr, 0, self.clear_val_ptr)
+        cuda_backend_write_i64(self.clear_args_ptr, 8, self.clear_val_ptr + 8)
+        cuda_backend_write_i64(self.clear_args_ptr, 16, self.clear_val_ptr + 16)
+        cuda_backend_write_i64(self.clear_args_ptr, 24, self.clear_val_ptr + 24)
+        cuda_backend_write_i64(self.rect_args_ptr, 0, self.rect_val_ptr)
+        cuda_backend_write_i64(self.rect_args_ptr, 8, self.rect_val_ptr + 8)
+        cuda_backend_write_i64(self.rect_args_ptr, 16, self.rect_val_ptr + 16)
+        cuda_backend_write_i64(self.rect_args_ptr, 24, self.rect_val_ptr + 24)
+        cuda_backend_write_i64(self.rect_args_ptr, 32, self.rect_val_ptr + 32)
+        cuda_backend_write_i64(self.rect_args_ptr, 40, self.rect_val_ptr + 40)
+        cuda_backend_write_i64(self.rect_args_ptr, 48, self.rect_val_ptr + 48)
+        cuda_backend_write_i64(self.rect_args_ptr, 56, self.rect_val_ptr + 56)
+        true
+
+    me _free_launch_buffers():
+        if self.clear_val_ptr != 0:
+            cuda_backend_free(self.clear_val_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+            self.clear_val_ptr = 0
+        if self.clear_args_ptr != 0:
+            cuda_backend_free(self.clear_args_ptr, CUDA_2D_CLEAR_ARG_BYTES)
+            self.clear_args_ptr = 0
+        if self.rect_val_ptr != 0:
+            cuda_backend_free(self.rect_val_ptr, 72)
+            self.rect_val_ptr = 0
+        if self.rect_args_ptr != 0:
+            cuda_backend_free(self.rect_args_ptr, 72)
+            self.rect_args_ptr = 0
+        if self.font_val_ptr != 0:
+            cuda_backend_free(self.font_val_ptr, CUDA_FONT_ARG_BYTES)
+            self.font_val_ptr = 0
+        if self.font_args_ptr != 0:
+            cuda_backend_free(self.font_args_ptr, CUDA_FONT_ARG_BYTES)
+            self.font_args_ptr = 0
+        if self.readback_ptr != 0:
+            cuda_backend_free(self.readback_ptr, self.framebuffer_bytes)
+            self.readback_ptr = 0
+
+    me _cleanup_cuda_surface():
+        self._free_launch_buffers()
+        if self.d_font_atlas != 0:
+            self.session.free(self.d_font_atlas)
+            self.d_font_atlas = 0
+        self.font_atlas_bytes = 0
+        self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
+        if self.d_framebuffer != 0:
+            self.session.free(self.d_framebuffer)
+            self.d_framebuffer = 0
+        self.framebuffer_bytes = 0
+
+    me _copy_mirror_to_device() -> bool:
+        if not self.initialized or self.d_framebuffer == 0 or self.framebuffer_bytes <= 0:
+            return false
+        val pixels = self.mirror.read_pixels()
+        val expected_pixels = self.width() * self.height()
+        if pixels.len() != expected_pixels:
+            return false
+        val host_pixels = cuda_backend_alloc(self.framebuffer_bytes)
+        if host_pixels == 0:
+            return false
+        _write_u32_pixels_to_host(host_pixels, pixels, expected_pixels)
+        val upload_rc = cuda_memcpy_htod(self.d_framebuffer, host_pixels, self.framebuffer_bytes)
+        cuda_backend_free(host_pixels, self.framebuffer_bytes)
+        upload_rc == CUDA_SUCCESS
+
+    me _disable_device_readback_after_mirror_sync_failure():
+        self.last_probe = _cuda_context_failure("CUDA mirror-to-device synchronization failed")
+        self.initialized = false
+
+    me _sync_mirror_to_device_after_cpu_path():
+        if self.initialized:
+            if not self._copy_mirror_to_device():
+                self._disable_device_readback_after_mirror_sync_failure()
+
+    me _draw_image_kernel(kernel_name: text, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool:
+        if not self.initialized:
+            return false
+        if w <= 0 or h <= 0:
+            return true
+        val pixel_count = w * h
+        val image_bytes = _i64(pixel_count) * 4
+        if pixel_count > pixels.len():
+            return false
+        val host_pixels = cuda_backend_alloc(image_bytes)
+        val d_pixels = self.session.alloc(image_bytes)
+        if host_pixels != 0 and d_pixels != 0:
+            _write_u32_pixels_to_host(host_pixels, pixels, pixel_count)
+            val upload_rc = cuda_memcpy_htod(d_pixels, host_pixels, image_bytes)
+            if upload_rc == CUDA_SUCCESS:
+                _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
+                val total = _i64(w) * _i64(h)
+                val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+                val rc = self.session.launch_kernel_args(kernel_name, grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+                if rc == CUDA_SUCCESS:
+                    val sync_rc = self.session.sync()
+                    if sync_rc == CUDA_SUCCESS:
+                        cuda_backend_free(host_pixels, image_bytes)
+                        self.session.free(d_pixels)
+                        return true
+            cuda_backend_free(host_pixels, image_bytes)
+            self.session.free(d_pixels)
+        else:
+            if host_pixels != 0:
+                cuda_backend_free(host_pixels, image_bytes)
+            if d_pixels != 0:
+                self.session.free(d_pixels)
+        false
+
+    me _upload_font_atlas(batch: FontRenderBatch) -> bool:
+        if not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0:
+            return false
+        val pixel_count = _i64(batch.atlas_width) * _i64(batch.atlas_height)
+        if pixel_count <= 0 or pixel_count > 2147483647 or batch.atlas_pixels.len() != pixel_count:
+            return false
+        val required_bytes = pixel_count * 4
+        val owner_identity = batch.atlas_owner_identity()
+        if self.d_font_atlas == 0 or self.font_atlas_bytes != required_bytes:
+            val new_atlas = self.session.alloc(required_bytes)
+            if new_atlas == 0:
+                return false
+            if self.d_font_atlas != 0:
+                self.session.free(self.d_font_atlas)
+            self.d_font_atlas = new_atlas
+            self.font_atlas_bytes = required_bytes
+            self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
+        if (self.font_atlas_owner_identity == owner_identity and
+            self.font_atlas_generation == batch.atlas_generation):
+            return true
+        val host_atlas = cuda_backend_alloc(required_bytes)
+        if host_atlas == 0:
+            return false
+        _write_u32_pixels_to_host(host_atlas, batch.atlas_pixels, pixel_count as i32)
+        val upload_rc = cuda_memcpy_htod(self.d_font_atlas, host_atlas, required_bytes)
+        cuda_backend_free(host_atlas, required_bytes)
+        if upload_rc != CUDA_SUCCESS:
+            self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
+            return false
+        self.font_atlas_generation = batch.atlas_generation
+        self.font_atlas_owner_identity = owner_identity
+        true
+
+    me invalidate_font_atlas():
+        self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
+
+    me install_font_atlas_ptx(ptx: text) -> bool:
+        if not self.initialized:
+            return false
+        val prior_identity = self.session.font_module_identity
+        if not self.session.install_font_module(ptx):
+            return false
+        if self.session.font_module_identity != prior_identity:
+            self.invalidate_font_atlas()
+        true
+
+    me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
+        if not font_atlas_composite_program_version_valid(batch.program_version):
+            return 0
+        if not batch.valid or batch.quads.len() == 0 or not self.initialized:
+            return 0
+        if self.mirror.clip_enabled or self.mirror.mask_buf.len() != 0:
+            return 0
+        if not self.session.font_module_ready():
+            return 0
+        if not self._upload_font_atlas(batch):
+            return 0
+        val dst_count = _i64(self.width()) * _i64(self.height())
+        if dst_count <= 0 or dst_count > 2147483647:
+            return 0
+        var submitted: i64 = 0
+        while submitted < batch.quads.len():
+            val quad = batch.quads[submitted]
+            val total = _i64(quad.width) * _i64(quad.height)
+            if total <= 0:
+                return submitted
+            val pixels = font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
+            if pixels.len() != total:
+                return submitted
+            val dst_x = font_destination_origin(origin_x, quad.dst_x, quad.width)
+            val dst_y = font_destination_origin(origin_y, quad.dst_y, quad.height)
+            if dst_x == nil or dst_y == nil:
+                return submitted
+            _write_font_atlas_composite_launch_args(
+                self.font_val_ptr, self.font_args_ptr, self.d_font_atlas, self.d_framebuffer,
+                batch.atlas_width as u32, batch.atlas_height as u32, batch.atlas_pixels.len() as u32,
+                quad.atlas_x as u32, quad.atlas_y as u32, quad.width as u32, quad.height as u32,
+                self.width() as u32, self.height() as u32, dst_count as u32,
+                dst_x.?, dst_y.?, quad.color
+            )
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_font_kernel_args(grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.font_args_ptr)
+            if rc != CUDA_SUCCESS:
+                return submitted
+            if self.session.sync() != CUDA_SUCCESS:
+                return submitted
+            self.mirror.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
+            submitted = submitted + 1
+        submitted
+
+impl RenderBackend for CudaBackend:
+    fn name() -> text:
+        "cuda"
+
+    me init(width: i32, height: i32) -> bool:
+        self.last_probe = probe_cuda_2d()
+        if self.last_probe.status != BackendStatus.Initialized:
+            self.initialized = false
+            return false
+        var session = CudaSession.create()
+        val session_status = session.init()
+        if session_status != CUDA_SUCCESS:
+            self.last_probe = _cuda_context_failure("CUDA shared session initialization failed")
+            self.initialized = false
+            return false
+        if not self.init_with_session(width, height, session):
+            session.release()
+            self.owns_session = false
+            return false
+        session.release()
+        true
+
+    me shutdown():
+        self._cleanup_cuda_surface()
+        self.mirror.shutdown()
+        if self.owns_session:
+            self.session.release()
+            self.owns_session = false
+        self.initialized = false
+
+    me clear(color: u32):
+        if self.initialized:
+            _write_clear_launch_args(self.clear_val_ptr, self.clear_args_ptr, self.d_framebuffer, color, self.width(), self.height())
+            val rc = self.session.fill_kernel(_i64(self.width()), _i64(self.height()), self.clear_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.clear(color)
+                return
+        self.mirror.clear(color)
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if (self.initialized and not self.mirror.clip_enabled and
+                self.mirror.mask_buf.len() == 0):
+            if w <= 0 or h <= 0:
+                return
+            cuda_backend_write_i64(self.rect_val_ptr, 0, self.d_framebuffer)
+            cuda_backend_write_i64(self.rect_val_ptr, 8, _i64(x))
+            cuda_backend_write_i64(self.rect_val_ptr, 16, _i64(y))
+            cuda_backend_write_i64(self.rect_val_ptr, 24, _i64(w))
+            cuda_backend_write_i64(self.rect_val_ptr, 32, _i64(h))
+            cuda_backend_write_i64(self.rect_val_ptr, 40, _i64_from_u32(color))
+            cuda_backend_write_i64(self.rect_val_ptr, 48, _i64(self.width()))
+            cuda_backend_write_i64(self.rect_val_ptr, 56, _i64(self.height()))
+            val total = _i64(w) * _i64(h)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_rect_outline", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_rect(x, y, w, h, color)
+                return
+        self.mirror.draw_rect(x, y, w, h, color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if (self.initialized and not self.mirror.clip_enabled and
+                self.mirror.mask_buf.len() == 0):
+            if w <= 0 or h <= 0:
+                return
+            cuda_backend_write_i64(self.rect_val_ptr, 0, self.d_framebuffer)
+            cuda_backend_write_i64(self.rect_val_ptr, 8, _i64(x))
+            cuda_backend_write_i64(self.rect_val_ptr, 16, _i64(y))
+            cuda_backend_write_i64(self.rect_val_ptr, 24, _i64(w))
+            cuda_backend_write_i64(self.rect_val_ptr, 32, _i64(h))
+            cuda_backend_write_i64(self.rect_val_ptr, 40, _i64_from_u32(color))
+            cuda_backend_write_i64(self.rect_val_ptr, 48, _i64(self.width()))
+            cuda_backend_write_i64(self.rect_val_ptr, 56, _i64(self.height()))
+            val total = _i64(w) * _i64(h)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_rect_filled", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_rect_filled(x, y, w, h, color)
+                return
+        self.mirror.draw_rect_filled(x, y, w, h, color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        if (self.initialized and thickness > 0 and
+                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0):
+            _write_line_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x1, y1, x2, y2, color, thickness, self.width(), self.height())
+            var dx = x2 - x1
+            if dx < 0:
+                dx = -dx
+            var dy = y2 - y1
+            if dy < 0:
+                dy = -dy
+            val steps = if dx > dy: dx else: dy
+            val total = _i64(steps + 1) * _i64(thickness) * _i64(thickness)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_line", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+                return
+        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        # KNOWN PARITY NOTE: kernel_draw_circle uses a per-pixel distance annulus
+        # ((r-1)² ≤ dx²+dy² ≤ r²) — a pre-existing semantic mismatch vs the CPU
+        # sw_midpoint loop. The Metal backend was aligned to CPU midpoint in
+        # engine2d_cpu_metal_primitive_raster_divergence fix (2026-06-05).
+        # CUDA realignment is tracked as follow-up work: do not remove this note
+        # until the PTX kernel is updated to match sw_midpoint output.
+        if r == 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        if (self.initialized and r > 0 and
+                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0):
+            _write_circle_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, cx, cy, r, color, self.width(), self.height(), 0)
+            val diameter = 2 * r + 1
+            val total = _i64(diameter) * _i64(diameter)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_circle", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_circle(cx, cy, r, color)
+                return
+        self.mirror.draw_circle(cx, cy, r, color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        if r == 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        if (self.initialized and r > 0 and
+                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0):
+            _write_circle_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, cx, cy, r, color, self.width(), self.height(), 1)
+            val diameter = 2 * r + 1
+            val total = _i64(diameter) * _i64(diameter)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_circle_filled", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_circle_filled(cx, cy, r, color)
+                return
+        self.mirror.draw_circle_filled(cx, cy, r, color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        # KNOWN PARITY NOTE: kernel_draw_rounded_rect is a FILLED interior test
+        # (corners excluded via distance check, interior pixels painted). The CPU
+        # draw_rounded_rect draws an OUTLINE only. This is a pre-existing semantic
+        # mismatch. The Metal backend was aligned to CPU outline semantics in
+        # engine2d_cpu_metal_primitive_raster_divergence fix (2026-06-05).
+        # CUDA realignment is tracked as follow-up work: do not remove this note
+        # until the PTX kernel is updated to draw outline matching sw_corner_arc.
+        if w <= 0 or h <= 0:
+            return
+        var r = radius
+        if r < 0:
+            r = 0
+        if r > w / 2:
+            r = w / 2
+        if r > h / 2:
+            r = h / 2
+        if (self.initialized and not self.mirror.clip_enabled and
+                self.mirror.mask_buf.len() == 0):
+            _write_rounded_rect_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x, y, w, h, r, color, self.width(), self.height())
+            val total = _i64(w) * _i64(h)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_rounded_rect", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+                return
+        self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if (self.initialized and not self.mirror.clip_enabled and
+                self.mirror.mask_buf.len() == 0):
+            if w <= 0 or h <= 0:
+                return
+            _write_gradient_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x, y, w, h, top_color, bottom_color, self.width(), self.height())
+            val total = _i64(w) * _i64(h)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("kernel_draw_gradient_rect", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+                return
+        self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        if not self.initialized:
+            self.mirror.draw_text(x, y, text_val, color, font_size)
+            return
+        val text_buf = text_transparent_blit_buffer(text_val, color, font_size)
+        if text_buf.is_empty():
+            return
+        if self._draw_image_kernel("kernel_draw_image_nonzero", x, y, text_buf.width, text_buf.height, text_buf.pixels):
+            self.mirror.draw_text(x, y, text_val, color, font_size)
+            return
+        self.mirror.draw_text(x, y, text_val, color, font_size)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        if self._draw_image_kernel("kernel_draw_image", x, y, w, h, pixels):
+            self.mirror.draw_image(x, y, w, h, pixels)
+            return
+        self.mirror.draw_image(x, y, w, h, pixels)
+        self._sync_mirror_to_device_after_cpu_path()
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        emu_draw_image_blend(self, x, y, w, h, pixels)
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.mirror.set_clip(x, y, w, h)
+    me clear_clip():
+        self.mirror.clear_clip()
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mirror.set_mask(mask_pixels, w, h)
+    me clear_mask():
+        self.mirror.clear_mask()
+    me present():
+        if self.initialized:
+            self.session.sync()
+        self.mirror.present()
+    fn read_pixels() -> [u32]:
+        self.read_pixels_with_source().pixels
+
+    fn read_pixels_with_source() -> Engine2DReadback:
+        if self.initialized and self.readback_ptr != 0 and self.d_framebuffer != 0:
+            self.session.sync()
+            val rc = cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes)
+            if rc == CUDA_SUCCESS:
+                return engine2d_readback_with_handle(_read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height()), "device_readback", self.d_framebuffer)
+        engine2d_readback(self.mirror.read_pixels(), "cpu_mirror")
+    fn width() -> i32:
+        self.mirror.width()
+    fn height() -> i32:
+        self.mirror.height()
+
+export cuda_2d_ptx_source

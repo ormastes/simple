@@ -1,0 +1,175 @@
+use std.spec
+use std.nogc_sync_mut.engine.render.gpu_mesh3d.{
+    GpuMeshHandle, gpu_mesh_upload, gpu_mesh_draw, gpu_mesh_free
+}
+use std.nogc_sync_mut.engine.render.backend3d.{
+    PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle, PipelineDesc3D, TextureFormat3D
+}
+use std.nogc_sync_mut.engine.render.software_backend3d.{SoftwareRenderBackend3D}
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn make_software_backend_inited() -> SoftwareRenderBackend3D:
+    var backend = SoftwareRenderBackend3D.create()
+    val _ = backend.init(320, 240)
+    backend
+
+fn make_triangle_vertices() -> [f32]:
+    # 3 vertices * 8 floats (pos xyz + normal xyz + uv xy)
+    [
+        0.0, 1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+        -1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0
+    ]
+
+fn make_triangle_indices() -> [u32]:
+    [0, 1, 2]
+
+fn make_quad_vertices() -> [f32]:
+    # 4 vertices * 8 floats
+    [
+        -1.0, 1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 1.0,
+        1.0, 1.0, 0.0,   0.0, 0.0, 1.0,  1.0, 1.0,
+        1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        -1.0, -1.0, 0.0, 0.0, 0.0, 1.0,  0.0, 0.0
+    ]
+
+fn make_quad_indices() -> [u32]:
+    [0, 1, 2,  0, 2, 3]
+
+fn make_render_pass(backend: SoftwareRenderBackend3D) -> RenderPassHandle:
+    val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+    val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+    backend.begin_render_pass(color_tex, depth_tex)
+
+fn make_pipeline_desc() -> PipelineDesc3D:
+    PipelineDesc3D(
+        vertex_shader_spirv: [],
+        fragment_shader_spirv: [],
+        vertex_shader_wgsl: "",
+        fragment_shader_wgsl: "",
+        vertex_stride: 32,
+        cull_back_faces: true,
+        depth_write: true,
+        depth_test: true
+    )
+
+# ============================================================================
+# Stream D — gpu_mesh3d.spl specs
+# AC-3
+# ============================================================================
+
+describe "Stream D: GpuMeshHandle":
+
+    describe "invalid sentinel":
+        it "AC-3: invalid() vbuf has id -1":
+            val h = GpuMeshHandle.invalid()
+            expect(h.vbuf.id).to_equal(-1)
+
+        it "AC-3: invalid() ibuf has id -1":
+            val h = GpuMeshHandle.invalid()
+            expect(h.ibuf.id).to_equal(-1)
+
+        it "AC-3: invalid() index_count is 0":
+            val h = GpuMeshHandle.invalid()
+            expect(h.index_count).to_equal(0)
+
+describe "Stream D: gpu_mesh_upload":
+
+    describe "upload triangle mesh via software backend":
+        it "AC-3: vbuf id is valid (not -1)":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            val handle = gpu_mesh_upload(backend, verts, idxs)
+            expect(handle.vbuf.id).to_be_greater_than(-1)
+
+        it "AC-3: ibuf id is valid (not -1)":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            val handle = gpu_mesh_upload(backend, verts, idxs)
+            expect(handle.ibuf.id).to_be_greater_than(-1)
+
+        it "AC-3: index_count equals number of indices for triangle":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            val handle = gpu_mesh_upload(backend, verts, idxs)
+            expect(handle.index_count).to_equal(3)
+
+    describe "upload quad mesh via software backend":
+        it "AC-3: index_count equals 6 for quad (two triangles)":
+            var backend = make_software_backend_inited()
+            val verts = make_quad_vertices()
+            val idxs = make_quad_indices()
+            val handle = gpu_mesh_upload(backend, verts, idxs)
+            expect(handle.index_count).to_equal(6)
+
+        it "AC-3: vbuf and ibuf are distinct handles":
+            var backend = make_software_backend_inited()
+            val verts = make_quad_vertices()
+            val idxs = make_quad_indices()
+            val handle = gpu_mesh_upload(backend, verts, idxs)
+            val distinct = handle.vbuf.id != handle.ibuf.id
+            expect(distinct).to_equal(true)
+
+describe "Stream D: gpu_mesh_draw":
+
+    describe "draw calls correct sequence via software backend":
+        it "AC-3: gpu_mesh_draw does not crash with valid mesh and rph":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            val mesh = gpu_mesh_upload(backend, verts, idxs)
+            backend.begin_frame()
+            val rph = make_render_pass(backend)
+            val desc = make_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            val mvp_buf = backend.create_uniform_buffer(64)
+            gpu_mesh_draw(backend, rph, mesh, mvp_buf, pip)
+            expect(backend.active_pass.pipeline_id).to_equal(pip.id)
+            expect(backend.active_pass.vertex_buf_id).to_equal(mesh.vbuf.id)
+            expect(backend.active_pass.index_buf_id).to_equal(mesh.ibuf.id)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+
+        it "AC-3: two consecutive mesh draw calls in one frame do not crash":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            val mesh1 = gpu_mesh_upload(backend, verts, idxs)
+            val mesh2 = gpu_mesh_upload(backend, verts, idxs)
+            backend.begin_frame()
+            val rph = make_render_pass(backend)
+            val desc = make_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            val mvp_buf = backend.create_uniform_buffer(64)
+            gpu_mesh_draw(backend, rph, mesh1, mvp_buf, pip)
+            gpu_mesh_draw(backend, rph, mesh2, mvp_buf, pip)
+            expect(backend.active_pass.pipeline_id).to_equal(pip.id)
+            expect(backend.active_pass.vertex_buf_id).to_equal(mesh2.vbuf.id)
+            expect(backend.active_pass.index_buf_id).to_equal(mesh2.ibuf.id)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+
+describe "Stream D: gpu_mesh_free":
+
+    describe "free marks handles invalid":
+        it "AC-3: after free, vbuf id is -1":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            var handle = gpu_mesh_upload(backend, verts, idxs)
+            gpu_mesh_free(handle)
+            expect(handle.vbuf.id).to_equal(-1)
+
+        it "AC-3: after free, ibuf id is -1":
+            var backend = make_software_backend_inited()
+            val verts = make_triangle_vertices()
+            val idxs = make_triangle_indices()
+            var handle = gpu_mesh_upload(backend, verts, idxs)
+            gpu_mesh_free(handle)
+            expect(handle.ibuf.id).to_equal(-1)

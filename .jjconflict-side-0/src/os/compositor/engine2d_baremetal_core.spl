@@ -1,0 +1,373 @@
+# Freestanding Engine2D-shaped core for Simple OS QEMU entries.
+#
+# This module intentionally avoids the full std.gpu.engine2d facade in
+# --entry-closure baremetal builds. It exposes the narrow drawing surface used
+# by QEMU system entries and writes through the x86_64 runtime framebuffer fill
+# primitive.
+#
+# Two render targets are supported:
+#   - Direct framebuffer mode (create_fb_engine_core): draw ops fill the live
+#     framebuffer immediately via rt_gui_fill4; present() is a no-op. This is
+#     the shipped OS boot path and is byte-identical to the original module.
+#   - In-memory buffer mode (create_buffer_engine_core): draw ops raster into a
+#     [u32] ARGB buffer. This is what enables src-over alpha blending (which
+#     requires a readable destination) and per-pixel parity testing.
+#
+# The color/blend/gradient pixel math below is copied verbatim from the host
+# CPU backend's shared color module (src/lib/gc_async_mut/gpu/engine2d/color.spl
+# blend()/rgba() and backend_emu.spl gradient/text) so buffer-mode output stays
+# byte-identical to the host raster oracle. It is re-implemented locally rather
+# than imported because that module lives in the gc_async_mut tier, which a
+# freestanding OS compositor cannot depend on.
+
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
+
+extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
+
+var _fb_width: i32 = 0
+var _fb_height: i32 = 0
+var _fb_addr: u64 = 0
+
+class Engine2DBaremetalCore:
+    fb_addr: u64
+    width: i32
+    height: i32
+    buf: [u32]
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
+
+fn _pack(hi: i32, lo: i32) -> u64:
+    (hi.to_u64() << 32) | (lo.to_u64() & 0xFFFFFFFF)
+
+fn _fill(x: i32, y: i32, w: i32, h: i32, color: u32):
+    if w <= 0 or h <= 0:
+        return
+    rt_gui_fill4(_pack(x, y), _pack(w, h), color.to_u64(), 0)
+
+fn _clamp_start(v: i32) -> i32:
+    if v < 0:
+        return 0
+    v
+
+fn _pixel_at(pixels: [u32], width: i32, x: i32, y: i32, fallback: u32) -> u32:
+    if x < 0 or y < 0 or width <= 0:
+        return fallback
+    val idx = (y * width + x).to_u64()
+    if idx >= pixels.len():
+        return fallback
+    pixels[idx]
+
+# ----------------------------------------------------------------------------
+# Local ARGB color math (copied from color.spl to avoid a gc_async_mut import).
+# ----------------------------------------------------------------------------
+
+fn _bm_a(c: u32) -> i32:
+    ((c >> 24u32) & 0xFFu32) as i32
+
+fn _bm_r(c: u32) -> i32:
+    ((c >> 16u32) & 0xFFu32) as i32
+
+fn _bm_g(c: u32) -> i32:
+    ((c >> 8u32) & 0xFFu32) as i32
+
+fn _bm_b(c: u32) -> i32:
+    (c & 0xFFu32) as i32
+
+fn _bm_clamp(v: i32) -> i32:
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    v
+
+fn _bm_rgba(r: i32, g: i32, b: i32, a: i32) -> u32:
+    val rc = _bm_clamp(r)
+    val gc = _bm_clamp(g)
+    val bc = _bm_clamp(b)
+    val ac = _bm_clamp(a)
+    ((ac as u32) << 24) | ((rc as u32) << 16) | ((gc as u32) << 8) | (bc as u32)
+
+# Porter-Duff src-over, identical to color.spl blend().
+fn _bm_blend(src: u32, dst: u32) -> u32:
+    val sa = _bm_a(src)
+    if sa == 255:
+        return src
+    if sa == 0:
+        return dst
+    val sr = _bm_r(src)
+    val sg = _bm_g(src)
+    val sb = _bm_b(src)
+    val dr = _bm_r(dst)
+    val dg = _bm_g(dst)
+    val db = _bm_b(dst)
+    val da = _bm_a(dst)
+    val inv_a = 255 - sa
+    val out_r = (sr * sa + dr * inv_a) / 255
+    val out_g = (sg * sa + dg * inv_a) / 255
+    val out_b = (sb * sa + db * inv_a) / 255
+    val out_a = sa + (da * inv_a) / 255
+    _bm_rgba(out_r, out_g, out_b, out_a)
+
+fn create_fb_engine_core(fb_addr: u64, width: i32, height: i32) -> Engine2DBaremetalCore:
+    _fb_addr = fb_addr
+    _fb_width = width
+    _fb_height = height
+    Engine2DBaremetalCore(fb_addr: fb_addr, width: width, height: height, buf: [], clip_x: 0, clip_y: 0, clip_w: width, clip_h: height, clip_enabled: false)
+
+# Buffer-backed core: raster into an in-memory ARGB buffer initialized to opaque
+# black. Enables alpha blending and per-pixel parity assertions. fb_addr is 0 so
+# present() stays a no-op (this target is not tied to a live framebuffer).
+fn create_buffer_engine_core(width: i32, height: i32) -> Engine2DBaremetalCore:
+    _fb_addr = 0u64
+    _fb_width = width
+    _fb_height = height
+    var buf: [u32] = [0xFF000000u32; width * height]
+    Engine2DBaremetalCore(fb_addr: 0u64, width: width, height: height, buf: buf, clip_x: 0, clip_y: 0, clip_w: width, clip_h: height, clip_enabled: false)
+
+impl Engine2DBaremetalCore:
+    me clear(color: u32):
+        if self.buf.len() > 0:
+            var i = 0
+            val total = self.width * self.height
+            while i < total:
+                self.buf[i.to_u64()] = color
+                i = i + 1
+        else:
+            _fill(0, 0, self.width, self.height, color)
+
+    me present():
+        return
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
+
+    me clear_clip():
+        self.clip_enabled = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.width
+        self.clip_h = self.height
+
+    # Clip + bounds intersected rect fill. Blends when the source alpha < 255 and
+    # a readable buffer is present; direct-framebuffer mode fills opaque (a live
+    # framebuffer cannot be read back for src-over).
+    me _fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var x0 = x
+        var y0 = y
+        var x1 = x + w
+        var y1 = y + h
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > self.width:
+            x1 = self.width
+        if y1 > self.height:
+            y1 = self.height
+        if self.clip_enabled:
+            if x0 < self.clip_x:
+                x0 = self.clip_x
+            if y0 < self.clip_y:
+                y0 = self.clip_y
+            if x1 > self.clip_x + self.clip_w:
+                x1 = self.clip_x + self.clip_w
+            if y1 > self.clip_y + self.clip_h:
+                y1 = self.clip_y + self.clip_h
+        if x1 <= x0 or y1 <= y0:
+            return
+        if self.buf.len() > 0:
+            val use_blend = _bm_a(color) < 255
+            var ry = y0
+            while ry < y1:
+                val base = ry * self.width
+                var rx = x0
+                while rx < x1:
+                    val idx = (base + rx).to_u64()
+                    if use_blend:
+                        self.buf[idx] = _bm_blend(color, self.buf[idx])
+                    else:
+                        self.buf[idx] = color
+                    rx = rx + 1
+                ry = ry + 1
+        else:
+            _fill(x0, y0, x1 - x0, y1 - y0, color)
+
+    # Single-pixel coverage write (used by text). Respects bounds + clip and
+    # blends when alpha < 255 in buffer mode.
+    me _blend_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        if self.clip_enabled:
+            if (x < self.clip_x or x >= self.clip_x + self.clip_w or
+                y < self.clip_y or y >= self.clip_y + self.clip_h):
+                return
+        if self.buf.len() > 0:
+            val idx = (y * self.width + x).to_u64()
+            if _bm_a(color) < 255:
+                self.buf[idx] = _bm_blend(color, self.buf[idx])
+            else:
+                self.buf[idx] = color
+        else:
+            _fill(x, y, 1, 1, color)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self._fill_rect(x, y, w, h, color)
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.draw_rect_stroked(x, y, w, h, color)
+
+    me draw_rect_stroked(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        self.draw_rect_filled(x, y, w, 1, color)
+        self.draw_rect_filled(x, y + h - 1, w, 1, color)
+        self.draw_rect_filled(x, y, 1, h, color)
+        self.draw_rect_filled(x + w - 1, y, 1, h, color)
+
+    # 2-color vertical linear gradient. Row lerp matches backend_emu.spl
+    # draw_gradient_rect bit-for-bit so buffer output equals the host oracle.
+    me gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if w <= 0 or h <= 0:
+            return
+        val tr = _bm_r(top_color)
+        val tg = _bm_g(top_color)
+        val tb = _bm_b(top_color)
+        val ta = _bm_a(top_color)
+        val br = _bm_r(bottom_color)
+        val bg = _bm_g(bottom_color)
+        val bb = _bm_b(bottom_color)
+        val ba = _bm_a(bottom_color)
+        val denom = if h - 1 >= 1: h - 1 else: 1
+        var row = 0
+        while row < h:
+            val r = tr + (br - tr) * row / denom
+            val g = tg + (bg - tg) * row / denom
+            val b = tb + (bb - tb) * row / denom
+            val a = ta + (ba - ta) * row / denom
+            self.draw_rect_filled(x, y + row, w, 1, _bm_rgba(r, g, b, a))
+            row = row + 1
+
+    # Bitmap text via the shared 5x7 glyph atlas (glyph_bitmap_5x7.spl), the same
+    # source the host emu/text fallback uses. Coverage-only writes: only set bits
+    # paint; the background is untouched. Advance is 6px (5 glyph + 1 gap), scale 1.
+    me draw_text(x: i32, y: i32, text_val: text, color: u32):
+        val text_len = text_val.len()
+        var i: i64 = 0
+        var cursor_x = x
+        while i < text_len:
+            val code = text_val.char_code_at(i)
+            val gi = glyph_index_for_char_code(code)
+            var gy = 0
+            while gy < 7:
+                val row_bits = glyph_row_bits(gi, gy)
+                var gx = 0
+                while gx < 5:
+                    val bit = (row_bits >> (4 - gx)) & 1
+                    if bit != 0:
+                        self._blend_pixel(cursor_x + gx, y + gy, color)
+                    gx = gx + 1
+                gy = gy + 1
+            cursor_x = cursor_x + 6
+            i = i + 1
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        var dx = x2 - x1
+        if dx < 0:
+            dx = 0 - dx
+        var dy = y2 - y1
+        if dy < 0:
+            dy = 0 - dy
+        val sx = if x1 < x2: 1 else: -1
+        val sy = if y1 < y2: 1 else: -1
+        var err = dx - dy
+        var x = x1
+        var y = y1
+        val t = if thickness <= 0: 1 else: thickness
+        while true:
+            self.draw_rect_filled(x, y, t, t, color)
+            if x == x2 and y == y2:
+                return
+            var e2 = err * 2
+            if e2 > (0 - dy):
+                err = err - dy
+                x = x + sx
+            if e2 < dx:
+                err = err + dx
+                y = y + sy
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        if r <= 0:
+            return
+        var x = r
+        var y = 0
+        var err = 1 - x
+        while x >= y:
+            self.draw_rect_filled(cx - x, cy + y, x * 2 + 1, 1, color)
+            self.draw_rect_filled(cx - x, cy - y, x * 2 + 1, 1, color)
+            self.draw_rect_filled(cx - y, cy + x, y * 2 + 1, 1, color)
+            self.draw_rect_filled(cx - y, cy - x, y * 2 + 1, 1, color)
+            y = y + 1
+            if err < 0:
+                err = err + 2 * y + 1
+            else:
+                x = x - 1
+                err = err + 2 * (y - x + 1)
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        self.draw_circle_stroked(cx, cy, r, color)
+
+    me draw_circle_stroked(cx: i32, cy: i32, r: i32, color: u32):
+        if r <= 0:
+            return
+        var x = r
+        var y = 0
+        var err = 1 - x
+        while x >= y:
+            self.draw_rect_filled(cx + x, cy + y, 1, 1, color)
+            self.draw_rect_filled(cx - x, cy + y, 1, 1, color)
+            self.draw_rect_filled(cx + x, cy - y, 1, 1, color)
+            self.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+            self.draw_rect_filled(cx + y, cy + x, 1, 1, color)
+            self.draw_rect_filled(cx - y, cy + x, 1, 1, color)
+            self.draw_rect_filled(cx + y, cy - x, 1, 1, color)
+            self.draw_rect_filled(cx - y, cy - x, 1, 1, color)
+            y = y + 1
+            if err < 0:
+                err = err + 2 * y + 1
+            else:
+                x = x - 1
+                err = err + 2 * (y - x + 1)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        var row = 0
+        while row < h:
+            var col = 0
+            while col < w:
+                val color = _pixel_at(pixels, w, col, row, 0xFF000000)
+                var run = 1
+                while col + run < w and _pixel_at(pixels, w, col + run, row, color) == color:
+                    run = run + 1
+                self.draw_rect_filled(x + col, y + row, run, 1, color)
+                col = col + run
+            row = row + 1
+
+    me draw_codes12_block(x: i32, y: i32, c0: i32, c1: i32, c2: i32, c3: i32, c4: i32, c5: i32, c6: i32, c7: i32, c8: i32, c9: i32, c10: i32, c11: i32, color: u32, scale: i32):
+        val cell_w = if scale <= 0: 6 else: scale * 3
+        val cell_h = if scale <= 0: 8 else: scale * 5
+        var i = 0
+        while i < 12:
+            val code = if i == 0: c0 elif i == 1: c1 elif i == 2: c2 elif i == 3: c3 elif i == 4: c4 elif i == 5: c5 elif i == 6: c6 elif i == 7: c7 elif i == 8: c8 elif i == 9: c9 elif i == 10: c10 else: c11
+            if code != 0 and code != 32:
+                self.draw_rect_filled(x + i * (cell_w + 1), y, cell_w, cell_h, color)
+            i = i + 1

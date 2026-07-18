@@ -1,0 +1,697 @@
+# Scenario Evidence Specification
+
+> <details>
+
+<!-- sdn-diagram:id=scenario_evidence_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=scenario_evidence_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+scenario_evidence_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=scenario_evidence_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 23 | 23 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Scenario Evidence Specification
+
+## Scenarios
+
+### scenario evidence capture policy
+
+#### keeps root capture off by default
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val policy = scenario_capture_off()
+expect(policy.enabled).to_equal(false)
+expect(scenario_policy_manual_summary(policy)).to_equal("capture off")
+```
+
+</details>
+
+#### treats bare capture as after step tui capture
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val policy = scenario_capture_bare()
+expect(policy.enabled).to_equal(true)
+expect(scenario_policy_manual_summary(policy)).to_equal("capture tui after_step")
+```
+
+</details>
+
+#### allows explicit enum based api capture
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val policy = scenario_capture_policy(
+    ScenarioCaptureMode.after_scenario,
+    ScenarioCaptureKind.api
+)
+expect(policy.enabled).to_equal(true)
+expect(scenario_policy_manual_summary(policy)).to_equal("capture api after_scenario")
+```
+
+</details>
+
+#### uses built in off when no capture policy scope is present
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val resolution = resolve_scenario_capture_policy(
+    absent,
+    absent,
+    absent,
+    absent,
+    absent,
+    absent
+)
+expect(resolution.source).to_equal("built-in")
+expect(resolution.policy.enabled).to_equal(false)
+expect(scenario_policy_resolution_manual_summary(resolution)).to_equal("capture off from built-in")
+```
+
+</details>
+
+#### resolves root policy when no closer scope is present
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val root = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.on_failure,
+        ScenarioCaptureKind.log
+    )
+)
+val resolution = resolve_scenario_capture_policy(
+    absent,
+    absent,
+    absent,
+    absent,
+    absent,
+    root
+)
+expect(resolution.source).to_equal("root")
+expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture log on_failure")
+```
+
+</details>
+
+#### resolves folder policy before root policy
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val folder = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.after_scenario,
+        ScenarioCaptureKind.exec
+    )
+)
+val root = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.on_failure,
+        ScenarioCaptureKind.log
+    )
+)
+val resolution = resolve_scenario_capture_policy(
+    absent,
+    absent,
+    absent,
+    absent,
+    folder,
+    root
+)
+expect(resolution.source).to_equal("folder")
+expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture exec after_scenario")
+```
+
+</details>
+
+#### resolves file policy before folder policy
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val file = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.after_step,
+        ScenarioCaptureKind.api
+    )
+)
+val folder = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.after_scenario,
+        ScenarioCaptureKind.exec
+    )
+)
+val resolution = resolve_scenario_capture_policy(
+    absent,
+    absent,
+    absent,
+    file,
+    folder,
+    absent
+)
+expect(resolution.source).to_equal("file")
+expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture api after_step")
+```
+
+</details>
+
+#### resolves scenario policy before file policy
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val scenario = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.after_step,
+        ScenarioCaptureKind.protocol
+    )
+)
+val file = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.after_step,
+        ScenarioCaptureKind.api
+    )
+)
+val resolution = resolve_scenario_capture_policy(
+    absent,
+    absent,
+    scenario,
+    file,
+    absent,
+    absent
+)
+expect(resolution.source).to_equal("scenario")
+expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture protocol after_step")
+```
+
+</details>
+
+#### resolves function checker policy before scenario policy
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val function_policy = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.on_failure,
+        ScenarioCaptureKind.text
+    )
+)
+val scenario = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.after_step,
+        ScenarioCaptureKind.protocol
+    )
+)
+val resolution = resolve_scenario_capture_policy(
+    absent,
+    function_policy,
+    scenario,
+    absent,
+    absent,
+    absent
+)
+expect(resolution.source).to_equal("function")
+expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture text on_failure")
+```
+
+</details>
+
+#### resolves step policy before function checker policy
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absent = scenario_capture_policy_absent()
+val step = scenario_capture_policy_override(scenario_capture_bare())
+val function_policy = scenario_capture_policy_override(
+    scenario_capture_policy(
+        ScenarioCaptureMode.on_failure,
+        ScenarioCaptureKind.text
+    )
+)
+val resolution = resolve_scenario_capture_policy(
+    step,
+    function_policy,
+    absent,
+    absent,
+    absent,
+    absent
+)
+expect(resolution.source).to_equal("step")
+expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture tui after_step")
+```
+
+</details>
+
+### scenario evidence artifact
+
+#### renders path backed evidence for manual output
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_evidence_artifact(
+    ScenarioCaptureKind.gui,
+    "App screen after login",
+    "image/png",
+    "artifacts/login.png",
+    "",
+    "login",
+    "submit"
+)
+expect(scenario_evidence_manual_summary(artifact)).to_equal("App screen after login (gui, image/png) -> artifacts/login.png")
+```
+
+</details>
+
+#### renders redacted evidence without leaking body or path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_redacted_evidence_artifact(
+    ScenarioCaptureKind.protocol,
+    "HTTP authorization header",
+    "message/http",
+    "api-login",
+    "request"
+)
+expect(scenario_evidence_manual_summary(artifact)).to_equal("HTTP authorization header (protocol, redacted)")
+```
+
+</details>
+
+#### creates api evidence with request and status details
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_api_evidence(
+    "Login API response",
+    "POST",
+    "/login",
+    200,
+    "body: token issued",
+    "login",
+    "submit"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.api)
+expect(artifact.body).to_contain("POST /login")
+expect(artifact.body).to_contain("status: 200")
+expect(artifact.body).to_contain("body: token issued")
+```
+
+</details>
+
+#### creates protocol evidence with params headers response fields and redaction notes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_api_protocol_evidence(
+    "MCP tools call",
+    "POST",
+    "/mcp",
+    "method=tools/call id=7",
+    "authorization=<redacted>; content-type=application/json",
+    "result.content[0].text; isError=false",
+    "authorization token",
+    "mcp",
+    "tools-call"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.protocol)
+expect(artifact.redacted).to_equal(true)
+expect(artifact.body).to_contain("POST /mcp")
+expect(artifact.body).to_contain("params: method=tools/call id=7")
+expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
+expect(artifact.body).to_contain("response fields: result.content[0].text; isError=false")
+expect(artifact.body).to_contain("redacted: authorization token")
+```
+
+</details>
+
+#### creates execution evidence with command and exit code
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_exec_evidence(
+    "Bootstrap command",
+    "simple test test/03_system/tools/bootstrap_mcp_spec.spl",
+    0,
+    "stdout: all passed",
+    "bootstrap",
+    "run"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+expect(artifact.body).to_contain("$ simple test test/03_system/tools/bootstrap_mcp_spec.spl")
+expect(artifact.body).to_contain("exit: 0")
+```
+
+</details>
+
+#### creates detailed execution evidence with args input streams and exit code
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_exec_detailed_evidence(
+    "MCP stdio command",
+    "simple_mcp_server",
+    "--stdio --log-level warn",
+    "stdin: initialize then tools/list",
+    "stdout: initialize result and tools",
+    "stderr: no panic",
+    0,
+    "mcp",
+    "stdio"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+expect(artifact.body).to_contain("$ simple_mcp_server")
+expect(artifact.body).to_contain("args: --stdio --log-level warn")
+expect(artifact.body).to_contain("input: stdin: initialize then tools/list")
+expect(artifact.body).to_contain("stdout: stdout: initialize result and tools")
+expect(artifact.body).to_contain("stderr: stderr: no panic")
+expect(artifact.body).to_contain("exit: 0")
+```
+
+</details>
+
+#### creates binary evidence with format and field summary
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_binary_evidence(
+    "ELF header",
+    "ELF64",
+    "e_machine: riscv64",
+    "loader",
+    "parse"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.binary)
+expect(artifact.body).to_contain("format: ELF64")
+expect(artifact.body).to_contain("e_machine: riscv64")
+```
+
+</details>
+
+#### creates detailed binary evidence with raw bytes decoded fields and comments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_binary_detailed_evidence(
+    "ELF header",
+    "ELF64",
+    "7f 45 4c 46 ...",
+    "e_machine=riscv64; e_type=executable",
+    "e_machine selects the target architecture",
+    "loader",
+    "parse"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.binary)
+expect(artifact.body).to_contain("format: ELF64")
+expect(artifact.body).to_contain("raw bytes: 7f 45 4c 46 ...")
+expect(artifact.body).to_contain("decoded fields: e_machine=riscv64; e_type=executable")
+expect(artifact.body).to_contain("field comments: e_machine selects the target architecture")
+```
+
+</details>
+
+#### creates TUI selection evidence with rectangle highlight and active menu
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_ui_selection_evidence(
+    ScenarioCaptureKind.tui,
+    "Settings menu after keyboard navigation",
+    "x=4 y=2 w=18 h=1",
+    "menu item: Save",
+    "File > Save",
+    "focus on Save, status Ready",
+    "artifacts/settings-menu.txt",
+    "settings",
+    "open-menu"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.tui)
+expect(artifact.mime).to_equal("text/plain")
+expect(artifact.path).to_equal("artifacts/settings-menu.txt")
+expect(artifact.body).to_contain("selected rectangle: x=4 y=2 w=18 h=1")
+expect(artifact.body).to_contain("highlight: menu item: Save")
+expect(artifact.body).to_contain("inverted active menu: File > Save")
+expect(artifact.body).to_contain("visible state: focus on Save, status Ready")
+```
+
+</details>
+
+#### creates GUI selection evidence with image mime
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_ui_selection_evidence(
+    ScenarioCaptureKind.gui,
+    "Toolbar button after hover",
+    "x=10 y=12 w=32 h=32",
+    "Save toolbar button",
+    "",
+    "button highlighted",
+    "artifacts/toolbar.png",
+    "toolbar",
+    "hover-save"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.gui)
+expect(artifact.mime).to_equal("image/png")
+expect(artifact.body).to_contain("selected rectangle: x=10 y=12 w=32 h=32")
+expect(artifact.body).to_contain("highlight: Save toolbar button")
+expect(artifact.body).to_contain("visible state: button highlighted")
+```
+
+</details>
+
+#### creates Simple Web GUI HTML evidence with visible text
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_simple_gui_html_evidence(
+    "Simple Web app",
+    "<html><body><button>Save</button></body></html>",
+    "Save",
+    "artifacts/simple-web.html",
+    "simple-web",
+    "save"
+)
+expect(artifact.kind).to_equal(ScenarioCaptureKind.html)
+expect(artifact.mime).to_equal("text/html")
+expect(artifact.path).to_equal("artifacts/simple-web.html")
+expect(artifact.body).to_contain("simple gui html capture")
+expect(artifact.body).to_contain("visible text: Save")
+expect(artifact.body).to_contain("<button>Save</button>")
+```
+
+</details>
+
+#### summarizes html checker results with tool name
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_simple_gui_html_evidence(
+    "Simple Web app",
+    "<html><body><main>Ready</main></body></html>",
+    "Ready",
+    "",
+    "simple-web",
+    "ready"
+)
+val result = scenario_html_check_result(
+    ScenarioHtmlCheckTool.simple_html_heuristic,
+    true,
+    "main landmark present",
+    "",
+    artifact
+)
+expect(scenario_html_check_manual_summary(result)).to_equal("simple_html_heuristic passed: main landmark present — Simple Web app (html, text/html)")
+```
+
+</details>
+
+#### links checker assertion status to captured evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = scenario_api_evidence(
+    "Tool response",
+    "POST",
+    "/mcp",
+    200,
+    "result: ok",
+    "mcp",
+    "call"
+)
+val evidence = scenario_checker_evidence("Then tool call succeeds", true, artifact)
+expect(scenario_checker_manual_summary(evidence)).to_equal("Then tool call succeeds (passed) — Tool response (api, text/plain)")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/common/spec/scenario_evidence_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- scenario evidence capture policy
+- scenario evidence artifact
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 23 |
+| Active scenarios | 23 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

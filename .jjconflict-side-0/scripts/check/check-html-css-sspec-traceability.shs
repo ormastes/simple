@@ -1,0 +1,274 @@
+#!/bin/sh
+# Trace WHATWG HTML elements and W3C CSS property inventory to SSpec coverage.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/html_css_sspec_traceability}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_sspec_traceability_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+tmp_env="$OUT_ENV.tmp"
+
+set +e
+python3 - <<'PY' >"$tmp_env"
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.request import Request, urlopen
+import re
+import sys
+
+ROOT = Path.cwd()
+HTML_URL = "https://html.spec.whatwg.org/multipage/indices.html"
+CSS_URL = "https://www.w3.org/TR/CSS/"
+
+HTML_TEST_ROOTS = [
+    "test/01_unit/lib/common/web",
+    "test/01_unit/lib/gc_async_mut/gpu/browser_engine",
+    "test/01_unit/app/ui",
+    "test/02_integration/rendering",
+    "test/03_system/gui",
+]
+
+CSS_TEST_ROOTS = [
+    "test/01_unit/lib/gc_async_mut/gpu/browser_engine",
+    "test/01_unit/app/ui",
+    "test/02_integration/rendering",
+    "test/03_system/gui",
+]
+
+TRACE_DOC = ROOT / "doc/03_plan/sys_test/html_css_spec_traceability.md"
+
+CSS_IMPLEMENTED_SPEC = "test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl"
+CSS_INVENTORY_SPEC = "test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl"
+
+CSS_SUPPORTED = {
+    "accent-color",
+    "align-content", "align-items", "align-self",
+    "animation", "animation-delay", "animation-direction", "animation-duration", "animation-fill-mode", "animation-iteration-count", "animation-name", "animation-play-state", "animation-timing-function",
+    "aspect-ratio",
+    "transform-box", "transform-origin", "transform-style",
+    "backface-visibility", "background", "background-attachment", "background-blend-mode", "background-clip", "background-color", "background-origin", "background-image", "background-position", "background-repeat", "background-size", "border", "border-collapse", "border-spacing", "border-bottom", "border-bottom-color",
+    "border-bottom-style", "border-bottom-width", "border-color", "border-left", "border-left-color",
+    "border-left-style", "border-left-width", "border-right", "border-right-color", "border-right-style",
+    "border-right-width", "border-style", "border-top", "border-top-color", "border-top-style",
+    "border-top-width", "border-width", "border-radius", "border-bottom-left-radius",
+    "border-bottom-right-radius", "border-top-left-radius", "border-top-right-radius",
+    "border-start-start-radius", "border-start-end-radius", "border-end-start-radius", "border-end-end-radius",
+    "border-block", "border-block-color", "border-block-end", "border-block-end-color",
+    "border-block-end-style", "border-block-end-width", "border-block-start",
+    "border-block-start-color", "border-block-start-style", "border-block-start-width",
+    "border-block-style", "border-block-width",
+    "border-inline", "border-inline-color", "border-inline-end", "border-inline-end-color",
+    "border-inline-end-style", "border-inline-end-width", "border-inline-start",
+    "border-inline-start-color", "border-inline-start-style", "border-inline-start-width",
+    "border-inline-style", "border-inline-width",
+    "box-shadow", "box-sizing",
+    "caption-side", "caret-color", "clear", "clip", "clip-path", "color", "color-adjust", "color-scheme", "column-count", "column-width", "columns", "column-rule", "column-rule-color", "column-rule-style", "column-rule-width", "column-gap", "content", "content-visibility", "contain", "cursor", "direction", "display", "empty-cells", "filter", "flex", "flex-basis", "forced-color-adjust", "flex-direction", "flex-flow",
+    "flex-grow", "flex-shrink", "flex-wrap", "font", "font-family", "font-feature-settings", "font-language-override", "font-variation-settings", "font-variant", "font-variant-alternates", "font-variant-caps", "font-variant-east-asian", "font-variant-emoji", "font-variant-ligatures", "font-variant-numeric", "font-variant-position", "font-kerning", "font-optical-sizing", "font-palette", "font-stretch", "font-width", "font-size", "font-size-adjust", "font-style", "font-synthesis", "font-synthesis-small-caps", "font-synthesis-position", "font-synthesis-style", "font-synthesis-weight", "font-weight", "gap", "grid", "grid-area", "grid-auto-flow", "grid-column", "grid-column-gap", "grid-column-start", "grid-gap", "grid-row", "grid-row-gap", "grid-row-start", "grid-template", "grid-template-areas", "grid-template-columns", "grid-template-rows",
+    "float", "height", "image-rendering", "inline-size", "inset", "inset-block", "inset-block-end", "inset-block-start", "inset-inline", "inset-inline-end", "inset-inline-start", "justify-content", "justify-items", "justify-self", "left", "letter-spacing", "line-height", "line-break", "hyphens", "list-style", "list-style-image", "list-style-position", "list-style-type", "bottom", "margin", "margin-block", "margin-block-end", "margin-block-start", "margin-bottom",
+    "margin-inline", "margin-inline-end", "margin-inline-start", "margin-left", "margin-right", "margin-top", "max-block-size", "max-height", "max-inline-size", "max-width",
+    "min-block-size", "min-height", "min-inline-size", "min-width", "object-fit", "object-position", "opacity", "order", "orphans", "outline", "outline-color",
+    "outline-offset", "outline-style", "outline-width", "overflow", "overflow-wrap", "overflow-x",
+    "overflow-y", "padding", "padding-block", "padding-block-end", "padding-block-start", "padding-bottom", "padding-inline", "padding-inline-end", "padding-inline-start", "padding-left", "padding-right",
+    "padding-top", "place-content", "place-items", "place-self", "position", "print-color-adjust", "quotes", "resize", "rotate", "scale", "scrollbar-color", "scrollbar-width", "right", "row-gap", "tab-size", "table-layout", "text-align", "text-align-all", "text-decoration",
+    "text-align-last", "text-decoration-color", "text-decoration-line", "text-decoration-style", "text-decoration-thickness", "text-emphasis", "text-emphasis-color", "text-emphasis-position", "text-emphasis-style", "text-indent", "text-combine-upright", "text-justify", "text-orientation", "text-overflow", "text-shadow", "text-transform", "text-underline-offset", "text-underline-position", "top", "transform",
+    "transition", "transition-delay", "transition-duration", "transition-property", "transition-timing-function", "translate",
+    "unicode-bidi", "vertical-align", "visibility", "white-space", "widows", "width", "block-size", "will-change", "word-break", "word-spacing", "word-wrap", "writing-mode", "z-index",
+}
+
+CSS_NAME_RE = re.compile(
+    r"^(accent|align|all|animation|appearance|aspect|azimuth|backdrop|backface|"
+    r"background|block|border|bottom|box|break|caption|caret|clear|clip|color|"
+    r"column|contain|container|content|counter|cursor|direction|display|empty|"
+    r"field|filter|flex|float|font|gap|grid|height|hyphen|image|initial|inline|"
+    r"inset|isolation|justify|left|letter|line|list|margin|marker|mask|max|min|"
+    r"mix|object|offset|opacity|order|orphans|outline|overflow|overscroll|padding|"
+    r"page|paint|perspective|pitch|place|play|pointer|position|print|property|"
+    r"quotes|resize|rest|richness|right|rotate|row|ruby|scale|scroll|shape|speak|"
+    r"tab|table|text|top|touch|transform|transition|translate|unicode|user|"
+    r"vertical|view|visibility|voice|white|widows|width|will|word|writing|z-index)"
+)
+
+
+def fetch(url: str) -> str:
+    req = Request(url, headers={"User-Agent": "simple-html-css-traceability"})
+    with urlopen(req, timeout=30) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def html_tags(source: str) -> list[str]:
+    tags = set()
+    for match in re.finditer(r"<code id=elements-3:the-([a-z0-9-]+)-element><a [^>]*>([a-z0-9-]+)</a></code>", source):
+        tags.add(match.group(2))
+    return sorted(tags)
+
+
+def css_properties(source: str) -> list[str]:
+    props = set()
+    for match in re.finditer(r"<a[^>]*href=\"[^\"]*#(?:propdef-|propertydef-)([a-zA-Z0-9_-]+)\"[^>]*>(--[a-zA-Z0-9_-]+|[a-zA-Z-]+)</a>", source):
+        props.add(match.group(2))
+    for match in re.finditer(r"<code[^>]*>([a-zA-Z-]{2,})</code>", source):
+        name = match.group(1)
+        if CSS_NAME_RE.match(name):
+            props.add(name)
+    return sorted(props)
+
+
+def read_roots(roots: list[str]) -> str:
+    parts = []
+    for root in roots:
+        base = ROOT / root
+        if not base.exists():
+            continue
+        for path in base.rglob("*"):
+            if path.suffix in {".spl", ".md", ".js"}:
+                parts.append(f"\nFILE:{path.relative_to(ROOT)}\n")
+                parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+    if TRACE_DOC.exists():
+        parts.append("\nFILE:doc/03_plan/sys_test/html_css_spec_traceability.md\n")
+        parts.append(TRACE_DOC.read_text(encoding="utf-8", errors="ignore"))
+    return "".join(parts)
+
+
+def read_text(path: str) -> str:
+    file_path = ROOT / path
+    if not file_path.exists():
+        return ""
+    return file_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def text_has_html_tag(blob: str, tag: str) -> bool:
+    esc = re.escape(tag)
+    return re.search(rf"<{esc}(\s|>|/)|['\"]{esc}['\"]|\b{esc}\b", blob, re.I) is not None
+
+
+def text_has_css_property(blob: str, prop: str) -> bool:
+    esc = re.escape(prop)
+    return re.search(rf"(^|[^a-zA-Z-]){esc}\s*:|['\"]{esc}['\"]|\b{esc}\b", blob, re.I | re.M) is not None
+
+
+def text_has_css_inventory_property(blob: str, prop: str) -> bool:
+    esc = re.escape(prop)
+    return re.search(rf"(?<![a-zA-Z0-9_-]){esc}(?![a-zA-Z0-9_-])", blob, re.I) is not None
+
+
+def emit(key: str, value) -> None:
+    text = "" if value is None else str(value)
+    print(f"{key}={text.replace(chr(10), ' ')}")
+
+
+def main() -> int:
+    html = html_tags(fetch(HTML_URL))
+    css = css_properties(fetch(CSS_URL))
+
+    html_blob = read_roots(HTML_TEST_ROOTS)
+    css_blob = read_roots(CSS_TEST_ROOTS)
+    inventory_blob = read_text(CSS_INVENTORY_SPEC)
+
+    missing_html = [tag for tag in html if not text_has_html_tag(html_blob, tag)]
+
+    indexed_implemented_css = [prop for prop in css if prop in CSS_SUPPORTED]
+    unsupported_css = [prop for prop in css if prop not in CSS_SUPPORTED]
+    missing_implemented_css_assignment = []
+    missing_unsupported_css_assignment = []
+    for prop in css:
+        if prop in CSS_SUPPORTED:
+            if not text_has_css_property(css_blob, prop):
+                missing_implemented_css_assignment.append(prop)
+        else:
+            if not text_has_css_inventory_property(inventory_blob, prop):
+                missing_unsupported_css_assignment.append(prop)
+    missing_css_assignment = missing_implemented_css_assignment + missing_unsupported_css_assignment
+
+    status = "pass"
+    reason = "pass"
+    if len(html) != 105:
+        status = "fail"
+        reason = "unexpected-html-tag-count"
+    elif len(css) < 390:
+        status = "fail"
+        reason = "unexpected-css-property-count"
+    elif missing_html:
+        status = "fail"
+        reason = "html-tags-missing-sspec-assignment"
+    elif missing_css_assignment:
+        status = "fail"
+        reason = "css-properties-missing-sspec-assignment"
+
+    emit("html_css_sspec_traceability_status", status)
+    emit("html_css_sspec_traceability_reason", reason)
+    emit("html_css_sspec_traceability_html_url", HTML_URL)
+    emit("html_css_sspec_traceability_css_url", CSS_URL)
+    emit("html_css_sspec_traceability_html_tag_count", len(html))
+    emit("html_css_sspec_traceability_required_html_tag_count", 105)
+    emit("html_css_sspec_traceability_html_tag_missing", ",".join(missing_html))
+    emit("html_css_sspec_traceability_css_property_count", len(css))
+    emit("html_css_sspec_traceability_required_css_property_min_count", 390)
+    emit("html_css_sspec_traceability_css_property_missing_count", len(missing_css_assignment))
+    emit("html_css_sspec_traceability_css_property_missing", ",".join(missing_css_assignment[:120]))
+    emit("html_css_sspec_traceability_implemented_css_property_count", len(CSS_SUPPORTED))
+    emit("html_css_sspec_traceability_implemented_css_property_indexed_count", len(indexed_implemented_css))
+    emit("html_css_sspec_traceability_implemented_css_property_missing_count", len(missing_implemented_css_assignment))
+    emit("html_css_sspec_traceability_implemented_css_property_missing", ",".join(missing_implemented_css_assignment[:120]))
+    emit("html_css_sspec_traceability_unsupported_css_property_count", len(unsupported_css))
+    emit("html_css_sspec_traceability_unsupported_css_properties", ",".join(unsupported_css))
+    emit("html_css_sspec_traceability_unsupported_css_property_missing_count", len(missing_unsupported_css_assignment))
+    emit("html_css_sspec_traceability_unsupported_css_property_missing", ",".join(missing_unsupported_css_assignment[:120]))
+    emit("html_css_sspec_traceability_implemented_css_subset_spec", CSS_IMPLEMENTED_SPEC)
+    emit("html_css_sspec_traceability_unsupported_css_inventory_spec", CSS_INVENTORY_SPEC)
+    return 0 if status == "pass" else 1
+
+
+try:
+    sys.exit(main())
+except Exception as exc:
+    emit("html_css_sspec_traceability_status", "fail")
+    emit("html_css_sspec_traceability_reason", "traceability-exception")
+    emit("html_css_sspec_traceability_error", f"{type(exc).__name__}:{exc}")
+    emit("html_css_sspec_traceability_html_url", HTML_URL)
+    emit("html_css_sspec_traceability_css_url", CSS_URL)
+    emit("html_css_sspec_traceability_required_html_tag_count", 105)
+    emit("html_css_sspec_traceability_required_css_property_min_count", 390)
+    sys.exit(1)
+PY
+code=$?
+set -e
+
+mv "$tmp_env" "$OUT_ENV"
+
+status="$(sed -n 's/^html_css_sspec_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^html_css_sspec_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
+html_count="$(sed -n 's/^html_css_sspec_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
+css_count="$(sed -n 's/^html_css_sspec_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+implemented_css_count="$(sed -n 's/^html_css_sspec_traceability_implemented_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+implemented_css_spec="$(sed -n 's/^html_css_sspec_traceability_implemented_css_subset_spec=//p' "$OUT_ENV" | tail -n 1)"
+inventory_css_spec="$(sed -n 's/^html_css_sspec_traceability_unsupported_css_inventory_spec=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# HTML/CSS SSpec Traceability"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- WHATWG HTML elements: $html_count/105"
+    echo "- W3C CSS property-like entries: $css_count >= 390"
+    echo "- implemented Simple Web CSS properties: $implemented_css_count"
+    echo "- implemented CSS subset spec: $implemented_css_spec"
+    echo "- unsupported CSS inventory spec: $inventory_css_spec"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    echo "PASS: HTML/CSS SSpec traceability html_tags=$html_count css_properties=$css_count"
+    echo "PASS: implemented CSS subset spec=$implemented_css_spec"
+    echo "PASS: unsupported CSS inventory spec=$inventory_css_spec"
+    exit 0
+fi
+
+exit "$code"

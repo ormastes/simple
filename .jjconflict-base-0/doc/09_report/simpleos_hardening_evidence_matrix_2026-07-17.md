@@ -1,0 +1,186 @@
+# SimpleOS Hardening Evidence Matrix
+
+- status: fail
+- reason: matrix-incomplete
+- mission_critical_release_status: fail
+- mission_critical_release_blockers: hardening_matrix,riscv_rtl_sby_proof,qemu_scheduler_smp_handoff,qemu_scheduler_hw_handoff,mission_critical_prereqs,async_library_hardening
+- stale_reports: none
+- stale_report_names: none
+- mission_critical_release_gate: scripts/check/check-simpleos-mission-critical-release.shs
+- mission_critical_release_prereq_gate: scripts/check/check-simpleos-mission-critical-prereqs.shs
+- mission_critical_prereqs_status: blocked
+- mission_critical_prereqs_missing: sby,yosys,smt-solver
+- mission_critical_prereqs_next_action: run scripts/setup/setup-simpleos-formal-env.shs --print-install, install the SymbiYosys stack or source OSS CAD Suite locally, rerun scripts/check/check-simpleos-mission-critical-prereqs.shs, then run scripts/check/check-simpleos-mission-critical-release.shs
+- nvme_baremetal_wrapper_coverage: pass
+- nvme_baremetal_wrapper_coverage_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/nvme_baremetal_wrapper_coverage.log
+- nvme_baremetal_wrapper_coverage_blockers: none
+- nvme_baremetal_wrapper_rv32_self_test: pass
+- nvme_baremetal_wrapper_rv32_spec_status: pass
+- nvme_baremetal_wrapper_rv64_self_test: pass
+- nvme_baremetal_wrapper_rv64_spec_status: pass
+- nvme_baremetal_wrapper_coverage_next_action: none
+- async_library_hardening: fail
+- async_library_hardening_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/async_library_hardening.log
+- async_library_hardening_gate: scripts/check/check-async-library-hardening-evidence.shs
+- async_library_hardening_scope: regression gate for async primitives, host tasks, thread pool, cooperative/multicore green tasks, green channels, process running state, actors, and generators
+- async_library_hardening_evidence: 19 async/thread/process/coroutine specs pass through check-async-library-hardening-evidence.shs; this is regression evidence, not a formal starvation/fairness/race proof
+- async_library_hardening_total: 19
+- async_library_hardening_passed: 0
+- async_library_hardening_failed: 19
+- async_library_hardening_missing: 0
+- passed: 18/26
+- blocked_rows: executable_launch_from_fs,ssh_shell_smf_and_exec,formal_riscv_dual_track,byl_sby_artifact_audit,async_library_hardening,qemu_wm_simple_gui_mdi,rv64_display_smoke_qmp,qemu_virtio_gpu_access,riscv_rtl_sby_proof
+- recovery_hints: ssh=test/03_system/os/ssh_live_login_in_qemu_spec.spl;web=test/03_system/gui/layered_simple_gui_web_engine2d_bitmap_evidence_spec.spl;mdi=test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl
+- executable_launch_from_fs: fail
+- ssh_shell_smf_and_exec: fail
+- formal_lean_proofs: pass
+- formal_lean_proofs_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/lean_proofs.log
+- formal_riscv_dual_track: fail
+- formal_riscv_dual_track_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/riscv_formal_dual_track.log
+- formal_critical_concurrency: pass
+- formal_critical_concurrency_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/critical_concurrency_formal.log
+- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
+- formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
+- formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup/drain and buffered receive, DRF read/write and lock race constraints plus synchronized-safe variants, kernel capability default-deny, memory capability upgrade denial and unique/shared write constraints
+- formal_memory_safety: pass
+- formal_memory_safety_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/memory_safety_formal.log
+- formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs
+- formal_memory_safety_scope: Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile
+- formal_memory_safety_evidence: mark/sweep reachability invariant with never-whiten and live-retention checks, no dangling after sweep, no-GC boundary checker soundness/rejection, alias counterexample, borrowed object liveness and pin preservation, manual pointer valid-state/exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
+- formal_storage_integrity: pass
+- formal_storage_integrity_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/storage_integrity_formal.log
+- formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs
+- formal_storage_integrity_scope: Lean model gate: db_storage, fat32, formal/nvfs
+- formal_storage_integrity_evidence: B-tree ordering/bounds, WAL-before-data and publish-root flush/commit requirements, MVCC snapshot/recovery completeness, FAT32 chain/LBA/8.3/free-chain/allocation invariants, NVFS arena/pmap/WAL/checkpoint/mount preservation and crash refinement
+- formal_boundary_integrity: pass
+- formal_boundary_integrity_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/boundary_integrity_formal.log
+- formal_boundary_integrity_gate: scripts/check/check-simpleos-boundary-formal-proofs.shs
+- formal_boundary_integrity_scope: Lean model gate: ffi_contract, process_lifecycle, tls_isolation
+- formal_boundary_integrity_evidence: FFI rejects undefined/null calls, preserves tag/payload roundtrips, and rejects unsafe untagging/reboxing; process lifecycle proves spawn/run/exit/reap progression, no double reap, orphan adoption, and no persistent zombies; TLS reads remain own-thread/key isolated with commuting independent writes
+- formal_process_resource_lifecycle: pass
+- formal_process_resource_lifecycle_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/boundary_integrity_formal.log
+- formal_process_resource_lifecycle_gate: scripts/check/check-simpleos-boundary-formal-proofs.shs
+- formal_process_resource_lifecycle_scope: Lean model gate: process_lifecycle resource cleanup, wait/reap state, zombie/orphan lifecycle
+- formal_process_resource_lifecycle_evidence: process_lifecycle proves exit_clears_resources, wait_blocks_on_running, reap_requires_exited, no_zombie_persist_table, and live_orphan_not_reaped through the boundary formal proof gate
+- formal_coroutine_resource_bounds: pass
+- formal_coroutine_resource_bounds_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/critical_concurrency_formal.log
+- formal_coroutine_resource_bounds_gate: scripts/check/check-simpleos-critical-formal-proofs.shs + scripts/check/check-simpleos-memory-safety-formal-proofs.shs
+- formal_coroutine_resource_bounds_scope: Lean model gate: green-task coroutine lifecycle, bounded channels, resource capacity, and noalloc/size safety
+- formal_coroutine_resource_bounds_evidence: green-task coroutine lifecycle proves park/unpark enqueue/no-op, done cannot re-enqueue, runBatch drains ready queues, task completion is idempotent, resource acquire/release preserves capacity and never underflows, bounded channel backpressure prevents overflow, close wakes/drains parked waiters, and noalloc gates reject allocation
+- formal_compiler_language: pass
+- formal_compiler_language_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/compiler_language_formal.log
+- formal_compiler_language_gate: scripts/check/check-simpleos-compiler-language-formal-proofs.shs
+- formal_compiler_language_scope: Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export
+- formal_compiler_language_evidence: module resolution ambiguity/exists rules, macro auto-import leakage and glob subset guards, deterministic type inference and async effect/await/promise rules, contract/generic substitution and literal inference constraints, heap read/write plus class alias versus struct copy semantics, private visibility meet/fold propagation
+- formal_ui_policy: pass
+- formal_ui_policy_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/ui_policy_formal.log
+- formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs
+- formal_ui_policy_scope: Lean model gate: ui_compositor
+- formal_ui_policy_evidence: damage add preserves the new rect and grows coverage, merge covers both inputs, clip output stays inside both bounds, z-sort and stacking-context sort preserve all windows/surfaces, z-order renormalisation preserves relative order, recursive paint-order flatten keeps every surface exactly once
+- formal_coverage: pass
+- formal_coverage_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/formal_coverage.log
+- formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs
+- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, process/resource lifecycle, coroutine/resource bounds, compiler/language, async-library hardening, and UI policy
+- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates, executed proof-checker, RISC-V dual-track, RTL/SBY, release-wrapper, NVMe baremetal wrapper coverage audit, async-library hardening wrapper, process/coroutine/resource theorem-wrapper self-tests, and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation
+- byl_sby_artifact_audit: fail
+- byl_sby_artifact_audit_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/byl_sby_artifact_audit.log
+- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs
+- byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts consist of the RISC-V BYL surface; generated SBY/RVFI artifacts are validated by the RISC-V sidecar contract and remain readiness evidence, not an RTL proof pass
+- byl_sby_artifact_audit_evidence: src/verification/riscv_product/riscv_product.byl plus sh scripts/check/check-riscv-formal-dual-track.shs
+- riscv_rtl_sby_proof: blocked-missing-formal-prereqs
+- riscv_rtl_sby_proof_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/riscv_rtl_sby_proof.log
+- riscv_rtl_sby_proof_gate: scripts/check/check-riscv-rtl-sby-proof.shs
+- riscv_rtl_sby_proof_scope: strict RISC-V RTL SymbiYosys proof run for generated rv32/rv64 default and mlk bundles
+- riscv_rtl_sby_proof_blocker: sby,yosys,smt-solver
+- riscv_rtl_rvfi_readiness_note: RISC-V generated RTL bundles pass RVFI port, formal harness, SBY, and manifest artifact checks through scripts/check/check-riscv-fpga-sidecar-contract.shs; without sby, yosys, and an SMT solver this is RVFI/SymbiYosys readiness evidence, not an RTL proof pass
+- qemu_scheduler_smp_handoff_status: fail
+- qemu_scheduler_smp_handoff_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/qemu_scheduler_smp_handoff.log
+- qemu_scheduler_smp_handoff_gate: test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl
+- qemu_scheduler_smp_handoff_scope: live QEMU 2-CPU boot + scheduler-owned AP-carrier green-work dispatch
+- qemu_scheduler_smp_handoff_live_env_var: SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
+- qemu_scheduler_smp_handoff_readiness_note: Matrix runs green_carrier_qemu_spec.spl with SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1, so this row is live scheduler/AP handoff evidence rather than host-mode skip evidence
+- qemu_scheduler_hw_handoff_status: fail
+- qemu_scheduler_hw_handoff_log: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/qemu_scheduler_hw_handoff.log
+- qemu_scheduler_hw_handoff_gate: test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl
+- qemu_scheduler_hw_handoff_scope: live QEMU final AP ring/user hardware handoff marker triplet
+- qemu_scheduler_hw_handoff_live_env_var: SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE
+- shared_wm_logic: pass
+- cpu_simd_engine2d_diagram: pass
+- cpu_simd_report: doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md
+- llvm_port: pass
+- llvm_port_report: doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md
+- gui_renderdoc_vulkan: pass
+- gui_renderdoc_report: doc/09_report/gui_renderdoc_feature_coverage_status_2026-07-03.md
+- web_renderer_engine2d_bitmap: pass
+- simple_gui_webrenderer_bitmap: pass
+- production_gui_web_renderer_parity: pass
+- qemu_host_counterpart_bitmap: pass
+- qemu_gui_smf_artifact_contract: pass
+- qemu_gui_smf_artifact_contract_status: pass
+- qemu_gui_smf_artifact_contract_row: GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf sha256=d2978950c6ac8046b84e2d017b39434a47f77cf28476c8d4b744af423e698c48 size=69400 smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=pass qemu_reason=arm64-smf-parity-verified macos_status=not-run macos_reason=requires-macos-arm64
+- qemu_guest_perf_release_gate: guest-simple-frame-plus-host-gtk-baseline
+- qemu_guest_perf_release_gate_status: pass
+- qemu_guest_perf_release_blocker: none
+- qemu_guest_perf_harness_status: pass
+- qemu_guest_perf_harness_reason: pass
+- qemu_guest_perf_harness_sample_origin: qemu-guest
+- qemu_guest_perf_harness_required_sample_origin: qemu-guest
+- qemu_guest_perf_harness_pending_marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
+- qemu_guest_perf_harness_marker_line: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=246916568 iterations=16 timing_unit=tsc scope=simple-vga-paint
+- qemu_host_perf_promotes_qemu_perf: false
+- qemu_wm_simple_gui_mdi: fail
+- qemu_wm_simple_gui_mdi_ppm_anchors: fail
+- qemu_wm_simple_gui_mdi_ppm_nonblack: 0
+- qemu_wm_simple_gui_mdi_input_status: fail
+- qemu_wm_simple_gui_mdi_input_before_ppm_bytes: 0
+- qemu_wm_simple_gui_mdi_input_after_ppm_bytes: 0
+- qemu_wm_simple_gui_mdi_input_before_raw_bytes: 0
+- qemu_wm_simple_gui_mdi_input_after_raw_bytes: 0
+- qemu_wm_simple_gui_mdi_input_before_sha256: 
+- qemu_wm_simple_gui_mdi_input_after_sha256: 
+- rv64_display_smoke_qmp: missing
+- rv64_display_smoke_qmp_reason: missing-report
+- rv64_display_smoke_qmp_report: doc/09_report/rv64_display_smoke_qmp_evidence_2026-07-17.md
+- rv64_display_smoke_qmp_contract_version: 0
+- rv64_display_smoke_qmp_width: 0
+- rv64_display_smoke_qmp_height: 0
+- rv64_display_smoke_qmp_stride: 0
+- rv64_display_smoke_qmp_present_revision: 0
+- rv64_display_smoke_qmp_nonblack: 0
+- rv64_display_smoke_qmp_palette_witnesses: 0
+- rv64_display_smoke_qmp_palette_names: 
+- qemu_virtio_gpu_access: fail
+- qemu_virtio_gpu_access_reason: rv64-qmp-virtio-gpu-display-smoke-incomplete
+- qemu_virtio_gpu_access_contract: src/os/_QemuRunner/scenario_catalog.spl:scenario_riscv64_display_smoke
+- qemu_host_gpu_2d_status: not-run
+- qemu_host_gpu_2d_reason: live-gate-not-requested
+- qemu_host_gpu_2d_report: /home/ormastes/dev/pub/simple/build/simpleos_mission_critical_release/matrix/simpleos_qemu_host_gpu_2d.env
+- simple_web_node_report: doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-07-03.md
+- simple_web_bun_report: doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-07-05.md
+- production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-29.md
+- simple_web_node_env: build/simple_web_engine2d_js_bitmap_evidence_current/evidence.env
+- simple_web_bun_env: build/bun_simple_web_engine2d_js_bitmap_evidence_current/evidence.env
+- gui_entry_latest_dir: 
+- gui_entry_capture_ppm_bytes: 0
+- gui_entry_capture_raw_bytes: 0
+- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
+- formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
+- formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup/drain and buffered receive, DRF read/write and lock race constraints plus synchronized-safe variants, kernel capability default-deny, memory capability upgrade denial and unique/shared write constraints
+- formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs
+- formal_memory_safety_scope: Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile
+- formal_memory_safety_evidence: mark/sweep reachability invariant with never-whiten and live-retention checks, no dangling after sweep, no-GC boundary checker soundness/rejection, alias counterexample, borrowed object liveness and pin preservation, manual pointer valid-state/exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
+- formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs
+- formal_storage_integrity_scope: Lean model gate: db_storage, fat32, formal/nvfs
+- formal_storage_integrity_evidence: B-tree ordering/bounds, WAL-before-data and publish-root flush/commit requirements, MVCC snapshot/recovery completeness, FAT32 chain/LBA/8.3/free-chain/allocation invariants, NVFS arena/pmap/WAL/checkpoint/mount preservation and crash refinement
+- formal_boundary_integrity_gate: scripts/check/check-simpleos-boundary-formal-proofs.shs
+- formal_boundary_integrity_scope: Lean model gate: ffi_contract, process_lifecycle, tls_isolation
+- formal_boundary_integrity_evidence: FFI rejects undefined/null calls, preserves tag/payload roundtrips, and rejects unsafe untagging/reboxing; process lifecycle proves spawn/run/exit/reap progression, no double reap, orphan adoption, and no persistent zombies; TLS reads remain own-thread/key isolated with commuting independent writes
+- formal_compiler_language_gate: scripts/check/check-simpleos-compiler-language-formal-proofs.shs
+- formal_compiler_language_scope: Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export
+- formal_compiler_language_evidence: module resolution ambiguity/exists rules, macro auto-import leakage and glob subset guards, deterministic type inference and async effect/await/promise rules, contract/generic substitution and literal inference constraints, heap read/write plus class alias versus struct copy semantics, private visibility meet/fold propagation
+- formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs
+- formal_ui_policy_scope: Lean model gate: ui_compositor
+- formal_ui_policy_evidence: damage add preserves the new rect and grows coverage, merge covers both inputs, clip output stays inside both bounds, z-sort and stacking-context sort preserve all windows/surfaces, z-order renormalisation preserves relative order, recursive paint-order flatten keeps every surface exactly once
+- formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs
+- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, process/resource lifecycle, coroutine/resource bounds, compiler/language, async-library hardening, and UI policy
+- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates, executed proof-checker, RISC-V dual-track, RTL/SBY, release-wrapper, NVMe baremetal wrapper coverage audit, async-library hardening wrapper, process/coroutine/resource theorem-wrapper self-tests, and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation

@@ -1,0 +1,280 @@
+# Debug CLI — command handlers + dispatch
+use app.cli_debug.commands.*
+# Simple Debugger — Command Parsing and Dispatch
+# Maps GDB-like commands to backend debugger operations.
+
+extern fn stdout_write(s: text)
+extern fn stdout_flush()
+
+use app.cli_debug.format.{
+    fmt_help_main, fmt_help_break, fmt_help_print, fmt_help_info,
+    fmt_error, fmt_info, fmt_breakpoint_set, fmt_session_created,
+    fmt_session_closed, fmt_program_started, fmt_bold
+}
+
+use app.mcpgdb.debug_backend_common.{
+    run_session_command, create_debugger_process, make_session,
+    stop_session_process, choose_workspace_root, ps_is_alive
+}
+
+use app.mcpgdb.state.{
+    DebugSession, MCPGDB_SESSIONS, MCPGDB_CURRENT_SESSION,
+    next_session_id, set_current_session, current_or_named_session,
+    put_session, remove_session, session_count
+}
+
+use app.mcpgdb.json_helpers.{js}
+
+# ============================================================================
+# State
+# ============================================================================
+
+fn cmd_restore(args: text):
+    if not sdb_ensure_session():
+        return
+    if args == "":
+        sdb_print("Usage: restore <file> [binary] <offset> <start> <end>")
+        return
+    val output = sdb_run_cmd("restore " + args)
+    sdb_print(output)
+
+fn cmd_raw(command: text):
+    """Pass raw command directly to the backend debugger."""
+    if not sdb_ensure_session():
+        return
+    val output = sdb_run_cmd(command)
+    sdb_print(output)
+
+fn cmd_help(args: text):
+    if args == "" or args == "help":
+        sdb_print(fmt_help_main())
+    elif args == "break" or args == "b":
+        sdb_print(fmt_help_break())
+    elif args == "print" or args == "p":
+        sdb_print(fmt_help_print())
+    elif args == "info":
+        sdb_print(fmt_help_info())
+    elif args == "run" or args == "r":
+        sdb_print("Usage: run [ARGS]\n\nStart the debugged program. Arguments are passed to the program.")
+    elif args == "step" or args == "s":
+        sdb_print("Usage: step [N]\n\nStep into N source lines (default 1). Steps into function calls.")
+    elif args == "next" or args == "n":
+        sdb_print("Usage: next [N]\n\nStep over N source lines (default 1). Steps over function calls.")
+    elif args == "continue" or args == "c":
+        sdb_print("Usage: continue [N]\n\nContinue execution. Optional N to ignore next N breakpoint hits.")
+    elif args == "finish":
+        sdb_print("Usage: finish\n\nExecute until selected stack frame returns.")
+    elif args == "backtrace" or args == "bt":
+        sdb_print("Usage: backtrace [N]\n\nPrint call stack. N limits depth. 'bt full' includes locals.")
+    elif args == "frame" or args == "f":
+        sdb_print("Usage: frame [N]\n\nSelect and display stack frame N. Without N, show current frame.")
+    elif args == "list" or args == "l":
+        sdb_print("Usage: list [LOCATION]\n\nList source lines around location.\n  list          List next 10 lines\n  list -        List previous 10 lines\n  list 42       List around line 42\n  list fn       List function fn")
+    elif args == "watch":
+        sdb_print("Usage: watch EXPRESSION\n\nSet watchpoint. Stop when EXPRESSION changes.\n  awatch EXPR   Stop on read or write\n  rwatch EXPR   Stop on read only")
+    elif args == "display":
+        sdb_print("Usage: display EXPRESSION\n\nAuto-display EXPRESSION each time program stops.\n  undisplay N   Remove display N\n  info display  List displays")
+    elif args == "x":
+        sdb_print("Usage: x/FMT ADDRESS\n\nExamine memory.\n  x/10x $sp     10 hex words at stack pointer\n  x/s addr      String at address\n  x/i $pc       Instruction at program counter\n  x/10i main    10 instructions at main")
+    elif args == "disassemble" or args == "disas":
+        sdb_print("Usage: disassemble [FUNCTION|START,END]\n\nDisassemble code.\n  disas          Current function\n  disas main     Function main\n  disas /m       Mixed source+assembly")
+    elif args == "thread":
+        sdb_print("Usage: thread [ID]\n\nSwitch to thread ID.\n  thread apply all bt   Backtrace all threads\n  info threads          List all threads")
+    elif args == "attach":
+        sdb_print("Usage: attach PID\n\nAttach to running process by PID.")
+    elif args == "detach":
+        sdb_print("Usage: detach\n\nDetach from the debugged process.")
+    elif args == "target":
+        sdb_print("Usage: target remote HOST:PORT\n\nConnect to remote GDB server.\n  target remote :1234       Local port\n  target remote 192.168.1.1:1234")
+    elif args == "set":
+        sdb_print("Usage: set VARIABLE = VALUE\n\nSet debugger or program variable.\n  set args ARG1 ARG2   Set program arguments\n  set var x = 42       Set variable x\n  set pagination off   Disable output paging")
+    elif args == "handle":
+        sdb_print("Usage: handle SIGNAL ACTION\n\nConfigure signal handling.\n  handle SIGSEGV stop print    Stop and print on SIGSEGV\n  handle SIGPIPE nostop noprint pass\n  info signals                 List signal settings")
+    elif args == "shell":
+        sdb_print("Usage: shell COMMAND  or  !COMMAND\n\nExecute a shell command without leaving the debugger.")
+    else:
+        sdb_print("No help for '" + args + "'. Type 'help' for command list.")
+
+fn cmd_quit() -> bool:
+    """Quit debugger. Returns true to exit."""
+    match SDB_SESSION:
+        Some(session):
+            stop_session_process(session)
+            remove_session(session.session_id)
+            SDB_SESSION = nil
+            sdb_print(fmt_session_closed(session.session_id))
+        nil: pass
+    true
+
+# ============================================================================
+# Command Dispatch
+# ============================================================================
+
+fn dispatch_command(line: text) -> bool:
+    """Parse and dispatch a GDB-like command. Returns true if should quit."""
+    val trimmed = line.trim()
+    if trimmed == "":
+        return false
+
+    # Split into command and args
+    val space_idx = trimmed.index_of(" ")
+    var cmd = ""
+    var args = ""
+    match space_idx:
+        Some(idx):
+            cmd = trimmed.substring(0, idx)
+            args = trimmed.substring(idx + 1).trim()
+        nil:
+            cmd = trimmed
+
+    # Handle ! prefix for shell commands
+    if cmd.starts_with("!"):
+        val shell_cmd = cmd.substring(1) + if args != "" then " " + args else ""
+        cmd_shell(shell_cmd)
+        return false
+
+    # Dispatch with aliases — organized by GDB category
+    # === Session / Quit ===
+    if cmd == "quit" or cmd == "q" or cmd == "exit":
+        return cmd_quit()
+    elif cmd == "help" or cmd == "h":
+        cmd_help(args)
+
+    # === File / Symbol Loading ===
+    elif cmd == "file":
+        cmd_file(args)
+
+    # === Execution Control ===
+    elif cmd == "run" or cmd == "r":
+        cmd_run(args)
+    elif cmd == "start":
+        cmd_start(args)
+    elif cmd == "continue" or cmd == "c" or cmd == "cont" or cmd == "fg":
+        cmd_continue()
+    elif cmd == "next" or cmd == "n":
+        cmd_next(args)
+    elif cmd == "nexti" or cmd == "ni":
+        cmd_nexti(args)
+    elif cmd == "step" or cmd == "s":
+        cmd_step(args)
+    elif cmd == "stepi" or cmd == "si":
+        cmd_stepi(args)
+    elif cmd == "finish" or cmd == "fin":
+        cmd_finish()
+    elif cmd == "until" or cmd == "u":
+        cmd_until(args)
+    elif cmd == "return":
+        cmd_return(args)
+    elif cmd == "jump" or cmd == "j":
+        cmd_jump(args)
+    elif cmd == "kill" or cmd == "k":
+        cmd_kill()
+    elif cmd == "signal":
+        cmd_signal(args)
+
+    # === Breakpoints / Watchpoints / Catchpoints ===
+    elif cmd == "break" or cmd == "b":
+        cmd_break(args)
+    elif cmd == "tbreak" or cmd == "tb":
+        cmd_tbreak(args)
+    elif cmd == "rbreak" or cmd == "rb":
+        cmd_rbreak(args)
+    elif cmd == "hbreak":
+        cmd_raw("hbreak " + args)
+    elif cmd == "delete" or cmd == "d" or cmd == "del":
+        cmd_delete(args)
+    elif cmd == "clear":
+        cmd_clear(args)
+    elif cmd == "enable":
+        cmd_enable(args)
+    elif cmd == "disable":
+        cmd_disable(args)
+    elif cmd == "condition" or cmd == "cond":
+        cmd_condition(args)
+    elif cmd == "commands":
+        cmd_commands(args)
+    elif cmd == "watch":
+        cmd_watch(args)
+    elif cmd == "awatch":
+        cmd_awatch(args)
+    elif cmd == "rwatch":
+        cmd_rwatch(args)
+    elif cmd == "catch":
+        cmd_catch(args)
+
+    # === Data / Variables ===
+    elif cmd == "print" or cmd == "p":
+        cmd_print(args)
+    elif cmd == "printf":
+        cmd_printf(args)
+    elif cmd == "display":
+        cmd_display(args)
+    elif cmd == "undisplay":
+        cmd_undisplay(args)
+    elif cmd == "ptype":
+        cmd_ptype(args)
+    elif cmd == "whatis":
+        cmd_whatis(args)
+    elif cmd == "x":
+        cmd_examine(args)
+    elif cmd == "set":
+        cmd_set(args)
+    elif cmd == "show":
+        cmd_show(args)
+
+    # === Stack ===
+    elif cmd == "backtrace" or cmd == "bt" or cmd == "where":
+        cmd_backtrace(args)
+    elif cmd == "frame" or cmd == "f":
+        cmd_frame(args)
+    elif cmd == "up":
+        cmd_up(args)
+    elif cmd == "down" or cmd == "do":
+        cmd_down(args)
+
+    # === Source ===
+    elif cmd == "list" or cmd == "l":
+        cmd_list(args)
+    elif cmd == "directory" or cmd == "dir":
+        cmd_directory(args)
+    elif cmd == "disassemble" or cmd == "disas":
+        cmd_disassemble(args)
+
+    # === Threads ===
+    elif cmd == "thread":
+        cmd_thread(args)
+    elif cmd == "info" or cmd == "i":
+        cmd_info(args)
+
+    # === Process / Attach ===
+    elif cmd == "attach":
+        cmd_attach(args)
+    elif cmd == "detach":
+        cmd_detach(args)
+    elif cmd == "target":
+        cmd_target(args)
+
+    # === Signals ===
+    elif cmd == "handle":
+        cmd_handle(args)
+
+    # === Memory ===
+    elif cmd == "dump":
+        cmd_dump(args)
+    elif cmd == "restore":
+        cmd_restore(args)
+
+    # === Scripting / Misc ===
+    elif cmd == "source":
+        cmd_source(args)
+    elif cmd == "shell":
+        cmd_shell(args)
+    elif cmd == "define":
+        cmd_define(args)
+    elif cmd == "backend":
+        cmd_backend(args)
+
+    else:
+        # Pass unknown commands directly to backend (covers remaining GDB commands)
+        cmd_raw(trimmed)
+    false

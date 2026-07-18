@@ -1,0 +1,256 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Argon2i — Pure Simple Implementation (RFC 9106)
+#
+# Argon2i is the data-independent addressing variant of Argon2. Every
+# reference block index is derived from a pseudo-random stream that depends
+# only on the pass/lane/slice counters and NOT on the memory contents, making
+# it resistant to data-dependent timing / cache-side-channel attacks.
+#
+# Public API:
+#   argon2i(password, salt, t_cost, m_cost, parallelism, tag_len) -> [u8]
+#   argon2i_hash(password, salt, t_cost, m_cost, parallelism,
+#                key, ad, tag_len) -> [u8]
+#
+# Parameters (RFC 9106 §3.1):
+#   t_cost      — number of passes (>= 1)
+#   m_cost      — desired memory in KiB (>= 8 * parallelism)
+#   parallelism — number of lanes (>= 1, <= 2^24-1)
+#   tag_len     — desired output length in bytes (>= 4, <= 2^32-1)
+#   key         — optional secret value (may be empty)
+#   ad          — optional associated data (may be empty)
+#
+# Built on shared primitives from src/os/crypto/argon2.spl.
+# No new externs.
+#
+# Differences from Argon2id (argon2.spl):
+#   - Type identifier y = 1 (Argon2i) instead of 2 (Argon2id)
+#   - Data-independent addressing is used for ALL passes and ALL slices
+#     (Argon2id only uses it for pass 0, slices 0-1)
+#   - key and ad are exposed as first-class parameters (argon2id uses empty)
+#
+# References:
+#   RFC 9106 §3.2 — H_0 initial 64-byte hash from parameters and inputs
+#   RFC 9106 §3.3 — H' variable-length BLAKE2b-based hash
+#   RFC 9106 §3.4 — Argon2i mode (§3.4.1.2 pseudo-random index generation)
+#   RFC 9106 §3.5 — G compression function
+#   RFC 9106 §5.2 — Argon2i test vector
+#
+# INTERPRETER PERFORMANCE
+#   Same watchdog concern as argon2id: each pass writes m KiB.
+#   Use t=1, m=8, p=1 for fast tests; mark t>=3/m>=32 as @slow.
+
+use os.crypto.argon2.{
+    _argon2_version,
+    _le32,
+    _append,
+    _h_prime,
+    _h0,
+    _g_compress,
+    _block_xor,
+    _bytes_to_block,
+    _block_to_bytes,
+    _zero_block,
+    _argon2i_seed_block,
+}
+
+# ============================================================================
+# Argon2i type constant
+# ============================================================================
+
+fn _argon2i_type_id() -> u32:
+    """RFC 9106 §3.1: y = 1 for Argon2i."""
+    var v: u32 = 1
+    v
+
+# ============================================================================
+# Argon2i main routine (key + ad variant)
+# ============================================================================
+
+pub fn argon2i_hash(password: [u8], salt: [u8], t_cost: i64, m_cost: i64,
+                    parallelism: i64, key: [u8], ad: [u8],
+                    tag_len: i64) -> [u8]:
+    """Argon2i key derivation (RFC 9106 §3.4, data-independent throughout).
+
+    Args:
+      password    — secret octet string
+      salt        — salt octet string (must be at least 8 bytes per RFC §3.1)
+      t_cost      — number of passes (RFC param `t`, >= 1)
+      m_cost      — memory in KiB (RFC param `m`, >= 8 * parallelism)
+      parallelism — lanes (RFC param `p`, >= 1)
+      key         — optional secret value (may be empty [])
+      ad          — optional associated data (may be empty [])
+      tag_len     — output length in bytes (RFC param `T`, >= 4)
+
+    Returns: derived tag of `tag_len` bytes.
+
+    Argon2i uses data-independent addressing for ALL (pass, slice) pairs.
+    The pseudo-random J1||J2 stream is generated per segment by evaluating
+    G(G(zero, seed_block)) where seed_block encodes the segment identity.
+    """
+    val ytype: u32 = _argon2i_type_id()
+
+    # Step 2: parameter conditioning per RFC §3.4
+    val p = parallelism
+    val four_p = 4 * p
+    val m_prime = (m_cost / four_p) * four_p
+    val q = m_prime / p          # blocks per lane
+    val sl = q / 4               # segment length (4 slices per lane)
+
+    # Step 1: H_0 — note y=1 (Argon2i) flows into the hash here
+    val h0_bytes = _h0(parallelism.to_u32(), tag_len.to_u32(), m_cost.to_u32(),
+                       t_cost.to_u32(), _argon2_version(), ytype,
+                       password, salt, key, ad)
+
+    # Step 3: initialize B[i][0] and B[i][1] for each lane.
+    var blocks: [[u64]] = []
+    var idx: i64 = 0
+    while idx < m_prime:
+        blocks.push(_zero_block())
+        idx = idx + 1
+
+    var lane: i64 = 0
+    while lane < p:
+        var seed0: [u8] = []
+        seed0 = _append(seed0, h0_bytes)
+        seed0 = _append(seed0, _le32(0.to_u32()))
+        seed0 = _append(seed0, _le32(lane.to_u32()))
+        val b0 = _h_prime(seed0, 1024.to_u32())
+        blocks[lane * q + 0] = _bytes_to_block(b0)
+
+        var seed1: [u8] = []
+        seed1 = _append(seed1, h0_bytes)
+        seed1 = _append(seed1, _le32(1.to_u32()))
+        seed1 = _append(seed1, _le32(lane.to_u32()))
+        val b1 = _h_prime(seed1, 1024.to_u32())
+        blocks[lane * q + 1] = _bytes_to_block(b1)
+        lane = lane + 1
+
+    # Step 4: passes — Argon2i uses data-independent indexing for ALL segments
+    var pass_r: i64 = 0
+    while pass_r < t_cost:
+        var slice_s: i64 = 0
+        while slice_s < 4:
+            # Argon2i: ALWAYS data-independent (unlike Argon2id which switches
+            # to Argon2d after pass 0 / slice 2)
+
+            var ln: i64 = 0
+            while ln < p:
+                # Pre-generate pseudo-random index blocks for this segment.
+                # Each double-compressed seed block yields 128 u64 words = 128
+                # (J1, J2) pairs. ceil(sl / 128) blocks cover all sl columns.
+                var i_blocks: [[u64]] = []
+                val needed_blocks: i64 = (sl + 127) / 128
+                var c: i64 = 1
+                while c <= needed_blocks:
+                    val seed = _argon2i_seed_block(
+                        pass_r.to_u64(), ln.to_u64(),
+                        slice_s.to_u64(),
+                        m_prime.to_u64(),
+                        t_cost.to_u64(),
+                        ytype.to_u64(),
+                        c.to_u64())
+                    val zero = _zero_block()
+                    val z1 = _g_compress(zero, seed)
+                    val z2 = _g_compress(zero, z1)
+                    i_blocks.push(z2)
+                    c = c + 1
+
+                # Iterate columns in this lane's segment
+                var col_in_seg: i64 = 0
+                while col_in_seg < sl:
+                    val j: i64 = slice_s * sl + col_in_seg
+
+                    # Skip first two columns of lane during pass 0
+                    if (pass_r == 0) and (j < 2):
+                        col_in_seg = col_in_seg + 1
+                        continue
+
+                    # Previous block in this lane (wraps modulo q)
+                    val prev_j = if j == 0: q - 1 else: j - 1
+                    val prev_block = blocks[ln * q + prev_j]
+
+                    # J1, J2 from pre-generated pseudo-random stream
+                    val pair_block_idx = col_in_seg / 128
+                    val pair_in_block = col_in_seg % 128
+                    val src = i_blocks[pair_block_idx]
+                    val word = src[pair_in_block]
+                    val j1: u64 = word & 0xFFFFFFFF
+                    val j2: u64 = (word >> 32) & 0xFFFFFFFF
+
+                    # Map (J1, J2) to reference (l', z) per RFC §3.4.1.2
+                    # l = J2 mod p (current lane if pass=0 and slice=0)
+                    var ref_lane: i64 = 0
+                    if (pass_r == 0) and (slice_s == 0):
+                        ref_lane = ln
+                    else:
+                        ref_lane = (j2 % p.to_u64()).to_i64()
+
+                    # Reference set size W
+                    var w_size: i64 = 0
+                    if pass_r == 0:
+                        if slice_s == 0 or ref_lane == ln:
+                            w_size = slice_s * sl + col_in_seg - 1
+                        else:
+                            w_size = slice_s * sl
+                            if col_in_seg == 0:
+                                w_size = w_size - 1
+                    else:
+                        if ref_lane == ln:
+                            w_size = q - sl + col_in_seg - 1
+                        else:
+                            w_size = q - sl
+                            if col_in_seg == 0:
+                                w_size = w_size - 1
+
+                    # x = (J1^2) >> 32
+                    val x = (j1 * j1) >> 32
+                    # y = (W * x) >> 32
+                    val y_term = (w_size.to_u64() * x) >> 32
+                    # z = W - 1 - y
+                    val z = w_size.to_u64() - 1 - y_term
+
+                    # Starting position: 0 for pass 0; (slice+1)*sl mod q for pass>0
+                    var start_pos: i64 = 0
+                    if pass_r != 0:
+                        start_pos = ((slice_s + 1) * sl) % q
+                    val ref_j: i64 = (start_pos + z.to_i64()) % q
+
+                    val ref_block = blocks[ref_lane * q + ref_j]
+
+                    val new_block = _g_compress(prev_block, ref_block)
+
+                    if pass_r == 0:
+                        blocks[ln * q + j] = new_block
+                    else:
+                        val old = blocks[ln * q + j]
+                        blocks[ln * q + j] = _block_xor(new_block, old)
+
+                    col_in_seg = col_in_seg + 1
+                ln = ln + 1
+            slice_s = slice_s + 1
+        pass_r = pass_r + 1
+
+    # Step 5: C = XOR of all B[i][q-1]
+    var c_block = blocks[0 * q + (q - 1)]
+    var li: i64 = 1
+    while li < p:
+        c_block = _block_xor(c_block, blocks[li * q + (q - 1)])
+        li = li + 1
+
+    # Step 6: Tag = H'(C, tag_len)
+    val c_bytes = _block_to_bytes(c_block)
+    _h_prime(c_bytes, tag_len.to_u32())
+
+# ============================================================================
+# Convenience wrapper — no key, no associated data (common case)
+# ============================================================================
+
+pub fn argon2i(password: [u8], salt: [u8], t_cost: i64, m_cost: i64,
+               parallelism: i64, tag_len: i64) -> [u8]:
+    """Argon2i KDF without optional key/ad (RFC 9106 §3.4, Argon2i variant).
+
+    Equivalent to argon2i_hash(password, salt, t_cost, m_cost, parallelism,
+                               [], [], tag_len).
+    """
+    val empty: [u8] = []
+    argon2i_hash(password, salt, t_cost, m_cost, parallelism, empty, empty, tag_len)

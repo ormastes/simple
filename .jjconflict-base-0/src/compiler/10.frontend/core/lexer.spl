@@ -1,0 +1,933 @@
+# Core Simple — Lexer (Tokenizer)
+#
+# Shared core library: converts source text into a stream of tokens.
+# Handles indentation tracking, literals, identifiers, keywords,
+# operators, delimiters, and comments.
+#
+# Design: All state in module-level vars. Functions modify state.
+# Works when compiled to C; NOT in the interpreter (closure bug).
+#
+# Split into modules:
+#   lexer_scanners.spl — all scanning functions (number, string, ident,
+#                        whitespace, indentation, main token scanner)
+
+val _NL = "\n"
+use compiler.core.tokens.{keyword_lookup}
+use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
+use compiler.core.lexer_types.{Token, Span, lex_span_new, lex_token_new, lex_token_eof}
+use std.string_core.{char_code, char_from_code}
+use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
+use compiler.frontend.core.lexer_struct.{core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get, core_lexer_last_suffix_get, core_token_env_save_set}
+use compiler.core.ast.{module_get_path}
+use compiler.core.ast.{lexer_core_pos_get, lexer_core_pos_set, lexer_core_line_get, lexer_core_line_set}
+use compiler.core.ast.{lexer_core_col_get, lexer_core_col_set, lexer_core_pending_dedents_get, lexer_core_pending_dedents_set}
+use compiler.core.ast.{lexer_core_at_line_start_get, lexer_core_at_line_start_set, lexer_core_paren_depth_get, lexer_core_paren_depth_set}
+use compiler.core.ast.{lexer_core_cur_kind_get, lexer_core_cur_kind_set, lexer_core_cur_text_get, lexer_core_cur_text_set}
+use compiler.core.ast.{lexer_core_cur_line_get, lexer_core_cur_line_set, lexer_core_cur_col_get, lexer_core_cur_col_set}
+use compiler.core.ast.{lexer_core_indent_stack_get, lexer_core_indent_stack_set}
+use compiler.core.ast.{lexer_cur_kind2_get, lexer_cur_kind2_set, lexer_cur_text2_get, lexer_cur_text2_set}
+use compiler.core.ast.{lexer_cur_line2_get, lexer_cur_line2_set, lexer_cur_col2_get, lexer_cur_col2_set}
+use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+fn lexer_array_len<T>(array: [T]) -> i64:
+    return array.len()
+
+# Import from split scanner module
+use compiler.core.lexer_scanners.{lex_scan_number, lex_scan_string, lex_scan_ident}
+use compiler.core.lexer_scanners.{lex_skip_spaces, lex_handle_indentation, lex_scan_token}
+
+# Light wrapper struct to satisfy callers expecting a Lexer value.
+struct Lexer:
+    dummy: i64
+
+struct LexSourceBuffer:
+    content: text
+
+# ===== Lexer State =====
+
+var lex_state: {text: text} = {}
+var lex_source_char_count_slot: [i64] = [0]
+var lex_source_code_base_slot: [i64] = [0]
+var lex_source_codes: [i64] = []
+var current_core_lexer_slot: [CoreLexer] = []
+var lex_env_save_enabled: [bool] = [false]
+var lex_generic_close_pending: [bool] = [false]
+var lex_cur_kind_direct: [i64] = [0]
+var lex_cur_text_direct: [text] = [""]
+# Module-global slot mirror of the active lexer source. current_core_source_get
+# formerly read the source ONLY from the SIMPLE_BOOTSTRAP_LEX_SOURCE env var,
+# which does not function in the SimpleOS guest (native env_set/get is a no-op) —
+# so every lex_source_slice returned "", every identifier came out empty, and the
+# in-guest interpreter could not resolve any name (`print` → unresolved → no
+# output). A module-global slot persists in the guest (like lex_cur_text_direct),
+# so mirror the source here and read it first.
+var lex_inline_source_slot: [text] = [""]
+var lex_cur_line_direct: [i64] = [0]
+var lex_cur_col_direct: [i64] = [0]
+var lex_cur_suffix_direct: [text] = [""]
+var lex_token_start_direct: [i64] = [0]
+var lex_token_end_direct: [i64] = [0]
+
+# ===== Public wrapper API =====
+
+fn lexer_new(source: text) -> Lexer:
+    # Initialize global lexer state for the given source and return a thin handle.
+    lex_init(source)
+    Lexer(dummy: 0)
+
+fn lexer_next_token(self: Lexer) -> Token:
+    # Advance the global lexer and build a Token record.
+    val kind: i64 = lex_next()
+    val text = lex_token_text()
+    val line = lex_token_line()
+    val col = lex_token_col()
+    val span = lex_span_new(0, text.len(), line, col)
+    Token(kind: kind, span: span, text: text)
+
+impl Lexer:
+    static fn new(source: text) -> Lexer:
+        lexer_new(source)
+
+# ===== Lexer Init/State Access =====
+
+fn lex_init(source: text):
+    lex_init_with_path(source, "")
+
+fn lex_init_with_path(source: text, source_path: text):
+    # Nil-guards: module-level vars may be nil in native binaries
+    if lex_state == nil:
+        lex_state = {}
+    if lexer_array_len(lex_source_char_count_slot) == 0:
+        lex_source_char_count_slot = [0]
+    if lexer_array_len(lex_source_code_base_slot) == 0:
+        lex_source_code_base_slot = [0]
+    if lexer_array_len(lex_source_codes) == 0:
+        lex_source_codes = []
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = []
+    if lexer_array_len(lex_env_save_enabled) == 0:
+        lex_env_save_enabled = [false]
+    if lexer_array_len(lex_generic_close_pending) == 0:
+        lex_generic_close_pending = [false]
+    if lexer_array_len(lex_cur_kind_direct) == 0:
+        lex_cur_kind_direct = [0]
+    if lexer_array_len(lex_cur_text_direct) == 0:
+        lex_cur_text_direct = [""]
+    if lexer_array_len(lex_cur_line_direct) == 0:
+        lex_cur_line_direct = [0]
+    if lexer_array_len(lex_cur_col_direct) == 0:
+        lex_cur_col_direct = [0]
+    if lexer_array_len(lex_cur_suffix_direct) == 0:
+        lex_cur_suffix_direct = [""]
+    if lexer_array_len(lex_token_start_direct) == 0:
+        lex_token_start_direct = [0]
+    if lexer_array_len(lex_token_end_direct) == 0:
+        lex_token_end_direct = [0]
+    lex_env_save_enabled[0] = (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
+    lex_generic_close_pending[0] = false
+    core_token_env_save_set(lex_env_save_enabled[0])
+    # Keep the active lexer and parser's offset-based token-text cache on the
+    # exact same source buffer. Rereading a non-empty caller source from disk can
+    # desync lexer offsets from parser_lex_source_cached() when the caller passed
+    # preprocessed or generated text under a real path.
+    var core_source = source
+    if core_source == "" and source_path != "":
+        core_source = rt_file_read_text(source_path) ?? ""
+    if lexer_array_len(lex_inline_source_slot) == 0:
+        lex_inline_source_slot = [""]
+    lex_inline_source_slot[0] = core_source
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
+    # Perf signal: bump the source generation so the parser's whole-source cache
+    # (parser_lex_source_cached) refetches for this new source. See parser.spl.
+    val src_gen_next = lex_env_i64("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN", 0) + 1
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN", "{src_gen_next}")
+    lex_state_set("pos", "0")
+    lex_state_set("core_pos", "0")
+    lex_state_set("line", "1")
+    lex_state_set("core_line", "1")
+    lex_state_set("col", "1")
+    lex_state_set("core_col", "1")
+    lex_state_set("pending_dedents", "0")
+    lex_state_set("core_pending_dedents", "0")
+    lex_state_set("at_line_start", "1")
+    lex_state_set("core_at_line_start", "1")
+    lex_state_set("paren_depth", "0")
+    lex_state_set("round_paren_depth", "0")
+    lex_state_set("core_paren_depth", "0")
+    lex_state_set("core_cur_kind", "0")
+    lex_state_set("core_cur_text", "")
+    lex_state_set("core_cur_line", "0")
+    lex_state_set("core_cur_col", "0")
+    lex_state_set("core_indent_stack", "0")
+    lex_state_set("indent_stack", "0")
+    lex_state_set("indent_count", "1")
+    lex_cur_kind_set(0)
+    lex_cur_text_set("")
+    lex_cur_line_set(0)
+    lex_cur_col_set(0)
+    lex_cur_suffix_set("")
+    current_core_lexer_slot = [make_core_lexer(core_source)]
+    current_core_lexer_reset_file()
+
+fn lex_state_get(key: text, fallback: text) -> text:
+    rt_env_get("SIMPLE_BOOTSTRAP_STATE_{key}") ?? fallback
+
+fn lex_state_set(key: text, value: text):
+    rt_env_set("SIMPLE_BOOTSTRAP_STATE_{key}", value)
+
+fn lex_source_len() -> i64:
+    current_core_source_get().len()
+
+fn lex_source_char_at(pos: i64) -> text:
+    val source = current_core_source_get()
+    val source_len = source.len()
+    if pos < 0 or pos >= source_len:
+        return ""
+    source[pos:pos + 1]
+
+fn lex_source_slice(start: i64, end: i64) -> text:
+    val source = current_core_source_get()
+    if start < 0:
+        start = 0
+    val source_len = source.len()
+    if end > source_len:
+        end = source_len
+    if end <= start:
+        return ""
+    source[start:end]
+
+fn lex_source_set(value: text):
+    # Nil-guards: module-level vars may be nil in native binaries
+    if lexer_array_len(lex_source_code_base_slot) == 0:
+        lex_source_code_base_slot = [0]
+    if lexer_array_len(lex_source_codes) == 0:
+        lex_source_codes = []
+    if lexer_array_len(lex_source_char_count_slot) == 0:
+        lex_source_char_count_slot = [0]
+    val source_len = value.len()
+    lex_source_code_base_slot[0] = lex_source_codes.len()
+    var pos = 0
+    while pos < source_len:
+        lex_source_codes = lex_source_codes.push(char_code(value[pos:pos + 1]))
+        pos = pos + 1
+    lex_source_char_count_slot[0] = source_len
+
+fn lex_pos_get() -> i64:
+    lex_state_get("pos", "0").to_int()
+
+fn lex_pos_set(value: i64):
+    lex_state_set("pos", "{value}")
+
+fn lex_line_get() -> i64:
+    lex_state_get("line", "1").to_int()
+
+fn lex_line_set(value: i64):
+    lex_state_set("line", "{value}")
+
+fn lex_col_get() -> i64:
+    lex_state_get("col", "1").to_int()
+
+fn lex_col_set(value: i64):
+    lex_state_set("col", "{value}")
+
+fn lex_indent_count_get() -> i64:
+    lex_state_get("indent_count", "1").to_int()
+
+fn lex_indent_count_set(value: i64):
+    lex_state_set("indent_count", "{value}")
+
+fn lex_pending_dedents_get() -> i64:
+    lex_state_get("pending_dedents", "0").to_int()
+
+fn lex_pending_dedents_set(value: i64):
+    lex_state_set("pending_dedents", "{value}")
+
+fn lex_at_line_start_get() -> bool:
+    val raw = lex_state_get("at_line_start", "1")
+    raw == "1" or raw == "true"
+
+fn lex_at_line_start_set(value: bool):
+    if value:
+        lex_state_set("at_line_start", "1")
+    else:
+        lex_state_set("at_line_start", "0")
+
+fn lex_paren_depth_get() -> i64:
+    lex_state_get("paren_depth", "0").to_int()
+
+fn lex_paren_depth_set(value: i64):
+    lex_state_set("paren_depth", "{value}")
+
+fn lex_round_paren_depth_get() -> i64:
+    lex_state_get("round_paren_depth", "0").to_int()
+
+fn lex_round_paren_depth_set(value: i64):
+    lex_state_set("round_paren_depth", "{value}")
+
+fn lex_cur_kind_get_slot() -> i64:
+    lex_cur_kind_direct[0]
+
+fn lex_cur_kind_set(value: i64):
+    lex_cur_kind_direct[0] = value
+    if lex_env_save_enabled[0]:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
+
+fn lex_cur_line_get_slot() -> i64:
+    lex_cur_line_direct[0]
+
+fn lex_cur_line_set(value: i64):
+    lex_cur_line_direct[0] = value
+    if lex_env_save_enabled[0]:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
+
+fn lex_cur_col_get_slot() -> i64:
+    lex_cur_col_direct[0]
+
+fn lex_cur_col_set(value: i64):
+    lex_cur_col_direct[0] = value
+    if lex_env_save_enabled[0]:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
+
+fn lex_cur_text_get_slot() -> text:
+    lex_cur_text_direct[0]
+
+fn lex_cur_text_set(value: text):
+    lex_cur_text_direct[0] = value
+    if lex_env_save_enabled[0]:
+        val nul = char_from_code(0)
+        if value.contains(nul):
+            rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
+        else:
+            rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", value)
+
+fn lex_cur_suffix_get_slot() -> text:
+    lex_cur_suffix_direct[0]
+
+fn lex_cur_suffix_set(value: text):
+    lex_cur_suffix_direct[0] = value
+    if lex_env_save_enabled[0]:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
+
+fn lex_token_start_get() -> i64:
+    if lexer_array_len(lex_token_start_direct) > 0:
+        return lex_token_start_direct[0]
+    lex_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", 0)
+
+fn lex_token_end_get() -> i64:
+    if lexer_array_len(lex_token_end_direct) > 0:
+        return lex_token_end_direct[0]
+    lex_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", 0)
+
+fn lex_env_i64(key: text, fallback: i64) -> i64:
+    val raw = rt_env_get(key) ?? ""
+    if raw == "":
+        return fallback
+    raw.to_int()
+
+# Dispatch-free digit parser. The seed interpreter misdispatches `.to_int()`
+# on split()-produced strings (and in plain assignment position) to a wrong
+# impl method, returning pointer-like garbage — which corrupted the indent
+# stack on lex_snapshot_restore and broke every `ident <` comparison via the
+# generic-args backtrack path. Only string == comparisons are used here.
+fn core_digits_to_i64(s: text) -> i64:
+    var v: i64 = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s[i:i+1]
+        var d = -1
+        if c == "0":
+            d = 0
+        elif c == "1":
+            d = 1
+        elif c == "2":
+            d = 2
+        elif c == "3":
+            d = 3
+        elif c == "4":
+            d = 4
+        elif c == "5":
+            d = 5
+        elif c == "6":
+            d = 6
+        elif c == "7":
+            d = 7
+        elif c == "8":
+            d = 8
+        elif c == "9":
+            d = 9
+        if d >= 0:
+            v = v * 10 + d
+        i = i + 1
+    v
+
+fn current_core_indent_stack_get() -> [i64]:
+    val raw = lex_state_get("core_indent_stack", "0")
+    if raw == "" or raw == nil:
+        return [0]
+    var result: [i64] = []
+    for part in raw.split(","):
+        if part == "":
+            continue
+        result = result.push(core_digits_to_i64(part))
+    if result.len() == 0:
+        return [0]
+    result
+
+fn current_core_indent_stack_set(values: [i64]):
+    var parts: [text] = []
+    for value in values:
+        parts = parts.push("{value}")
+    if parts.len() == 0:
+        lex_state_set("core_indent_stack", "0")
+        return
+    lex_state_set("core_indent_stack", parts.join(","))
+
+fn current_core_source_get() -> text:
+    # Guest-first: the module-global slot persists where the env var does not.
+    if lexer_array_len(lex_inline_source_slot) > 0 and lex_inline_source_slot[0] != "":
+        return lex_inline_source_slot[0]
+    val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    if inline_source != "":
+        return inline_source
+    val source_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? module_get_path()
+    if source_path != "":
+        val content = rt_file_read_text(source_path) ?? ""
+        return content
+    ""
+
+fn current_core_indent_stack_parse(raw: text) -> [i64]:
+    if raw == "" or raw == nil:
+        return [0]
+    var result: [i64] = []
+    for part in raw.split(","):
+        if part == "":
+            continue
+        # Seed-interpreter bug: see core_digits_to_i64.
+        result = result.push(core_digits_to_i64(part))
+    if result.len() == 0:
+        return [0]
+    result
+
+fn current_core_indent_stack_format(values: [i64]) -> text:
+    if values.len() == 0:
+        return "0"
+    var result = "{values[0]}"
+    var i = 1
+    while i < values.len():
+        result = result + "," + "{values[i]}"
+        i = i + 1
+    result
+
+fn current_core_lexer_load() -> CoreLexer:
+    var pos = 0
+    var line = 1
+    var col = 1
+    var pending_dedents = 0
+    var at_line_start = true
+    var paren_depth = 0
+    var indent_stack_raw = "0"
+    val raw_pos = rt_env_get("SIMPLE_BOOTSTRAP_LEX_POS") ?? ""
+    val raw_line = rt_env_get("SIMPLE_BOOTSTRAP_LEX_LINE") ?? ""
+    val raw_col = rt_env_get("SIMPLE_BOOTSTRAP_LEX_COL") ?? ""
+    val raw_pending = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PENDING") ?? ""
+    val raw_line_start = rt_env_get("SIMPLE_BOOTSTRAP_LEX_LINE_START") ?? ""
+    val raw_paren = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PAREN") ?? ""
+    val raw_indent = rt_env_get("SIMPLE_BOOTSTRAP_LEX_INDENT") ?? ""
+    if raw_pos != "":
+        pos = raw_pos.to_int()
+    if raw_line != "":
+        line = raw_line.to_int()
+    if raw_col != "":
+        col = raw_col.to_int()
+    if raw_pending != "":
+        pending_dedents = raw_pending.to_int()
+    if raw_line_start != "":
+        at_line_start = raw_line_start == "1"
+    if raw_paren != "":
+        paren_depth = raw_paren.to_int()
+    if raw_indent != "":
+        indent_stack_raw = raw_indent
+    val source = current_core_source_get()
+    var lexer = make_core_lexer(source)
+    lexer.pos = pos
+    lexer.line = line
+    lexer.col = col
+    lexer.indent_stack = current_core_indent_stack_parse(indent_stack_raw)
+    lexer.pending_dedents = pending_dedents
+    lexer.at_line_start = at_line_start
+    lexer.paren_depth = paren_depth
+    lexer.cur_kind = 0
+    lexer.cur_text = ""
+    lexer.cur_line = 0
+    lexer.cur_col = 0
+    lexer.cur_start = pos
+    lexer
+
+fn current_core_lexer_save(lexer: CoreLexer):
+    if not lex_env_save_enabled[0]:
+        return
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "{lexer.pos}")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "{lexer.line}")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_COL", "{lexer.col}")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PENDING", "{lexer.pending_dedents}")
+    if lexer.at_line_start:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "1")
+    else:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "0")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PAREN", "{lexer.paren_depth}")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_INDENT", "0")
+
+fn current_core_lexer_reset_file():
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "0")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "1")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_COL", "1")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PENDING", "0")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "1")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PAREN", "0")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_INDENT", "0")
+
+fn lex_next_token_record() -> Token:
+    val kind = lex_next()
+    val text = lex_cur_text_get_slot()
+    val line = lex_cur_line_get_slot()
+    val col = lex_cur_col_get_slot()
+    val span = lex_span_new(0, text.len(), line, col)
+    Token(kind: kind, span: span, text: text)
+
+fn lex_indent_stack_len() -> i64:
+    lex_indent_count_get()
+
+fn lex_indent_stack_top() -> i64:
+    val stack_text = lex_state_get("indent_stack", "0")
+    if stack_text == "" or stack_text == nil:
+        return 0
+    val parts = stack_text.split(",")
+    if parts.len() <= 0:
+        return 0
+    parts[parts.len() - 1].to_int()
+
+fn lex_indent_stack_push(value: i64):
+    lex_state_set("indent_stack", lex_state_get("indent_stack", "0") + "," + "{value}")
+    lex_indent_count_set(lex_indent_count_get() + 1)
+
+fn lex_indent_stack_pop() -> i64:
+    val stack_text = lex_state_get("indent_stack", "0")
+    if stack_text == "" or stack_text == nil:
+        return 0
+    val parts = stack_text.split(",")
+    if parts.len() <= 1:
+        val value = stack_text.to_int()
+        lex_state_set("indent_stack", "")
+        lex_indent_count_set(0)
+        return value
+    val value = parts[parts.len() - 1].to_int()
+    var new_parts: [text] = []
+    var i = 0
+    while i < parts.len() - 1:
+        new_parts = new_parts.push(parts[i])
+        i = i + 1
+    lex_state_set("indent_stack", new_parts.join(","))
+    lex_indent_count_set(lex_indent_count_get() - 1)
+    value
+
+fn lex_at_end() -> bool:
+    lex_pos_get() >= lex_source_len()
+
+fn lex_peek() -> text:
+    val pos = lex_pos_get()
+    lex_source_char_at(pos)
+
+fn lex_peek_next() -> text:
+    val next_pos: i64 = lex_pos_get() + 1
+    lex_source_char_at(next_pos)
+
+fn lex_peek_at(offset: i64) -> text:
+    val target: i64 = lex_pos_get() + offset
+    lex_source_char_at(target)
+
+fn lex_advance() -> text:
+    val pos = lex_pos_get()
+    if pos >= lex_source_len():
+        return ""
+    val c: text = lex_source_char_at(pos)
+    lex_pos_set(pos + 1)
+    if c == _NL:
+        lex_line_set(lex_line_get() + 1)
+        lex_col_set(1)
+        lex_at_line_start_set(true)
+    else:
+        lex_col_set(lex_col_get() + 1)
+    c
+
+fn lex_match_char(expected: text) -> bool:
+    val pos = lex_pos_get()
+    if pos >= lex_source_len():
+        return false
+    if lex_source_char_at(pos) != expected:
+        return false
+    lex_pos_set(pos + 1)
+    lex_col_set(lex_col_get() + 1)
+    true
+
+# ===== Token Construction =====
+
+fn lex_make_token(kind: i64, token_text: text, start_line: i64, start_col: i64):
+    lex_cur_kind_set(kind)
+    lex_cur_text_set(token_text)
+    lex_cur_line_set(start_line)
+    lex_cur_col_set(start_col)
+
+fn lex_make_simple(kind: i64, token_text: text):
+    lex_make_token(kind, token_text, lex_line_get(), lex_col_get())
+
+fn lex_scan_token_local():
+    if lex_at_end():
+        val slen: i64 = lex_indent_stack_len()
+        if slen > 1:
+            lex_indent_stack_pop()
+            lex_pending_dedents_set(slen - 2)
+            lex_make_token(182, "", lex_line_get(), lex_col_get())
+            return
+        lex_make_token(190, "", lex_line_get(), lex_col_get())
+        return
+
+    if lex_at_line_start_get():
+        if lex_round_paren_depth_get() > 0:
+            lex_at_line_start_set(false)
+            lex_skip_spaces()
+            lex_scan_token_local()
+            return
+        lex_cur_kind_set(0)
+        lex_handle_indentation()
+        if lex_cur_kind_get_slot() != 0:
+            return
+        lex_scan_token_local()
+        return
+
+    lex_skip_spaces()
+
+    if lex_at_end():
+        val slen: i64 = lex_indent_stack_len()
+        if slen > 1:
+            lex_indent_stack_pop()
+            lex_pending_dedents_set(slen - 2)
+            lex_make_token(182, "", lex_line_get(), lex_col_get())
+            return
+        lex_make_token(190, "", lex_line_get(), lex_col_get())
+        return
+
+    val start_line: i64 = lex_line_get()
+    val start_col: i64 = lex_col_get()
+    val c: text = lex_peek()
+
+    if c == _NL:
+        lex_advance()
+        lex_at_line_start_set(true)
+        if lex_round_paren_depth_get() > 0:
+            lex_scan_token_local()
+            return
+        lex_make_token(180, _NL, start_line, start_col)
+        return
+
+    if c == "#":
+        for i in 0..100000:
+            val cc: text = lex_peek()
+            val done: bool = cc == _NL or cc == ""
+            if done:
+                break
+            lex_advance()
+        lex_scan_token_local()
+        return
+
+    val is_dquote: bool = c == "\""
+    val is_squote: bool = c == "'"
+    if is_dquote:
+        lex_scan_string()
+        return
+    if is_squote:
+        val after_quote: text = lex_peek_next()
+        val is_label: bool = is_alpha(after_quote) or after_quote == "_"
+        if is_label:
+            lex_advance()
+            val label_start: i64 = lex_pos_get()
+            for li in 0..1000:
+                val lc: text = lex_peek()
+                if is_ident_char(lc):
+                    lex_advance()
+                else:
+                    break
+            val label_name: text = lex_source_slice(label_start, lex_pos_get())
+            lex_make_token(192, label_name, start_line, start_col)
+            return
+        lex_scan_string()
+        return
+
+    if is_digit(c):
+        lex_scan_number()
+        return
+
+    val starts_ident: bool = is_alpha(c) or c == "_"
+    if starts_ident:
+        lex_scan_ident()
+        return
+
+    lex_advance()
+    if c == "=":
+        if lex_match_char("="):
+            lex_make_token(80, "==", start_line, start_col)
+        elif lex_match_char(">"):
+            lex_make_token(168, "=>", start_line, start_col)
+        else:
+            lex_make_token(100, "=", start_line, start_col)
+        return
+
+    if c == "!":
+        if lex_match_char("="):
+            lex_make_token(81, "!=", start_line, start_col)
+        else:
+            lex_make_token(57, "!", start_line, start_col)
+        return
+
+    if c == "<":
+        if lex_match_char("<"):
+            lex_make_token(66, "<<", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(84, "<=", start_line, start_col)
+        else:
+            lex_make_token(82, "<", start_line, start_col)
+        return
+
+    if c == ">":
+        if lex_match_char(">"):
+            lex_make_token(67, ">>", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(85, ">=", start_line, start_col)
+        else:
+            lex_make_token(83, ">", start_line, start_col)
+        return
+
+    if c == "\\":
+        lex_make_token(220, "\\", start_line, start_col)
+        return
+
+    lex_make_token(191, c, start_line, start_col)
+
+# ===== Public API =====
+
+fn lex_next() -> i64:
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var loaded = current_core_lexer_slot[0]
+    var _scan_kind: i64 = 0
+    if lex_generic_close_pending[0]:
+        lex_generic_close_pending[0] = false
+        _scan_kind = loaded.next_token_after_generic_close()
+    else:
+        _scan_kind = loaded.next_token()
+    val kind = loaded.cur_kind
+    current_core_lexer_slot[0] = loaded
+    current_core_lexer_save(loaded)
+    val env_save = lex_env_save_enabled[0]
+    if env_save:
+        lex_cur_kind_set(kind)
+        if kind == 7 or kind == 8:
+            lex_cur_suffix_set(core_lexer_last_suffix_get())
+        else:
+            lex_cur_suffix_set("")
+    else:
+        lex_cur_kind_direct[0] = kind
+        if kind == 7 or kind == 8:
+            lex_cur_suffix_direct[0] = core_lexer_last_suffix_get()
+        else:
+            lex_cur_suffix_direct[0] = ""
+    lex_token_start_direct[0] = loaded.cur_start
+    lex_token_end_direct[0] = loaded.pos
+    if env_save:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{loaded.cur_start}")
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{loaded.pos}")
+    if env_save:
+        lex_cur_text_set(loaded.cur_text)
+        lex_cur_line_set(core_lexer_last_line_get())
+        lex_cur_col_set(core_lexer_last_col_get())
+    else:
+        lex_cur_text_direct[0] = loaded.cur_text
+        lex_cur_line_direct[0] = core_lexer_last_line_get()
+        lex_cur_col_direct[0] = core_lexer_last_col_get()
+    kind
+
+# The parser calls this after recognizing `>` as a generic type close. Without
+# the handoff, CoreLexer still classifies the current token as the binary `>`
+# operator when it scans the following newline, so token_requires_rhs suppresses
+# the structural newline/dedent and the next top-level declaration is parsed as
+# a member of the preceding owner.
+fn lex_mark_current_token_as_generic_close():
+    if lexer_array_len(lex_generic_close_pending) == 0:
+        lex_generic_close_pending = [false]
+    lex_generic_close_pending[0] = true
+
+# ===== Forced Indentation (block bodies inside call parens) =====
+# See CoreLexer.enable_forced_indentation in lexer_struct.spl. The parser
+# calls these around a block-bodied `\param:` lambda so its multi-statement
+# body gets real NEWLINE/INDENT/DEDENT tokens even while inside a call's `(`.
+
+fn lex_enable_forced_indentation():
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var loaded = current_core_lexer_slot[0]
+    loaded.enable_forced_indentation()
+    current_core_lexer_slot[0] = loaded
+
+fn lex_disable_forced_indentation():
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var loaded = current_core_lexer_slot[0]
+    loaded.disable_forced_indentation()
+    current_core_lexer_slot[0] = loaded
+
+fn lex_pop_indent():
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var loaded = current_core_lexer_slot[0]
+    loaded.pop_indent()
+    current_core_lexer_slot[0] = loaded
+
+fn lex_token_kind() -> i64:
+    lex_cur_kind_get_slot()
+
+fn lex_token_text() -> text:
+    lex_cur_text_get_slot()
+
+fn lex_token_line() -> i64:
+    lex_cur_line_get_slot()
+
+fn lex_token_col() -> i64:
+    lex_cur_col_get_slot()
+
+fn lex_cur_kind_get() -> i64:
+    lex_cur_kind_get_slot()
+
+fn lex_cur_text_get() -> text:
+    lex_cur_text_get_slot()
+
+fn lex_cur_line_get() -> i64:
+    lex_cur_line_get_slot()
+
+fn lex_cur_col_get() -> i64:
+    lex_cur_col_get_slot()
+
+fn lex_cur_suffix_get() -> text:
+    lex_cur_suffix_get_slot()
+
+# ===== Lexer + Parser Token Snapshot (for speculative parse / backtrack) =====
+#
+# Saves / restores the full tokenizer position AND the current parser token.
+# Used by try_skip_ident_generic_args to backtrack when <…> turns out to be
+# a binary less-than rather than a generic-argument list.
+#
+# The saved state is a flat [i64] with the layout:
+#   [0]  CoreLexer.pos          (source byte offset after current token)
+#   [1]  CoreLexer.line
+#   [2]  CoreLexer.col
+#   [3]  CoreLexer.pending_dedents
+#   [4]  CoreLexer.at_line_start  (1 = true)
+#   [5]  CoreLexer.paren_depth
+#   [6]  CoreLexer.cur_start      (start offset of current token in source)
+#   [7]  lex_cur_kind_direct[0]  (kind of the token that is "current")
+#   [8]  lex_cur_line_direct[0]
+#   [9]  lex_cur_col_direct[0]
+#
+# Text fields (par_text, lex_cur_text) are stored alongside as a [text].
+
+fn lex_snapshot_save() -> ([i64], [text]):
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    val lx = current_core_lexer_slot[0]
+    var at_ls_i: i64 = 0
+    if lx.at_line_start:
+        at_ls_i = 1
+    var nums: [i64] = [lx.pos, lx.line, lx.col, lx.pending_dedents, at_ls_i, lx.paren_depth, lx.cur_start, lex_cur_kind_direct[0], lex_cur_line_direct[0], lex_cur_col_direct[0]]
+    val indent_stack_text = current_core_indent_stack_format(lx.indent_stack)
+    var txts: [text] = [lex_cur_text_direct[0], indent_stack_text, lex_cur_suffix_direct[0]]
+    (nums, txts)
+
+fn lex_snapshot_restore(nums: [i64], txts: [text]):
+    # Rebuild the CoreLexer from saved fields
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var lx = current_core_lexer_slot[0]
+    lx.pos = nums[0]
+    lx.line = nums[1]
+    lx.col = nums[2]
+    lx.pending_dedents = nums[3]
+    lx.at_line_start = nums[4] == 1
+    lx.paren_depth = nums[5]
+    lx.cur_start = nums[6]
+    # Restore indent stack (txts[1] if present, else default)
+    var saved_indent_raw = "0"
+    if txts.len() > 1:
+        saved_indent_raw = txts[1]
+    val restored_indent_stack = current_core_indent_stack_parse(saved_indent_raw)
+    lx.indent_stack = restored_indent_stack
+    current_core_lexer_slot[0] = lx
+    current_core_lexer_save(lx)
+    # Sync indent stack to env-var-backed state used by lex_next
+    current_core_indent_stack_set(restored_indent_stack)
+    # Restore lex_cur_* direct slots and env vars
+    val saved_kind = nums[7]
+    val saved_line = nums[8]
+    val saved_col  = nums[9]
+    val saved_text = txts[0]
+    var saved_suffix = ""
+    if txts.len() > 2:
+        saved_suffix = txts[2]
+    lex_cur_kind_set(saved_kind)
+    lex_cur_line_set(saved_line)
+    lex_cur_col_set(saved_col)
+    lex_cur_text_set(saved_text)
+    lex_cur_suffix_set(saved_suffix)
+    # Restore the token offset env vars so parser_token_text_from_offsets works
+    lex_token_start_direct[0] = nums[6]
+    lex_token_end_direct[0] = nums[0]
+    if lex_env_save_enabled[0]:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{nums[6]}")
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{nums[0]}")
+
+# ===== Convenience: Tokenize All =====
+# Tokenizes entire source and returns arrays of token data.
+# Useful for testing and debugging.
+
+var lex_all_kinds: [i64] = []
+var lex_all_texts: [text] = []
+var lex_all_lines: [i64] = []
+var lex_all_cols: [i64] = []
+
+fn lex_tokenize_all(source: text) -> i64:
+    # Nil-guards: module-level vars may be nil in native binaries
+    if lex_all_kinds == nil:
+        lex_all_kinds = []
+    if lex_all_texts == nil:
+        lex_all_texts = []
+    if lex_all_lines == nil:
+        lex_all_lines = []
+    if lex_all_cols == nil:
+        lex_all_cols = []
+    lex_init(source)
+    lex_all_kinds.clear()
+    lex_all_texts.clear()
+    lex_all_lines.clear()
+    lex_all_cols.clear()
+
+    for i in 0..1000000:
+        val kind: i64 = lex_next()
+        lex_all_kinds.push(kind)
+        lex_all_texts.push(lex_cur_text_get_slot())
+        lex_all_lines.push(lex_cur_line_get_slot())
+        lex_all_cols.push(lex_cur_col_get_slot())
+        if kind == 190:
+            break
+
+    lex_all_kinds.len()

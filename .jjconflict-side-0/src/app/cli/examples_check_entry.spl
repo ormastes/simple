@@ -1,0 +1,89 @@
+# Lightweight entrypoint for `simple examples-check`.
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.process_ops.{process_run_timeout}
+
+val OUTPUT_LIMIT = 12000
+
+fn print_help():
+    print "Usage: simple examples-check [path] [options]"
+    print ""
+    print "Safely check example files one by one with per-file timeout containment."
+    print ""
+    print "Options:"
+    print "  --timeout-ms=N     Per-file timeout"
+    print "  --limit=N          Limit checked files"
+    print "  --fail-fast        Stop after first failing example"
+    print "  --json             Emit JSON summary"
+    print "  -h, --help         Show this help"
+
+fn normalize_args(args: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if (i == 0 and arg.ends_with("examples_check_entry.spl")) or arg == "examples-check":
+            i = i + 1
+            continue
+        out.push(arg)
+        i = i + 1
+    out
+
+fn wants_json(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--json" or arg == "--log-mode=json":
+            return true
+        if arg == "--log-mode" and i + 1 < args.len() and args[i + 1] == "json":
+            return true
+        i = i + 1
+    false
+
+fn last_json_line(output: text) -> text:
+    var found = ""
+    val lines = output.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{") and trimmed.ends_with("}"):
+            found = trimmed
+    found
+
+fn print_bounded_stdout(output: text, as_json: bool):
+    if output.len() == 0:
+        return
+    if as_json:
+        val json = last_json_line(output)
+        if json != "":
+            print json
+            return
+    if output.len() <= OUTPUT_LIMIT:
+        print output
+        return
+    print output[0:OUTPUT_LIMIT]
+    print "[stdout truncated by examples-check entry]"
+
+fn print_bounded_stderr(output: text):
+    if output.len() == 0:
+        return
+    if output.len() > OUTPUT_LIMIT:
+        eprint output[0:OUTPUT_LIMIT]
+        eprint "[stderr truncated by examples-check entry]"
+    else:
+        eprint output
+
+fn main() -> i64:
+    val args = normalize_args(get_cli_args())
+    if args.contains("-h") or args.contains("--help"):
+        print_help()
+        return 0
+
+    var worker_args = ["run", "src/app/examples_check/main.spl"]
+    for arg in args:
+        worker_args.push(arg)
+
+    val (stdout, stderr, code) = process_run_timeout("bin/simple", worker_args, 120000)
+    print_bounded_stdout(stdout, wants_json(args))
+    if code != 0:
+        print_bounded_stderr(stderr)
+    code as i64

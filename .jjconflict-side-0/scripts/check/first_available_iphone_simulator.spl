@@ -1,0 +1,73 @@
+# Select the first available iPhone simulator UDID from xcrun simctl JSON.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn ignored_arg(arg: text) -> bool:
+    arg == "--" or arg == "--clean" or arg.starts_with("--mode=")
+
+fn has_arg(all_args: [text], wanted: text) -> bool:
+    var seen_script = false
+    var fallback = false
+    var i = 0
+    while i < all_args.len():
+        val arg = all_args[i]
+        if arg.ends_with("first_available_iphone_simulator.spl"):
+            seen_script = true
+        elif seen_script and not ignored_arg(arg):
+            if arg == wanted:
+                return true
+        elif i > 0:
+            fallback = true
+        i = i + 1
+    if fallback and not seen_script:
+        i = 1
+        while i < all_args.len():
+            val arg2 = all_args[i]
+            if not ignored_arg(arg2) and arg2 == wanted:
+                return true
+            i = i + 1
+    false
+
+fn compact_json(source: text) -> text:
+    source.replace(" ", "").replace("\n", "").replace("\t", "").replace("\r", "")
+
+fn quoted_field(source: text, key: text) -> text:
+    val token = "\"" + key + "\":\""
+    val idx = source.index_of(token) ?? -1
+    if idx < 0:
+        return ""
+    val rest = source.substring(idx + token.len())
+    val end_idx = rest.index_of("\"") ?? -1
+    if end_idx < 0:
+        return ""
+    rest.substring(0, end_idx)
+
+fn first_available_iphone_udid(json: text) -> text:
+    val compact = compact_json(json)
+    val entries = compact.split("{")
+    for entry in entries:
+        if entry.contains("\"isAvailable\":true") and entry.contains("\"name\":\"iPhone"):
+            val udid = quoted_field(entry, "udid")
+            if udid != "":
+                return udid
+    ""
+
+fn self_test() -> i32:
+    val fixture = "{\"devices\":{\"com.apple.CoreSimulator.SimRuntime.iOS-18-0\":[{\"name\":\"iPad Pro\",\"udid\":\"IPAD-1\",\"isAvailable\":true},{\"name\":\"iPhone 16\",\"udid\":\"IPHONE-16\",\"isAvailable\":true}]}}"
+    val udid = first_available_iphone_udid(fixture)
+    if udid != "IPHONE-16":
+        print "first_available_iphone_simulator_self_test=fail got=" + udid
+        return 1
+    print "first_available_iphone_simulator_self_test=pass"
+    return 0
+
+fn main() -> i32:
+    val args = rt_cli_get_args()
+    if has_arg(args, "--self-test"):
+        return self_test()
+    val result = rt_process_run("xcrun", ["simctl", "list", "devices", "available", "-j"])
+    if result.2 != 0:
+        return 0
+    print first_available_iphone_udid(result.0)
+    return 0

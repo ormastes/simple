@@ -1,0 +1,304 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_opencl.spl 70%
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
+# @tag: unit, gpu, engine2d, opencl, backend
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gpu.engine2d.backend_opencl.{OpenClBackend, opencl_2d_generated_source, opencl_font_atlas_dirty_upload_bytes}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
+
+describe "Engine2D OpenCL backend facade":
+
+    it "ships generated OpenCL 2D source with the shared kernel entries":
+        # @req REQ-013 NFR-011
+        val source = opencl_2d_generated_source()
+
+        expect(source).to_contain("__kernel void simple_2d_fill_u32")
+        expect(source).to_contain("__kernel void simple_2d_copy_u32")
+        expect(source).to_contain("__kernel void simple_2d_alpha_u32")
+        expect(source).to_contain("__kernel void simple_2d_scroll_u32")
+        expect(source).to_contain("__kernel void simple_2d_rect_filled_u32")
+        expect(source).to_contain("__kernel void simple_2d_rect_outline_u32")
+        expect(source).to_contain("__kernel void simple_2d_line_u32")
+        expect(source).to_contain("__kernel void simple_2d_gradient_rect_u32")
+        expect(source).to_contain("__kernel void simple_2d_circle_u32")
+        expect(source).to_contain("__kernel void simple_2d_circle_filled_u32")
+        expect(source).to_contain("__kernel void simple_2d_rounded_rect_u32")
+        expect(source).to_contain("__kernel void simple_2d_triangle_filled_u32")
+        expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
+        expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
+        expect(source).to_contain("__kernel void simple_2d_blit_alpha_u32")
+        expect(source.ends_with(font_atlas_composite_opencl_source())).to_equal(true)
+
+    it "selects dirty bytes only for a consecutive valid atlas generation":
+        val rect = FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0u32)
+        val warm = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 2, dirty_rects: [rect])
+        val gap = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 4, dirty_rects: [rect])
+        val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 2, dirty_rects: [FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 0, dst_y: 0, width: 2, height: 1, atlas_x: 1, atlas_y: 0, color: 0u32)])
+        val empty = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 2, dirty_rects: [])
+
+        expect(opencl_font_atlas_dirty_upload_bytes(warm, 1, false)).to_equal(4)
+        expect(opencl_font_atlas_dirty_upload_bytes(warm, -1, true)).to_equal(0)
+        expect(opencl_font_atlas_dirty_upload_bytes(gap, 2, false)).to_equal(0)
+        expect(opencl_font_atlas_dirty_upload_bytes(invalid, 1, false)).to_equal(0)
+        expect(opencl_font_atlas_dirty_upload_bytes(empty, 1, false)).to_equal(0)
+
+    it "full-uploads across distinct renderer dependency-token gaps":
+        var first_renderer = FontRenderer.new()
+        var skipped_renderer = FontRenderer.new()
+        var second_renderer = FontRenderer.new()
+        val first = first_renderer.prepare_text("A", 0xffffffffu32, 16)
+        skipped_renderer.prepare_text("X", 0xffffffffu32, 16)
+        val second = second_renderer.prepare_text("B", 0xffffffffu32, 16)
+
+        expect(first.is_empty()).to_equal(false)
+        expect(second.is_empty()).to_equal(false)
+        expect(first.atlas_generation).to_be_greater_than(0)
+        expect(second.atlas_generation).to_be_greater_than(first.atlas_generation + 1)
+        expect(opencl_font_atlas_dirty_upload_bytes(second, first.atlas_generation, false)).to_equal(0)
+
+    it "fails closed or initializes through the OpenCL render facade without CPU fallback":
+        var backend = OpenClBackend.create()
+        val ok = backend.init(4, 4)
+
+        expect(backend.name()).to_equal("opencl")
+        expect(backend.last_probe.requested_name).to_equal("opencl")
+        expect(backend.last_probe.selected_name).to_equal("opencl")
+        expect(backend.last_probe.api_name).to_equal("opencl")
+        expect(backend.last_probe.shader_format).to_equal("opencl-c")
+        expect(backend.last_probe.has_compute).to_equal(true)
+        expect(backend.last_probe.strict_failure_without_fallback()).to_equal(true)
+        if ok:
+            expect(backend.last_probe.status).to_equal(BackendStatus.Initialized)
+            expect(backend.last_probe.feature_gate).to_equal("opencl_2d_render")
+            backend.clear(0xff112233u32)
+            val cleared = backend.read_pixels()
+            expect(cleared.len()).to_equal(16)
+            expect(cleared[0]).to_equal(0xff112233u32)
+            expect(cleared[15]).to_equal(0xff112233u32)
+            backend.draw_rect_filled(1, 1, 2, 2, 0xff445566u32)
+            val filled = backend.read_pixels()
+            expect(filled[0]).to_equal(0xff112233u32)
+            expect(filled[5]).to_equal(0xff445566u32)
+            expect(filled[6]).to_equal(0xff445566u32)
+            expect(filled[9]).to_equal(0xff445566u32)
+            expect(filled[10]).to_equal(0xff445566u32)
+            expect(filled[15]).to_equal(0xff112233u32)
+            backend.draw_line(0, 0, 3, 3, 0xff778899u32, 1)
+            val lined = backend.read_pixels()
+            expect(lined[0]).to_equal(0xff778899u32)
+            expect(lined[5]).to_equal(0xff778899u32)
+            expect(lined[10]).to_equal(0xff778899u32)
+            expect(lined[15]).to_equal(0xff778899u32)
+            backend.draw_gradient_rect(0, 0, 4, 4, 0xffff0000u32, 0xff0000ffu32)
+            val gradient = backend.read_pixels()
+            expect(gradient[0]).to_equal(0xffff0000u32)
+            expect(gradient[15]).to_equal(0xff0000ffu32)
+            backend.draw_circle(1, 1, 1, 0xffabcdefu32)
+            val circle = backend.read_pixels()
+            expect(circle[5]).to_equal(0xffabcdefu32)
+            backend.draw_circle_filled(2, 2, 1, 0xff135724u32)
+            val filled_circle = backend.read_pixels()
+            expect(filled_circle[10]).to_equal(0xff135724u32)
+            backend.draw_rounded_rect(0, 0, 4, 4, 1, 0xff2468acu32)
+            val rounded = backend.read_pixels()
+            expect(rounded[5]).to_equal(0xff2468acu32)
+            expect(rounded[10]).to_equal(0xff2468acu32)
+            backend.draw_triangle_filled(0, 0, 3, 0, 0, 3, 0xff55aa11u32)
+            val triangle = backend.read_pixels()
+            expect(triangle[0]).to_equal(0xff55aa11u32)
+            expect(triangle[1]).to_equal(0xff55aa11u32)
+            expect(triangle[4]).to_equal(0xff55aa11u32)
+            backend.clear(0xff112233u32)
+            backend.draw_image_blend(0, 0, 1, 1, [0x80ff0000u32])
+            expect(backend.read_pixels()[0]).to_equal(0xff881019u32)
+            backend.clear(0xff000000u32)
+            val unsupported_font_batch = FontRenderBatch(
+                program_version: 2,
+                font_identity: "test-font", face_generation: 1,
+                valid: true,
+                atlas_width: 2,
+                atlas_height: 1,
+                atlas_pixels: [0x80000000u32, 0u32],
+                quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
+                atlas_generation: 1,
+                dirty_rects: []
+            )
+            expect(backend.draw_font_batch(0, 0, unsupported_font_batch)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(-1)
+            val font_batch = FontRenderBatch(
+                program_version: 1,
+                font_identity: "test-font", face_generation: 1,
+                valid: true,
+                atlas_width: 2,
+                atlas_height: 1,
+                atlas_pixels: [0x80000000u32, 0u32],
+                quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
+                atlas_generation: 1,
+                dirty_rects: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0u32)]
+            )
+            expect(backend.draw_font_batch(0, 0, font_batch)).to_equal(1)
+            expect(backend.font_atlas_generation).to_equal(1)
+            val warm_batch = FontRenderBatch(
+                program_version: 1,
+                font_identity: "test-font", face_generation: 1,
+                valid: true,
+                atlas_width: 2,
+                atlas_height: 1,
+                atlas_pixels: [0x80000000u32, 0x80000000u32],
+                quads: [FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 2, dst_y: 1, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0x8000ff00u32)],
+                atlas_generation: 2,
+                dirty_rects: [FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0u32)]
+            )
+            expect(backend.draw_font_batch(0, 0, warm_batch)).to_equal(1)
+            expect(backend.font_atlas_generation).to_equal(2)
+            val gap_batch = FontRenderBatch(
+                program_version: 1,
+                font_identity: "test-font", face_generation: 1,
+                valid: true,
+                atlas_width: 2,
+                atlas_height: 1,
+                atlas_pixels: [0x80000000u32, 0xff000000u32],
+                quads: [FontRenderQuad(codepoint: 67, byte_offset: 2, dst_x: 3, dst_y: 1, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0x800000ffu32)],
+                atlas_generation: 4,
+                dirty_rects: [FontRenderQuad(codepoint: 67, byte_offset: 2, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0u32)]
+            )
+            expect(backend.draw_font_batch(0, 0, gap_batch)).to_equal(1)
+            val font_readback = backend.read_pixels_with_source()
+            expect(font_readback.source).to_equal("device_readback")
+            expect(font_readback.pixels[5]).to_equal(0xff400000u32)
+            expect(font_readback.pixels[6]).to_equal(0xff004000u32)
+            expect(font_readback.pixels[7]).to_equal(0xff000080u32)
+        else:
+            expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
+            expect(backend.last_probe.has_graphics).to_equal(false)
+        backend.shutdown()
+
+    it "fails closed before submitting an invalid font batch":
+        var backend = OpenClBackend.create()
+        expect(backend.mirror.init(2, 2)).to_equal(true)
+        backend.clear(0xff112233u32)
+        val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
+
+        expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
+        expect(backend.device_current).to_equal(false)
+        expect(backend.read_pixels()[0]).to_equal(0xff112233u32)
+        backend.shutdown()
+
+    it "rejects unsupported font programs before OpenCL atlas or coherence mutation":
+        var backend = OpenClBackend.create()
+        backend.font_atlas_generation = 7
+        backend.device_current = true
+        for version in [0, -1, 2]:
+            val batch = FontRenderBatch(program_version: version, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(7)
+            expect(backend.device_current).to_equal(true)
+
+    it "invalidates a colliding atlas generation on font replacement":
+        var backend = OpenClBackend.create()
+        backend.font_atlas_generation = 7
+
+        backend.invalidate_font_atlas()
+        expect(backend.font_atlas_generation).to_equal(-1)
+
+    it "marks OpenCL device pixels stale after mirror-only primitive fallbacks":
+        var backend = OpenClBackend.create()
+        expect(backend.mirror.init(8, 8)).to_equal(true)
+
+        backend.device_current = true
+        backend.draw_line(0, 0, 7, 7, 0xff112233u32, 1)
+        expect(backend.device_current).to_equal(false)
+
+        backend.device_current = true
+        backend.draw_circle(4, 4, 3, 0xff112233u32)
+        expect(backend.device_current).to_equal(false)
+
+        backend.device_current = true
+        backend.draw_circle_filled(4, 4, 2, 0xff112233u32)
+        expect(backend.device_current).to_equal(false)
+
+        backend.device_current = true
+        backend.draw_rounded_rect(1, 1, 4, 4, 1, 0xff112233u32)
+        expect(backend.device_current).to_equal(false)
+
+        backend.device_current = true
+        backend.draw_triangle_filled(1, 1, 6, 1, 3, 6, 0xff112233u32)
+        expect(backend.device_current).to_equal(false)
+
+        backend.device_current = true
+        backend.draw_gradient_rect(1, 1, 4, 4, 0xff112233u32, 0xff445566u32)
+        expect(backend.device_current).to_equal(false)
+
+        backend.shutdown()
+
+    it "shares the CUDA HIP advanced facade methods through emulator logic":
+        var backend = OpenClBackend.create()
+        expect(backend.mirror.init(16, 16)).to_equal(true)
+
+        backend.clear(0xff000000u32)
+        backend.draw_ellipse(8, 8, 5, 3, 0xff112233u32)
+        backend.draw_ellipse_filled(8, 8, 2, 2, 0xff223344u32)
+        backend.draw_arc(8, 8, 5, 0, 180, 0xff334455u32, 1)
+        backend.draw_bezier(1, 1, 3, 12, 12, 3, 14, 14, 0xff445566u32, 1)
+        backend.draw_polygon_filled([1, 8, 14], [14, 2, 14], 3, 0xff556677u32)
+        backend.draw_polyline([1, 4, 8, 12], [1, 6, 1, 6], 4, 0xff667788u32, 1)
+        backend.draw_rect_thick(1, 1, 6, 6, 0xff778899u32, 2)
+        backend.draw_circle_thick(8, 8, 4, 0xff8899aau32, 2)
+        backend.draw_rounded_rect_outline(2, 2, 10, 8, 2, 0xff99aabbu32, 1)
+        backend.draw_gradient_rect_h(0, 0, 4, 4, 0xffaa0000u32, 0xff00aau32)
+        backend.draw_radial_gradient(8, 8, 4, 0xff00bb00u32, 0xff0000bbu32)
+        backend.draw_rect_blend(2, 2, 4, 4, 0x80ffffffu32)
+        backend.draw_image_blend(0, 0, 2, 2, [0x80ff0000u32, 0x8000ff00u32, 0x800000ffu32, 0x80ffffffu32])
+        backend.draw_image_scaled(12, 0, 4, 4, 2, 2, [0xffff0000u32, 0xff00ff00u32, 0xff0000ffu32, 0xffffffffu32])
+        backend.draw_triangle_outline(0, 15, 8, 8, 15, 15, 0xffabcdefu32, 1)
+        backend.draw_blur_rect(0, 0, 4, 4, 1)
+        backend.draw_shadow_rect(2, 2, 3, 3, 1, 1, 1, 0x80000000u32)
+        backend.draw_image_transform(4, 4, 2, 2, 256, 0, 0, 256, 0, 0, [0xff135724u32, 0xff246813u32, 0xff357924u32, 0xff468135u32])
+        backend.draw_rect_blend_mode(10, 10, 3, 3, 0x80ffffffu32, 1)
+
+        val pixels = backend.read_pixels()
+        expect(pixels.len()).to_equal(256)
+        expect(pixels[8 * 16 + 8]).to_be_greater_than(0u32)
+
+        backend.shutdown()
+
+    it "blocks OpenCL device draws while software clip state is active":
+        var backend = OpenClBackend.create()
+        expect(backend.mirror.init(8, 8)).to_equal(true)
+        backend.initialized = true
+        backend.d_framebuffer = 1
+
+        expect(backend._can_use_device_draw()).to_equal(true)
+        backend.set_clip(1, 1, 4, 4)
+        expect(backend._can_use_device_draw()).to_equal(false)
+        backend.clear_clip()
+        expect(backend._can_use_device_draw()).to_equal(true)
+
+        backend.shutdown()
+
+    it "routes Engine2D opencl probing through the render backend facade":
+        val probe = Engine2D.probe_backend(4, 4, "opencl")
+
+        expect(probe.requested_name).to_equal("opencl")
+        expect(probe.selected_name).to_equal("opencl")
+        expect(probe.api_name).to_equal("opencl")
+        expect(probe.shader_format).to_equal("opencl-c")
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+        if probe.status == BackendStatus.Initialized:
+            expect(probe.feature_gate).to_equal("opencl_2d_render")
+            val strict = Engine2D.create_with_backend_strict(4, 4, "opencl")
+            match strict:
+                case Ok(engine):
+                    expect(engine.backend_name()).to_equal("opencl")
+                    engine.shutdown()
+                case Err(_):
+                    expect(false).to_equal(true)
+        else:
+            expect(probe.status).to_equal(BackendStatus.Unavailable)
+            val gate_is_known = probe.feature_gate == "opencl_context" or probe.feature_gate == "opencl_2d_render" or probe.feature_gate == "opencl_surface"
+            expect(gate_is_known).to_equal(true)

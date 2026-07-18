@@ -1,0 +1,71 @@
+#!/usr/bin/env sh
+# Electron (Chromium) vs Vulkan-backed web-renderer parity check.
+#
+# Renders a solid-background HTML page two ways and asserts the frames are
+# pixel-identical:
+#   1. Through a REAL browser — Electron's bundled Chromium — captured headlessly
+#      via xvfb (tools/electron-live-bitmap/capture_html_argb.js).
+#   2. Through the Vulkan-backed Engine2D web surface
+#      (src/app/test/electron_vulkan_web_parity.spl).
+#
+# Chromium is the reference oracle: the Vulkan-backed renderer must match the
+# real browser on the page background. This is the "electron vulkan-backed GUI
+# test / chrome web render with reference" harness.
+#
+# Requires: electron (tools/electron-shell/node_modules), xvfb-run, node, and a
+# Vulkan-capable host. Exits 0 on parity, non-zero otherwise.
+set -e
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+WIDTH=${EVWP_WIDTH:-64}
+HEIGHT=${EVWP_HEIGHT:-48}
+BG_HEX=${EVWP_BG_HEX:-224466}
+BG_DEC=${EVWP_BG_DEC:-4280435814}   # 0xFF224466
+WORK=${EVWP_WORK:-/tmp/electron_vulkan_web_parity}
+ELECTRON_BIN="$ROOT/tools/electron-shell/node_modules/.bin/electron"
+
+mkdir -p "$WORK"
+HTML="$WORK/page.html"
+ELECTRON_JSON="$WORK/electron.json"
+VULKAN_JSON="$WORK/vulkan.json"
+
+printf '%s' "<!doctype html><html><body style='margin:0;background:#${BG_HEX}'></body></html>" > "$HTML"
+
+if [ ! -x "$ELECTRON_BIN" ] && [ ! -f "$ELECTRON_BIN" ]; then
+  echo "SKIP: electron not installed at $ELECTRON_BIN"
+  exit 0
+fi
+if ! command -v xvfb-run >/dev/null 2>&1; then
+  echo "SKIP: xvfb-run not available (needs a virtual display for headless Electron)"
+  exit 0
+fi
+
+echo "[1/3] Capturing through Electron/Chromium (headless, xvfb)..."
+ELECTRON_CAPTURE_HTML="$HTML" \
+ELECTRON_CAPTURE_WIDTH="$WIDTH" ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+ELECTRON_CAPTURE_OUTPUT="$ELECTRON_JSON" \
+ELECTRON_CAPTURE_SETTLE_MS=600 \
+xvfb-run --auto-servernum "$ELECTRON_BIN" --no-sandbox --disable-gpu \
+  tools/electron-live-bitmap/capture_html_argb.js
+
+echo "[2/3] Rendering through the Vulkan-backed Engine2D web surface..."
+EVWP_BG="$BG_DEC" EVWP_WIDTH="$WIDTH" EVWP_HEIGHT="$HEIGHT" EVWP_OUTPUT="$VULKAN_JSON" \
+SIMPLE_EXECUTION_MODE=interpret \
+  bin/simple run src/app/test/electron_vulkan_web_parity.spl
+
+echo "[3/3] Comparing frames..."
+node -e '
+const fs=require("fs");
+const e=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const v=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+if(v.backend!=="vulkan"){console.error("FAIL: web render did not run on vulkan (backend="+v.backend+")");process.exit(2);}
+const n=Math.min(e.pixels.length,v.pixels.length);
+if(n===0){console.error("FAIL: empty pixel buffers");process.exit(2);}
+let mism=0;
+for(let i=0;i<n;i++) if((e.pixels[i]>>>0)!==(v.pixels[i]>>>0)) mism++;
+console.log("electron(chromium) px0="+(e.pixels[0]>>>0)+"  vulkan px0="+(v.pixels[0]>>>0)+"  compared="+n+"  mismatches="+mism);
+if(mism!==0){console.error("FAIL: Chromium and Vulkan-backed renderer diverge");process.exit(1);}
+console.log("PASS: Chromium (reference) == Vulkan-backed web render, pixel-exact");
+' "$ELECTRON_JSON" "$VULKAN_JSON"

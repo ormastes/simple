@@ -1,0 +1,887 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/electron_simple_web_layout_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_simple_web_layout_bitmap_evidence_$(date -u +%F).md}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+WIDTH="${ELECTRON_BITMAP_WIDTH:-96}"
+HEIGHT="${ELECTRON_BITMAP_HEIGHT:-64}"
+ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-3}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
+SCENE="${ELECTRON_BITMAP_SCENE:-simple-web-layout-text-flow}"
+CAPTURE_MODE="${ELECTRON_LAYOUT_CAPTURE_MODE:-auto}"
+SIMPLE_SRC="$BUILD_DIR/simple_web_layout_expected.spl"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+HTML_PATH="$BUILD_DIR/scene.html"
+EXPECTED_ARGB="$BUILD_DIR/expected-argb.json"
+CAPTURED_ARGB="$BUILD_DIR/electron-argb.json"
+ELECTRON_GEOMETRY="$BUILD_DIR/electron-geometry.json"
+ELECTRON_OUT="$BUILD_DIR/electron.out"
+ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
+VALIDATED_ENV="$BUILD_DIR/electron-proof.validation.env"
+VALIDATOR="scripts/check/validate-electron-simple-web-layout-proof.js"
+SIMPLE_EXPECTED_TIMEOUT_SECS="$TIMEOUT_SECS"
+SIMPLE_EXPECTED_EXIT_CODE=
+SIMPLE_EXPECTED_TIMED_OUT=false
+SIMPLE_EXPECTED_STATUS=not-run
+SIMPLE_EXPECTED_REASON=not-run
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$HTML_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_GEOMETRY" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+field_of_env() {
+    key="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "electron_simple_web_layout_status=unavailable"
+        echo "electron_simple_web_layout_reason=$reason"
+        echo "electron_simple_web_layout_scene=$SCENE"
+        echo "electron_simple_web_layout_simple_bin=$SIMPLE_BIN"
+        echo "electron_simple_web_layout_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "electron_simple_web_layout_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "electron_simple_web_layout_capture_mode=$CAPTURE_MODE"
+        echo "electron_simple_web_layout_proof_source="
+        echo "electron_simple_web_layout_proof_source_file_status="
+        echo "electron_simple_web_layout_proof_source_size_bytes="
+        echo "electron_simple_web_layout_proof_source_actual_size_bytes="
+        echo "electron_simple_web_layout_proof_source_file_reason="
+        echo "electron_simple_web_layout_proof_source_artifact_status=unavailable"
+        echo "electron_simple_web_layout_proof_symlink_status="
+        echo "electron_simple_web_layout_proof_hardlink_status="
+        echo "electron_simple_web_layout_width=$WIDTH"
+        echo "electron_simple_web_layout_height=$HEIGHT"
+        echo "electron_simple_web_layout_iterations=$ITERATIONS"
+        echo "electron_simple_web_layout_simple_expected_status=$SIMPLE_EXPECTED_STATUS"
+        echo "electron_simple_web_layout_simple_expected_reason=$SIMPLE_EXPECTED_REASON"
+        echo "electron_simple_web_layout_simple_expected_timeout_secs=$SIMPLE_EXPECTED_TIMEOUT_SECS"
+        echo "electron_simple_web_layout_simple_expected_timed_out=$SIMPLE_EXPECTED_TIMED_OUT"
+        echo "electron_simple_web_layout_simple_expected_exit_code=$SIMPLE_EXPECTED_EXIT_CODE"
+        echo "electron_simple_web_layout_geometry_file_status=fail"
+        echo "electron_simple_web_layout_geometry_file_reason=not-run"
+        echo "electron_simple_web_layout_geometry_artifact_status=unavailable"
+        echo "electron_simple_web_layout_geometry_symlink_status="
+        echo "electron_simple_web_layout_geometry_hardlink_status="
+        echo "electron_simple_web_layout_captured_argb_file_status=fail"
+        echo "electron_simple_web_layout_captured_argb_file_reason=not-run"
+        echo "electron_simple_web_layout_captured_argb_artifact_status=unavailable"
+        echo "electron_simple_web_layout_captured_argb_symlink_status="
+        echo "electron_simple_web_layout_captured_argb_hardlink_status="
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Electron Simple Web Layout Bitmap Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+        echo "- proof source artifact:  /  / unavailable"
+        echo "- Electron geometry artifact: fail / not-run / unavailable"
+        echo "- captured ARGB artifact: fail / not-run / unavailable"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
+    exit 1
+fi
+
+for required in node npm; do
+    if ! have "$required"; then
+        emit_unavailable "missing-command:$required"
+        exit 1
+    fi
+done
+
+ELECTRON_BIN="${ELECTRON_BIN:-${SIMPLE_ELECTRON_BIN:-}}"
+if [ -n "$ELECTRON_BIN" ] && [ ! -x "$ELECTRON_BIN" ]; then
+    emit_unavailable "electron-bin-missing"
+    exit 1
+elif [ -x "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+elif [ -x "tools/electron-shell/node_modules/.bin/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/.bin/electron"
+elif [ -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/electron"
+fi
+
+if [ ! -f "$VALIDATOR" ]; then
+    emit_unavailable "missing-electron-proof-validator"
+    exit 1
+fi
+
+if [ "$ELECTRON_BIN" = "" ]; then
+    emit_unavailable "missing-electron-dependency"
+    exit 1
+fi
+
+cat >"$SIMPLE_SRC" <<SIMPLE_EOF
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.nogc_sync_mut.sffi.io.{file_write_text}
+
+val WIDTH: i32 = $WIDTH
+val HEIGHT: i32 = $HEIGHT
+val HTML_PATH: text = "$HTML_PATH"
+val EXPECTED_ARGB_PATH: text = "$EXPECTED_ARGB"
+
+fn checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + pixels[i].to_i64()
+        i = i + 1
+    sum
+
+fn weighted_checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + (pixels[i].to_i64() * (i.to_i64() + 1))
+        i = i + 1
+    sum
+
+fn write_expected_bitmap(pixels: [u32]) -> bool:
+    var json = "{\"width\":" + WIDTH.to_text() + ",\"height\":" + HEIGHT.to_text() + ",\"format\":\"argb-u32\",\"producer\":\"simple_web_render_html_to_pixels\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    file_write_text(EXPECTED_ARGB_PATH, json)
+
+fn main():
+    var html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#ffffff;color:#141418}h1{font-size:34px;margin:10px 0;font-weight:bold}p{font-size:16px;margin:6px 0}</style></head><body><main><h1>GUI</h1><p>taskbar command</p></main></body></html>"
+    if "$SCENE" == "simple-web-layout-css-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{display:flex;gap:4px;background-color:#0f172a;padding:4px;width:88px;height:56px}.rail{background-color:#1d4ed8;width:12px;height:48px}.stack{display:flex;flex-direction:column;gap:3px;background-color:#e5e7eb;background-image:linear-gradient(#e5e7eb,#cbd5e1);background-blend-mode:multiply;background-size:20px 20px;background-repeat:no-repeat;background-position:4px 5px;background-attachment:fixed;padding:3px;padding-inline:3px 3px;padding-inline-start:3px;padding-inline-end:3px;padding-block:3px 3px;padding-block-start:3px;padding-block-end:3px;width:60px;height:42px;inline-size:60px;block-size:42px;min-inline-size:60px;max-inline-size:60px;min-block-size:42px;max-block-size:42px}.row{background-color:#22c55e;width:54px;height:10px}.row.alt{background-color:#f59e0b;width:36px;height:10px}.leaf{position:relative;inset:0 0 0 0;inset-block:0 0;inset-block-start:0;inset-block-end:0;inset-inline:0 0;inset-inline-start:0;inset-inline-end:0;background-color:#ef4444;width:18px;height:8px;margin-inline:6px 0;margin-inline-start:6px;margin-inline-end:0;margin-block:0 0;margin-block-start:0;margin-block-end:0}</style></head><body><section class='shell'><div class='rail'></div><div class='stack'><div class='row'></div><div class='row alt'></div><div class='leaf'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-border-nested-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#dbeafe;border:2px solid #0f172a;border-style:solid;padding:4px;width:84px;height:52px}.shell>.direct{background-color:#22c55e;border:1px solid #14532d;width:24px;height:12px}.shell .nested .target{background-color:#f59e0b;border:2px solid #7c2d12;width:36px;height:10px;margin-left:6px}.shell>.nested{background-color:#e5e7eb;border:1px solid #334155;padding:3px;width:60px;height:24px;margin-top:4px}.outside .target{background-color:#ef4444;width:10px;height:10px}</style></head><body><section class='shell'><div class='direct'></div><div class='nested'><div class='target'></div></div></section><section class='outside'><div class='target'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-text-raster-track":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#ffffff}.panel{background-color:#f8fafc;border:1px solid #334155;padding:4px;width:86px;height:54px}.title{color:#0f172a;font-size:16px;background-color:#f8fafc}.sub{color:#475569;font-size:8px;background-color:#f8fafc;margin-top:4px}</style></head><body><section class='panel'><div class='title'>TEXT RASTER</div><div class='sub'>Chrome AA baseline</div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-line-height-text-track":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;background-clip:content-box;background-origin:content-box;background-image:linear-gradient(#e5e7eb,#cbd5e1);box-shadow:2px 2px #94a3b8;border-radius:4px;border-top-left-radius:6px;border-top-right-radius:3px;border-bottom-right-radius:5px;border-bottom-left-radius:2px;border-start-start-radius:6px;border-start-end-radius:3px;border-end-end-radius:5px;border-end-start-radius:2px;padding:4px;width:60px;height:56px}.copy{background-color:#dbeafe;color:#0f172a;font-family:system;font-size:8px;line-height:12px;width:22px}.copy::before{content:'>'}.after{background-color:#f59e0b;width:10px;height:6px;margin-top:2px}</style></head><body><section class='shell'><div class='copy'>ALPHA BETA GAMMA</div><div class='after'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-text-style-flow-track":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:88px;height:56px}.center{caption-side:top;list-style-position:outside;list-style-image:none;justify-items:stretch;justify-self:auto;color-scheme:dark;column-count:1;column-width:auto;columns:auto;column-rule:0 none transparent;column-rule-color:#000000;column-rule-style:none;column-rule-width:0;background-color:#ffffff;color:#0f172a;font:italic bold 8px/8px sans-serif;font-size:8px;font-size-adjust:0.5;font-palette:dark;font-feature-settings:'kern' 0;font-language-override:'TRK';font-variation-settings:'wght' 700;font-variant:small-caps tabular-nums;font-variant-alternates:historical-forms;font-variant-caps:small-caps;font-variant-east-asian:ruby;font-variant-emoji:emoji;font-variant-ligatures:no-common-ligatures;font-variant-numeric:tabular-nums;font-variant-position:super;font-style:italic;font-weight:bold;font-kerning:none;font-optical-sizing:none;font-stretch:expanded;font-width:expanded;font-synthesis:none;font-synthesis-small-caps:none;font-synthesis-position:none;font-synthesis-style:none;font-synthesis-weight:none;letter-spacing:1px;line-height:8px;hyphens:auto;line-break:strict;white-space:pre;text-overflow:ellipsis;overflow-wrap:anywhere;word-break:break-all;word-wrap:break-word;word-spacing:2px;caret-color:#06b6d4;cursor:pointer;resize:both;tab-size:4;unicode-bidi:plaintext;writing-mode:vertical-rl;text-orientation:upright;will-change:transform, opacity;color-adjust:exact;forced-color-adjust:none;print-color-adjust:exact;orphans:4;widows:5;text-combine-upright:all;text-align:center;text-align-all:center;text-align-last:right;text-emphasis:dot #dc2626;text-emphasis-color:#dc2626;text-emphasis-position:under;text-emphasis-style:dot;quotes:'[' ']';text-indent:4px;text-justify:inter-word;text-shadow:2px 1px #dc2626;text-transform:uppercase;text-decoration:underline;text-decoration-line:underline;text-decoration-color:#dc2626;text-decoration-style:double;text-decoration-thickness:2px;text-underline-offset:2px;text-underline-position:under;width:42px;height:18px;image-rendering:pixelated;overflow:hidden}.right{background-color:#dbeafe;color:#334155;font-size:8px;font-weight:400;line-height:8px;white-space:nowrap;text-align:right;direction:rtl;width:46px;height:10px;margin-top:4px;overflow:hidden}.marker{background-color:#f59e0b;width:16px;aspect-ratio:8/3;margin-top:4px}.grid{display:table;table-layout:fixed}.va{vertical-align:middle}</style></head><body><section class='shell'><div class='center'>a  b&#10;cd</div><div class='right'>TAIL SHIFT</div><div class='marker'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-selector-inline-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:88px;height:56px}.shell>.direct.hot{background-color:#22c55e;width:16px;height:12px}.shell .nested #target{background-color:#1d4ed8;width:24px;height:10px;margin-left:6px}.shell .nested .inline{background-color:#f59e0b;width:12px;height:8px;margin-left:8px;margin-top:3px}.outside #target{background-color:#ef4444;width:40px;height:40px}</style></head><body><section class='shell'><div class='direct hot'></div><div class='nested'><div id='target'></div><div class='inline' style='background-color:#334155;width:18px;height:8px'></div></div></section><section class='outside'><div id='target'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-attribute-selector-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:88px;height:56px}[data-card]{background-color:#22c55e;width:16px;height:8px}div[data-state='active']{background-color:#1d4ed8;width:20px;height:8px;margin-top:3px}div[data-route^='/app']{background-color:#f59e0b;width:12px;height:8px;margin-left:5px;margin-top:3px}div[data-route$='/settings']{background-color:#334155;width:10px;height:8px;margin-left:5px}.shell div[data-state='inactive']{background-color:#ef4444;width:40px;height:12px}</style></head><body><section class='shell'><div data-card='true'></div><div data-state='active'></div><div data-route='/app/home'></div><div data-route='/account/settings'></div><div data-state='inactive'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-pseudo-selector-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;gap:3px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.col{display:block;width:18px}.card:is(.card,.alias){background-color:#1d4ed8;width:16px;height:6px}.not-target:not(.disabled,#archived){background-color:#22c55e;width:18px;height:6px;margin-top:2px}.has:has(> .badge){background-color:#f59e0b;width:18px;height:6px;margin-top:2px}.nohas:has(> .badge){background-color:#ef4444;width:18px;height:6px;margin-top:2px}.childbox .target:first-child{background-color:#334155;width:18px;height:6px}.childbox .target:last-child{background-color:#a855f7;width:18px;height:6px;margin-top:2px}.nthbox .target:nth-child(2n+1){background-color:#14b8a6;width:18px;height:6px;margin-top:2px}.spacer{width:18px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='col'><div class='card'></div><div class='not-target'></div><div class='not-target disabled'></div></div><div class='col'><div class='has'><span class='badge'></span></div><div class='nohas'><section><span class='badge'></span></section></div></div><div class='col childbox'><div class='target'></div><div class='spacer'></div><div class='target'></div></div><div class='col nthbox'><div class='target'></div><div class='spacer'></div><div class='target'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-layer-nesting-structural-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;gap:3px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}@layer components{.layer-card{background-color:#1d4ed8;width:16px;height:6px}.layer-card:not(.disabled){margin-top:2px}.nest{&.primary{background-color:#22c55e;width:18px;height:6px;margin-top:2px}& .child{background-color:#f59e0b;width:14px;height:6px;margin-top:2px}}}.only>.target:only-child{background-color:#9333ea;width:18px;height:6px}.only>.target{background-color:#ef4444;width:18px;height:6px;margin-top:2px}.empty>.target:empty{background-color:#0f766e;width:18px;height:6px}.empty>.target{background-color:#334155;width:18px;height:6px;margin-top:2px}.nth>.target:nth-child(2n+1){background-color:#14b8a6;width:18px;height:6px;margin-top:2px}.col{display:block;width:18px}.spacer{width:18px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='col'><div class='layer-card'></div><div class='layer-card disabled'></div></div><div class='col'><div class='nest primary'></div><div class='nest'><div class='child'></div></div></div><div class='col only'><div class='target'></div></div><div class='col empty'><div class='target'></div><div class='target'><span></span></div></div><div class='col nth'><div class='target'></div><div class='spacer'></div><div class='target'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-border-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{box-sizing:border-box;background-color:#dbeafe;border:3px solid #0f172a;padding:5px;width:88px;height:58px}.content{box-sizing:border-box;background-color:#22c55e;border:2px solid #14532d;padding:3px;width:42px;height:22px}.inner{background-color:#f59e0b;width:18px;height:6px}.normal{background-color:#1d4ed8;border:2px solid #1e3a8a;padding:3px;width:18px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='content'><div class='inner'></div></div><div class='normal'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-padding-longhand-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding-top:3px;padding-right:5px;padding-bottom:7px;padding-left:9px;width:78px;height:46px}.box{background-color:#22c55e;width:24px;height:10px}.override{background-color:#1d4ed8;padding:2px;padding-left:6px;padding-bottom:4px;width:20px;height:8px;margin-top:4px}.leaf{background-color:#f59e0b;width:8px;height:4px}</style></head><body><section class='shell'><div class='box'></div><div class='override'><div class='leaf'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-border-side-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;border-left:1px solid #0f172a;border-left-width:4px;border-left-style:solid;border-left-color:#0f172a;border-top:1px solid #0f172a;border-top-width:2px;border-top-style:solid;border-top-color:#0f172a;border-right:1px solid #0f172a;border-right-width:6px;border-right-style:solid;border-right-color:#0f172a;border-bottom:1px solid #0f172a;border-bottom-width:3px;border-bottom-style:solid;border-bottom-color:#0f172a;outline:2px solid #7c3aed;outline-width:2px;outline-style:solid;outline-color:#7c3aed;outline-offset:1px;padding:3px 5px 7px 9px;width:70px;height:40px}.box{background-color:#22c55e;width:20px;height:8px}.next{background-color:#1d4ed8;border:1px solid #334155;border-color:#334155;border-width:1px 3px 2px 5px;padding:2px;width:16px;height:6px;margin-top:4px}.leaf{background-color:#f59e0b;width:8px;height:3px;border-block:0 solid #000000;border-block-color:#000000;border-block-style:solid;border-block-width:0;border-block-start:0 solid #000000;border-block-start-color:#000000;border-block-start-style:solid;border-block-start-width:0;border-block-end:0 solid #000000;border-block-end-color:#000000;border-block-end-style:solid;border-block-end-width:0;border-inline:0 solid #000000;border-inline-color:#000000;border-inline-style:solid;border-inline-width:0;border-inline-start:0 solid #000000;border-inline-start-color:#000000;border-inline-start-style:solid;border-inline-start-width:0;border-inline-end:0 solid #000000;border-inline-end-color:#000000;border-inline-end-style:solid;border-inline-end-width:0}</style></head><body><section class='shell'><div class='box'></div><div class='next'><div class='leaf'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-overflow-hidden-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{contain:paint;overflow:hidden;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:40px;height:24px}.wide{background-color:#22c55e;width:70px;height:10px}.tall{background-color:#1d4ed8;width:20px;height:20px;margin-top:4px}.outside{background-color:#ef4444;width:10px;height:10px;margin-top:4px}</style></head><body><section class='shell'><div class='wide'></div><div class='tall'></div><div class='outside'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-overflow-axis-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;gap:6px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.clipx{scrollbar-color:#9333ea #f97316;scrollbar-width:none;overflow-x:hidden;overflow-y:visible;background-color:#dbeafe;width:22px;height:18px}.clipx .wide{background-color:#1d4ed8;width:38px;height:8px}.clipx .drop{background-color:#22c55e;width:12px;height:14px;margin-top:2px}.clipy{overflow-x:visible;overflow-y:hidden;background-color:#fef3c7;width:22px;height:18px}.clipy .tall{background-color:#f59e0b;width:10px;height:34px}.both{overflow-x:hidden;overflow-y:hidden;background-color:#334155;width:22px;height:18px}.both .oversize{background-color:#ef4444;width:34px;height:30px}</style></head><body><section class='stage'><div class='clipx'><div class='wide'></div><div class='drop'></div></div><div class='clipy'><div class='tall'></div></div><div class='both'><div class='oversize'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-visibility-hidden-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:60px;height:44px}.hidden{content-visibility:hidden;visibility:hidden;background-color:#ef4444;border:2px solid #7f1d1d;padding:2px;width:24px;height:10px}.hidden .child{background-color:#f59e0b;width:12px;height:4px}.next{background-color:#1d4ed8;width:18px;height:8px;margin-top:4px}.shown{visibility:visible;background-color:#22c55e;width:12px;height:6px;margin-top:3px}</style></head><body><section class='shell'><div class='hidden'><div class='child'></div></div><div class='next'></div><div class='shown'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-display-contents-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:60px;height:44px}.contents{display:contents;margin-top:20px;background-color:#ef4444;border:3px solid #7f1d1d;padding:6px;width:40px;height:24px}.first{background-color:#1d4ed8;width:24px;height:8px}.second{background-color:#22c55e;width:18px;height:8px;margin-top:4px}.after{background-color:#f59e0b;width:12px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='contents'><div class='first'></div><div class='second'></div></div><div class='after'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-display-none-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:88px;height:56px}.none{display:none;background-color:#ef4444;border:4px solid #7f1d1d;padding:8px;width:60px;height:30px;margin-top:12px}.none .child{background-color:#f59e0b;width:40px;height:16px}.first{background-color:#1d4ed8;width:28px;height:10px}.second{background-color:#22c55e;width:22px;height:8px;margin-top:4px}.tail{background-color:#334155;width:18px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='none'><div class='child'></div></div><div class='first'></div><div class='second'></div><div class='tail'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-float-clear-flowroot-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:3px;width:90px;height:58px}.row{background-color:#dbeafe;width:56px}.left{float:left;background-color:#1d4ed8;width:16px;height:12px}.right{float:right;background-color:#22c55e;width:14px;height:10px}.clear{clear:both;background-color:#f59e0b;width:50px;height:8px}.bfc{display:flow-root;background-color:#334155;width:42px;margin-top:3px}.bfc .float{float:left;background-color:#ef4444;width:18px;height:10px}.bfc .side{background-color:#a855f7;width:18px;height:6px}.overflow{overflow:hidden;background-color:#14b8a6;width:38px;margin-top:3px}.overflow .float{float:right;background-color:#64748b;width:16px;height:8px}</style></head><body><section class='stage'><div class='row'><div class='left'></div><div class='right'></div><div class='clear'></div></div><div class='bfc'><div class='float'></div><div class='side'></div></div><div class='overflow'><div class='float'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-absolute-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.abs{position:absolute;left:32px;top:4px;background-color:#1d4ed8;width:20px;height:12px;clip-path:inset(0px)}.next{background-color:#334155;width:24px;height:8px;margin-top:4px}.abs2{position:absolute;left:6px;top:30px;background-color:#f59e0b;width:16px;height:8px}</style></head><body><section class='shell'><div class='flow'></div><div class='abs'></div><div class='next'></div><div class='abs2'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-relative-offset-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.rel{position:relative;left:12px;top:7px;background-color:#1d4ed8;width:22px;height:10px;clip:rect(0px,22px,10px,0px)}.child{background-color:#22c55e;width:10px;height:4px;margin-left:4px}.after{background-color:#f59e0b;width:18px;height:7px;margin-top:4px}.marker{background-color:#334155;width:26px;height:6px;margin-top:4px;transform:translate(0px,0px)}</style></head><body><section class='shell'><div class='rel'><div class='child'></div></div><div class='after'></div><div class='marker'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-right-bottom-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.right{position:absolute;right:6px;top:6px;background-color:#1d4ed8;width:12px;height:10px}.bottom{position:absolute;right:8px;bottom:5px;background-color:#f59e0b;width:16px;height:8px}.next{background-color:#334155;width:24px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='flow'></div><div class='right'></div><div class='bottom'></div><div class='next'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-overlap-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.abs{position:absolute;left:10px;top:8px;background-color:#1d4ed8;width:30px;height:20px}.next{background-color:#334155;width:36px;height:14px;margin-top:4px}</style></head><body><section class='shell'><div class='flow'></div><div class='abs'></div><div class='next'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-z-index-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.base{background-color:#22c55e;width:36px;height:14px}.high{position:absolute;left:8px;top:6px;z-index:2;background-color:#f59e0b;width:30px;height:20px}.low{position:absolute;left:14px;top:10px;z-index:1;background-color:#1d4ed8;width:30px;height:20px}.next{background-color:#334155;width:24px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='base'></div><div class='high'></div><div class='low'></div><div class='next'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-opacity-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}@keyframes hold{from{transform:translate(0px,0px)}to{transform:translate(0px,0px)}}.shell{background-color:#f8fafc;padding:4px;width:88px;height:56px}.half{background-color:#1d4ed8;opacity:0.5;filter:opacity(100%);transform:translate(0px,0px);transform-origin:center center;transform-box:border-box;transform-style:flat;transition:opacity 150ms ease-in 25ms;transition-property:opacity;transition-duration:150ms;transition-delay:25ms;transition-timing-function:ease-in;animation:hold 1000ms ease-out 0ms 2 alternate forwards paused;animation-name:hold;animation-duration:1000ms;animation-delay:0ms;animation-timing-function:ease-out;animation-iteration-count:2;animation-direction:alternate;animation-fill-mode:forwards;animation-play-state:paused;width:20px;height:12px}.zero{background-color:#ef4444;opacity:0;width:24px;height:10px;margin-top:4px}.full{background-color:#22c55e;opacity:1;backface-visibility:hidden;translate:0px 0px;rotate:0deg;scale:1;width:16px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='half'></div><div class='zero'></div><div class='full'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-background-shorthand-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background:url(hero.png) #dbeafe no-repeat;padding:4px;width:88px;height:56px}.rgb{background:rgb(34,197,94) no-repeat;width:20px;height:10px}.later-bg{background-color:#ef4444;background:#1d4ed8;width:18px;height:8px;margin-top:4px}.later-bg-color{background:#f59e0b;background-color:#334155;width:16px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='rgb'></div><div class='later-bg'></div><div class='later-bg-color'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-color-values-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.col{display:block;width:18px}.short{background-color:#0f8;width:18px;height:6px}.rgb{background-color:rgb(29,78,216);width:18px;height:6px;margin-top:3px}.rgba{background-color:rgba(245,158,11,1);width:18px;height:6px;margin-top:3px}.current{color:#334155;background-color:currentColor;width:18px;height:6px}.named{background-color:red;width:18px;height:6px;margin-top:3px}.url{background:url(hero.png) #a855f7 no-repeat;width:18px;height:6px;margin-top:3px}</style></head><body><section class='stage'><div class='col'><div class='short'></div><div class='rgb'></div><div class='rgba'></div></div><div class='col'><div class='current'></div><div class='named'></div><div class='url'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-min-max-gap-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;grid:42px / 36px 34px;grid-template:42px / 36px 34px;grid-template-areas:'main side';grid-template-columns:36px 34px;grid-auto-flow:column;grid-gap:5px;grid-column-gap:5px;column-gap:5px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.col{display:flex;flex-direction:column;grid-template-areas:'grow' 'cap' 'range';grid-template-rows:8px 7px 9px;grid-auto-flow:row;grid-row-gap:3px;row-gap:3px;background-color:#dbeafe;padding:3px;width:36px;height:42px;grid-column-start:1;grid-column:1 / 2;grid-area:1 / 1 / 2 / 2}.grow{background-color:#1d4ed8;width:10px;min-width:22px;height:4px;min-height:8px;grid-row-start:1;grid-row:1 / 2}.cap{background-color:#22c55e;width:38px;max-width:24px;height:16px;max-height:7px}.range{background-color:#f59e0b;width:12px;min-width:18px;max-width:30px;height:5px;min-height:9px;max-height:14px}.side{display:flex;grid-column-gap:4px;column-gap:4px;background-color:#334155;padding:3px;width:34px;height:20px;grid-column-start:2;grid-column:2 / 3;grid-area:2 / 2 / 3 / 3}.a{background-color:#ef4444;width:8px;height:12px}.b{background-color:#14b8a6;width:10px;height:8px}</style></head><body><section class='stage'><div class='col'><div class='grow'></div><div class='cap'></div><div class='range'></div></div><div class='side'><div class='a'></div><div class='b'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-percent-viewport-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:4px;width:88px;height:56px}.outer{background-color:#dbeafe;width:80px;height:40px;padding:4px}.half{background-color:#1d4ed8;width:50%;height:25%}.tall{background-color:#22c55e;width:25%;height:50%;margin-top:4px}.vh{background-color:#f59e0b;width:18px;min-height:20vh;margin-top:4px}</style></head><body><section class='stage'><div class='outer'><div class='half'></div><div class='tall'></div><div class='vh'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-auto-margin-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:4px;width:88px;height:56px}.block{background-color:#dbeafe;width:64px;height:16px;padding:2px}.center{background-color:#1d4ed8;width:20px;height:6px;margin-left:auto;margin-right:auto}.right{background-color:#22c55e;width:16px;height:6px;margin-left:auto;margin-top:2px}.flex{display:flex;background-color:#334155;width:70px;height:16px;margin-top:4px;padding:2px}.push{background-color:#f59e0b;width:12px;height:8px;margin-left:auto}.end{background-color:#ef4444;width:10px;height:8px}</style></head><body><section class='stage'><div class='block'><div class='center'></div><div class='right'></div></div><div class='flex'><div class='push'></div><div class='end'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-order-justify-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;justify-content:space-between;align-items:flex-start;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.first{order:3;flex-basis:10px;width:2px;height:12px;background-color:#ef4444}.second{order:1;flex-basis:14px;width:2px;height:8px;background-color:#1d4ed8}.third{order:2;flex-basis:12px;width:2px;height:10px;background-color:#22c55e}</style></head><body><section class='stage'><div class='first'></div><div class='second'></div><div class='third'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-justify-variants-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:3px;width:90px;height:58px}.row{display:flex;background-color:#dbeafe;width:54px;height:9px;margin-bottom:3px}.center{justify-content:center}.end{justify-content:flex-end}.around{justify-content:space-around}.evenly{justify-content:space-evenly}.a{background-color:#1d4ed8;width:8px;height:7px}.b{background-color:#22c55e;width:8px;height:7px}.c{background-color:#f59e0b;width:8px;height:7px}</style></head><body><section class='stage'><div class='row center'><div class='a'></div><div class='b'></div></div><div class='row end'><div class='a'></div><div class='b'></div></div><div class='row around'><div class='a'></div><div class='b'></div><div class='c'></div></div><div class='row evenly'><div class='a'></div><div class='b'></div><div class='c'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-safe-unsafe-center-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:3px;width:90px;height:58px}.row{display:flex;column-gap:2px;background-color:#dbeafe;width:24px;height:10px;margin-bottom:4px;overflow:hidden}.a{flex-shrink:0;background-color:#1d4ed8;width:18px;height:8px}.b{flex-shrink:0;background-color:#22c55e;width:18px;height:8px}.c{flex-shrink:0;background-color:#f59e0b;width:12px;height:8px}.marker{background-color:#ef4444;width:28px;height:7px}</style></head><body><section class='stage'><div class='row' style='justify-content:unsafe center'><div class='a'></div><div class='b'></div></div><div class='row' style='justify-content:safe center'><div class='a'></div><div class='b'></div></div><div class='row' style='justify-content:end'><div class='a'></div><div class='c'></div></div><div class='marker'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-column-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{display:flex;column-gap:4px;background-color:#e5e7eb;padding:3px;width:90px;height:58px}.space{display:flex;flex-direction:column;justify-content:space-between;align-items:center;background-color:#dbeafe;width:28px;height:46px;padding:2px}.end{display:flex;flex-direction:column;justify-content:flex-end;align-items:flex-end;row-gap:3px;background-color:#334155;width:24px;height:46px;padding:2px}.auto{display:flex;flex-direction:column;background-color:#fef3c7;width:22px;height:46px;padding:2px}.a{background-color:#1d4ed8;width:10px;height:6px}.b{background-color:#22c55e;width:12px;height:8px}.c{background-color:#ef4444;width:8px;height:6px}.d{background-color:#f59e0b;width:12px;height:6px}.e{background-color:#14b8a6;width:9px;height:7px}.f{background-color:#a855f7;width:14px;height:6px}.push{background-color:#64748b;width:12px;height:6px;margin-top:auto}.tail{background-color:#0f172a;width:10px;height:6px}</style></head><body><section class='stage'><div class='space'><div class='a'></div><div class='b'></div><div class='c'></div></div><div class='end'><div class='d'></div><div class='e'></div><div class='f'></div></div><div class='auto'><div class='push'></div><div class='tail'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-grow-shrink-wrap-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:3px;width:90px;height:58px}.grow{display:flex;background-color:#dbeafe;width:90px;height:10px}.grow .a{flex-grow:1;width:0;height:8px;background-color:#1d4ed8}.grow .b{flex-grow:2;width:0;height:8px;background-color:#22c55e}.shrink{display:flex;background-color:#334155;width:40px;height:10px;margin-top:3px}.shrink .a{flex-shrink:1;width:30px;height:8px;background-color:#ef4444}.shrink .b{flex-shrink:1;width:30px;height:8px;background-color:#f59e0b}.wrap{display:flex;flex-flow:row wrap;flex-wrap:wrap;column-gap:2px;row-gap:2px;background-color:#cbd5e1;width:46px;height:20px;margin-top:3px}.wrap .a{width:20px;height:8px;background-color:#14b8a6}.wrap .b{width:20px;height:8px;background-color:#a855f7}.wrap .c{flex:0 0 auto;width:20px;height:8px;background-color:#64748b}</style></head><body><section class='stage'><div class='grow'><div class='a'></div><div class='b'></div></div><div class='shrink'><div class='a'></div><div class='b'></div></div><div class='wrap'><div class='a'></div><div class='b'></div><div class='c'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-wrap-reverse-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:3px;width:90px;height:58px}.reverse{display:flex;flex-wrap:wrap-reverse;align-content:space-between;column-gap:2px;row-gap:3px;background-color:#dbeafe;width:46px;height:34px}.reverse .a{background-color:#1d4ed8;width:20px;height:8px}.reverse .b{background-color:#22c55e;width:20px;height:8px}.reverse .c{background-color:#f59e0b;width:20px;height:8px}.reverse .d{background-color:#ef4444;width:20px;height:8px}.reverse .e{background-color:#334155;width:20px;height:8px}.marker{background-color:#14b8a6;width:24px;height:7px;margin-top:4px}</style></head><body><section class='stage'><div class='reverse'><div class='a'></div><div class='b'></div><div class='c'></div><div class='d'></div><div class='e'></div></div><div class='marker'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flex-cross-align-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.stage{background-color:#e5e7eb;padding:3px;width:90px;height:58px}.items{display:flex;place-items:center;background-color:#dbeafe;width:52px;height:20px}.items .a{background-color:#1d4ed8;width:10px;height:6px}.items .b{place-self:flex-end;background-color:#22c55e;width:12px;height:8px}.items .c{align-self:flex-start;background-color:#ef4444;width:8px;height:10px}.content{display:flex;flex-wrap:wrap;place-content:space-between flex-start;column-gap:2px;row-gap:2px;background-color:#334155;width:46px;height:30px;margin-top:3px}.content .a{background-color:#f59e0b;width:20px;height:8px}.content .b{background-color:#14b8a6;width:20px;height:8px}.content .c{background-color:#a855f7;width:20px;height:8px}</style></head><body><section class='stage'><div class='items'><div class='a'></div><div class='b'></div><div class='c'></div></div><div class='content'><div class='a'></div><div class='b'></div><div class='c'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-semantic-gui-controls-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.shell{display:block;background-color:#e5e7eb;padding:4px;width:88px;height:56px}header{display:block;background-color:#1d4ed8;width:80px;height:8px}nav{display:block;background-color:#0f172a;width:80px;height:8px;margin-top:4px}main{display:block;background-color:#dbeafe;width:74px;height:22px;margin-top:4px;padding:3px}section{display:block;background-color:#22c55e;width:30px;height:8px}button{display:block;background-color:#f59e0b;border:0;margin:4px 0 0 0;padding:0;width:22px;height:8px;color:transparent;font-size:0}footer{display:block;background-color:#334155;width:80px;height:6px;margin-top:4px}</style></head><body><div class='shell'><header></header><nav></nav><main><section></section><button></button></main><footer></footer></div></body></html>"
+    if "$SCENE" == "simple-web-layout-section-heading-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}hgroup,h1,h2,h3,h4,h5,h6,p,search,address{display:block;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}hgroup{background-color:#dbeafe;width:32px;height:14px;padding:2px}h1{background-color:#1d4ed8;width:22px;height:4px}p{background-color:#22c55e;width:18px;height:4px;margin-top:2px}h2{background-color:#f59e0b;width:24px;height:5px;margin-top:3px}h3{background-color:#ef4444;width:20px;height:5px;margin-top:2px}h4{background-color:#334155;width:26px;height:5px}h5{background-color:#a855f7;width:18px;height:5px;margin-top:2px}h6{background-color:#14b8a6;width:22px;height:5px;margin-top:2px}search{background-color:#84cc16;width:28px;height:5px;margin-top:2px}address{background-color:#64748b;width:30px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><hgroup><h1></h1><p></p></hgroup><h2></h2><h3></h3></div><div class='right'><h4></h4><h5></h5><h6></h6><search></search><address></address></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-flow-text-adjacent-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}blockquote,pre,bdi,bdo,hr{display:block;box-sizing:content-box;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}blockquote{background-color:#dbeafe;width:32px;height:10px;padding:2px}pre{background-color:#1d4ed8;width:28px;height:6px;margin-top:2px}bdi{background-color:#22c55e;width:24px;height:5px;margin-top:2px}bdo{background-color:#f59e0b;width:20px;height:5px;margin-top:2px}hr{background-color:#ef4444;width:30px;height:4px;margin-top:2px}.bar{display:block;background-color:#334155;width:26px;height:6px}.tile{display:block;background-color:#14b8a6;width:30px;height:6px;margin-top:2px}.chip{display:block;background-color:#a855f7;width:28px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><blockquote></blockquote><pre></pre><bdi></bdi><bdo dir='rtl'></bdo><hr></div><div class='right'><div class='bar'></div><div class='tile'></div><div class='chip'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-metadata-nonpaint-tags-matrix":
+        html = "<html><head><base href='https://example.invalid/'><meta name='viewport' content='width=device-width'><link rel='preload' href='x.dat' as='fetch'><title>nonpaint</title><script type='application/json'>{}</script><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}map,area{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><map name='m'><area shape='rect' coords='0,0,1,1' href='#'></map><div class='b'></div><div class='c'></div></div><div class='right'><div class='d'></div><div class='e'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-hidden-helper-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}datalist,select,optgroup,option,br,wbr,selectedcontent,slot{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><datalist id='choices'><option value='x'></option></datalist><div class='b'></div><br><wbr><div class='c'></div></div><div class='right'><div class='d'></div><select><optgroup label='g'><option value='y'></option></optgroup><selectedcontent></selectedcontent></select><slot name='s'></slot><div class='e'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-hidden-resource-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}img,audio,track,embed,iframe,meter,progress,template,noscript,table,colgroup,col{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><img alt='' src=''><audio><track kind='captions' srclang='en' label='en'></audio><div class='b'></div><template><div class='ghost'></div></template><noscript><div class='ghost'></div></noscript><div class='c'></div></div><div class='right'><div class='d'></div><embed src='about:blank'><iframe src='about:blank'></iframe><meter value='0.5'></meter><progress value='1' max='2'></progress><table><colgroup><col></colgroup></table><div class='e'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-form-controls-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left{display:block;width:34px}.right{display:block;width:34px}form{display:block;background-color:#1d4ed8;margin:0;padding:2px;width:30px;height:14px}fieldset{display:block;background-color:#22c55e;border:0;margin:2px 0 0 0;padding:2px;width:30px;height:8px}legend{display:block;background-color:#f59e0b;width:20px;height:4px;margin-top:2px;padding:0}label{display:block;background-color:#ef4444;width:26px;height:5px;margin-top:2px}input,textarea,select,output{display:block;appearance:none;-webkit-appearance:none;border:0;margin:0;padding:0;color:transparent;font-size:0;line-height:0}input{background-color:#334155;width:24px;height:5px;accent-color:#22c55e}textarea{background-color:#a855f7;width:28px;height:6px;margin-top:2px;resize:none;overflow:hidden}select{background-color:#14b8a6;width:30px;height:5px;margin-top:2px}output{background-color:#64748b;width:20px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><form></form><fieldset></fieldset><legend></legend><label></label></div><div class='right'><input type='checkbox'><textarea></textarea><select></select><output></output></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-list-description-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left{display:block;width:34px}.right{display:block;width:36px}ul,ol,menu,li,dl,dt,dd{display:block;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}ul{background-color:#1d4ed8;width:30px;height:6px}li{background-color:#ef4444;width:18px;height:3px}ol{background-color:#22c55e;width:26px;height:6px;margin-top:2px}menu{background-color:#f59e0b;width:22px;height:6px;margin-top:2px}dl{background-color:#dbeafe;width:32px;height:15px;margin-top:2px;padding:2px}dt{background-color:#334155;width:20px;height:4px}dd{background-color:#a855f7;width:24px;height:4px;margin-top:2px}.bar{display:block;background-color:#14b8a6;width:34px;height:6px}.tile{display:block;background-color:#84cc16;width:28px;height:6px;margin-top:2px}.chip{display:block;background-color:#64748b;width:20px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><ul><li></li></ul><ol><li></li></ol><menu><li></li></menu><dl><dt></dt><dd></dd></dl></div><div class='right'><div class='bar'></div><div class='tile'></div><div class='chip'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-table-section-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:block;background-color:#e5e7eb;padding:4px;width:88px;height:56px}table,caption,thead,tbody,tfoot,tr,th,td{display:block;box-sizing:content-box;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}table{background-color:#dbeafe;width:54px;height:42px;border-collapse:collapse;border-spacing:0}caption{background-color:#1d4ed8;width:34px;height:5px}thead{background-color:#22c55e;width:44px;height:8px;margin-top:2px}tbody{background-color:#f59e0b;width:48px;height:12px;margin-top:2px}tfoot{background-color:#334155;width:40px;height:6px;margin-top:2px}tr{background-color:#ef4444;width:30px;height:4px}th{background-color:#a855f7;width:18px;height:3px}td{background-color:#14b8a6;width:24px;height:3px;empty-cells:hide}</style></head><body><section class='stage'><table><caption></caption><thead><tr><th></th></tr></thead><tbody><tr><td></td></tr></tbody><tfoot><tr><td>x</td></tr></tfoot></table></section></body></html>"
+    if "$SCENE" == "simple-web-layout-interactive-disclosure-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:38px}details,summary,dialog{display:block;appearance:none;-webkit-appearance:none;box-sizing:content-box;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}details{background-color:#dbeafe;width:34px;height:18px;padding:2px}summary{background-color:#1d4ed8;width:26px;height:5px;list-style:none;list-style-type:none}dialog{position:static;inset:auto;background-color:#22c55e;width:30px;height:8px;margin-top:3px}.bar{display:block;background-color:#f59e0b;width:34px;height:6px}.tile{display:block;background-color:#334155;width:28px;height:6px;margin-top:3px}.chip{display:block;background-color:#ef4444;width:22px;height:6px;margin-top:3px}</style></head><body><section class='stage'><div class='left'><details open><summary></summary><dialog open></dialog></details></div><div class='right'><div class='bar'></div><div class='tile'></div><div class='chip'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-media-placeholders-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:block;background-color:#e5e7eb;padding:4px;width:88px;height:56px}canvas{display:block;background-color:#1d4ed8;width:18px;height:8px}img{display:block;visibility:hidden;width:36px;height:12px;object-fit:contain;object-position:left top;margin-top:2px}picture{display:block;background-color:#dbeafe;width:28px;height:10px;margin-top:2px}video{display:block;background-color:#f59e0b;width:24px;height:7px;margin-top:2px}object{display:block;background-color:#334155;width:22px;height:7px;margin-top:2px}.fallback{display:block;background-color:#ef4444;width:30px;height:5px;margin-top:2px}</style></head><body><section class='stage'><canvas></canvas><img alt=''><picture><source srcset='x'></picture><video></video><object></object><div class='fallback'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-structured-content-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left{display:block}.right{display:block}.article{display:block;background-color:#1d4ed8;width:36px;height:6px}.aside{display:block;background-color:#22c55e;width:28px;height:6px;margin-top:2px}.figure{display:block;background-color:#dbeafe;margin:2px 0 0 0;padding:2px;width:38px;height:14px}.caption{display:block;background-color:#f59e0b;width:20px;height:4px}.address{display:block;background-color:#ef4444;width:26px;height:6px;margin-top:2px}.time{display:block;background-color:#0f172a;width:34px;height:6px}.mark{display:block;background-color:#a855f7;width:24px;height:6px;margin-top:2px}.small{display:block;background-color:#14b8a6;width:20px;height:6px;margin-top:2px}.code{display:block;background-color:#84cc16;width:30px;height:6px;margin-top:2px}.kbd{display:block;background-color:#64748b;width:18px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><article class='article'></article><aside class='aside'></aside><figure class='figure'><figcaption class='caption'></figcaption></figure><address class='address'></address></div><div class='right'><time class='time'></time><mark class='mark'></mark><small class='small'></small><code class='code'></code><kbd class='kbd'></kbd></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-phrasing-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left{display:block;width:30px}.right{display:block;width:34px}.a{display:block;background-color:#1d4ed8;width:30px;height:5px}.span{display:block;background-color:#22c55e;width:26px;height:5px;margin-top:2px}.b{display:block;background-color:#f59e0b;width:22px;height:5px;margin-top:2px}.strong{display:block;background-color:#ef4444;width:18px;height:5px;margin-top:2px}.em{display:block;background-color:#334155;width:28px;height:5px;margin-top:2px}.i{display:block;background-color:#a855f7;width:20px;height:5px}.u{display:block;background-color:#14b8a6;width:24px;height:5px;margin-top:2px}.s{display:block;background-color:#84cc16;width:16px;height:5px;margin-top:2px}.abbr{display:block;background-color:#0f172a;width:32px;height:5px;margin-top:2px}.cite{display:block;background-color:#64748b;width:22px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><a class='a'></a><span class='span'></span><b class='b'></b><strong class='strong'></strong><em class='em'></em></div><div class='right'><i class='i'></i><u class='u'></u><s class='s'></s><abbr class='abbr'></abbr><cite class='cite'></cite></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-ruby-edit-data-tags-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:34px}ruby,rb,rt,rp,ins,del,data,var,samp,q,dfn{display:block;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}ruby{background-color:#dbeafe;width:32px;height:16px;padding:2px}rb{background-color:#1d4ed8;width:24px;height:4px}rt{background-color:#22c55e;width:20px;height:4px;margin-top:2px}rp{background-color:#f59e0b;width:16px;height:3px;margin-top:1px}ins{background-color:#ef4444;width:30px;height:5px;margin-top:3px}del{background-color:#334155;width:26px;height:5px;margin-top:2px}data{background-color:#a855f7;width:22px;height:5px}var{background-color:#14b8a6;width:24px;height:5px;margin-top:2px}samp{background-color:#84cc16;width:28px;height:5px;margin-top:2px}q{background-color:#0f172a;width:18px;height:5px;margin-top:2px}dfn{background-color:#64748b;width:20px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><ruby><rb></rb><rt></rt><rp></rp></ruby><ins></ins><del></del></div><div class='right'><data value='42'></data><var></var><samp></samp><q></q><dfn></dfn></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-commandbar-taskbar-card":
+        html = "<html><style>header{background-color:#1d4ed8;color:#ffffff;font-size:8px;padding:1px}nav{background-color:#0f172a;color:#ffffff;font-size:8px;padding:1px}main{background-color:#e5e7eb;background-image:linear-gradient(#e5e7eb,#cbd5e1);color:#111827;font-size:8px;padding:1px}button{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}footer{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><header>CMD</header><nav>TASK</nav><main><button>RUN</button>CARD</main><footer>OK</footer></body></html>"
+    if "$SCENE" == "simple-web-layout-image-text-command-taskbar":
+        html = "<html><style>header{background-color:#1d4ed8;color:#ffffff;font-size:8px;padding:1px}nav{background-color:#0f172a;color:#ffffff;font-size:8px;padding:1px}main{background-color:#f8fafc;color:#111827;font-size:8px;padding:1px}img.preview{display:block;width:48px;height:16px;object-fit:contain;object-position:left top;background-color:#94a3b8;padding:4px}p{color:#111827;font-size:8px;padding:1px}footer{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><header>CMD</header><nav>TASK</nav><main><img class='preview widget-image' alt='image'/><p>IMAGE LAB</p></main><footer>OK</footer></body></html>"
+    if "$SCENE" == "simple-web-layout-selector-inline-override":
+        html = "<html><style>body{background-color:#f8fafc;color:#111827;font-size:8px}.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}#override{background-color:#f59e0b;color:#111827;font-size:8px;padding:1px}footer.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><div class='status'>CLASS</div><button id='override' style='background-color:#ef4444;color:#ffffff;font-size:8px;padding:1px'>INLINE</button><footer class='status'>READY</footer></body></html>"
+    if "$SCENE" == "simple-web-layout-descendant-scope":
+        html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>IN</div></section><div class='status'>OUT</div></body></html>"
+    if "$SCENE" == "simple-web-layout-child-scope":
+        html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel>.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
+    val wrote_html = file_write_text(HTML_PATH, html)
+    val pixels = simple_web_render_html_to_pixels(html, WIDTH, HEIGHT)
+    if pixels.len() != WIDTH * HEIGHT:
+        print "simple_status=fail"
+        print "simple_reason=wrong-pixel-count"
+        return
+    val wrote = write_expected_bitmap(pixels)
+    print "simple_status={if wrote and wrote_html: \"pass\" else: \"fail\"}"
+    print "simple_reason={if wrote and wrote_html: \"pass\" else: \"write-expected-artifacts-failed\"}"
+    print "renderer=pure-simple-web-layout-renderer"
+    print "scene=$SCENE"
+    print "width={WIDTH}"
+    print "height={HEIGHT}"
+    print "checksum={checksum(pixels)}"
+    print "weighted_checksum={weighted_checksum(pixels)}"
+    print "expected_argb_path={EXPECTED_ARGB_PATH}"
+    print "blur_or_tolerance_used=false"
+
+main()
+SIMPLE_EOF
+
+set +e
+if have timeout; then
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" timeout "$SIMPLE_EXPECTED_TIMEOUT_SECS" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+    simple_code=$?
+else
+    simple_code=127
+fi
+set -e
+SIMPLE_EXPECTED_EXIT_CODE=$simple_code
+if [ "$simple_code" -eq 124 ]; then
+    SIMPLE_EXPECTED_TIMED_OUT=true
+    SIMPLE_EXPECTED_STATUS=unavailable
+    SIMPLE_EXPECTED_REASON=simple-expected-timeout
+elif [ "$simple_code" -eq 127 ] && ! have timeout; then
+    SIMPLE_EXPECTED_STATUS=unavailable
+    SIMPLE_EXPECTED_REASON=simple-expected-timeout-command-missing
+elif [ "$simple_code" -ne 0 ]; then
+    SIMPLE_EXPECTED_STATUS=fail
+    SIMPLE_EXPECTED_REASON=simple-layout-render-failed
+else
+    SIMPLE_EXPECTED_STATUS=pass
+    SIMPLE_EXPECTED_REASON=pass
+fi
+
+if [ "$simple_code" -ne 0 ]; then
+    emit_unavailable "$SIMPLE_EXPECTED_REASON"
+    exit 1
+fi
+
+simple_status="$(field_of simple_status "$SIMPLE_OUT")"
+simple_checksum="$(field_of checksum "$SIMPLE_OUT")"
+simple_weighted="$(field_of weighted_checksum "$SIMPLE_OUT")"
+simple_blur="$(field_of blur_or_tolerance_used "$SIMPLE_OUT")"
+
+if [ "$simple_status" != "pass" ]; then
+    emit_unavailable "simple-layout-status-failed"
+    exit 1
+fi
+if [ ! -s "$HTML_PATH" ]; then
+    emit_unavailable "missing-scene-html-file"
+    exit 1
+fi
+if [ ! -s "$EXPECTED_ARGB" ]; then
+    emit_unavailable "missing-expected-argb-file"
+    exit 1
+fi
+if [ "$simple_blur" != "false" ]; then
+    emit_unavailable "simple-blur-or-tolerance-not-allowed"
+    exit 1
+fi
+
+ELECTRON_CAPTURE_HTML_PATH="$HTML_PATH"
+if [ "$CAPTURE_MODE" = "canvas" ]; then
+    ELECTRON_CAPTURE_HTML_PATH=""
+elif [ "$CAPTURE_MODE" = "auto" ] && [ "$SCENE" = "simple-web-layout-text-flow" ]; then
+    ELECTRON_CAPTURE_HTML_PATH=""
+elif [ "$CAPTURE_MODE" != "auto" ] && [ "$CAPTURE_MODE" != "dom" ]; then
+    emit_unavailable "invalid-capture-mode:$CAPTURE_MODE"
+    exit 1
+fi
+
+set +e
+if have xvfb-run; then
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$ELECTRON_CAPTURE_HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" ELECTRON_BITMAP_GEOMETRY_PATH="$ELECTRON_GEOMETRY" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+        xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        "$ELECTRON_BIN" --disable-gpu --disable-gpu-compositing --disable-software-rasterizer=false --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
+else
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$ELECTRON_CAPTURE_HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" ELECTRON_BITMAP_GEOMETRY_PATH="$ELECTRON_GEOMETRY" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+        "$ELECTRON_BIN" --disable-gpu --disable-gpu-compositing --disable-software-rasterizer=false --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
+fi
+electron_pid=$!
+elapsed=0
+electron_code=0
+while kill -0 "$electron_pid" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$TIMEOUT_SECS" ]; then
+        kill "$electron_pid" >/dev/null 2>&1 || true
+        sleep 1
+        kill -9 "$electron_pid" >/dev/null 2>&1 || true
+        wait "$electron_pid" >/dev/null 2>&1 || true
+        electron_code=124
+        break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+if [ "$electron_code" -eq 0 ]; then
+    wait "$electron_pid"
+    electron_code=$?
+fi
+set -e
+
+if [ -f "$ELECTRON_PROOF" ]; then
+    set +e
+    node "$VALIDATOR" "$ELECTRON_PROOF" >"$VALIDATED_ENV"
+    validation_code=$?
+    set -e
+else
+    validation_code=1
+    {
+        echo "electron_simple_web_layout_validation_status=fail"
+        echo "electron_simple_web_layout_validation_reason=missing-electron-proof"
+        echo "electron_simple_web_layout_renderer="
+        echo "electron_simple_web_layout_proof_source="
+        echo "electron_simple_web_layout_proof_source_file_status="
+        echo "electron_simple_web_layout_proof_source_size_bytes="
+        echo "electron_simple_web_layout_proof_source_actual_size_bytes="
+        echo "electron_simple_web_layout_proof_source_file_reason="
+        echo "electron_simple_web_layout_proof_source_artifact_status=fail"
+        echo "electron_simple_web_layout_proof_symlink_status=missing"
+        echo "electron_simple_web_layout_proof_hardlink_status=missing"
+        echo "electron_simple_web_layout_scene="
+        echo "electron_simple_web_layout_capture_backend="
+        echo "electron_simple_web_layout_compositor_mode="
+        echo "electron_simple_web_layout_browser_engine="
+        echo "electron_simple_web_layout_electron_user_agent="
+        echo "electron_simple_web_layout_electron_process_version="
+        echo "electron_simple_web_layout_chrome_process_version="
+        echo "electron_simple_web_layout_gpu_compositing="
+        echo "electron_simple_web_layout_gpu_rasterization="
+        echo "electron_simple_web_layout_simple_checksum=$simple_checksum"
+        echo "electron_simple_web_layout_electron_checksum="
+        echo "electron_simple_web_layout_simple_weighted_checksum=$simple_weighted"
+        echo "electron_simple_web_layout_electron_weighted_checksum="
+        echo "electron_simple_web_layout_mismatch_count="
+        echo "electron_simple_web_layout_blur_or_tolerance_used="
+        echo "electron_simple_web_layout_proof_iterations="
+        echo "electron_simple_web_layout_electron_frame_us="
+        echo "electron_simple_web_layout_estimated_fps_floor="
+        echo "electron_simple_web_layout_requested_width="
+        echo "electron_simple_web_layout_requested_height="
+        echo "electron_simple_web_layout_capture_native_width="
+        echo "electron_simple_web_layout_capture_native_height="
+        echo "electron_simple_web_layout_capture_downsampled="
+        echo "electron_simple_web_layout_geometry_path=$ELECTRON_GEOMETRY"
+        echo "electron_simple_web_layout_geometry_written=false"
+        echo "electron_simple_web_layout_geometry_file_status=fail"
+        echo "electron_simple_web_layout_geometry_file_reason=not-run"
+        echo "electron_simple_web_layout_geometry_artifact_status=fail"
+        echo "electron_simple_web_layout_geometry_symlink_status=missing"
+        echo "electron_simple_web_layout_geometry_hardlink_status=missing"
+        echo "electron_simple_web_layout_geometry_size_bytes="
+        echo "electron_simple_web_layout_geometry_producer="
+        echo "electron_simple_web_layout_geometry_viewport_width="
+        echo "electron_simple_web_layout_geometry_viewport_height="
+        echo "electron_simple_web_layout_geometry_item_count=0"
+        echo "electron_simple_web_layout_geometry_measured_item_count=0"
+        echo "electron_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+        echo "electron_simple_web_layout_captured_argb_written=false"
+        echo "electron_simple_web_layout_captured_argb_file_status=fail"
+        echo "electron_simple_web_layout_captured_argb_file_reason=not-run"
+        echo "electron_simple_web_layout_captured_argb_artifact_status=fail"
+        echo "electron_simple_web_layout_captured_argb_symlink_status=missing"
+        echo "electron_simple_web_layout_captured_argb_hardlink_status=missing"
+        echo "electron_simple_web_layout_captured_argb_size_bytes="
+        echo "electron_simple_web_layout_captured_argb_format="
+        echo "electron_simple_web_layout_captured_argb_producer="
+        echo "electron_simple_web_layout_captured_argb_width="
+        echo "electron_simple_web_layout_captured_argb_height="
+        echo "electron_simple_web_layout_captured_argb_pixel_count=0"
+        echo "electron_simple_web_layout_captured_argb_nonzero_pixel_count=0"
+        echo "electron_simple_web_layout_captured_argb_checksum="
+        echo "electron_simple_web_layout_captured_argb_weighted_checksum="
+    } >"$VALIDATED_ENV"
+fi
+cat "$VALIDATED_ENV"
+
+validation_status="$(field_of_env electron_simple_web_layout_validation_status "$VALIDATED_ENV")"
+validation_reason="$(field_of_env electron_simple_web_layout_validation_reason "$VALIDATED_ENV")"
+proof_symlink_status="$(field_of_env electron_simple_web_layout_proof_symlink_status "$VALIDATED_ENV")"
+proof_hardlink_status="$(field_of_env electron_simple_web_layout_proof_hardlink_status "$VALIDATED_ENV")"
+proof_renderer="$(field_of_env electron_simple_web_layout_renderer "$VALIDATED_ENV")"
+proof_source="$(field_of_env electron_simple_web_layout_proof_source "$VALIDATED_ENV")"
+proof_source_file_status="$(field_of_env electron_simple_web_layout_proof_source_file_status "$VALIDATED_ENV")"
+proof_source_size_bytes="$(field_of_env electron_simple_web_layout_proof_source_size_bytes "$VALIDATED_ENV")"
+proof_source_actual_size_bytes="$(field_of_env electron_simple_web_layout_proof_source_actual_size_bytes "$VALIDATED_ENV")"
+proof_source_file_reason="$(field_of_env electron_simple_web_layout_proof_source_file_reason "$VALIDATED_ENV")"
+proof_source_artifact_status="$(field_of_env electron_simple_web_layout_proof_source_artifact_status "$VALIDATED_ENV")"
+proof_scene="$(field_of_env electron_simple_web_layout_scene "$VALIDATED_ENV")"
+capture_backend="$(field_of_env electron_simple_web_layout_capture_backend "$VALIDATED_ENV")"
+compositor_mode="$(field_of_env electron_simple_web_layout_compositor_mode "$VALIDATED_ENV")"
+browser_engine="$(field_of_env electron_simple_web_layout_browser_engine "$VALIDATED_ENV")"
+electron_user_agent="$(field_of_env electron_simple_web_layout_electron_user_agent "$VALIDATED_ENV")"
+electron_process_version="$(field_of_env electron_simple_web_layout_electron_process_version "$VALIDATED_ENV")"
+chrome_process_version="$(field_of_env electron_simple_web_layout_chrome_process_version "$VALIDATED_ENV")"
+gpu_compositing="$(field_of_env electron_simple_web_layout_gpu_compositing "$VALIDATED_ENV")"
+gpu_rasterization="$(field_of_env electron_simple_web_layout_gpu_rasterization "$VALIDATED_ENV")"
+electron_checksum="$(field_of_env electron_simple_web_layout_electron_checksum "$VALIDATED_ENV")"
+electron_weighted="$(field_of_env electron_simple_web_layout_electron_weighted_checksum "$VALIDATED_ENV")"
+mismatch_count="$(field_of_env electron_simple_web_layout_mismatch_count "$VALIDATED_ENV")"
+proof_iterations="$(field_of_env electron_simple_web_layout_proof_iterations "$VALIDATED_ENV")"
+electron_frame_us="$(field_of_env electron_simple_web_layout_electron_frame_us "$VALIDATED_ENV")"
+estimated_fps_floor="$(field_of_env electron_simple_web_layout_estimated_fps_floor "$VALIDATED_ENV")"
+requested_width="$(field_of_env electron_simple_web_layout_requested_width "$VALIDATED_ENV")"
+requested_height="$(field_of_env electron_simple_web_layout_requested_height "$VALIDATED_ENV")"
+capture_native_width="$(field_of_env electron_simple_web_layout_capture_native_width "$VALIDATED_ENV")"
+capture_native_height="$(field_of_env electron_simple_web_layout_capture_native_height "$VALIDATED_ENV")"
+capture_downsampled="$(field_of_env electron_simple_web_layout_capture_downsampled "$VALIDATED_ENV")"
+geometry_path="$(field_of_env electron_simple_web_layout_geometry_path "$VALIDATED_ENV")"
+geometry_written="$(field_of_env electron_simple_web_layout_geometry_written "$VALIDATED_ENV")"
+geometry_file_status="$(field_of_env electron_simple_web_layout_geometry_file_status "$VALIDATED_ENV")"
+geometry_file_reason="$(field_of_env electron_simple_web_layout_geometry_file_reason "$VALIDATED_ENV")"
+geometry_artifact_status="$(field_of_env electron_simple_web_layout_geometry_artifact_status "$VALIDATED_ENV")"
+geometry_symlink_status="$(field_of_env electron_simple_web_layout_geometry_symlink_status "$VALIDATED_ENV")"
+geometry_hardlink_status="$(field_of_env electron_simple_web_layout_geometry_hardlink_status "$VALIDATED_ENV")"
+geometry_size_bytes="$(field_of_env electron_simple_web_layout_geometry_size_bytes "$VALIDATED_ENV")"
+geometry_producer="$(field_of_env electron_simple_web_layout_geometry_producer "$VALIDATED_ENV")"
+geometry_viewport_width="$(field_of_env electron_simple_web_layout_geometry_viewport_width "$VALIDATED_ENV")"
+geometry_viewport_height="$(field_of_env electron_simple_web_layout_geometry_viewport_height "$VALIDATED_ENV")"
+geometry_item_count="$(field_of_env electron_simple_web_layout_geometry_item_count "$VALIDATED_ENV")"
+geometry_measured_item_count="$(field_of_env electron_simple_web_layout_geometry_measured_item_count "$VALIDATED_ENV")"
+captured_argb_path="$(field_of_env electron_simple_web_layout_captured_argb_path "$VALIDATED_ENV")"
+captured_argb_written="$(field_of_env electron_simple_web_layout_captured_argb_written "$VALIDATED_ENV")"
+captured_argb_file_status="$(field_of_env electron_simple_web_layout_captured_argb_file_status "$VALIDATED_ENV")"
+captured_argb_file_reason="$(field_of_env electron_simple_web_layout_captured_argb_file_reason "$VALIDATED_ENV")"
+captured_argb_artifact_status="$(field_of_env electron_simple_web_layout_captured_argb_artifact_status "$VALIDATED_ENV")"
+captured_argb_symlink_status="$(field_of_env electron_simple_web_layout_captured_argb_symlink_status "$VALIDATED_ENV")"
+captured_argb_hardlink_status="$(field_of_env electron_simple_web_layout_captured_argb_hardlink_status "$VALIDATED_ENV")"
+captured_argb_size_bytes="$(field_of_env electron_simple_web_layout_captured_argb_size_bytes "$VALIDATED_ENV")"
+captured_argb_format="$(field_of_env electron_simple_web_layout_captured_argb_format "$VALIDATED_ENV")"
+captured_argb_producer="$(field_of_env electron_simple_web_layout_captured_argb_producer "$VALIDATED_ENV")"
+captured_argb_width="$(field_of_env electron_simple_web_layout_captured_argb_width "$VALIDATED_ENV")"
+captured_argb_height="$(field_of_env electron_simple_web_layout_captured_argb_height "$VALIDATED_ENV")"
+captured_argb_pixel_count="$(field_of_env electron_simple_web_layout_captured_argb_pixel_count "$VALIDATED_ENV")"
+captured_argb_nonzero_pixel_count="$(field_of_env electron_simple_web_layout_captured_argb_nonzero_pixel_count "$VALIDATED_ENV")"
+captured_argb_checksum="$(field_of_env electron_simple_web_layout_captured_argb_checksum "$VALIDATED_ENV")"
+captured_argb_weighted_checksum="$(field_of_env electron_simple_web_layout_captured_argb_weighted_checksum "$VALIDATED_ENV")"
+blur_used="$(field_of_env electron_simple_web_layout_blur_or_tolerance_used "$VALIDATED_ENV")"
+
+RESIDUAL_ENV="$BUILD_DIR/residual.env"
+if [ -s "$EXPECTED_ARGB" ] && [ -s "$CAPTURED_ARGB" ]; then
+    node - "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$SCENE" >"$RESIDUAL_ENV" <<'NODE'
+const fs = require("fs");
+const simple = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const electron = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const scene = String(process.argv[4] || "");
+const sp = Array.isArray(simple.pixels) ? simple.pixels : [];
+const ep = Array.isArray(electron.pixels) ? electron.pixels : [];
+const surface = scene === "simple-web-layout-text-raster-track"
+  ? new Set([0xffffffff, 0xfff8fafc, 0xff334155])
+  : scene === "simple-web-layout-line-height-text-track"
+  ? new Set([0xffffffff, 0xfff8fafc, 0xffe5e7eb, 0xffdbeafe, 0xfff59e0b])
+  : scene === "simple-web-layout-text-style-flow-track"
+  ? new Set([0xffffffff, 0xfff8fafc, 0xffe5e7eb, 0xffdbeafe, 0xfff59e0b])
+  : scene === "simple-web-layout-overflow-axis-matrix"
+  ? new Set([0xffffffff, 0xfff8fafc, 0xffe5e7eb, 0xffdbeafe, 0xfffef3c7, 0xff334155, 0xff1d4ed8, 0xff22c55e, 0xfff59e0b, 0xffef4444])
+  : new Set([
+      0xffffffff, 0xfff8fafc, 0xff334155, 0xffdbeafe, 0xffe5e7eb,
+      0xff0f172a, 0xff1d4ed8, 0xff22c55e, 0xfff59e0b, 0xffef4444,
+      0xff7c2d12, 0xff14532d
+    ]);
+let chromeExtraTextPixels = 0;
+let simpleExtraTextPixels = 0;
+let textColorDeltaPixels = 0;
+let surfaceGeometryPixels = 0;
+let samePixels = 0;
+const n = Math.min(sp.length, ep.length);
+for (let i = 0; i < n; i += 1) {
+  const sv = Number(sp[i]) >>> 0;
+  const ev = Number(ep[i]) >>> 0;
+  if (sv === ev) {
+    samePixels += 1;
+    continue;
+  }
+  const simpleSurface = surface.has(sv);
+  const electronSurface = surface.has(ev);
+  if (simpleSurface && !electronSurface) chromeExtraTextPixels += 1;
+  else if (!simpleSurface && electronSurface) simpleExtraTextPixels += 1;
+  else if (!simpleSurface && !electronSurface) textColorDeltaPixels += 1;
+  else surfaceGeometryPixels += 1;
+}
+surfaceGeometryPixels += Math.abs(sp.length - ep.length);
+console.log(`electron_simple_web_layout_same_pixels=${samePixels}`);
+console.log(`electron_simple_web_layout_chrome_extra_text_pixels=${chromeExtraTextPixels}`);
+console.log(`electron_simple_web_layout_simple_extra_text_pixels=${simpleExtraTextPixels}`);
+console.log(`electron_simple_web_layout_text_color_delta_pixels=${textColorDeltaPixels}`);
+console.log(`electron_simple_web_layout_surface_geometry_pixels=${surfaceGeometryPixels}`);
+NODE
+else
+    {
+        echo "electron_simple_web_layout_same_pixels="
+        echo "electron_simple_web_layout_chrome_extra_text_pixels="
+        echo "electron_simple_web_layout_simple_extra_text_pixels="
+        echo "electron_simple_web_layout_text_color_delta_pixels="
+        echo "electron_simple_web_layout_surface_geometry_pixels="
+    } >"$RESIDUAL_ENV"
+fi
+same_pixels="$(field_of electron_simple_web_layout_same_pixels "$RESIDUAL_ENV")"
+chrome_extra_text_pixels="$(field_of electron_simple_web_layout_chrome_extra_text_pixels "$RESIDUAL_ENV")"
+simple_extra_text_pixels="$(field_of electron_simple_web_layout_simple_extra_text_pixels "$RESIDUAL_ENV")"
+text_color_delta_pixels="$(field_of electron_simple_web_layout_text_color_delta_pixels "$RESIDUAL_ENV")"
+surface_geometry_pixels="$(field_of electron_simple_web_layout_surface_geometry_pixels "$RESIDUAL_ENV")"
+
+mismatch_class=
+if [ "${mismatch_count:-}" != "" ] && [ "${mismatch_count:-0}" != "0" ]; then
+    text_delta_total=$(( ${chrome_extra_text_pixels:-0} + ${simple_extra_text_pixels:-0} + ${text_color_delta_pixels:-0} ))
+    if [ "${surface_geometry_pixels:-0}" = "0" ] && [ "$text_delta_total" -gt 0 ]; then
+        case "$SCENE" in
+            simple-web-layout-text-raster-track|simple-web-layout-line-height-text-track|simple-web-layout-text-style-flow-track)
+                mismatch_class=text-raster-mismatch
+                ;;
+            *)
+                mismatch_class=paint-color-mismatch
+                ;;
+        esac
+    elif [ "${surface_geometry_pixels:-0}" != "0" ]; then
+        mismatch_class=surface-geometry-mismatch
+    else
+        mismatch_class=unknown-pixel-mismatch
+    fi
+fi
+
+status=pass
+reason=pass
+if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
+    status=fail
+    reason=electron-live-capture-failed
+elif [ "$validation_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
+    case "$validation_reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch|captured-argb-checksum-mismatch|captured-argb-weighted-checksum-mismatch)
+            status=divergent
+            ;;
+        *)
+            status=fail
+            ;;
+    esac
+    reason="${validation_reason:-electron-proof-validation-failed}"
+    if [ "$status" = "divergent" ] && [ "$mismatch_class" != "" ]; then
+        reason="$mismatch_class"
+    fi
+elif [ "$proof_symlink_status" != "pass" ]; then
+    status=fail
+    reason=proof-json-symlink-status-not-pass
+elif [ "$proof_hardlink_status" != "pass" ]; then
+    status=fail
+    reason=proof-json-hardlink-status-not-pass
+elif [ "$proof_source_file_status" != "pass" ] || [ "$proof_source_artifact_status" != "pass" ] || ! num_at_least "$proof_source_size_bytes" 1; then
+    status=fail
+    reason=proof-source-file-status-not-pass
+elif ! num_at_least "$proof_source_actual_size_bytes" 1 || [ "$proof_source_actual_size_bytes" != "$proof_source_size_bytes" ]; then
+    status=fail
+    reason=proof-source-size-mismatch
+elif [ "$geometry_symlink_status" != "pass" ]; then
+    status=fail
+    reason=electron-geometry-symlink-status-not-pass
+elif [ "$geometry_hardlink_status" != "pass" ]; then
+    status=fail
+    reason=electron-geometry-hardlink-status-not-pass
+elif [ "$geometry_artifact_status" != "pass" ]; then
+    status=fail
+    reason=electron-geometry-artifact-status-not-pass
+elif [ "$captured_argb_symlink_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-symlink-status-not-pass
+elif [ "$captured_argb_hardlink_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-hardlink-status-not-pass
+elif [ "$captured_argb_artifact_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-artifact-status-not-pass
+elif [ ! -s "$CAPTURED_ARGB" ]; then
+    status=fail
+    reason=missing-captured-argb-file
+elif [ "$electron_code" -ne 0 ]; then
+    reason=pass-with-electron-teardown-warning
+fi
+
+{
+    echo "electron_simple_web_layout_status=$status"
+    echo "electron_simple_web_layout_reason=$reason"
+    echo "electron_simple_web_layout_scene=$SCENE"
+    echo "electron_simple_web_layout_proof_renderer=${proof_renderer:-}"
+    echo "electron_simple_web_layout_proof_source=${proof_source:-}"
+    echo "electron_simple_web_layout_proof_source_file_status=${proof_source_file_status:-}"
+    echo "electron_simple_web_layout_proof_source_size_bytes=${proof_source_size_bytes:-}"
+    echo "electron_simple_web_layout_proof_source_actual_size_bytes=${proof_source_actual_size_bytes:-}"
+    echo "electron_simple_web_layout_proof_source_file_reason=${proof_source_file_reason:-}"
+    echo "electron_simple_web_layout_proof_source_artifact_status=${proof_source_artifact_status:-}"
+    echo "electron_simple_web_layout_proof_scene=${proof_scene:-}"
+    echo "electron_simple_web_layout_capture_backend=${capture_backend:-}"
+    echo "electron_simple_web_layout_compositor_mode=${compositor_mode:-}"
+    echo "electron_simple_web_layout_browser_engine=${browser_engine:-}"
+    echo "electron_simple_web_layout_electron_user_agent=${electron_user_agent:-}"
+    echo "electron_simple_web_layout_electron_process_version=${electron_process_version:-}"
+    echo "electron_simple_web_layout_chrome_process_version=${chrome_process_version:-}"
+    echo "electron_simple_web_layout_gpu_compositing=${gpu_compositing:-}"
+    echo "electron_simple_web_layout_gpu_rasterization=${gpu_rasterization:-}"
+    echo "electron_simple_web_layout_simple_bin=$SIMPLE_BIN"
+    echo "electron_simple_web_layout_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "electron_simple_web_layout_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "electron_simple_web_layout_capture_mode=$CAPTURE_MODE"
+    echo "electron_simple_web_layout_dom_html_path=${ELECTRON_CAPTURE_HTML_PATH:-}"
+    echo "electron_simple_web_layout_width=$WIDTH"
+    echo "electron_simple_web_layout_height=$HEIGHT"
+    echo "electron_simple_web_layout_iterations=$ITERATIONS"
+    echo "electron_simple_web_layout_simple_expected_status=$SIMPLE_EXPECTED_STATUS"
+    echo "electron_simple_web_layout_simple_expected_reason=$SIMPLE_EXPECTED_REASON"
+    echo "electron_simple_web_layout_simple_expected_timeout_secs=$SIMPLE_EXPECTED_TIMEOUT_SECS"
+    echo "electron_simple_web_layout_simple_expected_timed_out=$SIMPLE_EXPECTED_TIMED_OUT"
+    echo "electron_simple_web_layout_simple_expected_exit_code=$SIMPLE_EXPECTED_EXIT_CODE"
+    echo "electron_simple_web_layout_validation_status=${validation_status:-}"
+    echo "electron_simple_web_layout_validation_reason=${validation_reason:-}"
+    echo "electron_simple_web_layout_proof_symlink_status=${proof_symlink_status:-}"
+    echo "electron_simple_web_layout_proof_hardlink_status=${proof_hardlink_status:-}"
+    echo "electron_simple_web_layout_simple_checksum=$simple_checksum"
+    echo "electron_simple_web_layout_electron_checksum=${electron_checksum:-0}"
+    echo "electron_simple_web_layout_simple_weighted_checksum=$simple_weighted"
+    echo "electron_simple_web_layout_electron_weighted_checksum=${electron_weighted:-0}"
+    echo "electron_simple_web_layout_mismatch_count=${mismatch_count:-}"
+    echo "electron_simple_web_layout_same_pixels=${same_pixels:-}"
+    echo "electron_simple_web_layout_chrome_extra_text_pixels=${chrome_extra_text_pixels:-}"
+    echo "electron_simple_web_layout_simple_extra_text_pixels=${simple_extra_text_pixels:-}"
+    echo "electron_simple_web_layout_text_color_delta_pixels=${text_color_delta_pixels:-}"
+    echo "electron_simple_web_layout_surface_geometry_pixels=${surface_geometry_pixels:-}"
+    echo "electron_simple_web_layout_mismatch_class=${mismatch_class:-}"
+    echo "electron_simple_web_layout_blur_or_tolerance_used=${blur_used:-}"
+    echo "electron_simple_web_layout_proof_iterations=${proof_iterations:-}"
+    echo "electron_simple_web_layout_electron_frame_us=${electron_frame_us:-0}"
+    echo "electron_simple_web_layout_estimated_fps_floor=${estimated_fps_floor:-}"
+    echo "electron_simple_web_layout_requested_width=${requested_width:-}"
+    echo "electron_simple_web_layout_requested_height=${requested_height:-}"
+    echo "electron_simple_web_layout_capture_native_width=${capture_native_width:-}"
+    echo "electron_simple_web_layout_capture_native_height=${capture_native_height:-}"
+    echo "electron_simple_web_layout_capture_downsampled=${capture_downsampled:-}"
+    echo "electron_simple_web_layout_geometry_path=${geometry_path:-$ELECTRON_GEOMETRY}"
+    echo "electron_simple_web_layout_geometry_written=${geometry_written:-}"
+    echo "electron_simple_web_layout_geometry_file_status=${geometry_file_status:-}"
+    echo "electron_simple_web_layout_geometry_file_reason=${geometry_file_reason:-}"
+    echo "electron_simple_web_layout_geometry_artifact_status=${geometry_artifact_status:-}"
+    echo "electron_simple_web_layout_geometry_symlink_status=${geometry_symlink_status:-}"
+    echo "electron_simple_web_layout_geometry_hardlink_status=${geometry_hardlink_status:-}"
+    echo "electron_simple_web_layout_geometry_size_bytes=${geometry_size_bytes:-}"
+    echo "electron_simple_web_layout_geometry_producer=${geometry_producer:-}"
+    echo "electron_simple_web_layout_geometry_viewport_width=${geometry_viewport_width:-}"
+    echo "electron_simple_web_layout_geometry_viewport_height=${geometry_viewport_height:-}"
+    echo "electron_simple_web_layout_geometry_item_count=${geometry_item_count:-}"
+    echo "electron_simple_web_layout_geometry_measured_item_count=${geometry_measured_item_count:-}"
+    echo "electron_simple_web_layout_html_path=$HTML_PATH"
+    echo "electron_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+    echo "electron_simple_web_layout_captured_argb_path=${captured_argb_path:-$CAPTURED_ARGB}"
+    echo "electron_simple_web_layout_captured_argb_written=${captured_argb_written:-}"
+    echo "electron_simple_web_layout_captured_argb_file_status=${captured_argb_file_status:-}"
+    echo "electron_simple_web_layout_captured_argb_file_reason=${captured_argb_file_reason:-}"
+    echo "electron_simple_web_layout_captured_argb_artifact_status=${captured_argb_artifact_status:-}"
+    echo "electron_simple_web_layout_captured_argb_symlink_status=${captured_argb_symlink_status:-}"
+    echo "electron_simple_web_layout_captured_argb_hardlink_status=${captured_argb_hardlink_status:-}"
+    echo "electron_simple_web_layout_captured_argb_size_bytes=${captured_argb_size_bytes:-}"
+    echo "electron_simple_web_layout_captured_argb_format=${captured_argb_format:-}"
+    echo "electron_simple_web_layout_captured_argb_producer=${captured_argb_producer:-}"
+    echo "electron_simple_web_layout_captured_argb_width=${captured_argb_width:-}"
+    echo "electron_simple_web_layout_captured_argb_height=${captured_argb_height:-}"
+    echo "electron_simple_web_layout_captured_argb_pixel_count=${captured_argb_pixel_count:-}"
+    echo "electron_simple_web_layout_captured_argb_nonzero_pixel_count=${captured_argb_nonzero_pixel_count:-}"
+    echo "electron_simple_web_layout_captured_argb_checksum=${captured_argb_checksum:-}"
+    echo "electron_simple_web_layout_captured_argb_weighted_checksum=${captured_argb_weighted_checksum:-}"
+    echo "electron_simple_web_layout_exit_code=$electron_code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Electron Simple Web Layout Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- scene: $SCENE"
+    echo "- proof renderer: ${proof_renderer:-}"
+    echo "- proof source: ${proof_source:-}"
+    echo "- proof source artifact: ${proof_source_file_status:-} / ${proof_source_file_reason:-} / ${proof_source_artifact_status:-}"
+    echo "- proof source size bytes: ${proof_source_size_bytes:-}"
+    echo "- proof source actual size bytes: ${proof_source_actual_size_bytes:-}"
+    echo "- proof symlink status: ${proof_symlink_status:-}"
+    echo "- proof hardlink status: ${proof_hardlink_status:-}"
+    echo "- proof scene: ${proof_scene:-}"
+    echo "- capture backend: ${capture_backend:-}"
+    echo "- compositor mode: ${compositor_mode:-}"
+    echo "- browser engine: ${browser_engine:-}"
+    echo "- Electron user agent: ${electron_user_agent:-}"
+    echo "- Electron process version: ${electron_process_version:-}"
+    echo "- Chrome process version: ${chrome_process_version:-}"
+    echo "- GPU compositing: ${gpu_compositing:-}"
+    echo "- GPU rasterization: ${gpu_rasterization:-}"
+    echo "- capture mode: $CAPTURE_MODE"
+    echo "- DOM HTML path: ${ELECTRON_CAPTURE_HTML_PATH:-}"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- Simple expected status: $SIMPLE_EXPECTED_STATUS ($SIMPLE_EXPECTED_REASON; timeout ${SIMPLE_EXPECTED_TIMEOUT_SECS}s; timed out: $SIMPLE_EXPECTED_TIMED_OUT; exit: $SIMPLE_EXPECTED_EXIT_CODE)"
+    echo "- Simple checksum: $simple_checksum"
+    echo "- Electron checksum: ${electron_checksum:-0}"
+    echo "- Simple weighted checksum: $simple_weighted"
+    echo "- Electron weighted checksum: ${electron_weighted:-0}"
+    echo "- mismatch count: ${mismatch_count:-}"
+    echo "- same pixels: ${same_pixels:-}"
+    echo "- Chrome extra text pixels: ${chrome_extra_text_pixels:-}"
+    echo "- Simple extra text pixels: ${simple_extra_text_pixels:-}"
+    echo "- text color delta pixels: ${text_color_delta_pixels:-}"
+    echo "- surface geometry pixels: ${surface_geometry_pixels:-}"
+    echo "- mismatch class: ${mismatch_class:-}"
+    echo "- blur/tolerance used: ${blur_used:-}"
+    echo "- proof iterations: ${proof_iterations:-}"
+    echo "- Electron frame us: ${electron_frame_us:-0}"
+    echo "- estimated FPS floor: ${estimated_fps_floor:-}"
+    echo "- Electron geometry path: ${geometry_path:-$ELECTRON_GEOMETRY}"
+    echo "- Electron geometry artifact: ${geometry_file_status:-} / ${geometry_file_reason:-} / ${geometry_artifact_status:-}"
+    echo "- Electron geometry symlink status: ${geometry_symlink_status:-}"
+    echo "- Electron geometry hardlink status: ${geometry_hardlink_status:-}"
+    echo "- Electron geometry size bytes: ${geometry_size_bytes:-}"
+    echo "- Electron geometry producer: ${geometry_producer:-}"
+    echo "- Electron geometry viewport: ${geometry_viewport_width:-}x${geometry_viewport_height:-}"
+    echo "- Electron geometry item count: ${geometry_item_count:-}"
+    echo "- Electron geometry measured item count: ${geometry_measured_item_count:-}"
+    echo "- HTML path: $HTML_PATH"
+    echo "- expected ARGB path: $EXPECTED_ARGB"
+    echo "- captured ARGB path: ${captured_argb_path:-$CAPTURED_ARGB}"
+    echo "- captured ARGB written: ${captured_argb_written:-}"
+    echo "- captured ARGB artifact: ${captured_argb_file_status:-} / ${captured_argb_file_reason:-} / ${captured_argb_artifact_status:-}"
+    echo "- captured ARGB symlink status: ${captured_argb_symlink_status:-}"
+    echo "- captured ARGB hardlink status: ${captured_argb_hardlink_status:-}"
+    echo "- captured ARGB size bytes: ${captured_argb_size_bytes:-}"
+    echo "- captured ARGB format: ${captured_argb_format:-}"
+    echo "- captured ARGB producer: ${captured_argb_producer:-}"
+    echo "- captured ARGB dimensions: ${captured_argb_width:-}x${captured_argb_height:-}"
+    echo "- captured ARGB pixels: ${captured_argb_pixel_count:-} nonzero=${captured_argb_nonzero_pixel_count:-}"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Simple Output"
+    sed 's/^/- /' "$SIMPLE_OUT"
+    echo
+    echo "## Electron Output"
+    sed 's/^/- /' "$ELECTRON_OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

@@ -1,0 +1,68 @@
+# Timer Math — common cycles ↔ ns conversion + deadline arithmetic.
+#
+# Per-arch timer.spl modules read raw counters (TSC, CNTPCT, mtime, time
+# CSR). Converting to wall-clock nanoseconds and computing absolute
+# deadlines from a relative duration is identical math everywhere; only
+# the frequency varies. This module captures that math.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+val NS_PER_SEC: u64 = 1_000_000_000
+
+# A frequency descriptor — the per-arch ticks_per_second value plus a
+# precomputed scale factor for fast cycles→ns conversion (avoids a 64x64
+# divide on the hot path; widely-used trick).
+@repr("C")
+struct TimerScale:
+    """Conversion factors for one timer source."""
+    ticks_per_sec: u64
+    ns_per_tick_q32: u64        # ns/tick in 32.32 fixed-point (multiply, then >> 32)
+
+fn make_timer_scale(ticks_per_sec: u64) -> TimerScale:
+    """Construct a TimerScale; ticks_per_sec must be > 0."""
+    if ticks_per_sec == 0:
+        return TimerScale(ticks_per_sec: 0, ns_per_tick_q32: 0)
+    # ns_per_tick * 2^32 = NS_PER_SEC * 2^32 / ticks_per_sec
+    val q32: u64 = (NS_PER_SEC << 32) / ticks_per_sec
+    TimerScale(ticks_per_sec: ticks_per_sec, ns_per_tick_q32: q32)
+
+# Convert a tick count to nanoseconds using the precomputed scale.
+fn ticks_to_ns(scale: TimerScale, ticks: u64) -> u64:
+    if scale.ticks_per_sec == 0:
+        return 0
+    (ticks * scale.ns_per_tick_q32) >> 32
+
+# Convert nanoseconds to ticks. Slower path (uses divide) — used at
+# deadline-set time, not on the read hot path.
+fn ns_to_ticks(scale: TimerScale, ns: u64) -> u64:
+    if scale.ticks_per_sec == 0:
+        return 0
+    (ns * scale.ticks_per_sec) / NS_PER_SEC
+
+# Compute an absolute deadline from a relative-duration request.
+# `now` is a recent counter value (caller reads it once); `delta_ns` is
+# the requested duration. Returns the absolute counter value to program
+# into the per-arch timer compare register.
+fn deadline_absolute(scale: TimerScale, now: u64, delta_ns: u64) -> u64:
+    val delta_ticks: u64 = ns_to_ticks(scale, delta_ns)
+    # Wraparound: u64 ticks won't wrap for centuries even at 3 GHz.
+    now + delta_ticks
+
+# Returns true iff `now >= deadline` (deadline reached).
+fn deadline_reached(now: u64, deadline: u64) -> bool:
+    now >= deadline
+
+# Time until deadline in nanoseconds (saturating to 0 if past).
+fn time_until(scale: TimerScale, now: u64, deadline: u64) -> u64:
+    if now >= deadline:
+        return 0
+    ticks_to_ns(scale, deadline - now)
+
+# Some archs (rv32, x86_32) read the counter as two 32-bit halves; this
+# helper handles the standard "lo / hi / lo-recheck" pattern. Caller
+# supplies two reads (hi_first and lo) and a recheck of hi.
+fn assemble_64_from_halves(hi: u32, lo: u32, hi_recheck: u32) -> u64 :
+    if hi == hi_recheck:
+        return ((hi as u64) << 32) | (lo as u64)
+    # Reread on rollover: caller must redo the read. Return 0 to signal.
+    0

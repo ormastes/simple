@@ -1,0 +1,72 @@
+# @tag: sys, wm_compare, parity, framebuffer, browser, chromium
+# @cover src/app/wm_compare/backend_parity.spl 0%
+# @cover src/os/compositor/browser_compositor_backend.spl 0%
+#
+# wm_compare framebuffer baseline/browser shell parity
+#
+# Locks the contract that the same drawing scene rendered through framebuffer baseline
+# (`FramebufferDriver.from_buffer`, the fb_backend code path) and browser shell
+# (`BrowserCompositorBackend`, the in-tree browser compositor software
+# backend that the `ui.chromium` shell blits through the winit present facade)
+# matches the framebuffer baseline exactly. Perceptual metrics are diagnostic
+# only and are not an acceptance gate.
+#
+# Scenes are the exact `ParityScene` set framebuffer/software gate uses — scene_solid_fill,
+# scene_fill_rect_row_edge, scene_text_with_bg, scene_glass_blend — so a
+# failing spec is guaranteed to be a real framebuffer↔browser divergence, not a new
+# scene pulling browser shell off its baseline.
+#
+# Scope: rendering parity only. The winit presenter
+# (`ChromiumBackend.present_to_window`) is not exercised here — blitting is
+# a pure pixel copy and gets its own coverage when the shell boots. M5 is
+# done the moment all four scenes match the framebuffer baseline exactly.
+
+use std.spec.{describe, context, it, expect}
+use app.wm_compare.backend_parity.{
+    run_browser_shell_parity, render_framebuffer_baseline, render_browser_shell, diff_buffers,
+    scene_solid_fill, scene_fill_rect_row_edge, scene_text_with_bg, scene_glass_blend,
+}
+
+describe "wm_compare framebuffer baseline/browser shell parity (browser-shell gate — simple_browser shell)":
+
+    context "solid fill — BrowserCompositorBackend.clear() matches fb_driver":
+
+        it "matches framebuffer exactly":
+            val r = run_browser_shell_parity(scene_solid_fill())
+            expect(r.pass_exact).to_equal(true)
+
+    context "fill_rect row edge — exercises [x,x+w) half-open contract on browser shell":
+
+        it "matches framebuffer exactly":
+            val r = run_browser_shell_parity(scene_fill_rect_row_edge())
+            expect(r.pass_exact).to_equal(true)
+
+    context "text + bg — BrowserCompositorBackend.draw_char_8x16 bg cells":
+
+        it "matches framebuffer exactly":
+            val r = run_browser_shell_parity(scene_text_with_bg())
+            expect(r.pass_exact).to_equal(true)
+
+    context "glass blend — CompositorGlassCapable.blend_rect on browser shell":
+
+        it "matches framebuffer exactly":
+            val r = run_browser_shell_parity(scene_glass_blend())
+            expect(r.pass_exact).to_equal(true)
+
+        it "marks perceptual as diagnostic only":
+            val r = run_browser_shell_parity(scene_glass_blend())
+            expect(r.perceptual_diagnostic_only).to_equal(true)
+            expect(r.exact_required).to_equal(true)
+            expect(r.tolerance_acceptance_allowed).to_equal(false)
+
+    context "browser shell render harness self-check":
+
+        it "returns a buffer of the expected length":
+            val browser_pixels = render_browser_shell(scene_solid_fill())
+            expect(browser_pixels.len()).to_equal(32 * 16)
+
+        it "diffs identical browser shell buffers as exact":
+            val a = render_browser_shell(scene_solid_fill())
+            val b = render_browser_shell(scene_solid_fill())
+            val r = diff_buffers("browser_shell_self_check", 32u32, 16u32, a, b)
+            expect(r.pass_exact).to_equal(true)

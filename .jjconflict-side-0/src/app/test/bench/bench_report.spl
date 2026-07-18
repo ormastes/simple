@@ -1,0 +1,324 @@
+# Benchmark Report — markdown rendering and persistent table helpers.
+#
+# Renders BenchResult rows into:
+#   doc/09_report/perf/<dated>.md       — human-readable run report
+#   doc/10_metrics/perf/<table>.md      — persistent comparison table
+#
+# Usage:
+#   use app.test.bench.bench_report.{bench_emit, bench_results_to_md_table,
+#       bench_results_to_md_report}
+
+use app.test.bench.bench_harness.{BenchResult}
+use app.io.mod.{process_run}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# Shared SMF-capture helpers (used by the per-domain bench drivers)
+#
+# A "workload program" self-times its representative operation(s) and prints one
+# line per metric:  RESULT|<name>|<elapsed_us>|<iters>
+# These helpers run that program as a subprocess in script (interpreted) or smf
+# (compiled-then-run) mode and parse the self-timed output, so a domain driver can
+# emit directly-comparable mode="script" / mode="smf" rows. The smf path uses the
+# two-step `compile -o x.smf && run x.smf` (the supported path — `run --mode=smf`
+# is NOT a valid CLI flag). Returns "" on any failure so callers skip (never fake).
+# ============================================================================
+
+fn bench_find_simple_bin() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/x86_64-unknown-linux-gnu/simple_seed"):
+        return "bin/release/x86_64-unknown-linux-gnu/simple_seed"
+    ""
+
+fn bench_parse_i64(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    var result: i64 = 0
+    var idx: i64 = 0
+    while idx < trimmed.len():
+        val ch = trimmed[idx:idx + 1]
+        var digit: i64 = -1
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return result
+        result = result * 10 + digit
+        idx = idx + 1
+    result
+
+# Find `RESULT|<name>|<elapsed_us>|<iters>` in `output` and return elapsed_us, or -1.
+fn bench_extract_us(output: text, name: text) -> i64:
+    val needle = "RESULT|" + name + "|"
+    for line in output.split("\n"):
+        if line.contains(needle):
+            val parts = line.split("|")
+            if parts.len() >= 3:
+                return bench_parse_i64(parts[2])
+    -1
+
+# Run `<simple_bin> run <workload>` (script/interpreter), return stdout ("" on failure).
+fn bench_script_capture(simple_bin: text, workload: text) -> text:
+    if simple_bin.len() == 0:
+        return ""
+    val (out, err, code) = process_run(simple_bin, ["run", workload])
+    if code == 0:
+        out
+    else:
+        ""
+
+# Compile `<workload>` to `<smf_path>` then run it (smf), return stdout ("" on failure).
+fn bench_smf_capture(simple_bin: text, workload: text, smf_path: text) -> text:
+    if simple_bin.len() == 0:
+        return ""
+    val (co, ce, ccode) = process_run(simple_bin, ["compile", workload, "-o", smf_path])
+    if ccode != 0:
+        return ""
+    val (ro, re, rcode) = process_run(simple_bin, ["run", smf_path])
+    if rcode == 0:
+        ro
+    else:
+        ""
+
+# ============================================================================
+# Markdown rendering helpers
+# ============================================================================
+
+fn bench_results_to_md_table(results: [BenchResult]) -> text:
+    # Emit a GFM markdown table with columns: name | mode | plane | metric | value | unit | arch
+    var lines: [text] = []
+    lines.push("| name | mode | plane | metric | value | unit | arch |")
+    lines.push("|------|------|-------|--------|------:|------|------|")
+    var i: i64 = 0
+    while i < results.len():
+        val r = results[i]
+        val row = "| " + r.name + " | " + r.mode + " | " + r.plane + " | " + r.metric_name + " | " + _i64_to_text(r.value) + " | " + r.unit_label + " | " + r.arch + " |"
+        lines.push(row)
+        i = i + 1
+    _join_lines(lines)
+
+fn bench_results_to_md_report(results: [BenchResult], title: text, date_str: text) -> text:
+    var parts: [text] = []
+    parts.push("# " + title)
+    parts.push("")
+    parts.push("Date: " + date_str)
+    parts.push("")
+    parts.push("## Results")
+    parts.push("")
+    parts.push(bench_results_to_md_table(results))
+    parts.push("")
+    parts.push("---")
+    parts.push("*Generated by bench_report.spl*")
+    _join_lines(parts)
+
+# ============================================================================
+# bench_emit — write report + append to persistent metrics table
+# ============================================================================
+
+fn bench_emit(results: [BenchResult], report_path: text, table_path: text):
+    # Ensure parent directories exist.
+    val report_dir = _dirname(report_path)
+    val table_dir = _dirname(table_path)
+    rt_dir_create_all(report_dir)
+    rt_dir_create_all(table_dir)
+
+    val date_str = _simple_date()
+    val report_md = bench_results_to_md_report(results, "Benchmark Run", date_str)
+    val report_ok = rt_file_write_text(report_path, report_md)
+    if report_ok:
+        print("bench_emit: wrote report -> " + report_path)
+    else:
+        print("bench_emit: ERROR writing report -> " + report_path)
+
+    # Persistent table: append new rows (with date prefix) to existing file.
+    val table_md = _build_table_append(results, date_str)
+    val existing: text = if rt_file_exists(table_path):
+        rt_file_read_text(table_path)
+    else:
+        ""
+    val new_content = existing + "\n" + table_md
+    val table_ok = rt_file_write_text(table_path, new_content)
+    if table_ok:
+        print("bench_emit: updated metrics -> " + table_path)
+    else:
+        print("bench_emit: ERROR writing metrics -> " + table_path)
+
+fn _build_table_append(results: [BenchResult], date_str: text) -> text:
+    var lines: [text] = []
+    lines.push("## Run: " + date_str)
+    lines.push("")
+    lines.push(bench_results_to_md_table(results))
+    lines.push("")
+    _join_lines(lines)
+
+# ============================================================================
+# String utilities (no std.text import to avoid cycle risk)
+# ============================================================================
+
+fn _join_lines(lines: [text]) -> text:
+    var result = ""
+    var i: i64 = 0
+    while i < lines.len():
+        if i > 0:
+            result = result + "\n"
+        result = result + lines[i]
+        i = i + 1
+    result
+
+fn _i64_to_text(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var digits: [text] = []
+    var v = n
+    val negative = v < 0
+    if negative:
+        v = 0 - v
+    while v > 0:
+        val d = v % 10
+        digits.push(_digit_char(d))
+        v = v / 10
+    var result = if negative: "-" else: ""
+    var di: i64 = digits.len() - 1
+    while di >= 0:
+        result = result + digits[di]
+        di = di - 1
+    result
+
+fn _digit_char(d: i64) -> text:
+    if d == 0: "0"
+    elif d == 1: "1"
+    elif d == 2: "2"
+    elif d == 3: "3"
+    elif d == 4: "4"
+    elif d == 5: "5"
+    elif d == 6: "6"
+    elif d == 7: "7"
+    elif d == 8: "8"
+    else: "9"
+
+fn _dirname(path: text) -> text:
+    # Return everything up to the last '/'.
+    var last: i64 = 0
+    var i: i64 = 0
+    while i < path.len():
+        if path.char_at(i) == '/':
+            last = i
+        i = i + 1
+    if last == 0:
+        "."
+    else:
+        path.slice(0, last)
+
+fn _simple_date() -> text:
+    # Produce a simple timestamp string from unix micros.
+    # Prints as "unix_<micros>" — a sortable opaque key when strftime is unavailable.
+    val us = rt_time_now_unix_micros()
+    "unix_" + _i64_to_text(us)
+
+# ============================================================================
+# bench_emit_rows — primitive-array emit API (interpreter-safe workaround)
+#
+# Avoids cross-module BenchResult struct passing (see bug
+# interp_cross_module_struct_return_unit_2026-06-13).  All data is passed
+# as parallel primitive arrays constructed in the caller's module.
+#
+# Parameters (all arrays must be the same length N):
+#   names   [text]   — benchmark name per row
+#   modes   [text]   — mode per row (e.g. "script", "native")
+#   metrics [text]   — metric_name per row (e.g. "ops/sec", "ns/op")
+#   values  [i64]    — measured integer value per row
+#   units   [text]   — unit label per row
+#   arch    text     — architecture tag applied to all rows (e.g. "x86_64")
+#   date_str text    — human-readable date string (e.g. "2026-06-13")
+#   report_path text — destination for the dated run report
+#   table_path  text — destination for the persistent metrics table
+# Returns true if both writes succeeded.
+# ============================================================================
+
+fn bench_emit_rows(names: [text], modes: [text], metrics: [text], values: [i64], units: [text], arch: text, date_str: text, report_path: text, table_path: text) -> bool:
+    val report_dir = _dirname(report_path)
+    val table_dir = _dirname(table_path)
+    rt_dir_create_all(report_dir)
+    rt_dir_create_all(table_dir)
+
+    val table_block = _rows_to_md_table(names, modes, metrics, values, units, arch)
+    val report_md = _rows_to_md_report(names, modes, metrics, values, units, arch, date_str, table_block)
+    val report_ok = rt_file_write_text(report_path, report_md)
+    if report_ok:
+        print("bench_emit_rows: wrote report -> " + report_path)
+    else:
+        print("bench_emit_rows: ERROR writing report -> " + report_path)
+
+    val append_block = _rows_build_table_append(names, modes, metrics, values, units, arch, date_str, table_block)
+    val existing: text = if rt_file_exists(table_path):
+        rt_file_read_text(table_path)
+    else:
+        ""
+    val new_content = existing + "\n" + append_block
+    val table_ok = rt_file_write_text(table_path, new_content)
+    if table_ok:
+        print("bench_emit_rows: updated metrics -> " + table_path)
+    else:
+        print("bench_emit_rows: ERROR writing metrics -> " + table_path)
+
+    report_ok and table_ok
+
+fn _rows_to_md_table(names: [text], modes: [text], metrics: [text], values: [i64], units: [text], arch: text) -> text:
+    var lines: [text] = []
+    lines.push("| name | mode | metric | value | unit | arch |")
+    lines.push("|------|------|--------|------:|------|------|")
+    var i: i64 = 0
+    while i < names.len():
+        val row = "| " + names[i] + " | " + modes[i] + " | " + metrics[i] + " | " + _i64_to_text(values[i]) + " | " + units[i] + " | " + arch + " |"
+        lines.push(row)
+        i = i + 1
+    _join_lines(lines)
+
+fn _rows_to_md_report(names: [text], modes: [text], metrics: [text], values: [i64], units: [text], arch: text, date_str: text, table_block: text) -> text:
+    var parts: [text] = []
+    parts.push("# Benchmark Run")
+    parts.push("")
+    parts.push("Date: " + date_str)
+    parts.push("")
+    parts.push("## Results")
+    parts.push("")
+    parts.push(table_block)
+    parts.push("")
+    parts.push("---")
+    parts.push("*Generated by bench_report.spl / bench_emit_rows*")
+    _join_lines(parts)
+
+fn _rows_build_table_append(names: [text], modes: [text], metrics: [text], values: [i64], units: [text], arch: text, date_str: text, table_block: text) -> text:
+    var lines: [text] = []
+    lines.push("## Run: " + date_str)
+    lines.push("")
+    lines.push(table_block)
+    lines.push("")
+    _join_lines(lines)
+
+export bench_emit, bench_results_to_md_table, bench_results_to_md_report
+export bench_emit_rows

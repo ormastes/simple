@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use app.test_daemon.resource_policy.{
+    TestDaemonResourcePolicy, TestDaemonResourceSnapshot,
+    test_daemon_can_accept_client, test_daemon_can_start_qemu,
+    test_daemon_effective_qemu_limit, test_daemon_poll_sleep_ms
+}
+
+fn policy() -> TestDaemonResourcePolicy:
+    TestDaemonResourcePolicy(
+        resource_limit_pct: 75,
+        min_free_cpu_pct: 25,
+        min_free_memory_pct: 25,
+        max_clients: 4,
+        max_qemu_sessions: 4,
+        qemu_memory_mb: 2048,
+        qemu_cpu_cores: 1,
+        idle_poll_ms: 1000,
+        busy_poll_ms: 100
+    )
+
+fn snap(cpu: f64, mem: f64, clients: i64, qemu: i64, idle_qemu: i64, cores: i64, total_mb: i64) -> TestDaemonResourceSnapshot:
+    TestDaemonResourceSnapshot(
+        cpu_percent: cpu,
+        memory_percent: mem,
+        memory_total_mb: total_mb,
+        active_clients: clients,
+        active_qemu_sessions: qemu,
+        idle_qemu_sessions: idle_qemu,
+        cpu_count: cores
+    )
+
+describe "TestDaemonResourcePolicy":
+    it "accepts clients when the host has resource headroom":
+        val ok = test_daemon_can_accept_client(policy(), snap(40.0, 50.0, 1, 0, 0, 8, 16384))
+        expect(ok[0]).to_equal(true)
+        expect(ok[1]).to_equal("")
+
+    it "queues clients when max client slots are already active":
+        val ok = test_daemon_can_accept_client(policy(), snap(10.0, 10.0, 4, 0, 0, 8, 16384))
+        expect(ok[0]).to_equal(false)
+        expect(ok[1]).to_contain("client limit")
+
+    it "queues clients when free memory is below the safety floor":
+        val ok = test_daemon_can_accept_client(policy(), snap(10.0, 90.0, 0, 0, 0, 8, 16384))
+        expect(ok[0]).to_equal(false)
+        expect(ok[1]).to_contain("memory")
+
+    it "computes QEMU limit from configured max, CPU budget, and memory budget":
+        val limit = test_daemon_effective_qemu_limit(policy(), snap(10.0, 10.0, 0, 0, 0, 2, 4096))
+        expect(limit).to_equal(1)
+
+    it "queues QEMU when active sessions reach the effective limit":
+        val ok = test_daemon_can_start_qemu(policy(), snap(10.0, 10.0, 0, 1, 0, 2, 4096))
+        expect(ok[0]).to_equal(false)
+        expect(ok[1]).to_contain("qemu")
+
+    it "uses long sleep while idle and short sleep while busy":
+        val p = policy()
+        val idle = test_daemon_poll_sleep_ms(p, snap(5.0, 5.0, 0, 0, 0, 8, 16384), 0)
+        val busy = test_daemon_poll_sleep_ms(p, snap(5.0, 5.0, 1, 0, 0, 8, 16384), 0)
+        expect(idle).to_equal(1000)
+        expect(busy).to_equal(100)

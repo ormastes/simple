@@ -1,0 +1,71 @@
+"""
+# Claude Full GlobalSearchDialog Component
+
+Checks global search query state, scoring, grouped rows, keyboard navigation, and summaries.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.GlobalSearchDialog.{GlobalSearchResult, GlobalSearchDialogState, sampleGlobalSearchResults, createGlobalSearchDialog, openGlobalSearchDialog, globalSearchRowsForQuery, groupGlobalSearchRows, globalSearchScore, renderGlobalSearchDialog, globalSearchCategoryLabel, globalSearchCategoryOptions, globalSearchModeledSourceFile, globalSearchModeledHook, globalSearchModeledKeyboardHelper, globalSearchModeledSourceLines}
+
+describe "Claude full GlobalSearchDialog component":
+    it "opens closes queries and normalizes selection":
+        step("Create a closed dialog and open it")
+        val results = sampleGlobalSearchResults()
+        val closed = createGlobalSearchDialog(results)
+        expect(closed.state.isOpen).to_equal(false)
+        expect(closed.render()).to_equal("Global search closed")
+
+        val opened = closed.open()
+        expect(opened.state.isOpen).to_equal(true)
+        expect(opened.state.selectedIndex).to_equal(0)
+        expect(opened.state.lastAction).to_equal("open")
+        expect(opened.query("keyboard").state.query).to_equal("keyboard")
+        expect(opened.close().state.isOpen).to_equal(false)
+
+    it "scores and filters rows":
+        step("Search title, subtitle, path, and keywords")
+        val results = sampleGlobalSearchResults()
+        val keyboardRows = globalSearchRowsForQuery(results, "keyboard", "all")
+        expect(keyboardRows.len()).to_equal(1)
+        expect(keyboardRows[0].result.id).to_equal("help-shortcuts")
+        expect(globalSearchScore(results[0], "review")).to_be_greater_than(globalSearchScore(results[0], "diff"))
+
+        val fileRows = globalSearchRowsForQuery(results, "agent", "files")
+        expect(fileRows.len()).to_equal(1)
+        expect(fileRows[0].result.path).to_equal("AGENTS.md")
+
+    it "groups categories and renders selected rows":
+        step("Render grouped rows with selected marker")
+        val model = openGlobalSearchDialog(sampleGlobalSearchResults()).query("claude")
+        val groups = groupGlobalSearchRows(model.rows())
+        expect(groups.len()).to_equal(2)
+        val output = model.render()
+        expect(output).to_contain("Global search 2/7")
+        expect(output).to_contain("Commands")
+        expect(output).to_contain("Sessions")
+        expect(output).to_contain("> Switch model [Commands] enabled")
+
+    it "handles keyboard navigation and summaries":
+        step("Move through result rows and close with Escape")
+        val model = openGlobalSearchDialog(sampleGlobalSearchResults())
+        expect(model.handleKey("ArrowDown").state.selectedIndex).to_equal(1)
+        expect(model.handleKey("ArrowUp").state.selectedIndex).to_equal(6)
+        expect(model.handleKey("End").state.selectedIndex).to_equal(6)
+        expect(model.handleKey("Home").state.selectedIndex).to_equal(0)
+        expect(model.handleKey("Enter").state.lastAction).to_equal("submit")
+        expect(model.handleKey("Escape").state.isOpen).to_equal(false)
+        expect(model.loading().summary()).to_equal("loading")
+        expect(model.fail("index unavailable").summary()).to_equal("error: index unavailable")
+
+    it "renders empty loading error and source helpers":
+        step("Pin summaries and upstream helper names")
+        val results = sampleGlobalSearchResults()
+        expect(renderGlobalSearchDialog(results, GlobalSearchDialogState.new(true, "missing", "help", 0, false, "", "query"))).to_equal("No global search results for search \"missing\" and category Help")
+        expect(renderGlobalSearchDialog(results, GlobalSearchDialogState.new(true, "read", "all", 0, true, "", "loading"))).to_equal("Global search loading · search:read")
+        expect(renderGlobalSearchDialog(results, GlobalSearchDialogState.new(true, "", "all", 0, false, "boom", "error"))).to_equal("Global search error: boom")
+        expect(globalSearchCategoryLabel("session")).to_equal("Sessions")
+        expect(globalSearchCategoryOptions()).to_contain("commands")
+        expect(globalSearchModeledSourceFile()).to_equal("src/components/GlobalSearchDialog.tsx")
+        expect(globalSearchModeledHook()).to_equal("useGlobalSearch")
+        expect(globalSearchModeledKeyboardHelper()).to_equal("handleKeyDown")
+        expect(globalSearchModeledSourceLines()).to_equal(342)

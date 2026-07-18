@@ -1,0 +1,33 @@
+# C-backend lowering for the advisory MIR bulk-op hints (SG-1.3).
+#
+# The bulk-op recognizers emit `bulk_{copy,fill,cmp}_hint` intrinsics. Without an
+# explicit arm the generic Intrinsic path emits a call to `__simple_intrinsic_<name>`
+# — a C symbol that does not exist (link error). These tests pin the no-op lowering:
+# the three hints emit NO call, while a normal intrinsic still does (else path intact).
+# The non-bulk control is the false-green guard: it proves build() actually captures
+# emitted C, so the "emits no call" assertions are meaningful.
+#
+# Run:  bin/simple run test/01_unit/compiler/backend/c_backend_bulk_hint_spec.spl
+
+use compiler.backend.backend.c_backend_translate.{MirToC}
+use compiler.backend.backend.c_backend_stubs.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+
+fn _emit_intrinsic(name: text) -> text:
+    val t = MirToC.create("test.bulk")
+    t.translate_instruction(MirInst(kind: MirInstKind.Intrinsic(nil, name, []), span: nil))
+    t.builder.build()
+
+describe "C backend drops advisory bulk-op hints (SG-1.3)":
+    it "emits no call for bulk_copy_hint":
+        expect(_emit_intrinsic("bulk_copy_hint").contains("__simple_intrinsic_bulk_copy_hint")).to_equal(false)
+
+    it "emits no call for bulk_fill_hint":
+        expect(_emit_intrinsic("bulk_fill_hint").contains("__simple_intrinsic_bulk_fill_hint")).to_equal(false)
+
+    it "emits no call for bulk_cmp_hint":
+        expect(_emit_intrinsic("bulk_cmp_hint").contains("__simple_intrinsic_bulk_cmp_hint")).to_equal(false)
+
+    it "still emits the call for a non-bulk intrinsic (else path intact / false-green guard)":
+        expect(_emit_intrinsic("some_other_intrinsic").contains("__simple_intrinsic_some_other_intrinsic")).to_equal(true)

@@ -1,0 +1,53 @@
+"""
+# Claude Full Bridge Session ID Compat
+
+Checks CCR v2 session tag translation without importing bridge-enabled gates.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.sessionIdCompat.{CseShimGate, setCseShimGate, defaultCseShimGate, toCompatSessionId, toCompatSessionIdWithGate, toInfraSessionId, csePrefix, sessionPrefix, compatEndpointFamily, workerEndpointFamily, reconnectEndpointFamily, compatTagName, infraTagName, shimDefaultActiveReason, sameUuidDifferentTag, roundTripSessionId, toCompatSessionIdForArchive, toCompatSessionIdForEvents, toInfraSessionIdForReconnect, shouldRetagForCompat, shouldRetagForInfra, cseShimGateRegistered, cseShimGateEnabled, sdkBundleAvoidsBridgeEnabledImport, sessionIdCompatModulePurpose}
+
+describe "Claude full bridge session id compat":
+    it "retags cse ids to compat session ids when the shim is active":
+        step("Default gate is active when no bridgeEnabled import registers it")
+        expect(toCompatSessionId("cse_abc")).to_equal("session_abc")
+        expect(toCompatSessionId("other_abc")).to_equal("other_abc")
+        expect(toCompatSessionIdWithGate("cse_abc", defaultCseShimGate())).to_equal("session_abc")
+        expect(toCompatSessionIdWithGate("cse_abc", setCseShimGate(true))).to_equal("session_abc")
+
+    it "leaves cse ids unchanged when the registered gate is off":
+        step("Injected GrowthBook gate can disable the compat shim")
+        val gate = setCseShimGate(false)
+        expect(cseShimGateRegistered(gate)).to_equal(true)
+        expect(cseShimGateEnabled(gate)).to_equal(false)
+        expect(toCompatSessionIdWithGate("cse_abc", gate)).to_equal("cse_abc")
+        expect(shouldRetagForCompat("cse_abc", gate)).to_equal(false)
+
+    it "retags compat session ids to infra cse ids":
+        step("Reconnect and worker calls need infrastructure tags")
+        expect(toInfraSessionId("session_abc")).to_equal("cse_abc")
+        expect(toInfraSessionId("cse_abc")).to_equal("cse_abc")
+        expect(toInfraSessionIdForReconnect("session_abc")).to_equal("cse_abc")
+        expect(shouldRetagForInfra("session_abc")).to_equal(true)
+        expect(shouldRetagForInfra("cse_abc")).to_equal(false)
+
+    it "preserves the UUID portion across both tags":
+        step("Same UUID, different compatibility costume")
+        expect(sameUuidDifferentTag("cse_abc")).to_equal(true)
+        expect(sameUuidDifferentTag("session_abc")).to_equal(false)
+        expect(roundTripSessionId("cse_abc")).to_equal("cse_abc")
+        expect(toCompatSessionIdForArchive("cse_abc")).to_equal("session_abc")
+        expect(toCompatSessionIdForEvents("cse_abc")).to_equal("session_abc")
+
+    it "exports source-backed prefixes and endpoint roles":
+        step("Document which API layer expects each tag")
+        expect(csePrefix()).to_equal("cse_")
+        expect(sessionPrefix()).to_equal("session_")
+        expect(compatEndpointFamily()).to_equal("/v1/sessions/<id>")
+        expect(workerEndpointFamily()).to_equal("/v1/code/sessions/<id>/worker/*")
+        expect(reconnectEndpointFamily()).to_equal("/v1/environments/<id>/bridge/reconnect")
+        expect(compatTagName()).to_equal("TagSession")
+        expect(infraTagName()).to_equal("cse")
+        expect(shimDefaultActiveReason()).to_contain("defaults active")
+        expect(sdkBundleAvoidsBridgeEnabledImport()).to_equal(true)
+        expect(sessionIdCompatModulePurpose()).to_contain("CCR v2 compat")

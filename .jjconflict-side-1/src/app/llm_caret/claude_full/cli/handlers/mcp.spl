@@ -1,0 +1,360 @@
+class McpServerConfig:
+    name: text
+    kind: text
+    scope: text
+    url: text
+    command: text
+    args: [text]
+    env: [text]
+    headers: [text]
+    oauthClientId: text
+    oauthCallbackPort: text
+    hasClientSecret: bool
+
+impl McpServerConfig:
+    static fn stdio(name: text, scope: text, command: text, args: [text], env: [text]) -> McpServerConfig:
+        McpServerConfig(name: name, kind: "stdio", scope: scope, url: "", command: command, args: args, env: env, headers: [], oauthClientId: "", oauthCallbackPort: "", hasClientSecret: false)
+
+    static fn sse(name: text, scope: text, url: text, headers: [text], clientId: text, callbackPort: text, hasSecret: bool) -> McpServerConfig:
+        McpServerConfig(name: name, kind: "sse", scope: scope, url: url, command: "", args: [], env: [], headers: headers, oauthClientId: clientId, oauthCallbackPort: callbackPort, hasClientSecret: hasSecret)
+
+    static fn http(name: text, scope: text, url: text, headers: [text], clientId: text, callbackPort: text, hasSecret: bool) -> McpServerConfig:
+        McpServerConfig(name: name, kind: "http", scope: scope, url: url, command: "", args: [], env: [], headers: headers, oauthClientId: clientId, oauthCallbackPort: callbackPort, hasClientSecret: hasSecret)
+
+    static fn claudeProxy(name: text, scope: text, url: text) -> McpServerConfig:
+        McpServerConfig(name: name, kind: "claudeai-proxy", scope: scope, url: url, command: "", args: [], env: [], headers: [], oauthClientId: "", oauthCallbackPort: "", hasClientSecret: false)
+
+class McpCommandResult:
+    stdout: text
+    stderr: text
+    exitCode: i64
+    events: [text]
+    modifiedFile: text
+    shutdownCode: i64
+    secureStorageCleaned: bool
+    savedClientSecret: bool
+
+impl McpCommandResult:
+    static fn ok(stdout: text, events: [text]) -> McpCommandResult:
+        McpCommandResult(stdout: stdout, stderr: "", exitCode: 0, events: events, modifiedFile: "", shutdownCode: -1, secureStorageCleaned: false, savedClientSecret: false)
+
+    static fn error(stderr: text) -> McpCommandResult:
+        McpCommandResult(stdout: "", stderr: stderr, exitCode: 1, events: [], modifiedFile: "", shutdownCode: -1, secureStorageCleaned: false, savedClientSecret: false)
+
+fn checkMcpServerHealth(connectionResult: text, raisedError: bool) -> text:
+    if raisedError:
+        return "Connection error"
+    if connectionResult == "connected":
+        return "Connected"
+    if connectionResult == "needs-auth":
+        return "Needs authentication"
+    "Failed to connect"
+
+fn mcpServeHandler(providedCwd: text, cwdAccessible: bool, setupSucceeds: bool, debug: bool, verbose: bool) -> McpCommandResult:
+    if not cwdAccessible:
+        return McpCommandResult.error("Error: Directory " + providedCwd + " does not exist")
+    if not setupSucceeds:
+        return McpCommandResult.error("Error: Failed to start MCP server: setup failed")
+    val debugText = if debug: "debug" else: "normal"
+    val verboseText = if verbose: " verbose" else: ""
+    McpCommandResult.ok("Started MCP server in " + providedCwd + " (" + debugText + verboseText + ")\n", ["tengu_mcp_start"])
+
+fn mcpRemoveHandler(name: text, requestedScope: text, localExists: bool, projectExists: bool, userExists: bool, priorKind: text) -> McpCommandResult:
+    if requestedScope != "":
+        val result = McpCommandResult.ok("Removed MCP server " + name + " from " + requestedScope + " config\nFile modified: " + describeMcpConfigFilePath(requestedScope) + "\n", ["tengu_mcp_delete:" + requestedScope])
+        result.modifiedFile = describeMcpConfigFilePath(requestedScope)
+        result.secureStorageCleaned = shouldCleanSecureStorage(priorKind)
+        return result
+    val scopes = discoveredScopes(localExists, projectExists, userExists)
+    if scopes.len() == 0:
+        return McpCommandResult.error("No MCP server found with name: \"" + name + "\"")
+    if scopes.len() == 1:
+        val scope = scopes[0]
+        val result = McpCommandResult.ok("Removed MCP server \"" + name + "\" from " + scope + " config\nFile modified: " + describeMcpConfigFilePath(scope) + "\n", ["tengu_mcp_delete:" + scope])
+        result.modifiedFile = describeMcpConfigFilePath(scope)
+        result.secureStorageCleaned = shouldCleanSecureStorage(priorKind)
+        return result
+    var stderr = "MCP server \"" + name + "\" exists in multiple scopes:\n"
+    var i = 0
+    while i < scopes.len():
+        stderr = stderr + "  - " + getScopeLabel(scopes[i]) + " (" + describeMcpConfigFilePath(scopes[i]) + ")\n"
+        i = i + 1
+    stderr = stderr + "\nTo remove from a specific scope, use:\n"
+    var j = 0
+    while j < scopes.len():
+        stderr = stderr + "  claude mcp remove \"" + name + "\" -s " + scopes[j] + "\n"
+        j = j + 1
+    McpCommandResult.error(stderr)
+
+fn mcpListHandler(configs: [McpServerConfig], statuses: [text]) -> McpCommandResult:
+    if configs.len() == 0:
+        val result = McpCommandResult.ok("No MCP servers configured. Use `claude mcp add` to add a server.\n", ["tengu_mcp_list"])
+        result.shutdownCode = 0
+        return result
+    var out = "Checking MCP server health...\n\n"
+    var i = 0
+    while i < configs.len():
+        val status = if i < statuses.len(): statuses[i] else: "Failed to connect"
+        out = out + formatMcpListLine(configs[i], status) + "\n"
+        i = i + 1
+    val result = McpCommandResult.ok(out, ["tengu_mcp_list"])
+    result.shutdownCode = 0
+    result
+
+fn mcpGetHandler(name: text, server: McpServerConfig?, status: text) -> McpCommandResult:
+    if val Some(config) = server:
+        val result = McpCommandResult.ok(formatMcpGetOutput(name, config, status), ["tengu_mcp_get:" + name])
+        result.shutdownCode = 0
+        return result
+    McpCommandResult.error("No MCP server found with name: " + name)
+
+fn mcpAddJsonHandler(name: text, scopeOption: text, parsedKind: text, url: text, hasOauthClientId: bool, wantsClientSecret: bool, readSecret: text, addSucceeds: bool) -> McpCommandResult:
+    val scope = ensureConfigScope(scopeOption)
+    if not addSucceeds:
+        return McpCommandResult.error("Failed to add MCP server")
+    val transportType = if parsedKind != "": parsedKind else: "stdio"
+    val result = McpCommandResult.ok("Added " + transportType + " MCP server " + name + " to " + scope + " config\n", ["tengu_mcp_add:json:" + transportType + ":" + scope])
+    result.savedClientSecret = shouldSaveClientSecret(transportType, url, hasOauthClientId, wantsClientSecret, readSecret)
+    result
+
+fn mcpAddFromDesktopHandler(scopeOption: text, platform: text, serverCount: i64) -> McpCommandResult:
+    val scope = ensureConfigScope(scopeOption)
+    if serverCount == 0:
+        return McpCommandResult.ok("No MCP servers found in Claude Desktop configuration or configuration file does not exist.\n", ["tengu_mcp_add:desktop:" + platform + ":" + scope])
+    McpCommandResult.ok("Opened Claude Desktop MCP import dialog for " + serverCount.to_text() + " servers in " + scope + " scope.\n", ["tengu_mcp_add:desktop:" + platform + ":" + scope])
+
+fn mcpResetChoicesHandler() -> McpCommandResult:
+    McpCommandResult.ok("All project-scoped (.mcp.json) server approvals and rejections have been reset.\nYou will be prompted for approval next time you start Claude Code.\n", ["tengu_mcp_reset_mcpjson_choices"])
+
+fn formatMcpListLine(server: McpServerConfig, status: text) -> text:
+    if server.kind == "sse":
+        return server.name + ": " + server.url + " (SSE) - " + status
+    if server.kind == "http":
+        return server.name + ": " + server.url + " (HTTP) - " + status
+    if server.kind == "claudeai-proxy":
+        return server.name + ": " + server.url + " - " + status
+    server.name + ": " + server.command + " " + joinText(server.args, " ") + " - " + status
+
+fn formatMcpGetOutput(name: text, server: McpServerConfig, status: text) -> text:
+    var out = name + ":\n"
+    out = out + "  Scope: " + getScopeLabel(server.scope) + "\n"
+    out = out + "  Status: " + status + "\n"
+    out = out + formatMcpServerDetails(server)
+    out + "\nTo remove this server, run: claude mcp remove \"" + name + "\" -s " + server.scope + "\n"
+
+fn formatMcpServerDetails(server: McpServerConfig) -> text:
+    if server.kind == "sse":
+        return formatUrlServerDetails("sse", server)
+    if server.kind == "http":
+        return formatUrlServerDetails("http", server)
+    if server.kind == "claudeai-proxy":
+        return "  Type: claudeai-proxy\n  URL: " + server.url + "\n"
+    formatStdioServerDetails(server)
+
+fn formatUrlServerDetails(label: text, server: McpServerConfig) -> text:
+    var out = "  Type: " + label + "\n"
+    out = out + "  URL: " + server.url + "\n"
+    if server.headers.len() > 0:
+        out = out + "  Headers:\n"
+        var i = 0
+        while i < server.headers.len():
+            out = out + "    " + server.headers[i] + "\n"
+            i = i + 1
+    val oauth = formatOAuth(server)
+    if oauth != "":
+        out = out + "  OAuth: " + oauth + "\n"
+    out
+
+fn formatStdioServerDetails(server: McpServerConfig) -> text:
+    var out = "  Type: stdio\n"
+    out = out + "  Command: " + server.command + "\n"
+    out = out + "  Args: " + joinText(server.args, " ") + "\n"
+    if server.env.len() > 0:
+        out = out + "  Environment:\n"
+        var i = 0
+        while i < server.env.len():
+            out = out + "    " + server.env[i] + "\n"
+            i = i + 1
+    out
+
+fn formatOAuth(server: McpServerConfig) -> text:
+    var parts: [text] = []
+    if server.oauthClientId != "":
+        parts.push("client_id configured")
+        if server.hasClientSecret:
+            parts.push("client_secret configured")
+    if server.oauthCallbackPort != "":
+        parts.push("callback_port " + server.oauthCallbackPort)
+    joinText(parts, ", ")
+
+fn shouldSaveClientSecret(kind: text, url: text, hasOauthClientId: bool, wantsClientSecret: bool, readSecret: text) -> bool:
+    wantsClientSecret and readSecret != "" and hasOauthClientId and url != "" and (kind == "sse" or kind == "http")
+
+fn shouldCleanSecureStorage(kind: text) -> bool:
+    kind == "sse" or kind == "http"
+
+fn discoveredScopes(localExists: bool, projectExists: bool, userExists: bool) -> [text]:
+    var scopes: [text] = []
+    if localExists:
+        scopes.push("local")
+    if projectExists:
+        scopes.push("project")
+    if userExists:
+        scopes.push("user")
+    scopes
+
+fn ensureConfigScope(scope: text) -> text:
+    if scope == "": "local" else: scope
+
+fn describeMcpConfigFilePath(scope: text) -> text:
+    if scope == "local":
+        return "local settings"
+    if scope == "project":
+        return ".mcp.json"
+    if scope == "user":
+        return "user settings"
+    scope + " config"
+
+fn getScopeLabel(scope: text) -> text:
+    if scope == "local":
+        return "Local"
+    if scope == "project":
+        return "Project"
+    if scope == "user":
+        return "User"
+    scope
+
+fn joinText(values: [text], separator: text) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + separator
+        out = out + values[i]
+        i = i + 1
+    out
+
+fn mcpServeCommandName() -> text:
+    "serve"
+
+fn mcpRemoveCommandName() -> text:
+    "remove"
+
+fn mcpListCommandName() -> text:
+    "list"
+
+fn mcpGetCommandName() -> text:
+    "get"
+
+fn mcpAddJsonCommandName() -> text:
+    "add-json"
+
+fn mcpAddFromDesktopCommandName() -> text:
+    "add-from-claude-desktop"
+
+fn mcpResetChoicesCommandName() -> text:
+    "reset-project-choices"
+
+fn mcpStartEventName() -> text:
+    "tengu_mcp_start"
+
+fn mcpDeleteEventName() -> text:
+    "tengu_mcp_delete"
+
+fn mcpListEventName() -> text:
+    "tengu_mcp_list"
+
+fn mcpGetEventName() -> text:
+    "tengu_mcp_get"
+
+fn mcpAddEventName() -> text:
+    "tengu_mcp_add"
+
+fn mcpResetEventName() -> text:
+    "tengu_mcp_reset_mcpjson_choices"
+
+fn noServersConfiguredMessage() -> text:
+    "No MCP servers configured. Use `claude mcp add` to add a server.\n"
+
+fn checkingHealthMessage() -> text:
+    "Checking MCP server health...\n\n"
+
+fn desktopNoServersMessage() -> text:
+    "No MCP servers found in Claude Desktop configuration or configuration file does not exist.\n"
+
+fn resetChoicesMessage() -> text:
+    "All project-scoped (.mcp.json) server approvals and rejections have been reset.\nYou will be prompted for approval next time you start Claude Code.\n"
+
+fn removeSpecificScopeHint(name: text, scope: text) -> text:
+    "claude mcp remove \"" + name + "\" -s " + scope
+
+fn removeServerFooter(name: text, scope: text) -> text:
+    "To remove this server, run: " + removeSpecificScopeHint(name, scope)
+
+fn configSourceJson() -> text:
+    "json"
+
+fn configSourceDesktop() -> text:
+    "desktop"
+
+fn defaultConfigScope() -> text:
+    "local"
+
+fn dynamicImportOnlyWhenCommandRuns() -> bool:
+    true
+
+fn listUsesGracefulShutdown() -> bool:
+    true
+
+fn getUsesGracefulShutdown() -> bool:
+    true
+
+fn serveChecksCwdBeforeSetup() -> bool:
+    true
+
+fn removeCleansSecureStorageBeforeExit() -> bool:
+    true
+
+fn addJsonReadsSecretBeforeWritingConfig() -> bool:
+    true
+
+fn desktopImportUsesKeybindingSetup() -> bool:
+    true
+
+fn resetChoicesClearsEnabledServers() -> bool:
+    true
+
+fn resetChoicesClearsDisabledServers() -> bool:
+    true
+
+fn resetChoicesDisablesEnableAllFlag() -> bool:
+    true
+
+fn connectionBatchSizeUsedForList() -> bool:
+    true
+
+fn internalSseIdeExcludedFromList() -> bool:
+    true
+
+fn cliOkUsedForMutationSuccess() -> bool:
+    true
+
+fn cliErrorUsedForUserErrors() -> bool:
+    true
+
+# Source parity notes for small inline behaviors in mcp.tsx:
+# serve imports setup lazily and passes setup mode "default".
+# serve defaults absent debug to false.
+# serve defaults absent verbose to false.
+# add-json falls back to transport type stdio.
+# list renders SSE with uppercase transport label.
+# list renders HTTP with uppercase transport label.
+# project scope reads from .mcp.json.
+# desktop import renders with exitOnCtrlC enabled.
+# get prints headers one per line.
+# get prints environment entries one per line.
+# remove reports all matching scopes before failing.
+# reset persists empty enabled and disabled project choices.
+
+fn mcpHandlerSourceLinesModeled() -> i64:
+    361

@@ -1,0 +1,230 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+case "${1:-}" in
+    --mock) RUNTIME_KIND=mock ;;
+    --real-amd) RUNTIME_KIND=real-amd ;;
+    *) echo "usage: $0 --mock|--real-amd" >&2; exit 2 ;;
+esac
+REAL_EVIDENCE=false
+
+HARNESS="scripts/check/rocm_engine2d_font_readback_harness.spl"
+BUILD_DIR="${ROCM_FONT_READBACK_BUILD_DIR:-build/check/rocm-engine2d-font-readback/$RUNTIME_KIND}"
+EVIDENCE="$BUILD_DIR/evidence.env"
+HARNESS_OUT="$BUILD_DIR/harness.out"
+NATIVE_BIN="$BUILD_DIR/rocm_engine2d_font_readback"
+FONT="assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+FONT_SHA256="2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081"
+mkdir -p "$BUILD_DIR"
+
+fail() {
+    reason="$1"
+    {
+        echo "rocm_engine2d_font_readback_status=fail"
+        echo "rocm_engine2d_font_readback_reason=$reason"
+        echo "rocm_engine2d_font_readback_runtime=$RUNTIME_KIND"
+        echo "rocm_engine2d_font_readback_real_evidence=false"
+    } >"$EVIDENCE"
+    cat "$EVIDENCE"
+    exit 1
+}
+
+line_of() { grep -nF "$1" "$HARNESS" | head -1 | cut -d: -f1; }
+create_line="$(line_of 'Engine2D.create_with_backend_strict(WIDTH, HEIGHT, "rocm")')"
+load_line="$(line_of 'rocm.load_font(FONT_PATH)')"
+draw_line="$(line_of 'rocm.draw_text_configured(')"
+read_line="$(line_of 'rocm.read_pixels_with_source()')"
+[ -n "$create_line" ] && [ -n "$load_line" ] && [ -n "$draw_line" ] && [ -n "$read_line" ] \
+    || fail "canonical-engine2d-route-missing"
+[ "$create_line" -lt "$load_line" ] && [ "$load_line" -lt "$draw_line" ] && [ "$draw_line" -lt "$read_line" ] \
+    || fail "canonical-engine2d-route-order-invalid"
+grep -Fq 'execution_policy: FontExecutionPolicy.Required' "$HARNESS" \
+    || fail "required-rocm-font-policy-missing"
+if grep -Fq 'RocmBackend' "$HARNESS"; then fail "direct-backend-shortcut-forbidden"; fi
+
+SIMPLE_BIN="${PURE_SIMPLE_BIN:-bin/simple}"
+[ -x "$SIMPLE_BIN" ] || fail "pure-simple-binary-missing"
+resolved_simple="$(readlink -f "$SIMPLE_BIN" 2>/dev/null || printf '%s\n' "$SIMPLE_BIN")"
+case "$resolved_simple" in
+    "$ROOT_DIR"/bin/release/*/simple|"$ROOT_DIR"/release/*/simple|"$ROOT_DIR"/build/bootstrap/full/*/simple) ;;
+    *) fail "unrecognized-selfhost-artifact-path" ;;
+esac
+[ -f "$FONT" ] || fail "font-asset-missing"
+command -v sha256sum >/dev/null 2>&1 || fail "sha256sum-missing"
+SIMPLE_BIN_SHA256="$(sha256sum "$resolved_simple" | awk '{print $1}')"
+CANDIDATE_FRONTEND_ROOT="$ROOT_DIR"
+. "$ROOT_DIR/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+simple_binary_is_valid "$resolved_simple" || fail "pure-simple-admission-failed"
+actual_font_sha256="$(sha256sum "$FONT" | awk '{print $1}')"
+[ "$actual_font_sha256" = "$FONT_SHA256" ] || fail "font-asset-digest-mismatch"
+HARNESS_SHA256="$(sha256sum "$HARNESS" | awk '{print $1}')"
+RUNTIME_SHA256="$(sha256sum src/runtime/runtime_rocm.c | awk '{print $1}')"
+COMPOSITOR_SHA256="$(sha256sum src/lib/common/gpu/font_atlas_composite.spl | awk '{print $1}')"
+ROCM_KERNELS_SHA256="$(sha256sum src/lib/gc_async_mut/gpu/engine2d/backend_rocm_kernels.spl | awk '{print $1}')"
+BUILD_COMMAND="$resolved_simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry $HARNESS --strip --output $NATIVE_BIN"
+
+if ! SIMPLE_BINARY="$resolved_simple" \
+    SIMPLE_BIN="$resolved_simple" \
+    SIMPLE_BOOTSTRAP_DRIVER="$resolved_simple" \
+    SIMPLE_FRONTEND_DELEGATE="$resolved_simple" \
+    SIMPLE_FRONTEND_DELEGATED=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_EXECUTION_MODE= \
+    SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+    SIMPLE_BOOTSTRAP=0 \
+    SIMPLE_LIB="$ROOT_DIR/src" \
+    "$resolved_simple" native-build \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry "$HARNESS" --strip --output "$NATIVE_BIN" \
+    >"$BUILD_DIR/native-build.log" 2>&1; then
+    fail "pure-simple-native-build-failed"
+fi
+[ "$(sha256sum "$resolved_simple" | awk '{print $1}')" = "$SIMPLE_BIN_SHA256" ] \
+    || fail "pure-simple-binary-changed-after-admission"
+[ "$(sha256sum "$HARNESS" | awk '{print $1}')" = "$HARNESS_SHA256" ] \
+    || fail "harness-changed-during-build"
+[ "$(sha256sum src/runtime/runtime_rocm.c | awk '{print $1}')" = "$RUNTIME_SHA256" ] \
+    || fail "runtime-rocm-changed-during-build"
+[ "$(sha256sum src/lib/common/gpu/font_atlas_composite.spl | awk '{print $1}')" = "$COMPOSITOR_SHA256" ] \
+    || fail "font-compositor-changed-during-build"
+[ "$(sha256sum src/lib/gc_async_mut/gpu/engine2d/backend_rocm_kernels.spl | awk '{print $1}')" = "$ROCM_KERNELS_SHA256" ] \
+    || fail "rocm-kernels-changed-during-build"
+
+if [ "$RUNTIME_KIND" = mock ]; then
+    MOCK_DIR="$BUILD_DIR/mock-libs"
+    if ! ROCM_MOCK_BUILD_DIR="$MOCK_DIR" sh scripts/check/check-runtime-rocm-provider.shs \
+        >"$BUILD_DIR/mock-provider.log" 2>&1; then
+        fail "mock-rocm-provider-check-failed"
+    fi
+    if ! env -u LD_PRELOAD -u LD_AUDIT -u LD_DEBUG -u LD_DEBUG_OUTPUT \
+        LD_LIBRARY_PATH="$MOCK_DIR" "$NATIVE_BIN" >"$HARNESS_OUT" 2>&1; then
+        fail "mock-harness-execution-failed"
+    fi
+    RUN_COMMAND="LD_LIBRARY_PATH=$MOCK_DIR $NATIVE_BIN"
+else
+    command -v ldconfig >/dev/null 2>&1 || fail "ldconfig-missing"
+    ROCMINFO_PATH="$(command -v rocminfo 2>/dev/null || true)"
+    [ -n "$ROCMINFO_PATH" ] || fail "rocminfo-missing"
+    ROCMINFO_PATH="$(readlink -f "$ROCMINFO_PATH")"
+    HIP_RUNTIME_PATH="$(ldconfig -p 2>/dev/null | awk '/libamdhip64\.so/{print $NF; exit}')"
+    [ -n "$HIP_RUNTIME_PATH" ] || fail "system-hip-runtime-missing"
+    HIP_RUNTIME_PATH="$(readlink -f "$HIP_RUNTIME_PATH")"
+    HIPRTC_RUNTIME_PATH="$(ldconfig -p 2>/dev/null | awk '/libhiprtc\.so/{print $NF; exit}')"
+    [ -n "$HIPRTC_RUNTIME_PATH" ] || fail "system-hiprtc-runtime-missing"
+    HIPRTC_RUNTIME_PATH="$(readlink -f "$HIPRTC_RUNTIME_PATH")"
+    system_rocm_path() {
+        case "$1" in
+            /usr/*|/opt/rocm/*|/opt/rocm-[0-9]*/*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    system_rocm_path "$ROCMINFO_PATH" && system_rocm_path "$HIP_RUNTIME_PATH" && \
+        system_rocm_path "$HIPRTC_RUNTIME_PATH" \
+        || fail "non-system-rocm-provider-path"
+    for trusted_file in "$ROCMINFO_PATH" "$HIP_RUNTIME_PATH" "$HIPRTC_RUNTIME_PATH"; do
+        [ "$(stat -c '%u' "$trusted_file")" = 0 ] || fail "rocm-provider-not-root-owned"
+        trusted_mode="$(stat -c '%a' "$trusted_file")"
+        [ $((0$trusted_mode & 022)) -eq 0 ] || fail "rocm-provider-writable-by-nonroot"
+    done
+    AMD_SYSFS_DEVICE=
+    for vendor_path in /sys/class/drm/card*/device/vendor /sys/class/drm/renderD*/device/vendor; do
+        [ -r "$vendor_path" ] || continue
+        IFS= read -r vendor <"$vendor_path"
+        [ "$vendor" = 0x1002 ] || continue
+        driver_path="$(readlink -f "$(dirname "$vendor_path")/driver" 2>/dev/null || true)"
+        [ "$(basename "$driver_path")" = amdgpu ] || continue
+        AMD_SYSFS_DEVICE="$(readlink -f "$(dirname "$vendor_path")")"
+        AMD_DRIVER_PATH="$driver_path"
+        break
+    done
+    [ -n "$AMD_SYSFS_DEVICE" ] || fail "amdgpu-sysfs-device-missing"
+    IFS= read -r AMD_PCI_DEVICE_ID <"$AMD_SYSFS_DEVICE/device"
+    AMD_PCI_BDF="$(basename "$AMD_SYSFS_DEVICE")"
+    KERNEL_RELEASE="$(uname -r)"
+    ROCMINFO_SHA256="$(sha256sum "$ROCMINFO_PATH" | awk '{print $1}')"
+    HIP_RUNTIME_SHA256="$(sha256sum "$HIP_RUNTIME_PATH" | awk '{print $1}')"
+    HIPRTC_RUNTIME_SHA256="$(sha256sum "$HIPRTC_RUNTIME_PATH" | awk '{print $1}')"
+    env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="${HOME:-/}" LC_ALL=C \
+        "$ROCMINFO_PATH" >"$BUILD_DIR/rocminfo.log" 2>&1 \
+        || fail "rocminfo-failed"
+    ROCMINFO_OUTPUT_SHA256="$(sha256sum "$BUILD_DIR/rocminfo.log" | awk '{print $1}')"
+    if ! env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="${HOME:-/}" LC_ALL=C LD_DEBUG=libs "$NATIVE_BIN" \
+        >"$HARNESS_OUT" 2>"$BUILD_DIR/loader.log"; then
+        fail "real-amd-harness-execution-failed"
+    fi
+    RUN_COMMAND="env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=${HOME:-/} LC_ALL=C LD_DEBUG=libs $NATIVE_BIN"
+    LOADED_HIP_RUNTIME="$(awk '/calling init: .*libamdhip64\.so/{sub(/^.*calling init: /, ""); print; exit}' "$BUILD_DIR/loader.log")"
+    [ -n "$LOADED_HIP_RUNTIME" ] || fail "loaded-hip-runtime-unproven"
+    LOADED_HIP_RUNTIME="$(readlink -f "$LOADED_HIP_RUNTIME")"
+    [ "$LOADED_HIP_RUNTIME" = "$HIP_RUNTIME_PATH" ] || fail "loaded-hip-runtime-path-mismatch"
+    LOADED_HIPRTC_RUNTIME="$(awk '/calling init: .*libhiprtc\.so/{sub(/^.*calling init: /, ""); print; exit}' "$BUILD_DIR/loader.log")"
+    [ -n "$LOADED_HIPRTC_RUNTIME" ] || fail "loaded-hiprtc-runtime-unproven"
+    LOADED_HIPRTC_RUNTIME="$(readlink -f "$LOADED_HIPRTC_RUNTIME")"
+    [ "$LOADED_HIPRTC_RUNTIME" = "$HIPRTC_RUNTIME_PATH" ] || fail "loaded-hiprtc-runtime-path-mismatch"
+fi
+
+value_of() { grep "^$1=" "$HARNESS_OUT" | head -1 | cut -d= -f2-; }
+positive() { printf '%s\n' "$1" | grep -Eq '^[0-9]*[1-9][0-9]*$'; }
+[ "$(value_of status)" = pass ] || fail "harness-did-not-pass"
+[ "$(value_of backend_name)" = rocm ] || fail "backend-name-mismatch"
+[ "$(value_of font_loaded)" = true ] || fail "font-not-loaded"
+[ "$(value_of draw_configured)" = true ] || fail "configured-draw-failed"
+[ "$(value_of execution_target)" = rocm ] || fail "execution-target-mismatch"
+[ "$(value_of attempts)" = rocm:success ] || fail "rocm-required-policy-fell-back"
+[ "$(value_of readback_source)" = device_readback ] || fail "device-readback-missing"
+[ "$(value_of pixel_count)" = 3840 ] || fail "pixel-count-mismatch"
+[ "$(value_of mismatch_count)" = 0 ] || fail "cpu-oracle-mismatch"
+positive "$(value_of readback_handle)" || fail "readback-handle-missing"
+positive "$(value_of device_identity)" || fail "device-identity-missing"
+positive "$(value_of device_memory)" || fail "device-memory-missing"
+positive "$(value_of nonblank_pixel_count)" || fail "font-readback-blank"
+positive "$(value_of device_checksum)" || fail "device-checksum-missing"
+[ "$(value_of device_checksum)" = "$(value_of cpu_checksum)" ] || fail "checksum-mismatch"
+device_name="$(value_of device_name)"
+[ -n "$device_name" ] || fail "device-name-missing"
+if [ "$RUNTIME_KIND" = mock ]; then
+    [ "$device_name" = "Mock AMD GPU" ] || fail "mock-device-name-mismatch"
+elif [ "$device_name" = "Mock AMD GPU" ]; then
+    fail "mock-device-rejected-as-real"
+fi
+
+NATIVE_BIN_SHA256="$(sha256sum "$NATIVE_BIN" | awk '{print $1}')"
+if [ "$RUNTIME_KIND" = real-amd ]; then REAL_EVIDENCE=true; fi
+
+sed 's/^/rocm_engine2d_font_readback_/' "$HARNESS_OUT" >"$EVIDENCE"
+{
+    echo "rocm_engine2d_font_readback_runtime=$RUNTIME_KIND"
+    echo "rocm_engine2d_font_readback_real_evidence=$REAL_EVIDENCE"
+    echo "rocm_engine2d_font_readback_font_sha256=$actual_font_sha256"
+    echo "rocm_engine2d_font_readback_build_command=$BUILD_COMMAND"
+    echo "rocm_engine2d_font_readback_run_command=$RUN_COMMAND"
+    echo "rocm_engine2d_font_readback_simple_bin_path=$resolved_simple"
+    echo "rocm_engine2d_font_readback_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+    echo "rocm_engine2d_font_readback_harness_sha256=$HARNESS_SHA256"
+    echo "rocm_engine2d_font_readback_runtime_rocm_sha256=$RUNTIME_SHA256"
+    echo "rocm_engine2d_font_readback_compositor_sha256=$COMPOSITOR_SHA256"
+    echo "rocm_engine2d_font_readback_rocm_kernels_sha256=$ROCM_KERNELS_SHA256"
+    echo "rocm_engine2d_font_readback_build_delegation=self"
+    echo "rocm_engine2d_font_readback_native_bin_sha256=$NATIVE_BIN_SHA256"
+    if [ "$RUNTIME_KIND" = real-amd ]; then
+        echo "rocm_engine2d_font_readback_rocminfo_path=$ROCMINFO_PATH"
+        echo "rocm_engine2d_font_readback_rocminfo_sha256=$ROCMINFO_SHA256"
+        echo "rocm_engine2d_font_readback_rocminfo_output_sha256=$ROCMINFO_OUTPUT_SHA256"
+        echo "rocm_engine2d_font_readback_hip_runtime_path=$HIP_RUNTIME_PATH"
+        echo "rocm_engine2d_font_readback_hip_runtime_sha256=$HIP_RUNTIME_SHA256"
+        echo "rocm_engine2d_font_readback_loaded_hip_runtime=$LOADED_HIP_RUNTIME"
+        echo "rocm_engine2d_font_readback_hiprtc_runtime_path=$HIPRTC_RUNTIME_PATH"
+        echo "rocm_engine2d_font_readback_hiprtc_runtime_sha256=$HIPRTC_RUNTIME_SHA256"
+        echo "rocm_engine2d_font_readback_loaded_hiprtc_runtime=$LOADED_HIPRTC_RUNTIME"
+        echo "rocm_engine2d_font_readback_amd_pci_bdf=$AMD_PCI_BDF"
+        echo "rocm_engine2d_font_readback_amd_pci_vendor=0x1002"
+        echo "rocm_engine2d_font_readback_amd_pci_device=$AMD_PCI_DEVICE_ID"
+        echo "rocm_engine2d_font_readback_amdgpu_driver_path=$AMD_DRIVER_PATH"
+        echo "rocm_engine2d_font_readback_kernel_release=$KERNEL_RELEASE"
+        echo "rocm_engine2d_font_readback_loader_environment=sanitized"
+    fi
+} >>"$EVIDENCE"
+cat "$EVIDENCE"

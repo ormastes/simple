@@ -1,0 +1,492 @@
+# HIR Lowering - Types and Error Handling
+#
+# This module contains type definitions and error handling for HIR lowering.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types.{TypeParam}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{TypeInferenceConfig, TypeDefault}
+use compiler.common.visibility.{effective_visibility}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: TypeKind) -> i64
+
+fn hir_type_env_get(key: text) -> text:
+    rt_env_get(key)
+
+fn hir_type_kind_disc(k: TypeKind) -> i64:
+    rt_enum_discriminant(k)
+
+# Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
+# The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
+# Kept here (layer 20) to avoid a layer violation (20 must not import 85).
+struct ModuleResolverPort:
+    name: text
+    resolve_fn: any
+
+type HirModulesByName = {text: Module}
+type HirImplFunctions = {SymbolId: HirFunction}
+type HirTraitsByName = {text: HirTrait}
+type HirFieldTypesByName = {text: {text: HirType}}
+type HirLocalStructTypes = {i64: text}
+type HirFieldOrderByName = {text: [text]}
+type HirLocalTupleTypes = {i64: [HirType]}
+
+# HIR Lowering Context
+# ============================================================================
+
+class HirLowering:
+    symbols: SymbolTable
+    errors: [LoweringError]
+    current_function: SymbolId?
+    loop_depth: i64
+    type_inference_config: TypeInferenceConfig?
+    module_filename: text          # Filename/path for visibility matching and defining_module population
+    module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
+    loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
+    modules_by_name: HirModulesByName       # All parsed modules keyed by module name (for resolve_import_symbols)
+    current_method_self_type: HirType?
+    lowered_impl_functions: HirImplFunctions
+    lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
+    # Nested-field-access support (native-build --entry path has no type
+    # inference pass, so a `s.arr` Field expr otherwise gets `type_: nil` and
+    # MIR defaults its result to i64 -- silently wrong for an array/struct
+    # field). struct_field_types_by_name is STATIC (built once from each
+    # struct's own declaration: struct name -> field name -> declared HirType)
+    # so it needs no inference. local_struct_types is the DYNAMIC half (local
+    # variable symbol id -> struct name), populated only for the simple,
+    # common `val/var x = StructName(...)` binding shape -- mirrors the MIR
+    # layer's struct_value_syms/struct_field_type_name propagation, one layer
+    # up, since the actual Field-expr type_ consumer lives in a file this lane
+    # may not edit (see doc/... nestedfield lane notes).
+    struct_field_types_by_name: HirFieldTypesByName
+    local_struct_types: HirLocalStructTypes
+    # Declared field NAME order per struct (parallels MIR's own
+    # struct_field_order). CallArg.has_name/.name are not reliably populated
+    # on this path (observed false/empty for every arg regardless of whether
+    # the source used `field: value` named-arg syntax), so both this layer
+    # and MIR fall back to positional-order matching against the struct's
+    # OWN declared field order to learn which arg feeds which field.
+    struct_field_order_by_name: HirFieldOrderByName
+    # Tuple analogue of local_struct_types: local variable symbol id ->
+    # per-element declared/inferred HirType, populated only for the simple
+    # `val/var t = (lit0, lit1, ...)` binding shape (element types are
+    # inferred straight from each literal's own AAST kind -- IntLit/
+    # FloatLit/StringLit/BoolLit -- since there is no general inference pass
+    # on this path). Lets a later `t.0`/`t.1` positional field access or a
+    # non-literal tuple destructure (`val (a, b) = t`) recover each element's
+    # REAL type instead of defaulting to i64: without this, a tuple element
+    # read through a variable (as opposed to a fresh literal) always decoded
+    # as i64 downstream, silently printing garbage for any non-i64 element
+    # (e.g. a text field) of a mixed-type tuple -- see is_tuple_positional_field
+    # in expressions.spl and lower_tuple_destructure below.
+    local_tuple_types: HirLocalTupleTypes
+    # Set of every enum-variant short name declared in this compilation
+    # (populated up-front in module_lowering pre-scan, parallel to
+    # struct_field_order_by_name). Used by lower_pattern to keep a bare
+    # positional pattern like `case Const(a, b, c):` a REFUTABLE enum-variant
+    # pattern when the subject enum owns a `Const` variant, even though an
+    # unrelated `class Const` is also registered -- without this guard the
+    # struct-positional reinterpretation (irrefutable) silently wins and the
+    # arm is always taken (native_const_pattern_lowers_irrefutably bug).
+    enum_variant_names: {text: bool}
+    # Function name -> tuple element types of its DECLARED tuple return type
+    # (`fn f(...) -> (text, text, i32)`), captured in module_lowering's
+    # signature-registration pass straight off the freshly lower_type'd
+    # return HirType. Lets lower_tuple_destructure type each element of
+    # `val (a, b, c) = f(...)` (a CALL init has no local_tuple_types entry).
+    # A by-NAME side registry is used deliberately instead of reading the
+    # Function symbol's stored type_ back out of the symbol table at
+    # destructure time: extracting the Tuple payload from a symbol-table-
+    # stored HirTypeKind.Function later yields garbage on the seed
+    # interpreter (cross-pass enum-payload landmine, observed disc
+    # 2735847868), while a fresh same-pass extraction is reliable.
+    fn_tuple_returns: {text: [HirType]}
+
+struct LoweringError:
+    message: text
+    span: Span
+    kind: LoweringErrorKind
+
+enum LoweringErrorKind:
+    UnresolvedName
+    DuplicateDefinition
+    TypeMismatch
+    InvalidPattern
+    InvalidExpression
+    Other
+    Recovered
+
+fn hirlowering_new() -> HirLowering:
+    val empty_errors: [LoweringError] = []
+    val empty_loaded_modules: [text] = []
+    val empty_modules_by_name: HirModulesByName = {}
+    val empty_impl_functions: HirImplFunctions = {}
+    val empty_traits: HirTraitsByName = {}
+    val empty_struct_field_types: HirFieldTypesByName = {}
+    val empty_local_struct_types: HirLocalStructTypes = {}
+    val empty_struct_field_order: HirFieldOrderByName = {}
+    val empty_local_tuple_types: HirLocalTupleTypes = {}
+    val empty_enum_variant_names: {text: bool} = {}
+    val empty_fn_tuple_returns: {text: [HirType]} = {}
+    HirLowering(
+        symbols: SymbolTable.new(),
+        errors: empty_errors,
+        current_function: nil,
+        loop_depth: 0,
+        type_inference_config: nil,
+        module_filename: "",
+        module_resolver: nil,
+        loaded_modules: empty_loaded_modules,
+        modules_by_name: empty_modules_by_name,
+        current_method_self_type: nil,
+        lowered_impl_functions: empty_impl_functions,
+        lowered_traits: empty_traits,
+        struct_field_types_by_name: empty_struct_field_types,
+        local_struct_types: empty_local_struct_types,
+        struct_field_order_by_name: empty_struct_field_order,
+        local_tuple_types: empty_local_tuple_types,
+        enum_variant_names: empty_enum_variant_names,
+        fn_tuple_returns: empty_fn_tuple_returns
+    )
+
+fn hirlowering_for_module(filename: text, modules_by_name: HirModulesByName) -> HirLowering:
+    var lowering = hirlowering_new()
+    lowering.module_filename = filename
+    lowering.modules_by_name = modules_by_name
+    lowering
+
+impl HirLowering:
+    static fn new() -> HirLowering:
+        hirlowering_new()
+
+    static fn with_filename(filename: text) -> HirLowering:
+        var lowering = hirlowering_new()
+        lowering.module_filename = filename
+        lowering
+
+    static fn with_config(config: TypeInferenceConfig) -> HirLowering:
+        var lowering = hirlowering_new()
+        lowering.type_inference_config = Some(config)
+        lowering
+
+    static fn with_resolver(resolver: ModuleResolverPort, filename: text) -> HirLowering:
+        var lowering = hirlowering_new()
+        lowering.module_filename = filename
+        lowering.module_resolver = Some(resolver)
+        lowering
+
+    me set_type_inference_config(config: TypeInferenceConfig):
+        self.type_inference_config = Some(config)
+
+    me get_empty_array_default() -> HirType:
+        val default_type = if self.type_inference_config.?:
+            self.type_inference_config.unwrap().empty_array_default
+        else:
+            TypeDefault.I32
+
+        # Convert TypeDefault to HirType
+        val span = Span.empty()
+        match default_type:
+            case TypeDefault.Void: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Bool: HirType(kind: HirTypeKind.Bool, span: span)
+            case TypeDefault.I8: HirType(kind: HirTypeKind.Int(8, true), span: span)
+            case TypeDefault.I16: HirType(kind: HirTypeKind.Int(16, true), span: span)
+            case TypeDefault.I32: HirType(kind: HirTypeKind.Int(32, true), span: span)
+            case TypeDefault.I64: HirType(kind: HirTypeKind.Int(64, true), span: span)
+            case TypeDefault.U8: HirType(kind: HirTypeKind.Int(8, false), span: span)
+            case TypeDefault.U16: HirType(kind: HirTypeKind.Int(16, false), span: span)
+            case TypeDefault.U32: HirType(kind: HirTypeKind.Int(32, false), span: span)
+            case TypeDefault.U64: HirType(kind: HirTypeKind.Int(64, false), span: span)
+            case TypeDefault.F32: HirType(kind: HirTypeKind.Float(32), span: span)
+            case TypeDefault.F64: HirType(kind: HirTypeKind.Float(64), span: span)
+            case TypeDefault.String: HirType(kind: HirTypeKind.Str, span: span)
+            case TypeDefault.Nil: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Any: HirType(kind: HirTypeKind.Any, span: span)
+            case _: HirType(kind: HirTypeKind.Int(32, true), span: span)  # Default to i32
+
+    me is_strict_empty_collections() -> bool:
+        if self.type_inference_config.?:
+            self.type_inference_config.unwrap().strict_empty_collections
+        else:
+            false
+
+    me error(message: text, span: Span):
+        if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+            eprint("[simpleos-hir-push] {message}")
+        self.errors = self.errors.push(LoweringError(
+            message: message,
+            span: span,
+            kind: LoweringErrorKind.Other
+        ))
+
+    me recovered(message: text, span: Span):
+        self.errors = self.errors.push(LoweringError(
+            message: message,
+            span: span,
+            kind: LoweringErrorKind.Recovered
+        ))
+
+    me compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
+        if (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return Visibility.Public
+        if declared_visibility != Visibility.Private:
+            return declared_visibility
+        if effective_visibility(type_name, self.module_filename, false):
+            return Visibility.Public
+        Visibility.Private
+
+    me lower_type(t: Type) -> HirType:
+        # Typed rebind before matching. On the stage4 unstub path `t` can arrive
+        # ANY-erased when it comes from a struct/class field's `type_` (extracted
+        # off an ANY-typed [Field]); matching `t.kind` on an ANY receiver
+        # mis-resolves the enum tag/payload -> SIGSEGV in the Named arm (bug:
+        # struct/class run file crash, iteration 19). Binding to a `Type`-typed
+        # local restores the correct discriminant + payload layout.
+        val lt: Type = t
+        val lt_kind: TypeKind = lt.kind
+
+        # QUALIFIED arms (`case TypeKind.*`) are REQUIRED on stage4: bare
+        # `case Named(...)` etc. compile as irrefutable bindings (the variant
+        # names also exist in HirTypeKind), so the first arm swallowed every
+        # value. `struct Function` (parser_types.spl) additionally SHADOWS
+        # TypeKind.Function: even a qualified `case TypeKind.Function` compiles
+        # as an always-true struct pattern (bug doc iteration 18 hazard #1), so
+        # it is pre-dispatched by discriminant (reference disc from a constructed
+        # value — no fragile hardcoded name-hash) and kept OUT of the big match.
+        # NOTE: the corrupt-field-type upstream cause is fixed in lower_struct/
+        # lower_class (direct field access instead of struct destructure).
+        # DISC-DISPATCH (bug doc iteration 20 #86). A multi-arm `match lt_kind`
+        # over qualified TypeKind variants MIS-ROUTES on stage4 for the
+        # struct/class field-type path: an `Infer` field value (confirmed by
+        # probe: disc == Infer reference) is swallowed by the FIRST arm
+        # `case TypeKind.Named(...)` (irrefutable — `Named` also names a
+        # HirTypeKind variant), which then extracts garbage `args` and SIGSEGVs
+        # in lower_type_list (gdb: lower_type_list <- lower_type <- lower_field).
+        # The identical match works for function param/return types, so this is
+        # value-specific irrefutable-arm mis-routing. Dispatch by discriminant
+        # (reference discs from freshly constructed values — construction is
+        # always correct; only pattern MATCHING mis-dereferences) and extract
+        # each payload in an ISOLATED single-arm guarded match, the idiom proven
+        # in expressions.spl / statements.spl.
+        val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
+        val d_named: i64 = hir_type_kind_disc(TypeKind.Named("", []))
+
+        # Extract in the frontend owner module, where HirTypeKind.Named is not
+        # in scope and cannot collide with TypeKind.Named on stage4.
+        if kind_disc_v == d_named:
+            val nm: text = parser_type_kind_named_name(lt_kind)
+            val nargs: [Type] = parser_type_kind_named_args(lt_kind)
+            if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+                eprint("[hir-type-named] {nm}")
+            if nm == "":
+                self.error("internal: failed to extract named type", lt.span)
+                return HirType(kind: HirTypeKind.Error, span: lt.span)
+            val named_kind = self.lower_named_kind(nm, self.lower_type_list(nargs), lt.span)
+            return HirType(kind: named_kind, span: lt.span)
+
+        val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
+
+        val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, nil))
+        val d_func: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
+        val d_opt: i64 = hir_type_kind_disc(TypeKind.Optional(lt))
+        val d_ref: i64 = hir_type_kind_disc(TypeKind.Reference(lt, false))
+        val d_union: i64 = hir_type_kind_disc(TypeKind.Union([]))
+        val d_proj: i64 = hir_type_kind_disc(TypeKind.Projection(lt, ""))
+
+        var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
+        if kind_disc_v == d_tuple:
+            var elems: [Type] = []
+            match lt_kind:
+                case TypeKind.Tuple(elements):
+                    elems = elements
+                case _:
+                    pass
+            if elems.is_empty():
+                kind = HirTypeKind.Unit
+            else:
+                kind = HirTypeKind.Tuple(self.lower_type_list(elems))
+        elif kind_disc_v == d_array:
+            var elem: Type = lt
+            match lt_kind:
+                case TypeKind.Array(element, size):
+                    elem = element
+                case _:
+                    pass
+            kind = HirTypeKind.Array(self.lower_type(elem), nil)
+        elif kind_disc_v == d_func:
+            var fparams: [Type] = []
+            var fret: Type = lt
+            match lt_kind:
+                case TypeKind.Function(params, ret):
+                    fparams = params
+                    fret = ret
+                case _:
+                    pass
+            kind = HirTypeKind.Function(self.lower_type_list(fparams), self.lower_type(fret), [])
+        elif kind_disc_v == d_opt:
+            var oinner: Type = lt
+            match lt_kind:
+                case TypeKind.Optional(inner):
+                    oinner = inner
+                case _:
+                    pass
+            kind = HirTypeKind.Optional(self.lower_type(oinner))
+        elif kind_disc_v == d_ref:
+            var rinner: Type = lt
+            var rmut: bool = false
+            match lt_kind:
+                case TypeKind.Reference(inner, mutable):
+                    rinner = inner
+                    rmut = mutable
+                case _:
+                    pass
+            kind = HirTypeKind.Ref(self.lower_type(rinner), rmut)
+        elif kind_disc_v == d_union:
+            var umembers: [Type] = []
+            match lt_kind:
+                case TypeKind.Union(members):
+                    umembers = members
+                case _:
+                    pass
+            val hir_members = self.lower_type_list(umembers)
+            if hir_members.len() == 0:
+                kind = HirTypeKind.Unit
+            elif hir_members.len() == 1:
+                kind = hir_members[0].kind
+            else:
+                kind = HirTypeKind.Union(hir_members)
+        elif kind_disc_v == d_proj:
+            var pbase: Type = lt
+            var passoc: text = ""
+            match lt_kind:
+                case TypeKind.Projection(base, assoc_name):
+                    pbase = base
+                    passoc = assoc_name
+                case _:
+                    pass
+            kind = HirTypeKind.Projection(self.lower_type(pbase), passoc)
+        else:
+            # Infer / Atomic / Isolated / Error and any unrecognized disc.
+            kind = HirTypeKind.Infer(0, 0)
+
+        HirType(kind: kind, span: lt.span)
+
+    me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
+        # bug: native_result_unwrap silent-wrong tail -- `T?` optional
+        # annotations arrive from the flat-AST bridge as Named("Option", [T])
+        # (convert_nodes.spl TYPE_OPTION_I64/F64/TEXT/BOOL tags), NOT as
+        # TypeKind.Optional (that parser kind is not what the flat path
+        # emits). Without this mapping every such annotation fell through to
+        # the unresolved-symbol branch below (no `Option` symbol exists) and
+        # collapsed to HirTypeKind.Error, so MIR's option_inner_hir_type saw
+        # no Optional, typed `x.unwrap_or(default)` results as I64, and
+        # print() rendered the raw char* of a text default as a decimal
+        # pointer (e.g. `absent_text.unwrap_or("fallback")` printed
+        # `101808922192363`). Mirror the Result/Dict special cases in the
+        # match: build the real HirTypeKind.Optional. A bare argless
+        # `Option` (the parser only threads i64/f64/text/bool inners through
+        # dedicated tags; every other `T?` collapses to plain TYPE_OPTION)
+        # deliberately keeps the pre-existing fall-through behavior.
+        if name == "Option" and hir_args.len() == 1:
+            return HirTypeKind.Optional(hir_args[0])
+        match name:
+            case "i8": HirTypeKind.Int(8, true)
+            case "i16": HirTypeKind.Int(16, true)
+            case "i32": HirTypeKind.Int(32, true)
+            case "i64": HirTypeKind.Int(64, true)
+            case "u8": HirTypeKind.Int(8, false)
+            case "u16": HirTypeKind.Int(16, false)
+            case "u32": HirTypeKind.Int(32, false)
+            case "u64": HirTypeKind.Int(64, false)
+            case "f32": HirTypeKind.Float(32)
+            case "f64": HirTypeKind.Float(64)
+            case "bool": HirTypeKind.Bool
+            case "char": HirTypeKind.Char
+            case "text" | "str" | "String": HirTypeKind.Str
+            case "Result":
+                if hir_args.len() == 2:
+                    HirTypeKind.Result(hir_args[0], hir_args[1])
+                else:
+                    self.recovered("Result type expects 2 type arguments", span)
+                    HirTypeKind.Error
+            case "Dict":
+                # bug: dicttype -- Dict<K,V> annotations previously fell
+                # through to the unresolved-symbol branch below (Dict is not
+                # a user-declared struct/class), producing HirTypeKind.Error
+                # and collapsing the whole param/local to MIR I64. The
+                # frontend (core/parser.spl + _FlatAstBridge/convert_nodes.spl)
+                # now threads the real K/V Type args through as Named("Dict",
+                # [K, V]); mirror the Result case above to build the real
+                # HirTypeKind.Dict(key, value) that already exists (hir_types.spl)
+                # and that function_lowering.lower_type already maps to
+                # MirTypeKind.Dict.
+                if hir_args.len() == 2:
+                    HirTypeKind.Dict(hir_args[0], hir_args[1])
+                else:
+                    self.error("Dict type expects 2 type arguments", span)
+                    HirTypeKind.Error
+            case _:
+                val symbol_id = self.symbols.lookup_or_invalid(name)
+                if symbol_id.is_valid():
+                    if custom_primitive_is_name(name):
+                        custom_primitive_bind_symbol(name, symbol_id.id)
+                    HirTypeKind.Named(symbol_id, hir_args)
+                else:
+                    if name == "Any" or (name == "Option" and hir_args.len() == 0):
+                        self.recovered("unresolved type: {name}", span)
+                    else:
+                        self.error("unresolved type: {name}", span)
+                    HirTypeKind.Error
+
+    me lower_type_list(types: [Type]) -> [HirType]:
+        var result: [HirType] = []
+        for t in types:
+            result = result.push(self.lower_type(t))
+        result
+
+    me lower_type_param(tp: TypeParam) -> HirTypeParam:
+        val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false, nil)
+
+        var bounds: [HirType] = []
+        for b in tp.bounds:
+            bounds = bounds.push(self.lower_type(b))
+
+        val default_ = if tp.default.?: self.lower_type(tp.default) else: nil
+        HirTypeParam(
+            symbol: symbol,
+            name: tp.name,
+            bounds: bounds,
+            default: default_,
+            span: tp.span
+        )
+
+    me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
+        # Lookup the type parameter symbol
+        val type_param_symbol = self.symbols.lookup_or_invalid(bound.type_param)
+
+        # Lower the trait type
+        val trait_type = self.lower_type(bound.trait_)
+
+        HirTraitBound(
+            type_param: type_param_symbol,
+            trait_: trait_type,
+            span: bound.span
+        )
+
+    me lower_trait_bounds(bounds: [TraitBound]) -> [HirTraitBound]:
+        var result: [HirTraitBound] = []
+        for b in bounds:
+            result = result.push(self.lower_trait_bound(b))
+        result
+
+
+# ============================================================================
+# Exports
+# ============================================================================

@@ -1,0 +1,627 @@
+#!/bin/sh
+# Validate Electron Chromium/Vulkan RenderDoc HTML/CSS capture evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/electron-html-gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_electron_html_gate_$(date -u +%F).md}"
+SOURCE_ENV="${RDOC_ELECTRON_HTML_EVIDENCE_ENV:-build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+SOURCE_CONTRACT="scripts/lib/renderdoc-evidence-common.shs"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_exists_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
+        echo "pass"
+    else
+        echo "missing"
+    fi
+}
+
+write_argb_gate_env() {
+    argb_path="$1"
+    expected_width="$2"
+    expected_height="$3"
+    out_path="$4"
+
+    if [ -n "$argb_path" ] && [ -L "$argb_path" ]; then
+        {
+            echo "rdoc_electron_html_gate_argb_status=fail"
+            echo "rdoc_electron_html_gate_argb_reason=electron-argb-symlink"
+            echo "rdoc_electron_html_gate_argb_path=$argb_path"
+            echo "rdoc_electron_html_gate_argb_width="
+            echo "rdoc_electron_html_gate_argb_height="
+            echo "rdoc_electron_html_gate_argb_format="
+            echo "rdoc_electron_html_gate_argb_producer="
+            echo "rdoc_electron_html_gate_argb_native_width="
+            echo "rdoc_electron_html_gate_argb_native_height="
+            echo "rdoc_electron_html_gate_argb_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_expected_width=$expected_width"
+            echo "rdoc_electron_html_gate_argb_expected_height=$expected_height"
+        } >"$out_path"
+        return 0
+    fi
+
+    if [ ! -s "$argb_path" ]; then
+        {
+            echo "rdoc_electron_html_gate_argb_status=missing"
+            echo "rdoc_electron_html_gate_argb_reason=missing-electron-argb-file"
+            echo "rdoc_electron_html_gate_argb_path=$argb_path"
+            echo "rdoc_electron_html_gate_argb_width="
+            echo "rdoc_electron_html_gate_argb_height="
+            echo "rdoc_electron_html_gate_argb_format="
+            echo "rdoc_electron_html_gate_argb_producer="
+            echo "rdoc_electron_html_gate_argb_native_width="
+            echo "rdoc_electron_html_gate_argb_native_height="
+            echo "rdoc_electron_html_gate_argb_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_expected_width=$expected_width"
+            echo "rdoc_electron_html_gate_argb_expected_height=$expected_height"
+        } >"$out_path"
+        return 0
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        {
+            echo "rdoc_electron_html_gate_argb_status=unavailable"
+            echo "rdoc_electron_html_gate_argb_reason=missing-node-json-reader"
+            echo "rdoc_electron_html_gate_argb_path=$argb_path"
+            echo "rdoc_electron_html_gate_argb_width="
+            echo "rdoc_electron_html_gate_argb_height="
+            echo "rdoc_electron_html_gate_argb_format="
+            echo "rdoc_electron_html_gate_argb_producer="
+            echo "rdoc_electron_html_gate_argb_native_width="
+            echo "rdoc_electron_html_gate_argb_native_height="
+            echo "rdoc_electron_html_gate_argb_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_expected_width=$expected_width"
+            echo "rdoc_electron_html_gate_argb_expected_height=$expected_height"
+        } >"$out_path"
+        return 0
+    fi
+
+    node - "$argb_path" "$expected_width" "$expected_height" <<'NODE' >"$out_path"
+const fs = require("fs");
+const argbPath = process.argv[2] || "";
+const expectedWidth = positiveIntegerText(process.argv[3] || "") ? Number(process.argv[3]) : 0;
+const expectedHeight = positiveIntegerText(process.argv[4] || "") ? Number(process.argv[4]) : 0;
+
+function emit(key, value) {
+  console.log(`rdoc_electron_html_gate_argb_${key}=${value === undefined || value === null ? "" : value}`);
+}
+
+function positiveIntegerText(value) {
+  if (!/^[1-9][0-9]*$/.test(String(value || ""))) return false;
+  return Number.isSafeInteger(Number(value));
+}
+
+function safePositiveInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function safeUint32(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
+}
+
+emit("path", argbPath);
+try {
+  const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  const widthText = safePositiveInteger(payload.width) ? payload.width : "";
+  const heightText = safePositiveInteger(payload.height) ? payload.height : "";
+  const width = widthText === "" ? 0 : widthText;
+  const height = heightText === "" ? 0 : heightText;
+  const format = String(payload.format || "");
+  const producer = String(payload.producer || "");
+  const nativeWidth = safePositiveInteger(payload.nativeWidth) ? payload.nativeWidth : "";
+  const nativeHeight = safePositiveInteger(payload.nativeHeight) ? payload.nativeHeight : "";
+  let nonblank = 0;
+  for (const value of pixels) {
+    if (!safeUint32(value)) continue;
+    const pixel = value >>> 0;
+    const alpha = (pixel >>> 24) & 255;
+    if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
+  }
+  let status = "pass";
+  let reason = "pass";
+  const expectedPixelCount = width > 0 && height > 0 ? width * height : 0;
+  if (expectedWidth <= 0 || expectedHeight <= 0) {
+    status = "invalid";
+    reason = "missing-electron-argb-expected-dimensions";
+  } else if (width <= 0 || height <= 0) {
+    status = "invalid";
+    reason = "missing-electron-argb-dimensions";
+  } else if (expectedWidth > 0 && width !== expectedWidth) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-width";
+  } else if (expectedHeight > 0 && height !== expectedHeight) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-height";
+  } else if (format !== "argb-u32") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-format";
+  } else if (producer !== "electron-chromium-capture") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-producer";
+  } else if (!Number.isSafeInteger(expectedPixelCount) || pixels.length !== expectedPixelCount) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-pixel-count";
+  } else if (!pixels.every(safeUint32)) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-pixel-type";
+  } else if (nonblank <= 0) {
+    status = "invalid";
+    reason = "blank-electron-argb-capture";
+  }
+  emit("status", status);
+  emit("reason", reason);
+  emit("width", widthText);
+  emit("height", heightText);
+  emit("format", format);
+  emit("producer", producer);
+  emit("native_width", nativeWidth);
+  emit("native_height", nativeHeight);
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+} catch (error) {
+  emit("status", "invalid");
+  emit("reason", "invalid-electron-argb-json");
+  emit("width", "");
+  emit("height", "");
+  emit("format", "");
+  emit("producer", "");
+  emit("native_width", "");
+  emit("native_height", "");
+  emit("pixel_count", 0);
+  emit("nonblank_pixel_count", 0);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+}
+NODE
+}
+
+write_vulkan_log_gate_env() {
+    log_path="$1"
+    out_path="$2"
+
+    if [ "$log_path" = "" ]; then
+        {
+            echo "rdoc_electron_html_gate_vulkan_log_status=not-recorded"
+            echo "rdoc_electron_html_gate_vulkan_log_reason=missing-log-path"
+            echo "rdoc_electron_html_gate_log="
+        } >"$out_path"
+        return 0
+    fi
+
+    if [ ! -s "$log_path" ]; then
+        {
+            echo "rdoc_electron_html_gate_vulkan_log_status=not-recorded"
+            echo "rdoc_electron_html_gate_vulkan_log_reason=missing-log-file"
+            echo "rdoc_electron_html_gate_log=$log_path"
+        } >"$out_path"
+        return 0
+    fi
+
+    if grep -E 'Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization' "$log_path" >/dev/null 2>&1; then
+        {
+            echo "rdoc_electron_html_gate_vulkan_log_status=fail"
+            echo "rdoc_electron_html_gate_vulkan_log_reason=vulkan-angle-unavailable"
+            echo "rdoc_electron_html_gate_log=$log_path"
+        } >"$out_path"
+        return 0
+    fi
+
+    {
+        echo "rdoc_electron_html_gate_vulkan_log_status=pass"
+        echo "rdoc_electron_html_gate_vulkan_log_reason=pass"
+        echo "rdoc_electron_html_gate_log=$log_path"
+    } >"$out_path"
+}
+
+write_gpu_exit_gate_env() {
+    log_path="$1"
+    out_path="$2"
+
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        {
+            echo "rdoc_electron_html_gate_gpu_process_exit_status=not-recorded"
+            echo "rdoc_electron_html_gate_gpu_process_exit_count=0"
+            echo "rdoc_electron_html_gate_gpu_process_exit_codes="
+            echo "rdoc_electron_html_gate_gpu_process_exit_reason="
+        } >"$out_path"
+        return 0
+    fi
+
+    exit_lines="$(grep -E 'GPU process exited unexpectedly: exit_code=' "$log_path" 2>/dev/null || true)"
+    if [ "$exit_lines" = "" ]; then
+        {
+            echo "rdoc_electron_html_gate_gpu_process_exit_status=pass"
+            echo "rdoc_electron_html_gate_gpu_process_exit_count=0"
+            echo "rdoc_electron_html_gate_gpu_process_exit_codes="
+            echo "rdoc_electron_html_gate_gpu_process_exit_reason=pass"
+        } >"$out_path"
+        return 0
+    fi
+
+    exit_count="$(printf '%s\n' "$exit_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+    exit_codes="$(printf '%s\n' "$exit_lines" | sed -n 's/.*exit_code=\([0-9][0-9]*\).*/\1/p' | sort -u | paste -sd, -)"
+    {
+        echo "rdoc_electron_html_gate_gpu_process_exit_status=fail"
+        echo "rdoc_electron_html_gate_gpu_process_exit_count=$exit_count"
+        echo "rdoc_electron_html_gate_gpu_process_exit_codes=$exit_codes"
+        echo "rdoc_electron_html_gate_gpu_process_exit_reason=gpu-process-exited-unexpectedly"
+    } >"$out_path"
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "rdoc_electron_html_gate_status=$status"
+        echo "rdoc_electron_html_gate_reason=$reason"
+        echo "rdoc_electron_html_gate_source_env=$SOURCE_ENV"
+        echo "rdoc_electron_html_gate_backend=${backend:-}"
+        echo "rdoc_electron_html_gate_scene=${scene:-}"
+        echo "rdoc_electron_html_gate_capture_status=${capture_status:-}"
+        echo "rdoc_electron_html_gate_capture_reason=${capture_reason:-}"
+        echo "rdoc_electron_html_gate_capture_file=${capture_file:-}"
+        echo "rdoc_electron_html_gate_capture_file_status=${capture_file_status:-}"
+        echo "rdoc_electron_html_gate_capture_magic=${capture_magic:-}"
+        echo "rdoc_electron_html_gate_capture_file_magic=${capture_file_magic:-}"
+        echo "rdoc_electron_html_gate_html_path=${html_path:-}"
+        echo "rdoc_electron_html_gate_electron=${electron_bin:-}"
+        echo "rdoc_electron_html_gate_capture_script=${capture_script:-}"
+        echo "rdoc_electron_html_gate_argb_path=${argb_path:-}"
+        echo "rdoc_electron_html_gate_argb_file_status=${argb_file_status:-}"
+        echo "rdoc_electron_html_gate_argb_status=${argb_status:-}"
+        echo "rdoc_electron_html_gate_argb_reason=${argb_reason:-}"
+        echo "rdoc_electron_html_gate_argb_width=${argb_width:-}"
+        echo "rdoc_electron_html_gate_argb_height=${argb_height:-}"
+        echo "rdoc_electron_html_gate_argb_format=${argb_format:-}"
+        echo "rdoc_electron_html_gate_argb_producer=${argb_producer:-}"
+        echo "rdoc_electron_html_gate_argb_native_width=${argb_native_width:-}"
+        echo "rdoc_electron_html_gate_argb_native_height=${argb_native_height:-}"
+        echo "rdoc_electron_html_gate_argb_pixel_count=${argb_pixel_count:-}"
+        echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=${argb_nonblank_pixel_count:-}"
+        echo "rdoc_electron_html_gate_argb_expected_width=${argb_expected_width:-}"
+        echo "rdoc_electron_html_gate_argb_expected_height=${argb_expected_height:-}"
+        echo "rdoc_electron_html_gate_requested_api=${requested_api:-}"
+        echo "rdoc_electron_html_gate_requested_angle=${requested_angle:-}"
+        echo "rdoc_electron_html_gate_requested_features=${requested_features:-}"
+        echo "rdoc_electron_html_gate_launch_flags=${launch_flags:-}"
+        echo "rdoc_electron_html_gate_launch_exit_code=${launch_exit_code:-}"
+        echo "rdoc_electron_html_gate_launch_timed_out=${launch_timed_out:-}"
+        echo "rdoc_electron_html_gate_launch_metadata_status=${launch_metadata_status:-}"
+        echo "rdoc_electron_html_gate_launch_metadata_reason=${launch_metadata_reason:-}"
+        echo "rdoc_electron_html_gate_source_contract_status=${source_contract_status:-}"
+        echo "rdoc_electron_html_gate_source_contract_reason=${source_contract_reason:-}"
+        echo "rdoc_electron_html_gate_source_contract=$SOURCE_CONTRACT"
+        echo "rdoc_electron_html_gate_log=${log_path:-}"
+        echo "rdoc_electron_html_gate_vulkan_log_status=${vulkan_log_status:-}"
+        echo "rdoc_electron_html_gate_vulkan_log_reason=${vulkan_log_reason:-}"
+        echo "rdoc_electron_html_gate_gpu_process_exit_status=${gpu_process_exit_status:-}"
+        echo "rdoc_electron_html_gate_gpu_process_exit_count=${gpu_process_exit_count:-}"
+        echo "rdoc_electron_html_gate_gpu_process_exit_codes=${gpu_process_exit_codes:-}"
+        echo "rdoc_electron_html_gate_gpu_process_exit_reason=${gpu_process_exit_reason:-}"
+        echo "rdoc_electron_html_gate_required_backend=electron"
+        echo "rdoc_electron_html_gate_required_scene=html-css-electron"
+        echo "rdoc_electron_html_gate_required_status=pass"
+        echo "rdoc_electron_html_gate_required_magic=RDOC"
+        echo "rdoc_electron_html_gate_required_api=vulkan"
+        echo "rdoc_electron_html_gate_required_angle=vulkan"
+        echo "rdoc_electron_html_gate_required_features=Vulkan"
+        echo "rdoc_electron_html_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
+        echo "rdoc_electron_html_gate_required_electron_suffix=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|tools/electron-shell/node_modules/.bin/electron"
+        echo "rdoc_electron_html_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js|tools/electron-live-bitmap/renderdoc_display_html.js"
+        echo "rdoc_electron_html_gate_required_argb_status=pass-for-capture_html_argb"
+        echo "rdoc_electron_html_gate_required_argb_format=argb-u32"
+        echo "rdoc_electron_html_gate_required_argb_producer=electron-chromium-capture"
+        echo "rdoc_electron_html_gate_required_argb_nonblank_pixel_count_min=1"
+        echo "rdoc_electron_html_gate_required_launch_flag_enable_features=--enable-features=Vulkan"
+        echo "rdoc_electron_html_gate_required_launch_flag_use_angle=--use-angle=vulkan"
+        echo "rdoc_electron_html_gate_required_vulkan_log_no_angle_failure=1"
+    } >"$OUT_ENV"
+    {
+        echo "# RenderDoc Electron HTML Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- backend: ${backend:-}"
+        echo "- scene: ${scene:-}"
+        echo "- capture status: ${capture_status:-}"
+        echo "- capture reason: ${capture_reason:-}"
+        echo "- capture file: ${capture_file:-}"
+        echo "- capture file status: ${capture_file_status:-}"
+        echo "- capture magic: ${capture_magic:-}"
+        echo "- capture file magic: ${capture_file_magic:-}"
+        echo "- argb status: ${argb_status:-}"
+        echo "- argb reason: ${argb_reason:-}"
+        echo "- argb path: ${argb_path:-}"
+        echo "- argb pixels: ${argb_pixel_count:-}"
+        echo "- argb nonblank pixels: ${argb_nonblank_pixel_count:-}"
+        echo "- requested API: ${requested_api:-}"
+        echo "- requested ANGLE: ${requested_angle:-}"
+        echo "- launch exit: ${launch_exit_code:-}"
+        echo "- launch timed out: ${launch_timed_out:-}"
+        echo "- launch metadata: ${launch_metadata_status:-} reason=${launch_metadata_reason:-}"
+        echo "- source contract: ${source_contract_status:-} reason=${source_contract_reason:-}"
+        echo "- Vulkan log status: ${vulkan_log_status:-}"
+        echo "- Vulkan log reason: ${vulkan_log_reason:-}"
+        echo "- GPU process exits: ${gpu_process_exit_status:-} count=${gpu_process_exit_count:-} codes=${gpu_process_exit_codes:-}"
+        echo "- log: ${log_path:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    backend=""
+    scene=""
+    capture_status=""
+    capture_reason="missing-source-evidence"
+    capture_file=""
+    capture_file_status="missing"
+    capture_magic=""
+    capture_file_magic=""
+    html_path=""
+    electron_bin=""
+    capture_script=""
+    requested_api=""
+    requested_angle=""
+    requested_features=""
+    launch_flags=""
+    launch_exit_code=""
+    launch_timed_out=""
+    launch_metadata_status=""
+    launch_metadata_reason=""
+    source_contract_status=""
+    source_contract_reason=""
+    argb_path=""
+    argb_file_status=""
+    argb_status=""
+    argb_reason=""
+    argb_width=""
+    argb_height=""
+    argb_format=""
+    argb_producer=""
+    argb_native_width=""
+    argb_native_height=""
+    argb_pixel_count=""
+    argb_nonblank_pixel_count=""
+    argb_expected_width=""
+    argb_expected_height=""
+    log_path=""
+    vulkan_log_status=""
+    vulkan_log_reason=""
+    gpu_process_exit_status=""
+    gpu_process_exit_count=""
+    gpu_process_exit_codes=""
+    gpu_process_exit_reason=""
+    write_evidence "unavailable" "missing-source-evidence"
+    exit 1
+fi
+
+backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+scene="$(value_of rdoc_scene "$SOURCE_ENV")"
+capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
+capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
+capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
+capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+capture_file_status="$(file_exists_status "$capture_file")"
+capture_file_magic=""
+if [ "$capture_file_status" = "pass" ]; then
+    capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+fi
+html_path="$(value_of rdoc_html_path "$SOURCE_ENV")"
+electron_bin="$(value_of rdoc_electron "$SOURCE_ENV")"
+capture_script="$(value_of rdoc_electron_capture_script "$SOURCE_ENV")"
+argb_path="$(value_of rdoc_electron_argb "$SOURCE_ENV")"
+argb_file_status="$(file_exists_status "$argb_path")"
+electron_width="$(value_of rdoc_electron_width "$SOURCE_ENV")"
+electron_height="$(value_of rdoc_electron_height "$SOURCE_ENV")"
+requested_api="$(value_of rdoc_chromium_requested_api "$SOURCE_ENV")"
+requested_angle="$(value_of rdoc_chromium_requested_angle "$SOURCE_ENV")"
+requested_features="$(value_of rdoc_chromium_requested_features "$SOURCE_ENV")"
+launch_flags="$(value_of rdoc_chromium_launch_flags "$SOURCE_ENV")"
+launch_exit_code="$(value_of rdoc_electron_launch_exit_code "$SOURCE_ENV")"
+launch_timed_out="$(value_of rdoc_electron_launch_timed_out "$SOURCE_ENV")"
+launch_metadata_status="pass"
+launch_metadata_reason="pass"
+source_contract_status="pass"
+source_contract_reason="pass"
+if [ "$launch_exit_code" = "" ] && [ "$launch_timed_out" = "" ]; then
+    launch_metadata_status="missing"
+    launch_metadata_reason="missing-launch-exit-metadata"
+    if [ -s "$SOURCE_ENV" ] && [ -s "$SOURCE_CONTRACT" ] && [ "$SOURCE_CONTRACT" -nt "$SOURCE_ENV" ]; then
+        source_contract_status="stale"
+        source_contract_reason="stale-source-missing-launch-exit-metadata"
+    fi
+elif [ "$launch_exit_code" = "" ]; then
+    launch_metadata_status="partial"
+    launch_metadata_reason="missing-launch-exit-code"
+    if [ -s "$SOURCE_ENV" ] && [ -s "$SOURCE_CONTRACT" ] && [ "$SOURCE_CONTRACT" -nt "$SOURCE_ENV" ]; then
+        source_contract_status="stale"
+        source_contract_reason="stale-source-missing-launch-exit-code"
+    fi
+elif [ "$launch_timed_out" = "" ]; then
+    launch_metadata_status="partial"
+    launch_metadata_reason="missing-launch-timeout-flag"
+    if [ -s "$SOURCE_ENV" ] && [ -s "$SOURCE_CONTRACT" ] && [ "$SOURCE_CONTRACT" -nt "$SOURCE_ENV" ]; then
+        source_contract_status="stale"
+        source_contract_reason="stale-source-missing-launch-timeout-flag"
+    fi
+fi
+log_path="$(value_of rdoc_log "$SOURCE_ENV")"
+
+argb_env="$BUILD_DIR/argb-gate.env"
+write_argb_gate_env "$argb_path" "$electron_width" "$electron_height" "$argb_env"
+argb_status="$(value_of rdoc_electron_html_gate_argb_status "$argb_env")"
+argb_reason="$(value_of rdoc_electron_html_gate_argb_reason "$argb_env")"
+argb_width="$(value_of rdoc_electron_html_gate_argb_width "$argb_env")"
+argb_height="$(value_of rdoc_electron_html_gate_argb_height "$argb_env")"
+argb_format="$(value_of rdoc_electron_html_gate_argb_format "$argb_env")"
+argb_producer="$(value_of rdoc_electron_html_gate_argb_producer "$argb_env")"
+argb_native_width="$(value_of rdoc_electron_html_gate_argb_native_width "$argb_env")"
+argb_native_height="$(value_of rdoc_electron_html_gate_argb_native_height "$argb_env")"
+argb_pixel_count="$(value_of rdoc_electron_html_gate_argb_pixel_count "$argb_env")"
+argb_nonblank_pixel_count="$(value_of rdoc_electron_html_gate_argb_nonblank_pixel_count "$argb_env")"
+argb_expected_width="$(value_of rdoc_electron_html_gate_argb_expected_width "$argb_env")"
+argb_expected_height="$(value_of rdoc_electron_html_gate_argb_expected_height "$argb_env")"
+
+vulkan_log_env="$BUILD_DIR/vulkan-log-gate.env"
+write_vulkan_log_gate_env "$log_path" "$vulkan_log_env"
+vulkan_log_status="$(value_of rdoc_electron_html_gate_vulkan_log_status "$vulkan_log_env")"
+vulkan_log_reason="$(value_of rdoc_electron_html_gate_vulkan_log_reason "$vulkan_log_env")"
+
+gpu_exit_env="$BUILD_DIR/gpu-process-exit-gate.env"
+write_gpu_exit_gate_env "$log_path" "$gpu_exit_env"
+gpu_process_exit_status="$(value_of rdoc_electron_html_gate_gpu_process_exit_status "$gpu_exit_env")"
+gpu_process_exit_count="$(value_of rdoc_electron_html_gate_gpu_process_exit_count "$gpu_exit_env")"
+gpu_process_exit_codes="$(value_of rdoc_electron_html_gate_gpu_process_exit_codes "$gpu_exit_env")"
+gpu_process_exit_reason="$(value_of rdoc_electron_html_gate_gpu_process_exit_reason "$gpu_exit_env")"
+
+case "$html_path" in
+    *test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html)
+        html_path_matches="1"
+        ;;
+    *)
+        html_path_matches="0"
+        ;;
+esac
+
+case "$capture_script" in
+    *tools/electron-live-bitmap/capture_html_argb.js)
+        capture_script_matches="1"
+        argb_required="1"
+        ;;
+    *tools/electron-live-bitmap/renderdoc_display_html.js)
+        capture_script_matches="1"
+        argb_required="0"
+        ;;
+    *)
+        capture_script_matches="0"
+        argb_required="1"
+        ;;
+esac
+
+case "$electron_bin" in
+    *tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|*tools/electron-shell/node_modules/.bin/electron)
+        electron_bin_matches="1"
+        ;;
+    *)
+        electron_bin_matches="0"
+        ;;
+esac
+
+case " $launch_flags " in
+    *" --enable-features=Vulkan "*|*" --enable-features=Vulkan,"*|*" --enable-features="*",Vulkan "*|*" --enable-features="*",Vulkan,"*)
+        launch_flags_enable_features="1"
+        ;;
+    *)
+        launch_flags_enable_features="0"
+        ;;
+esac
+
+case "$requested_features" in
+    *Vulkan*)
+        requested_features_vulkan="1"
+        ;;
+    *)
+        requested_features_vulkan="0"
+        ;;
+esac
+
+case " $launch_flags " in
+    *" --use-angle=vulkan "*)
+        launch_flags_use_angle="1"
+        ;;
+    *)
+        launch_flags_use_angle="0"
+        ;;
+esac
+
+if [ "$backend" = "electron" ] \
+    && [ "$scene" = "html-css-electron" ] \
+    && [ "$capture_status" = "pass" ] \
+    && [ "$capture_magic" = "RDOC" ] \
+    && [ "$capture_file_magic" = "RDOC" ] \
+    && [ "$capture_file_status" = "pass" ] \
+    && [ "$requested_api" = "vulkan" ] \
+    && [ "$requested_angle" = "vulkan" ] \
+    && [ "$requested_features_vulkan" = "1" ] \
+    && [ "$html_path_matches" = "1" ] \
+    && [ "$electron_bin_matches" = "1" ] \
+    && [ "$capture_script_matches" = "1" ] \
+    && { [ "$argb_required" = "0" ] || [ "$argb_status" = "pass" ]; } \
+    && [ "$launch_flags_enable_features" = "1" ] \
+    && [ "$launch_flags_use_angle" = "1" ] \
+    && [ "$vulkan_log_status" != "fail" ]; then
+    write_evidence "pass" "pass"
+    exit 0
+fi
+
+if [ "$capture_status" = "" ]; then
+    write_evidence "unavailable" "missing-capture-status"
+elif [ "$backend" != "electron" ]; then
+    write_evidence "fail" "unexpected-backend"
+elif [ "$scene" != "html-css-electron" ]; then
+    write_evidence "fail" "unexpected-scene"
+elif [ "$gpu_process_exit_status" = "fail" ]; then
+    write_evidence "fail" "chromium-gpu-process-crashed-under-renderdoc"
+elif [ "$capture_status" != "pass" ]; then
+    write_evidence "fail" "${capture_reason:-capture-not-pass}"
+elif [ "$capture_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-magic"
+elif [ "$capture_file_status" = "symlink" ]; then
+    write_evidence "fail" "rdc-file-symlink"
+elif [ "$capture_file_status" != "pass" ]; then
+    write_evidence "fail" "missing-rdc-file"
+elif [ "$capture_file_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-file-magic"
+elif [ "$requested_api" != "vulkan" ]; then
+    write_evidence "fail" "missing-vulkan-api"
+elif [ "$requested_angle" != "vulkan" ]; then
+    write_evidence "fail" "missing-vulkan-angle"
+elif [ "$requested_features_vulkan" != "1" ]; then
+    write_evidence "fail" "missing-vulkan-requested-feature"
+elif [ "$html_path_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-html-fixture"
+elif [ "$electron_bin" = "" ]; then
+    write_evidence "fail" "missing-electron-binary"
+elif [ "$electron_bin_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-electron-binary"
+elif [ "$capture_script_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-capture-script"
+elif [ "$launch_flags_enable_features" != "1" ]; then
+    write_evidence "fail" "missing-vulkan-feature-flag"
+elif [ "$launch_flags_use_angle" != "1" ]; then
+    write_evidence "fail" "missing-vulkan-angle-flag"
+elif [ "$vulkan_log_status" = "fail" ]; then
+    write_evidence "fail" "$vulkan_log_reason"
+elif [ "$argb_required" != "0" ] && [ "$argb_status" != "pass" ]; then
+    write_evidence "fail" "${argb_reason:-missing-electron-argb-render-proof}"
+else
+    write_evidence "fail" "electron-renderdoc-gate-failed"
+fi
+exit 1

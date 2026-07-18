@@ -1,0 +1,589 @@
+use std.common.compress.types.{CompressionError}
+use std.common.compress.zstd_bits.{ZstdMsbBackwardBits, zstd_msb_bits_init, zstd_msb_bits_read, zstd_msb_bits_remaining}
+use std.common.compress.zstd_fse.{ZstdFseDecodeTable, ZstdFseState, zstd_fse_parse_normalized_counts, zstd_fse_build_decode_table, zstd_fse_init_state, zstd_fse_get_entry}
+use std.common.compress.zstd_types.{append_bytes, append_self_overlap_copy}
+use std.common.compress.zstd_types.{ZstdSequenceCount, ZstdSequenceModes, ZstdSequence, ZstdRepeatOffsets, ZstdRleSequenceTables, ZstdSequenceTables, ZstdSequenceTableHistory, ZSTD_LL_MAX_TABLE_LOG, ZSTD_ML_MAX_TABLE_LOG, ZSTD_OF_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION, ZSTD_ML_DEFAULT_DISTRIBUTION, ZSTD_OF_DEFAULT_DISTRIBUTION}
+
+fn _zstd_sequence_bounds_invalid(pos: i64, block_end: i64, input_len: i64) -> bool:
+    pos < 0 or pos >= block_end or block_end > input_len
+
+fn _zstd_parse_sequence_count(input: [u8], pos: i64, block_end: i64) -> Result<ZstdSequenceCount, CompressionError>:
+    if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
+        return Err(CompressionError.TruncatedInput("zstd sequences header"))
+    val byte0 = input[pos].to_i64()
+    if byte0 < 128:
+        return Ok(ZstdSequenceCount(count: byte0, bytes_used: 1))
+    if byte0 < 255:
+        if pos + 2 > block_end:
+            return Err(CompressionError.TruncatedInput("zstd sequences header"))
+        return Ok(ZstdSequenceCount(
+            count: ((byte0 - 128) << 8) | input[pos + 1].to_i64(),
+            bytes_used: 2
+        ))
+    if pos + 3 > block_end:
+        return Err(CompressionError.TruncatedInput("zstd sequences header"))
+    Ok(ZstdSequenceCount(
+        count: input[pos + 1].to_i64() | (input[pos + 2].to_i64() << 8) | 0x7F00,
+        bytes_used: 3
+    ))
+
+fn _zstd_parse_sequence_modes(input: [u8], pos: i64, block_end: i64) -> Result<ZstdSequenceModes, CompressionError>:
+    if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
+        return Err(CompressionError.TruncatedInput("zstd sequence modes"))
+    val mode_byte = input[pos].to_i64()
+    if (mode_byte & 0x03) != 0:
+        return Err(CompressionError.CorruptStream("zstd sequence modes reserved bits"))
+    Ok(ZstdSequenceModes(
+        literals_length_mode: (mode_byte >> 6) & 0x03,
+        offsets_mode: (mode_byte >> 4) & 0x03,
+        match_length_mode: (mode_byte >> 2) & 0x03,
+        bytes_used: 1
+    ))
+
+fn _zstd_decode_literal_length(code: i64, extra: i64) -> Result<i64, CompressionError>:
+    if code < 0 or code > 35:
+        return Err(CompressionError.CorruptStream("zstd literal length code"))
+    if code <= 15:
+        if extra != 0:
+            return Err(CompressionError.CorruptStream("zstd literal length extra bits"))
+        return Ok(code)
+    if code <= 19:
+        return Ok(16 + (code - 16) * 2 + extra)
+    if code == 20:
+        return Ok(24 + extra)
+    if code == 21:
+        return Ok(28 + extra)
+    if code == 22:
+        return Ok(32 + extra)
+    if code == 23:
+        return Ok(40 + extra)
+    if code == 24:
+        return Ok(48 + extra)
+    if code == 25:
+        return Ok(64 + extra)
+    if code == 26:
+        return Ok(128 + extra)
+    if code == 27:
+        return Ok(256 + extra)
+    if code == 28:
+        return Ok(512 + extra)
+    if code == 29:
+        return Ok(1024 + extra)
+    if code == 30:
+        return Ok(2048 + extra)
+    if code == 31:
+        return Ok(4096 + extra)
+    if code == 32:
+        return Ok(8192 + extra)
+    if code == 33:
+        return Ok(16384 + extra)
+    if code == 34:
+        return Ok(32768 + extra)
+    Ok(65536 + extra)
+
+fn _zstd_literal_length_extra_bits(code: i64) -> Result<i64, CompressionError>:
+    if code < 0 or code > 35:
+        return Err(CompressionError.CorruptStream("zstd literal length code"))
+    if code <= 19:
+        return Ok(if code <= 15: 0 else: 1)
+    if code <= 21:
+        return Ok(2)
+    if code <= 23:
+        return Ok(3)
+    if code == 24:
+        return Ok(4)
+    if code == 25:
+        return Ok(6)
+    if code == 26:
+        return Ok(7)
+    if code == 27:
+        return Ok(8)
+    if code == 28:
+        return Ok(9)
+    if code == 29:
+        return Ok(10)
+    if code == 30:
+        return Ok(11)
+    if code == 31:
+        return Ok(12)
+    if code == 32:
+        return Ok(13)
+    if code == 33:
+        return Ok(14)
+    if code == 34:
+        return Ok(15)
+    Ok(16)
+
+fn _zstd_decode_match_length(code: i64, extra: i64) -> Result<i64, CompressionError>:
+    if code < 0 or code > 52:
+        return Err(CompressionError.CorruptStream("zstd match length code"))
+    if code <= 31:
+        if extra != 0:
+            return Err(CompressionError.CorruptStream("zstd match length extra bits"))
+        return Ok(code + 3)
+    if code <= 35:
+        return Ok(35 + (code - 32) * 2 + extra)
+    if code == 36:
+        return Ok(43 + extra)
+    if code == 37:
+        return Ok(47 + extra)
+    if code == 38:
+        return Ok(51 + extra)
+    if code == 39:
+        return Ok(59 + extra)
+    if code == 40:
+        return Ok(67 + extra)
+    if code == 41:
+        return Ok(83 + extra)
+    if code == 42:
+        return Ok(99 + extra)
+    if code == 43:
+        return Ok(131 + extra)
+    if code == 44:
+        return Ok(259 + extra)
+    if code == 45:
+        return Ok(515 + extra)
+    if code == 46:
+        return Ok(1027 + extra)
+    if code == 47:
+        return Ok(2051 + extra)
+    if code == 48:
+        return Ok(4099 + extra)
+    if code == 49:
+        return Ok(8195 + extra)
+    if code == 50:
+        return Ok(16387 + extra)
+    if code == 51:
+        return Ok(32771 + extra)
+    Ok(65539 + extra)
+
+fn _zstd_match_length_extra_bits(code: i64) -> Result<i64, CompressionError>:
+    if code < 0 or code > 52:
+        return Err(CompressionError.CorruptStream("zstd match length code"))
+    if code <= 31:
+        return Ok(0)
+    if code <= 35:
+        return Ok(1)
+    if code <= 37:
+        return Ok(2)
+    if code <= 39:
+        return Ok(3)
+    if code <= 41:
+        return Ok(4)
+    if code == 42:
+        return Ok(5)
+    if code == 43:
+        return Ok(7)
+    if code == 44:
+        return Ok(8)
+    if code == 45:
+        return Ok(9)
+    if code == 46:
+        return Ok(10)
+    if code == 47:
+        return Ok(11)
+    if code == 48:
+        return Ok(12)
+    if code == 49:
+        return Ok(13)
+    if code == 50:
+        return Ok(14)
+    if code == 51:
+        return Ok(15)
+    Ok(16)
+
+fn _zstd_parse_rle_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: ZstdSequenceModes) -> Result<ZstdRleSequenceTables, CompressionError>:
+    if modes.literals_length_mode != 1 or modes.offsets_mode != 1 or modes.match_length_mode != 1:
+        return Err(CompressionError.UnsupportedFeature("zstd non-rle sequence tables are not supported"))
+    if pos < 0 or block_end > input.len() or pos + 3 > block_end:
+        return Err(CompressionError.TruncatedInput("zstd rle sequence tables"))
+    Ok(ZstdRleSequenceTables(
+        literal_length_code: input[pos].to_i64(),
+        offset_code: input[pos + 1].to_i64(),
+        match_length_code: input[pos + 2].to_i64(),
+        bytes_used: 3
+    ))
+
+fn _zstd_predefined_table(distribution: [i64], table_log: i64) -> Result<ZstdFseDecodeTable, CompressionError>:
+    zstd_fse_build_decode_table(table_log, distribution)
+
+fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode: i64, max_table_log: i64, predefined_distribution: [i64], previous_table: ZstdFseDecodeTable) -> Result<(i64?, ZstdFseDecodeTable?, ZstdFseDecodeTable, i64), CompressionError>:
+    if mode == 1:
+        if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
+            return Err(CompressionError.TruncatedInput("zstd rle sequence table"))
+        return Ok((Some(input[pos].to_i64()), nil, previous_table, 1))
+    if mode == 3:
+        return Ok((nil, Some(previous_table), previous_table, 0))
+    if mode == 0:
+        val table_res = _zstd_predefined_table(predefined_distribution, if max_table_log == ZSTD_OF_MAX_TABLE_LOG: 5 else: 6)
+        val table = match table_res:
+            case Ok(found_table): found_table
+            case Err(reason): return Err(reason)
+        return Ok((nil, Some(table), table, 0))
+    val counts_res = zstd_fse_parse_normalized_counts(input, pos, block_end, max_table_log, predefined_distribution.len() - 1)
+    val counts = match counts_res:
+        case Ok(found_counts): found_counts
+        case Err(reason): return Err(reason)
+    val table_res = zstd_fse_build_decode_table(counts.table_log, counts.counts)
+    val table = match table_res:
+        case Ok(found_table): found_table
+        case Err(reason): return Err(reason)
+    Ok((nil, Some(table), table, counts.bytes_used))
+
+fn _zstd_parse_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: ZstdSequenceModes, previous_tables: ZstdSequenceTableHistory) -> Result<(ZstdSequenceTables, ZstdSequenceTableHistory), CompressionError>:
+    # Gate unsupported modes with specific errors before attempting decode
+    if (modes.literals_length_mode == 3 or
+            modes.offsets_mode == 3 or
+            modes.match_length_mode == 3):
+        return Err(CompressionError.UnsupportedFeature("zstd repeated fse tables are not supported"))
+    if (modes.literals_length_mode == 0 and
+            modes.offsets_mode == 0 and
+            modes.match_length_mode == 0):
+        return Err(CompressionError.UnsupportedFeature("zstd sequence decoding tables via all-predefined modes not supported"))
+    var cursor = pos
+    val ll_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.literals_length_mode, ZSTD_LL_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION, previous_tables.literal_lengths)
+    val (ll_rle, ll_table, next_ll_table, ll_used) = match ll_res:
+        case Ok(parsed): parsed
+        case Err(reason): return Err(reason)
+    cursor = cursor + ll_used
+    val of_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.offsets_mode, ZSTD_OF_MAX_TABLE_LOG, ZSTD_OF_DEFAULT_DISTRIBUTION, previous_tables.offsets)
+    val (of_rle, of_table, next_of_table, of_used) = match of_res:
+        case Ok(parsed): parsed
+        case Err(reason): return Err(reason)
+    cursor = cursor + of_used
+    val ml_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.match_length_mode, ZSTD_ML_MAX_TABLE_LOG, ZSTD_ML_DEFAULT_DISTRIBUTION, previous_tables.match_lengths)
+    val (ml_rle, ml_table, next_ml_table, ml_used) = match ml_res:
+        case Ok(parsed): parsed
+        case Err(reason): return Err(reason)
+    cursor = cursor + ml_used
+    Ok((
+        ZstdSequenceTables(
+        literal_lengths_mode: modes.literals_length_mode,
+        literal_lengths_rle: ll_rle,
+        literal_lengths: ll_table,
+        offsets_mode: modes.offsets_mode,
+        offsets_rle: of_rle,
+        offsets: of_table,
+        match_lengths_mode: modes.match_length_mode,
+        match_lengths_rle: ml_rle,
+        match_lengths: ml_table,
+        bytes_used: cursor - pos
+        ),
+        ZstdSequenceTableHistory(
+            literal_lengths: next_ll_table,
+            offsets: next_of_table,
+            match_lengths: next_ml_table
+        )
+    ))
+
+fn _zstd_read_sequence_bits(reader: ZstdMsbBackwardBits, count: i64) -> Result<(i64, ZstdMsbBackwardBits), CompressionError>:
+    if count == 0:
+        return Ok((0, reader))
+    val read_res = zstd_msb_bits_read(reader, count)
+    val (value, next_reader, padded) = match read_res:
+        case Ok(found): found
+        case Err(reason): return Err(reason)
+    # Real zstd sequence bitstreams carry exactly the required bits; running off
+    # the end mid-read is a truncated/corrupt stream, not a zero-padded tail.
+    if padded:
+        return Err(CompressionError.TruncatedInput("zstd sequence bitstream bits"))
+    Ok((value, next_reader))
+
+fn _zstd_read_sequence_state(reader: ZstdMsbBackwardBits, table: ZstdFseDecodeTable?) -> Result<(ZstdFseState?, ZstdMsbBackwardBits), CompressionError>:
+    if table == nil:
+        return Ok((nil, reader))
+    val actual = table ??
+        ZstdFseDecodeTable(table_log: 0, entries: [])
+    val raw_res = _zstd_read_sequence_bits(reader, actual.table_log)
+    val (raw_state, next_reader) = match raw_res:
+        case Ok(parsed): parsed
+        case Err(reason): return Err(reason)
+    val state_res = zstd_fse_init_state(raw_state, actual)
+    val state = match state_res:
+        case Ok(found_state): found_state
+        case Err(reason): return Err(reason)
+    Ok((Some(state), next_reader))
+
+fn _zstd_get_sequence_code(table_mode: i64, rle_code: i64?, table: ZstdFseDecodeTable?, state: ZstdFseState?) -> Result<(i64, i64, i64), CompressionError>:
+    if table_mode == 1:
+        if rle_code == nil:
+            return Err(CompressionError.CorruptStream("zstd missing rle sequence code"))
+        return Ok((rle_code ?? 0, -1, -1))
+    if table == nil or state == nil:
+        return Err(CompressionError.CorruptStream("zstd missing fse sequence state"))
+    val actual_table = table ??
+        ZstdFseDecodeTable(table_log: 0, entries: [])
+    val actual_state = state ?? ZstdFseState(state: 0)
+    val entry_res = zstd_fse_get_entry(actual_table, actual_state)
+    val entry = match entry_res:
+        case Ok(found_entry): found_entry
+        case Err(reason): return Err(reason)
+    Ok((entry.symbol, entry.bits, entry.baseline))
+
+fn _zstd_advance_sequence_state(reader: ZstdMsbBackwardBits, table_mode: i64, state: ZstdFseState?, bits: i64, baseline: i64) -> Result<(ZstdFseState?, ZstdMsbBackwardBits), CompressionError>:
+    if table_mode == 1:
+        return Ok((nil, reader))
+    val low_res = _zstd_read_sequence_bits(reader, bits)
+    val (low_bits, next_reader) = match low_res:
+        case Ok(found_bits): found_bits
+        case Err(reason): return Err(reason)
+    val next_state = baseline + low_bits
+    Ok((Some(ZstdFseState(state: next_state)), next_reader))
+
+fn _zstd_decode_fse_sequences(input: [u8], bitstream_start: i64, bitstream_end: i64, sequence_count: i64, tables: ZstdSequenceTables) -> Result<[ZstdSequence], CompressionError>:
+    if sequence_count < 0:
+        return Err(CompressionError.CorruptStream("zstd negative sequence count"))
+    if bitstream_start >= bitstream_end:
+        return Err(CompressionError.TruncatedInput("zstd sequence bitstream"))
+    val reader_res = zstd_msb_bits_init(input, bitstream_start, bitstream_end)
+    var reader = match reader_res:
+        case Ok(found_reader): found_reader
+        case Err(reason): return Err(reason)
+
+    val ll_state_res = _zstd_read_sequence_state(reader, tables.literal_lengths)
+    var (ll_state, after_ll) = match ll_state_res:
+        case Ok(found_state): found_state
+        case Err(reason): return Err(reason)
+    reader = after_ll
+    val of_state_res = _zstd_read_sequence_state(reader, tables.offsets)
+    var (of_state, after_of) = match of_state_res:
+        case Ok(found_state): found_state
+        case Err(reason): return Err(reason)
+    reader = after_of
+    val ml_state_res = _zstd_read_sequence_state(reader, tables.match_lengths)
+    var (ml_state, after_ml) = match ml_state_res:
+        case Ok(found_state): found_state
+        case Err(reason): return Err(reason)
+    reader = after_ml
+
+    var sequences: [ZstdSequence] = []
+    var idx = 0
+    while idx < sequence_count:
+        val of_code_res = _zstd_get_sequence_code(tables.offsets_mode, tables.offsets_rle, tables.offsets, of_state)
+        val (offset_code, of_bits, of_baseline) = match of_code_res:
+            case Ok(found_code): found_code
+            case Err(reason): return Err(reason)
+        val ml_code_res = _zstd_get_sequence_code(tables.match_lengths_mode, tables.match_lengths_rle, tables.match_lengths, ml_state)
+        val (match_code, ml_bits, ml_baseline) = match ml_code_res:
+            case Ok(found_code): found_code
+            case Err(reason): return Err(reason)
+        val ll_code_res = _zstd_get_sequence_code(tables.literal_lengths_mode, tables.literal_lengths_rle, tables.literal_lengths, ll_state)
+        val (literal_code, ll_bits, ll_baseline) = match ll_code_res:
+            case Ok(found_code): found_code
+            case Err(reason): return Err(reason)
+
+        if offset_code < 0 or offset_code > 31:
+            return Err(CompressionError.UnsupportedFeature("zstd offset codes above 31 are not supported"))
+        val offset_extra_res = _zstd_read_sequence_bits(reader, offset_code)
+        val (offset_extra, after_offset) = match offset_extra_res:
+            case Ok(found_extra): found_extra
+            case Err(reason): return Err(reason)
+        reader = after_offset
+
+        val match_extra_bits_res = _zstd_match_length_extra_bits(match_code)
+        val match_extra_bits = match match_extra_bits_res:
+            case Ok(found_bits): found_bits
+            case Err(reason): return Err(reason)
+        val match_extra_res = _zstd_read_sequence_bits(reader, match_extra_bits)
+        val (match_extra, after_match) = match match_extra_res:
+            case Ok(found_extra): found_extra
+            case Err(reason): return Err(reason)
+        reader = after_match
+
+        val literal_extra_bits_res = _zstd_literal_length_extra_bits(literal_code)
+        val literal_extra_bits = match literal_extra_bits_res:
+            case Ok(found_bits): found_bits
+            case Err(reason): return Err(reason)
+        val literal_extra_res = _zstd_read_sequence_bits(reader, literal_extra_bits)
+        val (literal_extra, after_literal) = match literal_extra_res:
+            case Ok(found_extra): found_extra
+            case Err(reason): return Err(reason)
+        reader = after_literal
+
+        val literal_length_res = _zstd_decode_literal_length(literal_code, literal_extra)
+        val literal_length = match literal_length_res:
+            case Ok(found_length): found_length
+            case Err(reason): return Err(reason)
+        val match_length_res = _zstd_decode_match_length(match_code, match_extra)
+        val match_length = match match_length_res:
+            case Ok(found_length): found_length
+            case Err(reason): return Err(reason)
+
+        sequences.push(ZstdSequence(
+            literal_length: literal_length,
+            match_length: match_length,
+            offset_value: (1 << offset_code) + offset_extra
+        ))
+
+        if idx + 1 < sequence_count:
+            val ll_next_res = _zstd_advance_sequence_state(reader, tables.literal_lengths_mode, ll_state, ll_bits, ll_baseline)
+            (ll_state, reader) = match ll_next_res:
+                case Ok(next_state): next_state
+                case Err(reason): return Err(reason)
+            val ml_next_res = _zstd_advance_sequence_state(reader, tables.match_lengths_mode, ml_state, ml_bits, ml_baseline)
+            (ml_state, reader) = match ml_next_res:
+                case Ok(next_state): next_state
+                case Err(reason): return Err(reason)
+            val of_next_res = _zstd_advance_sequence_state(reader, tables.offsets_mode, of_state, of_bits, of_baseline)
+            (of_state, reader) = match of_next_res:
+                case Ok(next_state): next_state
+                case Err(reason): return Err(reason)
+        idx = idx + 1
+    if zstd_msb_bits_remaining(reader) != 0:
+        return Err(CompressionError.CorruptStream("zstd sequence bitstream has trailing bits"))
+    Ok(sequences)
+
+fn _zstd_read_extra_bits(reader: ZstdMsbBackwardBits, count: i64) -> Result<(i64, ZstdMsbBackwardBits), CompressionError>:
+    if count == 0:
+        return Ok((0, reader))
+    val read_res = zstd_msb_bits_read(reader, count)
+    val (read_bits, next_reader, padded) = match read_res:
+        case Ok(found): found
+        case Err(reason): return Err(reason)
+    if padded:
+        return Err(CompressionError.TruncatedInput("zstd sequence bitstream bits"))
+    Ok((read_bits, next_reader))
+
+fn _zstd_decode_rle_sequences(input: [u8], bitstream_start: i64, bitstream_end: i64, sequence_count: i64, tables: ZstdRleSequenceTables) -> Result<[ZstdSequence], CompressionError>:
+    if sequence_count < 0:
+        return Err(CompressionError.CorruptStream("zstd negative sequence count"))
+    if bitstream_start >= bitstream_end:
+        return Err(CompressionError.TruncatedInput("zstd sequence bitstream"))
+    val ll_bits_res = _zstd_literal_length_extra_bits(tables.literal_length_code)
+    val ll_bits = match ll_bits_res:
+        case Ok(found_bits): found_bits
+        case Err(reason): return Err(reason)
+    val ml_bits_res = _zstd_match_length_extra_bits(tables.match_length_code)
+    val ml_bits = match ml_bits_res:
+        case Ok(found_bits): found_bits
+        case Err(reason): return Err(reason)
+    if tables.offset_code < 0 or tables.offset_code > 31:
+        return Err(CompressionError.UnsupportedFeature("zstd offset codes above 31 are not supported"))
+    val reader_res = zstd_msb_bits_init(input, bitstream_start, bitstream_end)
+    var reader = match reader_res:
+        case Ok(found_reader): found_reader
+        case Err(reason): return Err(reason)
+    var sequences: [ZstdSequence] = []
+    var i = 0
+    while i < sequence_count:
+        val offset_extra_res = _zstd_read_extra_bits(reader, tables.offset_code)
+        val (offset_extra, after_offset) = match offset_extra_res:
+            case Ok(found_extra): found_extra
+            case Err(reason): return Err(reason)
+        reader = after_offset
+        val match_extra_res = _zstd_read_extra_bits(reader, ml_bits)
+        val (match_extra, after_match) = match match_extra_res:
+            case Ok(found_extra): found_extra
+            case Err(reason): return Err(reason)
+        reader = after_match
+        val literal_extra_res = _zstd_read_extra_bits(reader, ll_bits)
+        val (literal_extra, after_literal) = match literal_extra_res:
+            case Ok(found_extra): found_extra
+            case Err(reason): return Err(reason)
+        reader = after_literal
+        val literal_length_res = _zstd_decode_literal_length(tables.literal_length_code, literal_extra)
+        val literal_length = match literal_length_res:
+            case Ok(found_length): found_length
+            case Err(reason): return Err(reason)
+        val match_length_res = _zstd_decode_match_length(tables.match_length_code, match_extra)
+        val match_length = match match_length_res:
+            case Ok(found_length): found_length
+            case Err(reason): return Err(reason)
+        sequences.push(ZstdSequence(
+            literal_length: literal_length,
+            match_length: match_length,
+            offset_value: (1 << tables.offset_code) + offset_extra
+        ))
+        i = i + 1
+    if zstd_msb_bits_remaining(reader) != 0:
+        return Err(CompressionError.CorruptStream("zstd sequence bitstream has trailing bits"))
+    Ok(sequences)
+
+fn _zstd_promote_repeat_offset(history: ZstdRepeatOffsets, offset: i64) -> ZstdRepeatOffsets:
+    if offset == history.rep1:
+        return history
+    if offset == history.rep2:
+        return ZstdRepeatOffsets(rep1: history.rep2, rep2: history.rep1, rep3: history.rep3)
+    if offset == history.rep3:
+        return ZstdRepeatOffsets(rep1: history.rep3, rep2: history.rep1, rep3: history.rep2)
+    ZstdRepeatOffsets(rep1: offset, rep2: history.rep1, rep3: history.rep2)
+
+fn _zstd_resolve_sequence_offset(sequence: ZstdSequence, history: ZstdRepeatOffsets) -> Result<(i64, ZstdRepeatOffsets), CompressionError>:
+    if sequence.offset_value <= 0:
+        return Err(CompressionError.CorruptStream("zstd invalid sequence distance"))
+    if sequence.offset_value > 3:
+        val offset = sequence.offset_value - 3
+        if offset <= 0:
+            return Err(CompressionError.CorruptStream("zstd invalid match offset"))
+        return Ok((offset, _zstd_promote_repeat_offset(history, offset)))
+    var offset = 0
+    if sequence.literal_length == 0:
+        if sequence.offset_value == 1:
+            offset = history.rep2
+        elif sequence.offset_value == 2:
+            offset = history.rep3
+        else:
+            offset = history.rep1 - 1
+    else:
+        if sequence.offset_value == 1:
+            offset = history.rep1
+        elif sequence.offset_value == 2:
+            offset = history.rep2
+        else:
+            offset = history.rep3
+    if offset <= 0:
+        return Err(CompressionError.CorruptStream("zstd invalid repeat offset"))
+    Ok((offset, _zstd_promote_repeat_offset(history, offset)))
+
+fn _zstd_execute_sequences(base_out: [u8], literals: [u8], sequences: [ZstdSequence], initial_history: ZstdRepeatOffsets) -> Result<([u8], ZstdRepeatOffsets), CompressionError>:
+    var out = base_out
+    var history = initial_history
+    var literals_pos = 0
+    var i = 0
+    while i < sequences.len():
+        val sequence = sequences[i]
+        if sequence.literal_length < 0:
+            return Err(CompressionError.CorruptStream("zstd invalid sequence literal length"))
+        if literals_pos + sequence.literal_length > literals.len():
+            return Err(CompressionError.CorruptStream("zstd sequence literal length exceeds literals buffer"))
+        if sequence.match_length <= 0:
+            return Err(CompressionError.CorruptStream("zstd invalid sequence match length"))
+        out = append_bytes(out, literals.slice(literals_pos, literals_pos + sequence.literal_length))
+        literals_pos = literals_pos + sequence.literal_length
+        val offset_res = _zstd_resolve_sequence_offset(sequence, history)
+        if offset_res.is_err():
+            return Err(offset_res.unwrap_err())
+        val (distance, next_history) = offset_res.unwrap()
+        if distance > out.len():
+            return Err(CompressionError.CorruptStream("zstd invalid match offset"))
+        val copy_res = append_self_overlap_copy(out, distance, sequence.match_length)
+        out = match copy_res:
+            case Ok(copied_out): copied_out
+            case Err(reason): return Err(reason)
+        history = next_history
+        i = i + 1
+    if literals_pos < literals.len():
+        out = append_bytes(out, literals.slice(literals_pos, literals.len()))
+    Ok((out, history))
+
+fn zstd_execute_sequences_for_test(base_out: [u8], literals: [u8], sequences: [ZstdSequence], initial_history: ZstdRepeatOffsets) -> Result<([u8], ZstdRepeatOffsets), CompressionError>:
+    _zstd_execute_sequences(base_out, literals, sequences, initial_history)
+
+fn _zstd_default_sequence_table_history() -> Result<ZstdSequenceTableHistory, CompressionError>:
+    val ll_res = _zstd_predefined_table(ZSTD_LL_DEFAULT_DISTRIBUTION, 6)
+    val literal_lengths = match ll_res:
+        case Ok(found_table): found_table
+        case Err(reason): return Err(reason)
+    val of_res = _zstd_predefined_table(ZSTD_OF_DEFAULT_DISTRIBUTION, 5)
+    val offsets = match of_res:
+        case Ok(found_table): found_table
+        case Err(reason): return Err(reason)
+    val ml_res = _zstd_predefined_table(ZSTD_ML_DEFAULT_DISTRIBUTION, 6)
+    val match_lengths = match ml_res:
+        case Ok(found_table): found_table
+        case Err(reason): return Err(reason)
+    Ok(ZstdSequenceTableHistory(
+        literal_lengths: literal_lengths,
+        offsets: offsets,
+        match_lengths: match_lengths
+    ))

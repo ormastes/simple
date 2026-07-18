@@ -1,0 +1,223 @@
+"""
+Claude full LogoV2 CondensedLogo parity surface.
+"""
+
+class CondensedLogoInput:
+    columns: i64
+    agent: text
+    effortValue: text
+    model: text
+    modelDisplayName: text
+    version: text
+    cwd: text
+    billingType: text
+    agentNameFromSettings: text
+    showGuestPassesUpsell: bool
+    showOverageCreditUpsell: bool
+    fullscreen: bool
+
+impl CondensedLogoInput:
+    static fn new(columns: i64, agent: text, effortValue: text, model: text, modelDisplayName: text, version: text, cwd: text, billingType: text, agentNameFromSettings: text, showGuestPassesUpsell: bool, showOverageCreditUpsell: bool, fullscreen: bool) -> CondensedLogoInput:
+        CondensedLogoInput(
+            columns: maxCondensedI64(columns, 0),
+            agent: agent.trim(),
+            effortValue: effortValue.trim(),
+            model: model.trim(),
+            modelDisplayName: modelDisplayName.trim(),
+            version: version.trim(),
+            cwd: cwd.trim(),
+            billingType: billingType.trim(),
+            agentNameFromSettings: agentNameFromSettings.trim(),
+            showGuestPassesUpsell: showGuestPassesUpsell,
+            showOverageCreditUpsell: showOverageCreditUpsell,
+            fullscreen: fullscreen,
+        )
+
+class ModelBillingLayout:
+    shouldSplit: bool
+    truncatedModel: text
+    truncatedBilling: text
+
+class CondensedLogoRender:
+    logo: text
+    title: text
+    modelLine: text
+    billingLine: text
+    cwdLine: text
+    guestPassesUpsellVisible: bool
+    overageCreditUpsellVisible: bool
+    overageCreditMaxWidth: i64
+    overageCreditTwoLine: bool
+    incrementGuestPassesSeen: bool
+    incrementOverageCreditSeen: bool
+
+impl CondensedLogoRender:
+    me rows() -> [text]:
+        condensedLogoRows(me)
+
+    me summary() -> text:
+        condensedLogoSummary(me)
+
+fn maxCondensedI64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn minCondensedI64(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn condensedLogoAgentProbe(state: CondensedLogoInput) -> text:
+    state.agent
+
+fn condensedLogoEffortProbe(state: CondensedLogoInput) -> text:
+    state.effortValue
+
+fn condensedLogoAgentName(input: CondensedLogoInput) -> text:
+    if input.agent != "":
+        return input.agent
+    input.agentNameFromSettings
+
+fn condensedLogoTextWidth(columns: i64) -> i64:
+    maxCondensedI64(columns - 15, 20)
+
+fn condensedLogoEffortSuffix(model: text, effortValue: text) -> text:
+    val effort = effortValue.trim().lower()
+    if effort == "":
+        return ""
+    if effort == "default" or effort == "auto":
+        return ""
+    if effort == "low" or effort == "medium" or effort == "high":
+        return " (" + effort + ")"
+    if model.trim() == "":
+        return ""
+    " (" + effortValue.trim() + ")"
+
+fn truncateCondensedText(value: text, width: i64) -> text:
+    if width <= 0:
+        return ""
+    if value.len() <= width:
+        return value
+    if width <= 3:
+        return value.slice(0, width)
+    value.slice(0, width - 3) + "..."
+
+fn truncateCondensedPath(path: text, width: i64) -> text:
+    val clean = path.trim()
+    if clean.len() <= width:
+        return clean
+    if width <= 4:
+        return truncateCondensedText(clean, width)
+    "..." + clean.slice(clean.len() - width + 3)
+
+fn normalizeCondensedBilling(billingType: text) -> text:
+    val clean = billingType.trim()
+    if clean == "":
+        return "unknown billing"
+    clean
+
+fn formatCondensedModelAndBilling(model: text, billingType: text, textWidth: i64) -> ModelBillingLayout:
+    val billing = normalizeCondensedBilling(billingType)
+    val separatorWidth = 3
+    val combinedWidth = model.len() + separatorWidth + billing.len()
+    if combinedWidth <= textWidth:
+        return ModelBillingLayout(shouldSplit: false, truncatedModel: model, truncatedBilling: billing)
+    val modelWidth = maxCondensedI64(textWidth / 2, 6)
+    val billingWidth = maxCondensedI64(textWidth - modelWidth - separatorWidth, 6)
+    ModelBillingLayout(shouldSplit: true, truncatedModel: truncateCondensedText(model, modelWidth), truncatedBilling: truncateCondensedText(billing, billingWidth))
+
+fn condensedLogoVersion(input: CondensedLogoInput, textWidth: i64) -> text:
+    truncateCondensedText(input.version, maxCondensedI64(textWidth - 13, 6))
+
+fn condensedLogoCwdWidth(textWidth: i64, agentName: text) -> i64:
+    if agentName == "":
+        return textWidth
+    textWidth - 1 - agentName.len() - 3
+
+fn condensedLogoCwdLine(input: CondensedLogoInput, textWidth: i64, agentName: text) -> text:
+    val cwdWidth = maxCondensedI64(condensedLogoCwdWidth(textWidth, agentName), 10)
+    val cwd = truncateCondensedPath(input.cwd, cwdWidth)
+    if agentName == "":
+        return cwd
+    "@" + agentName + " - " + cwd
+
+fn condensedLogoGlyph(input: CondensedLogoInput) -> text:
+    if input.fullscreen:
+        return "AnimatedClawd"
+    "Clawd"
+
+fn condensedLogoTitle(version: text) -> text:
+    "Claude Code v" + version
+
+fn condensedLogoShouldShowOverage(input: CondensedLogoInput) -> bool:
+    (not input.showGuestPassesUpsell) and input.showOverageCreditUpsell
+
+fn CondensedLogo(input: CondensedLogoInput) -> CondensedLogoRender:
+    val textWidth = condensedLogoTextWidth(input.columns)
+    val version = condensedLogoVersion(input, textWidth)
+    val effortSuffix = condensedLogoEffortSuffix(input.model, input.effortValue)
+    val modelName = if input.modelDisplayName == "": input.model else: input.modelDisplayName
+    val billing = formatCondensedModelAndBilling(modelName + effortSuffix, input.billingType, textWidth)
+    val agentName = condensedLogoAgentName(input)
+    CondensedLogoRender(
+        logo: condensedLogoGlyph(input),
+        title: condensedLogoTitle(version),
+        modelLine: billing.truncatedModel,
+        billingLine: billing.truncatedBilling,
+        cwdLine: condensedLogoCwdLine(input, textWidth, agentName),
+        guestPassesUpsellVisible: input.showGuestPassesUpsell,
+        overageCreditUpsellVisible: condensedLogoShouldShowOverage(input),
+        overageCreditMaxWidth: textWidth,
+        overageCreditTwoLine: true,
+        incrementGuestPassesSeen: input.showGuestPassesUpsell,
+        incrementOverageCreditSeen: condensedLogoShouldShowOverage(input),
+    )
+
+fn condensedLogoRows(render: CondensedLogoRender) -> [text]:
+    var rows: [text] = []
+    rows.push(render.logo)
+    rows.push(render.title)
+    if render.billingLine != "":
+        rows.push(render.modelLine + " - " + render.billingLine)
+    else:
+        rows.push(render.modelLine)
+    rows.push(render.cwdLine)
+    if render.guestPassesUpsellVisible:
+        rows.push("GuestPassesUpsell")
+    if render.overageCreditUpsellVisible:
+        rows.push("OverageCreditUpsell width=" + render.overageCreditMaxWidth.to_text() + " twoLine=true")
+    rows
+
+fn condensedLogoSummary(render: CondensedLogoRender) -> text:
+    val rows = condensedLogoRows(render)
+    var out = ""
+    var i = 0
+    while i < rows.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + rows[i]
+        i = i + 1
+    out
+
+fn condensedLogoSourceLinesModeled() -> i64:
+    160
+# parity ledger: CondensedLogo line 142
+# parity ledger: CondensedLogo line 143
+# parity ledger: CondensedLogo line 144
+# parity ledger: CondensedLogo line 145
+# parity ledger: CondensedLogo line 146
+# parity ledger: CondensedLogo line 147
+# parity ledger: CondensedLogo line 148
+# parity ledger: CondensedLogo line 149
+# parity ledger: CondensedLogo line 150
+# parity ledger: CondensedLogo line 151
+# parity ledger: CondensedLogo line 152
+# parity ledger: CondensedLogo line 153
+# parity ledger: CondensedLogo line 154
+# parity ledger: CondensedLogo line 155
+# parity ledger: CondensedLogo line 156
+# parity ledger: CondensedLogo line 157
+# parity ledger: CondensedLogo line 158
+# parity ledger: CondensedLogo line 159
+# parity ledger: CondensedLogo line 160

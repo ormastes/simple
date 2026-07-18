@@ -1,0 +1,65 @@
+# Security Audit Log — write security events to a log file or stdout.
+#
+# Provides: log_security_event.
+
+use std.common.security.types.{AuditEntry, AuditConfig, SecuritySeverity, SecurityEvent}
+
+extern fn rt_file_append_text(path: text, content: text)
+extern fn rt_stderr_write(msg: text)
+
+fn _severity_rank(s: SecuritySeverity) -> i64:
+    match s:
+        SecuritySeverity.Debug:    0
+        SecuritySeverity.Info:     1
+        SecuritySeverity.Warn:     2
+        SecuritySeverity.Error:    3
+        SecuritySeverity.Critical: 4
+
+fn _severity_name(s: SecuritySeverity) -> text:
+    match s:
+        SecuritySeverity.Debug:    "DEBUG"
+        SecuritySeverity.Info:     "INFO"
+        SecuritySeverity.Warn:     "WARN"
+        SecuritySeverity.Error:    "ERROR"
+        SecuritySeverity.Critical: "CRITICAL"
+
+# Sanitize a log field value: strip CR, LF, and tab to prevent log forging.
+fn _sanitize_log_field(value: text) -> text:
+    var v = value
+    v = v.replace("\r", "")
+    v = v.replace("\n", "")
+    v = v.replace("\t", " ")
+    v
+
+fn _event_text(event: SecurityEvent) -> text:
+    match event:
+        SecurityEvent.AccessDenied(resource, capability, peer):
+            val r = _sanitize_log_field(resource)
+            val c = _sanitize_log_field(capability)
+            val p = _sanitize_log_field(peer)
+            "ACCESS_DENIED resource={r} capability={c} peer={p}"
+        SecurityEvent.AuthFailure(user, reason):
+            val u = _sanitize_log_field(user)
+            val rs = _sanitize_log_field(reason)
+            "AUTH_FAILURE user={u} reason={rs}"
+        SecurityEvent.PrivilegeEscalation(subject, attempted_level):
+            val s = _sanitize_log_field(subject)
+            val a = _sanitize_log_field(attempted_level)
+            "PRIVILEGE_ESCALATION subject={s} attempted={a}"
+        SecurityEvent.AnomalyDetected(description):
+            val d = _sanitize_log_field(description)
+            "ANOMALY description={d}"
+
+# Append an audit entry to the configured log destination.
+fn log_security_event(entry: AuditEntry, config: AuditConfig):
+    if not config.enabled:
+        return
+    if _severity_rank(entry.severity) < _severity_rank(config.min_severity):
+        return
+    val corr = _sanitize_log_field(entry.correlation_id)
+    val mod_path = _sanitize_log_field(entry.module_path)
+    val line = "[{_severity_name(entry.severity)}] corr={corr} module={mod_path} {_event_text(entry.event)}\n"
+    if config.log_to_stdout:
+        rt_stderr_write(line)
+    if config.log_file.len() > 0:
+        rt_file_append_text(config.log_file, line)

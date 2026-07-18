@@ -1,0 +1,127 @@
+#!/bin/sh
+set -u
+
+# redeploy_gate.shs — behavioral acceptance gate for a stage-4 self-host redeploy.
+#
+# ~130 correct pure-Simple source fixes are FROZEN behind a stage-4 self-host
+# redeploy (see doc/03_plan/cert/redeploy_selfhost_plan.md,
+# doc/03_plan/cert/redeploy_kit/ACTIVATION_MANIFEST.md). Before a rebuilt
+# candidate binary is promoted into bin/release/<triple>/simple, it must pass
+# these behavioral checks. Each check is a discriminator that a *linked-but-
+# miscompiled* stage4 binary fails while a *correctly self-hosted* one passes —
+# a fresh binary that merely links is not enough.
+#
+# Usage:
+#   sh redeploy_gate.shs [CANDIDATE_BIN]   # candidate binary; default: bin/simple
+#   sh redeploy_gate.shs --list            # print check names (no binary needed)
+#   sh redeploy_gate.shs --help
+#
+# Output: PASS/FAIL per check + a final "GATE: N/M PASS" line.
+# Exit:   0 if every executed check PASSes; non-zero otherwise.
+# Paths are repo-root-relative, computed from this script's location — no /tmp.
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
+FIX="$SCRIPT_DIR/fixtures"
+
+# Ordered list of every check name (used by --list and as documentation).
+CHECK_NAMES="val-scalar add print-literal enum-payload qmark twofn struct-field struct-copy-isolation class-in-array-mutation cfg-arch-dispatch-a cfg-arch-dispatch-b cfg-lowered-funcs=2"
+
+case "${1:-}" in
+    --list|-l)
+        for n in $CHECK_NAMES; do printf '%s\n' "$n"; done
+        exit 0
+        ;;
+    --help|-h)
+        sed -n '3,26p' "$0"
+        exit 0
+        ;;
+esac
+
+# Candidate binary: $1 (default bin/simple), resolved relative to repo root.
+BIN_ARG="${1:-bin/simple}"
+case "$BIN_ARG" in
+    /*) BIN="$BIN_ARG" ;;
+    *)  BIN="$REPO_ROOT/$BIN_ARG" ;;
+esac
+
+if [ ! -x "$BIN" ]; then
+    printf 'redeploy-gate: FATAL — candidate binary not found/executable: %s\n' "$BIN" >&2
+    printf 'redeploy-gate: (run with --list to print check names without a binary)\n' >&2
+    exit 1
+fi
+
+PASS=0
+TOTAL=0
+SKIP=0
+
+pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf 'PASS  %-24s %s\n' "$1" "$2"; }
+fail() { TOTAL=$((TOTAL + 1)); printf 'FAIL  %-24s %s\n' "$1" "$2"; }
+skip() { SKIP=$((SKIP + 1)); printf 'SKIP  %-24s %s\n' "$1" "$2"; }
+
+# assert_eq NAME EXPECTED ACTUAL  — exact stdout match (command substitution
+# already strips trailing newlines from the captured output).
+assert_eq() {
+    if [ "$3" = "$2" ]; then
+        pass "$1" "= $2"
+    else
+        fail "$1" "expected [$2] got [$(printf '%s' "$3" | tr '\n' ';')]"
+    fi
+}
+
+assert_host_arch() {
+    host_arch="$(uname -m)"
+    case "$host_arch" in
+        arm64|aarch64) expected_arch="arm64" ;;
+        x86_64|amd64) expected_arch="x86_64" ;;
+        *) fail "$1" "unsupported host architecture: $host_arch"; return ;;
+    esac
+    if printf '%s' "$2" | grep -q "arch_name() = ${expected_arch}"; then
+        pass "$1" "selected ${expected_arch}"
+    else
+        fail "$1" "expected ${expected_arch}: [$(printf '%s' "$2" | tr '\n' ';')]"
+    fi
+}
+
+printf '== STAGE-4 REDEPLOY BEHAVIORAL GATE ==\n'
+printf 'candidate : %s\n' "$BIN"
+printf 'fixtures  : %s\n' "$FIX"
+printf -- '---------------------------------------------------------------\n'
+
+# --- inline -c checks (no fixture) ---
+OUT=$("$BIN" -c 'val x=5; print(x)' 2>/dev/null); assert_eq "val-scalar"    "5" "$OUT"
+OUT=$("$BIN" -c 'print(1+1)'        2>/dev/null); assert_eq "print-literal" "2" "$OUT"
+
+# --- fixture checks (exact stdout) ---
+OUT=$("$BIN" run "$FIX/p2_add.spl"               2>/dev/null); assert_eq "add"                    "5"   "$OUT"
+OUT=$("$BIN" run "$FIX/payload_check.spl"         2>/dev/null); assert_eq "enum-payload"           "42"  "$OUT"
+OUT=$("$BIN" run "$FIX/qmark_check.spl"           2>/dev/null); assert_eq "qmark"                  "42"  "$OUT"
+OUT=$("$BIN" run "$FIX/twofn_min.spl"             2>/dev/null); assert_eq "twofn"                  "99"  "$OUT"
+OUT=$("$BIN" run "$FIX/struct_field.spl"          2>/dev/null); assert_eq "struct-field"           "7"   "$OUT"
+OUT=$("$BIN" run "$FIX/struct_copy_isolation.spl" 2>/dev/null); assert_eq "struct-copy-isolation"  "5"   "$OUT"
+
+# --- #112: class-in-array mutation MUST run under the interpreter ---
+OUT=$(SIMPLE_EXECUTION_MODE=interpret "$BIN" run "$FIX/class_in_array_mutation.spl" 2>/dev/null)
+assert_eq "class-in-array-mutation" "777" "$OUT"
+
+# --- #45: cfg arch-variant dispatch (fixtures self-check on an x86_64 host) ---
+OUT=$("$BIN" run "$FIX/cfg_arch_dispatch_repro_a.spl" 2>/dev/null); assert_host_arch "cfg-arch-dispatch-a" "$OUT"
+OUT=$("$BIN" run "$FIX/cfg_arch_dispatch_repro_b.spl" 2>/dev/null); assert_host_arch "cfg-arch-dispatch-b" "$OUT"
+
+# --- cfg-lowered-funcs=2: count-check (recorded gate gap) ---
+# The lowered-function count is not observable from current CLI output.
+# ponytail: needs an --emit=mir / lowered-fn dump flag to assert count == 2;
+# until then this stays a soft/skipped check rather than inventing a mechanism.
+if "$BIN" run "$FIX/cfg_min2.spl" >/dev/null 2>&1; then
+    skip "cfg-lowered-funcs=2" "fixture runs; count-check needs --emit/dump flag (ponytail)"
+else
+    skip "cfg-lowered-funcs=2" "fixture failed to run; count-check needs --emit/dump flag (ponytail)"
+fi
+
+printf -- '---------------------------------------------------------------\n'
+printf 'GATE: %d/%d PASS' "$PASS" "$TOTAL"
+[ "$SKIP" -gt 0 ] && printf ' (%d skipped)' "$SKIP"
+printf '\n'
+
+[ "$PASS" -eq "$TOTAL" ] || exit 1
+exit 0

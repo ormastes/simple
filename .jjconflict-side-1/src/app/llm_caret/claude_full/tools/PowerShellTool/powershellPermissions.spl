@@ -1,0 +1,51 @@
+const POWERSHELL_PERMISSIONS_SOURCE_LINES = 1648
+const POWERSHELL_PERMISSION_PROMPT = "PowerShell command requires permission"
+
+fn normalizePowerShellCommandRoute(command: text) -> text:
+    command.replace("\t", " ").to_lower()
+
+fn canonicalPowerShellCommandRoute(command: text) -> text:
+    val normalized = normalizePowerShellCommandRoute(command)
+    if normalized.starts_with("rm "):
+        return "remove-item " + normalized.substring(3)
+    if normalized.starts_with("microsoft.powershell.management\\remove-item "):
+        return "remove-item " + normalized.substring("microsoft.powershell.management\\remove-item ".len())
+    normalized
+
+fn powershellPermissionRuleRoute(behavior: text, command: text, matchMode: text) -> text:
+    behavior + ":" + matchMode + ":" + command
+
+fn suggestionForExactCommandRoute(command: text) -> text:
+    if command.contains("\n") || command.contains("*"):
+        return "none"
+    "allow exact " + command
+
+fn powershellRuleMatchesRoute(ruleCommand: text, input: text, matchMode: text, behavior: text) -> bool:
+    val rule = canonicalPowerShellCommandRoute(ruleCommand)
+    val command = canonicalPowerShellCommandRoute(input)
+    if behavior == "allow" && ruleCommand.contains("\\"):
+        return false
+    if matchMode == "prefix":
+        return command == rule || command.starts_with(rule + " ")
+    command == rule
+
+fn powershellToolCheckExactMatchPermissionRoute(input: text, hasDeny: bool, hasAsk: bool, hasAllow: bool) -> text:
+    if hasDeny:
+        return "deny"
+    if hasAsk:
+        return "ask " + POWERSHELL_PERMISSION_PROMPT
+    if hasAllow:
+        return "allow updatedInput " + input
+    "passthrough " + suggestionForExactCommandRoute(input)
+
+fn powershellToolCheckPermissionRoute(input: text, denyMatches: bool, askMatches: bool, allowMatches: bool) -> text:
+    if denyMatches:
+        return "deny"
+    if askMatches:
+        return "ask " + POWERSHELL_PERMISSION_PROMPT
+    if allowMatches:
+        return "allow updatedInput " + input
+    "passthrough approval prompt"
+
+fn powershellPermissionsSourceLinesModeled() -> i64:
+    POWERSHELL_PERMISSIONS_SOURCE_LINES

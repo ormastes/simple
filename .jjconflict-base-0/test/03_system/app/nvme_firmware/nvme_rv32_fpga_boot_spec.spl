@@ -1,0 +1,80 @@
+"""
+NVMe firmware rv32 **FPGA softcore** boot — the Simple-compiled rv32 FPGA boot image
+booted on QEMU virt (the documented FPGA-softcore stand-in) and observed over serial.
+
+**Feature IDs:** #NVME-RV32FPGA-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** Implemented
+**Research:** doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md
+
+`src/os/kernel/arch/riscv32/fpga_boot.spl` is the M-mode FPGA softcore entry for rv32
+(VexRiscv / LiteX / NaxRiscv), mirroring the rv64 `fpga_boot.spl`. Unlike the qemu
+`boot.spl` entry it installs `mtvec` first (a fault traps to a diagnostic handler instead
+of looping forever at 0x0 with no handler) and lives in `.text.start`. It reuses the
+proven rv32 no-alloc boot chain and the QEMU-virt-compatible memory layout, so it is
+"also verifiable on QEMU virt" exactly like the rv64 FPGA entry.
+
+This spec builds nothing; it boots the prebuilt FPGA image
+(`build/os/simpleos_riscv32_fpga.elf`) under `qemu-system-riscv32 -machine virt -smp 3`
+and asserts the FPGA banner, the 3-core SMP census, and the subsystem-health markers.
+
+FAIL-CLOSED: this spec passes ONLY when the FPGA boot image genuinely boots and the serial
+shows every required marker (banner + 3-core census + subsystem health). If
+`qemu-system-riscv32` is absent, the prebuilt image is missing, or a marker is absent, the
+single classification assertion below goes RED — it never asserts a self-containing literal
+and never skips. Run:
+`bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_fpga_boot_spec.spl`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val ELF: text = "build/os/simpleos_riscv32_fpga.elf"
+val SERIAL: text = "build/test-artifacts/nvme_rv32_fpga.log"
+
+fn _probe(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+fn _boot() -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "mkdir -p build/test-artifacts; timeout 12 qemu-system-riscv32 -machine virt -cpu rv32 -smp 3 -m 128M -nographic -bios none -kernel " + ELF + " -serial file:" + SERIAL + " </dev/null; cat " + SERIAL])
+
+describe "NVMe firmware rv32 FPGA softcore boot on QEMU virt":
+    """
+    The rv32 FPGA softcore boot image boots on a 3-hart QEMU machine (FPGA stand-in):
+    FPGA banner, 3-core census, and subsystem-health markers over serial.
+    """
+
+    it "the rv32 FPGA boot image boots on the softcore stand-in and reports health":
+        step("Probe the host for qemu-system-riscv32 and the prebuilt rv32 FPGA image")
+        val (qout, qerr, qcode) = _probe("command -v qemu-system-riscv32 >/dev/null 2>&1 && echo QEMU_PRESENT || echo QEMU_ABSENT")
+        val (eout, eerr, ecode) = _probe("test -f " + ELF + " && echo ELF_PRESENT || echo ELF_ABSENT")
+
+        # Single fail-closed classification (see header): GREEN only on a real boot whose
+        # serial shows the FPGA banner, the 3-core census, and the subsystem-health markers.
+        var verdict: text = "pass"
+        if qout.contains("QEMU_ABSENT"):
+            verdict = "host-unavailable: qemu-system-riscv32 not installed"
+        else:
+            if eout.contains("ELF_ABSENT"):
+                verdict = "missing-media: " + ELF + " not built (build the rv32 FPGA boot image first)"
+            else:
+                step("Boot the rv32 FPGA image on the softcore stand-in and capture serial")
+                val (out, err, code) = _boot()
+                if not out.contains("FPGA-RV32"):
+                    verdict = "boot-fail: FPGA-RV32 banner absent"
+                else:
+                    if out.contains("FAIL"):
+                        verdict = "boot-fail: serial failure marker present"
+                    else:
+                        if not out.contains("FPGA SMP: 3"):
+                            verdict = "boot-fail: 3-core FPGA census marker absent"
+                        else:
+                            if not out.contains("HEAP OK"):
+                                verdict = "boot-fail: heap subsystem health marker absent"
+                            else:
+                                if not out.contains("SVC OK"):
+                                    verdict = "boot-fail: supervisor-call subsystem health marker absent"
+
+        step("Fail-closed: only a real FPGA boot with banner + census + health classifies as pass")
+        expect(verdict).to_equal("pass")

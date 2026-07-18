@@ -1,0 +1,61 @@
+use std.io_runtime.{file_read}
+
+describe "MIR target context wiring":
+    it "keeps target state immutable below the driver boundary":
+        val types = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        val lowering = file_read("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+        val asm_targets = file_read("src/compiler/50.mir/_MirLowering/asm_and_targets.spl")
+
+        expect(types).to_contain("target_context: MirTargetContext")
+        expect(lowering).to_contain("static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext)")
+        expect(asm_targets).to_contain("self.target_context.arch")
+        expect(asm_targets).to_contain("self.target_context.os")
+        expect(asm_targets).to_contain("self.target_context.abi")
+        expect(asm_targets).to_contain("self.target_context.backend")
+        expect(asm_targets).to_contain("self.target_context.version")
+        expect(asm_targets.contains("\"x86_64\"\n\n    me get_target_os")).to_equal(false)
+
+    it "threads one context through normal, bootstrap, and nested lowerers":
+        val pipeline = file_read("src/compiler/80.driver/driver_pipeline.spl")
+        val bootstrap = file_read("src/compiler/80.driver/driver_bootstrap.spl")
+        val nested = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+
+        expect(pipeline).to_contain("val target_context = driver_mir_target_context(self.ctx.options)")
+        expect(pipeline).to_contain("MirLowering.new_for_target(bootstrap_hir.symbols, target_context)")
+        expect(pipeline).to_contain("target_context: target_context")
+        expect(bootstrap).to_contain("bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)")
+        expect(bootstrap).to_contain("bootstrap_lower_extra_hir_module_to_mir_for_target(extra_hir, target_context)")
+        expect(nested).to_contain("MirLowering.new_for_target(self.symbols, self.target_context)")
+
+    it "keeps LLVM default and Cranelift explicit":
+        val backend = file_read("src/compiler/70.backend/backend/backend_helpers.spl")
+        val target = file_read("src/compiler/80.driver/driver_mir_target.spl")
+        val provider = file_read("src/compiler/70.backend/backend/mir_target_context_provider.spl")
+
+        expect(backend).to_contain("elif backend_name == \"auto\" or backend_name == \"\"")
+        expect(backend).to_contain("elif backend_name == \"cranelift\"")
+        expect(target).to_contain("backend_mir_target_context(effective_backend)")
+        expect(provider).to_contain("capabilities.llc.version.major")
+        expect(provider).to_contain("capabilities.libllvm.version.major")
+        expect(provider).to_contain("val known_version = if version > 0: version else: -1")
+
+    it "routes backend, JIT, C, and seed-core lowerers through real boundary contexts":
+        val compiler_backend = file_read("src/compiler/70.backend/backend/compiler.spl")
+        val jit = file_read("src/compiler/70.backend/backend/jit_interpreter.spl")
+        val c_entry = file_read("src/compiler/70.backend/backend/compile_c_entry.spl")
+        val core = file_read("src/compiler/10.frontend/core/mir/lowering.spl")
+
+        expect(compiler_backend).to_contain("MirLowering.new_for_target(module.symbols, target_context)")
+        expect(jit).to_contain("MirLowering.new_for_target(module.symbols, target_context)")
+        expect(c_entry).to_contain("MirLowering.new_for_target(sym_table, target_context)")
+        expect(core).to_contain("bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)")
+        expect(compiler_backend.contains("MirLowering.new(module.symbols)")).to_equal(false)
+        expect(jit.contains("MirLowering.new(module.symbols)")).to_equal(false)
+        expect(c_entry.contains("MirLowering.new(sym_table)")).to_equal(false)
+
+    it "fails closed when a selected backend version is unavailable":
+        val asm_targets = file_read("src/compiler/50.mir/_MirLowering/asm_and_targets.spl")
+
+        expect(asm_targets).to_contain("if ver_ops.len() > 0 and target_backend_version < 0")
+        expect(asm_targets).to_contain("return \"unknown_version\"")
+        expect(asm_targets).to_contain("cannot evaluate asm target backend version")

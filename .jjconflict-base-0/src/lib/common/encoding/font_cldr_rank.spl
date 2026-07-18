@@ -1,0 +1,598 @@
+# Targeted CLDR population ranking support.
+#
+# This is deliberately not an XML parser. It scans only the three CLDR start
+# tags needed by the pinned font-language oracle and fails closed when one of
+# those tags is malformed.
+
+val CLDR_PERCENT_SCALE: i64 = 1000000
+val CLDR_PERCENT_DENOMINATOR: i64 = 100000000
+
+class CldrLanguageAlias:
+    from_language: text
+    to_language: text
+
+class CldrLikelyScript:
+    language: text
+    script: text
+
+class CldrLanguagePopulationRow:
+    territory: text
+    language: text
+    population: i64
+    population_percent_micros: i64
+    literacy_percent_micros: i64
+    contribution: i64
+
+class CldrScriptTotal:
+    script: text
+    total: i64
+
+class CldrLanguageTotal:
+    language: text
+    likely_script: text
+    total: i64
+    script_totals: [CldrScriptTotal]
+
+class _CldrAttribute:
+    found: bool
+    value: text
+    error: text
+
+fn _cldr_is_space(c: i64) -> bool:
+    c == 32 or c == 9 or c == 10 or c == 13
+
+fn _cldr_is_name_char(c: i64) -> bool:
+    ((c >= 48 and c <= 57) or (c >= 65 and c <= 90) or
+        (c >= 97 and c <= 122) or c == 45 or c == 58 or c == 95)
+
+fn _cldr_tag_name(tag: text) -> text:
+    var i: i64 = 0
+    val n = tag.len()
+    while i < n and _cldr_is_space(tag.char_code_at(i)):
+        i = i + 1
+    if i < n and tag.char_code_at(i) == 47:
+        i = i + 1
+    val start = i
+    while i < n and _cldr_is_name_char(tag.char_code_at(i)):
+        i = i + 1
+    tag.slice(start, i)
+
+fn _cldr_attribute(tag: text, wanted: text) -> _CldrAttribute:
+    var i: i64 = 0
+    val n = tag.len()
+    while i < n and _cldr_is_space(tag.char_code_at(i)):
+        i = i + 1
+    if i < n and tag.char_code_at(i) == 47:
+        i = i + 1
+    while i < n and _cldr_is_name_char(tag.char_code_at(i)):
+        i = i + 1
+    var found = false
+    var value = ""
+    while i < n:
+        while i < n and _cldr_is_space(tag.char_code_at(i)):
+            i = i + 1
+        if i >= n or tag.char_code_at(i) == 47:
+            break
+        val name_start = i
+        while i < n and _cldr_is_name_char(tag.char_code_at(i)):
+            i = i + 1
+        if i == name_start:
+            return _CldrAttribute(found: false, value: "", error: "CLDR: malformed attribute name")
+        val name = tag.slice(name_start, i)
+        while i < n and _cldr_is_space(tag.char_code_at(i)):
+            i = i + 1
+        if i >= n or tag.char_code_at(i) != 61:
+            return _CldrAttribute(found: false, value: "", error: "CLDR: attribute without '='")
+        i = i + 1
+        while i < n and _cldr_is_space(tag.char_code_at(i)):
+            i = i + 1
+        if i >= n or (tag.char_code_at(i) != 34 and tag.char_code_at(i) != 39):
+            return _CldrAttribute(found: false, value: "", error: "CLDR: unquoted attribute")
+        val quote = tag.char_code_at(i)
+        i = i + 1
+        val value_start = i
+        while i < n and tag.char_code_at(i) != quote:
+            i = i + 1
+        if i >= n:
+            return _CldrAttribute(found: false, value: "", error: "CLDR: unterminated attribute")
+        if name == wanted:
+            if found:
+                return _CldrAttribute(found: false, value: "", error: "CLDR: duplicate attribute '{wanted}'")
+            found = true
+            value = tag.slice(value_start, i)
+        i = i + 1
+    _CldrAttribute(found: found, value: value, error: "")
+
+fn _cldr_required_attribute(tag: text, name: text) -> Result<text, text>:
+    val attr = _cldr_attribute(tag, name)
+    if attr.error != "":
+        return Err(attr.error)
+    if not attr.found or attr.value == "":
+        return Err("CLDR: missing attribute '{name}'")
+    Ok(attr.value)
+
+fn _cldr_optional_attribute(tag: text, name: text) -> Result<text, text>:
+    val attr = _cldr_attribute(tag, name)
+    if attr.error != "":
+        return Err(attr.error)
+    Ok(attr.value)
+
+fn _cldr_parse_positive_i64(raw: text, label: text) -> Result<i64, text>:
+    if raw.len() == 0:
+        return Err("CLDR: empty {label}")
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < raw.len():
+        val c = raw.char_code_at(i)
+        if c < 48 or c > 57:
+            return Err("CLDR: invalid {label} '{raw}'")
+        val digit = c - 48
+        if value > 1000000000 or (value == 1000000000 and digit > 0):
+            return Err("CLDR: {label} out of range")
+        value = value * 10 + digit
+        i = i + 1
+    Ok(value)
+
+fn _cldr_parse_percent_micros(raw: text, label: text) -> Result<i64, text>:
+    if raw.len() == 0:
+        return Err("CLDR: empty {label}")
+    var whole: i64 = 0
+    var fraction: i64 = 0
+    var fraction_digits: i64 = 0
+    var saw_digit = false
+    var saw_dot = false
+    var i: i64 = 0
+    while i < raw.len():
+        val c = raw.char_code_at(i)
+        if c == 46 and not saw_dot:
+            saw_dot = true
+        elif c >= 48 and c <= 57:
+            saw_digit = true
+            val digit = c - 48
+            if not saw_dot:
+                if whole > 10 or (whole == 10 and digit > 0):
+                    return Err("CLDR: {label} outside 0..100")
+                whole = whole * 10 + digit
+            elif fraction_digits < 6:
+                fraction = fraction * 10 + digit
+                fraction_digits = fraction_digits + 1
+            else:
+                return Err("CLDR: {label} exceeds six decimal places")
+        else:
+            return Err("CLDR: invalid {label} '{raw}'")
+        i = i + 1
+    if not saw_digit:
+        return Err("CLDR: invalid {label} '{raw}'")
+    if saw_dot and fraction_digits == 0:
+        return Err("CLDR: invalid {label} '{raw}'")
+    while fraction_digits < 6:
+        fraction = fraction * 10
+        fraction_digits = fraction_digits + 1
+    val scaled = whole * CLDR_PERCENT_SCALE + fraction
+    if scaled < 0 or scaled > CLDR_PERCENT_DENOMINATOR:
+        return Err("CLDR: {label} outside 0..100")
+    Ok(scaled)
+
+# Exact round-half-up(population * population% * literacy% / 100^2) without
+# overflowing i64. The quotient/remainder split keeps every intermediate below
+# 2.1e16 for valid CLDR inputs.
+fn _cldr_contribution(population: i64, population_percent: i64,
+                      literacy_percent: i64) -> i64:
+    val denominator = CLDR_PERCENT_DENOMINATOR
+    val first = population * population_percent
+    val first_q = first / denominator
+    val first_r = first % denominator
+    val second = first_q * literacy_percent
+    val base = second / denominator
+    val remainder = (second % denominator) * denominator + first_r * literacy_percent
+    val denominator_squared = denominator * denominator
+    base + (remainder + denominator_squared / 2) / denominator_squared
+
+fn _cldr_first_token(value: text) -> text:
+    var i: i64 = 0
+    while i < value.len() and not _cldr_is_space(value.char_code_at(i)):
+        i = i + 1
+    value.slice(0, i)
+
+fn _cldr_base_language(value: text) -> text:
+    var i: i64 = 0
+    while i < value.len() and value.char_code_at(i) != 45 and value.char_code_at(i) != 95:
+        i = i + 1
+    value.slice(0, i)
+
+fn _cldr_explicit_region(value: text) -> text:
+    var start: i64 = 0
+    var segment: i64 = 0
+    var i: i64 = 0
+    while i <= value.len():
+        val at_end = i == value.len()
+        val separator = not at_end and (value.char_code_at(i) == 45 or value.char_code_at(i) == 95)
+        if at_end or separator:
+            val size = i - start
+            if segment > 0 and (size == 2 or size == 3):
+                return value.slice(start, i)
+            segment = segment + 1
+            start = i + 1
+        i = i + 1
+    ""
+
+fn _cldr_merge_base_alias(replacement: text, original: text) -> text:
+    val base = _cldr_base_language(replacement)
+    var script = _cldr_explicit_script(original)
+    if script == "":
+        script = _cldr_explicit_script(replacement)
+    var region = _cldr_explicit_region(original)
+    if region == "":
+        region = _cldr_explicit_region(replacement)
+    var merged = base
+    if script != "":
+        merged = merged + "_" + script
+    if region != "":
+        merged = merged + "_" + region
+    merged
+
+fn _cldr_explicit_script(value: text) -> text:
+    var start: i64 = 0
+    var segment: i64 = 0
+    var i: i64 = 0
+    while i <= value.len():
+        val at_end = i == value.len()
+        val separator = not at_end and (value.char_code_at(i) == 45 or value.char_code_at(i) == 95)
+        if at_end or separator:
+            if segment > 0 and i - start == 4:
+                return value.slice(start, i)
+            segment = segment + 1
+            start = i + 1
+        i = i + 1
+    ""
+
+fn cldr_scan_language_population(xml: text) -> Result<[CldrLanguagePopulationRow], text>:
+    var rows: [CldrLanguagePopulationRow] = []
+    var territory = ""
+    var territory_population: i64 = 0
+    var territory_literacy: i64 = -1
+    var territory_open = false
+    var i: i64 = 0
+    while i < xml.len():
+        if xml.char_code_at(i) != 60:
+            i = i + 1
+        else:
+            if xml.slice(i, if i + 4 < xml.len(): i + 4 else: xml.len()) == "<!--":
+                var comment_end = i + 4
+                while comment_end + 2 < xml.len() and xml.slice(comment_end, comment_end + 3) != "-->":
+                    comment_end = comment_end + 1
+                if comment_end + 2 >= xml.len():
+                    return Err("CLDR: unterminated comment")
+                i = comment_end + 3
+                continue
+            val tag_start = i + 1
+            var tag_end = tag_start
+            while tag_end < xml.len() and xml.char_code_at(tag_end) != 62:
+                tag_end = tag_end + 1
+            if tag_end >= xml.len():
+                return Err("CLDR: unterminated tag")
+            val tag = xml.slice(tag_start, tag_end).trim()
+            val name = _cldr_tag_name(tag)
+            val closing = tag.starts_with("/")
+            if name == "territory" and closing:
+                if not territory_open:
+                    return Err("CLDR: unmatched territory close")
+                territory = ""
+                territory_population = 0
+                territory_literacy = -1
+                territory_open = false
+            elif name == "territory":
+                if territory_open:
+                    return Err("CLDR: nested territory")
+                territory = _cldr_required_attribute(tag, "type")?
+                territory_population = _cldr_parse_positive_i64(
+                    _cldr_required_attribute(tag, "population")?, "territory population")?
+                val literacy_text = _cldr_optional_attribute(tag, "literacyPercent")?
+                territory_literacy = -1
+                if literacy_text != "":
+                    territory_literacy = _cldr_parse_percent_micros(
+                        literacy_text, "territory literacyPercent")?
+                territory_open = true
+            elif name == "languagePopulation" and not closing:
+                if territory == "":
+                    return Err("CLDR: languagePopulation outside territory")
+                val language = _cldr_required_attribute(tag, "type")?
+                val population_percent = _cldr_parse_percent_micros(
+                    _cldr_required_attribute(tag, "populationPercent")?,
+                    "language populationPercent")?
+                val language_literacy_text = _cldr_optional_attribute(tag, "literacyPercent")?
+                var literacy_percent = territory_literacy
+                if language_literacy_text != "":
+                    literacy_percent = _cldr_parse_percent_micros(
+                        language_literacy_text, "language literacyPercent")?
+                if literacy_percent < 0:
+                    return Err("CLDR: no literacyPercent for {territory}/{language}")
+                rows.push(CldrLanguagePopulationRow(
+                    territory: territory,
+                    language: language,
+                    population: territory_population,
+                    population_percent_micros: population_percent,
+                    literacy_percent_micros: literacy_percent,
+                    contribution: _cldr_contribution(
+                        territory_population, population_percent, literacy_percent)
+                ))
+            i = tag_end + 1
+    if territory_open:
+        return Err("CLDR: unclosed territory")
+    if rows.len() == 0:
+        return Err("CLDR: no languagePopulation rows")
+    Ok(rows)
+
+fn cldr_scan_language_aliases(xml: text) -> Result<[CldrLanguageAlias], text>:
+    var aliases: [CldrLanguageAlias] = []
+    var i: i64 = 0
+    while i < xml.len():
+        if xml.char_code_at(i) != 60:
+            i = i + 1
+        else:
+            if xml.slice(i, if i + 4 < xml.len(): i + 4 else: xml.len()) == "<!--":
+                var comment_end = i + 4
+                while comment_end + 2 < xml.len() and xml.slice(comment_end, comment_end + 3) != "-->":
+                    comment_end = comment_end + 1
+                if comment_end + 2 >= xml.len():
+                    return Err("CLDR: unterminated metadata comment")
+                i = comment_end + 3
+                continue
+            val tag_start = i + 1
+            var tag_end = tag_start
+            while tag_end < xml.len() and xml.char_code_at(tag_end) != 62:
+                tag_end = tag_end + 1
+            if tag_end >= xml.len():
+                return Err("CLDR: unterminated metadata tag")
+            val tag = xml.slice(tag_start, tag_end).trim()
+            if _cldr_tag_name(tag) == "languageAlias" and not tag.starts_with("/"):
+                val from_language = _cldr_required_attribute(tag, "type")?
+                val reason = _cldr_required_attribute(tag, "reason")?
+                val replacement = _cldr_first_token(
+                    _cldr_required_attribute(tag, "replacement")?)
+                if replacement == "":
+                    return Err("CLDR: empty languageAlias replacement")
+                if reason != "macrolanguage":
+                    var duplicate = false
+                    var alias_index: i64 = 0
+                    while alias_index < aliases.len():
+                        if aliases[alias_index].from_language == from_language:
+                            duplicate = true
+                        alias_index = alias_index + 1
+                    if duplicate:
+                        return Err("CLDR: duplicate languageAlias '{from_language}'")
+                    aliases.push(CldrLanguageAlias(
+                        from_language: from_language,
+                        to_language: replacement
+                    ))
+            i = tag_end + 1
+    Ok(aliases)
+
+fn cldr_scan_likely_scripts(xml: text) -> Result<[CldrLikelyScript], text>:
+    var likely: [CldrLikelyScript] = []
+    var i: i64 = 0
+    while i < xml.len():
+        if xml.char_code_at(i) != 60:
+            i = i + 1
+        else:
+            if xml.slice(i, if i + 4 < xml.len(): i + 4 else: xml.len()) == "<!--":
+                var comment_end = i + 4
+                while comment_end + 2 < xml.len() and xml.slice(comment_end, comment_end + 3) != "-->":
+                    comment_end = comment_end + 1
+                if comment_end + 2 >= xml.len():
+                    return Err("CLDR: unterminated likely-subtag comment")
+                i = comment_end + 3
+                continue
+            val tag_start = i + 1
+            var tag_end = tag_start
+            while tag_end < xml.len() and xml.char_code_at(tag_end) != 62:
+                tag_end = tag_end + 1
+            if tag_end >= xml.len():
+                return Err("CLDR: unterminated likely-subtag tag")
+            val tag = xml.slice(tag_start, tag_end).trim()
+            if _cldr_tag_name(tag) == "likelySubtag" and not tag.starts_with("/"):
+                val language = _cldr_required_attribute(tag, "from")?
+                val target = _cldr_required_attribute(tag, "to")?
+                val script = _cldr_explicit_script(target)
+                if script == "":
+                    return Err("CLDR: likelySubtag '{target}' has no script")
+                var duplicate = false
+                var likely_index: i64 = 0
+                while likely_index < likely.len():
+                    if likely[likely_index].language == language:
+                        duplicate = true
+                    likely_index = likely_index + 1
+                if duplicate:
+                    return Err("CLDR: duplicate likelySubtag '{language}'")
+                likely.push(CldrLikelyScript(language: language, script: script))
+            i = tag_end + 1
+    if likely.len() == 0:
+        return Err("CLDR: no likelySubtag rows")
+    Ok(likely)
+
+fn _cldr_alias_id(language: text, aliases: [CldrLanguageAlias]) -> Result<text, text>:
+    var current = language
+    var passes: i64 = 0
+    var changed = true
+    while changed:
+        changed = false
+        var i: i64 = 0
+        while i < aliases.len() and not changed:
+            if aliases[i].from_language == current:
+                current = aliases[i].to_language
+                changed = true
+            i = i + 1
+        if not changed:
+            val base = _cldr_base_language(current)
+            i = 0
+            while i < aliases.len() and not changed:
+                if aliases[i].from_language == base:
+                    current = _cldr_merge_base_alias(aliases[i].to_language, current)
+                    changed = true
+                i = i + 1
+        passes = passes + 1
+        if passes > aliases.len() + 1:
+            return Err("CLDR: language alias cycle at '{language}'")
+    Ok(current)
+
+fn _cldr_likely_script(language: text, territory: text, aliases: [CldrLanguageAlias],
+                       likely: [CldrLikelyScript]) -> text:
+    val territory_key = language + "_" + territory
+    var i: i64 = 0
+    while i < likely.len():
+        if likely[i].language == territory_key:
+            return likely[i].script
+        i = i + 1
+    i = 0
+    while i < likely.len():
+        if likely[i].language == language:
+            return likely[i].script
+        i = i + 1
+    i = 0
+    while i < likely.len():
+        val likely_id = _cldr_alias_id(likely[i].language, aliases)
+        match likely_id:
+            case Ok(resolved):
+                if _cldr_base_language(resolved) == language:
+                    return likely[i].script
+            case Err(_): ()
+        i = i + 1
+    ""
+
+fn _cldr_text_lt(a: text, b: text) -> bool:
+    var i: i64 = 0
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    while i < n:
+        val ac = a.char_code_at(i)
+        val bc = b.char_code_at(i)
+        if ac < bc:
+            return true
+        if ac > bc:
+            return false
+        i = i + 1
+    a.len() < b.len()
+
+fn _cldr_sort_script_totals(values: [CldrScriptTotal]) -> [CldrScriptTotal]:
+    var i: i64 = 1
+    while i < values.len():
+        val saved = values[i]
+        var j = i - 1
+        while j >= 0 and _cldr_text_lt(saved.script, values[j].script):
+            values[j + 1] = values[j]
+            j = j - 1
+        values[j + 1] = saved
+        i = i + 1
+    values
+
+fn _cldr_total_before(a: CldrLanguageTotal, b: CldrLanguageTotal) -> bool:
+    a.total > b.total or (a.total == b.total and _cldr_text_lt(a.language, b.language))
+
+fn _cldr_sort_language_totals(values: [CldrLanguageTotal]) -> [CldrLanguageTotal]:
+    var i: i64 = 1
+    while i < values.len():
+        val saved = values[i]
+        var j = i - 1
+        while j >= 0 and _cldr_total_before(saved, values[j]):
+            values[j + 1] = values[j]
+            j = j - 1
+        values[j + 1] = saved
+        i = i + 1
+    values
+
+fn cldr_aggregate_language_population(
+    rows: [CldrLanguagePopulationRow], aliases: [CldrLanguageAlias],
+    likely: [CldrLikelyScript]
+) -> Result<[CldrLanguageTotal], text>:
+    var totals: [CldrLanguageTotal] = []
+    var i: i64 = 0
+    while i < rows.len():
+        val resolved_id = _cldr_alias_id(rows[i].language, aliases)?
+        val language = _cldr_base_language(resolved_id)
+        if language == "":
+            return Err("CLDR: empty canonical language")
+        if language == "und":
+            i = i + 1
+            continue
+        var likely_script = _cldr_likely_script(language, rows[i].territory, aliases, likely)
+        if likely_script == "":
+            return Err("CLDR: no likely script for '{language}'")
+        var script = _cldr_explicit_script(resolved_id)
+        if script == "":
+            script = likely_script
+        var language_index: i64 = -1
+        var j: i64 = 0
+        while j < totals.len() and language_index < 0:
+            if totals[j].language == language:
+                language_index = j
+            j = j + 1
+        if language_index < 0:
+            totals.push(CldrLanguageTotal(
+                language: language,
+                likely_script: likely_script,
+                total: rows[i].contribution,
+                script_totals: [CldrScriptTotal(script: script, total: rows[i].contribution)]
+            ))
+        else:
+            totals[language_index].total = totals[language_index].total + rows[i].contribution
+            var script_index: i64 = -1
+            j = 0
+            while j < totals[language_index].script_totals.len() and script_index < 0:
+                if totals[language_index].script_totals[j].script == script:
+                    script_index = j
+                j = j + 1
+            if script_index < 0:
+                totals[language_index].script_totals.push(
+                    CldrScriptTotal(script: script, total: rows[i].contribution))
+            else:
+                totals[language_index].script_totals[script_index].total = (
+                    totals[language_index].script_totals[script_index].total + rows[i].contribution)
+        i = i + 1
+    i = 0
+    while i < totals.len():
+        totals[i].script_totals = _cldr_sort_script_totals(totals[i].script_totals)
+        var dominant_index: i64 = 0
+        var script_index: i64 = 1
+        while script_index < totals[i].script_totals.len():
+            val candidate = totals[i].script_totals[script_index]
+            val dominant = totals[i].script_totals[dominant_index]
+            if (candidate.total > dominant.total or
+                    (candidate.total == dominant.total and _cldr_text_lt(candidate.script, dominant.script))):
+                dominant_index = script_index
+            script_index = script_index + 1
+        totals[i].likely_script = totals[i].script_totals[dominant_index].script
+        i = i + 1
+    Ok(_cldr_sort_language_totals(totals))
+
+fn cldr_rank_languages(population_xml: text, metadata_xml: text,
+                       likely_xml: text) -> Result<[CldrLanguageTotal], text>:
+    val rows = cldr_scan_language_population(population_xml)?
+    val aliases = cldr_scan_language_aliases(metadata_xml)?
+    val likely = cldr_scan_likely_scripts(likely_xml)?
+    cldr_aggregate_language_population(rows, aliases, likely)
+
+fn cldr_serialize_language_totals(totals: [CldrLanguageTotal], limit: i64) -> text:
+    var lines: [text] = ["schema=simple-cldr-language-ranking-v1"]
+    var count = limit
+    if count < 0 or count > totals.len():
+        count = totals.len()
+    var i: i64 = 0
+    while i < count:
+        val total = totals[i]
+        var scripts = ""
+        var j: i64 = 0
+        while j < total.script_totals.len():
+            if j > 0:
+                scripts = scripts + ","
+            val script = total.script_totals[j]
+            scripts = scripts + script.script + "=" + script.total.to_text()
+            j = j + 1
+        lines.push((i + 1).to_text() + "|" + total.language + "|" +
+            total.likely_script + "|" + total.total.to_text() + "|" + scripts)
+        i = i + 1
+    lines.join("\n") + "\n"
+
+export CldrLanguageAlias, CldrLikelyScript, CldrLanguagePopulationRow
+export CldrScriptTotal, CldrLanguageTotal
+export cldr_scan_language_population, cldr_scan_language_aliases
+export cldr_scan_likely_scripts, cldr_aggregate_language_population
+export cldr_rank_languages, cldr_serialize_language_totals

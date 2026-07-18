@@ -1,0 +1,38 @@
+# WmService COMP_TEST_API_REQ introspection tests
+#
+# The handler used to always reply STATUS_INVALID ("in-kernel bridge not
+# wired"). It now answers with live WM state reachable from the handler:
+# the owned-window count and the active ECS window count. Off-line (no live
+# IPC port) the same introspection is observable via the returned WmAction,
+# so the reply path never reaches a syscall in the interpreter.
+
+use std.spec
+use os.services.wm.wm_service.{WmService}
+use common.window_protocol.geometry.{WindowId}
+
+describe "WmService COMP_TEST_API_REQ introspection":
+    it "replies with the live owned-window count, not STATUS_INVALID":
+        val wm = WmService.new()
+        wm.register_window_owner_with_identity(WindowId(value: 11), 40, 1234, "app.a")
+        wm.register_window_owner_with_identity(WindowId(value: 22), 41, 5678, "app.b")
+        val action = wm.parse_test_api_req(41, 0, 0)
+        expect(action.kind).to_equal("test_api")
+        expect(action.x).to_equal(2)
+        expect(action.width).to_equal(2)
+        expect(action.src_port).to_equal(41)
+
+    it "reports zero windows for a fresh service with no ownership":
+        val wm = WmService.new()
+        val action = wm.parse_test_api_req(7, 0, 0)
+        expect(action.kind).to_equal("test_api")
+        expect(action.x).to_equal(0)
+        expect(action.y).to_equal(0)
+
+    it "tracks the owned-window count as windows register and unregister":
+        val wm = WmService.new()
+        wm.register_window_owner_with_identity(WindowId(value: 100), 50, 9000, "app.c")
+        val after_one = wm.parse_test_api_req(50, 0, 0)
+        expect(after_one.x).to_equal(1)
+        wm.remove_owner(100)
+        val after_remove = wm.parse_test_api_req(50, 0, 0)
+        expect(after_remove.x).to_equal(0)

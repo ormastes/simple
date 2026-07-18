@@ -1,0 +1,262 @@
+class StyleProps:
+    """Inline CSS properties on a browser engine node."""
+    display: text          # "block", "inline", "flex", "none", ""
+    width: f64             # px, 0 = auto
+    height: f64            # px, 0 = auto
+    margin_top: f64
+    margin_right: f64
+    margin_bottom: f64
+    margin_left: f64
+    padding_top: f64
+    padding_right: f64
+    padding_bottom: f64
+    padding_left: f64
+    color: text            # CSS color string
+    background_color: text
+    font_size: f64         # px
+    font_weight: text      # "normal", "bold"
+    font_family: text
+    text_align: text       # "left", "center", "right"
+    border_width: f64
+    border_color: text
+    border_style: text
+    flex_direction: text   # "row", "column"
+    flex_grow: f64
+    position: text         # "static", "relative", "absolute", "fixed"
+    top: f64
+    left: f64
+    z_index: i64
+    overflow: text         # "visible", "hidden", "scroll"
+    float_css: text        # "none", "left", "right"
+    clear_css: text        # "none", "left", "right", "both"
+
+impl StyleProps:
+    static fn empty() -> StyleProps:
+        StyleProps(
+            display: "",
+            width: 0.0,
+            height: 0.0,
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            padding_top: 0.0,
+            padding_right: 0.0,
+            padding_bottom: 0.0,
+            padding_left: 0.0,
+            color: "",
+            background_color: "",
+            font_size: 16.0,
+            font_weight: "normal",
+            font_family: "sans-serif",
+            text_align: "left",
+            border_width: 0.0,
+            border_color: "",
+            border_style: "none",
+            flex_direction: "row",
+            flex_grow: 0.0,
+            position: "static",
+            top: 0.0,
+            left: 0.0,
+            z_index: 0,
+            overflow: "visible",
+            float_css: "none",
+            clear_css: "none"
+        )
+
+class BeDomNode:
+    """A node in the browser engine document tree.
+
+    Represents both element and text nodes. Text nodes have
+    tag_name == "#text" and data populated.
+    """
+    node_id: i64
+    tag_name: text          # e.g. "div", "span", "#text", "#document"
+    data: text              # text content for #text nodes
+    attributes: Dict<text, text>
+    style: StyleProps
+    children: [BeDomNode]
+    parent_id: i64          # -1 for root
+    event_listener_types: [text]
+    event_listener_actions: [text]
+    event_listener_capture: [bool]
+
+    me add_event_listener_with_capture(event_type: text, action: text, capture: bool):
+        """Register a listener, appending to the parallel listener arrays."""
+        self.event_listener_types.push(event_type.trim().lower())
+        self.event_listener_actions.push(action)
+        self.event_listener_capture.push(capture)
+
+class BeDomEvent:
+    event_type: text
+    namespace_uri: text
+    target_id: text
+    current_target_id: text
+    related_target_id: text
+    bubbles: bool
+    cancelable: bool
+    default_prevented: bool
+    propagation_stopped: bool
+
+    static fn create(event_type: text, namespace_uri: text, target_id: text, current_target_id: text, related_target_id: text, bubbles: bool, cancelable: bool) -> BeDomEvent:
+        BeDomEvent(event_type: event_type, namespace_uri: namespace_uri, target_id: target_id, current_target_id: current_target_id, related_target_id: related_target_id, bubbles: bubbles, cancelable: cancelable, default_prevented: false, propagation_stopped: false)
+
+    me prevent_default():
+        self.default_prevented = true
+
+    me stop_propagation():
+        self.propagation_stopped = true
+
+class BeDomEventDispatch:
+    actions: [text]
+
+fn normalize_dom_event_type(event_type: text) -> text:
+    event_type.trim().lower()
+
+fn be_dom_find_by_id(node: BeDomNode, id_value: text) -> BeDomNode?:
+    if node.attributes.get("id") ?? "" == id_value:
+        return Some(node)
+    for child in node.children:
+        val found = be_dom_find_by_id(child, id_value)
+        if found.?:
+            return found
+    nil
+
+fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
+    if selector.starts_with("#"):
+        return be_dom_find_by_id(node, selector.substring(1, selector.len()))
+    if node.tag_name == selector:
+        return Some(node)
+    for child in node.children:
+        val found = be_dom_query_selector(child, selector)
+        if found.?:
+            return found
+    nil
+
+fn be_dom_get_text_content(node: BeDomNode) -> text:
+    if node.tag_name == "#text":
+        return node.data
+    var out = ""
+    for child in node.children:
+        out = out + be_dom_get_text_content(child)
+    out
+
+impl BeDomNode:
+    static fn element(tag_name: text) -> BeDomNode:
+        """Construct an element node with auto node_id=0."""
+        BeDomNode(
+            node_id: 0,
+            tag_name: tag_name,
+            data: "",
+            attributes: {},
+            style: StyleProps.empty(),
+            children: [],
+            parent_id: -1,
+            event_listener_types: [],
+            event_listener_actions: [],
+            event_listener_capture: []
+        )
+
+    static fn element(node_id: i64, tag_name: text) -> BeDomNode:
+        """Construct an element node."""
+        BeDomNode(
+            node_id: node_id,
+            tag_name: tag_name,
+            data: "",
+            attributes: {},
+            style: StyleProps.empty(),
+            children: [],
+            parent_id: -1,
+            event_listener_types: [],
+            event_listener_actions: [],
+            event_listener_capture: []
+        )
+
+    static fn text_node(node_id: i64, data: text) -> BeDomNode:
+        """Construct a text node."""
+        BeDomNode(
+            node_id: node_id,
+            tag_name: "#text",
+            data: data,
+            attributes: {},
+            style: StyleProps.empty(),
+            children: [],
+            parent_id: -1,
+            event_listener_types: [],
+            event_listener_actions: [],
+            event_listener_capture: []
+        )
+
+    static fn text(data: text) -> BeDomNode:
+        """Construct a text node with auto node_id=0."""
+        BeDomNode.text_node(0, data)
+
+    static fn document() -> BeDomNode:
+        """Construct a root document node."""
+        BeDomNode(
+            node_id: 0,
+            tag_name: "#document",
+            data: "",
+            attributes: {},
+            style: StyleProps.empty(),
+            children: [],
+            parent_id: -1,
+            event_listener_types: [],
+            event_listener_actions: [],
+            event_listener_capture: []
+        )
+
+    fn is_element() -> bool:
+        self.tag_name != "#text" and self.tag_name != "#document"
+
+    fn is_text() -> bool:
+        self.tag_name == "#text"
+
+    fn get_attr(name: text) -> text:
+        self.attributes.get(name) ?? ""
+
+    fn has_attr(name: text) -> bool:
+        self.attributes.has(name)
+
+    me set_attr(name: text, value: text):
+        self.attributes[name] = value
+
+    me remove_attr(name: text):
+        self.attributes.remove(name)
+
+    me add_child(child: BeDomNode):
+        var c = child
+        c.parent_id = self.node_id
+        self.children.push(c)
+
+    me set_style(prop: text, value: text):
+        """Set a CSS property on this node's inline style by name."""
+        val p = prop.trim().lower()
+        val v = value.trim()
+        if p == "display":
+            self.style.display = v
+        elif p == "float":
+            self.style.float_css = v
+        elif p == "clear":
+            self.style.clear_css = v
+        elif p == "overflow":
+            self.style.overflow = v
+        elif p == "position":
+            self.style.position = v
+        elif p == "color":
+            self.style.color = v
+        elif p == "background-color":
+            self.style.background_color = v
+        elif p == "font-weight":
+            self.style.font_weight = v
+        elif p == "text-align":
+            self.style.text_align = v
+
+export StyleProps
+export BeDomNode
+export BeDomEvent
+export BeDomEventDispatch
+export normalize_dom_event_type
+export be_dom_find_by_id
+export be_dom_query_selector
+export be_dom_get_text_content

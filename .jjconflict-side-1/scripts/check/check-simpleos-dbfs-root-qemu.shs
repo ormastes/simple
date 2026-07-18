@@ -1,0 +1,162 @@
+#!/bin/sh
+set -eu
+
+# DBFS-root boot QEMU gate for SimpleOS.
+#
+# Boots build/os/simpleos_x86_64.elf against a DBFS-formatted NVMe disk
+# image (built by scripts/os/mkfs-dbfs.shs) TWICE against the SAME image
+# file, asserting:
+#   1st boot: DBFS is probed and mounted as root through the production
+#             boot_fs_sequence() (src/os/kernel/boot/boot_fs.spl), the
+#             Filesystem-trait adapter self-test passes (dbfs_filesystem_ops.spl),
+#             the FS-neutral exists(path) probe works, and the persistence
+#             marker file is written for the first time.
+#   2nd boot: the SAME persistence marker is read back with matching content
+#             -- proof that DBFS namespace state survives a reboot.
+# Then boots the existing FAT32 NVMe disk image once and asserts the FAT32
+# lane still reaches its own root-mount marker unchanged (non-regression;
+# does not touch or modify the FAT32 image/boot path).
+#
+# sshd's accept-loop marker is checked but NOT gating: exec'ing a binary
+# straight off a DBFS root is explicitly out of scope for this gate (the
+# native exec loader still stream-opens via the FAT32 path) -- see the
+# "out of scope" note in dbfs_filesystem_ops.spl and mkfs_dbfs.spl. Until a
+# DBFS-backed exec loader lands, /sbin/init cannot be loaded from a
+# DBFS-only image, so sshd will not actually come up on this lane yet. That
+# gap is recorded as a follow-up TODO, not silently marked green here.
+#
+# Usage:
+#   sh scripts/check/check-simpleos-dbfs-root-qemu.shs [--timeout=30]
+#
+# Env knobs:
+#   SIMPLEOS_DBFS_ROOT_ELF      Kernel ELF (default: build/os/simpleos_x86_64.elf)
+#   SIMPLEOS_DBFS_ROOT_IMG      DBFS root disk image (default: build/os/simpleos_dbfs_root.img)
+#   SIMPLEOS_DBFS_ROOT_SECTORS  DBFS image size in sectors (default: 65536 == 32 MiB)
+#   SIMPLEOS_FAT32_IMG          FAT32 disk image for the non-regression check
+#                                (default: build/os/fat32-x86_64.img)
+#   SIMPLEOS_DBFS_ROOT_LOGDIR   Serial log directory
+#                                (default: build/test-artifacts/simpleos-dbfs-root-qemu)
+#   SIMPLEOS_DBFS_ROOT_TIMEOUT  Per-boot timeout seconds (default: 30)
+#   SIMPLEOS_DBFS_ROOT_SKIP_MKFS  Set to 1 to skip (re)building the DBFS image
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+ELF="${SIMPLEOS_DBFS_ROOT_ELF:-${ROOT_DIR}/build/os/simpleos_x86_64.elf}"
+IMG="${SIMPLEOS_DBFS_ROOT_IMG:-${ROOT_DIR}/build/os/simpleos_dbfs_root.img}"
+SECTORS="${SIMPLEOS_DBFS_ROOT_SECTORS:-65536}"
+FAT32_IMG="${SIMPLEOS_FAT32_IMG:-${ROOT_DIR}/build/os/fat32-x86_64.img}"
+LOGDIR="${SIMPLEOS_DBFS_ROOT_LOGDIR:-${ROOT_DIR}/build/test-artifacts/simpleos-dbfs-root-qemu}"
+TIMEOUT="${SIMPLEOS_DBFS_ROOT_TIMEOUT:-30}"
+SKIP_MKFS="${SIMPLEOS_DBFS_ROOT_SKIP_MKFS:-0}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        *) echo "[dbfs-root-qemu] Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+mkdir -p "$LOGDIR"
+
+if [ ! -f "$ELF" ]; then
+    echo "[dbfs-root-qemu] ERROR: kernel ELF not found: $ELF" >&2
+    echo "[dbfs-root-qemu] build it first (e.g. bin/simple os build --arch=x86_64)" >&2
+    exit 3
+fi
+
+if [ "$SKIP_MKFS" != "1" ]; then
+    echo "[dbfs-root-qemu] building DBFS root image: $IMG ($SECTORS sectors)"
+    sh scripts/os/mkfs-dbfs.shs "$IMG" "$SECTORS"
+fi
+
+if [ ! -f "$IMG" ]; then
+    echo "[dbfs-root-qemu] ERROR: DBFS image not found after mkfs: $IMG" >&2
+    exit 3
+fi
+
+boot_once() {
+    log_path="$1"
+    img_path="$2"
+    rm -f "$log_path"
+    set +e
+    timeout "${TIMEOUT}s" qemu-system-x86_64 \
+        -machine q35 \
+        -cpu qemu64 \
+        -m 512M \
+        -kernel "$ELF" \
+        -serial file:"$log_path" \
+        -monitor none \
+        -display none \
+        -no-reboot \
+        -drive "file=${img_path},if=none,id=nvme0,format=raw" \
+        -device nvme,drive=nvme0,serial=simpleos0 \
+        >/dev/null 2>&1
+    code=$?
+    set -e
+    cat "$log_path"
+    return 0
+}
+
+require_marker() {
+    log_path="$1"
+    marker="$2"
+    if ! grep -a -F -q "$marker" "$log_path"; then
+        echo "[dbfs-root-qemu] MISSING required marker: $marker"
+        return 1
+    fi
+    echo "[dbfs-root-qemu] found: $marker"
+    return 0
+}
+
+missing=0
+
+echo "[dbfs-root-qemu] === boot 1/2: fresh DBFS root image ==="
+LOG1="${LOGDIR}/boot1.log"
+boot_once "$LOG1" "$IMG"
+
+require_marker "$LOG1" "[boot-fs] DBFS superblock found" || missing=1
+require_marker "$LOG1" "[DBFS] mounted as root filesystem" || missing=1
+require_marker "$LOG1" "[boot-fs] DBFS Filesystem-trait self-test ok" || missing=1
+require_marker "$LOG1" "[boot-fs] DBFS PATH exists-probe: /etc/motd=true" || missing=1
+require_marker "$LOG1" "[boot-fs] DBFS persistence check: written:first-boot" || missing=1
+
+if grep -a -F -q "[sshd] accept loop start" "$LOG1"; then
+    echo "[dbfs-root-qemu] informational: sshd reached its accept loop on DBFS root"
+else
+    echo "[dbfs-root-qemu] informational (non-gating): sshd did NOT reach its accept loop --"
+    echo "[dbfs-root-qemu]   expected: exec'ing /sbin/init from a DBFS-only image is out of"
+    echo "[dbfs-root-qemu]   scope for this gate (native exec loader still stream-opens via"
+    echo "[dbfs-root-qemu]   FAT32 today). See dbfs_filesystem_ops.spl TODOs."
+fi
+
+echo "[dbfs-root-qemu] === boot 2/2: SAME DBFS root image (reboot persistence) ==="
+LOG2="${LOGDIR}/boot2.log"
+boot_once "$LOG2" "$IMG"
+
+require_marker "$LOG2" "[boot-fs] DBFS superblock found" || missing=1
+require_marker "$LOG2" "[DBFS] mounted as root filesystem" || missing=1
+require_marker "$LOG2" "[boot-fs] DBFS persistence check: persisted:match content=dbfs-persist-ok" || missing=1
+
+if [ -f "$FAT32_IMG" ]; then
+    echo "[dbfs-root-qemu] === FAT32 lane non-regression check ==="
+    LOG3="${LOGDIR}/boot3_fat32.log"
+    boot_once "$LOG3" "$FAT32_IMG"
+    require_marker "$LOG3" "[boot-fs] Attempting production FAT32..." || missing=1
+    require_marker "$LOG3" "[boot-fs] FAT32 mounted as root filesystem" || missing=1
+    # The DBFS/NVFS probes must be cheap and non-fatal on a FAT32 disk --
+    # they should be attempted and miss, never abort the boot.
+    require_marker "$LOG3" "[boot-fs] No DBFS superblock at LBA 2" || missing=1
+else
+    echo "[dbfs-root-qemu] WARNING: FAT32 image not found ($FAT32_IMG) -- skipping non-regression check"
+    echo "[dbfs-root-qemu]   build one first, e.g. via scripts/os/build_clang_disk.shs or"
+    echo "[dbfs-root-qemu]   scripts/run_simpleos_q35_smoke.shs's own image build step, then rerun."
+    missing=1
+fi
+
+if [ "$missing" -ne 0 ]; then
+    echo "[dbfs-root-qemu] FAIL marker_contract=missing"
+    exit 1
+fi
+
+echo "[dbfs-root-qemu] PASS dbfs_root=ready reboot_persistence=ready fat32_regression=none"

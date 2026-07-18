@@ -1,0 +1,100 @@
+# ============================================================================
+# game_net/interest.spl — per-client distance-based interest management
+#
+# Netcode plan deferred interest management to a later slice; this is the
+# minimal version: filter the broadcast entity list down to what a client
+# can actually see before the snapshot is encoded, so bandwidth scales with
+# view radius instead of world size.
+#
+# Boundary rule: an entity exactly AT the radius is INSIDE the interest set
+# (`dist <= radius`, not `dist < radius`) — one well-defined edge instead of
+# a gap where a boundary-riding entity is in neither client's view.
+#
+# Enter/leave is a set diff against the previously-visible ids
+# (`InterestState.visible_ids`, carried by the caller tick to tick):
+#   - ENTERING needs no wire change at all — the caller's per-client delta
+#     baseline simply won't contain the entity yet, so
+#     `wire.encode_snapshot_delta` already emits full fields for it (same
+#     path as any never-before-seen entity; see wire.spl's dirty-mask note).
+#   - LEAVING has no natural representation (the entity just stops
+#     appearing), so the caller passes `left_ids` as `removed_ids` into
+#     `wire.encode_snapshot_delta`, which writes `DIRTY_REMOVE` for each.
+# ============================================================================
+
+use std.nogc_sync_mut.game_net.wire.{EntityState}
+
+struct InterestConfig:
+    """Per-client view center + radius. A `nil` InterestConfig on the
+    server's snapshot build path means broadcast-all (unchanged)."""
+    center_x: f32
+    center_y: f32
+    radius: f32
+
+struct InterestState:
+    """Previously-visible entity ids for one client, carried tick to tick
+    so entering/leaving entities can be computed as a set diff."""
+    visible_ids: [u32]
+
+struct InterestResult:
+    """Output of one `interest_update` tick: the filtered entity list plus
+    which ids newly entered or left interest this tick."""
+    state: InterestState
+    visible: [EntityState]
+    entered_ids: [u32]
+    left_ids: [u32]
+
+fn interest_state_new() -> InterestState:
+    InterestState(visible_ids: [])
+
+fn _contains(ids: [u32], id: u32) -> bool:
+    var i: u64 = 0
+    while i < ids.len().to_u64():
+        if ids[i] == id:
+            return true
+        i = i + 1
+    false
+
+fn interest_filter(entities: [EntityState], center_x: f32, center_y: f32, radius: f32) -> [EntityState]:
+    """Distance-based interest filter: keep entities with dist <= radius
+    (boundary is inclusive — an entity exactly at radius is kept)."""
+    var out: [EntityState] = []
+    var i: u64 = 0
+    while i < entities.len().to_u64():
+        val e = entities[i]
+        val dx = e.pos_x - center_x
+        val dy = e.pos_y - center_y
+        val dist2 = dx * dx + dy * dy
+        if dist2 <= radius * radius:
+            out.push(e)
+        i = i + 1
+    out
+
+fn interest_update(state: InterestState, entities: [EntityState], center_x: f32, center_y: f32, radius: f32) -> InterestResult:
+    """Filter `entities` by interest, then diff the resulting visible-id set
+    against `state.visible_ids` to find what entered/left this tick."""
+    val visible = interest_filter(entities, center_x, center_y, radius)
+    var entered: [u32] = []
+    var still: [u32] = []
+    var i: u64 = 0
+    while i < visible.len().to_u64():
+        val e = visible[i]
+        if _contains(state.visible_ids, e.entity_id):
+            still.push(e.entity_id)
+        else:
+            entered.push(e.entity_id)
+            still.push(e.entity_id)
+        i = i + 1
+    var left: [u32] = []
+    i = 0
+    while i < state.visible_ids.len().to_u64():
+        val id = state.visible_ids[i]
+        if not _contains(still, id):
+            left.push(id)
+        i = i + 1
+    InterestResult(
+        state: InterestState(visible_ids: still),
+        visible: visible, entered_ids: entered, left_ids: left
+    )
+
+export InterestConfig, InterestState, InterestResult
+export interest_state_new, interest_filter, interest_update

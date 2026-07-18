@@ -1,0 +1,305 @@
+"""
+# JS Value Types
+
+JavaScript runtime value types for the browser engine JS interpreter.
+Models the ES5 type system: Undefined, Null, Boolean, Number, String, Object, Function.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+# =========================================================================
+# Core value enum
+# =========================================================================
+
+pub enum JsVal:
+    """A JavaScript value. Covers the seven ES5 types."""
+    Undefined
+    Null
+    Bool(v: bool)
+    Num(v: f64)
+    Str(v: text)
+    Obj(id: i64)
+    Func(id: i64)
+
+# =========================================================================
+# Property descriptor
+# =========================================================================
+
+pub class JsProp:
+    """A named property on a JS object."""
+    key: text
+    value: JsVal
+    writable: bool
+    enumerable: bool
+
+    static fn data(key: text, value: JsVal) -> JsProp:
+        """Create a writable, enumerable data property."""
+        JsProp(key: key, value: value, writable: true, enumerable: true)
+
+    static fn readonly(key: text, value: JsVal) -> JsProp:
+        """Create a non-writable data property."""
+        JsProp(key: key, value: value, writable: false, enumerable: true)
+
+# =========================================================================
+# Object representation
+# =========================================================================
+
+pub class JsObj:
+    """A JavaScript object with id, properties, and optional prototype."""
+    id: i64
+    props: [JsProp]
+    prototype_id: i64
+
+    static fn create(id: i64) -> JsObj:
+        """Create a bare object with no prototype."""
+        JsObj(id: id, props: [], prototype_id: -1)
+
+    static fn with_proto(id: i64, proto_id: i64) -> JsObj:
+        """Create an object with a prototype link."""
+        JsObj(id: id, props: [], prototype_id: proto_id)
+
+    me get_prop(key: text) -> JsVal:
+        """Lookup a property by key. Returns JsVal.Undefined if not found."""
+        var i = 0
+        while i < self.props.len():
+            if self.props[i].key == key:
+                return self.props[i].value
+            i = i + 1
+        JsVal.Undefined
+
+    me set_prop(key: text, value: JsVal):
+        """Set a property value. Overwrites if key exists, appends otherwise."""
+        var i = 0
+        while i < self.props.len():
+            if self.props[i].key == key:
+                if self.props[i].writable:
+                    self.props[i] = JsProp.data(key, value)
+                return
+            i = i + 1
+        self.props.push(JsProp.data(key, value))
+
+    me has_prop(key: text) -> bool:
+        """Check whether a property with the given key exists."""
+        var i = 0
+        while i < self.props.len():
+            if self.props[i].key == key:
+                return true
+            i = i + 1
+        false
+
+    me delete_prop(key: text) -> bool:
+        """Remove a property by key. Returns true if found and removed."""
+        var new_props: [JsProp] = []
+        var found = false
+        var i = 0
+        while i < self.props.len():
+            if self.props[i].key == key:
+                found = true
+            else:
+                new_props.push(self.props[i])
+            i = i + 1
+        self.props = new_props
+        found
+
+    me prop_keys() -> [text]:
+        """Return all enumerable property keys."""
+        var keys: [text] = []
+        var i = 0
+        while i < self.props.len():
+            if self.props[i].enumerable:
+                keys.push(self.props[i].key)
+            i = i + 1
+        keys
+
+# =========================================================================
+# JS function representation
+# =========================================================================
+
+pub class JsFunc:
+    """A JavaScript function: either user-defined (with AST body) or native."""
+    id: i64
+    name: text
+    params: [text]
+    is_native: bool
+    native_tag: i64
+    scope_depth: i32
+
+    static fn user(id: i64, name: text, params: [text], scope_depth: i32) -> JsFunc:
+        """Create a user-defined function."""
+        JsFunc(id: id, name: name, params: params, is_native: false, native_tag: 0, scope_depth: scope_depth)
+
+    static fn native(id: i64, name: text, tag: i64) -> JsFunc:
+        """Create a native-backed function."""
+        JsFunc(id: id, name: name, params: [], is_native: true, native_tag: tag, scope_depth: 0)
+
+# =========================================================================
+# Object store (heap)
+# =========================================================================
+
+pub class JsHeap:
+    """Flat store of all JS objects and functions. IDs index into these arrays."""
+    _objects: [JsObj]
+    _functions: [JsFunc]
+    _next_id: i64
+
+    static fn new() -> JsHeap:
+        """Create an empty heap."""
+        JsHeap(_objects: [], _functions: [], _next_id: 1)
+
+    me alloc_object() -> i64:
+        """Allocate a new empty object and return its id."""
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        self._objects.push(JsObj.create(id))
+        id
+
+    me alloc_object_with_proto(proto_id: i64) -> i64:
+        """Allocate a new object with a prototype link."""
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        self._objects.push(JsObj.with_proto(id, proto_id))
+        id
+
+    me alloc_func(name: text, params: [text], scope_depth: i32) -> i64:
+        """Allocate a new user-defined function and return its id."""
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        self._functions.push(JsFunc.user(id, name, params, scope_depth))
+        id
+
+    me alloc_native_func(name: text, tag: i64) -> i64:
+        """Allocate a native function and return its id."""
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        self._functions.push(JsFunc.native(id, name, tag))
+        id
+
+    me get_object(id: i64) -> JsObj?:
+        """Lookup an object by id. Returns nil if not found."""
+        var i = 0
+        while i < self._objects.len():
+            if self._objects[i].id == id:
+                return self._objects[i]
+            i = i + 1
+        nil
+
+    me get_func(id: i64) -> JsFunc?:
+        """Lookup a function by id. Returns nil if not found."""
+        var i = 0
+        while i < self._functions.len():
+            if self._functions[i].id == id:
+                return self._functions[i]
+            i = i + 1
+        nil
+
+    me set_object_prop(obj_id: i64, key: text, value: JsVal):
+        """Set a property on an object identified by id."""
+        var i = 0
+        while i < self._objects.len():
+            if self._objects[i].id == obj_id:
+                self._objects[i].set_prop(key, value)
+                return
+            i = i + 1
+
+    me get_object_prop(obj_id: i64, key: text) -> JsVal:
+        """Get a property from an object identified by id."""
+        var i = 0
+        while i < self._objects.len():
+            if self._objects[i].id == obj_id:
+                return self._objects[i].get_prop(key)
+            i = i + 1
+        JsVal.Undefined
+
+# =========================================================================
+# Type coercion helpers (free functions)
+# =========================================================================
+
+pub fn js_to_bool(v: JsVal) -> bool:
+    """JS ToBoolean: Undefined/Null->false, 0/NaN->false, ""->false, else true."""
+    match v:
+        JsVal.Undefined => false
+        JsVal.Null => false
+        JsVal.Bool(b) => b
+        JsVal.Num(n) => n != 0.0
+        JsVal.Str(s) => s.len() > 0
+        JsVal.Obj(_) => true
+        JsVal.Func(_) => true
+
+pub fn js_to_number(v: JsVal) -> f64:
+    """JS ToNumber: Undefined->NaN, Null->0, Bool->0/1, Str->parse or NaN."""
+    match v:
+        JsVal.Undefined => 0.0
+        JsVal.Null => 0.0
+        JsVal.Bool(b) =>
+            if b:
+                1.0
+            else:
+                0.0
+        JsVal.Num(n) => n
+        JsVal.Str(s) =>
+            if s.len() == 0:
+                0.0
+            else:
+                0.0
+        JsVal.Obj(_) => 0.0
+        JsVal.Func(_) => 0.0
+
+pub fn js_to_string(v: JsVal) -> text:
+    """JS ToString conversion."""
+    match v:
+        JsVal.Undefined => "undefined"
+        JsVal.Null => "null"
+        JsVal.Bool(b) =>
+            if b:
+                "true"
+            else:
+                "false"
+        JsVal.Num(n) => "{n}"
+        JsVal.Str(s) => s
+        JsVal.Obj(id) => "[object Object]"
+        JsVal.Func(id) => "function"
+
+pub fn js_typeof(v: JsVal) -> text:
+    """JS typeof operator result."""
+    match v:
+        JsVal.Undefined => "undefined"
+        JsVal.Null => "object"
+        JsVal.Bool(_) => "boolean"
+        JsVal.Num(_) => "number"
+        JsVal.Str(_) => "string"
+        JsVal.Obj(_) => "object"
+        JsVal.Func(_) => "function"
+
+pub fn js_strict_equal(a: JsVal, b: JsVal) -> bool:
+    """JS strict equality (===)."""
+    match a:
+        JsVal.Undefined =>
+            match b:
+                JsVal.Undefined => true
+                _ => false
+        JsVal.Null =>
+            match b:
+                JsVal.Null => true
+                _ => false
+        JsVal.Bool(av) =>
+            match b:
+                JsVal.Bool(bv) => av == bv
+                _ => false
+        JsVal.Num(av) =>
+            match b:
+                JsVal.Num(bv) => av == bv
+                _ => false
+        JsVal.Str(av) =>
+            match b:
+                JsVal.Str(bv) => av == bv
+                _ => false
+        JsVal.Obj(av) =>
+            match b:
+                JsVal.Obj(bv) => av == bv
+                _ => false
+        JsVal.Func(av) =>
+            match b:
+                JsVal.Func(bv) => av == bv
+                _ => false

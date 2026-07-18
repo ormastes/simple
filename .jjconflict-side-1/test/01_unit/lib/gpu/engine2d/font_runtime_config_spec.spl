@@ -1,0 +1,78 @@
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gc_async_mut.text_layout.font_renderer.{
+    FontExecutionPolicy, FontRenderBatch, FontRenderConfig, FontRenderQuad
+}
+
+fn _font_config(target: text, policy: FontExecutionPolicy) -> FontRenderConfig:
+    FontRenderConfig(
+        family: "Noto Sans Mono", category: "mono", language: "en", script: "latn", size: 18,
+        weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+        atlas_policy: "shared-alpha-1024", execution_target: target, execution_policy: policy
+    )
+
+describe "Engine2D configured font execution":
+    it "applies policy when CUDA is attached but its generated font companion is absent":
+        var engine = Engine2D.create_with_backend(64, 48, "cpu")
+        var cuda = CudaBackend.create()
+        cuda.initialized = true
+        engine.cuda_backend = cuda
+
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Suggested)
+        )).to_be(true)
+        expect(engine.font_execution_attempts()).to_equal(
+            ["cuda:failed", "metal:unavailable", "opencl:unavailable", "vulkan:unavailable", "cpu:success"]
+        )
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Preferred)
+        )).to_be(true)
+        expect(engine.font_execution_attempts()).to_equal(["cuda:failed", "cpu:success"])
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Required)
+        )).to_be(false)
+        expect(engine.font_execution_attempts()).to_equal(["cuda:failed"])
+        engine.cuda_backend = nil
+        engine.shutdown()
+
+    it "applies exact fallback policy and rejects invalid config before mutation":
+        var engine = Engine2D.create_with_backend(64, 48, "cpu")
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Suggested)
+        )).to_be(true)
+        expect(engine.font_cache_stats().font_identity).to_start_with("sha256=2cb2adb378a8f574")
+        expect(engine.font_execution_attempts()).to_equal(
+            ["cuda:unavailable", "metal:unavailable", "opencl:unavailable", "vulkan:unavailable", "cpu:success"]
+        )
+        expect(engine.font_execution_target()).to_equal("cpu")
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Preferred)
+        )).to_be(true)
+        expect(engine.font_execution_attempts()).to_equal(["cuda:unavailable", "cpu:success"])
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Required)
+        )).to_be(false)
+        expect(engine.font_execution_attempts()).to_equal(["cuda:unavailable"])
+        val before_stats = engine.font_cache_stats()
+        val before_attempts = engine.font_execution_attempts()
+        expect(engine.draw_text_configured(
+            2, 2, "B", 0xffffffffu32, _font_config("auto", FontExecutionPolicy.Required)
+        )).to_be(false)
+        val after_stats = engine.font_cache_stats()
+        expect(after_stats.entries).to_equal(before_stats.entries)
+        expect(after_stats.hits).to_equal(before_stats.hits)
+        expect(after_stats.misses).to_equal(before_stats.misses)
+        expect(engine.font_execution_attempts()).to_equal(before_attempts)
+        val malformed = FontRenderBatch(
+            program_version: 1, font_identity: "test", face_generation: 1, valid: true,
+            atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+            atlas_generation: 1, dirty_rects: [], transform_identity: "rotated"
+        )
+        val before_pixels = engine.read_pixels()
+        expect(engine._draw_font_batch_plan(0, 0, malformed, ["cpu"])).to_be(false)
+        expect(engine.read_pixels()).to_equal(before_pixels)
+        expect(engine.font_execution_attempts()).to_equal(before_attempts)
+        engine.shutdown()

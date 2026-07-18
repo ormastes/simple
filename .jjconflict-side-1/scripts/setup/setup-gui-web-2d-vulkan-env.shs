@@ -1,0 +1,831 @@
+#!/bin/sh
+# Probe and optionally run the GUI/Web/2D Vulkan evidence lanes.
+#
+# This wrapper is intentionally conservative: --check records host readiness
+# without launching GUI apps, --browser-backing runs focused browser GPU probes,
+# --run launches direct Electron/Chrome/Simple probes, --renderdoc-simple captures
+# only the Simple Vulkan lane, and --renderdoc asks the shared RenderDoc helper
+# for all capture lanes.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/lib/renderdoc-evidence-common.shs"
+cd "$ROOT_DIR"
+
+MODE="${1:---check}"
+BUILD_DIR="${GUI_WEB_2D_VULKAN_BUILD_DIR:-${BUILD_DIR:-$ROOT_DIR/build/gui-web-2d-vulkan-env}}"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+HTML_PATH="${RDOC_HTML_PATH:-$ROOT_DIR/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+WIDTH="${GUI_WEB_2D_VULKAN_WIDTH:-1280}"
+HEIGHT="${GUI_WEB_2D_VULKAN_HEIGHT:-720}"
+TIMEOUT_SECS="${GUI_WEB_2D_VULKAN_TIMEOUT_SECS:-${TIMEOUT_SECS:-45}}"
+
+usage() {
+    cat <<'EOF'
+usage: scripts/setup/setup-gui-web-2d-vulkan-env.shs [--check|--browser-backing|--run|--renderdoc-simple|--renderdoc|--print-install]
+
+  --check         Record host Vulkan, RenderDoc, Chrome, and Electron readiness.
+  --browser-backing
+                  Launch focused Electron/Chrome GPU feature probes.
+  --run           Also launch direct Electron, Chrome, and Simple Engine2D probes.
+  --renderdoc-simple
+                  Run the Simple Engine2D probe and Simple RenderDoc capture only.
+  --renderdoc     Run --run plus the shared RenderDoc capture helpers and gates.
+  --print-install Print platform setup commands without installing anything.
+
+Evidence is written to build/gui-web-2d-vulkan-env/evidence.env by default.
+Set GUI_WEB_2D_VULKAN_BUILD_DIR, or BUILD_DIR for compatibility with other
+repo check wrappers, to keep --run and --browser-backing evidence separate.
+EOF
+}
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_bound() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    elif have gtimeout; then
+        gtimeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+run_electron_bound() {
+    if [ "$UNAME_S" = "Linux" ] && have xvfb-run; then
+        run_bound xvfb-run -a --server-args="-screen 0 ${WIDTH}x${HEIGHT}x24" "$@"
+    else
+        run_bound "$@"
+    fi
+}
+
+append_kv() {
+    key="$1"
+    value="${2:-}"
+    printf '%s=%s\n' "$key" "$value" >>"$EVIDENCE_ENV"
+}
+
+append_file_value() {
+    key="$1"
+    file="$2"
+    pattern="$3"
+    value="$(sed -n "$pattern" "$file" 2>/dev/null | tail -n 1)"
+    append_kv "$key" "$value"
+}
+
+append_vulkan_device_summary() {
+    summary_path="$1"
+    if ! have node; then
+        append_file_value "gui_web_2d_vulkan_device" "$summary_path" 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p'
+        append_file_value "gui_web_2d_vulkan_driver" "$summary_path" 's/^[[:space:]]*driverName[[:space:]]*=[[:space:]]*//p'
+        append_kv "gui_web_2d_vulkan_device_selection_status" "unknown-missing-node"
+        return 0
+    fi
+    node - "$summary_path" >>"$EVIDENCE_ENV" <<'NODE'
+const fs = require("fs");
+const path = process.argv[2] || "";
+const text = fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "";
+const devices = [];
+let current = null;
+function finish() {
+  if (current) devices.push(current);
+  current = null;
+}
+for (const line of text.split(/\r?\n/)) {
+  const header = line.match(/^GPU\d+:/);
+  if (header) {
+    finish();
+    current = {};
+    continue;
+  }
+  if (!current) continue;
+  const match = line.match(/^\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*(.*)$/);
+  if (match) current[match[1]] = match[2].trim();
+}
+finish();
+const selected = devices.find((device) => device.deviceType && !device.deviceType.includes("CPU")) || devices[0] || {};
+const status = selected.deviceType
+  ? (selected.deviceType.includes("CPU") ? "cpu-fallback" : "hardware")
+  : "missing";
+function emit(key, value) {
+  console.log(`${key}=${value || ""}`);
+}
+emit("gui_web_2d_vulkan_device", selected.deviceName);
+emit("gui_web_2d_vulkan_driver", selected.driverName);
+emit("gui_web_2d_vulkan_device_type", selected.deviceType);
+emit("gui_web_2d_vulkan_device_selection_status", status);
+NODE
+}
+
+parse_argb() {
+    argb_path="$1"
+    prefix="$2"
+    if [ ! -s "$argb_path" ]; then
+        append_kv "${prefix}_argb_status" "missing"
+        append_kv "${prefix}_argb_path" "$argb_path"
+        return 0
+    fi
+    if ! have node; then
+        append_kv "${prefix}_argb_status" "unavailable"
+        append_kv "${prefix}_argb_reason" "missing-node"
+        append_kv "${prefix}_argb_path" "$argb_path"
+        return 0
+    fi
+    node - "$argb_path" "$prefix" >>"$EVIDENCE_ENV" <<'NODE'
+const fs = require("fs");
+const argbPath = process.argv[2] || "";
+const prefix = process.argv[3] || "argb";
+function emit(k, v) {
+  console.log(`${prefix}_argb_${k}=${v === undefined || v === null ? "" : v}`);
+}
+try {
+  const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  let nonblank = 0;
+  let checksum = 0n;
+  let weighted = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    const value = pixels[i];
+    const pixel = Number(value) >>> 0;
+    checksum += BigInt(pixel);
+    weighted += BigInt(pixel) * BigInt(i + 1);
+    const alpha = (pixel >>> 24) & 255;
+    if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
+  }
+  emit("status", pixels.length > 0 && nonblank > 0 ? "pass" : "fail");
+  emit("path", argbPath);
+  emit("width", Number(payload.width || 0));
+  emit("height", Number(payload.height || 0));
+  emit("format", String(payload.format || ""));
+  emit("producer", String(payload.producer || ""));
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("checksum", checksum.toString());
+  emit("weighted_checksum", weighted.toString());
+} catch (error) {
+  emit("status", "invalid");
+  emit("reason", "invalid-json");
+  emit("path", argbPath);
+}
+NODE
+}
+
+run_argb_diff() {
+    ref_path="$1"
+    test_path="$2"
+    prefix="$3"
+    diff_path="$4"
+    diff_out="$5"
+    append_kv "${prefix}_diff_path" "$diff_path"
+    if ! have node; then
+        append_kv "${prefix}_diff_status" "unavailable"
+        append_kv "${prefix}_diff_reason" "missing-node"
+        append_kv "${prefix}_mismatch_count" ""
+        return 0
+    fi
+    if [ ! -s "$ref_path" ] || [ ! -s "$test_path" ]; then
+        append_kv "${prefix}_diff_status" "unavailable"
+        append_kv "${prefix}_diff_reason" "missing-argb-input"
+        append_kv "${prefix}_mismatch_count" ""
+        return 0
+    fi
+    if node "$ROOT_DIR/tools/pixel_compare/diff_argb.js" "$ref_path" "$test_path" "$diff_path" >"$diff_out" 2>&1; then
+        mismatch_count="$(sed -n 's/^differing=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        max_channel_delta="$(sed -n 's/^max_channel_delta=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        total_delta="$(sed -n 's/^max_channel_delta=[0-9][0-9]* total_delta=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        bg_diff="$(sed -n 's/^bg_diff=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        text_diff="$(sed -n 's/^bg_diff=[0-9][0-9]* text_diff=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        diff_bbox="$(sed -n 's/^diff_bbox=\(.*\)$/\1/p' "$diff_out" | tail -n 1)"
+        component_count="$(sed -n 's/^diff_component_count=\([0-9][0-9]*\)$/\1/p' "$diff_out" | tail -n 1)"
+        top_components="$(sed -n 's/^diff_top_components=\(.*\)$/\1/p' "$diff_out" | tail -n 1)"
+        append_kv "${prefix}_max_channel_delta" "$max_channel_delta"
+        append_kv "${prefix}_total_delta" "$total_delta"
+        append_kv "${prefix}_bg_diff_count" "$bg_diff"
+        append_kv "${prefix}_text_diff_count" "$text_diff"
+        append_kv "${prefix}_diff_bbox" "$diff_bbox"
+        append_kv "${prefix}_diff_component_count" "$component_count"
+        append_kv "${prefix}_diff_top_components" "$top_components"
+        if [ "$mismatch_count" = "" ]; then
+            append_kv "${prefix}_diff_status" "fail"
+            append_kv "${prefix}_diff_reason" "missing-differing-count"
+            append_kv "${prefix}_mismatch_count" ""
+        elif [ "$mismatch_count" = "0" ]; then
+            append_kv "${prefix}_diff_status" "pass"
+            append_kv "${prefix}_diff_reason" "pass"
+            append_kv "${prefix}_mismatch_count" "$mismatch_count"
+        else
+            append_kv "${prefix}_diff_status" "fail"
+            append_kv "${prefix}_diff_reason" "pixel-mismatch"
+            append_kv "${prefix}_mismatch_count" "$mismatch_count"
+        fi
+    else
+        append_kv "${prefix}_diff_status" "fail"
+        append_kv "${prefix}_diff_reason" "diff-argb-failed"
+        append_kv "${prefix}_mismatch_count" ""
+    fi
+}
+
+print_install() {
+    cat <<'EOF'
+macOS:
+  brew install vulkan-tools vulkan-loader vulkan-headers molten-vk spirv-tools glslang
+  brew upgrade vulkan-tools vulkan-loader vulkan-headers molten-vk
+  vulkaninfo --summary
+  # RenderDoc is separate from the Homebrew Vulkan/MoltenVK stack on macOS.
+  # On this repo's macOS path, first record whether Homebrew has a package:
+  HOMEBREW_NO_AUTO_UPDATE=1 brew info --cask renderdoc || true
+  HOMEBREW_NO_AUTO_UPDATE=1 brew info renderdoc || true
+  # If those are unavailable, use a project-approved RenderDoc.app/fork or an
+  # unpacked tree containing renderdoccmd; official upstream RenderDoc builds
+  # list Windows/Linux/Android support, so do not assume macOS parity.
+  export RDOC_HOME=/Applications/RenderDoc.app
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+
+Ubuntu/Debian:
+  sudo apt-get update
+  sudo apt-get install vulkan-tools mesa-vulkan-drivers glslang-tools spirv-tools
+  # Install the GPU vendor driver and RenderDoc package/appimage appropriate to the distro.
+  # For Linux Chromium/ANGLE RenderDoc capture, prefer the repo-local Vulkan-only
+  # RenderDoc build so RenderDoc does not hook EGL:
+  sh scripts/setup/build-renderdoc-linux-vulkan-only.shs --print-deps
+  sh scripts/setup/build-renderdoc-linux-vulkan-only.shs --all
+  export RDOC_HOME=$PWD/build/tools/renderdoc-linux-vulkan-only
+  vulkaninfo --summary
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+
+Fedora:
+  sudo dnf install vulkan-tools mesa-vulkan-drivers glslang spirv-tools renderdoc
+  vulkaninfo --summary
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+
+Arch:
+  sudo pacman -S vulkan-tools vulkan-icd-loader glslang spirv-tools renderdoc
+  vulkaninfo --summary
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+
+Windows PowerShell:
+  winget install --id KhronosGroup.VulkanSDK --accept-source-agreements --accept-package-agreements
+  winget install --id Google.Chrome --accept-source-agreements --accept-package-agreements
+  winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+  npm install -g electron
+  # The Vulkan SDK installer may request administrator elevation. After it
+  # completes, open a fresh shell and require these tools before claiming SDK
+  # readiness:
+  Get-Command glslangValidator
+  Get-Command spirv-as
+  Get-Command dxc
+  vulkaninfo --summary
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing
+EOF
+}
+
+case "$MODE" in
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    --print-install)
+        print_install
+        exit 0
+        ;;
+    --check|--browser-backing|--run|--renderdoc-simple|--renderdoc)
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$BUILD_DIR"
+rm -f "$EVIDENCE_ENV"
+
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+UNAME_M="$(uname -m 2>/dev/null || echo unknown)"
+renderdoc_home="$(rdoc_find_renderdoc_home "$ROOT_DIR" || true)"
+chrome_bin="$(rdoc_find_chrome "$ROOT_DIR" || true)"
+electron_bin="$(rdoc_find_electron "$ROOT_DIR" || true)"
+simple_bin="${SIMPLE_BIN:-}"
+simple_bin_selection_reason="missing-self-hosted"
+if [ -n "${SIMPLE_BIN+x}" ]; then
+    simple_bin_selection_reason="explicit-env"
+fi
+
+binary_has_macos_vulkan_loader_paths() {
+    [ -x "$1" ] && have strings && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'libvulkan.1.dylib'
+}
+
+same_repo_executable() {
+    candidate="$1"
+    [ -n "$candidate" ] || return 1
+    [ -x "$candidate" ] || return 1
+    have git || return 1
+    candidate_real="$(readlink -f "$candidate" 2>/dev/null || printf '%s\n' "$candidate")"
+    candidate_dir="$(dirname -- "$candidate_real")"
+    root_git_dir="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    candidate_git_dir="$(git -C "$candidate_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [ -n "$root_git_dir" ] && [ "$candidate_git_dir" = "$root_git_dir" ]
+}
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+if [ -z "${SIMPLE_BIN+pinned}" ]; then
+    for candidate in \
+        "release/x86_64-unknown-linux-gnu/simple" \
+        "release/aarch64-unknown-linux-gnu/simple" \
+        "release/aarch64-apple-darwin/simple" \
+        "release/x86_64-apple-darwin/simple" \
+        "bin/release/x86_64-unknown-linux-gnu/simple" \
+        "bin/release/aarch64-unknown-linux-gnu/simple" \
+        "bin/release/aarch64-apple-darwin/simple" \
+        "bin/release/x86_64-apple-darwin/simple" \
+        "bootstrap/stage3/x86_64-unknown-linux-gnu/simple"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            simple_bin="$candidate"
+            simple_bin_selection_reason="self-hosted-release"
+            break
+        fi
+    done
+    if [ ! -x "$simple_bin" ]; then
+        simple_bin="bin/simple"
+        simple_bin_selection_reason="repo-bin"
+    fi
+fi
+
+if [ -z "${SIMPLE_BIN+pinned}" ]; then
+    if [ ! -x "$simple_bin" ]; then
+        path_simple_candidate="$(command -v simple 2>/dev/null || true)"
+        if [ ! -x "$simple_bin" ] && same_repo_executable "$path_simple_candidate"; then
+            simple_bin="$path_simple_candidate"
+            simple_bin_selection_reason="default-missing-same-repo-path-fallback"
+        elif [ ! -x "$simple_bin" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && [ -n "$path_simple_candidate" ] && [ -x "$path_simple_candidate" ]; then
+            simple_bin="$path_simple_candidate"
+            simple_bin_selection_reason="default-missing-path-opt-in"
+        fi
+        if [ ! -x "$simple_bin" ]; then
+            for candidate in \
+                "bin/simple_native" \
+                "bin/simple-interp"; do
+                if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                    simple_bin="$candidate"
+                    simple_bin_selection_reason="default-missing-fallback"
+                    break
+                fi
+            done
+        fi
+    fi
+    if [ "$UNAME_S" = "Darwin" ]; then
+        for candidate in \
+            "release/aarch64-apple-darwin/simple" \
+            "release/x86_64-apple-darwin/simple" \
+            "bin/release/aarch64-apple-darwin/simple" \
+            "bin/release/x86_64-apple-darwin/simple" \
+            "$simple_bin"; do
+            if binary_has_macos_vulkan_loader_paths "$candidate"; then
+                simple_bin="$candidate"
+                simple_bin_selection_reason="self-hosted-macos-vulkan-loader-paths-present"
+                break
+            fi
+        done
+    fi
+fi
+
+simple_bin_status="missing"
+if is_rust_seed_simple "$simple_bin"; then
+    simple_bin_status="forbidden"
+    simple_bin_selection_reason="${simple_bin_selection_reason}-rust-seed-forbidden"
+elif [ -x "$simple_bin" ]; then
+    if run_bound "$simple_bin" --version >/dev/null 2>&1; then
+        simple_bin_status="pass"
+    else
+        simple_bin_status="startup-failed-$?"
+    fi
+fi
+
+append_kv "gui_web_2d_vulkan_mode" "$MODE"
+append_kv "gui_web_2d_vulkan_root" "$ROOT_DIR"
+append_kv "gui_web_2d_vulkan_build_dir" "$BUILD_DIR"
+append_kv "gui_web_2d_vulkan_uname_s" "$UNAME_S"
+append_kv "gui_web_2d_vulkan_uname_m" "$UNAME_M"
+append_kv "gui_web_2d_vulkan_html_path" "$HTML_PATH"
+append_kv "gui_web_2d_vulkan_width" "$WIDTH"
+append_kv "gui_web_2d_vulkan_height" "$HEIGHT"
+append_kv "gui_web_2d_vulkan_timeout_secs" "$TIMEOUT_SECS"
+append_kv "gui_web_2d_vulkan_chrome" "$chrome_bin"
+append_kv "gui_web_2d_vulkan_electron" "$electron_bin"
+append_kv "gui_web_2d_vulkan_electron_requested_api" "vulkan"
+append_kv "gui_web_2d_vulkan_electron_requested_angle" "vulkan"
+append_kv "gui_web_2d_vulkan_electron_requested_features" "Vulkan"
+append_kv "gui_web_2d_vulkan_electron_launch_flags" "$(rdoc_electron_vulkan_flags)"
+append_kv "gui_web_2d_vulkan_chrome_requested_api" "vulkan"
+append_kv "gui_web_2d_vulkan_chrome_requested_angle" "vulkan"
+append_kv "gui_web_2d_vulkan_chrome_requested_features" "Vulkan"
+append_kv "gui_web_2d_vulkan_chrome_launch_flags" "$(rdoc_chrome_vulkan_flags)"
+append_kv "gui_web_2d_vulkan_renderdoc_home" "$renderdoc_home"
+append_kv "gui_web_2d_vulkan_renderdoc_search_paths" "$(rdoc_renderdoc_search_paths_value "$ROOT_DIR")"
+append_kv "gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status" "$(rdoc_macos_homebrew_package_status)"
+append_kv "gui_web_2d_vulkan_renderdoc_macos_upstream_support_status" "$(rdoc_macos_upstream_support_status)"
+if [ "$renderdoc_home" != "" ]; then
+    append_kv "gui_web_2d_vulkan_renderdoc_cmd" "$(rdoc_renderdoccmd_path "$renderdoc_home")"
+    append_kv "gui_web_2d_vulkan_renderdoc_reason" "ready"
+    append_kv "gui_web_2d_vulkan_renderdoc_install_hint" ""
+else
+    append_kv "gui_web_2d_vulkan_renderdoc_cmd" ""
+    append_kv "gui_web_2d_vulkan_renderdoc_reason" "$(rdoc_missing_renderdoc_reason)"
+    append_kv "gui_web_2d_vulkan_renderdoc_install_hint" "$(rdoc_install_hint)"
+fi
+append_kv "gui_web_2d_vulkan_simple_bin" "$simple_bin"
+append_kv "gui_web_2d_vulkan_simple_bin_selection_reason" "$simple_bin_selection_reason"
+append_kv "gui_web_2d_vulkan_simple_bin_status" "$simple_bin_status"
+
+VULKAN_SUMMARY="$BUILD_DIR/vulkaninfo-summary.out"
+if have vulkaninfo && vulkaninfo --summary >"$VULKAN_SUMMARY" 2>&1; then
+    append_kv "gui_web_2d_vulkan_loader_status" "present"
+    append_kv "gui_web_2d_vulkan_loader_summary" "$VULKAN_SUMMARY"
+    append_vulkan_device_summary "$VULKAN_SUMMARY"
+else
+    append_kv "gui_web_2d_vulkan_loader_status" "missing-or-error"
+    append_kv "gui_web_2d_vulkan_loader_summary" "$VULKAN_SUMMARY"
+fi
+
+SETUP_OUT="$BUILD_DIR/renderdoc-setup.out"
+if [ "$renderdoc_home" != "" ]; then
+    append_kv "gui_web_2d_vulkan_renderdoc_status" "ready"
+    renderdoc_setup_reason="ready"
+    renderdoc_setup_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+else
+    append_kv "gui_web_2d_vulkan_renderdoc_status" "unavailable"
+    renderdoc_setup_reason="$(rdoc_missing_renderdoc_reason)"
+    renderdoc_setup_cmd=""
+fi
+append_kv "gui_web_2d_vulkan_renderdoc_setup_log" "$SETUP_OUT"
+append_kv "gui_web_2d_vulkan_renderdoc_setup_reason" "$renderdoc_setup_reason"
+append_kv "gui_web_2d_vulkan_renderdoc_setup_cmd" "$renderdoc_setup_cmd"
+append_kv "gui_web_2d_vulkan_renderdoc_setup_search_paths" "$(rdoc_renderdoc_search_paths_value "$ROOT_DIR")"
+append_kv "gui_web_2d_vulkan_renderdoc_setup_install_hint" "$(rdoc_install_hint)"
+append_kv "gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status" "$(rdoc_macos_homebrew_package_status)"
+append_kv "gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status" "$(rdoc_macos_upstream_support_status)"
+
+if [ "$MODE" = "--browser-backing" ] || [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "--renderdoc" ]; then
+    ELECTRON_OUT="$BUILD_DIR/electron.out"
+    ELECTRON_LOG="$BUILD_DIR/electron.log"
+    ELECTRON_ARGB="$BUILD_DIR/electron_argb.json"
+    ELECTRON_ARGB_PROOF="$BUILD_DIR/electron_argb_proof.json"
+    ELECTRON_CDP_PORT="${GUI_WEB_2D_VULKAN_ELECTRON_CDP_PORT:-$((33000 + ($$ % 10000)))}"
+    if [ "$MODE" = "--renderdoc-simple" ]; then
+        append_kv "gui_web_2d_vulkan_electron_exit_code" ""
+        append_kv "gui_web_2d_vulkan_electron_vulkan_status" "not-run"
+        append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "simple-renderdoc-only"
+    elif [ "$electron_bin" != "" ] && [ -x "$electron_bin" ]; then
+        ELECTRON_CAPTURE_HTML="$HTML_PATH" \
+        ELECTRON_CAPTURE_WIDTH="$WIDTH" \
+        ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+        ELECTRON_CAPTURE_OUTPUT="$ELECTRON_ARGB" \
+        ELECTRON_CAPTURE_PROOF_PATH="$ELECTRON_ARGB_PROOF" \
+        ELECTRON_CAPTURE_SETTLE_MS="${RDOC_ELECTRON_SETTLE_MS:-1000}" \
+        ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT="$ELECTRON_CDP_PORT" \
+        ELECTRON_ENABLE_LOGGING=1 \
+            run_electron_bound "$electron_bin" $(rdoc_electron_vulkan_flags) "$ROOT_DIR/tools/electron-live-bitmap/capture_html_argb.js" \
+            >"$ELECTRON_OUT" 2>"$ELECTRON_LOG"
+        electron_code=$?
+        append_kv "gui_web_2d_vulkan_electron_exit_code" "$electron_code"
+        append_kv "gui_web_2d_vulkan_electron_stdout" "$ELECTRON_OUT"
+        append_kv "gui_web_2d_vulkan_electron_log" "$ELECTRON_LOG"
+        append_kv "gui_web_2d_vulkan_electron_argb_proof" "$ELECTRON_ARGB_PROOF"
+        parse_argb "$ELECTRON_ARGB" "gui_web_2d_vulkan_electron"
+        if grep -E 'Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization' "$ELECTRON_LOG" >/dev/null 2>&1; then
+            append_kv "gui_web_2d_vulkan_electron_vulkan_status" "fail"
+            append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "vulkan-angle-unavailable"
+        elif node -e 'const fs=require("fs"); const p=process.argv[1]; const j=fs.existsSync(p)?JSON.parse(fs.readFileSync(p,"utf8")):{}; process.exit(/enabled/i.test(String(j.gpuFeatureStatus&&j.gpuFeatureStatus.vulkan||"")) ? 0 : 1)' "$ELECTRON_ARGB"; then
+            append_kv "gui_web_2d_vulkan_electron_vulkan_status" "pass"
+            append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "electron-vulkan-enabled"
+        else
+            append_kv "gui_web_2d_vulkan_electron_vulkan_status" "not-rejected-by-log"
+            append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "no-angle-vulkan-unavailable-log"
+        fi
+    else
+        append_kv "gui_web_2d_vulkan_electron_exit_code" ""
+        append_kv "gui_web_2d_vulkan_electron_vulkan_status" "unavailable"
+        append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "missing-electron"
+    fi
+
+    CHROME_OUT="$BUILD_DIR/chrome.out"
+    CHROME_LOG="$BUILD_DIR/chrome.log"
+    CHROME_SCREENSHOT="$BUILD_DIR/chrome.png"
+    CHROME_ARGB="$BUILD_DIR/chrome_argb.json"
+    CHROME_ARGB_OUT="$BUILD_DIR/chrome_argb.out"
+    CHROME_ARGB_PROOF="$BUILD_DIR/chrome_argb_proof.json"
+    CHROME_GEOMETRY="$BUILD_DIR/chrome_geometry.json"
+    CHROME_USER_DATA="$BUILD_DIR/chrome-user-data"
+    if [ "$MODE" = "--renderdoc-simple" ]; then
+        append_kv "gui_web_2d_vulkan_chrome_exit_code" ""
+        append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "not-run"
+        append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "simple-renderdoc-only"
+        append_kv "gui_web_2d_vulkan_chrome_argb_status" "not-run"
+        append_kv "gui_web_2d_vulkan_chrome_argb_reason" "simple-renderdoc-only"
+        append_kv "gui_web_2d_vulkan_chrome_argb_path" "$CHROME_ARGB"
+    elif [ "$chrome_bin" != "" ] && [ -x "$chrome_bin" ]; then
+        rm -rf "$CHROME_USER_DATA"
+        mkdir -p "$CHROME_USER_DATA"
+        if [ "${GUI_WEB_2D_VULKAN_CHROME_SCREENSHOT:-0}" = "1" ]; then
+            run_bound "$chrome_bin" $(rdoc_chrome_vulkan_flags) \
+                --headless=new \
+                --disable-background-networking \
+                --user-data-dir="$CHROME_USER_DATA" \
+                --window-size="${WIDTH},${HEIGHT}" \
+                --screenshot="$CHROME_SCREENSHOT" \
+                "file://$HTML_PATH" >"$CHROME_OUT" 2>"$CHROME_LOG"
+            chrome_code=$?
+        else
+            : >"$CHROME_OUT"
+            : >"$CHROME_LOG"
+            chrome_code=
+        fi
+        append_kv "gui_web_2d_vulkan_chrome_exit_code" "$chrome_code"
+        append_kv "gui_web_2d_vulkan_chrome_stdout" "$CHROME_OUT"
+        append_kv "gui_web_2d_vulkan_chrome_log" "$CHROME_LOG"
+        append_kv "gui_web_2d_vulkan_chrome_screenshot" "$CHROME_SCREENSHOT"
+        if [ -s "$CHROME_SCREENSHOT" ]; then
+            append_kv "gui_web_2d_vulkan_chrome_bitmap_status" "pass"
+        elif [ "${GUI_WEB_2D_VULKAN_CHROME_SCREENSHOT:-0}" != "1" ]; then
+            append_kv "gui_web_2d_vulkan_chrome_bitmap_status" "not-run"
+        else
+            append_kv "gui_web_2d_vulkan_chrome_bitmap_status" "missing"
+        fi
+        if grep -E 'Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization' "$CHROME_LOG" >/dev/null 2>&1; then
+            append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "fail"
+            append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "vulkan-angle-unavailable"
+        else
+            append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "not-rejected-by-log"
+            append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "no-angle-vulkan-unavailable-log"
+        fi
+
+        CHROME_CAPTURE_HTML="$HTML_PATH" \
+        CHROME_CAPTURE_WIDTH="$WIDTH" \
+        CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+        CHROME_CAPTURE_OUTPUT="$CHROME_ARGB" \
+        CHROME_CAPTURE_PROOF_PATH="$CHROME_ARGB_PROOF" \
+        CHROME_CAPTURE_GEOMETRY_OUTPUT="$CHROME_GEOMETRY" \
+        CHROME_CAPTURE_BIN="$chrome_bin" \
+        CHROME_CAPTURE_DISABLE_GPU=false \
+        CHROME_CAPTURE_EXTRA_ARGS="$(rdoc_chrome_vulkan_flags)" \
+        CHROME_CAPTURE_TIMEOUT_MS="$((TIMEOUT_SECS * 1000))" \
+            run_bound node "$ROOT_DIR/tools/chrome-live-bitmap/capture_html_argb.js" >"$CHROME_ARGB_OUT" 2>&1
+        chrome_argb_code=$?
+        append_kv "gui_web_2d_vulkan_chrome_argb_exit_code" "$chrome_argb_code"
+        append_kv "gui_web_2d_vulkan_chrome_argb_stdout" "$CHROME_ARGB_OUT"
+        append_kv "gui_web_2d_vulkan_chrome_argb_proof" "$CHROME_ARGB_PROOF"
+        parse_argb "$CHROME_ARGB" "gui_web_2d_vulkan_chrome"
+    else
+        append_kv "gui_web_2d_vulkan_chrome_exit_code" ""
+        append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "unavailable"
+        append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "missing-chrome"
+        append_kv "gui_web_2d_vulkan_chrome_argb_status" "unavailable"
+        append_kv "gui_web_2d_vulkan_chrome_argb_reason" "missing-chrome"
+        append_kv "gui_web_2d_vulkan_chrome_argb_path" "$CHROME_ARGB"
+    fi
+
+    if [ "$MODE" = "--browser-backing" ] && have node; then
+        if [ -f "$ROOT_DIR/scripts/check/gui-web-2d-vulkan-browser-backing-status.js" ]; then
+            node "$ROOT_DIR/scripts/check/gui-web-2d-vulkan-browser-backing-status.js" "$ELECTRON_ARGB_PROOF" "$ELECTRON_ARGB" "$CHROME_ARGB_PROOF" >>"$EVIDENCE_ENV"
+        else
+            node - "$ELECTRON_ARGB_PROOF" "$ELECTRON_ARGB" "$CHROME_ARGB_PROOF" >>"$EVIDENCE_ENV" <<'NODE'
+const fs = require("fs");
+const electronProofPath = process.argv[2] || "";
+const electronArgbPath = process.argv[3] || "";
+const chromeProofPath = process.argv[4] || "";
+function emit(k, v) { console.log(`${k}=${v === undefined || v === null ? "" : v}`); }
+function readJson(path) {
+  try { return path && fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : null; }
+  catch (_err) { return null; }
+}
+const electronProof = readJson(electronProofPath);
+const electronArgb = readJson(electronArgbPath);
+const chrome = readJson(chromeProofPath);
+function sourceFileStatus(path) {
+  if (!path) return "unavailable";
+  let stat = null;
+  try { stat = fs.lstatSync(path); }
+  catch (_err) { return "missing"; }
+  if (stat.isSymbolicLink()) return "symlink";
+  if (!stat.isFile()) return "not-regular";
+  if (stat.nlink > 1) return "hardlink";
+  if (stat.size <= 0) return "empty";
+  return "pass";
+}
+const electronProofFileStatus = sourceFileStatus(electronProofPath);
+const electronArgbFileStatus = sourceFileStatus(electronArgbPath);
+const chromeProofFileStatus = sourceFileStatus(chromeProofPath);
+const electronFeatureStatus = electronProof && electronProof.gpu_feature_status ? electronProof.gpu_feature_status : (electronArgb && electronArgb.gpuFeatureStatus ? electronArgb.gpuFeatureStatus : {});
+const electronBrowserGpuInfo = electronProof && electronProof.browser_target_gpu_info ? electronProof.browser_target_gpu_info : (electronArgb && electronArgb.browserTargetGpuInfo ? electronArgb.browserTargetGpuInfo : {});
+const electronAppGpuInfo = electronProof && electronProof.gpu_info ? electronProof.gpu_info : (electronArgb && electronArgb.gpuInfo ? electronArgb.gpuInfo : {});
+const electronGpuInfo = electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? electronBrowserGpuInfo : electronAppGpuInfo;
+const electronBrowserGpuInfoStatus = electronProof && electronProof.browser_target_gpu_info_status ? String(electronProof.browser_target_gpu_info_status) : (electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? "pass" : (electronBrowserGpuInfo && electronBrowserGpuInfo.error ? "fail" : "not-run"));
+const electronBrowserGpuInfoReason = electronBrowserGpuInfo && electronBrowserGpuInfo.error ? String(electronBrowserGpuInfo.error) : electronBrowserGpuInfoStatus;
+const electronVulkan = String(electronFeatureStatus.vulkan || "");
+const electronGpuCompositing = String(electronFeatureStatus.gpu_compositing || "");
+function gpuAux(info) {
+  return info && info.gpu && info.gpu.auxAttributes ? info.gpu.auxAttributes : (info && info.auxAttributes ? info.auxAttributes : {});
+}
+const electronAux = gpuAux(electronGpuInfo);
+const electronAppAux = gpuAux(electronAppGpuInfo);
+const electronDisplay = String(electronAux.displayType || "");
+const electronHardware = Boolean(electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan);
+const electronGlParts = String(electronAux.glImplementationParts || electronAppAux.glImplementationParts || "");
+const electronSkiaBackend = String(electronAux.skiaBackendType || electronAppAux.skiaBackendType || "");
+const electronGlRenderer = String(electronAux.glRenderer || electronAppAux.glRenderer || "");
+const electronEnabled = /enabled/i.test(electronVulkan);
+const electronGpuEnabled = /enabled/i.test(electronGpuCompositing);
+const electronMentionsVulkan = /vulkan/i.test(`${electronDisplay} ${electronGlParts} ${electronSkiaBackend} ${electronGlRenderer}`);
+const electronProofFileOk = electronProofFileStatus === "pass";
+const electronStatus = electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan && electronProofFileOk ? "pass" : "fail";
+const electronReason = electronStatus === "pass"
+  ? "electron-vulkan-backed"
+  : (!electronProofFileOk ? `electron-source-file-${electronProofFileStatus}` : (electronEnabled && !electronGpuEnabled ? "electron-vulkan-gpu-compositing-disabled" : (electronEnabled ? "electron-vulkan-enabled-without-angle-vulkan-proof" : `electron-vulkan-${electronVulkan || "unknown"}`)));
+const chromeGpuInfo = chrome ? chrome.gpu_info : null;
+const chromeFeatureStatus = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.featureStatus || {} : {};
+const chromeAux = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.auxAttributes || {} : {};
+const chromeDisplay = String(chromeAux.displayType || "");
+const chromeGpuCompositing = String(chromeFeatureStatus.gpu_compositing || "");
+const chromeGl = String(chromeAux.glImplementationParts || "");
+const chromeSkiaBackend = String(chromeAux.skiaBackendType || "");
+const chromeGlRenderer = String(chromeAux.glRenderer || "");
+const chromeHardware = Boolean(chromeAux.hardwareSupportsVulkan);
+const chromeGpuEnabled = /enabled/i.test(chromeGpuCompositing);
+const chromeMentionsVulkan = /vulkan/i.test(`${chromeDisplay} ${chromeGl} ${chromeSkiaBackend} ${chromeGlRenderer}`);
+const chromeProofFileOk = chromeProofFileStatus === "pass";
+const chromeStatus = chromeGpuEnabled && chromeHardware && chromeMentionsVulkan && chromeProofFileOk ? "pass" : "fail";
+const chromeReason = chromeStatus === "pass" ? "chrome-vulkan-backed" : (!chromeProofFileOk ? `chrome-source-file-${chromeProofFileStatus}` : (chromeGpuInfo ? (!chromeGpuEnabled ? "chrome-vulkan-gpu-compositing-disabled" : (chromeHardware ? "chrome-vulkan-not-proven" : "chrome-vulkan-hardware-missing")) : "chrome-gpu-info-missing"));
+emit("gui_web_2d_vulkan_browser_backing_mode", "gpu-feature-status");
+emit("gui_web_2d_vulkan_electron_browser_backing_source", electronProofPath);
+emit("gui_web_2d_vulkan_electron_browser_backing_source_file_status", electronProofFileStatus);
+emit("gui_web_2d_vulkan_electron_browser_backing_argb_source", electronArgbPath);
+emit("gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status", electronArgbFileStatus);
+emit("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status", electronBrowserGpuInfoStatus);
+emit("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_reason", electronBrowserGpuInfoReason);
+emit("gui_web_2d_vulkan_electron_browser_backing_status", electronStatus);
+emit("gui_web_2d_vulkan_electron_browser_backing_reason", electronReason);
+emit("gui_web_2d_vulkan_electron_browser_backing_vulkan", electronVulkan);
+emit("gui_web_2d_vulkan_electron_browser_backing_gpu_compositing", electronGpuCompositing);
+emit("gui_web_2d_vulkan_electron_browser_backing_display_type", electronDisplay);
+emit("gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan", electronHardware ? "true" : "false");
+emit("gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts", electronGlParts);
+emit("gui_web_2d_vulkan_electron_browser_backing_skia_backend_type", electronSkiaBackend);
+emit("gui_web_2d_vulkan_electron_browser_backing_gl_renderer", electronGlRenderer);
+emit("gui_web_2d_vulkan_chrome_browser_backing_source", chromeProofPath);
+emit("gui_web_2d_vulkan_chrome_browser_backing_source_file_status", chromeProofFileStatus);
+emit("gui_web_2d_vulkan_chrome_browser_backing_status", chromeStatus);
+emit("gui_web_2d_vulkan_chrome_browser_backing_reason", chromeReason);
+emit("gui_web_2d_vulkan_chrome_browser_backing_display_type", chromeDisplay);
+emit("gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing", chromeGpuCompositing);
+emit("gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts", chromeGl);
+emit("gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type", chromeSkiaBackend);
+emit("gui_web_2d_vulkan_chrome_browser_backing_gl_renderer", chromeGlRenderer);
+emit("gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan", chromeHardware ? "true" : "false");
+emit("gui_web_2d_vulkan_browser_backing_status", electronStatus === "pass" && chromeStatus === "pass" ? "pass" : "fail");
+emit("gui_web_2d_vulkan_browser_backing_reason", electronStatus === "pass" && chromeStatus === "pass" ? "pass" : `${electronReason};${chromeReason}`);
+NODE
+        fi
+    elif [ "$MODE" = "--browser-backing" ]; then
+        append_kv "gui_web_2d_vulkan_browser_backing_mode" "gpu-feature-status"
+        append_kv "gui_web_2d_vulkan_browser_backing_status" "fail"
+        append_kv "gui_web_2d_vulkan_browser_backing_reason" "missing-node"
+    fi
+
+    if [ "$MODE" != "--browser-backing" ]; then
+        SIMPLE_OUT="$BUILD_DIR/simple-vulkan-readback.out"
+        SIMPLE_WORK_DIR="$BUILD_DIR/simple-vulkan-readback"
+        SIMPLE_ARGB="$BUILD_DIR/simple_argb.json"
+        SIMPLE_ARGB_OUT="$BUILD_DIR/simple_argb.out"
+        SIMPLE_PIXEL_BACKEND="${GUI_WEB_2D_VULKAN_SIMPLE_PIXEL_BACKEND:-vulkan}"
+        if [ "$simple_bin_status" != "pass" ]; then
+            : >"$SIMPLE_OUT"
+            : >"$SIMPLE_ARGB_OUT"
+            append_kv "gui_web_2d_vulkan_simple_exit_code" ""
+            append_kv "gui_web_2d_vulkan_simple_log" "$SIMPLE_OUT"
+            append_kv "gui_web_2d_vulkan_simple_evidence_env" "$SIMPLE_WORK_DIR/evidence.env"
+            append_kv "gui_web_2d_vulkan_simple_status" "unavailable"
+            append_kv "gui_web_2d_vulkan_simple_reason" "simple-bin-${simple_bin_status}"
+            append_kv "gui_web_2d_vulkan_simple_probe_status" ""
+            append_kv "gui_web_2d_vulkan_simple_available" ""
+            append_kv "gui_web_2d_vulkan_simple_backend_name" ""
+            append_kv "gui_web_2d_vulkan_simple_argb_exit_code" ""
+            append_kv "gui_web_2d_vulkan_simple_argb_stdout" "$SIMPLE_ARGB_OUT"
+            append_kv "gui_web_2d_vulkan_simple_argb_backend" "$SIMPLE_PIXEL_BACKEND"
+            append_kv "gui_web_2d_vulkan_simple_argb_status" "unavailable"
+            append_kv "gui_web_2d_vulkan_simple_argb_reason" "simple-bin-${simple_bin_status}"
+            append_kv "gui_web_2d_vulkan_simple_argb_path" "$SIMPLE_ARGB"
+        else
+            SIMPLE_VULKAN_READBACK_WORK_DIR="$SIMPLE_WORK_DIR" \
+            REPORT_PATH="$SIMPLE_WORK_DIR/report.md" \
+            SIMPLE_BIN="$simple_bin" \
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+                sh "$ROOT_DIR/scripts/check/check-vulkan-engine2d-readback.shs" >"$SIMPLE_OUT" 2>&1
+            simple_code=$?
+            append_kv "gui_web_2d_vulkan_simple_exit_code" "$simple_code"
+            append_kv "gui_web_2d_vulkan_simple_log" "$SIMPLE_OUT"
+            append_kv "gui_web_2d_vulkan_simple_evidence_env" "$SIMPLE_WORK_DIR/evidence.env"
+            if [ -f "$SIMPLE_WORK_DIR/evidence.env" ]; then
+                append_file_value "gui_web_2d_vulkan_simple_status" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_status=//p'
+                append_file_value "gui_web_2d_vulkan_simple_reason" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_reason=//p'
+                append_file_value "gui_web_2d_vulkan_simple_probe_status" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_probe_status=//p'
+                append_file_value "gui_web_2d_vulkan_simple_available" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_available=//p'
+                append_file_value "gui_web_2d_vulkan_simple_backend_name" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_backend_name=//p'
+            else
+                append_kv "gui_web_2d_vulkan_simple_status" "missing-evidence"
+                append_kv "gui_web_2d_vulkan_simple_reason" "missing-evidence-env"
+            fi
+
+            PIXEL_HTML="$HTML_PATH" \
+            PIXEL_W="$WIDTH" \
+            PIXEL_H="$HEIGHT" \
+            PIXEL_BACKEND="$SIMPLE_PIXEL_BACKEND" \
+            PIXEL_OUT="$SIMPLE_ARGB" \
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+                run_bound "$simple_bin" run "$ROOT_DIR/tools/pixel_compare/render_simple_html.spl" --mode=native --clean >"$SIMPLE_ARGB_OUT" 2>&1
+            simple_argb_code=$?
+            append_kv "gui_web_2d_vulkan_simple_argb_exit_code" "$simple_argb_code"
+            append_kv "gui_web_2d_vulkan_simple_argb_stdout" "$SIMPLE_ARGB_OUT"
+            append_kv "gui_web_2d_vulkan_simple_argb_backend" "$SIMPLE_PIXEL_BACKEND"
+            parse_argb "$SIMPLE_ARGB" "gui_web_2d_vulkan_simple"
+        fi
+
+        run_argb_diff "$ELECTRON_ARGB" "$CHROME_ARGB" "gui_web_2d_vulkan_electron_chrome" "$BUILD_DIR/electron_chrome_diff.ppm" "$BUILD_DIR/electron_chrome_diff.out"
+        run_argb_diff "$ELECTRON_ARGB" "$SIMPLE_ARGB" "gui_web_2d_vulkan_electron_simple" "$BUILD_DIR/electron_simple_diff.ppm" "$BUILD_DIR/electron_simple_diff.out"
+        run_argb_diff "$CHROME_ARGB" "$SIMPLE_ARGB" "gui_web_2d_vulkan_chrome_simple" "$BUILD_DIR/chrome_simple_diff.ppm" "$BUILD_DIR/chrome_simple_diff.out"
+
+        electron_chrome_status="$(sed -n 's/^gui_web_2d_vulkan_electron_chrome_diff_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
+        electron_simple_status="$(sed -n 's/^gui_web_2d_vulkan_electron_simple_diff_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
+        chrome_simple_status="$(sed -n 's/^gui_web_2d_vulkan_chrome_simple_diff_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
+        append_kv "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status" "$electron_chrome_status"
+        append_kv "gui_web_2d_vulkan_electron_simple_pairwise_diff_status" "$electron_simple_status"
+        append_kv "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status" "$chrome_simple_status"
+        electron_chrome_mismatch="$(sed -n 's/^gui_web_2d_vulkan_electron_chrome_mismatch_count=//p' "$EVIDENCE_ENV" | tail -n 1)"
+        electron_simple_mismatch="$(sed -n 's/^gui_web_2d_vulkan_electron_simple_mismatch_count=//p' "$EVIDENCE_ENV" | tail -n 1)"
+        chrome_simple_mismatch="$(sed -n 's/^gui_web_2d_vulkan_chrome_simple_mismatch_count=//p' "$EVIDENCE_ENV" | tail -n 1)"
+        simple_within_browser_floor=0
+        case "$electron_chrome_mismatch:$electron_simple_mismatch:$chrome_simple_mismatch" in
+            *[!0-9:]*|::*|*::*) ;;
+            *)
+                es_excess=$((electron_simple_mismatch - electron_chrome_mismatch))
+                cs_excess=$((chrome_simple_mismatch - electron_chrome_mismatch))
+                [ "$es_excess" -lt 0 ] && es_excess=0
+                [ "$cs_excess" -lt 0 ] && cs_excess=0
+                append_kv "gui_web_2d_vulkan_electron_simple_excess_over_browser_floor" "$es_excess"
+                append_kv "gui_web_2d_vulkan_chrome_simple_excess_over_browser_floor" "$cs_excess"
+                if [ "$es_excess" -eq 0 ] && [ "$cs_excess" -eq 0 ]; then
+                    simple_within_browser_floor=1
+                fi
+                ;;
+        esac
+        if [ "$simple_within_browser_floor" = "1" ]; then
+            append_kv "gui_web_2d_vulkan_simple_browser_floor_status" "pass"
+            append_kv "gui_web_2d_vulkan_simple_browser_floor_reason" "simple-has-no-excess-over-electron-chrome-drift"
+        else
+            append_kv "gui_web_2d_vulkan_simple_browser_floor_status" "fail"
+            append_kv "gui_web_2d_vulkan_simple_browser_floor_reason" "simple-exceeds-browser-drift-or-browser-floor-missing"
+        fi
+        if [ "$electron_chrome_status" = "pass" ] && [ "$electron_simple_status" = "pass" ] && [ "$chrome_simple_status" = "pass" ]; then
+            append_kv "gui_web_2d_vulkan_pixel_comparison_status" "pass"
+            append_kv "gui_web_2d_vulkan_pixel_comparison_reason" "all-pairwise-diffs-pass"
+        else
+            append_kv "gui_web_2d_vulkan_pixel_comparison_status" "fail"
+            append_kv "gui_web_2d_vulkan_pixel_comparison_reason" "pairwise-diff-incomplete-or-mismatch"
+        fi
+        append_kv "gui_web_2d_vulkan_pixel_comparison_mode" "pairwise-argb-diff"
+    fi
+fi
+
+if [ "$MODE" = "--renderdoc-simple" ]; then
+    RDOC_OUT="$BUILD_DIR/renderdoc"
+    RDOC_OUTPUT_DIR="$RDOC_OUT" "$ROOT_DIR/scripts/tool/renderdoc-evidence.shs" capture-simple >"$BUILD_DIR/renderdoc-simple.out" 2>&1
+    rdoc_simple_code=$?
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_exit_code" "$rdoc_simple_code"
+    append_kv "gui_web_2d_vulkan_renderdoc_output_dir" "$RDOC_OUT"
+fi
+
+if [ "$MODE" = "--renderdoc" ]; then
+    RDOC_OUT="$BUILD_DIR/renderdoc"
+    RDOC_OUTPUT_DIR="$RDOC_OUT" "$ROOT_DIR/scripts/tool/renderdoc-evidence.shs" capture-simple >"$BUILD_DIR/renderdoc-simple.out" 2>&1
+    rdoc_simple_code=$?
+    RDOC_OUTPUT_DIR="$RDOC_OUT" "$ROOT_DIR/scripts/tool/renderdoc-evidence.shs" capture-html >"$BUILD_DIR/renderdoc-html.out" 2>&1
+    rdoc_html_code=$?
+    RDOC_OUTPUT_DIR="$RDOC_OUT" "$ROOT_DIR/scripts/tool/renderdoc-evidence.shs" capture-electron-html >"$BUILD_DIR/renderdoc-electron-html.out" 2>&1
+    rdoc_electron_code=$?
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_exit_code" "$rdoc_simple_code"
+    append_kv "gui_web_2d_vulkan_renderdoc_html_exit_code" "$rdoc_html_code"
+    append_kv "gui_web_2d_vulkan_renderdoc_electron_exit_code" "$rdoc_electron_code"
+    append_kv "gui_web_2d_vulkan_renderdoc_output_dir" "$RDOC_OUT"
+fi
+
+append_kv "gui_web_2d_vulkan_evidence_env" "$EVIDENCE_ENV"
+cat "$EVIDENCE_ENV"

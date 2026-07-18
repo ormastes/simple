@@ -1,0 +1,125 @@
+# CRC-32 and CRC-32C Known-Answer Test Vectors
+#
+# Tests crc32 / crc32c against standard reference vectors and streaming API.
+#
+# CRC-32 (IEEE 802.3):  poly 0xEDB88320, init 0xFFFFFFFF, xorout 0xFFFFFFFF
+#   ""          → 0x00000000
+#   "abc"       → 0x352441C2
+#   "123456789" → 0xCBF43926  (canonical check-value from ISO 3309)
+#
+# CRC-32C (Castagnoli): poly 0x82F63B78, init 0xFFFFFFFF, xorout 0xFFFFFFFF
+#   ""          → 0x00000000
+#   "abc"       → 0x364B3FB7
+#   "123456789" → 0xE3069283  (canonical check-value, RFC 3720)
+#
+# Reference: ISO 3309, ITU-T V.42, IETF RFC 3720 §B.4
+
+use std.spipe.*
+use os.crypto.crc32.{crc32, crc32c, crc32_init, crc32_update, crc32_finalize,
+    crc32c_init, crc32c_update, crc32c_finalize}
+
+# ============================================================================
+# Test data helpers — module-level to avoid it-block var-mutation footgun
+# (see .claude/memory/feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _empty() -> [u8]:
+    var out: [u8] = []
+    out
+
+fn _abc() -> [u8]:
+    # ASCII "abc" = 61 62 63
+    var out: [u8] = []
+    out.push(0x61)
+    out.push(0x62)
+    out.push(0x63)
+    out
+
+fn _check_sequence() -> [u8]:
+    # ASCII "123456789" = 31 32 33 34 35 36 37 38 39
+    var out: [u8] = []
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out
+
+fn _abc_part1() -> [u8]:
+    # First byte of "abc" for streaming split: "a"
+    var out: [u8] = []
+    out.push(0x61)
+    out
+
+fn _abc_part2() -> [u8]:
+    # Remaining bytes of "abc" for streaming split: "bc"
+    var out: [u8] = []
+    out.push(0x62)
+    out.push(0x63)
+    out
+
+# ============================================================================
+# CRC-32 (IEEE 802.3) one-shot KATs
+# ============================================================================
+
+describe "CRC-32 IEEE 802.3 one-shot KATs":
+
+    it "empty input → 0x00000000":
+        expect(crc32(_empty())).to_equal(0x00000000)
+
+    it "\"abc\" → 0x352441C2":
+        expect(crc32(_abc())).to_equal(0x352441C2)
+
+    it "\"123456789\" → 0xCBF43926 (ISO 3309 check-value)":
+        expect(crc32(_check_sequence())).to_equal(0xCBF43926)
+
+# ============================================================================
+# CRC-32C (Castagnoli) one-shot KATs
+# ============================================================================
+
+describe "CRC-32C Castagnoli one-shot KATs":
+
+    it "empty input → 0x00000000":
+        expect(crc32c(_empty())).to_equal(0x00000000)
+
+    it "\"abc\" → 0x364B3FB7":
+        expect(crc32c(_abc())).to_equal(0x364B3FB7)
+
+    it "\"123456789\" → 0xE3069283 (RFC 3720 check-value)":
+        expect(crc32c(_check_sequence())).to_equal(0xE3069283)
+
+# ============================================================================
+# Streaming API — CRC-32 IEEE 802.3
+# ============================================================================
+
+describe "CRC-32 IEEE 802.3 streaming API":
+
+    it "streaming \"abc\" split 1+2 bytes matches one-shot":
+        val s1 = crc32_update(crc32_init(), _abc_part1())
+        val s2 = crc32_update(s1, _abc_part2())
+        val result = crc32_finalize(s2)
+        expect(result).to_equal(0x352441C2)
+
+    it "streaming empty matches one-shot":
+        val result = crc32_finalize(crc32_update(crc32_init(), _empty()))
+        expect(result).to_equal(0x00000000)
+
+# ============================================================================
+# Streaming API — CRC-32C Castagnoli
+# ============================================================================
+
+describe "CRC-32C Castagnoli streaming API":
+
+    it "streaming \"abc\" split 1+2 bytes matches one-shot":
+        val s1 = crc32c_update(crc32c_init(), _abc_part1())
+        val s2 = crc32c_update(s1, _abc_part2())
+        val result = crc32c_finalize(s2)
+        expect(result).to_equal(0x364B3FB7)
+
+    it "streaming empty matches one-shot":
+        val result = crc32c_finalize(crc32c_update(crc32c_init(), _empty()))
+        expect(result).to_equal(0x00000000)

@@ -1,0 +1,274 @@
+@no_gc
+
+# ExecTarget — two-level, config-selectable compute-target policy.
+#
+# Models SYCL device_type: you tag the DEVICE CLASS (level 1); the runtime resolves
+# the concrete BACKEND (level 2). No value mixes a class with a backend-API name.
+# Config carries an enforcement mode: `suggest` (soft, falls back to best) or
+# `require` (hard, fail-closed). See doc/glossary.md "ExecTarget (Compute Target Mode)".
+#
+# This module is the PROCESSING (compute) domain policy for std.compute. The DRAWING
+# (render) domain reuses the same enforcement model via SIMPLE_2D_BACKEND.
+
+use std.nogc_async_mut.io.env_ops.{env_get}
+
+# ---------------------------------------------------------------------------
+# Level 1 — device class (what you tag / configure)
+# ---------------------------------------------------------------------------
+enum DeviceClass:
+    Default
+    Cpu
+    SimdCpu
+    Gpu
+    Fpga
+    Simd
+
+# ---------------------------------------------------------------------------
+# Level 2 — concrete backend (auto-resolved, never tagged directly)
+# ---------------------------------------------------------------------------
+enum ComputeBackend:
+    Scalar
+    Neon
+    Sve2
+    Rvv
+    Cuda
+    Hip
+    OpenCl
+    Vulkan
+    Metal
+    WebGpu
+    Vhdl
+    PureSimple
+    NoneBackend
+
+# ---------------------------------------------------------------------------
+# Config enforcement mode
+# ---------------------------------------------------------------------------
+enum EnforceMode:
+    Suggest
+    Require
+
+fn device_class_name(c: DeviceClass) -> text:
+    if c == DeviceClass.Default:
+        return "default"
+    if c == DeviceClass.Cpu:
+        return "cpu"
+    if c == DeviceClass.SimdCpu:
+        return "simd_cpu"
+    if c == DeviceClass.Gpu:
+        return "gpu"
+    if c == DeviceClass.Fpga:
+        return "fpga"
+    if c == DeviceClass.Simd:
+        return "simd"
+    return "unknown"
+
+fn compute_backend_name(b: ComputeBackend) -> text:
+    if b == ComputeBackend.Scalar:
+        return "scalar"
+    if b == ComputeBackend.Neon:
+        return "neon"
+    if b == ComputeBackend.Sve2:
+        return "sve2"
+    if b == ComputeBackend.Rvv:
+        return "rvv"
+    if b == ComputeBackend.Cuda:
+        return "cuda"
+    if b == ComputeBackend.Hip:
+        return "hip"
+    if b == ComputeBackend.OpenCl:
+        return "opencl"
+    if b == ComputeBackend.Vulkan:
+        return "vulkan"
+    if b == ComputeBackend.Metal:
+        return "metal"
+    if b == ComputeBackend.WebGpu:
+        return "webgpu"
+    if b == ComputeBackend.Vhdl:
+        return "vhdl"
+    if b == ComputeBackend.PureSimple:
+        return "pure_simple"
+    return "none"
+
+fn parse_device_class(name: text) -> DeviceClass:
+    if name == "" or name == "default" or name == "auto":
+        return DeviceClass.Default
+    if name == "cpu":
+        return DeviceClass.Cpu
+    if name == "simd_cpu" or name == "simd-cpu":
+        return DeviceClass.SimdCpu
+    if name == "gpu":
+        return DeviceClass.Gpu
+    if name == "fpga" or name == "vhdl":
+        return DeviceClass.Fpga
+    if name == "simd":
+        return DeviceClass.Simd
+    return DeviceClass.Default
+
+fn parse_enforce_mode(name: text) -> EnforceMode:
+    if name == "require" or name == "must":
+        return EnforceMode.Require
+    return EnforceMode.Suggest
+
+# ---------------------------------------------------------------------------
+# Backend availability on the current machine (injectable for tests).
+# ---------------------------------------------------------------------------
+class BackendCaps:
+    has_cuda: bool
+    has_hip: bool
+    has_opencl: bool
+    has_vulkan: bool
+    has_metal: bool
+    has_webgpu: bool
+    has_simd_cpu: bool
+    has_fpga: bool
+
+    static fn none() -> BackendCaps:
+        # CPU / pure-Simple are always available and are not listed here.
+        BackendCaps(
+            has_cuda: false, has_hip: false, has_opencl: false,
+            has_vulkan: false, has_metal: false, has_webgpu: false,
+            has_simd_cpu: false, has_fpga: false)
+
+    fn any_gpu() -> bool:
+        self.has_vulkan or self.has_metal or self.has_cuda or self.has_hip or self.has_opencl or self.has_webgpu
+
+# ---------------------------------------------------------------------------
+# Resolved target
+# ---------------------------------------------------------------------------
+class ExecTarget:
+    dclass: DeviceClass        # requested class (level 1)
+    backend: ComputeBackend    # resolved concrete backend (level 2)
+    enforce: EnforceMode
+    resolved: bool             # false => requirement unmet (caller fail-closes rt_exit 70)
+    reason: text
+
+    static fn create(dclass: DeviceClass, backend: ComputeBackend, enforce: EnforceMode, resolved: bool, reason: text) -> ExecTarget:
+        ExecTarget(dclass: dclass, backend: backend, enforce: enforce, resolved: resolved, reason: reason)
+
+    fn is_cpu() -> bool:
+        self.backend == ComputeBackend.Scalar or self.backend == ComputeBackend.PureSimple
+
+    fn to_text() -> text:
+        "ExecTarget[class={device_class_name(self.dclass)} backend={compute_backend_name(self.backend)} resolved={self.resolved.to_text()} reason={self.reason}]"
+
+# Best available GPU backend in the landed preference order: vulkan,metal,cuda,hip,opencl.
+fn best_gpu_backend(caps: BackendCaps) -> ComputeBackend:
+    if caps.has_vulkan:
+        return ComputeBackend.Vulkan
+    if caps.has_metal:
+        return ComputeBackend.Metal
+    if caps.has_cuda:
+        return ComputeBackend.Cuda
+    if caps.has_hip:
+        return ComputeBackend.Hip
+    if caps.has_opencl:
+        return ComputeBackend.OpenCl
+    if caps.has_webgpu:
+        return ComputeBackend.WebGpu
+    return ComputeBackend.NoneBackend
+
+fn gpu_backend_available(b: ComputeBackend, caps: BackendCaps) -> bool:
+    if b == ComputeBackend.Cuda:
+        return caps.has_cuda
+    if b == ComputeBackend.Hip:
+        return caps.has_hip
+    if b == ComputeBackend.OpenCl:
+        return caps.has_opencl
+    if b == ComputeBackend.Vulkan:
+        return caps.has_vulkan
+    if b == ComputeBackend.Metal:
+        return caps.has_metal
+    if b == ComputeBackend.WebGpu:
+        return caps.has_webgpu
+    return false
+
+# A failed requirement: caller fail-closes (rt_exit 70).
+fn unmet(dclass: DeviceClass, enforce: EnforceMode, reason: text) -> ExecTarget:
+    ExecTarget.create(dclass, ComputeBackend.NoneBackend, enforce, false, reason)
+
+# Resolve a (class, optional explicit backend, enforce) request against machine caps.
+# `requested` may be NoneBackend to mean "auto-pick best for the class".
+fn resolve_exec_target(dclass: DeviceClass, requested: ComputeBackend, enforce: EnforceMode, caps: BackendCaps) -> ExecTarget:
+    val require = enforce == EnforceMode.Require
+
+    if dclass == DeviceClass.Cpu:
+        return ExecTarget.create(dclass, ComputeBackend.Scalar, enforce, true, "cpu-scalar")
+
+    if dclass == DeviceClass.SimdCpu:
+        if caps.has_simd_cpu:
+            return ExecTarget.create(dclass, ComputeBackend.Neon, enforce, true, "simd-cpu")
+        if require:
+            return unmet(dclass, enforce, "require simd_cpu: no SIMD CPU backend")
+        return ExecTarget.create(dclass, ComputeBackend.Scalar, enforce, true, "suggest simd_cpu -> cpu fallback")
+
+    if dclass == DeviceClass.Fpga:
+        if caps.has_fpga:
+            return ExecTarget.create(dclass, ComputeBackend.Vhdl, enforce, true, "fpga-vhdl")
+        if require:
+            return unmet(dclass, enforce, "require fpga: no FPGA backend")
+        return ExecTarget.create(dclass, ComputeBackend.PureSimple, enforce, true, "suggest fpga -> cpu fallback")
+
+    if dclass == DeviceClass.Gpu:
+        # Explicit backend requested?
+        if requested != ComputeBackend.NoneBackend:
+            if gpu_backend_available(requested, caps):
+                return ExecTarget.create(dclass, requested, enforce, true, "gpu-explicit")
+            if require:
+                return unmet(dclass, enforce, "require gpu backend {compute_backend_name(requested)}: unavailable")
+            # suggest: fall back to best gpu, else cpu
+        val best = best_gpu_backend(caps)
+        if best != ComputeBackend.NoneBackend:
+            return ExecTarget.create(dclass, best, enforce, true, "gpu-best")
+        if require:
+            return unmet(dclass, enforce, "require gpu: no GPU backend")
+        return ExecTarget.create(dclass, ComputeBackend.PureSimple, enforce, true, "suggest gpu -> cpu fallback")
+
+    if dclass == DeviceClass.Simd:
+        # Umbrella: prefer gpu, then simd_cpu, then fpga; else cpu.
+        val best = best_gpu_backend(caps)
+        if best != ComputeBackend.NoneBackend:
+            return ExecTarget.create(dclass, best, enforce, true, "simd -> gpu")
+        if caps.has_simd_cpu:
+            return ExecTarget.create(dclass, ComputeBackend.Neon, enforce, true, "simd -> simd_cpu")
+        if caps.has_fpga:
+            return ExecTarget.create(dclass, ComputeBackend.Vhdl, enforce, true, "simd -> fpga")
+        if require:
+            return unmet(dclass, enforce, "require simd: no data-parallel backend")
+        return ExecTarget.create(dclass, ComputeBackend.PureSimple, enforce, true, "suggest simd -> cpu fallback")
+
+    # Default: best overall — gpu, then simd_cpu, then cpu. Never fails.
+    val best = best_gpu_backend(caps)
+    if best != ComputeBackend.NoneBackend:
+        return ExecTarget.create(DeviceClass.Default, best, enforce, true, "default -> gpu")
+    if caps.has_simd_cpu:
+        return ExecTarget.create(DeviceClass.Default, ComputeBackend.Neon, enforce, true, "default -> simd_cpu")
+    return ExecTarget.create(DeviceClass.Default, ComputeBackend.PureSimple, enforce, true, "default -> cpu")
+
+# Convenience: parse a backend name (for SIMPLE_COMPUTE_BACKEND); "" => auto.
+fn parse_compute_backend(name: text) -> ComputeBackend:
+    if name == "cuda":
+        return ComputeBackend.Cuda
+    if name == "hip":
+        return ComputeBackend.Hip
+    if name == "opencl":
+        return ComputeBackend.OpenCl
+    if name == "vulkan":
+        return ComputeBackend.Vulkan
+    if name == "metal":
+        return ComputeBackend.Metal
+    if name == "webgpu":
+        return ComputeBackend.WebGpu
+    return ComputeBackend.NoneBackend
+
+# Resolve from environment: SIMPLE_COMPUTE_TARGET / SIMPLE_COMPUTE_BACKEND / SIMPLE_COMPUTE_ENFORCE.
+fn exec_target_from_env(caps: BackendCaps) -> ExecTarget:
+    val dclass = parse_device_class(env_get("SIMPLE_COMPUTE_TARGET"))
+    val requested = parse_compute_backend(env_get("SIMPLE_COMPUTE_BACKEND"))
+    val enforce = parse_enforce_mode(env_get("SIMPLE_COMPUTE_ENFORCE"))
+    resolve_exec_target(dclass, requested, enforce, caps)
+
+export DeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget
+export device_class_name, compute_backend_name, parse_device_class, parse_enforce_mode
+export parse_compute_backend, best_gpu_backend, gpu_backend_available
+export resolve_exec_target, exec_target_from_env

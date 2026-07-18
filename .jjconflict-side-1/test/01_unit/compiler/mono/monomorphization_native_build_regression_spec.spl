@@ -1,0 +1,115 @@
+use compiler.mono.{run_monomorphization}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind, HirTypeParam}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn empty_span() -> Span:
+    Span.default()
+
+fn unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: empty_span())
+
+fn generic_call_expr() -> HirExpr:
+    val callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: 10)), has_type_: false, type_: unit_type(), span: empty_span())
+    HirExpr(kind: HirExprKind.Call(callee, [], [unit_type()]), has_type_: false, type_: unit_type(), span: empty_span())
+
+fn field_expr() -> HirExpr:
+    val base = generic_call_expr()
+    HirExpr(kind: HirExprKind.Field(base, "value", nil), has_type_: false, type_: unit_type(), span: empty_span())
+
+fn nested_block_expr() -> HirExpr:
+    val inner = HirBlock(stmts: [], has: true, value: field_expr(), span: empty_span())
+    HirExpr(kind: HirExprKind.Block(inner), has_type_: false, type_: unit_type(), span: empty_span())
+
+fn generic_function_body() -> HirBlock:
+    HirBlock(stmts: [], has: true, value: nested_block_expr(), span: empty_span())
+
+fn generic_function() -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 10),
+        name: "touch_monomorphization_path",
+        type_params: [
+            HirTypeParam(
+                symbol: SymbolId(id: 11),
+                name: "T",
+                bounds: [],
+                has_default: false,
+                default: unit_type(),
+                span: empty_span()
+            )
+        ],
+        params: [],
+        return_type: unit_type(),
+        body: generic_function_body(),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: nil,
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span()
+    )
+
+fn module_with_generic_function() -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    val fn_ = generic_function()
+    functions[fn_.symbol] = fn_
+    HirModule(
+        name: "mono.regression",
+        path: "mono.regression.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
+
+describe "monomorphization native-build regression":
+    it "scans block and field expressions without rt_enum_discriminant":
+        val input = module_with_generic_function()
+        val (output, stats) = run_monomorphization({"mono.regression": input})
+
+        expect(output.len()).to_equal(1)
+        expect(stats.generic_functions_found).to_equal(1)
+        expect(stats.call_sites_found).to_equal(1)
+
+    it "keeps direct mono compiles off root std.sdn and relative HIR imports":
+        val cache_source = rt_file_read_text("src/compiler/40.mono/monomorphize/cache.spl") ?? ""
+        val hot_reload_source = rt_file_read_text("src/compiler/40.mono/monomorphize/hot_reload.spl") ?? ""
+        val engine_source = rt_file_read_text("src/compiler/40.mono/monomorphize/engine.spl") ?? ""
+        val integration_source = rt_file_read_text("src/compiler/40.mono/monomorphize_integration.spl") ?? ""
+
+        expect(cache_source.contains("use std.sdn.")).to_equal(false)
+        expect(hot_reload_source.contains("use std.sdn.")).to_equal(false)
+        expect(engine_source.contains("use hir_types.*")).to_equal(false)
+        expect(engine_source.contains("use hir_definitions.*")).to_equal(false)
+        expect(cache_source).to_contain("use std.common.sdn.parser (parse)")
+        expect(engine_source).to_contain("use compiler.hir.hir_types.*")
+        expect(integration_source).to_contain("use std.alloc.sffi.{rt_dict_keys}")
+        expect(integration_source).to_contain("val mod_keys: [text] = rt_dict_keys(modules)")
+        expect(integration_source.contains(".keys()")).to_equal(false)

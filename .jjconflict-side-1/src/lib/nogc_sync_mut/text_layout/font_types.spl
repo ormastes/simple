@@ -1,0 +1,241 @@
+# Shared font-rendering values. Kept separate so renderer and rasterizer do not
+# depend on each other's partially resolved module shape.
+
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid}
+
+class CachedGlyph:
+    codepoint: i32
+    face_id: i64
+    face_generation: i64
+    glyph_index: i32
+    font_size: i32
+    width: i32
+    height: i32
+    advance: i32
+    bearing_x: i32
+    bearing_y: i32
+    pixels: [u8]
+    render_config_identity: text = ""
+
+    static fn empty(cp: i32, fs: i32) -> CachedGlyph:
+        CachedGlyph(codepoint: cp, face_id: 0, face_generation: 0, glyph_index: -1, font_size: fs, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+
+class FontGlyphRun:
+    valid: bool
+    face_id: i64
+    face_generation: i64
+    glyph_ids: [u32]
+    xs: [i32]
+    ys: [i32]
+    # Logical source positions in the caller's codepoint array. Text APIs may
+    # later translate these to UTF-8 byte offsets; this value does not pretend
+    # to be a byte index.
+    clusters: [i64]
+
+class FontCacheStats:
+    entries: i64
+    bytes: i64
+    generation: i64
+    font_identity: text
+    hits: i64
+    misses: i64
+    rasterizations: i64
+    evictions: i64
+    render_config_identity: text = ""
+
+enum FontExecutionPolicy:
+    Suggested
+    Preferred
+    Required
+
+fn font_execution_policy_name(policy: FontExecutionPolicy) -> text:
+    match policy:
+        FontExecutionPolicy.Suggested: "suggested"
+        FontExecutionPolicy.Preferred: "preferred"
+        FontExecutionPolicy.Required: "required"
+
+fn font_render_config_normalize(value: text) -> text:
+    val trimmed = value.trim()
+    trimmed.lower()
+
+fn font_execution_target_name(target: text) -> text:
+    val normalized = font_render_config_normalize(target)
+    if normalized == "hip": "rocm" else: normalized
+
+fn font_execution_target_supported(target: text) -> bool:
+    val normalized = font_execution_target_name(target)
+    (normalized == "auto" or normalized == "cuda" or normalized == "metal" or
+        normalized == "rocm" or normalized == "opencl" or normalized == "vulkan" or
+        normalized == "cpu")
+
+fn font_render_category_name(category: text) -> text:
+    val normalized = font_render_config_normalize(category)
+    if normalized == "pixel/bitmap": "pixel" else: normalized
+
+fn font_render_category_supported(category: text) -> bool:
+    val normalized = font_render_category_name(category)
+    (normalized == "auto" or normalized == "sans" or normalized == "serif" or
+        normalized == "mono" or normalized == "display" or normalized == "rounded" or
+        normalized == "handwriting" or normalized == "slab" or normalized == "blackletter" or
+        normalized == "pixel" or normalized == "emoji")
+
+class FontRenderConfig:
+    family: text
+    category: text
+    language: text
+    script: text
+    size: i32
+    weight: text
+    style: text
+    hinting: text
+    antialiasing: text
+    atlas_policy: text
+    execution_target: text
+    execution_policy: FontExecutionPolicy
+
+    static fn default_for_size(size: i32) -> FontRenderConfig:
+        font_render_config_default_for_size(size)
+
+# NOTE(2026-07-18): identity()/valid() are FREE FUNCTIONS, not instance methods.
+# A `config.identity()`/`config.valid()` instance-method call is miscompiled on the
+# entry-closure freestanding native path (`--entry-closure --target x86_64-unknown-none`):
+# the call loads the callee's own address into the `self` register (rdi) instead of the
+# receiver, so `self` is a code address and every field read faults (first desktop-frame
+# fault storm). Free-function calls pass `config` correctly as an argument. See bug
+# doc/08_tracking/bug/engine2d_cpu_offscreen_render_commands_first_frame_fault_2026-07-17.md.
+
+fn font_render_config_identity(config: FontRenderConfig) -> text:
+    val family = font_render_config_normalize(config.family)
+    val category = font_render_category_name(config.category)
+    val language = font_render_config_normalize(config.language)
+    val script = font_render_config_normalize(config.script)
+    val weight = font_render_config_normalize(config.weight)
+    val style = font_render_config_normalize(config.style)
+    val hinting = font_render_config_normalize(config.hinting)
+    val antialiasing = font_render_config_normalize(config.antialiasing)
+    val atlas = font_render_config_normalize(config.atlas_policy)
+    val target = font_execution_target_name(config.execution_target)
+    "font-config-v1|family=" + family.len().to_string() + ":" + family +
+        "|category=" + category.len().to_string() + ":" + category +
+        "|language=" + language.len().to_string() + ":" + language +
+        "|script=" + script.len().to_string() + ":" + script +
+        "|size=" + config.size.to_string() +
+        "|weight=" + weight.len().to_string() + ":" + weight +
+        "|style=" + style.len().to_string() + ":" + style +
+        "|hinting=" + hinting.len().to_string() + ":" + hinting +
+        "|antialiasing=" + antialiasing.len().to_string() + ":" + antialiasing +
+        "|atlas=" + atlas.len().to_string() + ":" + atlas +
+        "|target=" + target.len().to_string() + ":" + target +
+        "|policy=" + font_execution_policy_name(config.execution_policy)
+
+fn font_render_config_valid(config: FontRenderConfig) -> bool:
+    val target = font_execution_target_name(config.execution_target)
+    (config.size > 0 and config.size <= 512 and config.family.trim() != "" and
+        font_render_category_supported(config.category) and config.language.trim() != "" and
+        config.script.trim() != "" and font_render_config_normalize(config.weight) == "normal" and
+        font_render_config_normalize(config.style) == "normal" and font_render_config_normalize(config.hinting) == "none" and
+        font_render_config_normalize(config.antialiasing) == "grayscale" and
+        font_render_config_normalize(config.atlas_policy) == "shared-alpha-1024" and
+        font_execution_target_supported(target) and
+        (target != "auto" or config.execution_policy == FontExecutionPolicy.Suggested))
+
+fn font_execution_plan(config: FontRenderConfig, executable_targets: [text]) -> [text]:
+    if not font_render_config_valid(config):
+        return []
+    var order: [text] = []
+    for raw in executable_targets:
+        val target = font_execution_target_name(raw)
+        if target == "auto" or not font_execution_target_supported(target):
+            return []
+        if not order.contains(target):
+            order.push(target)
+    val requested = font_execution_target_name(config.execution_target)
+    if order.len() == 0 or (requested != "auto" and not order.contains(requested)):
+        return []
+    if config.execution_policy == FontExecutionPolicy.Required:
+        return [requested]
+    if config.execution_policy == FontExecutionPolicy.Preferred:
+        var preferred = [requested]
+        if requested != "cpu" and order.contains("cpu"):
+            preferred.push("cpu")
+        return preferred
+    if requested == "auto":
+        return order
+    var suggested = [requested]
+    for target in order:
+        if target != requested:
+            suggested.push(target)
+    suggested
+
+# Free-function form of FontRenderConfig.default_for_size: the seed compiler's
+# semantic analyzer rejects the static path call `FontRenderConfig.default_for_size(...)`
+# ("unsupported path call") in the interpreted web-render path, while free
+# function calls resolve fine. Callers in that path use this; the static method
+# delegates here so both entry points stay identical. See bug
+# web_font_provider_split_nested_call_resolution_2026-07-14 (same seed-gap cluster).
+fn font_render_config_default_for_size(size: i32) -> FontRenderConfig:
+    FontRenderConfig(
+        family: "auto", category: "auto", language: "und", script: "auto", size: size,
+        weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+        atlas_policy: "shared-alpha-1024", execution_target: "auto",
+        execution_policy: FontExecutionPolicy.Suggested
+    )
+
+class FontTextPayload:
+    valid: bool
+    width: i32
+    height: i32
+    offset_x: i32
+    offset_y: i32
+    pixels: [u32]
+
+    fn is_empty() -> bool:
+        self.width <= 0 or self.height <= 0 or self.pixels.len() == 0
+
+class FontRenderQuad:
+    codepoint: i32
+    byte_offset: i64
+    dst_x: i32
+    dst_y: i32
+    width: i32
+    height: i32
+    atlas_x: i32
+    atlas_y: i32
+    color: u32
+    # Logical codepoint cluster for shaped runs; -1 for byte-oriented layout.
+    cluster: i64 = -1
+
+class FontRenderBatch:
+    program_version: i64
+    font_identity: text
+    face_generation: i64
+    valid: bool
+    atlas_width: i32
+    atlas_height: i32
+    atlas_pixels: [u32]
+    quads: [FontRenderQuad]
+    atlas_generation: i64
+    dirty_rects: [FontRenderQuad]
+    render_config_identity: text = "coverage8;hint=none;subpixel=none"
+    transform_identity: text = "uniform-scale;translate-late"
+    execution_target: text = "auto"
+    execution_policy: FontExecutionPolicy = FontExecutionPolicy.Suggested
+
+    fn is_empty() -> bool:
+        self.quads.len() == 0 or self.atlas_pixels.len() == 0
+
+    fn material_supported() -> bool:
+        self.valid and font_atlas_composite_program_version_valid(self.program_version) and
+            self.transform_identity == "uniform-scale;translate-late"
+
+    fn atlas_owner_identity() -> text:
+        val identity = self.font_identity
+        "font-atlas-v1|" + identity.len().to_string() + ":" + identity +
+            "|face-generation=" + self.face_generation.to_string() +
+            "|program=" + self.program_version.to_string() +
+            "|config=" + self.render_config_identity.len().to_string() + ":" + self.render_config_identity +
+            "|transform=" + self.transform_identity.len().to_string() + ":" + self.transform_identity +
+            "|size=" + self.atlas_width.to_string() + "x" + self.atlas_height.to_string()
+
+    fn atlas_cache_identity() -> text:
+        self.atlas_owner_identity() + "|generation=" + self.atlas_generation.to_string()

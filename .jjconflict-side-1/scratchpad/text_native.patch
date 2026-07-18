@@ -1,0 +1,42 @@
+diff --git a/src/compiler/10.frontend/core/lexer_struct.spl b/src/compiler/10.frontend/core/lexer_struct.spl
+index 639bc995e72..97aa58cadfc 100644
+--- a/src/compiler/10.frontend/core/lexer_struct.spl
++++ b/src/compiler/10.frontend/core/lexer_struct.spl
+@@ -36,16 +36,27 @@ fn lex_escape_octal_value(c: text) -> i64:
+ extern fn rt_env_get(key: text) -> text
+ extern fn rt_env_set(key: text, value: text) -> bool
+ fn rt_array_len_safe<T>(array: [T]) -> i64:
+-    # Nil-/zero-safe: in one-binary freestanding native builds the
+-    # module-level array-global INITIALIZERS never run, so an unassigned
+-    # global reads as a RAW 0 handle in zeroed .bss (NOT the nil tag 3, so
+-    # `== nil` / `?? []` do not catch it). A plain `.len()` inlines to an
+-    # unchecked (handle&-8)+8 load and faults (cr2=0x8). Reinterpret the
+-    # handle and apply the SAME `< 4096` low-address gate array_is_valid
+-    # uses (catches raw 0, nil tag 3, and any bogus small handle). Mirror of
+-    # the C twin rt_array_len_safe in src/os/libc/simpleos_libc.c.
+-    val raw = array as i64
+-    if raw < 4096:
++    # Nil-safe only: NOT the raw-i64-reinterpret guard that briefly lived
++    # here (a `val raw = array as i64` low-address check meant to catch
++    # zeroed-.bss globals in one-binary freestanding native builds -- see
++    # the C twin `rt_array_len_safe` in src/os/libc/simpleos_libc.c for that
++    # scenario). `array as i64` is a native-codegen-only reinterpret: the
++    # seed's own interpreter models [T] as a real Array value (never a raw
++    # i64 handle) and hard-errors on the cast ("semantic: type mismatch:
++    # cannot cast array to i64"). Since `bin/simple native-build` runs by
++    # INTERPRETING the whole src/compiler pipeline before it ever reaches
++    # user code (this very function is called on every single parse, from
++    # lex_init_with_path -> core_token_env_save_set), that cast turned into a
++    # universal native-build blocker -- every `--entry` build failed during
++    # frontend init, regardless of the target program's content. There is no
++    # execution-mode signal that reliably survives the native-build
++    # worker's subprocess spawn (checked empirically: SIMPLE_EXECUTION_MODE
++    # read back as nil inside the worker despite the parent setting it), so
++    # gate on nil only here. The freestanding/bare-metal zeroed-global case
++    # this used to catch needs a dedicated, target-scoped helper instead of
++    # living in this shared frontend path -- see the native-build text
++    # characterization report for the filed follow-up.
++    if array == nil:
+         return 0
+     return array.len()
+ 

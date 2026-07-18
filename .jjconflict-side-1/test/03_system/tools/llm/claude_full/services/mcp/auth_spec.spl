@@ -1,0 +1,110 @@
+"""
+# Claude Full MCP Auth
+
+## Overview
+
+Checks deterministic parity for the Claude CLI MCP OAuth auth surface: sensitive
+URL redaction, OAuth error normalization, server-keyed token/config storage,
+XAA discovery bypass, cancellation class, step-up scope detection,
+`ClaudeAuthProvider` token behavior, client secret helpers, and scope extraction.
+
+**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Plan:** N/A - target selected from strict checker output.
+**Design:** N/A - source mirror for `tmp/claude/claude-code-main/src/services/mcp/auth.ts`.
+**Research:** N/A - upstream TypeScript file is the source reference.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.services.mcp.auth.*
+
+describe "Claude full MCP auth":
+    it "should redact sensitive OAuth URL params":
+        step("Redact state, code, and verifier-like params")
+        val redacted = redactSensitiveUrlParams("https://a/cb?state=s&code=c&safe=ok&nonce=n")
+        expect(redacted).to_contain("state=[REDACTED]")
+        expect(redacted).to_contain("code=[REDACTED]")
+        expect(redacted).to_contain("nonce=[REDACTED]")
+        expect(redacted).to_contain("safe=ok")
+
+    it "should normalize OAuth error bodies returned with 2xx status":
+        step("Rewrite nonstandard invalid grant aliases")
+        val response = normalizeOAuthErrorBody(AuthResponse.new(200, "{\"error\":\"expired_refresh_token\"}"))
+        expect(response.status).to_equal(400)
+        expect(response.body).to_contain("invalid_grant")
+
+    it "should build server keys and detect discovery without token":
+        step("Use config material in server key")
+        val storage = AuthStorage.new()
+        val config = McpServerConfig.new("http", "https://mcp.example/path")
+        val key = getServerKey("srv", config)
+        storage.discoveryKeys.push(key)
+        expect(key).to_contain("srv|http|https://mcp.example/path")
+        expect(hasMcpDiscoveryButNoToken(storage, "srv", config, false)).to_equal(true)
+        config.oauthXaa = true
+        expect(hasMcpDiscoveryButNoToken(storage, "srv", config, true)).to_equal(false)
+
+    it "should expose cancellation and metadata discovery fallback":
+        step("Create cancellation error and fallback metadata")
+        val err = abort()
+        expect(err.name).to_equal("AuthenticationCancelledError")
+        expect(fetchAuthServerMetadata("srv", "https://mcp.example/path", false)).to_equal("legacy-metadata:/path")
+        expect(fetchAuthServerMetadata("srv", "https://mcp.example/", false)).to_equal("")
+
+    it "should key credential storage consistently":
+        step("Read client secret and token by server key")
+        val config = McpServerConfig.new("sse", "https://mcp.example/sse")
+        val key = getServerKey("srv", config)
+        val storage = AuthStorage(tokenKeys: [key], tokens: [OAuthTokens.new("access", "refresh", 1000, "read")], clientInfoKeys: [], clientInfos: [], clientConfigKeys: [key], clientSecrets: ["secret"], discoveryKeys: [], updates: [])
+        expect(getMcpClientConfig(storage, "srv", config)).to_equal("secret")
+        expect(storage.getToken(key).accessToken).to_equal("access")
+
+    it "should provide client metadata and client information":
+        step("Use stored client info before configured client id")
+        val storage = AuthStorage.new()
+        val config = McpServerConfig.new("http", "https://mcp.example")
+        val provider = ClaudeAuthProvider.new("srv", config, "http://localhost/callback", storage)
+        val metadata = OAuthMetadata.new()
+        metadata.scope = "read write"
+        provider.setMetadata(metadata)
+        expect(provider.clientMetadata()).to_contain("scope=read write")
+        provider.saveClientInformation(OAuthClientInfo.new("stored", "stored-secret"))
+        expect(provider.clientInformation().clientId).to_equal("stored")
+
+    it "should omit refresh token when step-up scope is pending":
+        step("Mark step-up after insufficient_scope response")
+        val storage = AuthStorage.new()
+        val config = McpServerConfig.new("http", "https://mcp.example")
+        val provider = ClaudeAuthProvider.new("srv", config, "http://localhost/callback", storage)
+        provider.nowMs = 1000
+        storage.setToken(getServerKey("srv", config), OAuthTokens.new("access", "refresh", 1000000, "read"))
+        val response = AuthResponse(status: 403, body: "", wwwAuthenticate: "Bearer error=\"insufficient_scope\", scope=\"read write\"")
+        expect(wwwAuthScope(response.wwwAuthenticate)).to_equal("read write")
+        provider.markStepUpPending(wwwAuthScope(response.wwwAuthenticate))
+        val tokens = provider.tokens()
+        expect(provider.pendingStepUpScope).to_equal("read write")
+        expect(tokens.refreshToken).to_equal("")
+
+    it "should run XAA auth only for cached XAA-capable servers":
+        step("Silent exchange with cached id token")
+        val storage = AuthStorage.new()
+        val config = McpServerConfig.new("http", "https://mcp.example")
+        config.oauthXaa = true
+        val provider = ClaudeAuthProvider.new("srv", config, "http://localhost/callback", storage)
+        val token = performMCPXaaAuth(provider, true)
+        expect(token.accessToken).to_equal("xaa-access")
+
+    it "should handle authorization code state and client secret input":
+        step("Resolve OAuth redirect and secret helpers")
+        val provider = ClaudeAuthProvider.new("srv", McpServerConfig.new("http", "https://mcp.example"), "http://localhost/callback", AuthStorage.new())
+        val state = provider.state()
+        expect(performMCPOAuthFlow(provider, "code", state)).to_equal("token_exchange")
+        expect(authorizationCode("http://localhost/callback?code=abc&state=s")).to_equal("abc")
+        expect(readClientSecret("env-secret", false, "")).to_equal("env-secret")
+        expect(onData("abc", "\u007F")).to_equal("ab")
+
+    it "should expose scope extraction and source-backed constants":
+        step("Pin source surface")
+        val metadata = OAuthMetadata.new()
+        metadata.scopesSupported = ["read", "write"]
+        expect(getScopeFromMetadata(metadata)).to_equal("read write")
+        expect(mcpAuthSourceLinesModeled()).to_equal(2465)

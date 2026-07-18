@@ -1,0 +1,499 @@
+diff --git a/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl b/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+index 7f6d4c00d30..620085ea0ea 100644
+--- a/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
++++ b/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+@@ -16,6 +16,7 @@ use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaul
+ use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+ use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel}
+ use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
++use compiler.core.ast.{decl_get_param_muts}
+ use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
+ use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args}
+ use compiler.core.ast.{decl_is_packed}
+@@ -1023,6 +1024,9 @@ fn convert_decl_fn(idx: i64) -> Function:
+         eprint("[flat-bridge] fn:start {name}")
+     val p_names = decl_get_param_names(idx)
+     val p_types = decl_get_param_types(idx)
++    # #173: per-param `mut` flags recorded by parse_fn_decl (1 = `mut`).
++    # Empty for decls that never set it (methods, externs) -> all false.
++    val p_muts = decl_get_param_muts(idx)
+     val span = make_span()
+     var params: [Param] = []
+     var pi = 0
+@@ -1035,7 +1039,8 @@ fn convert_decl_fn(idx: i64) -> Function:
+             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+             has_default: false,
+             default: Expr(kind: ExprKind.NilLit, span: span),
+-            span: span
++            span: span,
++            is_mut: pi < p_muts.len() and p_muts[pi] == 1
+         ))
+         pi = pi + 1
+ 
+@@ -1238,6 +1243,9 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
+     val name = decl_get_name(idx)
+     val p_names = decl_get_param_names(idx)
+     val p_types = decl_get_param_types(idx)
++    # #173: per-param `mut` flags recorded by parse_fn_decl (1 = `mut`).
++    # Empty for decls that never set it (methods, externs) -> all false.
++    val p_muts = decl_get_param_muts(idx)
+     val span = make_span()
+     var params: [Param] = []
+     var pi = 0
+@@ -1250,7 +1258,8 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
+             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+             has_default: false,
+             default: Expr(kind: ExprKind.NilLit, span: span),
+-            span: span
++            span: span,
++            is_mut: pi < p_muts.len() and p_muts[pi] == 1
+         ))
+         pi = pi + 1
+ 
+diff --git a/src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl b/src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+index 192edb61ae3..e1d49b2e28d 100644
+--- a/src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
++++ b/src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+@@ -13,6 +13,7 @@ use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaul
+ use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+ use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
+ use compiler.core.ast.{decl_is_packed}
++use compiler.core.ast.{decl_get_is_value_type}
+ use compiler.core.ast_expr.*
+ use compiler.core.ast_stmt.*
+ use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
+@@ -251,7 +252,14 @@ fn flat_ast_to_module(path: text) -> Module:
+                     attributes: [],
+                     has_doc_comment: false,
+                     doc_comment: "",
+-                    span: span
++                    span: span,
++                    # #173: decl_get_is_value_type is 1 for `struct` (value
++                    # semantics), 0 for `class`/`actor` (reference
++                    # semantics) -- set by decl_set_is_value_type in the
++                    # parser (fn_struct_decls.spl). Previously discarded
++                    # here, which conflated class/struct at this bridge and
++                    # let #167's copy-on-param-bind fire for classes too.
++                    is_value_type: decl_get_is_value_type(idx) != 0
+                 )
+         elif tag_text == "8":
+             val e_name = decl_get_name(idx)
+diff --git a/src/compiler/10.frontend/core/_Ast/decl_nodes.spl b/src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+index 7f99525095d..9970ffa2223 100644
+--- a/src/compiler/10.frontend/core/_Ast/decl_nodes.spl
++++ b/src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+@@ -660,6 +660,27 @@ fn decl_get_param_defaults(idx: i64) -> [i64]:
+         return ast_i64_list_split(env_value)
+     []
+ 
++# Per-parameter `mut` modifier flags (parallel to PARAM_NAMES; 1 = declared
++# `mut`, 0 = plain). #173: a `mut` struct param is the sanctioned "caller
++# observes the mutation" spelling, so 50.mir's #167 copy-on-param-bind must
++# be skipped for it -- previously the parser consumed and discarded the
++# modifier (parser_skip_mut_if_present). NOT stored via ast_decl_text_set:
++# that store silently drops any field outside its NAME/PARAM_NAMES/...
++# whitelist (see ast_decl_text_set above), so a dedicated idx-keyed side
++# table is used instead (same spirit as decl_is_value_type, dict-keyed so it
++# needs no arena push-alignment).
++var decl_param_muts_store: Dict<i64, text> = {}
++
++fn decl_set_param_muts(idx: i64, muts: [i64]):
++    decl_param_muts_store[idx] = ast_i64_list_join(muts)
++
++fn decl_get_param_muts(idx: i64) -> [i64]:
++    if decl_param_muts_store.has(idx):
++        val stored = decl_param_muts_store[idx]
++        if stored != "":
++            return ast_i64_list_split(stored)
++    []
++
+ fn decl_get_field_bits(idx: i64) -> [i64]:
+     val env_value = ast_decl_text_get(idx, "FIELD_BITS")
+     if env_value != "":
+diff --git a/src/compiler/10.frontend/core/_Ast/module_state.spl b/src/compiler/10.frontend/core/_Ast/module_state.spl
+index 5fb7b69f8c1..46d4f814aa2 100644
+--- a/src/compiler/10.frontend/core/_Ast/module_state.spl
++++ b/src/compiler/10.frontend/core/_Ast/module_state.spl
+@@ -353,6 +353,7 @@ fn ast_reset():
+     decl_is_hardware = []
+     decl_clocked_args = []
+     decl_is_value_type = []
++    decl_param_muts_store = {}
+     arm_pattern = []
+     arm_guard = []
+     arm_body = []
+diff --git a/src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl b/src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl
+index 5458fa33fbb..a5b9d5f6f88 100644
+--- a/src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl
++++ b/src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl
+@@ -42,6 +42,7 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
+ use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
+ use compiler.core.ast.{decl_set_is_value_type}
+ use compiler.core.ast.{decl_set_param_defaults}
++use compiler.core.ast.{decl_set_param_muts}
+ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
+ use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
+ use compiler.core.ast.{decl_impl_block}
+@@ -83,7 +84,7 @@ fn parser_skip_tilde_if_present():
+     if par_kind_get() == 123:
+         parser_advance()
+ 
+-fn parser_skip_mut_if_present():
++fn parser_skip_mut_if_present() -> i64:
+     # Skip a leading `mut` modifier in a parameter declaration (`mut buf: [u8]`).
+     # `mut` lexes as a plain identifier (kind 6) — it is NOT reserved, so it CAN
+     # be used as a parameter name (`fn f(mut: i32)`). Consuming it on a bare
+@@ -93,8 +94,10 @@ fn parser_skip_mut_if_present():
+     # treat `mut` as the modifier when the following token is itself a valid
+     # parameter-name token (identifier or `self`) — i.e. `mut buf`/`mut self`,
+     # not `mut:` or `mut)` where `mut` is the parameter name.
+-    # The mutability annotation is a no-op at the stage4 self-hosted frontend
+-    # (the interpreter already permits reassignment of the bound param name).
++    # #173: returns 1 when a `mut` modifier was consumed, 0 otherwise, so
++    # parse_fn_decl can record the flag (decl_set_param_muts) instead of
++    # discarding it -- 50.mir needs it to exempt `mut` params from the #167
++    # copy-on-param-bind ("caller observes the mutation" semantics).
+     if par_kind_get() == 6 and par_text_get() == "mut":
+         val (mut_snap_nums, mut_snap_txts) = lex_snapshot_save()
+         val (mut_tok_nums, mut_tok_text) = parser_tok_save()
+@@ -104,6 +107,8 @@ fn parser_skip_mut_if_present():
+         parser_tok_restore(mut_tok_nums, mut_tok_text)
+         if next_is_param_name:
+             parser_advance()
++            return 1
++    0
+ 
+ fn parser_expect_param_name():
+     # Accept IDENT, SELF, UNDERSCORE, or any keyword as parameter name (e.g. cli, mcp, type)
+@@ -322,6 +327,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
+     var param_names: [text] = []
+     var param_types: [i64] = []
+     var param_defaults: [i64] = []
++    var param_muts: [i64] = []
+ 
+     # Canonical zero-argument Simple syntax permits `fn main:` without `()`.
+     if par_kind_get() == 140:
+@@ -329,7 +335,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
+         if par_kind_get() != 141:
+             # First parameter (skip ~ keyword-only marker + optional `mut` modifier)
+             parser_skip_tilde_if_present()
+-            parser_skip_mut_if_present()
++            param_muts.push(parser_skip_mut_if_present())
+             val pname = par_text_get()
+             parser_expect_param_name()
+             param_names.push(pname)
+@@ -352,7 +358,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
+                 if par_kind_get() == 141:
+                     break
+                 parser_skip_tilde_if_present()
+-                parser_skip_mut_if_present()
++                param_muts.push(parser_skip_mut_if_present())
+                 val pn = par_text_get()
+                 parser_expect_param_name()
+                 param_names.push(pn)
+@@ -398,6 +404,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
+ 
+     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, 0)
+     decl_set_param_defaults(fn_decl_idx, param_defaults)
++    decl_set_param_muts(fn_decl_idx, param_muts)
+     fn_decl_idx
+ 
+ fn parse_extern_fn_decl() -> i64:
+diff --git a/src/compiler/10.frontend/parser_types.spl b/src/compiler/10.frontend/parser_types.spl
+index 7e34129cef8..4380285af8b 100644
+--- a/src/compiler/10.frontend/parser_types.spl
++++ b/src/compiler/10.frontend/parser_types.spl
+@@ -146,6 +146,10 @@ struct Param:
+     has_default: bool
+     default: Expr
+     span: Span
++    # #173: declared with the `mut` modifier ("caller observes the mutation").
++    # Threaded from decl_get_param_muts; exempts the param from 50.mir's #167
++    # copy-on-param-bind.
++    is_mut: bool
+ 
+ struct TypeParam:
+     """Generic type parameter."""
+@@ -228,6 +232,11 @@ struct Struct:
+     doc_comment: text
+     attributes: [Attribute]     # Attributes like @repr, @packed, @align
+     span: Span
++    # true = struct (value semantics, copy on bind); false = class/actor
++    # (reference semantics). Threaded from the parser's decl_is_value_type
++    # side table (bug #108) through the flat-AST bridge (bug #173) so
++    # 50.mir's copy-on-param-bind (#167) can exempt classes.
++    is_value_type: bool
+ 
+ struct Field:
+     """Struct/class field."""
+diff --git a/src/compiler/20.hir/hir_definitions.spl b/src/compiler/20.hir/hir_definitions.spl
+index 1f17f22cb35..abfc6e887f3 100644
+--- a/src/compiler/20.hir/hir_definitions.spl
++++ b/src/compiler/20.hir/hir_definitions.spl
+@@ -70,6 +70,11 @@ struct HirParam:
+     has_default: bool
+     default: HirExpr
+     span: Span
++    # #173: declared with the `mut` modifier. Consumers must read this
++    # defensively (`== true`): HirParam values built by sites that predate
++    # the field (e.g. closure lowering) leave it unset, which must mean
++    # "not mut" (the safe, pre-existing copy behavior).
++    is_mut: bool
+ 
+ struct HirClass:
+     """Class definition in HIR."""
+@@ -130,6 +135,11 @@ struct HirStruct:
+     has_specialization_of: bool
+     specialization_of: text
+     type_bindings: Dict<text, HirType>
++    # #173: true = struct (value semantics), false = class/actor (reference
++    # semantics). Threaded from parser_types.Struct.is_value_type so 50.mir
++    # can gate the #167 copy-on-param-bind by real value/reference kind
++    # instead of "is it registered in struct_field_order at all".
++    is_value_type: bool
+ 
+ struct HirField:
+     """Struct/class field."""
+diff --git a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+index d70430804ba..7a9b7dcdc82 100644
+--- a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+@@ -57,7 +57,7 @@ impl HirLowering:
+             eprint("[hir-lower] flat_function:param {name} {pi}")
+             val p_type = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+             val p_sym = self.symbols.define("", SymbolKind.Parameter, Some(p_type), span, Visibility.Private, false, nil)
+-            params.push(HirParam(symbol: p_sym, name: "", type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span))
++            params.push(HirParam(symbol: p_sym, name: "", type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span, is_mut: false))
+             pi = pi + 1
+         eprint("[hir-lower] flat_function:body:start {name}")
+         val body_ids = decl_get_body(decl_idx)
+@@ -201,7 +201,8 @@ impl HirLowering:
+                 type_: self_type,
+                 has_default: false,
+                 default: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: fn_.span), span: fn_.span),
+-                span: fn_.span
++                span: fn_.span,
++                is_mut: false
+             ))
+         var pi = 0
+         while pi < fn_params.len():
+@@ -318,7 +319,10 @@ impl HirLowering:
+             name: p.name,
+             type_: type_,
+             default: default_,
+-            span: p.span
++            span: p.span,
++            # #173: `mut` modifier bit from the parser; read defensively
++            # (`== true`) since Params built by older sites leave it unset.
++            is_mut: p.is_mut == true
+         )
+ 
+     me lower_class(class_: Class) -> HirClass:
+@@ -411,6 +415,7 @@ impl HirLowering:
+         val struct_attributes: [Attribute] = struct_.attributes
+         val struct_doc_comment: text = struct_.doc_comment
+         val struct_span: Span = struct_.span
++        val struct_is_value_type: bool = struct_.is_value_type
+ 
+         val symbol = self.symbols.lookup_or_invalid(struct_name)
+         if custom_primitive_is_name(struct_name):
+@@ -454,7 +459,8 @@ impl HirLowering:
+             platform_diagnostic_line: platform_first_diagnostic_line(platform),
+             is_generic_template: false,
+             specialization_of: nil,
+-            type_bindings: {}
++            type_bindings: {},
++            is_value_type: struct_is_value_type
+         )
+ 
+     me lower_field(f: Field) -> HirField:
+diff --git a/src/compiler/50.mir/_MirLowering/function_lowering.spl b/src/compiler/50.mir/_MirLowering/function_lowering.spl
+index 1893c891277..5c4fdb0d2c3 100644
+--- a/src/compiler/50.mir/_MirLowering/function_lowering.spl
++++ b/src/compiler/50.mir/_MirLowering/function_lowering.spl
+@@ -151,6 +151,38 @@ impl MirLowering:
+                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                     if is_named_struct:
+                         self.struct_value_syms[local.id] = parameter_type.name
++                        # #173: struct_field_order is keyed by NAME only and
++                        # (per the note this comment used to carry) a `class`
++                        # declaration lands in the same `module.structs` dict
++                        # as a real `struct` -- `struct_field_order.has(name)`
++                        # alone can NOT tell struct from class. The real
++                        # discriminator is struct_is_value_type (threaded from
++                        # parser_types.Struct.is_value_type <-
++                        # decl_get_is_value_type, see _FlatAstBridge/
++                        # module_assembly.spl and hir_lowering/_Items/
++                        # declaration_lowering.spl): true only for a genuine
++                        # `struct`, false for `class`/`actor`.
++                        val is_value_type = self.struct_is_value_type.has(parameter_type.name) and self.struct_is_value_type[parameter_type.name]
++                        # A `me`-declared method's `self` receiver has a
++                        # granted mutation capability: even for a real struct,
++                        # `self` must alias the caller's storage (mutations
++                        # visible after the call), the same way a class
++                        # instance always does. `self` is lowered as an
++                        # ordinary Named param (see declaration_lowering.spl),
++                        # named "self" by construction (parser_decls_use.spl
++                        # parse_class_body_method); fn_.is_mutable is HIR's
++                        # existing 'me' vs 'fn' flag (already threaded, see
++                        # declaration_lowering.spl:285).
++                        val is_me_self_receiver = param.name == "self" and fn_.is_mutable
++                        # A `mut`-declared param is the documented "caller
++                        # observes the mutation" spelling (memory-model doc:
++                        # `x: mut Data` = exclusive single-writer) -- the copy
++                        # must not fire even for a real struct. Read
++                        # defensively (`== true`): HirParams from sites that
++                        # predate the field (e.g. closure lowering) leave
++                        # is_mut unset, meaning plain param -> copy (the safe
++                        # pre-existing behavior).
++                        val is_mut_param = param.is_mut == true
+                         # Bug #167: structs have VALUE semantics (mirrors the HIR
+                         # interpreter's Value.Struct -- see backend/objects.spl,
+                         # "instances get value semantics (copied on bind/assign)
+@@ -166,45 +198,44 @@ impl MirLowering:
+                         # then rebind the parameter symbol to the COPY instead
+                         # of the raw arg local.
+                         #
+-                        # NOTE (found during this fix, NOT addressed here --
+-                        # out of lane / a broader pre-existing frontend gap):
+-                        # `self.struct_field_order` is keyed by NAME only (fed
+-                        # from module.structs, see module_lowering.spl) and a
+-                        # `class` declaration currently lands in `module.structs`
+-                        # too (confirmed empirically: a `class K: n: i64`, with
+-                        # or without methods, satisfies
+-                        # `struct_field_order.has("K")`, and never appears in
+-                        # `module.classes`; `Symbol.kind` resolved here also
+-                        # read back as `SymbolKind.Struct` for that same class).
+-                        # So this MIR layer currently has no reliable class-vs-
+-                        # struct signal at all -- native codegen doesn't yet
+-                        # implement class reference semantics as a distinct
+-                        # concept; a class param only "looked" reference-typed
+-                        # before this fix by accident (nothing was ever copied
+-                        # for anyone). This copy therefore applies uniformly to
+-                        # every `Named` aggregate param reachable through
+-                        # struct_field_order, class included, until the
+-                        # upstream class/struct conflation is fixed separately.
+-                        val field_names = self.struct_field_order[parameter_type.name]
+-                        var copy_ops: [MirOperand] = []
+-                        var cfi = 0
+-                        while cfi < field_names.len():
+-                            var field_bldr = self.builder
+-                            val field_val = field_bldr.emit_get_field(mir_operand_copy(local), cfi, MirType.i64())
+-                            self.builder = field_bldr
+-                            copy_ops = copy_ops.push(mir_operand_copy(field_val))
+-                            cfi = cfi + 1
+-                        var agg_bldr = self.builder
+-                        val copy_local = agg_bldr.emit_aggregate(
+-                            AggregateKind.Struct(type_symbol),
+-                            copy_ops,
+-                            MirType(kind: MirTypeKind.Struct(type_symbol))
+-                        )
+-                        self.builder = agg_bldr
+-                        self.struct_value_syms[copy_local.id] = parameter_type.name
+-                        if val copy_symbol = param.symbol:
+-                            if copy_symbol != nil:
+-                                self.local_map[copy_symbol.id] = copy_local
++                        # This copy must NOT fire for (a) classes/actors --
++                        # reference semantics, mutations must be visible to the
++                        # caller -- (b) a `me` method's `self` receiver on
++                        # ANY type (struct or class) -- `me` is the sanctioned
++                        # spelling for "this call mutates the receiver" -- or
++                        # (c) a `mut`-declared param on ANY type (the other
++                        # sanctioned mutation spelling).
++                        # Plain `fn`-param / non-`me` self mutation on a real
++                        # struct is a separate, documented, OUT-OF-SCOPE gap
++                        # (W1006 mut-capability enforcement is absent on the
++                        # native --entry path entirely -- see
++                        # doc/08_tracking/bug/struct_param_mutation_semantics_2026-07-03.md
++                        # and scratchpad/class_semantics_probe.md); leaving
++                        # those uncopied would silently makes an unsanctioned
++                        # mutation "work" instead of the documented
++                        # compile-time rejection, so the struct copy still
++                        # applies there, same as before this fix.
++                        if is_value_type and not is_me_self_receiver and not is_mut_param:
++                            val field_names = self.struct_field_order[parameter_type.name]
++                            var copy_ops: [MirOperand] = []
++                            var cfi = 0
++                            while cfi < field_names.len():
++                                var field_bldr = self.builder
++                                val field_val = field_bldr.emit_get_field(mir_operand_copy(local), cfi, MirType.i64())
++                                self.builder = field_bldr
++                                copy_ops = copy_ops.push(mir_operand_copy(field_val))
++                                cfi = cfi + 1
++                            var agg_bldr = self.builder
++                            val copy_local = agg_bldr.emit_aggregate(
++                                AggregateKind.Struct(type_symbol),
++                                copy_ops,
++                                MirType(kind: MirTypeKind.Struct(type_symbol))
++                            )
++                            self.builder = agg_bldr
++                            self.struct_value_syms[copy_local.id] = parameter_type.name
++                            if val copy_symbol = param.symbol:
++                                if copy_symbol != nil:
++                                    self.local_map[copy_symbol.id] = copy_local
+                 case _:
+                     ()
+             pli = pli + 1
+diff --git a/src/compiler/50.mir/_MirLowering/module_lowering.spl b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+index eab31e06836..c6a32ea2d0b 100644
+--- a/src/compiler/50.mir/_MirLowering/module_lowering.spl
++++ b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+@@ -68,6 +68,7 @@ impl MirLowering:
+             bitfield_value_syms: {},
+             struct_field_order: {},
+             struct_field_type_name: {},
++            struct_is_value_type: {},
+             struct_value_syms: {},
+             struct_method_syms: {},
+             struct_method_ambiguous: {},
+@@ -340,8 +341,14 @@ impl MirLowering:
+             self.field_map[self.symbol_id_value(sym_id)] = field_names
+             # Name-keyed struct field order: lower_call reclassifies a
+             # `Point(x:3,y:4)` paren-constructor Call into aggregate construction
+-            # by looking up the callee name here (structs only, not classes).
++            # by looking up the callee name here. NOTE: despite the comment
++            # below's original intent ("structs only, not classes"), classes
++            # land in this same `module.structs` dict too (see #173 /
++            # _FlatAstBridge/module_assembly.spl) -- struct_is_value_type is
++            # the real discriminator consumers must check, not membership in
++            # struct_field_order.
+             self.struct_field_order[struct_def.name] = field_names
++            self.struct_is_value_type[struct_def.name] = struct_def.is_value_type
+             si = si + 1
+ 
+         # Build enum variant-index registry (enum NAME -> ordered variant names).
+diff --git a/src/compiler/50.mir/mir_lowering_types.spl b/src/compiler/50.mir/mir_lowering_types.spl
+index 871000e89b5..5ad6001ba5e 100644
+--- a/src/compiler/50.mir/mir_lowering_types.spl
++++ b/src/compiler/50.mir/mir_lowering_types.spl
+@@ -45,6 +45,10 @@ struct MirLowering:
+     # struct_value_syms (see lower_expr's Field arm) so a further `.field`
+     # on that result can resolve correctly.
+     struct_field_type_name: Dict<text, [text]>
++    # Struct/class NAME -> is_value_type (parallels struct_field_order).
++    # true = real struct (value semantics, #167 copy-on-bind applies),
++    # false = class/actor (reference semantics, must NOT be copied). #173.
++    struct_is_value_type: Dict<text, bool>
+     # MIR local ID -> struct NAME, for locals holding a value produced by struct
+     # construction. Same role as bitfield_value_syms: the pipeline has no expr
+     # type-inference, so a bare `p` Var carries no `.type_` and resolve_field_index
+diff --git a/src/compiler/80.driver/driver_pipeline.spl b/src/compiler/80.driver/driver_pipeline.spl
+index e899def8cd9..aa5adb7d4f2 100644
+--- a/src/compiler/80.driver/driver_pipeline.spl
++++ b/src/compiler/80.driver/driver_pipeline.spl
+@@ -407,6 +407,7 @@ impl CompilerDriver:
+                 bitfield_value_syms: {},
+                 struct_field_order: {},
+                 struct_field_type_name: {},
++                struct_is_value_type: {},
+                 struct_value_syms: {},
+                 struct_method_syms: {},
+                 struct_method_ambiguous: {},
+@@ -474,6 +475,7 @@ impl CompilerDriver:
+             bitfield_value_syms: {},
+             struct_field_order: {},
+             struct_field_type_name: {},
++            struct_is_value_type: {},
+             struct_value_syms: {},
+             struct_method_syms: {},
+             struct_method_ambiguous: {},

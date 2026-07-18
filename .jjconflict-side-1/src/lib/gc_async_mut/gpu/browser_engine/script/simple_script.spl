@@ -1,0 +1,129 @@
+"""
+# SimpleScript Executor
+
+Executes Simple language code in the browser engine, providing DOM access,
+event handling, timers, and console output equivalent to JavaScript (M15 / REQ-6 / AC-5).
+
+The SimpleScriptExecutor wraps the Simple interpreter and bridges it to the
+browser DOM and event loop infrastructure.
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
+use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch}
+use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{script_host_apply_event_action}
+use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
+    ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
+    script_response_from_net}
+
+pub class SimpleScriptExecutor:
+    """Executor for Simple language code in the browser.
+
+    Fields:
+        _dom_root       - current DOM root for this script context
+        _event_loop     - shared event loop for timers and rAF
+        _console_buf    - shared console output buffer
+        _dom_dirty      - true if Simple code mutated the DOM
+        fetch_dispatch  - optional FetchDispatch for fetch() API
+        _runner         - canonical browser Simple/JavaScript runner
+    """
+    _dom_root: BeDomNode
+    _event_loop: EventLoop
+    _console_buf: ConsoleBuffer
+    _dom_dirty: bool
+    fetch_dispatch: FetchDispatch?
+    _runner: ScriptRunner
+
+    static fn new(event_loop: EventLoop, console_buf: ConsoleBuffer) -> SimpleScriptExecutor:
+        """Create a SimpleScriptExecutor with empty DOM root."""
+        SimpleScriptExecutor(
+            _dom_root: BeDomNode.element("div"),
+            _event_loop: event_loop,
+            _console_buf: console_buf,
+            _dom_dirty: false,
+            fetch_dispatch: nil,
+            _runner: ScriptRunner.new()
+        )
+
+    me execute(source: text, dom_root: BeDomNode):
+        """Parse and execute Simple code against dom_root.
+
+        Stores dom_root as the current root. Empty source is a no-op. Non-empty
+        source is delegated to the canonical ScriptRunner so this compatibility
+        surface shares the browser's interpreter, DOM, event-loop, and console
+        ownership rather than maintaining a second execution path.
+        """
+        self._dom_root = dom_root
+        if source.len() == 0:
+            return
+
+        self._runner.dom_root = dom_root
+        self._runner.console_buffer = self._console_buf
+        self._runner.event_loop = self._event_loop
+        val stdout = run_script(self._runner, source)
+        if stdout.len() > 0:
+            self._console_buf.append("log", stdout, 0)
+        self._dom_dirty = true
+
+    me tick(now_micros: i64):
+        """Fire expired timers and drain microtasks from event loop.
+
+        Callback IDs are owned by the canonical EventLoop. Draining any timer
+        or animation-frame work invalidates the rendered DOM snapshot.
+        """
+        val timers = self._event_loop.drain_expired(now_micros)
+        val raf = self._event_loop.drain_raf()
+        if timers.len() > 0 or raf.len() > 0:
+            self._dom_dirty = true
+
+    me inject_dom_event(event: BeDomEvent):
+        """Dispatch a DOM event into registered Simple event listeners.
+
+        Deterministic listener actions are dispatched through the same DOM
+        owner used by ScriptHost. Any delivered action invalidates rendering.
+        """
+        val actions = event_dispatch(self._dom_root, event)
+        for action in actions:
+            self._dom_root = script_host_apply_event_action(self._dom_root, action)
+        if actions.len() == 0:
+            return
+        self._dom_dirty = true
+
+    me dom_root() -> BeDomNode:
+        """Return the current (possibly Simple-mutated) DOM root."""
+        self._dom_root
+
+    me dom_dirty() -> bool:
+        """True if Simple code has mutated the DOM since last clear."""
+        self._dom_dirty
+
+    me clear_dirty():
+        """Reset the dom_dirty flag."""
+        self._dom_dirty = false
+
+    me console_buffer() -> ConsoleBuffer:
+        """Read-only access to the shared console log buffer."""
+        self._console_buf
+
+    me event_loop() -> EventLoop:
+        """Return the shared timer and animation-frame owner."""
+        self._event_loop
+
+    me set_fetch_dispatch(d: FetchDispatch):
+        """Wire a FetchDispatch implementation for fetch() calls."""
+        self.fetch_dispatch = Some(d)
+
+    me fetch(request: ScriptFetchRequest) -> ScriptFetchResponse:
+        """Dispatch a fetch request or return the fail-closed zero response."""
+        if val dispatch = self.fetch_dispatch:
+            return script_response_from_net(dispatch.dispatch(script_fetch_to_net_request(request)))
+        fetch_send(request)
+
+    me log(level: text, message: text, now_micros: i64):
+        """Append a console log entry (called from Simple code)."""
+        self._console_buf.append(level, message, now_micros)

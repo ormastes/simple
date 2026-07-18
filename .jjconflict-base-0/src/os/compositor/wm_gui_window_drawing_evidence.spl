@@ -1,0 +1,315 @@
+# WM GUI Window Drawing Evidence
+#
+# Capture-based verification that both WM lanes (a) the compositor scene/CSS
+# lane (os.compositor.wm_scene) and (b) the hosted-compositor chrome lane
+# (os.compositor.host_compositor_entry) actually DRAW windows, titlebars, a
+# taskbar, and correctly-sized text — not a blank frame or the giant-text
+# "font:" shorthand regression (weight parsed as size) that was just fixed in
+# the shared CSS/GUI-web renderer.
+#
+# Renders three scenes at 1024x768, writes P6 PPM captures, and reports
+# per-scene pixel metrics (background/body/accent/text-ink proportions plus a
+# giant-glyph pathology detector: the longest vertical run of text-ink pixels
+# in any column). Metric definitions mirror
+# scripts/check/validate_hosted_wm_capture_ppm.spl (non_bg / bright / accent
+# via channel-spread) so producer output stays self-describing.
+#
+# scripts/check/check-wm-gui-window-drawing-evidence.shs drives this file,
+# converts the PPM captures to PNG (sips), and writes the fail-closed
+# build/wm_gui_window_drawing/report.md.
+
+use os.compositor.wm_scene.{standard_wm_scene, shared_wm_scene_to_chromed_wm_scene, render_scene_to_backend}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED, shared_wm_background_color}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend}
+use common.window_protocol.geometry.{Size}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_get(key: text) -> text?
+
+val CAPTURE_W: i32 = 1024
+val CAPTURE_H: i32 = 768
+# Regression threshold: legitimate glyphs (CSS font-size <= ~13px, or the 8x16
+# bitmap font) never produce a vertical ink run taller than this. The giant-
+# text "font:" shorthand bug (weight parsed as size) produced glyphs hundreds
+# of px tall, so this catches it without depending on exact pixel counts.
+val GIANT_GLYPH_RUN_PX: i64 = 40
+
+struct SceneMetrics:
+    name: text
+    width: i32
+    height: i32
+    render_ms: i64
+    pixel_count: i64
+    write_ok: bool
+    non_bg_pixels: i64
+    bright_pixels: i64
+    ink_pixels: i64
+    accent_pixels: i64
+    max_glyph_run_px: i64
+    ppm_path: text
+
+# Background is the same literal (0xFF0F172A / theme.compositor_bg) across all
+# three captures: standard_wm_scene's desktop_chrome element, the chromed
+# scene's desktop_chrome element, and host_compositor_entry's clear()/CSS
+# backdrop all use wm_chrome_theme().compositor_bg.
+val BG_R: i64 = 15
+val BG_G: i64 = 23
+val BG_B: i64 = 42
+
+# Single flat pass: non-background / near-white ("bright") / exact-white text
+# ink / saturated-accent counts, plus the giant-glyph pathology detector
+# (longest vertical run of INK pixels in any single column, tracked via a
+# per-column running-count array rather than full connected-component
+# labeling — sufficient to catch a regression that inflates glyph height).
+#
+# Ink vs bright (measured on a real capture, do not merge them back): the WM
+# chrome CSS renders large near-white glass-panel gradients — a first version
+# that ran the glyph detector on the >210 "bright" class measured a 425px
+# vertical run on a CORRECT render of standard_wm_scene (the glass panel
+# body, not text). Text in both lanes is exact white (`color:white` /
+# theme.text_primary 0xFFFFFFFF, solid bitmap glyphs, no antialiasing), while
+# CSS gradient panels never reach 255 on all channels — so exact white is the
+# text-ink discriminator and the giant-glyph run detector uses ONLY it.
+#
+# Everything is inlined (no per-pixel helper-function calls, no y*width+x
+# multiply — a running flat index instead) because under the interpreter,
+# per-pixel function-call overhead dominates: a first version with
+# _channel_r/g/b + _max3/_min3 + _is_bright helper calls did not finish
+# measuring even one 1024x768 (786432px) scene inside 300s; this inlined
+# version is the fix, not a smaller capture resolution.
+fn _measure(pixels: [u32], width: i32, height: i32) -> SceneMetrics:
+    var non_bg: i64 = 0
+    var bright: i64 = 0
+    var ink: i64 = 0
+    var accent: i64 = 0
+    var max_run: i64 = 0
+    var col_run: [i64] = [0; width]
+    # Glyph-run discriminator: a white pixel only extends a vertical glyph
+    # run if its full contiguous horizontal white span is stroke-narrow.
+    # Solid white PANELS (window content surfaces, input fields, progress
+    # fills) are exact white too and previously registered 200px+ vertical
+    # "glyph" runs; real bitmap glyph strokes at UI sizes are only a few px
+    # wide. Extra right-to-left pass per row keeps everything arithmetic
+    # (no helper calls) per the perf note below.
+    var row_fwd_white: [i64] = [0; width]
+    var i: i64 = 0
+    var y = 0
+    while y < height:
+        var x2 = width - 1
+        var fwd: i64 = 0
+        while x2 >= 0:
+            val p2 = pixels[i + x2.to_i64()]
+            val r2 = ((p2 >> 16u32) & 0xFFu32).to_i64()
+            val g2 = ((p2 >> 8u32) & 0xFFu32).to_i64()
+            val b2 = (p2 & 0xFFu32).to_i64()
+            if r2 == 255 and g2 == 255 and b2 == 255:
+                fwd = fwd + 1
+            else:
+                fwd = 0
+            row_fwd_white[x2] = fwd
+            x2 = x2 - 1
+        var back: i64 = 0
+        var x = 0
+        while x < width:
+            val p = pixels[i]
+            val r = ((p >> 16u32) & 0xFFu32).to_i64()
+            val g = ((p >> 8u32) & 0xFFu32).to_i64()
+            val b = (p & 0xFFu32).to_i64()
+            if r != BG_R or g != BG_G or b != BG_B:
+                non_bg = non_bg + 1
+            if r > 210 and g > 210 and b > 210:
+                bright = bright + 1
+            if r == 255 and g == 255 and b == 255:
+                ink = ink + 1
+                back = back + 1
+                val h_span = back + row_fwd_white[x] - 1
+                if h_span <= 32:
+                    val nr = col_run[x] + 1
+                    col_run[x] = nr
+                    if nr > max_run:
+                        max_run = nr
+                else:
+                    col_run[x] = 0
+            else:
+                back = 0
+                col_run[x] = 0
+            var mx = r
+            if g > mx:
+                mx = g
+            if b > mx:
+                mx = b
+            var mn = r
+            if g < mn:
+                mn = g
+            if b < mn:
+                mn = b
+            if mx - mn > 65:
+                accent = accent + 1
+            i = i + 1
+            x = x + 1
+        y = y + 1
+    SceneMetrics(
+        name: "",
+        width: width,
+        height: height,
+        render_ms: 0,
+        pixel_count: (width * height).to_i64(),
+        write_ok: false,
+        non_bg_pixels: non_bg,
+        bright_pixels: bright,
+        ink_pixels: ink,
+        accent_pixels: accent,
+        max_glyph_run_px: max_run,
+        ppm_path: ""
+    )
+
+fn _capture(name: text, width: i32, height: i32, pixels: [u32], render_ms: i64, out_dir: text) -> SceneMetrics:
+    val ppm_path = "{out_dir}/{name}.ppm"
+    val m = _measure(pixels, width, height)
+    val ok = if pixels.len() == width * height:
+        val ppm = encode_ppm_p6(width.to_u32(), height.to_u32(), pixels)
+        rt_file_write_bytes(ppm_path, ppm)
+    else:
+        false
+    SceneMetrics(
+        name: name,
+        width: m.width,
+        height: m.height,
+        render_ms: render_ms,
+        pixel_count: m.pixel_count,
+        write_ok: ok,
+        non_bg_pixels: m.non_bg_pixels,
+        bright_pixels: m.bright_pixels,
+        ink_pixels: m.ink_pixels,
+        accent_pixels: m.accent_pixels,
+        max_glyph_run_px: m.max_glyph_run_px,
+        ppm_path: ppm_path
+    )
+
+fn _print_metrics(m: SceneMetrics):
+    print "{m.name}_render_ms={m.render_ms}"
+    print "{m.name}_pixel_count={m.pixel_count}"
+    print "{m.name}_write_ok={m.write_ok}"
+    print "{m.name}_non_bg_pixels={m.non_bg_pixels}"
+    print "{m.name}_bright_pixels={m.bright_pixels}"
+    print "{m.name}_ink_pixels={m.ink_pixels}"
+    print "{m.name}_accent_pixels={m.accent_pixels}"
+    print "{m.name}_max_glyph_run_px={m.max_glyph_run_px}"
+    print "{m.name}_ppm_path={m.ppm_path}"
+
+# (a) CSS scene lane, plain scene.
+fn _render_wm_scene_css(out_dir: text) -> SceneMetrics:
+    val scene = standard_wm_scene(CAPTURE_W, CAPTURE_H)
+    val t0 = rt_time_now_unix_micros()
+    val px = render_scene_to_backend(scene, nil)
+    val t1 = rt_time_now_unix_micros()
+    _capture("wm_scene_css", CAPTURE_W, CAPTURE_H, px, (t1 - t0) / 1000, out_dir)
+
+fn _demo_window(id: i64, title: text, x: i32, y: i32, w: i32, h: i32, focused: bool) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: "surface-{id}",
+        window_id: "win-{id}",
+        surface_kind: "app",
+        process_id: id.to_u64(),
+        app_id: "/sys/apps/demo{id}",
+        title: title,
+        language: "und",
+        x: x,
+        y: y,
+        width: w,
+        height: h,
+        tree: nil,
+        html: "",
+        minimized: false,
+        focused: focused,
+        z_index: id.to_i32(),
+        chrome_kind: WM_CHROME_KIND_TITLED
+    )
+
+# (b) CSS scene lane, richer scene: 3 internal windows + full chrome (taskbar,
+# command lane, pinned/running taskbar entries).
+fn _render_wm_scene_windows(out_dir: text) -> SceneMetrics:
+    val windows: [SharedWmWindow] = [
+        _demo_window(1, "Terminal", 60, 90, 360, 260, true),
+        _demo_window(2, "Editor", 460, 130, 420, 300, false),
+        _demo_window(3, "Files", 140, 420, 380, 240, false)
+    ]
+    val scene = SharedWmScene(width: CAPTURE_W, height: CAPTURE_H, backend: "evidence", windows: windows, background: shared_wm_background_color(wm_chrome_theme().compositor_bg))
+    val taskbar = TaskbarModel(
+        pinned: [
+            AppRef(app_id: "/sys/apps/terminal", display_name: "Terminal", icon: "terminal"),
+            AppRef(app_id: "/sys/apps/editor", display_name: "Editor", icon: "editor")
+        ],
+        running: [
+            WindowRef(window_id: "win-1", app_id: "/sys/apps/terminal", title: "Terminal", minimized: false),
+            WindowRef(window_id: "win-3", app_id: "/sys/apps/files", title: "Files", minimized: false)
+        ],
+        tray: []
+    )
+    val spec = shared_wm_scene_to_chromed_wm_scene(scene, taskbar, 1000, "09:41", 3)
+    val t0 = rt_time_now_unix_micros()
+    val px = render_scene_to_backend(spec, nil)
+    val t1 = rt_time_now_unix_micros()
+    _capture("wm_scene_windows", CAPTURE_W, CAPTURE_H, px, (t1 - t0) / 1000, out_dir)
+
+# (c) Hosted-compositor chrome lane: real HostCompositor with a headless
+# pixel-capturing backend, 3 hosted windows, render_frame() via the CSS fast
+# path (Metal available on this host), then read the backend's own pixel
+# buffer back.
+#
+# Window sizes are deliberately modest (~240x170): render_frame runs one FULL
+# CSS render per window content (simple_web_content_frame_cached ->
+# cache.request_to_pixel_artifact) on top of the full-frame chrome render,
+# and content cost scales with window area under the interpreter. Windows of
+# 360x260..420x300 pushed the whole scene past a 3600s timeout; these smaller
+# windows keep the exact same code path (chrome CSS lane + per-window content
+# compose) at an affordable runtime.
+fn _render_host_compositor(out_dir: text) -> SceneMetrics:
+    val backend = HeadlessHostCompositorBackend.new(CAPTURE_W, CAPTURE_H)
+    val comp = HostCompositor.new(backend, Size.wh(CAPTURE_W, CAPTURE_H))
+    comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 60, 90, 240, 170, "ready $", 900, "/sys/apps/terminal")
+    comp.apply_bridge_request(2, 78, COMP_CREATE_WINDOW.to_i64(), 0, "Editor", 400, 150, 250, 180, "main.spl", 901, "/sys/apps/editor")
+    comp.apply_bridge_request(3, 79, COMP_CREATE_WINDOW.to_i64(), 0, "Files", 160, 400, 240, 170, "src/ test/", 902, "/sys/apps/files")
+    val t0 = rt_time_now_unix_micros()
+    comp.render_frame()
+    val t1 = rt_time_now_unix_micros()
+    # Read the framebuffer through comp.backend, NOT the local `backend`
+    # binding: the compositor holds its own reference, and mutations through
+    # comp.backend do not reflect into the local binding (value-semantics
+    # write-back) — capturing `backend.pixels` reads an untouched all-zero
+    # buffer.
+    _capture("host_compositor", CAPTURE_W, CAPTURE_H, comp.backend.pixels, (t1 - t0) / 1000, out_dir)
+
+# Scene selection: WM_GUI_WINDOW_DRAWING_SCENE = wm_scene_css |
+# wm_scene_windows | host_compositor | all (default). The check script runs
+# one scene PER PROCESS so a renderer crash in one lane (e.g. an interpreter
+# semantic abort inside a layout branch only that scene's HTML reaches)
+# cannot erase the other lanes' captures — the driver process dies with only
+# that scene's metrics missing, and the gate fails just that scene.
+fn main() -> i64:
+    val out_dir = rt_env_get("WM_GUI_WINDOW_DRAWING_OUT_DIR") ?? "build/wm_gui_window_drawing"
+    val scene = rt_env_get("WM_GUI_WINDOW_DRAWING_SCENE") ?? "all"
+    var all_ok = true
+    if scene == "wm_scene_css" or scene == "all":
+        val css = _render_wm_scene_css(out_dir)
+        _print_metrics(css)
+        if not css.write_ok:
+            all_ok = false
+    if scene == "wm_scene_windows" or scene == "all":
+        val windows = _render_wm_scene_windows(out_dir)
+        _print_metrics(windows)
+        if not windows.write_ok:
+            all_ok = false
+    if scene == "host_compositor" or scene == "all":
+        val host = _render_host_compositor(out_dir)
+        _print_metrics(host)
+        if not host.write_ok:
+            all_ok = false
+    if all_ok:
+        return 0
+    1

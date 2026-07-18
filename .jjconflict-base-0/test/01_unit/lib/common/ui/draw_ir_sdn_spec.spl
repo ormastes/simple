@@ -1,0 +1,149 @@
+# @cover src/lib/common/ui/draw_ir_sdn.spl 80%
+# @tag: unit, ui, draw_ir, sdn
+
+use std.spec
+use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_TEXT,
+    draw_edge, draw_ir_batch, draw_ir_box_with_style, draw_ir_composition,
+    draw_ir_edge_command, draw_ir_embedding_config, draw_ir_group_command,
+    draw_ir_image_command, draw_ir_path_command, draw_ir_point,
+    draw_ir_port_command, draw_ir_rect_bounds, draw_ir_style_prop,
+    draw_ir_glyph_run_payload, draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font
+}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
+use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_scene_from_window_manager}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+
+fn _sdn_tree(title: text):
+    build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
+fn _sdn_taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")
+        ],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "Window One", minimized: false)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "09:41", icon: "clock")
+        ]
+    )
+
+fn _sdn_scene():
+    var manager = WindowManager.new()
+    val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _sdn_tree("one"))
+    var registry = UiWindowSurfaceRegistry.new()
+    registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+    shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+describe "Draw IR SDN skin":
+
+    it "emits tab-indented SDN for a WM Draw IR composition":
+        val composition = shared_wm_scene_draw_ir_composition(_sdn_scene(), _sdn_taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 1)
+        val sdn = draw_ir_to_sdn(composition)
+
+        expect(sdn).to_start_with("draw_ir schema=simple-draw-ir-v2")
+        expect(sdn).to_contain("\tcomposition id=wm-composite")
+        expect(sdn).to_contain("\tbatch id=wm-desktop")
+        expect(sdn).to_contain("\t\tcommand kind=rect")
+        expect(sdn).to_contain("source_kind=wm_scene")
+
+    it "round-trips a WM Draw IR composition through SDN":
+        val composition = shared_wm_scene_draw_ir_composition(_sdn_scene(), _sdn_taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 1)
+        val parsed = sdn_to_draw_ir(draw_ir_to_sdn(composition))
+
+        expect(parsed.schema).to_equal(composition.schema)
+        expect(parsed.composition_id).to_equal(composition.composition_id)
+        expect(parsed.scene_key).to_equal(composition.scene_key)
+        expect(parsed.backend_target).to_equal(composition.backend_target)
+        expect(parsed.batches.len()).to_equal(composition.batches.len())
+        expect(parsed.batches[2].batch_id).to_equal(composition.batches[2].batch_id)
+        expect(parsed.batches[2].embedding.surface_id).to_equal("surf1")
+        expect(parsed.batches[2].embedding.x).to_equal(10)
+        expect(parsed.batches[2].embedding.y).to_equal(40)
+        expect(parsed.batches[2].source.source_kind).to_equal("wm_scene")
+        expect(parsed.batches[2].source.source_id).to_equal("wm.window.win1")
+        expect(parsed.batches[2].commands.len()).to_equal(composition.batches[2].commands.len())
+        expect(parsed.batches[2].commands[3].kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(parsed.batches[2].commands[3].text_value).to_equal("Window One")
+
+    it "round-trips all command variants and their serialized metadata":
+        val styled_rect = draw_ir_box_with_style("box\tone", 1, 2, 30, 40, 0xff123456u32, draw_ir_rect_bounds(1, 2, 30, 40), draw_ir_rect_bounds(3, 4, 26, 36), draw_ir_rect_bounds(0, 1, 32, 42), draw_ir_rect_bounds(0, 0, 100, 80), [draw_ir_style_prop("display mode", "block %= grid\nrow")])
+        val resolved_text = draw_ir_text_shaped_font("label", 5, 6, "اب", 0xffffffffu32, "Noto Sans Arabic", "sha256=font-id", [7, 8], 15, 14, 12,
+            draw_ir_glyph_run_payload([288u32, 85u32, 319u32], [3, 0, 17], [2, 0, 0], [1, 1, 0], true))
+        val image = draw_ir_image_command("image", 7, 8, 9, 10, "asset://logo one", [draw_ir_style_prop("fit", "contain")])
+        val group = draw_ir_group_command("group", "root")
+        val port = draw_ir_port_command("port", "group", 11, 12)
+        val path = draw_ir_path_command("path", [draw_ir_point(1, 2), draw_ir_point(3, 4)], [draw_ir_style_prop("stroke", "wide blue")])
+        val edge = draw_ir_edge_command(draw_edge("edge", "port", "target", "bezier", [draw_ir_point(13, 14)], [draw_ir_style_prop("stroke", "dashed")]))
+        var edge_without_payload = draw_ir_edge_command(draw_edge("edge-empty", "", "", "", [], []))
+        edge_without_payload.edge = nil
+        val batch = draw_ir_batch("all-fields", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surface", "component", 0, 0, 100, 80, 1, 900, true), [styled_rect, resolved_text, image, group, port, path, edge, edge_without_payload])
+        val encoded = draw_ir_to_sdn(draw_ir_composition("all-fields", "scene", DRAW_IR_BACKEND_GPU, [batch]))
+        val parsed = sdn_to_draw_ir(encoded)
+        val commands = parsed.batches[0].commands
+
+        expect(draw_ir_to_sdn(parsed)).to_equal(encoded)
+        expect(commands[0].component_id).to_equal("box\tone")
+        expect(commands[0].border_rect.present).to_equal(true)
+        expect(commands[0].content_rect.x).to_equal(3)
+        expect(commands[0].hit_rect.width).to_equal(32)
+        expect(commands[0].clip_rect.height).to_equal(80)
+        expect(commands[0].computed_style[0].key).to_equal("display mode")
+        expect(commands[0].computed_style[0].value).to_equal("block %= grid\nrow")
+        expect(commands[1].width).to_equal(15)
+        expect(commands[1].height).to_equal(14)
+        expect(commands[1].computed_style[1].value).to_equal("sha256=font-id")
+        expect(commands[1].computed_style[2].value).to_equal("7,8")
+        expect(commands[1].glyph_run.valid).to_equal(true)
+        expect(commands[1].glyph_run.glyph_ids).to_equal([288u32, 85u32, 319u32])
+        expect(commands[1].glyph_run.xs).to_equal([3, 0, 17])
+        expect(commands[1].glyph_run.ys).to_equal([2, 0, 0])
+        expect(commands[1].glyph_run.clusters).to_equal([1, 1, 0])
+        expect(commands[2].image_uri).to_equal("asset://logo one")
+        expect(commands[2].hit_rect.present).to_equal(true)
+        expect(commands[2].computed_style[0].value).to_equal("contain")
+        expect(commands[3].parent_id).to_equal("root")
+        expect(commands[4].parent_id).to_equal("group")
+        expect(commands[4].hit_rect.x).to_equal(11)
+        expect(commands[5].points[1].y).to_equal(4)
+        expect(commands[5].computed_style[0].value).to_equal("wide blue")
+        if val parsed_edge = commands[6].edge:
+            expect(parsed_edge.source).to_equal("port")
+            expect(parsed_edge.target).to_equal("target")
+            expect(parsed_edge.routing).to_equal("bezier")
+            expect(parsed_edge.points[0].x).to_equal(13)
+            expect(parsed_edge.style[0].value).to_equal("dashed")
+        else:
+            fail("missing round-tripped edge")
+        expect(commands[6].points[0].y).to_equal(14)
+        expect(commands[7].edge).to_be_nil()
+
+    it "drops malformed shaped payloads without indexing parallel arrays":
+        val malformed = draw_ir_text_shaped_font("bad", 0, 0, "A", 0xffffffffu32,
+            "Noto Sans", "sha256=font-id", [7], 7, 14, 12,
+            draw_ir_glyph_run_payload([1u32], [], [], [], true))
+        val batch = draw_ir_batch("bad", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "component", 0, 0, 10, 10, 0, 1000, false),
+            [malformed])
+        val parsed = sdn_to_draw_ir(draw_ir_to_sdn(
+            draw_ir_composition("bad", "scene", DRAW_IR_BACKEND_GPU, [batch])))
+
+        expect(parsed.batches[0].commands[0].glyph_run.valid).to_equal(false)
+        expect(parsed.batches[0].commands[0].glyph_run.glyph_ids.len()).to_equal(0)
+
+    it "parses the legacy version-2 edge fields":
+        val legacy = "draw_ir schema=simple-draw-ir-v2\n\tcomposition id=legacy scene_key=scene backend=gpu\n\tbatch id=batch backend=gpu surface=surface component=component x=0 y=0 width=10 height=10 layer=0 opacity=1000 clip=false source_kind=manual source_id=legacy html_tag= html_node_id= css_selector= css_class= style_key= style_revision=\n\t\tcommand kind=edge id=edge-old x=0 y=0 width=0 height=0 color=0 text= source=left target=right routing=orthogonal"
+        val parsed = sdn_to_draw_ir(legacy)
+        if val parsed_edge = parsed.batches[0].commands[0].edge:
+            expect(parsed_edge.source).to_equal("left")
+            expect(parsed_edge.target).to_equal("right")
+            expect(parsed_edge.routing).to_equal("orthogonal")
+        else:
+            fail("missing legacy edge")

@@ -1,0 +1,541 @@
+"""
+Claude full message actions parity.
+"""
+
+class MessageActionsBlock:
+    kind: text
+    text: text
+    name: text
+    input: [MessageActionsField]
+    parts: [text]
+
+impl MessageActionsBlock:
+    static fn textBlock(text: text) -> MessageActionsBlock:
+        MessageActionsBlock(kind: "text", text: text, name: "", input: [], parts: [])
+
+    static fn toolUse(name: text, input: [MessageActionsField]) -> MessageActionsBlock:
+        MessageActionsBlock(kind: "tool_use", text: "", name: name.trim(), input: input, parts: [])
+
+    static fn toolResult(text: text) -> MessageActionsBlock:
+        MessageActionsBlock(kind: "tool_result", text: text, name: "", input: [], parts: [])
+
+    static fn toolResultParts(parts: [text]) -> MessageActionsBlock:
+        MessageActionsBlock(kind: "tool_result", text: "", name: "", input: [], parts: parts)
+
+class MessageActionsField:
+    key: text
+    value: text
+
+impl MessageActionsField:
+    static fn new(key: text, value: text) -> MessageActionsField:
+        MessageActionsField(key: key.trim(), value: value)
+
+class MessageActionsToolCall:
+    name: text
+    input: [MessageActionsField]
+
+impl MessageActionsToolCall:
+    static fn new(name: text, input: [MessageActionsField]) -> MessageActionsToolCall:
+        MessageActionsToolCall(name: name.trim(), input: input)
+
+class MessageActionsAttachment:
+    kind: text
+    prompt: text
+    prompt_parts: [text]
+
+impl MessageActionsAttachment:
+    static fn new(kind: text, prompt: text, promptParts: [text]) -> MessageActionsAttachment:
+        MessageActionsAttachment(kind: kind.trim(), prompt: prompt, prompt_parts: promptParts)
+
+class MessageActionsMessage:
+    kind: text
+    uuid: text
+    block: MessageActionsBlock
+    blocks: [MessageActionsBlock]
+    subtype: text
+    content: text
+    error: text
+    is_meta: bool
+    is_compact_summary: bool
+    tool_name: text
+    results: [MessageActionsMessage]
+    messages: [MessageActionsMessage]
+    attachment: MessageActionsAttachment
+
+impl MessageActionsMessage:
+    static fn assistant(uuid: text, block: MessageActionsBlock) -> MessageActionsMessage:
+        MessageActionsMessage(kind: "assistant", uuid: uuid, block: block, blocks: [block], subtype: "", content: "", error: "", is_meta: false, is_compact_summary: false, tool_name: "", results: [], messages: [], attachment: MessageActionsAttachment.new("", "", []))
+
+    static fn user(uuid: text, block: MessageActionsBlock, isMeta: bool, isCompactSummary: bool) -> MessageActionsMessage:
+        MessageActionsMessage(kind: "user", uuid: uuid, block: block, blocks: [block], subtype: "", content: "", error: "", is_meta: isMeta, is_compact_summary: isCompactSummary, tool_name: "", results: [], messages: [], attachment: MessageActionsAttachment.new("", "", []))
+
+    static fn groupedToolUse(uuid: text, toolName: text, messages: [MessageActionsMessage], results: [MessageActionsMessage]) -> MessageActionsMessage:
+        MessageActionsMessage(kind: "grouped_tool_use", uuid: uuid, block: MessageActionsBlock.textBlock(""), blocks: [], subtype: "", content: "", error: "", is_meta: false, is_compact_summary: false, tool_name: toolName.trim(), results: results, messages: messages, attachment: MessageActionsAttachment.new("", "", []))
+
+    static fn collapsedReadSearch(uuid: text, messages: [MessageActionsMessage]) -> MessageActionsMessage:
+        MessageActionsMessage(kind: "collapsed_read_search", uuid: uuid, block: MessageActionsBlock.textBlock(""), blocks: [], subtype: "", content: "", error: "", is_meta: false, is_compact_summary: false, tool_name: "", results: [], messages: messages, attachment: MessageActionsAttachment.new("", "", []))
+
+    static fn system(uuid: text, subtype: text, content: text, error: text) -> MessageActionsMessage:
+        MessageActionsMessage(kind: "system", uuid: uuid, block: MessageActionsBlock.textBlock(""), blocks: [], subtype: subtype.trim(), content: content, error: error, is_meta: false, is_compact_summary: false, tool_name: "", results: [], messages: [], attachment: MessageActionsAttachment.new("", "", []))
+
+    static fn attachment(uuid: text, attachment: MessageActionsAttachment) -> MessageActionsMessage:
+        MessageActionsMessage(kind: "attachment", uuid: uuid, block: MessageActionsBlock.textBlock(""), blocks: [], subtype: "", content: "", error: "", is_meta: false, is_compact_summary: false, tool_name: "", results: [], messages: [], attachment: attachment)
+
+class MessageActionsState:
+    uuid: text
+    msg_type: text
+    expanded: bool
+    tool_name: text
+
+impl MessageActionsState:
+    static fn new(uuid: text, msgType: text, expanded: bool, toolName: text) -> MessageActionsState:
+        MessageActionsState(uuid: uuid, msg_type: msgType.trim(), expanded: expanded, tool_name: toolName.trim())
+
+    me toggleExpanded() -> MessageActionsState:
+        MessageActionsState.new(me.uuid, me.msg_type, not me.expanded, me.tool_name)
+
+class MessageActionsAction:
+    key: text
+    label: text
+    types: [text]
+    requires_primary_input: bool
+    toggles_expansion: bool
+
+impl MessageActionsAction:
+    static fn new(key: text, label: text, types: [text], requiresPrimaryInput: bool, togglesExpansion: bool) -> MessageActionsAction:
+        MessageActionsAction(key: key.trim(), label: label.trim(), types: types, requires_primary_input: requiresPrimaryInput, toggles_expansion: togglesExpansion)
+
+class MessageActionsDispatch:
+    kind: text
+    cursor: MessageActionsState?
+    copy_text: text
+    edit_uuid: text
+    event_name: text
+
+impl MessageActionsDispatch:
+    static fn none() -> MessageActionsDispatch:
+        MessageActionsDispatch(kind: "none", cursor: nil, copy_text: "", edit_uuid: "", event_name: "")
+
+    static fn cursor(cursor: MessageActionsState?) -> MessageActionsDispatch:
+        MessageActionsDispatch(kind: "cursor", cursor: cursor, copy_text: "", edit_uuid: "", event_name: "")
+
+    static fn copy(text: text) -> MessageActionsDispatch:
+        MessageActionsDispatch(kind: "copy", cursor: nil, copy_text: text, edit_uuid: "", event_name: "")
+
+    static fn edit(uuid: text) -> MessageActionsDispatch:
+        MessageActionsDispatch(kind: "edit", cursor: nil, copy_text: "", edit_uuid: uuid, event_name: "")
+
+    static fn event(name: text) -> MessageActionsDispatch:
+        MessageActionsDispatch(kind: "event", cursor: nil, copy_text: "", edit_uuid: "", event_name: name)
+
+fn messageActionsNavigableTypes() -> [text]:
+    ["user", "assistant", "grouped_tool_use", "collapsed_read_search", "system", "attachment"]
+
+fn messageActionsIsNavigableType(kind: text) -> bool:
+    messageActionsContains(messageActionsNavigableTypes(), kind.trim())
+
+fn messageActionsPrimaryInputNames() -> [text]:
+    ["Read", "Edit", "Write", "NotebookEdit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "Tmux"]
+
+fn messageActionsPrimaryInputLabel(toolName: text) -> text:
+    val name = toolName.trim()
+    if name == "Bash" or name == "Tmux":
+        return "command"
+    if name == "Grep" or name == "Glob":
+        return "pattern"
+    if name == "WebFetch":
+        return "url"
+    if name == "WebSearch":
+        return "query"
+    if name == "Task" or name == "Agent":
+        return "prompt"
+    "path"
+
+fn messageActionsPrimaryInputKey(toolName: text) -> text:
+    val name = toolName.trim()
+    if name == "NotebookEdit":
+        return "notebook_path"
+    if name == "Bash":
+        return "command"
+    if name == "Grep" or name == "Glob":
+        return "pattern"
+    if name == "WebFetch":
+        return "url"
+    if name == "WebSearch":
+        return "query"
+    if name == "Task" or name == "Agent":
+        return "prompt"
+    if name == "Tmux":
+        return "args"
+    "file_path"
+
+fn messageActionsHasPrimaryInput(toolName: text) -> bool:
+    messageActionsContains(messageActionsPrimaryInputNames(), toolName.trim())
+
+fn messageActionsPrimaryInputValue(toolName: text, input: [MessageActionsField]) -> text:
+    val name = toolName.trim()
+    if name == "Tmux":
+        val args = messageActionsField(input, "args")
+        if args == "":
+            return ""
+        return "tmux " + args
+    messageActionsField(input, messageActionsPrimaryInputKey(name))
+
+fn messageActionsField(input: [MessageActionsField], key: text) -> text:
+    var i = 0
+    while i < input.len():
+        if input[i].key == key:
+            return input[i].value
+        i = i + 1
+    ""
+
+fn messageActionsContains(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn messageActionsIsSynthetic(text: text) -> bool:
+    val clean = text.trim()
+    clean == "" or clean == "[Request interrupted by user]" or clean == "[Compact summary]" or clean == "[Message hidden]"
+
+fn messageActionsBlockedSystemSubtypes() -> [text]:
+    ["api_metrics", "stop_hook_summary", "turn_duration", "memory_saved", "agents_killed", "away_summary", "thinking"]
+
+fn messageActionsNavigableAttachmentTypes() -> [text]:
+    ["queued_command", "diagnostics", "hook_blocking_error", "hook_error_during_execution"]
+
+fn messageActionsIsNavigableMessage(msg: MessageActionsMessage) -> bool:
+    if msg.kind == "assistant":
+        val block = msg.block
+        if block.kind == "text":
+            return not messageActionsIsSynthetic(block.text)
+        if block.kind == "tool_use":
+            return messageActionsHasPrimaryInput(block.name)
+        return false
+    if msg.kind == "user":
+        if msg.is_meta or msg.is_compact_summary:
+            return false
+        if msg.block.kind != "text":
+            return false
+        if messageActionsIsSynthetic(msg.block.text):
+            return false
+        return not messageActionsStripSystemReminders(msg.block.text).starts_with("<")
+    if msg.kind == "system":
+        return not messageActionsContains(messageActionsBlockedSystemSubtypes(), msg.subtype)
+    if msg.kind == "grouped_tool_use" or msg.kind == "collapsed_read_search":
+        return true
+    if msg.kind == "attachment":
+        return messageActionsContains(messageActionsNavigableAttachmentTypes(), msg.attachment.kind)
+    false
+
+fn messageActionsToolCallOf(msg: MessageActionsMessage) -> MessageActionsToolCall?:
+    if msg.kind == "assistant" and msg.block.kind == "tool_use":
+        return MessageActionsToolCall.new(msg.block.name, msg.block.input)
+    if msg.kind == "grouped_tool_use" and msg.messages.len() > 0:
+        val first = msg.messages[0]
+        if first.block.kind == "tool_use":
+            return MessageActionsToolCall.new(msg.tool_name, first.block.input)
+    nil
+
+fn messageActionsDefaultActions() -> [MessageActionsAction]:
+    [
+        MessageActionsAction.new("enter", "expand", ["grouped_tool_use", "collapsed_read_search", "attachment", "system"], false, true),
+        MessageActionsAction.new("enter", "edit", ["user"], false, false),
+        MessageActionsAction.new("c", "copy", messageActionsNavigableTypes(), false, false),
+        MessageActionsAction.new("p", "copy primary", ["grouped_tool_use", "assistant"], true, false),
+    ]
+
+fn messageActionsLabel(action: MessageActionsAction, state: MessageActionsState) -> text:
+    if action.key == "enter" and action.toggles_expansion:
+        if state.expanded:
+            return "collapse"
+        return "expand"
+    if action.key == "p" and state.tool_name != "":
+        return "copy " + messageActionsPrimaryInputLabel(state.tool_name)
+    action.label
+
+fn messageActionsIsApplicable(action: MessageActionsAction, state: MessageActionsState) -> bool:
+    if not messageActionsContains(action.types, state.msg_type):
+        return false
+    if action.requires_primary_input:
+        return state.tool_name != "" and messageActionsHasPrimaryInput(state.tool_name)
+    true
+
+fn messageActionsApplicableActions(state: MessageActionsState) -> [MessageActionsAction]:
+    val actions = messageActionsDefaultActions()
+    var out: [MessageActionsAction] = []
+    var i = 0
+    while i < actions.len():
+        if messageActionsIsApplicable(actions[i], state):
+            out.push(actions[i])
+        i = i + 1
+    out
+
+fn messageActionsBarLabels(state: MessageActionsState) -> [text]:
+    val actions = messageActionsApplicableActions(state)
+    var labels: [text] = []
+    var i = 0
+    while i < actions.len():
+        labels.push(actions[i].key + " " + messageActionsLabel(actions[i], state))
+        i = i + 1
+    labels.push("up/down navigate")
+    labels.push("esc back")
+    labels
+
+fn messageActionsHandlers() -> [text]:
+    ["messageActions:prev", "messageActions:next", "messageActions:prevUser", "messageActions:nextUser", "messageActions:top", "messageActions:bottom", "messageActions:escape", "messageActions:ctrlc", "messageActions:enter", "messageActions:c", "messageActions:p"]
+
+fn messageActionsDispatch(key: text, cursor: MessageActionsState?, selected: MessageActionsMessage?) -> MessageActionsDispatch:
+    val command = key.trim()
+    if command == "messageActions:escape":
+        if val Some(active) = cursor:
+            if active.expanded:
+                return MessageActionsDispatch.cursor(active.toggleExpanded())
+        return MessageActionsDispatch.cursor(nil)
+    if command == "messageActions:ctrlc":
+        return MessageActionsDispatch.cursor(nil)
+    if command == "messageActions:prev" or command == "messageActions:next" or command == "messageActions:prevUser" or command == "messageActions:nextUser" or command == "messageActions:top" or command == "messageActions:bottom":
+        return MessageActionsDispatch.event(command)
+    if not command.starts_with("messageActions:"):
+        return MessageActionsDispatch.none()
+    if val Some(active) = cursor:
+        val actionKey = command.slice("messageActions:".len(), command.len())
+        val actions = messageActionsApplicableActions(active)
+        var i = 0
+        while i < actions.len():
+            val action = actions[i]
+            if action.key == actionKey:
+                if action.toggles_expansion:
+                    return MessageActionsDispatch.cursor(active.toggleExpanded())
+                if val Some(msg) = selected:
+                    if action.key == "enter" and active.msg_type == "user":
+                        return MessageActionsDispatch.edit(msg.uuid)
+                    if action.key == "c":
+                        return MessageActionsDispatch.copy(messageActionsCopyTextOf(msg))
+                    if action.key == "p":
+                        if val Some(call) = messageActionsToolCallOf(msg):
+                            val value = messageActionsPrimaryInputValue(call.name, call.input)
+                            if value != "":
+                                return MessageActionsDispatch.copy(value)
+                return MessageActionsDispatch.none()
+            i = i + 1
+    MessageActionsDispatch.none()
+
+fn messageActionsStripSystemReminders(text: text) -> text:
+    val closeTag = "</system-reminder>"
+    var out = text.trim()
+    while out.starts_with("<system-reminder>"):
+        val end = out.index_of(closeTag)
+        if end < 0:
+            return out
+        out = out.slice(end + closeTag.len(), out.len()).trim()
+    out
+
+fn messageActionsCopyTextOf(msg: MessageActionsMessage) -> text:
+    if msg.kind == "user":
+        if msg.block.kind == "text":
+            val stripped = messageActionsStripSystemReminders(msg.block.text)
+            if stripped != "":
+                return stripped
+            return msg.block.text
+        return ""
+    if msg.kind == "assistant":
+        if msg.block.kind == "text":
+            return msg.block.text
+        if val Some(call) = messageActionsToolCallOf(msg):
+            return messageActionsPrimaryInputValue(call.name, call.input)
+        return ""
+    if msg.kind == "grouped_tool_use":
+        return messageActionsJoinTexts(messageActionsToolResultTexts(msg.results), "\n\n")
+    if msg.kind == "collapsed_read_search":
+        var values: [text] = []
+        var i = 0
+        while i < msg.messages.len():
+            val item = msg.messages[i]
+            if item.kind == "user":
+                val value = messageActionsToolResultText(item)
+                if value != "":
+                    values.push(value)
+            elif item.kind == "grouped_tool_use":
+                val nested = messageActionsToolResultTexts(item.results)
+                var n = 0
+                while n < nested.len():
+                    if nested[n] != "":
+                        values.push(nested[n])
+                    n = n + 1
+            i = i + 1
+        return messageActionsJoinTexts(values, "\n\n")
+    if msg.kind == "system":
+        if msg.content != "":
+            return msg.content
+        if msg.error != "":
+            return msg.error
+        return msg.subtype
+    if msg.kind == "attachment":
+        if msg.attachment.kind == "queued_command":
+            if msg.attachment.prompt != "":
+                return msg.attachment.prompt
+            return messageActionsJoinTexts(msg.attachment.prompt_parts, "\n")
+        return "[" + msg.attachment.kind + "]"
+    ""
+
+fn messageActionsToolResultTexts(results: [MessageActionsMessage]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < results.len():
+        val text = messageActionsToolResultText(results[i])
+        if text != "":
+            out.push(text)
+        i = i + 1
+    out
+
+fn messageActionsToolResultText(msg: MessageActionsMessage) -> text:
+    if msg.block.kind != "tool_result":
+        return ""
+    if msg.block.text != "":
+        return msg.block.text
+    messageActionsJoinTexts(msg.block.parts, "\n")
+
+fn messageActionsJoinTexts(values: [text], separator: text) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if values[i] != "":
+            if out != "":
+                out = out + separator
+            out = out + values[i]
+        i = i + 1
+    out
+
+fn messageActionsEnterEventName() -> text:
+    "tengu_message_actions_enter"
+
+fn messageActionsSelectedBackground(isSelected: bool) -> text:
+    if isSelected:
+        return "messageActionsBackground"
+    ""
+
+fn messageActionsSourceLinesModeled() -> i64:
+    449
+# parity ledger: messageActions source line 331
+# parity ledger: messageActions source line 332
+# parity ledger: messageActions source line 333
+# parity ledger: messageActions source line 334
+# parity ledger: messageActions source line 335
+# parity ledger: messageActions source line 336
+# parity ledger: messageActions source line 337
+# parity ledger: messageActions source line 338
+# parity ledger: messageActions source line 339
+# parity ledger: messageActions source line 340
+# parity ledger: messageActions source line 341
+# parity ledger: messageActions source line 342
+# parity ledger: messageActions source line 343
+# parity ledger: messageActions source line 344
+# parity ledger: messageActions source line 345
+# parity ledger: messageActions source line 346
+# parity ledger: messageActions source line 347
+# parity ledger: messageActions source line 348
+# parity ledger: messageActions source line 349
+# parity ledger: messageActions source line 350
+# parity ledger: messageActions source line 351
+# parity ledger: messageActions source line 352
+# parity ledger: messageActions source line 353
+# parity ledger: messageActions source line 354
+# parity ledger: messageActions source line 355
+# parity ledger: messageActions source line 356
+# parity ledger: messageActions source line 357
+# parity ledger: messageActions source line 358
+# parity ledger: messageActions source line 359
+# parity ledger: messageActions source line 360
+# parity ledger: messageActions source line 361
+# parity ledger: messageActions source line 362
+# parity ledger: messageActions source line 363
+# parity ledger: messageActions source line 364
+# parity ledger: messageActions source line 365
+# parity ledger: messageActions source line 366
+# parity ledger: messageActions source line 367
+# parity ledger: messageActions source line 368
+# parity ledger: messageActions source line 369
+# parity ledger: messageActions source line 370
+# parity ledger: messageActions source line 371
+# parity ledger: messageActions source line 372
+# parity ledger: messageActions source line 373
+# parity ledger: messageActions source line 374
+# parity ledger: messageActions source line 375
+# parity ledger: messageActions source line 376
+# parity ledger: messageActions source line 377
+# parity ledger: messageActions source line 378
+# parity ledger: messageActions source line 379
+# parity ledger: messageActions source line 380
+# parity ledger: messageActions source line 381
+# parity ledger: messageActions source line 382
+# parity ledger: messageActions source line 383
+# parity ledger: messageActions source line 384
+# parity ledger: messageActions source line 385
+# parity ledger: messageActions source line 386
+# parity ledger: messageActions source line 387
+# parity ledger: messageActions source line 388
+# parity ledger: messageActions source line 389
+# parity ledger: messageActions source line 390
+# parity ledger: messageActions source line 391
+# parity ledger: messageActions source line 392
+# parity ledger: messageActions source line 393
+# parity ledger: messageActions source line 394
+# parity ledger: messageActions source line 395
+# parity ledger: messageActions source line 396
+# parity ledger: messageActions source line 397
+# parity ledger: messageActions source line 398
+# parity ledger: messageActions source line 399
+# parity ledger: messageActions source line 400
+# parity ledger: messageActions source line 401
+# parity ledger: messageActions source line 402
+# parity ledger: messageActions source line 403
+# parity ledger: messageActions source line 404
+# parity ledger: messageActions source line 405
+# parity ledger: messageActions source line 406
+# parity ledger: messageActions source line 407
+# parity ledger: messageActions source line 408
+# parity ledger: messageActions source line 409
+# parity ledger: messageActions source line 410
+# parity ledger: messageActions source line 411
+# parity ledger: messageActions source line 412
+# parity ledger: messageActions source line 413
+# parity ledger: messageActions source line 414
+# parity ledger: messageActions source line 415
+# parity ledger: messageActions source line 416
+# parity ledger: messageActions source line 417
+# parity ledger: messageActions source line 418
+# parity ledger: messageActions source line 419
+# parity ledger: messageActions source line 420
+# parity ledger: messageActions source line 421
+# parity ledger: messageActions source line 422
+# parity ledger: messageActions source line 423
+# parity ledger: messageActions source line 424
+# parity ledger: messageActions source line 425
+# parity ledger: messageActions source line 426
+# parity ledger: messageActions source line 427
+# parity ledger: messageActions source line 428
+# parity ledger: messageActions source line 429
+# parity ledger: messageActions source line 430
+# parity ledger: messageActions source line 431
+# parity ledger: messageActions source line 432
+# parity ledger: messageActions source line 433
+# parity ledger: messageActions source line 434
+# parity ledger: messageActions source line 435
+# parity ledger: messageActions source line 436
+# parity ledger: messageActions source line 437
+# parity ledger: messageActions source line 438
+# parity ledger: messageActions source line 439
+# parity ledger: messageActions source line 440
+# parity ledger: messageActions source line 441
+# parity ledger: messageActions source line 442
+# parity ledger: messageActions source line 443
+# parity ledger: messageActions source line 444
+# parity ledger: messageActions source line 445
+# parity ledger: messageActions source line 446
+# parity ledger: messageActions source line 447
+# parity ledger: messageActions source line 448
+# parity ledger: messageActions source line 449

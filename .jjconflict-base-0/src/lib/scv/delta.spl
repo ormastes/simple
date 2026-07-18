@@ -1,0 +1,246 @@
+# SCV delta encoding/decoding using rolling-hash copy/insert instructions.
+
+# Max chain depth enforced at verify and read time.
+val SCV_DELTA_MAX_DEPTH: i64 = 10
+
+# Delta wire format opcodes
+val SCV_DELTA_OPCODE_COPY: i64 = 1
+val SCV_DELTA_OPCODE_INSERT: i64 = 2
+
+# Header magic bytes: 'D','E','L','T' = 0x44, 0x45, 0x4C, 0x54
+val SCV_DELTA_MAGIC_0: i64 = 68
+val SCV_DELTA_MAGIC_1: i64 = 69
+val SCV_DELTA_MAGIC_2: i64 = 76
+val SCV_DELTA_MAGIC_3: i64 = 84
+
+fn scv_delta_write_u8(buf: [u8], v: i64) -> [u8]:
+    var r = buf
+    r.push((v % 256).to_u8())
+    r
+
+fn scv_delta_write_u16_le(buf: [u8], v: i64) -> [u8]:
+    var r = buf
+    r.push((v % 256).to_u8())
+    r.push(((v / 256) % 256).to_u8())
+    r
+
+fn scv_delta_write_u32_le(buf: [u8], v: i64) -> [u8]:
+    var r = buf
+    r.push((v % 256).to_u8())
+    r.push(((v / 256) % 256).to_u8())
+    r.push(((v / 65536) % 256).to_u8())
+    r.push(((v / 16777216) % 256).to_u8())
+    r
+
+fn scv_delta_read_u32_le(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos].to_i64()
+    val b1 = data[pos + 1].to_i64()
+    val b2 = data[pos + 2].to_i64()
+    val b3 = data[pos + 3].to_i64()
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+fn scv_delta_read_u16_le(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos].to_i64()
+    val b1 = data[pos + 1].to_i64()
+    b0 + b1 * 256
+
+fn scv_delta_crc32_update(crc: i64, byte: i64) -> i64:
+    # Simple polynomial CRC32 step
+    var c = crc ^ byte
+    var i = 0
+    while i < 8:
+        val lsb = c % 2
+        c = c / 2
+        if lsb != 0:
+            c = c ^ 3988292384
+        i = i + 1
+    c
+
+fn scv_delta_crc32(data: [u8]) -> i64:
+    var crc = 4294967295
+    var i = 0
+    while i < data.len():
+        crc = scv_delta_crc32_update(crc, data[i].to_i64())
+        i = i + 1
+    crc ^ 4294967295
+
+# Adler-32 rolling hash over a window starting at pos in data
+fn scv_delta_adler32(data: [u8], pos: i64, window: i64) -> i64:
+    var a = 1
+    var b = 0
+    var i = 0
+    while i < window and pos + i < data.len():
+        val byte = data[pos + i].to_i64()
+        a = (a + byte) % 65521
+        b = (b + a) % 65521
+        i = i + 1
+    a + b * 65536
+
+# Build a hash table mapping adler32(window) -> offset in base
+# Returns newline-separated "hash offset" pairs
+fn scv_delta_build_hash_index(base: [u8], window: i64) -> text:
+    var index = ""
+    var i = 0
+    while i + window <= base.len():
+        val h = scv_delta_adler32(base, i, window)
+        index = index + "{h} {i}\n"
+        i = i + 1
+    index
+
+fn scv_delta_lookup_hash(index: text, h: i64) -> i64:
+    val needle = "{h} "
+    for line in index.split("\n"):
+        if line.starts_with(needle):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                val offset = parts[1].to_i64() ?? -1
+                return offset
+    -1
+
+# Verify that base[base_off:base_off+len] == target[target_off:target_off+len]
+fn scv_delta_match_len(base: [u8], base_off: i64, target: [u8], target_off: i64, max_len: i64) -> i64:
+    var n = 0
+    while n < max_len and base_off + n < base.len() and target_off + n < target.len():
+        if base[base_off + n] != target[target_off + n]:
+            return n
+        n = n + 1
+    n
+
+fn scv_delta_encode(base: [u8], target: [u8]) -> ([u8], text):
+    val window = 32
+    # Build hash index of base
+    val index = scv_delta_build_hash_index(base, window)
+
+    # Build header: magic + base_size + target_size (all u32 LE)
+    var out: [u8] = []
+    out = scv_delta_write_u8(out, SCV_DELTA_MAGIC_0)
+    out = scv_delta_write_u8(out, SCV_DELTA_MAGIC_1)
+    out = scv_delta_write_u8(out, SCV_DELTA_MAGIC_2)
+    out = scv_delta_write_u8(out, SCV_DELTA_MAGIC_3)
+    out = scv_delta_write_u32_le(out, base.len())
+    out = scv_delta_write_u32_le(out, target.len())
+
+    var pos = 0
+    var insert_start = 0
+    var insert_count = 0
+
+    while pos < target.len():
+        # Try to find a match in base at current position
+        var found_offset = -1
+        var found_len = 0
+
+        if pos + window <= target.len():
+            val h = scv_delta_adler32(target, pos, window)
+            val base_off = scv_delta_lookup_hash(index, h)
+            if base_off >= 0:
+                # Verify exact match
+                val mlen = scv_delta_match_len(base, base_off, target, pos, base.len() - base_off)
+                if mlen >= window:
+                    found_offset = base_off
+                    found_len = mlen
+
+        if found_offset >= 0:
+            # Flush any pending insert bytes first
+            if insert_count > 0:
+                # Emit INSERT opcode
+                out = scv_delta_write_u8(out, SCV_DELTA_OPCODE_INSERT)
+                out = scv_delta_write_u16_le(out, insert_count)
+                var ii = 0
+                while ii < insert_count:
+                    out.push(target[insert_start + ii])
+                    ii = ii + 1
+                insert_count = 0
+            # Emit COPY opcode
+            out = scv_delta_write_u8(out, SCV_DELTA_OPCODE_COPY)
+            out = scv_delta_write_u32_le(out, found_offset)
+            out = scv_delta_write_u32_le(out, found_len)
+            pos = pos + found_len
+            insert_start = pos
+        else:
+            if insert_count == 0:
+                insert_start = pos
+            insert_count = insert_count + 1
+            pos = pos + 1
+
+    # Flush remaining insert bytes
+    if insert_count > 0:
+        out = scv_delta_write_u8(out, SCV_DELTA_OPCODE_INSERT)
+        out = scv_delta_write_u16_le(out, insert_count)
+        var ii = 0
+        while ii < insert_count:
+            out.push(target[insert_start + ii])
+            ii = ii + 1
+
+    # Append CRC32
+    val crc = scv_delta_crc32(out)
+    out = scv_delta_write_u32_le(out, crc)
+
+    (out, "")
+
+fn scv_delta_decode(base: [u8], delta: [u8]) -> ([u8], text):
+    # Check minimum header size: 4 magic + 4 base_size + 4 target_size + 4 crc = 16
+    if delta.len() < 16:
+        return ([], "ERROR delta too short\n")
+
+    # Check magic
+    if (delta[0].to_i64() != SCV_DELTA_MAGIC_0 or
+        delta[1].to_i64() != SCV_DELTA_MAGIC_1 or
+        delta[2].to_i64() != SCV_DELTA_MAGIC_2 or
+        delta[3].to_i64() != SCV_DELTA_MAGIC_3):
+        return ([], "ERROR delta bad magic\n")
+
+    val stored_base_size = scv_delta_read_u32_le(delta, 4)
+    val target_size = scv_delta_read_u32_le(delta, 8)
+
+    if stored_base_size != base.len():
+        return ([], "ERROR delta base size mismatch\n")
+
+    # Verify CRC (all bytes except last 4)
+    val payload_end = delta.len() - 4
+    val stored_crc = scv_delta_read_u32_le(delta, payload_end)
+    val computed_crc = scv_delta_crc32(delta[0:payload_end])
+    if stored_crc != computed_crc:
+        return ([], "ERROR delta crc mismatch\n")
+
+    var out: [u8] = []
+    var pos = 12  # skip magic + base_size + target_size
+
+    while pos < payload_end:
+        val opcode = delta[pos].to_i64()
+        pos = pos + 1
+
+        if opcode == SCV_DELTA_OPCODE_COPY:
+            if pos + 8 > payload_end:
+                return ([], "ERROR delta truncated COPY\n")
+            val offset = scv_delta_read_u32_le(delta, pos)
+            val length = scv_delta_read_u32_le(delta, pos + 4)
+            pos = pos + 8
+            if offset + length > base.len():
+                return ([], "ERROR delta COPY out of bounds\n")
+            var i = 0
+            while i < length:
+                out.push(base[offset + i])
+                i = i + 1
+
+        elif opcode == SCV_DELTA_OPCODE_INSERT:
+            if pos + 2 > payload_end:
+                return ([], "ERROR delta truncated INSERT\n")
+            val length = scv_delta_read_u16_le(delta, pos)
+            pos = pos + 2
+            if pos + length > payload_end:
+                return ([], "ERROR delta INSERT overrun\n")
+            var i = 0
+            while i < length:
+                out.push(delta[pos + i])
+                i = i + 1
+            pos = pos + length
+
+        else:
+            return ([], "ERROR delta unknown opcode: {opcode}\n")
+
+    if out.len() != target_size:
+        return ([], "ERROR delta reconstructed size mismatch\n")
+
+    (out, "")
+
+export SCV_DELTA_MAX_DEPTH

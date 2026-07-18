@@ -1,0 +1,42 @@
+use std.spec.*
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.block_device.{BlockDevice}
+use os.kernel.boot.mmio.{mmio_reset_for_test}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_alloc_page_raw}
+use os.kernel.memory.vmm.{vmm_init_sparse_for_test, vmm_map_page, vmm_translate}
+use os.kernel.memory.memory_leveling_vmm.{memory_vmm_write_physical, memory_vmm_read_physical}
+use std.memory_leveling.{simple_memory_iso_cpu_cold, simple_memory_placement_config_from_intent, memory_leveling_policy_from_intent}
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_swap_block.{memory_swap_block_store_new}
+use os.kernel.memory.memory_swap_coordinator.{memory_swap_coordinator_new}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install, memory_swap_runtime_clear_for_test, memory_swap_runtime_handle_fault}
+
+describe "SimpleOS swap page-fault restore":
+
+    it "restores a swapped page before normal VMA fault handling":
+        mmio_reset_for_test()
+        memory_swap_runtime_clear_for_test()
+        expect(if pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024): 1 else: 0).to_equal(1)
+        expect(if vmm_init_sparse_for_test(pmm_get_manager(), 0): 1 else: 0).to_equal(1)
+        val source = pmm_alloc_page_raw()
+        val virt = VirtAddr(addr: 0x71000000)
+        val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+        expect(if vmm_map_page(virt, PhysAddr(addr: source), flags): 1 else: 0).to_equal(1)
+        val expected: [u8] = [1, 3, 5, 7, 9, 11, 13]
+        memory_vmm_write_physical(source, expected)
+
+        val intent = simple_memory_iso_cpu_cold()
+        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+        val allocation = manager.request(simple_memory_placement_config_from_intent(intent), memory_leveling_policy_from_intent(intent), expected.len() as u64, 1, 88)
+        val memory_device = MemBlockDevice.new(32, 512)
+        val device: BlockDevice = memory_device
+        val store = memory_swap_block_store_new(true, device, 0, 2, 4096)
+        val coordinator = memory_swap_coordinator_new(manager, store)
+        expect(coordinator.swap_out_page(allocation.allocation_id, 88, virt.addr, 0, expected.len() as u64).state).to_equal("swapped")
+        memory_swap_runtime_install(coordinator)
+
+        expect(memory_swap_runtime_handle_fault(virt.addr + 3)).to_equal(0)
+        val restored_phys = vmm_translate(virt).unwrap().addr
+        expect(memory_vmm_read_physical(restored_phys, expected.len() as u64)).to_equal(expected)
+        expect(memory_swap_runtime_handle_fault(virt.addr + 3)).to_equal(-1)

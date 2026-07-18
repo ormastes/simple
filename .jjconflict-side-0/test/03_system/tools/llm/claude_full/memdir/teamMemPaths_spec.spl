@@ -1,0 +1,61 @@
+"""
+# Claude Full Team Memory Paths
+
+Checks team memory path validation and traversal rejection.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.memdir.teamMemPaths.*
+
+describe "Claude full team memory paths":
+    it "should create PathTraversalError with stable name":
+        step("Construct a traversal error")
+        val error = PathTraversalError.new("bad path")
+        expect(error.name).to_equal("PathTraversalError")
+        expect(error.message).to_equal("bad path")
+
+    it "should reject dangerous path keys":
+        step("Validate direct injection vectors")
+        expect(sanitizePathKey("ok/file.md").ok).to_equal(true)
+        expect(sanitizePathKey("bad\u0000key").ok).to_equal(false)
+        expect(sanitizePathKey("%2e%2e%2fsecret").ok).to_equal(false)
+        expect(sanitizePathKey("．．／secret").ok).to_equal(false)
+        expect(sanitizePathKey("a\\b").ok).to_equal(false)
+        expect(sanitizePathKey("/absolute").ok).to_equal(false)
+
+    it "should derive team memory paths below auto memory":
+        step("Build directory and entrypoint paths")
+        expect(isTeamMemoryEnabled(false, true)).to_equal(false)
+        expect(isTeamMemoryEnabled(true, true)).to_equal(true)
+        expect(getTeamMemPath("/mem/project")).to_equal("/mem/project/team/")
+        expect(getTeamMemEntrypoint("/mem/project")).to_equal("/mem/project/team/MEMORY.md")
+
+    it "should validate write paths with string and realpath containment":
+        step("Validate safe, escaping, and symlink-escaping writes")
+        val safe = validateTeamMemWritePath("/mem/project/team/a.md", "/mem/project/team/", true)
+        expect(safe.ok).to_equal(true)
+        expect(safe.path).to_equal("/mem/project/team/a.md")
+        expect(validateTeamMemWritePath("/mem/project/team/../../secret", "/mem/project/team/", true).ok).to_equal(false)
+        expect(validateTeamMemWritePath("/mem/project/team/link", "/mem/project/team/", false).ok).to_equal(false)
+
+    it "should validate relative keys against the team directory":
+        step("Join a relative key and reject traversal")
+        val safe = validateTeamMemKey("dir/a.md", "/mem/project/team/", true)
+        expect(safe.ok).to_equal(true)
+        expect(safe.path).to_equal("/mem/project/team/dir/a.md")
+        expect(validateTeamMemKey("../secret", "/mem/project/team/", true).ok).to_equal(false)
+        expect(validateTeamMemKey("dir/a.md", "/mem/project/team/", false).ok).to_equal(false)
+
+    it "should classify team memory files only when enabled":
+        step("Check enabled and disabled file detection")
+        expect(isTeamMemFile("/mem/project/team/a.md", "/mem/project/team/", true, true)).to_equal(true)
+        expect(isTeamMemFile("/mem/project/team/a.md", "/mem/project/team/", false, true)).to_equal(false)
+        expect(isTeamMemFile("/mem/project/team-evil/a.md", "/mem/project/team/", true, true)).to_equal(false)
+
+    it "should fail closed for dangerous realpath states":
+        step("Classify filesystem containment status")
+        expect(realpathDeepestExistingStatus("ENOENT", false).ok).to_equal(true)
+        expect(realpathDeepestExistingStatus("", true).ok).to_equal(false)
+        expect(realpathDeepestExistingStatus("ELOOP", false).ok).to_equal(false)
+        expect(realpathDeepestExistingStatus("EACCES", false).ok).to_equal(false)
+        expect(teamMemPathsSourceLinesModeled()).to_equal(292)

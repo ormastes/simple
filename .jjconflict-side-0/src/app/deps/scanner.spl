@@ -1,0 +1,442 @@
+# Dependency Scanner — src/app/deps/scanner.spl
+#
+# All analysis functions for `bin/simple deps`. Separated from main.spl so specs
+# can import from app.deps.scanner without triggering the semantic checker's
+# known false-positive on app.X.main modules.
+#
+# Resolver logic mirrors src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl.
+
+use compiler.dependency.graph.{
+    ImportGraph, ImportEdge, ImportKind, CyclicDependencyError,
+    importgraph_new, importgraph_add_edge, importgraph_find_cycles
+}
+use app.io.mod.{env_get}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_list(parent: text) -> [text]
+
+# ===== Minimal module resolver =====
+
+fn _deps_str_eq(a: text, b: text) -> bool:
+    a.len() == b.len() and a.starts_with(b)
+
+fn _deps_path_parent(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return "."
+    path.substring(0, slash)
+
+fn _deps_path_join(a: text, b: text) -> text:
+    if a == "" or a == ".":
+        return b
+    if b.starts_with("/"):
+        return b
+    a + "/" + b
+
+fn _deps_module_to_relpath(module_name: text) -> text:
+    # std.X -> lib/X  (std is alias for lib/)
+    var name = module_name
+    if name.starts_with("std."):
+        name = "lib." + name.substring(4)
+    val parts = name.split(".")
+    parts.join("/")
+
+# Find a numbered directory: looks in parent for entries matching "NN.segment"
+fn _find_numbered_dir(parent: text, segment: text) -> text:
+    val entries = rt_dir_list(parent) ?? []
+    for entry in entries:
+        val dot_idx = entry.index_of(".") ?? -1
+        if dot_idx > 0:
+            val suffix = entry.substring(dot_idx + 1)
+            if _deps_str_eq(suffix, segment):
+                return _deps_path_join(parent, entry)
+    ""
+
+# Resolve numbered-dir path components: e.g. compiler.frontend.core -> compiler/10.frontend/core
+fn _resolve_numbered(base: text, parts: [text]) -> text:
+    var current = base
+    for part in parts:
+        val direct = _deps_path_join(current, part)
+        if rt_file_exists(direct):
+            current = direct
+        else:
+            val numbered = _find_numbered_dir(current, part)
+            if numbered != "":
+                current = numbered
+            else:
+                # Can't resolve this segment
+                return ""
+    current
+
+fn _deps_try_exists(path: text) -> text:
+    if rt_file_exists(path):
+        return path
+    ""
+
+fn _deps_resolve_module(module_name: text, current_file: text) -> text:
+    val current_dir = _deps_path_parent(current_file)
+
+    # Handle relative imports: use .sibling or use ..parent.sibling
+    if module_name.starts_with("."):
+        # Strip leading dots to get the relative segment name
+        var rel = module_name
+        var base_dir = current_dir
+        # Strip one leading dot per level
+        for _up in range(0, 10):
+            if rel.starts_with(".."):
+                rel = rel.substring(2)
+                base_dir = _deps_path_parent(base_dir)
+            elif rel.starts_with("."):
+                rel = rel.substring(1)
+            else:
+                break
+        # rel may now be empty or have a segment like "cycle_b"
+        val seg_parts = rel.split(".")
+        val seg_path = seg_parts.join("/")
+        if seg_path != "":
+            val direct_spl = _deps_path_join(base_dir, seg_path + ".spl")
+            val r0 = _deps_try_exists(direct_spl)
+            if r0 != "":
+                return r0
+            val direct_mod = _deps_path_join(base_dir, seg_path + "/mod.spl")
+            val r0m = _deps_try_exists(direct_mod)
+            if r0m != "":
+                return r0m
+        return ""
+
+    val relpath = _deps_module_to_relpath(module_name)
+    val parts = relpath.split("/")
+
+    # 1. Local directory (relative to current file)
+    val local_spl = _deps_path_join(current_dir, relpath + ".spl")
+    val local_mod = _deps_path_join(current_dir, relpath + "/mod.spl")
+    val r1 = _deps_try_exists(local_spl)
+    if r1 != "":
+        return r1
+    val r2 = _deps_try_exists(local_mod)
+    if r2 != "":
+        return r2
+
+    # 2. SIMPLE_LIB environment variable
+    val simple_lib = env_get("SIMPLE_LIB")
+    val simple_lib_ok = simple_lib != ""
+    if simple_lib_ok:
+        val lib_spl = _deps_path_join(simple_lib, relpath + ".spl")
+        val lib_mod = _deps_path_join(simple_lib, relpath + "/mod.spl")
+        val r3 = _deps_try_exists(lib_spl)
+        if r3 != "":
+            return r3
+        val r4 = _deps_try_exists(lib_mod)
+        if r4 != "":
+            return r4
+
+    # 3. src/ fallback
+    val src_spl = "src/" + relpath + ".spl"
+    val src_mod = "src/" + relpath + "/mod.spl"
+    val r5 = _deps_try_exists(src_spl)
+    if r5 != "":
+        return r5
+    val r6 = _deps_try_exists(src_mod)
+    if r6 != "":
+        return r6
+
+    # 4. lib subdirectory search for std./lib. imports
+    if relpath.starts_with("lib/"):
+        val lib_subdirs = ["nogc_sync_mut", "nogc_async_mut", "gc_async_mut",
+                           "nogc_async_mut_noalloc", "common"]
+        val base_name = relpath.substring(4)   # strip "lib/"
+        for sub in lib_subdirs:
+            val candidate = "src/lib/" + sub + "/" + base_name + ".spl"
+            val rc = _deps_try_exists(candidate)
+            if rc != "":
+                return rc
+            val candidate_mod = "src/lib/" + sub + "/" + base_name + "/mod.spl"
+            val rcm = _deps_try_exists(candidate_mod)
+            if rcm != "":
+                return rcm
+
+    # 5. Numbered-directory resolution (e.g. compiler.10.frontend -> compiler/10.frontend)
+    val numbered = _resolve_numbered("src", parts)
+    if numbered != "":
+        val ns = numbered + ".spl"
+        val nm = numbered + "/mod.spl"
+        val r7 = _deps_try_exists(ns)
+        if r7 != "":
+            return r7
+        val r8 = _deps_try_exists(nm)
+        if r8 != "":
+            return r8
+
+    ""
+
+# ===== `use` line parser =====
+
+# Parse one trimmed `use` line and return the list of module paths it imports.
+# Handles:
+#   use std.x.y
+#   use std.x.{a, b, c}
+#   use std.x.*
+#   use .sibling
+#   export use std.x.y
+#   use app.x (print_cli_help, foo)   <- space-paren form
+# Strip trailing dots from a text value (avoid chained trim_end which fails in interpreter)
+fn _strip_trailing_dot(s: text) -> text:
+    var result = s
+    for _i in range(0, 20):
+        if result.ends_with("."):
+            result = result.substring(0, result.len() - 1)
+        else:
+            break
+    result
+
+fn _parse_use_line(line: text) -> [text]:
+    var trimmed = line.trim()
+    # strip leading "export "
+    if trimmed.starts_with("export "):
+        var after_export = trimmed.substring(7)
+        trimmed = after_export.trim()
+    if not trimmed.starts_with("use "):
+        return []
+    var rest_raw = trimmed.substring(4)
+    var rest = rest_raw.trim()
+    # Remove trailing comment (avoid chained calls - use intermediate vars)
+    val hash_idx = rest.index_of("#") ?? -1
+    var no_comment = rest
+    if hash_idx >= 0:
+        var before_hash = rest.substring(0, hash_idx)
+        no_comment = before_hash.trim()
+
+    # Determine module prefix (before { or ( or * or end)
+    val brace_idx = no_comment.index_of("{") ?? -1
+    val paren_idx = no_comment.index_of("(") ?? -1
+    val star_idx  = no_comment.index_of(".*") ?? -1
+
+    var module_part = ""
+    if brace_idx >= 0:
+        var before_brace = no_comment.substring(0, brace_idx)
+        var before_brace_trim = before_brace.trim()
+        module_part = _strip_trailing_dot(before_brace_trim)
+    elif paren_idx >= 0:
+        var before_paren = no_comment.substring(0, paren_idx)
+        module_part = before_paren.trim()
+    elif star_idx >= 0:
+        var before_star = no_comment.substring(0, star_idx)
+        module_part = before_star.trim()
+    else:
+        module_part = no_comment.trim()
+
+    if module_part == "":
+        return []
+    var result: [text] = []
+    result.push(module_part)
+    result
+
+# ===== Recursive file scanner =====
+
+# Scan a file and recursively collect all transitive file paths into visited dict.
+# visited: {text: bool} — keys are file paths already processed.
+# Returns updated visited dict.
+fn _scan_file_recursive(file_path: text, visited: {text: bool}) -> {text: bool}:
+    if visited.has(file_path):
+        return visited
+    visited[file_path] = true
+    val content = rt_file_read_text(file_path) ?? ""
+    if content == "":
+        print "WARN: could not read {file_path}"
+        return visited
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if not (trimmed.starts_with("use ") or trimmed.starts_with("export use ")):
+            continue
+        val modules = _parse_use_line(trimmed)
+        for mod_name in modules:
+            val resolved = _deps_resolve_module(mod_name, file_path)
+            if resolved != "":
+                if not visited.has(resolved):
+                    visited = _scan_file_recursive(resolved, visited)
+    visited
+
+# Collect only the direct (first-level) imports of a file
+fn _direct_imports(file_path: text) -> [text]:
+    val content = rt_file_read_text(file_path) ?? ""
+    if content == "":
+        return []
+    val lines = content.split("\n")
+    var result: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if not (trimmed.starts_with("use ") or trimmed.starts_with("export use ")):
+            continue
+        val mods = _parse_use_line(trimmed)
+        for mod_name in mods:
+            val resolved = _deps_resolve_module(mod_name, file_path)
+            if resolved != "":
+                var already = false
+                for r in result:
+                    if _deps_str_eq(r, resolved):
+                        already = true
+                if not already:
+                    result.push(resolved)
+    result
+
+# ===== Output helpers =====
+
+fn _sort_texts(items: [text]) -> [text]:
+    # Selection sort (avoids negative index arithmetic that confuses type checker)
+    var arr = items
+    val n = arr.len()
+    for i in range(0, n):
+        var min_idx = i
+        for j in range(i + 1, n):
+            if arr[j] < arr[min_idx]:
+                min_idx = j
+        if min_idx != i:
+            val tmp = arr[i]
+            arr[i] = arr[min_idx]
+            arr[min_idx] = tmp
+    arr
+
+fn _make_relative(path: text) -> text:
+    # Strip leading "./" if present
+    if path.starts_with("./"):
+        return path.substring(2)
+    path
+
+# ===== Cycle detection using ImportGraph =====
+
+fn _build_import_graph(entry_file: text) -> ImportGraph:
+    var g = importgraph_new()
+    var visited: {text: bool} = {}
+    # BFS/DFS to add edges
+    var queue: [text] = []
+    queue.push(entry_file)
+    visited[entry_file] = true
+    for _iter in range(0, 100000):
+        if queue.len() == 0:
+            break
+        val current = queue[0]
+        var rest_queue: [text] = []
+        for qi in range(1, queue.len()):
+            rest_queue.push(queue[qi])
+        queue = rest_queue
+        val directs = _direct_imports(current)
+        for dep in directs:
+            g = importgraph_add_edge(g, current, dep, ImportKind.UseImport)
+            if not visited.has(dep):
+                visited[dep] = true
+                queue.push(dep)
+    g
+
+# Find cycles in an entry file's import graph.
+# Returns list of cycle paths (each cycle as [text]).
+# Used by the spec and by _run_fast/_run_normal.
+fn find_cycles_in_file(entry_file: text) -> [[text]]:
+    val g = _build_import_graph(entry_file)
+    val cycle_errors = importgraph_find_cycles(g)
+    var result: [[text]] = []
+    for ce in cycle_errors:
+        result.push(ce.cycle)
+    result
+
+# ===== Main report generators =====
+
+fn _run_fast(entry_file: text) -> i64:
+    if not rt_file_exists(entry_file):
+        print "ERROR: file not found: {entry_file}"
+        return 1
+    val directs = _direct_imports(entry_file)
+    print "=== deps fast: {entry_file} ==="
+    print "Direct imports: {directs.len()}"
+    print ""
+    for imp in directs:
+        var imp_visited: {text: bool} = {}
+        imp_visited = _scan_file_recursive(imp, imp_visited)
+        val all_files = imp_visited.keys()
+        val sorted_files = _sort_texts(all_files)
+        val imp_rel = _make_relative(imp)
+        print "  {imp_rel}  ({sorted_files.len()} transitive files)"
+        for f in sorted_files:
+            print "    {_make_relative(f)}"
+    print ""
+    # Cycle detection
+    val cycle_paths = find_cycles_in_file(entry_file)
+    print "=== CYCLES ==="
+    if cycle_paths.len() == 0:
+        print "  none"
+    else:
+        for cyc_path in cycle_paths:
+            val path_str = cyc_path.join(" -> ")
+            print "  {path_str}"
+    0
+
+fn _run_normal(entry_file: text) -> i64:
+    if not rt_file_exists(entry_file):
+        print "ERROR: file not found: {entry_file}"
+        return 1
+    val directs = _direct_imports(entry_file)
+    print "=== deps normal: {entry_file} ==="
+    print "Direct imports: {directs.len()}"
+    print ""
+    # Collect transitive sets per direct import
+    var import_sets: [{text: bool}] = []
+    for imp in directs:
+        var imp_visited: {text: bool} = {}
+        imp_visited = _scan_file_recursive(imp, imp_visited)
+        import_sets.push(imp_visited)
+    for idx in range(0, directs.len()):
+        val imp = directs[idx]
+        val imp_set = import_sets[idx]
+        val all_files = imp_set.keys()
+        val sorted_files = _sort_texts(all_files)
+        val imp_rel = _make_relative(imp)
+        print "  {imp_rel}  ({sorted_files.len()} transitive files)"
+        # Exclusive: files only in this import's set
+        var exclusive_count = 0
+        for f in all_files:
+            var shared_with_other = false
+            for other_idx in range(0, import_sets.len()):
+                if other_idx != idx:
+                    val other_set_ex = import_sets[other_idx]
+                    if other_set_ex.has(f):
+                        shared_with_other = true
+            if not shared_with_other:
+                exclusive_count = exclusive_count + 1
+        # Shared: files reachable via >= 2 direct imports
+        var shared_count = 0
+        for f in all_files:
+            var in_count = 0
+            for other_idx in range(0, import_sets.len()):
+                val check_set = import_sets[other_idx]
+                if check_set.has(f):
+                    in_count = in_count + 1
+            if in_count >= 2:
+                shared_count = shared_count + 1
+        print "    exclusive: {exclusive_count}  shared: {shared_count}"
+        # Per-other-import overlap breakdown
+        for other_idx in range(0, directs.len()):
+            if other_idx == idx:
+                continue
+            val other = directs[other_idx]
+            val other_set = import_sets[other_idx]
+            var overlap = 0
+            for f in all_files:
+                if other_set.has(f):
+                    overlap = overlap + 1
+            if overlap > 0:
+                val other_rel = _make_relative(other)
+                print "    shared with {other_rel}: {overlap} files"
+    print ""
+    # Cycles (same as fast)
+    val cycle_paths2 = find_cycles_in_file(entry_file)
+    print "=== CYCLES ==="
+    if cycle_paths2.len() == 0:
+        print "  none"
+    else:
+        for cyc_path2 in cycle_paths2:
+            val path_str2 = cyc_path2.join(" -> ")
+            print "  {path_str2}"
+    0
+
+# ===== Entry point =====

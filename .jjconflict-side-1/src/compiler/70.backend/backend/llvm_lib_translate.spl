@@ -1,0 +1,448 @@
+# LLVM Lib Translate — Module/Function Structure
+#
+# Translates MIR module structure to LLVM IR via C API calls.
+# Handles: function declarations, basic block layout, runtime declarations.
+# Delegates instruction translation to llvm_lib_translate_expr.spl.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, SwitchCase}
+use compiler.backend.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
+use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction}
+use std.sffi.llvm.*
+
+# ============================================================================
+# Module Translation
+# ============================================================================
+
+pub fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeMapper, mir_module: MirModule):
+    # Pass 0: Declare runtime functions
+    declare_runtime_functions(ctx, mod_, type_mapper)
+
+    # `mir_module.functions` is a `Dict<SymbolId, MirFunction>`; the runtime
+    # Dict is backed by a Rust HashMap with a per-process random hash seed, so
+    # `.values()` iteration order is NOT stable across process invocations.
+    # That nondeterminism propagates into LLVM's global/string-constant
+    # ordering (and downstream section sizes/offsets, unwind info, and the
+    # final code-signature hash), causing `bin/simple build bootstrap`'s
+    # stage1/stage2/stage3 outputs to differ byte-for-byte despite identical
+    # source. Sort by function name (already used as the unique dedup key in
+    # func_map below) before both passes to make emission order deterministic.
+    var by_name: {text: MirFunction} = {}
+    var names: [text] = []
+    for func in mir_module.functions.values():
+        by_name[func.name] = func
+        names = names.push(func.name)
+    names.sort()
+
+    # Pass 1: Declare all functions (forward references)
+    var func_map: {text: i64} = {}
+    for fname in names:
+        val func = by_name[fname]
+        val fn_name = if func.name == "main": "__simple_main" else: func.name
+        val fn_ty = build_function_type(ctx, type_mapper, func.signature)
+        val llvm_fn = llvm_add_function(mod_, fn_name, fn_ty)
+        llvm_set_linkage(llvm_fn, LLVM_EXTERNAL_LINKAGE)
+        func_map[func.name] = llvm_fn
+
+        # Do not add function-index attributes here. LLVM's C API represents
+        # the function index as an unsigned sentinel, and the current Simple
+        # SFFI rejects the legacy -1 value before LLVM sees it.
+
+    # Pass 2: Compile function bodies
+    for fname in names:
+        val func = by_name[fname]
+        val llvm_fn = func_map[func.name]
+        compile_function(ctx, mod_, builder, type_mapper, func, llvm_fn, func_map)
+
+# ============================================================================
+# Function Compilation
+# ============================================================================
+
+fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeMapper, func: MirFunction, llvm_fn: i64, func_map: {text: i64}):
+    # Create basic blocks
+    var block_map: {i64: i64} = {}
+    for block in func.blocks:
+        val bb = llvm_append_basic_block_in_context(ctx, llvm_fn, "bb{block.id}")
+        block_map[block.id] = bb
+
+    # Build value map: local ID → LLVMValueRef
+    var value_map: {i64: i64} = {}
+
+    # Map function parameters to locals. Guard against index mismatches
+    # between the MIR signature and the actual LLVM function's param count --
+    # llvm_get_param(fn, index) with an out-of-range index is a classic OOB
+    # segfault, so validate against both before calling it.
+    val n_params = func.signature.params.len()
+    val n_llvm_params = llvm_count_params(llvm_fn)
+    if n_llvm_params != n_params:
+        eprint("[llvm-lib] ERROR: LLVM param count mismatch for " + func.name + " sig_n_params=" + n_params.to_text() + " llvm_n_params=" + n_llvm_params.to_text())
+    var param_idx = 0
+    for local in func.locals:
+        match local.kind:
+            case Arg(index):
+                if index < 0 or index >= n_params or index >= n_llvm_params:
+                    eprint("[llvm-lib] ERROR: Arg local id=" + local.id.id.to_text() + " index=" + index.to_text() + " out of range for " + func.name + " (n_params=" + n_params.to_text() + " n_llvm_params=" + n_llvm_params.to_text() + ") — skipping llvm_get_param to avoid OOB")
+                else:
+                    val param_val = llvm_get_param(llvm_fn, index)
+                    value_map[local.id.id] = param_val
+                param_idx = param_idx + 1
+            case _: ()
+
+    # Build local type map: local ID → LLVMTypeRef
+    var local_types: {i64: i64} = {}
+    var local_unsigned: {i64: bool} = {}
+    for local in func.locals:
+        local_types[local.id.id] = type_mapper.map_type(local.type_)
+        match local.type_.kind:
+            case U8 | U16 | U32 | U64: local_unsigned[local.id.id] = true
+            case _: ()
+
+    # Compile each block
+    for block in func.blocks:
+        val bb = block_map[block.id]
+        llvm_position_builder_at_end(builder, bb)
+
+        # Translate instructions
+        for inst in block.instructions:
+            value_map = translate_instruction(ctx, mod_, builder, type_mapper, inst, value_map, local_types, local_unsigned, block_map, func_map)
+
+        # Translate terminator
+        var precomputed_cond_val: i64 = 0
+        var precomputed_final_cond: i64 = 0
+        var precomputed_then_bb: i64 = 0
+        var precomputed_else_bb: i64 = 0
+        var terminator_already_emitted = false
+        match block.terminator:
+            case Ret(value):
+                val declared_void = type_mapper.is_void_mir_type(func.signature.return_type)
+                if value.? and declared_void:
+                    # MIR Ret carries a value but the function is declared
+                    # void — emitting `ret <ty> val` against a void signature
+                    # fails IR verification ("Function return type does not
+                    # match operand type of return inst"). This is a real
+                    # value-presence mismatch (likely a MIR lowering gap, not
+                    # something to hide) — name it and drop the value so the
+                    # module still verifies.
+                    eprint("[llvm-lib] ERROR: Ret carries a value in void-declared function " + func.name + " — emitting ret_void and dropping the value")
+                    llvm_build_ret_void(builder)
+                elif value.?:
+                    val ret_val = translate_operand(ctx, mod_, builder, type_mapper, value.unwrap(), value_map, local_types, func_map)
+                    # Coerce to the declared return type: string globals are ptr
+                    # but text-returning signatures map to i64 (tagged values),
+                    # and vice versa — an uncoerced ret fails IR verification
+                    # ("Function return type does not match operand type").
+                    val coerced = if ret_val == 0:
+                        # Unmapped operand: translate_operand (via get_value)
+                        # already named-diagnosed the missing def ("read of
+                        # undefined local _N — no def reached value_map").
+                        # Passing ret_val=0 straight to LLVMBuildRet is NOT a
+                        # safe no-op: LLVM's ReturnInst treats a null Value*
+                        # as a ZERO-OPERAND return (prints as bare `ret void`)
+                        # regardless of the declared return type, so it fails
+                        # verification exactly like a genuinely-missing Ret
+                        # value ("Function return type does not match operand
+                        # type of return inst"). Same fix as the missing-value
+                        # case below: name it and synthesize a typed
+                        # zero/null placeholder so the module still verifies
+                        # instead of silently producing an unlabeled mismatch.
+                        eprint("[llvm-lib] ERROR: Ret operand unmapped (undefined local) in " + func.name + " — emitting a typed zero/null placeholder instead of a null-operand ret")
+                        val want_ty0 = type_mapper.map_type(func.signature.return_type)
+                        val ptr_ty_h0 = llvm_pointer_type(llvm_int8_type_in_context(ctx), 0)
+                        if want_ty0 == ptr_ty_h0:
+                            llvm_const_null(want_ty0)
+                        else:
+                            llvm_const_int(want_ty0, 0, false)
+                    else:
+                        val want_ty = type_mapper.map_type(func.signature.return_type)
+                        val have_ty = llvm_type_of(ret_val)
+                        val ptr_ty_h = llvm_pointer_type(llvm_int8_type_in_context(ctx), 0)
+                        val i1_ty_h = llvm_int1_type_in_context(ctx)
+                        if have_ty == want_ty:
+                            ret_val
+                        elif have_ty == ptr_ty_h and want_ty != ptr_ty_h:
+                            llvm_build_ptr_to_int(builder, ret_val, want_ty, "retcast")
+                        elif have_ty != ptr_ty_h and want_ty == ptr_ty_h:
+                            llvm_build_int_to_ptr(builder, ret_val, want_ty, "retcast")
+                        elif have_ty == i1_ty_h:
+                            llvm_build_zext(builder, ret_val, want_ty, "retcast")
+                        else:
+                            ret_val
+                    llvm_build_ret(builder, coerced)
+                elif declared_void:
+                    llvm_build_ret_void(builder)
+                else:
+                    # MIR Ret carries no value but the function is declared
+                    # non-void — emitting `ret void` against a non-void
+                    # signature fails IR verification the same way as above.
+                    # A lost return value is a real MIR bug (diverging path,
+                    # miscompiled early-return, etc.) — name it and synthesize
+                    # a typed zero/null placeholder instead of silently
+                    # normalizing to ret_void.
+                    eprint("[llvm-lib] ERROR: Ret carries no value in non-void-declared function " + func.name + " — emitting a typed zero/null placeholder instead of ret_void")
+                    val want_ty = type_mapper.map_type(func.signature.return_type)
+                    val ptr_ty_h = llvm_pointer_type(llvm_int8_type_in_context(ctx), 0)
+                    val placeholder = if want_ty == ptr_ty_h:
+                        llvm_const_null(want_ty)
+                    else:
+                        llvm_const_int(want_ty, 0, false)
+                    llvm_build_ret(builder, placeholder)
+                terminator_already_emitted = true
+            case Goto(target):
+                val dest_bb = block_map[target]
+                llvm_build_br(builder, dest_bb)
+                terminator_already_emitted = true
+            case If(cond, then_target, else_target):
+                precomputed_cond_val = translate_operand(ctx, mod_, builder, type_mapper, cond, value_map, local_types, func_map)
+                val i1_ty = llvm_int1_type_in_context(ctx)
+                precomputed_final_cond = if precomputed_cond_val == 0:
+                    # A null LLVMValueRef condition segfaults inside
+                    # LLVMTypeOf (see the ret-coercion comment above) — name
+                    # the operand kind so the producing translation path is
+                    # identifiable, then substitute a constant so codegen
+                    # continues instead of crashing.
+                    val cond_desc = match cond.kind:
+                        case Copy(local): "Copy#" + local.id.to_text()
+                        case Move(local): "Move#" + local.id.to_text()
+                        case Const(_, _): "Const"
+                    eprint("[llvm-lib] ERROR: If-terminator cond translated to null (" + cond_desc + ") — substituting false to avoid LLVMTypeOf(NULL) segfault")
+                    llvm_const_int(i1_ty, 0, false)
+                else:
+                    val cond_ty = llvm_type_of(precomputed_cond_val)
+                    if cond_ty != i1_ty:
+                        val zero = if llvm_get_type_kind(cond_ty) == 12:  # 12=Pointer (was 14=Metadata)
+                            llvm_const_null(cond_ty)
+                        else:
+                            llvm_const_int(cond_ty, 0, false)
+                        llvm_build_icmp(builder, LLVM_INT_NE, precomputed_cond_val, zero, "tobool")
+                    else:
+                        precomputed_cond_val
+                precomputed_then_bb = block_map[then_target]
+                precomputed_else_bb = block_map[else_target]
+                llvm_build_cond_br(builder, precomputed_final_cond, precomputed_then_bb, precomputed_else_bb)
+                terminator_already_emitted = true
+            case Switch(value, targets, default):
+                val discr_val = translate_operand(ctx, mod_, builder, type_mapper, value, value_map, local_types, func_map)
+                val default_bb = block_map[default]
+                val switch_inst = llvm_build_switch(builder, discr_val, default_bb, targets.len())
+                for switch_case_raw in targets:
+                    val switch_case: SwitchCase = switch_case_raw
+                    val case_val = llvm_const_int(type_mapper.native_int_type(), switch_case.value, false)
+                    val case_bb = block_map[switch_case.target]
+                    llvm_add_case(switch_inst, case_val, case_bb)
+                terminator_already_emitted = true
+            case Unreachable:
+                llvm_build_unreachable(builder)
+                terminator_already_emitted = true
+            case Abort(_):
+                val abort_fn = llvm_get_named_function(mod_, "abort")
+                if abort_fn != 0:
+                    val fn_ty = llvm_global_get_value_type(abort_fn)
+                    llvm_build_call2(builder, fn_ty, abort_fn, [], "")
+                llvm_build_unreachable(builder)
+                terminator_already_emitted = true
+            case CallTerminator(dest, func, args, normal, _):
+                translate_call(ctx, mod_, builder, type_mapper, dest, func, args, value_map, local_types, func_map)
+                val normal_bb = block_map[normal]
+                llvm_build_br(builder, normal_bb)
+                terminator_already_emitted = true
+            case _: ()
+        if not terminator_already_emitted:
+            eprint("[llvm-lib] ERROR: unhandled terminator kind")
+
+# ============================================================================
+# Function Type Builder
+# ============================================================================
+
+fn build_function_type(ctx: i64, type_mapper: LlvmLibTypeMapper, sig: MirSignature) -> i64:
+    val ret_ty = if sig.return_type == nil: llvm_void_type_in_context(ctx) else: type_mapper.map_type(sig.return_type)
+    var param_types: [i64] = []
+    for param in sig.params:
+        val param_ty: MirType = param
+        param_types.push(type_mapper.map_type(param_ty))
+    llvm_function_type(ret_ty, param_types, false)
+
+# ============================================================================
+# Runtime Function Declarations
+# ============================================================================
+
+fn declare_runtime_functions(ctx: i64, mod_: i64, tm: LlvmLibTypeMapper):
+    val void_ty = llvm_void_type_in_context(ctx)
+    val i1_ty = llvm_int1_type_in_context(ctx)
+    val i8_ty = llvm_int8_type_in_context(ctx)
+    val i64_ty = llvm_int64_type_in_context(ctx)
+    val ptr_ty = tm.ptr_type()
+    val double_ty = llvm_double_type_in_context(ctx)
+
+    # File I/O
+    declare_fn(mod_, "rt_file_open", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_close", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_read_text", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_write", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_read_bytes", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_write_bytes", llvm_function_type(i1_ty, [ptr_ty, ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_file_exists", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_delete", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_copy", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_move", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_size", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_lock", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_unlock", llvm_function_type(i1_ty, [ptr_ty], false))
+
+    # Directory operations
+    declare_fn(mod_, "rt_dir_create", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dir_delete", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dir_exists", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dir_list", llvm_function_type(ptr_ty, [ptr_ty], false))
+
+    # Process operations
+    declare_fn(mod_, "rt_process_spawn", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_process_wait", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_getenv", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_setenv", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_getpid", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_exit", llvm_function_type(void_ty, [i64_ty], false))
+
+    # Memory operations
+    declare_fn(mod_, "rt_alloc", llvm_function_type(ptr_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_realloc", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_free", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_memcpy", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_memset", llvm_function_type(ptr_ty, [ptr_ty, i8_ty, i64_ty], false))
+    declare_fn(mod_, "rt_memcmp", llvm_function_type(i64_ty, [ptr_ty, ptr_ty, i64_ty], false))
+
+    # String operations
+    declare_fn(mod_, "rt_strlen", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_strcat", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_substr", llvm_function_type(ptr_ty, [ptr_ty, i64_ty, i64_ty], false))
+    declare_fn(mod_, "rt_strfind", llvm_function_type(i64_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_strreplace", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_strsplit", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_strcmp", llvm_function_type(i64_ty, [ptr_ty, ptr_ty], false))
+
+    # Array/Collection operations
+    declare_fn(mod_, "rt_array_new", llvm_function_type(ptr_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_array_len", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_array_get", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_array_set", llvm_function_type(void_ty, [ptr_ty, i64_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_push", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_clear", llvm_function_type(i8_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_array_pop", llvm_function_type(ptr_ty, [ptr_ty], false))
+
+    # Dict/Map operations
+    declare_fn(mod_, "rt_dict_new", llvm_function_type(ptr_ty, [], false))
+    declare_fn(mod_, "rt_dict_get", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_set", llvm_function_type(void_ty, [ptr_ty, ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_contains", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_len", llvm_function_type(i64_ty, [ptr_ty], false))
+
+    # I/O operations
+    declare_fn(mod_, "rt_print", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_println", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_readline", llvm_function_type(ptr_ty, [], false))
+    declare_fn(mod_, "rt_print_value", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_println_value", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_eprint", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_eprintln", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_eprint_value", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_eprintln_value", llvm_function_type(void_ty, [ptr_ty], false))
+
+    # Args
+    declare_fn(mod_, "rt_get_args", llvm_function_type(ptr_ty, [], false))
+    declare_fn(mod_, "rt_cli_get_args", llvm_function_type(ptr_ty, [], false))
+    declare_fn(mod_, "rt_cli_arg_count", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_cli_arg_at", llvm_function_type(ptr_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_get_argc", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_set_args", llvm_function_type(void_ty, [i64_ty, ptr_ty], false))
+
+    # Time operations
+    declare_fn(mod_, "rt_time_now_unix", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_time_now_unix_millis", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_time_now_unix_micros", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_sleep_ms", llvm_function_type(void_ty, [i64_ty], false))
+
+    # Error handling
+    declare_fn(mod_, "rt_panic", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "abort", llvm_function_type(void_ty, [], false))
+
+    # Math operations
+    declare_fn(mod_, "rt_sin", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_cos", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_sqrt", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_pow", llvm_function_type(double_ty, [double_ty, double_ty], false))
+    declare_fn(mod_, "rt_abs", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_floor", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_ceil", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_log", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_exp", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_tan", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_atan2", llvm_function_type(double_ty, [double_ty, double_ty], false))
+
+    # Integer power
+    declare_fn(mod_, "__simple_pow", llvm_function_type(i64_ty, [i64_ty, i64_ty], false))
+
+    # Extended string operations
+    declare_fn(mod_, "rt_string_new", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_string_concat", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_string_starts_with", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_string_ends_with", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_to_string", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_string_join", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_string_split", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_string_replace", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_string_trim", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_string_char_at", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_string_contains", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_string_to_lower", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_string_to_upper", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_to_int", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_to_float", llvm_function_type(double_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_int_to_string", llvm_function_type(ptr_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_float_to_string", llvm_function_type(ptr_ty, [double_ty], false))
+
+    # Extended collection operations
+    declare_fn(mod_, "rt_array_slice", llvm_function_type(ptr_ty, [ptr_ty, i64_ty, i64_ty], false))
+    declare_fn(mod_, "rt_array_contains", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_concat", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_sort", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_array_reverse", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_array_map", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_filter", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_copy", llvm_function_type(ptr_ty, [ptr_ty], false))
+
+    # Extended dict operations
+    declare_fn(mod_, "rt_dict_insert", llvm_function_type(void_ty, [ptr_ty, ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_remove", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_keys", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dict_values", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dict_clear", llvm_function_type(void_ty, [ptr_ty], false))
+
+    # Comparison / type checking
+    declare_fn(mod_, "rt_value_eq", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_native_eq", llvm_function_type(i64_ty, [i64_ty, i64_ty], false))
+    declare_fn(mod_, "rt_native_neq", llvm_function_type(i64_ty, [i64_ty, i64_ty], false))
+    declare_fn(mod_, "rt_is_none", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_is_some", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_typeof", llvm_function_type(ptr_ty, [ptr_ty], false))
+
+    # Enum / variant operations
+    declare_fn(mod_, "rt_enum_id", llvm_function_type(i64_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_enum_payload", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_enum_check_discriminant", llvm_function_type(i1_ty, [ptr_ty, i64_ty], false))
+
+    # Native build support
+    declare_fn(mod_, "rt_native_build", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_getpid", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_mkdir_p", llvm_function_type(i1_ty, [ptr_ty], false))
+
+    # Runtime init/shutdown
+    declare_fn(mod_, "__simple_runtime_init", llvm_function_type(void_ty, [], false))
+    declare_fn(mod_, "__simple_runtime_shutdown", llvm_function_type(void_ty, [], false))
+
+fn declare_fn(mod_: i64, name: text, ty: i64):
+    val existing = llvm_get_named_function(mod_, name)
+    if existing == 0:
+        llvm_add_function(mod_, name, ty)
+
+# ============================================================================
+# Exports
+# ============================================================================

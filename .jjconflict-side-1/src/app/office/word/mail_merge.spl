@@ -1,0 +1,143 @@
+# Mail Merge
+#
+# Substitute {{field}} placeholders in a Writer RichDocument with per-row
+# values from a Calc Sheet data source (header row 1 = field names, rows
+# 2+ = data), producing one merged document per data row. Reuses
+# edit_ops.document_replace for substitution so span styling around a
+# placeholder (bold/italic/etc.) is preserved, and file_formats
+# document_to_markdown for rendering merged docs back out.
+
+use common.rich_text.attributed_text.{RichDocument, block_to_plain_text}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref}
+use app.office.word.edit_ops.{document_replace}
+use app.office.file_formats.{document_to_markdown}
+
+# =========================================================================
+# Field Discovery
+# =========================================================================
+
+fn _find_close(s: text, marker: text, from: i32) -> i32:
+    """Index of the next occurrence of marker in s at or after `from`, or -1."""
+    var i = from
+    val mlen = marker.len()
+    while i + mlen <= s.len():
+        if s.slice(i, i + mlen) == marker:
+            return i
+        i = i + 1
+    -1
+
+fn _fields_contains(fields: [text], name: text) -> bool:
+    """Check whether name is already present in fields."""
+    for f in fields:
+        if f == name:
+            return true
+    false
+
+fn merge_fields(doc: RichDocument) -> [text]:
+    """Return the distinct {field} placeholder names found in the document
+    (written as double curly braces around the name in the source text), in
+    document order — first occurrence wins, duplicates are not repeated."""
+    val open = "{" + "{"
+    val close = "}" + "}"
+    var fields: [text] = []
+    for block in doc.blocks:
+        val plain = block_to_plain_text(block)
+        var i = 0
+        while i < plain.len():
+            if i + open.len() <= plain.len() and plain.slice(i, i + open.len()) == open:
+                val close_idx = _find_close(plain, close, i + open.len())
+                if close_idx >= 0:
+                    val name = plain.slice(i + open.len(), close_idx).trim()
+                    if not _fields_contains(fields, name):
+                        fields.push(name)
+                    i = close_idx + close.len()
+                else:
+                    i = i + 1
+            else:
+                i = i + 1
+    fields
+
+# =========================================================================
+# Data Lookup
+# =========================================================================
+
+fn _header_column(sheet: Sheet, field: text) -> i32:
+    """Return the 0-based column index whose row-1 header cell text equals
+    field, or -1 if no such header column exists."""
+    var col = 0
+    while col < sheet.col_count:
+        val ref_str = "{col_to_letter(col)}1"
+        val header_text = cell_display_text(sheet.get_cell(ref_str))
+        if header_text == field:
+            return col
+        col = col + 1
+    -1
+
+fn _field_value(sheet: Sheet, field: text, row: i32) -> text:
+    """Look up the data value for `field` at the given 1-based data row (row 1
+    reads sheet row 2, since sheet row 1 is the header). Returns empty string
+    when the field has no matching header column."""
+    val col = _header_column(sheet, field)
+    if col < 0:
+        return ""
+    val ref_str = "{col_to_letter(col)}{row + 1}"
+    cell_display_text(sheet.get_cell(ref_str))
+
+fn _sheet_data_row_count(sheet: Sheet) -> i32:
+    """Number of data rows in sheet, excluding header row 1."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    if parts.len() < 2:
+        return 0
+    val end_ref = parse_cell_ref(parts[1])
+    if end_ref == nil:
+        return 0
+    val total_rows = end_ref.row + 1
+    if total_rows <= 1:
+        return 0
+    total_rows - 1
+
+# =========================================================================
+# Merge
+# =========================================================================
+
+fn merge_document(doc: RichDocument, sheet: Sheet, row: i32) -> RichDocument:
+    """Substitute every {field} placeholder in doc with sheet's data value for
+    `row` (1-based data row; row 1 reads sheet row 2, since sheet row 1 is the
+    header). Missing fields (no matching header column) become empty string.
+    Uses document_replace so span styling around a placeholder is preserved.
+    Returns a new document (doc is not mutated)."""
+    val open = "{" + "{"
+    val close = "}" + "}"
+    val fields = merge_fields(doc)
+    var merged = doc
+    for field in fields:
+        val placeholder = "{open}{field}{close}"
+        val value = _field_value(sheet, field, row)
+        merged = document_replace(merged, placeholder, value)
+    merged
+
+fn merge_all(doc: RichDocument, sheet: Sheet) -> [RichDocument]:
+    """Merge doc against every data row in sheet (rows 2+, row 1 is the
+    header), returning one RichDocument per data row in row order."""
+    val data_rows = _sheet_data_row_count(sheet)
+    var docs: [RichDocument] = []
+    var row = 1
+    while row <= data_rows:
+        docs.push(merge_document(doc, sheet, row))
+        row = row + 1
+    docs
+
+fn merge_all_markdown(doc: RichDocument, sheet: Sheet) -> text:
+    """Merge doc against every data row and render the results back to
+    markdown (via file_formats.document_to_markdown), joined by a
+    '\\n\\n---\\n\\n' separator line between documents."""
+    val docs = merge_all(doc, sheet)
+    var out = ""
+    var first = true
+    for d in docs:
+        val md = document_to_markdown(d)
+        out = if first: md else: "{out}\n\n---\n\n{md}"
+        first = false
+    out

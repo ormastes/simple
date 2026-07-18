@@ -1,0 +1,199 @@
+# adaptive_scaffold_spec — unit tests for adaptive_nav_scaffold and list_detail_scaffold.
+# AC-3: same items/content at 3 canonical viewports → bottom/rail/sidebar;
+# landscape-phone → rail; resize re-selection; list_detail collapse.
+
+use std.spec.{describe, it, expect}
+use common.ui.adaptive_scaffold.{
+    NavItem,
+    adaptive_nav_scaffold,
+    list_detail_scaffold
+}
+use common.ui.form_factor.{
+    DeviceClass,
+    FormFactorProfile,
+    compute_form_factor,
+    min_touch_target
+}
+use common.ui.profile.{SizeClass, Orientation}
+use common.ui.viewport.{new_viewport}
+use common.ui.widget.{WidgetNode}
+use common.ui.builder.{column, row, label}
+
+# =========================================================================
+# Shared fixture helpers
+# =========================================================================
+
+fn make_items() -> [NavItem]:
+    return [
+        NavItem(id: "home",     label: "Home",     icon: "home",     action: "nav_home"),
+        NavItem(id: "search",   label: "Search",   icon: "search",   action: "nav_search"),
+        NavItem(id: "library",  label: "Library",  icon: "library",  action: "nav_library"),
+        NavItem(id: "settings", label: "Settings", icon: "settings", action: "nav_settings")
+    ]
+
+fn make_content() -> WidgetNode:
+    return label("content_node", "Content")
+
+fn phone_portrait_ff() -> FormFactorProfile:
+    val vp = new_viewport(390, 844, "gui")
+    return compute_form_factor(vp, "ios", true)
+
+fn landscape_phone_ff() -> FormFactorProfile:
+    val vp = new_viewport(844, 390, "gui")
+    return compute_form_factor(vp, "ios", true)
+
+fn tablet_landscape_ff() -> FormFactorProfile:
+    val vp = new_viewport(1024, 768, "gui")
+    return compute_form_factor(vp, "ipados", true)
+
+fn tablet_portrait_ff() -> FormFactorProfile:
+    val vp = new_viewport(700, 1000, "gui")
+    return compute_form_factor(vp, "android", true)
+
+fn desktop_ff() -> FormFactorProfile:
+    val vp = new_viewport(1440, 900, "gui")
+    return compute_form_factor(vp, "macos", false)
+
+# =========================================================================
+# Phone portrait: bottom nav
+# =========================================================================
+
+describe "adaptive_nav_scaffold phone portrait":
+    it "nav_pattern prop == bottom":
+        val ff = phone_portrait_ff()
+        val root = adaptive_nav_scaffold("nav_root", make_items(), make_content(), ff)
+        expect(root.get_prop("nav_pattern")).to_equal("bottom")
+
+    it "root is a column layout":
+        val ff = phone_portrait_ff()
+        val root = adaptive_nav_scaffold("nav_root2", make_items(), make_content(), ff)
+        expect(root.layout()).to_equal("vbox")
+
+    it "nav bar contains all 4 item ids":
+        val ff = phone_portrait_ff()
+        val root = adaptive_nav_scaffold("nav_root3", make_items(), make_content(), ff)
+        # In bottom layout: column([content, nav_bar])
+        # nav_bar is the second child; its children are the item buttons
+        val nav_bar = root.child_at(1)
+        expect(nav_bar != nil).to_equal(true)
+        # Collect all descendant ids
+        val all_ids = root.collect_ids()
+        val has_home     = all_ids.contains("home")
+        val has_search   = all_ids.contains("search")
+        val has_library  = all_ids.contains("library")
+        val has_settings = all_ids.contains("settings")
+        expect(has_home).to_equal(true)
+        expect(has_search).to_equal(true)
+        expect(has_library).to_equal(true)
+        expect(has_settings).to_equal(true)
+
+    it "nav item buttons carry min_height == 44 (ios apple touch)":
+        val ff = phone_portrait_ff()
+        val root = adaptive_nav_scaffold("nav_root4", make_items(), make_content(), ff)
+        val home_btn = root.find_by_id("home")
+        expect(home_btn != nil).to_equal(true)
+        expect(home_btn.get_prop("min_height")).to_equal("44")
+
+# =========================================================================
+# Landscape phone: rail (height Compact forces rail over bottom)
+# =========================================================================
+
+describe "adaptive_nav_scaffold landscape phone":
+    it "nav_pattern == rail (NOT bottom) for height-Compact ios landscape":
+        val ff = landscape_phone_ff()
+        expect(ff.layout.vertical).to_equal(SizeClass.Compact)
+        val root = adaptive_nav_scaffold("nav_ls_root", make_items(), make_content(), ff)
+        expect(root.get_prop("nav_pattern")).to_equal("rail")
+
+# =========================================================================
+# Tablet landscape: sidebar (Expanded)
+# =========================================================================
+
+describe "adaptive_nav_scaffold tablet landscape":
+    it "1024x768 ipados Expanded → nav_pattern == sidebar":
+        val ff = tablet_landscape_ff()
+        expect(ff.layout.horizontal).to_equal(SizeClass.Expanded)
+        val root = adaptive_nav_scaffold("nav_tab_exp", make_items(), make_content(), ff)
+        expect(root.get_prop("nav_pattern")).to_equal("sidebar")
+
+describe "adaptive_nav_scaffold tablet portrait 700x1000 android Regular":
+    it "700x1000 android Regular → nav_pattern == rail":
+        val ff = tablet_portrait_ff()
+        expect(ff.layout.horizontal).to_equal(SizeClass.Regular)
+        val root = adaptive_nav_scaffold("nav_tab_reg", make_items(), make_content(), ff)
+        expect(root.get_prop("nav_pattern")).to_equal("rail")
+
+# =========================================================================
+# Desktop: sidebar + dense touch targets
+# =========================================================================
+
+describe "adaptive_nav_scaffold desktop":
+    it "1440x900 macos → nav_pattern == sidebar":
+        val ff = desktop_ff()
+        val root = adaptive_nav_scaffold("nav_desk", make_items(), make_content(), ff)
+        expect(root.get_prop("nav_pattern")).to_equal("sidebar")
+
+    it "desktop nav items carry min_height == 32 (dense desktop)":
+        val ff = desktop_ff()
+        val root = adaptive_nav_scaffold("nav_desk2", make_items(), make_content(), ff)
+        val home_btn = root.find_by_id("home")
+        expect(home_btn != nil).to_equal(true)
+        expect(home_btn.get_prop("min_height")).to_equal("32")
+
+# =========================================================================
+# Resize re-selection: same function, different ff → different nav_pattern
+# =========================================================================
+
+describe "adaptive_nav_scaffold resize re-selection":
+    it "390x844 → bottom, then 1440x900 → sidebar (pure function)":
+        val ff_phone = compute_form_factor(new_viewport(390, 844, "gui"), "ios", true)
+        val root_phone = adaptive_nav_scaffold("nav_resize_phone", make_items(), make_content(), ff_phone)
+        expect(root_phone.get_prop("nav_pattern")).to_equal("bottom")
+
+        val ff_desktop = compute_form_factor(new_viewport(1440, 900, "gui"), "macos", false)
+        val root_desktop = adaptive_nav_scaffold("nav_resize_desktop", make_items(), make_content(), ff_desktop)
+        expect(root_desktop.get_prop("nav_pattern")).to_equal("sidebar")
+
+# =========================================================================
+# list_detail_scaffold
+# =========================================================================
+
+fn make_list_node() -> WidgetNode:
+    return label("list_pane", "List")
+
+fn make_detail_node() -> WidgetNode:
+    return label("detail_pane", "Detail")
+
+describe "list_detail_scaffold desktop two_pane":
+    it "1440x900 macos Expanded → list_detail == two_pane with both children":
+        val ff = desktop_ff()
+        val root = list_detail_scaffold("ld_desk", make_list_node(), make_detail_node(), ff, false)
+        expect(root.get_prop("list_detail")).to_equal("two_pane")
+        val all_ids = root.collect_ids()
+        expect(all_ids.contains("list_pane")).to_equal(true)
+        expect(all_ids.contains("detail_pane")).to_equal(true)
+
+describe "list_detail_scaffold phone single_list":
+    it "390x844 ios show_detail=false → list_detail == single_list, detail absent":
+        val ff = phone_portrait_ff()
+        val root = list_detail_scaffold("ld_phone_list", make_list_node(), make_detail_node(), ff, false)
+        expect(root.get_prop("list_detail")).to_equal("single_list")
+        val all_ids = root.collect_ids()
+        expect(all_ids.contains("list_pane")).to_equal(true)
+        expect(all_ids.contains("detail_pane")).to_equal(false)
+
+describe "list_detail_scaffold phone single_detail":
+    it "390x844 ios show_detail=true → list_detail == single_detail, list absent":
+        val ff = phone_portrait_ff()
+        val root = list_detail_scaffold("ld_phone_detail", make_list_node(), make_detail_node(), ff, true)
+        expect(root.get_prop("list_detail")).to_equal("single_detail")
+        val all_ids = root.collect_ids()
+        expect(all_ids.contains("detail_pane")).to_equal(true)
+        expect(all_ids.contains("list_pane")).to_equal(false)
+
+    it "single_detail has back_nav=true on detail node":
+        val ff = phone_portrait_ff()
+        val root = list_detail_scaffold("ld_phone_detail2", make_list_node(), make_detail_node(), ff, true)
+        val detail = root.find_by_id("detail_pane")
+        expect(detail != nil).to_equal(true)
+        expect(detail.get_prop("back_nav")).to_equal("true")

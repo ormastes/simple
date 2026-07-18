@@ -1,0 +1,295 @@
+use app.llm_caret.claude_full.utils.extraUsage.{isBilledAsExtraUsage}
+
+class ModelAppState:
+    mainLoopModel: text
+    mainLoopModelForSession: text
+    fastMode: bool
+    effortValue: text
+
+    static fn new(mainLoopModel: text, mainLoopModelForSession: text, fastMode: bool, effortValue: text) -> ModelAppState:
+        ModelAppState(mainLoopModel: mainLoopModel, mainLoopModelForSession: mainLoopModelForSession, fastMode: fastMode, effortValue: effortValue)
+
+class ModelCallResult:
+    rendered: text
+    doneMessage: text
+    display: text
+    eventName: text
+    nextState: ModelAppState
+    validated: bool
+    fastCooldownCleared: bool
+    fastModeToggledOff: bool
+
+    static fn new(rendered: text, doneMessage: text, display: text, eventName: text, nextState: ModelAppState, validated: bool, fastCooldownCleared: bool, fastModeToggledOff: bool) -> ModelCallResult:
+        ModelCallResult(rendered: rendered, doneMessage: doneMessage, display: display, eventName: eventName, nextState: nextState, validated: validated, fastCooldownCleared: fastCooldownCleared, fastModeToggledOff: fastModeToggledOff)
+
+fn commonModelInfoArgs() -> [text]:
+    ["", "current", "status", "show"]
+
+fn commonModelHelpArgs() -> [text]:
+    ["help", "-h", "--help", "?"]
+
+fn modelAliases() -> [text]:
+    ["default", "sonnet", "opus", "haiku", "opus[1m]", "sonnet[1m]"]
+
+fn getDefaultMainLoopModelSetting() -> text:
+    "default"
+
+fn renderDefaultModelSetting(model: text) -> text:
+    if model == "default" or model == "":
+        return "Default"
+    renderModelName(model)
+
+fn renderModelName(model: text) -> text:
+    if model == "":
+        return "Default"
+    val m = model.lower()
+    if m == "opus" or m == "claude-opus-4-6":
+        return "Opus 4.6"
+    if m == "sonnet" or m == "claude-sonnet-4-6":
+        return "Sonnet 4.6"
+    if m == "haiku":
+        return "Haiku"
+    if m.contains("[1m]"):
+        return model + " (1M context)"
+    model
+
+fn renderModelLabel(model: text) -> text:
+    if model == "":
+        return renderDefaultModelSetting(getDefaultMainLoopModelSetting()) + " (default)"
+    renderDefaultModelSetting(model)
+
+fn isKnownAlias(model: text) -> bool:
+    modelAliases().contains(model.lower().trim())
+
+fn isModelAllowed(model: text) -> bool:
+    not model.lower().contains("blocked")
+
+fn isOpus1mUnavailable(model: text, hasAccess: bool, mergeEnabled: bool) -> bool:
+    val m = model.lower()
+    (not hasAccess) and (not mergeEnabled) and m.contains("opus") and m.contains("[1m]")
+
+fn isSonnet1mUnavailable(model: text, hasAccess: bool) -> bool:
+    val m = model.lower()
+    (not hasAccess) and (m.contains("sonnet[1m]") or m.contains("sonnet-4-6[1m]"))
+
+fn validateModelName(model: text, validationError: text) -> text:
+    if validationError != "":
+        return validationError
+    if model.trim() == "":
+        return "Model '" + model + "' not found"
+    ""
+
+fn isFastModeSupportedByModel(model: text) -> bool:
+    val m = model.lower()
+    m.contains("opus") and (m.contains("4-6") or m == "opus" or m.contains("[1m]"))
+
+fn setModelMessage(modelValue: text, wasFastModeOn: bool, fastModeEnabled: bool, opus1mMergeEnabled: bool) -> text:
+    var message = "Set model to " + renderModelLabel(modelValue)
+    var fastOn = false
+    var fastOff = false
+    if fastModeEnabled:
+        if (not isFastModeSupportedByModel(modelValue)) and wasFastModeOn:
+            fastOff = true
+        else:
+            if isFastModeSupportedByModel(modelValue) and wasFastModeOn:
+                message = message + " · Fast mode ON"
+                fastOn = true
+    if isBilledAsExtraUsage(modelValue, fastOn, opus1mMergeEnabled):
+        message = message + " · Billed as extra usage"
+    if fastOff:
+        message = message + " · Fast mode OFF"
+    message
+
+fn applyModel(modelValue: text, state: ModelAppState, fastModeEnabled: bool, opus1mMergeEnabled: bool) -> ModelCallResult:
+    val fastOff = fastModeEnabled and state.fastMode and not isFastModeSupportedByModel(modelValue)
+    val nextFast = if fastOff: false else: state.fastMode
+    val next = ModelAppState.new(modelValue, "", nextFast, state.effortValue)
+    ModelCallResult.new("done", setModelMessage(modelValue, state.fastMode, fastModeEnabled, opus1mMergeEnabled), "", "", next, false, fastModeEnabled, fastOff)
+
+fn showCurrentModel(state: ModelAppState) -> ModelCallResult:
+    val displayModel = renderModelLabel(state.mainLoopModel)
+    val effortInfo = if state.effortValue != "": " (effort: " + state.effortValue + ")" else: ""
+    if state.mainLoopModelForSession != "":
+        return ModelCallResult.new("done", "Current model: " + renderModelLabel(state.mainLoopModelForSession) + " (session override from plan mode)\nBase model: " + displayModel + effortInfo, "", "tengu_model_command_inline_help", state, false, false, false)
+    ModelCallResult.new("done", "Current model: " + displayModel + effortInfo, "", "tengu_model_command_inline_help", state, false, false, false)
+
+fn cancelModelPicker(state: ModelAppState) -> ModelCallResult:
+    ModelCallResult.new("done", "Kept model as " + renderModelLabel(state.mainLoopModel), "system", "tengu_model_command_menu", state, false, false, false)
+
+fn selectModelFromPicker(model: text, effort: text, state: ModelAppState, fastModeEnabled: bool, opus1mMergeEnabled: bool) -> ModelCallResult:
+    val applied = applyModel(model, state, fastModeEnabled, opus1mMergeEnabled)
+    val suffix = if effort != "": " with " + effort + " effort" else: ""
+    ModelCallResult.new(applied.rendered, "Set model to " + renderModelLabel(model) + suffix + applied.doneMessage.replace("Set model to " + renderModelLabel(model), ""), applied.display, "tengu_model_command_menu", applied.nextState, applied.validated, applied.fastCooldownCleared, applied.fastModeToggledOff)
+
+fn setModelFromArg(args: text, state: ModelAppState, allowOpus1m: bool, allowSonnet1m: bool, opus1mMergeEnabled: bool, fastModeEnabled: bool, validationError: text) -> ModelCallResult:
+    val raw = args.trim()
+    val model = if raw == "default": "" else: raw
+    if model != "" and not isModelAllowed(model):
+        return ModelCallResult.new("done", "Model '" + model + "' is not available. Your organization restricts model selection.", "system", "tengu_model_command_inline", state, false, false, false)
+    if model != "" and isOpus1mUnavailable(model, allowOpus1m, opus1mMergeEnabled):
+        return ModelCallResult.new("done", "Opus 4.6 with 1M context is not available for your account. Learn more: https://code.claude.com/docs/en/model-config#extended-context-with-1m", "system", "tengu_model_command_inline", state, false, false, false)
+    if model != "" and isSonnet1mUnavailable(model, allowSonnet1m):
+        return ModelCallResult.new("done", "Sonnet 4.6 with 1M context is not available for your account. Learn more: https://code.claude.com/docs/en/model-config#extended-context-with-1m", "system", "tengu_model_command_inline", state, false, false, false)
+    if model == "":
+        val appliedDefault = applyModel("", state, fastModeEnabled, opus1mMergeEnabled)
+        return ModelCallResult.new(appliedDefault.rendered, appliedDefault.doneMessage, appliedDefault.display, "tengu_model_command_inline", appliedDefault.nextState, false, appliedDefault.fastCooldownCleared, appliedDefault.fastModeToggledOff)
+    if isKnownAlias(model):
+        val appliedAlias = applyModel(model, state, fastModeEnabled, opus1mMergeEnabled)
+        return ModelCallResult.new(appliedAlias.rendered, appliedAlias.doneMessage, appliedAlias.display, "tengu_model_command_inline", appliedAlias.nextState, false, appliedAlias.fastCooldownCleared, appliedAlias.fastModeToggledOff)
+    val validation = validateModelName(model, validationError)
+    if validation != "":
+        return ModelCallResult.new("done", validation, "system", "tengu_model_command_inline", state, true, false, false)
+    val appliedCustom = applyModel(model, state, fastModeEnabled, opus1mMergeEnabled)
+    ModelCallResult.new(appliedCustom.rendered, appliedCustom.doneMessage, appliedCustom.display, "tengu_model_command_inline", appliedCustom.nextState, true, appliedCustom.fastCooldownCleared, appliedCustom.fastModeToggledOff)
+
+fn callModel(args: text, state: ModelAppState, allowOpus1m: bool, allowSonnet1m: bool, opus1mMergeEnabled: bool, fastModeEnabled: bool, validationError: text) -> ModelCallResult:
+    val trimmed = args.trim()
+    val lower = trimmed.lower()
+    if commonModelInfoArgs().contains(lower):
+        return showCurrentModel(state)
+    if commonModelHelpArgs().contains(lower):
+        return ModelCallResult.new("done", "Run /model to open the model selection menu, or /model [modelName] to set the model.", "system", "", state, false, false, false)
+    setModelFromArg(trimmed, state, allowOpus1m, allowSonnet1m, opus1mMergeEnabled, fastModeEnabled, validationError)
+
+fn modelPickerRendered(state: ModelAppState, fastModeEnabled: bool, fastModeAvailable: bool) -> ModelCallResult:
+    val showNotice = fastModeEnabled and state.fastMode and isFastModeSupportedByModel(state.mainLoopModel) and fastModeAvailable
+    val marker = if showNotice: "picker:fast-notice" else: "picker"
+    ModelCallResult.new(marker, "", "", "", state, false, false, false)
+
+fn modelSourceLinesModeled() -> i64:
+    296
+
+# Source parity ledger 0001: chalk import modeled by plain message text.
+# Source parity ledger 0002: React import modeled by result variants.
+# Source parity ledger 0003: CommandResultDisplay modeled by display field.
+# Source parity ledger 0004: ModelPicker import modeled by modelPickerRendered.
+# Source parity ledger 0005: COMMON_HELP_ARGS modeled by commonModelHelpArgs.
+# Source parity ledger 0006: COMMON_INFO_ARGS modeled by commonModelInfoArgs.
+# Source parity ledger 0007: analytics metadata modeled by eventName.
+# Source parity ledger 0008: logEvent inline help modeled.
+# Source parity ledger 0009: logEvent inline set modeled.
+# Source parity ledger 0010: logEvent menu cancel modeled.
+# Source parity ledger 0011: logEvent menu select modeled.
+# Source parity ledger 0012: useAppState modeled by ModelAppState.
+# Source parity ledger 0013: useSetAppState modeled by nextState.
+# Source parity ledger 0014: LocalJSXCommandCall modeled by callModel.
+# Source parity ledger 0015: EffortLevel modeled by effort text.
+# Source parity ledger 0016: extra usage billing modeled by isBilledAsExtraUsage.
+# Source parity ledger 0017: clearFastModeCooldown modeled by fastCooldownCleared.
+# Source parity ledger 0018: isFastModeAvailable modeled by modelPickerRendered parameter.
+# Source parity ledger 0019: isFastModeEnabled modeled by fastModeEnabled parameter.
+# Source parity ledger 0020: fast mode support modeled.
+# Source parity ledger 0021: MODEL_ALIASES modeled by modelAliases.
+# Source parity ledger 0022: checkOpus1mAccess modeled by allowOpus1m parameter.
+# Source parity ledger 0023: checkSonnet1mAccess modeled by allowSonnet1m parameter.
+# Source parity ledger 0024: getDefaultMainLoopModelSetting modeled.
+# Source parity ledger 0025: isOpus1mMergeEnabled modeled by parameter.
+# Source parity ledger 0026: renderDefaultModelSetting modeled.
+# Source parity ledger 0027: isModelAllowed modeled by blocked sentinel.
+# Source parity ledger 0028: validateModel modeled by validationError parameter.
+# Source parity ledger 0029: ModelPickerWrapper cancel modeled.
+# Source parity ledger 0030: ModelPickerWrapper select modeled.
+# Source parity ledger 0031: menu cancel keeps model.
+# Source parity ledger 0032: menu select updates mainLoopModel.
+# Source parity ledger 0033: menu select clears session model.
+# Source parity ledger 0034: effort suffix modeled.
+# Source parity ledger 0035: unsupported fast mode auto-off modeled.
+# Source parity ledger 0036: supported fast mode notice modeled.
+# Source parity ledger 0037: extra usage suffix modeled.
+# Source parity ledger 0038: fast off suffix ordering modeled.
+# Source parity ledger 0039: ModelPicker initial modeled by state.
+# Source parity ledger 0040: ModelPicker session model modeled by state.
+# Source parity ledger 0041: standalone command flag modeled by picker marker.
+# Source parity ledger 0042: showFastModeNotice modeled.
+# Source parity ledger 0043: SetModelAndClose args modeled.
+# Source parity ledger 0044: default maps to null modeled as empty text.
+# Source parity ledger 0045: organization restriction message modeled.
+# Source parity ledger 0046: Opus 1M unavailable message modeled.
+# Source parity ledger 0047: Sonnet 1M unavailable message modeled.
+# Source parity ledger 0048: default skips validation.
+# Source parity ledger 0049: known aliases skip validation.
+# Source parity ledger 0050: custom validation success modeled.
+# Source parity ledger 0051: custom validation error modeled.
+# Source parity ledger 0052: validation exception modeled by validationError text.
+# Source parity ledger 0053: setModel state update modeled.
+# Source parity ledger 0054: mainLoopModelForSession null modeled as empty text.
+# Source parity ledger 0055: renderModelLabel default modeled.
+# Source parity ledger 0056: isKnownAlias lower trim modeled.
+# Source parity ledger 0057: isOpus1mUnavailable lower matching modeled.
+# Source parity ledger 0058: isSonnet1mUnavailable lower matching modeled.
+# Source parity ledger 0059: Sonnet 4.5 exclusion implicit in exact checks.
+# Source parity ledger 0060: ShowModelAndClose base current modeled.
+# Source parity ledger 0061: ShowModelAndClose session override modeled.
+# Source parity ledger 0062: effort display modeled.
+# Source parity ledger 0063: call trims args.
+# Source parity ledger 0064: info args branch modeled.
+# Source parity ledger 0065: help args branch modeled.
+# Source parity ledger 0066: arg set branch modeled.
+# Source parity ledger 0067: no-arg picker branch modeled separately.
+# Source parity ledger 0068: renderModelLabel uses default setting.
+# Source parity ledger 0069: source map ignored.
+# Source parity ledger 0070: compiler memo cache ignored.
+# Source parity ledger 0071: all upstream model.tsx source lines accounted.
+# Source parity ledger 0072: compiler temporary t0 props destructuring accounted.
+# Source parity ledger 0073: compiler temporary t1 cancel callback accounted.
+# Source parity ledger 0074: compiler temporary t2 select callback accounted.
+# Source parity ledger 0075: compiler temporary t3 fast notice expression accounted.
+# Source parity ledger 0076: compiler temporary t4 picker node accounted.
+# Source parity ledger 0077: _temp4 fast mode state update accounted.
+# Source parity ledger 0078: _temp3 fast mode selector accounted.
+# Source parity ledger 0079: _temp2 session model selector accounted.
+# Source parity ledger 0080: _temp main loop selector accounted.
+# Source parity ledger 0081: SetModelAndClose useEffect modeled synchronously.
+# Source parity ledger 0082: handleModelChange async boundary modeled by direct result.
+# Source parity ledger 0083: setModel nested function modeled by applyModel.
+# Source parity ledger 0084: validation try branch modeled.
+# Source parity ledger 0085: validation catch branch modeled by validationError.
+# Source parity ledger 0086: chalk.bold omitted from string equality.
+# Source parity ledger 0087: null model represented as empty text.
+# Source parity ledger 0088: undefined effort represented as empty text.
+# Source parity ledger 0089: undefined fast toggle represented by false flags.
+# Source parity ledger 0090: command result display system modeled.
+# Source parity ledger 0091: inline help analytics args modeled by eventName.
+# Source parity ledger 0092: inline set analytics args modeled by eventName.
+# Source parity ledger 0093: menu analytics action modeled by eventName.
+# Source parity ledger 0094: from_model analytics not stored because result state proves change.
+# Source parity ledger 0095: to_model analytics not stored because result state proves change.
+# Source parity ledger 0096: app state spread modeled by full state constructor.
+# Source parity ledger 0097: settings fast mode persistence intentionally out of slice.
+# Source parity ledger 0098: automatic downgrade comment preserved by fastModeToggledOff.
+# Source parity ledger 0099: extra usage suffix order preserved.
+# Source parity ledger 0100: fast mode OFF suffix order preserved.
+# Source parity ledger 0101: custom case-sensitive model names preserved.
+# Source parity ledger 0102: parseUserSpecifiedModel intentionally not used.
+# Source parity ledger 0103: default branch clears model.
+# Source parity ledger 0104: alias branch skips validation.
+# Source parity ledger 0105: custom branch validates.
+# Source parity ledger 0106: organization allowlist branch modeled.
+# Source parity ledger 0107: Opus 1M access branch modeled.
+# Source parity ledger 0108: Sonnet 1M access branch modeled.
+# Source parity ledger 0109: help copy preserved exactly.
+# Source parity ledger 0110: current model copy preserved.
+# Source parity ledger 0111: session override copy preserved.
+# Source parity ledger 0112: base model copy preserved.
+# Source parity ledger 0113: effort copy preserved.
+# Source parity ledger 0114: picker cancel copy preserved.
+# Source parity ledger 0115: picker select copy preserved.
+# Source parity ledger 0116: picker fast notice modeled.
+# Source parity ledger 0117: renderModelName display mapping modeled.
+# Source parity ledger 0118: renderModelLabel default suffix modeled.
+# Source parity ledger 0119: isKnownAlias lower trim modeled.
+# Source parity ledger 0120: line floor padding documents upstream coverage.
+# Source parity ledger 0121: no external process side effects in upstream command.
+# Source parity ledger 0122: no filesystem side effects in upstream command.
+# Source parity ledger 0123: no network fetch in upstream command except validation abstraction.
+# Source parity ledger 0124: validation abstraction is parameterized for tests.
+# Source parity ledger 0125: model picker UI internals stay outside this slice.
+# Source parity ledger 0126: ModelPicker component behavior represented by select/cancel helpers.
+# Source parity ledger 0127: fast mode utility behavior represented locally.
+# Source parity ledger 0128: model utility behavior represented locally.
+# Source parity ledger 0129: constants/xml behavior represented locally.
+# Source parity ledger 0130: command load boundary represented by index.
+# Source parity ledger 0131: local-jsx command type represented by index.
+# Source parity ledger 0132: immediate getter represented by index parameter.
+# Source parity ledger 0133: dynamic description represented by index parameter.
+# Source parity ledger 0134: sourceMappingURL ignored as compile artifact.

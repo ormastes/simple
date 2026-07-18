@@ -1,0 +1,182 @@
+# Proof Obligations
+#
+# Extracts and manages proof obligations from contracts.
+
+use verification.lean.expressions_eval.{translate_contract_expr}
+use verification.lean.codegen.{LeanTheorem, build_theorem}
+use verification.models.contracts.{FunctionContract, ClassInvariant}
+
+# Proof obligation status
+enum ProofStatus:
+    Pending       # Not yet attempted
+    InProgress    # Being worked on
+    Proven        # Proof complete
+    Admitted      # Accepted without proof (sorry)
+    Failed        # Proof attempt failed
+    Trusted       # Bypassed via @trusted/assume axiom path
+    Stale         # Cached result exists but inputs changed
+    NotChecked    # Artifacts exist, proof check has not run
+
+    fn to_string(self) -> text:
+        match self:
+            case Pending: return "pending"
+            case InProgress: return "in_progress"
+            case Proven: return "proven"
+            case Admitted: return "admitted"
+            case Failed: return "failed"
+            case Trusted: return "trusted"
+            case Stale: return "stale"
+            case NotChecked: return "not_checked"
+
+# Single proof obligation
+class ProofObligation:
+    id: text
+    name: text
+    source_file: text
+    source_line: i32
+    proposition: text
+    status: ProofStatus
+    lean_file: Option<text>
+    proof_script: Option<text>
+
+    fn create(id: text, name: text, source_file: text, source_line: i32, proposition: text) -> ProofObligation:
+        return ProofObligation(id, name, source_file, source_line, proposition, ProofStatus.Pending, nil, nil)
+
+    fn with_status(status: ProofStatus) -> ProofObligation:
+        return ProofObligation(self.id, self.name, self.source_file, self.source_line, self.proposition, status, self.lean_file, self.proof_script)
+
+    fn with_proof(new_proof: text) -> ProofObligation:
+        return ProofObligation(self.id, self.name, self.source_file, self.source_line, self.proposition, ProofStatus.Proven, self.lean_file, new_proof)
+
+    fn to_lean_theorem() -> LeanTheorem:
+        var proof = "sorry"
+        val ps = self.proof_script.to_text()
+        if ps != "nil":
+            proof = ps
+        build_theorem(self.name, [], self.proposition, proof)
+
+# Obligation category
+enum ObligationCategory:
+    Precondition
+    Postcondition
+    ContractPreservation
+    ClassPreservation
+    Termination
+    SafetyProperty
+
+# Obligation set for a module
+class ObligationSet:
+    module_name: text
+    obligations: List<ProofObligation>
+
+    fn create(module_name: text) -> ObligationSet:
+        return ObligationSet(module_name, [])
+
+    fn add(obligation: ProofObligation) -> ObligationSet:
+        new_obligations = self.obligations.append(obligation)
+        return ObligationSet(self.module_name, new_obligations)
+
+    fn find_by_id(id: text) -> Option<ProofObligation>:
+        for ob in self.obligations:
+            if ob.id == id:
+                return ob
+        return nil
+
+    fn find_by_status(status: ProofStatus) -> List<ProofObligation>:
+        return [for ob in self.obligations if ob.status == status: ob]
+
+    fn count_by_status() -> Dict<text, i32>:
+        counts = {}
+        for ob in self.obligations:
+            key = ob.status.to_string()
+            if key in counts:
+                counts[key] = counts[key] + 1
+            else:
+                counts[key] = 1
+        return counts
+
+    fn summary() -> text:
+        counts = self.count_by_status()
+        total = len(self.obligations)
+        proven = counts.get("proven", 0)
+        pending = counts.get("pending", 0)
+        admitted = counts.get("admitted", 0)
+        failed = counts.get("failed", 0)
+
+        return "Proof Obligations for " + self.module_name + ": " + str(total) + " total, " + str(proven) + " proven, " + str(pending) + " pending, " + str(admitted) + " admitted, " + str(failed) + " failed"
+
+# Extract obligations from a function contract
+fn extract_from_contract(fn_name: text, source_file: text, source_line: i32, contract: FunctionContract) -> List<ProofObligation>:
+    var obligations: List<ProofObligation> = []
+
+    # Precondition obligations
+    for (i, clause) in contract.preconditions.enumerate():
+        val prop = translate_contract_expr(clause.expr)
+        val ob = ProofObligation.create(
+            fn_name + "_pre_" + i.to_text(),
+            fn_name + "_precondition_" + i.to_text(),
+            source_file,
+            source_line,
+            "∀ args, " + prop
+        )
+        obligations = obligations + [ob]
+
+    # Postcondition obligations
+    for (i, clause) in contract.postconditions.enumerate():
+        val prop = translate_contract_expr(clause.expr)
+        val ob = ProofObligation.create(
+            fn_name + "_post_" + i.to_text(),
+            fn_name + "_postcondition_" + i.to_text(),
+            source_file,
+            source_line,
+            "∀ args result, preconditions → " + prop
+        )
+        obligations = obligations + [ob]
+
+    # Invariant preservation obligations
+    for (i, clause) in contract.invariants.enumerate():
+        val prop = translate_contract_expr(clause.expr)
+        val ob = ProofObligation.create(
+            fn_name + "_inv_" + i.to_text(),
+            fn_name + "_invariant_preserved_" + i.to_text(),
+            source_file,
+            source_line,
+            "∀ self, inv_entry self → " + prop
+        )
+        obligations = obligations + [ob]
+
+    obligations
+
+# Extract obligations from a type invariant
+fn extract_from_type_invariant(type_name: text, source_file: text, source_line: i32, type_inv: ClassInvariant) -> List<ProofObligation>:
+    var obligations: List<ProofObligation> = []
+
+    for (i, clause) in type_inv.conditions.enumerate():
+        val prop = translate_contract_expr(clause.expr)
+        val ob = ProofObligation.create(
+            type_name + "_type_inv_" + i.to_text(),
+            type_name + "_type_invariant_" + i.to_text(),
+            source_file,
+            source_line,
+            "∀ self : " + type_name + ", " + prop
+        )
+        obligations = obligations + [ob]
+
+    obligations
+
+# Generate theorem stubs for obligations
+fn generate_theorem_stubs(obligations: ObligationSet) -> text:
+    var lines: List<text> = []
+    lines = lines + ["-- Proof obligations for " + obligations.module_name]
+    lines = lines + [""]
+
+    for ob in obligations.obligations:
+        lines = lines + ["-- " + ob.id + " (" + ob.status.to_string() + ")"]
+        lines = lines + ["-- Source: " + ob.source_file + ":" + ob.source_line.to_text()]
+        val thm = ob.to_lean_theorem()
+        lines = lines + ["theorem " + thm.name + " :"]
+        lines = lines + ["  " + thm.statement + " := by"]
+        lines = lines + ["  " + thm.proof_text()]
+        lines = lines + [""]
+
+    lines.join("\n")

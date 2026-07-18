@@ -1,0 +1,434 @@
+# Boot Filesystem — mount NVFS/DBFS as root and launch init process.
+#
+# Boot sequence: try NVFS → DBFS → FAT32 fallback.
+# After mounting, loads /sbin/init (or /INIT.ELF on FAT32) and spawns it.
+#
+# MDSOC: feature dimension, kernel boot layer.
+
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.loader.elf_loader.{load_user_executable, ElfImage}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.arch.arch_context.{Architecture, current_architecture}
+use os.services.vfs.vfs_init.{
+    vfs_boot_init_production, g_vfs_initialized, g_vfs_read_file_bytes,
+    g_c_adapter, CNvmeBlockAdapter,
+    vfs_mount_rootfs, vfs_boot_probe_pure_simple_nvme_adapter,
+    g_vfs_file_exists
+}
+use os.services.block_device.{BlockDevice}
+use os.userlib.process.{spawn_binary}
+use std.fs_driver.nvfs_superblock.{
+    nvfs_superblock_set_device, nvfs_superblock_probe_disk, nvfs_superblock_read_from_disk
+}
+use std.db.dbfs_engine.superblock.{
+    dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk,
+    DbfsSuperblock
+}
+use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
+use std.fs_driver.types.{MountOptions}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use os.services.dbfs.dbfs_filesystem_ops.{
+    dbfs_filesystem_ops_self_test, dbfs_filesystem_ops_persistence_check
+}
+
+val DBFS_ARENA_BASE_LBA: i64 = 4
+
+extern fn serial_println(msg: text)
+
+enum BootFsType:
+    Nvfs
+    Dbfs
+    Fat32
+    None_
+
+struct BootFsConfig:
+    root_device:  text
+    fs_type:      BootFsType
+    init_binary:  text
+
+    static fn default_config() -> BootFsConfig:
+        BootFsConfig(
+            root_device: "nvme0n1",
+            fs_type:     BootFsType.Nvfs,
+            init_binary: "/sbin/init"
+        )
+
+    static fn fat32_fallback() -> BootFsConfig:
+        BootFsConfig(
+            root_device: "nvme0n1",
+            fs_type:     BootFsType.Fat32,
+            init_binary: "/SYS/APPS/HELLOSMF.SMF"
+        )
+
+struct BootFsResult:
+    mounted:    bool
+    fs_type:    BootFsType
+    init_pid:   i64
+    init_path:  text
+
+var _boot_fs_mounted: bool = false
+var _boot_fs_type: BootFsType = BootFsType.None_
+var _boot_init_pid: i64 = -1
+
+fn boot_fs_is_mounted() -> bool:
+    _boot_fs_mounted
+
+fn boot_fs_type() -> BootFsType:
+    _boot_fs_type
+
+fn boot_fs_init_pid() -> i64:
+    _boot_init_pid
+
+fn boot_fs_sequence_uses_c_bridge_roots_for_test() -> bool:
+    false
+
+fn boot_fs_development_sequence_uses_c_bridge_roots_for_test() -> bool:
+    true
+
+fn boot_fs_sequence() -> Result<BootFsResult, text>:
+    """Production hosted boot sequence: fail closed on C-backed NVFS/DBFS roots.
+
+    The legacy C-bridge NVFS/DBFS probe (_try_nvfs_root/_try_dbfs_root, used
+    only by boot_fs_sequence_development_c_bridge) is permanently disabled in
+    production -- CNvmeBlockAdapter.init_c_bridge() is a link-clean stub that
+    always returns false (see c_nvme_block_adapter.spl: the C symbols it used
+    to wrap were phantom externs with no definition on any target). That
+    reason still applies, so production does not call the C-bridge probe.
+
+    Instead, production probes NVFS then DBFS through a dedicated
+    pure-Simple NVMe BlockDevice (vfs_boot_probe_pure_simple_nvme_adapter).
+    Both probes are cheap superblock reads and fail closed on any miss or
+    acquisition error, falling through to the existing pure-Simple FAT32
+    production path unchanged.
+    """
+    log_raw_println("[boot-fs] Starting filesystem mount sequence...")
+    log_raw_println("[boot-fs] Hosted NVFS/DBFS C-bridge probing disabled for production")
+
+    val probe_dev_result = vfs_boot_probe_pure_simple_nvme_adapter()
+    if probe_dev_result.is_err():
+        log_raw_println("[boot-fs] pure-Simple NVMe root probe unavailable: {probe_dev_result.unwrap_err()}")
+    else:
+        val probe_dev = probe_dev_result.unwrap()
+
+        log_raw_println("[boot-fs] Attempting pure-Simple NVFS root probe...")
+        if _try_nvfs_root_pure_simple(probe_dev):
+            log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+            _boot_fs_mounted = true
+            _boot_fs_type = BootFsType.Nvfs
+            val init_result = _launch_init("/sbin/init")
+            return Ok(BootFsResult(
+                mounted:   true,
+                fs_type:   BootFsType.Nvfs,
+                init_pid:  init_result,
+                init_path: "/sbin/init"
+            ))
+
+        log_raw_println("[boot-fs] Attempting pure-Simple DBFS root probe...")
+        val dbfs_driver_opt = _try_dbfs_root_pure_simple(probe_dev)
+        if dbfs_driver_opt.?:
+            val dbfs_driver = dbfs_driver_opt.unwrap()
+            _boot_fs_mounted = true
+            _boot_fs_type = BootFsType.Dbfs
+
+            # PATH-based exec resolution needs an FS-neutral exists(path) probe.
+            # Lane A owns the installable hook seam; until it lands, this call
+            # proves the DBFS-backed probe path works (see
+            # _dbfs_root_path_exists doc comment for the install point).
+            log_raw_println("[boot-fs] DBFS PATH exists-probe: /etc/motd={_dbfs_root_path_exists(\"/etc/motd\")}")
+
+            # Prove DBFS is also reachable through the shared Filesystem
+            # trait / VfsManager.mount() surface (see dbfs_filesystem_ops.spl)
+            # -- the same generic interface Fat32Driver implements -- not
+            # just through the MountTable root-mount path above.
+            val trait_check = dbfs_filesystem_ops_self_test(dbfs_driver, "/etc/motd")
+            match trait_check:
+                case Ok(summary):
+                    log_raw_println("[boot-fs] DBFS Filesystem-trait self-test ok: {summary}")
+                case Err(trait_err):
+                    log_raw_println("[boot-fs] DBFS Filesystem-trait self-test failed: {trait_err}")
+
+            # Reboot persistence proof: writes /boot-marker.txt on the first
+            # boot against a fresh image, reads it back and confirms content
+            # on any later boot against the SAME image. A gate that boots the
+            # same DBFS image twice and checks this marker on the second boot
+            # proves namespace state survives a reboot.
+            val persist_check = dbfs_filesystem_ops_persistence_check(dbfs_driver)
+            match persist_check:
+                case Ok(summary):
+                    log_raw_println("[boot-fs] DBFS persistence check: {summary}")
+                case Err(persist_err):
+                    log_raw_println("[boot-fs] DBFS persistence check FAILED: {persist_err}")
+
+            val init_result = _launch_init("/sbin/init")
+            return Ok(BootFsResult(
+                mounted:   true,
+                fs_type:   BootFsType.Dbfs,
+                init_pid:  init_result,
+                init_path: "/sbin/init"
+            ))
+
+    # Production FAT32 root must come through the pure-Simple NVMe gate.
+    log_raw_println("[boot-fs] Attempting production FAT32...")
+    val fat32_ok = vfs_boot_init_production()
+    if fat32_ok:
+        log_raw_println("[boot-fs] FAT32 mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Fat32
+        val init_result = _launch_init_fat32()
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Fat32,
+            init_pid:  init_result,
+            init_path: "/SYS/APPS/HELLOSMF.SMF"
+        ))
+
+    log_raw_println("[boot-fs] No production filesystem available -- boot failed")
+    Err("boot-fs: no production root filesystem found")
+
+fn boot_fs_sequence_development_c_bridge() -> Result<BootFsResult, text>:
+    """Development-only hosted sequence that may probe NVFS/DBFS through the C bridge."""
+    log_raw_println("[boot-fs] Starting development C-bridge filesystem mount sequence...")
+
+    # Step 1: Try NVFS on NVMe
+    log_raw_println("[boot-fs] Attempting NVFS root mount...")
+    val nvfs_ok = _try_nvfs_root()
+    if nvfs_ok:
+        log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Nvfs
+        val init_result = _launch_init("/sbin/init")
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Nvfs,
+            init_pid:  init_result,
+            init_path: "/sbin/init"
+        ))
+
+    # Step 2: Try DBFS on NVMe
+    log_raw_println("[boot-fs] NVFS unavailable, attempting DBFS root mount...")
+    val dbfs_ok = _try_dbfs_root()
+    if dbfs_ok:
+        log_raw_println("[boot-fs] DBFS mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Dbfs
+        val init_result = _launch_init("/sbin/init")
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Dbfs,
+            init_pid:  init_result,
+            init_path: "/sbin/init"
+        ))
+
+    # Step 3: Production FAT32 root must come through the pure-Simple NVMe gate.
+    log_raw_println("[boot-fs] NVFS/DBFS unavailable, attempting production FAT32...")
+    val fat32_ok = vfs_boot_init_production()
+    if fat32_ok:
+        log_raw_println("[boot-fs] FAT32 mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Fat32
+        val init_result = _launch_init_fat32()
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Fat32,
+            init_pid:  init_result,
+            init_path: "/SYS/APPS/HELLOSMF.SMF"
+        ))
+
+    log_raw_println("[boot-fs] No filesystem available -- boot failed")
+    Err("boot-fs: no root filesystem found")
+
+var _nvfs_driver: NvfsHostedDriver = NvfsHostedDriver.new("nvfs-root")
+
+fn _try_nvfs_root() -> bool:
+    log_raw_println("[boot-fs] Probing NVMe for NVFS superblock...")
+
+    var adapter = g_c_adapter
+    val init_ok = adapter.init_c_bridge()
+    if not init_ok:
+        log_raw_println("[boot-fs] NVMe adapter init failed — no NVFS")
+        return false
+
+    nvfs_superblock_set_device(adapter)
+
+    val found = nvfs_superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs] No NVFS superblock at LBA 0 — trying next FS")
+        return false
+
+    val sb = nvfs_superblock_read_from_disk()
+    log_raw_println("[boot-fs] NVFS superblock found: gen={sb.mount_generation}")
+
+    val opts = MountOptions(read_only: false)
+    val mount_r = _nvfs_driver.mount(opts)
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] NVFS mount failed")
+        return false
+
+    log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+    true
+
+fn _try_dbfs_root() -> bool:
+    log_raw_println("[boot-fs] Probing NVMe for DBFS superblock...")
+
+    var adapter = g_c_adapter
+    val init_ok = adapter.init_c_bridge()
+    if not init_ok:
+        log_raw_println("[boot-fs] NVMe adapter init failed — no DBFS")
+        return false
+
+    dbfs_superblock_set_device(adapter)
+
+    val found = dbfs_superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs] No DBFS superblock at LBA 2 — trying next FS")
+        return false
+
+    val sb = dbfs_superblock_read_from_disk()
+    log_raw_println("[boot-fs] DBFS superblock found: gen={sb.mount_generation}")
+
+    val arena_count: i64 = sb.block_count.to_i64()
+    val driver_r = DbFsDriver.open_on_device(adapter, DBFS_ARENA_BASE_LBA, arena_count)
+    if driver_r.is_err():
+        log_raw_println("[boot-fs] DBFS driver open failed — falling through")
+        return false
+
+    val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(driver_r.unwrap()))
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] DBFS VFS mount failed — falling through")
+        return false
+
+    log_raw_println("[DBFS] mounted as root filesystem")
+    true
+
+fn _try_nvfs_root_pure_simple(dev: BlockDevice) -> bool:
+    """Production NVFS probe: same superblock/mount logic as _try_nvfs_root,
+    but against a caller-supplied pure-Simple BlockDevice instead of the
+    permanently-stubbed g_c_adapter. NVFS stays probe-only for now (no
+    dedicated root-mount consumer yet) -- see module doc TODO.
+    """
+    log_raw_println("[boot-fs] Probing NVMe (pure-Simple) for NVFS superblock...")
+
+    nvfs_superblock_set_device(dev)
+
+    val found = nvfs_superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs] No NVFS superblock at LBA 0 — trying next FS")
+        return false
+
+    val sb = nvfs_superblock_read_from_disk()
+    log_raw_println("[boot-fs] NVFS superblock found: gen={sb.mount_generation}")
+
+    val opts = MountOptions(read_only: false)
+    val mount_r = _nvfs_driver.mount(opts)
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] NVFS mount failed")
+        return false
+
+    log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+    true
+
+fn _try_dbfs_root_pure_simple(dev: BlockDevice) -> DbFsDriver?:
+    """Production DBFS probe: same superblock/mount logic as _try_dbfs_root,
+    but against a caller-supplied pure-Simple BlockDevice instead of the
+    permanently-stubbed g_c_adapter. Returns the opened DbFsDriver on success
+    (nil on any probe/open/mount failure) so the caller can also exercise it
+    through the Filesystem trait for the boot-time self-test.
+    """
+    log_raw_println("[boot-fs] Probing NVMe (pure-Simple) for DBFS superblock...")
+
+    dbfs_superblock_set_device(dev)
+
+    val found = dbfs_superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs] No DBFS superblock at LBA 2 — trying next FS")
+        return nil
+
+    val sb = dbfs_superblock_read_from_disk()
+    log_raw_println("[boot-fs] DBFS superblock found: gen={sb.mount_generation}")
+
+    val arena_count: i64 = sb.block_count.to_i64()
+    val driver_r = DbFsDriver.open_on_device(dev, DBFS_ARENA_BASE_LBA, arena_count)
+    if driver_r.is_err():
+        log_raw_println("[boot-fs] DBFS driver open failed — falling through")
+        return nil
+    val driver = driver_r.unwrap()
+
+    val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(driver))
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] DBFS VFS mount failed — falling through")
+        return nil
+
+    log_raw_println("[DBFS] mounted as root filesystem")
+    Some(driver)
+
+fn _dbfs_root_path_exists(path: text) -> bool:
+    """FS-neutral exists(path) probe for PATH-based exec resolution.
+
+    Lane A owns the installable `exists(path) -> bool` hook seam (not yet in
+    the tree as of this change -- searched for g_exists_hook / install_*_exists
+    / PathResolver-style names, found nothing). Until that seam lands, this
+    wraps the VFS layer's OWN existing generic mount-table dispatch
+    (g_vfs_file_exists -> g_vfs_dispatch_file_exists -> DriverInstance.DbFs(d)
+    => d.stat_path(...), see vfs_write_ops.spl/vfs_dispatch.spl), which
+    already resolves correctly for a DBFS-mounted root with zero extra
+    plumbing -- it falls through to the mount-table branch whenever
+    g_root_fat32 and g_root_nvfs_hosted are both nil, which is exactly the
+    DBFS-root case.
+
+    Install point for Lane A's hook once it exists: call this function (or
+    inline its one-line body) as the DBFS arm of whatever dispatch table the
+    PATH resolver installs, right here in boot_fs_sequence() where DBFS
+    mounts as root.
+    """
+    g_vfs_file_exists(path)
+
+fn _launch_init(path: text) -> i64:
+    log_raw_println("[boot-fs] Loading init binary: {path}")
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() <= 4:
+        log_raw_println("[boot-fs] init binary not found or too small: {path}")
+        return -1
+    val arch = current_architecture()
+    val image = build_user_process_image(path, bytes, arch, [], [])
+    if image.is_err():
+        log_raw_println("[boot-fs] ELF parse failed for {path}: {image.unwrap_err()}")
+        return -1
+    val pid_result = spawn_binary(path, 1)
+    if pid_result.is_err():
+        log_raw_println("[boot-fs] spawn failed for {path}: {pid_result.unwrap_err()}")
+        return -1
+    val pid = pid_result.unwrap() as i64
+    _boot_init_pid = pid
+    log_raw_println("[boot-fs] init launched: pid={pid} path={path}")
+    pid
+
+fn _launch_init_fat32() -> i64:
+    log_raw_println("[boot-fs] Loading init binary from FAT32...")
+    val path = "/SYS/APPS/HELLOSMF.SMF"
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() <= 4:
+        log_raw_println("[boot-fs] FAT32 init binary not found: {path}")
+        return -1
+    log_raw_println("[boot-fs] FAT32 init binary loaded: {bytes.len()} bytes")
+    val pid_result = spawn_binary(path, 1)
+    if pid_result.is_err():
+        log_raw_println("[boot-fs] FAT32 spawn failed: {pid_result.unwrap_err()}")
+        return -1
+    val pid = pid_result.unwrap() as i64
+    _boot_init_pid = pid
+    log_raw_println("[boot-fs] FAT32 init launched: pid={pid}")
+    pid
+
+fn boot_fs_load_and_validate_elf(path: text) -> Result<ElfImage, text>:
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() <= 4:
+        return Err("file not found or too small: {path}")
+    val arch = current_architecture()
+    load_user_executable(bytes, arch)
+
+fn boot_fs_spawn_executable(path: text, priority: u8) -> Result<i64, text>:
+    val pid_result = spawn_binary(path, priority)
+    if pid_result.is_err():
+        return Err("spawn failed: {pid_result.unwrap_err()}")
+    Ok(pid_result.unwrap() as i64)

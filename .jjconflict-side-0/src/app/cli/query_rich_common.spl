@@ -1,0 +1,150 @@
+# Simple Language - Query Rich Common Utilities
+#
+# Shared state and utility functions used across query_rich split files.
+# All extern fn declarations for query_* modules are centralised here.
+
+use app.io.mod.{process_run}
+use std.io_runtime.{file_read, file_write, file_exists, dir_list, get_args}
+
+# ---------------------------------------------------------------------------
+# Thin wrappers — importable by other query_* modules via `use`
+# ---------------------------------------------------------------------------
+
+fn query_file_exists(path: text) -> bool:
+    file_exists(path)
+
+fn query_file_write(path: text, content: text) -> bool:
+    file_write(path, content)
+
+fn query_process_run(cmd: text, args: [text]) -> (text, text, i64):
+    process_run(cmd, args)
+
+fn query_dir_list(path: text) -> [text]:
+    dir_list(path)
+
+fn query_cli_get_args() -> [text]:
+    get_args()
+
+# Module-level diagnostic accumulator for JSON collection mode
+var _DIAG_COLLECT_MODE = false
+var _DIAG_COLLECTED: [text] = []
+
+# Per-lint severity override, keyed by lint code. Populated by query_lint from the
+# resolved LintConfig (strictness tier + sdn + @lint_profile). Value -1 suppresses
+# the diagnostic (Allow); a positive value rewrites the LSP severity (Deny -> 1).
+# Codes absent from the map keep their emitted severity (Warn / unconfigurable).
+var _DIAG_SEVERITY_OVERRIDE: Dict<text, i64> = {}
+
+export _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE
+export _diag_emit_or_collect, query_file_read_rich
+export _find_in_line, _find_in_line_from, _parse_error_location, _extract_decl_name
+
+fn _diag_is_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
+     or c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+fn _diag_code_of(json_str: text) -> text:
+    """Extract the "code":"XXX" value from a diagnostic JSON string ("" if absent)."""
+    val marker = "\"code\":\""
+    val start = _find_in_line_from(json_str, marker, 0)
+    if start < 0:
+        return ""
+    val vstart = start + marker.len()
+    val vend = _find_in_line_from(json_str, "\"", vstart)
+    if vend < 0:
+        return ""
+    json_str.substring(vstart, vend)
+
+fn _diag_rewrite_severity(json_str: text, sev: i64) -> text:
+    """Rewrite the "severity":N field of a diagnostic JSON to sev."""
+    val marker = "\"severity\":"
+    val start = _find_in_line_from(json_str, marker, 0)
+    if start < 0:
+        return json_str
+    val vstart = start + marker.len()
+    var vend = vstart
+    while vend < json_str.len() and _diag_is_digit(json_str.substring(vend, vend + 1)):
+        vend = vend + 1
+    json_str.substring(0, vstart) + sev.to_string() + json_str.substring(vend)
+
+fn _diag_emit_or_collect(json_str: text):
+    """Either print or collect a JSON diagnostic string depending on mode.
+
+    Applies the LintConfig-derived severity override (suppress / elevate) so the
+    LSP/build diagnostic path honors the strictness tier, matching `simple lint`.
+    """
+    var out = json_str
+    val code = _diag_code_of(json_str)
+    if code != "" and _DIAG_SEVERITY_OVERRIDE.has(code):
+        val ov = _DIAG_SEVERITY_OVERRIDE[code]
+        if ov < 0:
+            return  # suppressed (Allow)
+        out = _diag_rewrite_severity(json_str, ov)
+    if _DIAG_COLLECT_MODE:
+        _DIAG_COLLECTED.push(out)
+    else:
+        print out
+
+fn query_file_read_rich(path: text) -> text:
+    file_read(path)
+
+fn _find_in_line(line: text, pattern: text) -> i64:
+    """Find the 0-based position of pattern in line. Returns 0 if not found."""
+    var pos = 0
+    while pos <= line.len() - pattern.len():
+        if line.substring(pos, pos + pattern.len()) == pattern:
+            return pos
+        pos = pos + 1
+    0
+
+fn _find_in_line_from(line: text, needle: text, start: i64) -> i64:
+    """Find needle in line starting from a given position. Returns -1 if not found."""
+    var i = start
+    val nlen = needle.len()
+    while i <= line.len() - nlen:
+        if line.substring(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn query_rich_nonnegative_int_or_zero(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return 0
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return 0
+    trimmed.to_int() ?? 0
+
+fn _parse_error_location(err: text) -> (i64, i64, text):
+    """Parse line:col:message from an error string. Returns (line, col, message)."""
+    var colon1 = -1
+    var colon2 = -1
+    var ci = 0
+    while ci < err.len():
+        if err.substring(ci, ci + 1) == ":":
+            if colon1 == -1:
+                colon1 = ci
+            elif colon2 == -1:
+                colon2 = ci
+                break
+        ci = ci + 1
+    if colon1 > 0 and colon2 > colon1:
+        val line_str = err.substring(0, colon1)
+        val col_str = err.substring(colon1 + 1, colon2)
+        val msg = err.substring(colon2 + 1).trim()
+        val line = query_rich_nonnegative_int_or_zero(line_str)
+        val col = query_rich_nonnegative_int_or_zero(col_str)
+        if line > 0:
+            return (line, if col > 0: col else: 1, msg)
+    (1, 1, err)
+
+fn _extract_decl_name(after_kw: text) -> text:
+    """Extract the variable name from text after val/var keyword."""
+    var name_chars: [text] = []
+    for ch in after_kw:
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        name_chars.push(ch)
+    name_chars.join("")

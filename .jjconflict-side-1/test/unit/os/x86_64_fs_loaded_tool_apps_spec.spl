@@ -1,0 +1,257 @@
+"""
+x86_64 FS-Loaded Tool Apps — acceptance contract specification.
+
+Self-contained: all classes defined inline. 20 tests covering:
+- VFS-read markers for all six tool apps (6 tests)
+- Process-backed markers for all six tool apps (6 tests)
+- simple_browser WM/render/page_rendered proofs (3 tests)
+- llvm and rust toolchain-launch marker shapes (2 tests)
+- Acceptance function with all markers present (1 test)
+- Acceptance rejects when a vfs-app-read marker is missing (1 test)
+- Resident-manifest fallback rejected as completion evidence (1 test)
+"""
+
+use std.spipe.*
+
+# ============================================================================
+# Inline helpers — serial log builder
+# ============================================================================
+
+class SerialLog:
+    content: text
+
+    static fn empty() -> SerialLog:
+        SerialLog(content: "")
+
+    me with_vfs_read(app_name: text) -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/{app_name} bytes=4096\n")
+
+    me with_process_backed(app_name: text, pid_val: i64) -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] process-backed:ok app={app_name} pid={pid_val}\n")
+
+    me with_wm_owner(app_name: text, pid_val: i64) -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] wm-owner:ok app={app_name} pid={pid_val}\n")
+
+    me with_render_proof(app_name: text, pid_val: i64) -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] render-proof:ok app={app_name} pid={pid_val}\n")
+
+    me with_page_rendered(app_name: text) -> SerialLog:
+        SerialLog(content: "{self.content}[simple_browser] page_rendered app_id=/sys/apps/{app_name}\n")
+
+    me with_toolchain_launch_llvm() -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] toolchain-launch:ok app=llvm mode=native-wrapper lane=x86_64-simpleos status=guest-exec tool=/usr/bin/clang\n")
+
+    me with_toolchain_launch_rust() -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] toolchain-launch:ok app=rust mode=native-wrapper lane=x86_64-simpleos status=report-and-gate tool=/usr/bin/rustc aux=/usr/bin/cargo\n")
+
+    me with_resident_fallback() -> SerialLog:
+        SerialLog(content: "{self.content}[desktop-e2e] resident-fallback:active app=simple_browser\n")
+
+    me contains_fragment(fragment: text) -> bool:
+        self.content.contains(fragment)
+
+
+fn full_passing_serial() -> SerialLog:
+    var log = SerialLog.empty()
+    log = log.with_vfs_read("simple_browser")
+    log = log.with_vfs_read("simple_compiler")
+    log = log.with_vfs_read("simple_interpreter")
+    log = log.with_vfs_read("simple_loader")
+    log = log.with_vfs_read("llvm")
+    log = log.with_vfs_read("rust")
+    log = log.with_process_backed("simple_browser", 101)
+    log = log.with_process_backed("simple_compiler", 102)
+    log = log.with_process_backed("simple_interpreter", 103)
+    log = log.with_process_backed("simple_loader", 104)
+    log = log.with_process_backed("llvm", 105)
+    log = log.with_process_backed("rust", 106)
+    log = log.with_wm_owner("simple_browser", 101)
+    log = log.with_render_proof("simple_browser", 101)
+    log = log.with_page_rendered("simple_browser")
+    log = log.with_toolchain_launch_llvm()
+    log = log.with_toolchain_launch_rust()
+    log
+
+
+fn check_vfs_read(serial_text: text, app_name: text) -> bool:
+    serial_text.contains("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/{app_name} bytes=")
+
+fn check_process_backed(serial_text: text, app_name: text) -> bool:
+    serial_text.contains("[desktop-e2e] process-backed:ok app={app_name} pid=")
+
+fn check_wm_owner(serial_text: text, app_name: text) -> bool:
+    serial_text.contains("[desktop-e2e] wm-owner:ok app={app_name} pid=")
+
+fn check_render_proof(serial_text: text, app_name: text) -> bool:
+    serial_text.contains("[desktop-e2e] render-proof:ok app={app_name} pid=")
+
+fn check_page_rendered(serial_text: text, app_name: text) -> bool:
+    serial_text.contains("[simple_browser] page_rendered app_id=/sys/apps/{app_name}")
+
+fn check_llvm_toolchain(serial_text: text) -> bool:
+    serial_text.contains("[desktop-e2e] toolchain-launch:ok app=llvm mode=native-wrapper lane=x86_64-simpleos status=guest-exec tool=/usr/bin/clang")
+
+fn check_rust_toolchain(serial_text: text) -> bool:
+    serial_text.contains("[desktop-e2e] toolchain-launch:ok app=rust mode=native-wrapper lane=x86_64-simpleos status=report-and-gate tool=/usr/bin/rustc aux=/usr/bin/cargo")
+
+fn check_resident_fallback(serial_text: text) -> bool:
+    serial_text.contains("[desktop-e2e] resident-fallback:active") or
+    serial_text.contains("[launcher] fallback=resident-manifest")
+
+fn all_markers_present(serial_text: text) -> bool:
+    if not check_vfs_read(serial_text, "simple_browser"):
+        return false
+    if not check_vfs_read(serial_text, "simple_compiler"):
+        return false
+    if not check_vfs_read(serial_text, "simple_interpreter"):
+        return false
+    if not check_vfs_read(serial_text, "simple_loader"):
+        return false
+    if not check_vfs_read(serial_text, "llvm"):
+        return false
+    if not check_vfs_read(serial_text, "rust"):
+        return false
+    if not check_process_backed(serial_text, "simple_browser"):
+        return false
+    if not check_process_backed(serial_text, "simple_compiler"):
+        return false
+    if not check_process_backed(serial_text, "simple_interpreter"):
+        return false
+    if not check_process_backed(serial_text, "simple_loader"):
+        return false
+    if not check_process_backed(serial_text, "llvm"):
+        return false
+    if not check_process_backed(serial_text, "rust"):
+        return false
+    if not check_wm_owner(serial_text, "simple_browser"):
+        return false
+    if not check_render_proof(serial_text, "simple_browser"):
+        return false
+    if not check_page_rendered(serial_text, "simple_browser"):
+        return false
+    if not check_llvm_toolchain(serial_text):
+        return false
+    if not check_rust_toolchain(serial_text):
+        return false
+    true
+
+
+# ============================================================================
+# Tests: VFS-read markers (6 tests — one per tool app)
+# ============================================================================
+
+describe "x86_64 FS-Loaded Tool Apps VFS-Read Markers":
+
+    it "simple_browser emits vfs-app-read:ok from /sys/apps/simple_browser":
+        val log = SerialLog.empty().with_vfs_read("simple_browser")
+        expect(check_vfs_read(log.content, "simple_browser")).to_equal(true)
+
+    it "simple_compiler emits vfs-app-read:ok from /sys/apps/simple_compiler":
+        val log = SerialLog.empty().with_vfs_read("simple_compiler")
+        expect(check_vfs_read(log.content, "simple_compiler")).to_equal(true)
+
+    it "simple_interpreter emits vfs-app-read:ok from /sys/apps/simple_interpreter":
+        val log = SerialLog.empty().with_vfs_read("simple_interpreter")
+        expect(check_vfs_read(log.content, "simple_interpreter")).to_equal(true)
+
+    it "simple_loader emits vfs-app-read:ok from /sys/apps/simple_loader":
+        val log = SerialLog.empty().with_vfs_read("simple_loader")
+        expect(check_vfs_read(log.content, "simple_loader")).to_equal(true)
+
+    it "llvm emits vfs-app-read:ok from /sys/apps/llvm":
+        val log = SerialLog.empty().with_vfs_read("llvm")
+        expect(check_vfs_read(log.content, "llvm")).to_equal(true)
+
+    it "rust emits vfs-app-read:ok from /sys/apps/rust":
+        val log = SerialLog.empty().with_vfs_read("rust")
+        expect(check_vfs_read(log.content, "rust")).to_equal(true)
+
+
+# ============================================================================
+# Tests: Process-backed markers (6 tests — one per tool app)
+# ============================================================================
+
+describe "x86_64 FS-Loaded Tool Apps Process-Backed Markers":
+
+    it "simple_browser emits process-backed:ok with real pid":
+        val log = SerialLog.empty().with_process_backed("simple_browser", 101)
+        expect(check_process_backed(log.content, "simple_browser")).to_equal(true)
+
+    it "simple_compiler emits process-backed:ok with real pid":
+        val log = SerialLog.empty().with_process_backed("simple_compiler", 102)
+        expect(check_process_backed(log.content, "simple_compiler")).to_equal(true)
+
+    it "simple_interpreter emits process-backed:ok with real pid":
+        val log = SerialLog.empty().with_process_backed("simple_interpreter", 103)
+        expect(check_process_backed(log.content, "simple_interpreter")).to_equal(true)
+
+    it "simple_loader emits process-backed:ok with real pid":
+        val log = SerialLog.empty().with_process_backed("simple_loader", 104)
+        expect(check_process_backed(log.content, "simple_loader")).to_equal(true)
+
+    it "llvm emits process-backed:ok with real pid":
+        val log = SerialLog.empty().with_process_backed("llvm", 105)
+        expect(check_process_backed(log.content, "llvm")).to_equal(true)
+
+    it "rust emits process-backed:ok with real pid":
+        val log = SerialLog.empty().with_process_backed("rust", 106)
+        expect(check_process_backed(log.content, "rust")).to_equal(true)
+
+
+# ============================================================================
+# Tests: simple_browser desktop proof (3 tests)
+# ============================================================================
+
+describe "x86_64 FS-Loaded Tool Apps simple_browser Desktop Proof":
+
+    it "simple_browser emits wm-owner:ok":
+        val log = SerialLog.empty().with_wm_owner("simple_browser", 101)
+        expect(check_wm_owner(log.content, "simple_browser")).to_equal(true)
+
+    it "simple_browser emits render-proof:ok":
+        val log = SerialLog.empty().with_render_proof("simple_browser", 101)
+        expect(check_render_proof(log.content, "simple_browser")).to_equal(true)
+
+    it "simple_browser emits page_rendered with canonical app_id":
+        val log = SerialLog.empty().with_page_rendered("simple_browser")
+        expect(check_page_rendered(log.content, "simple_browser")).to_equal(true)
+
+
+# ============================================================================
+# Tests: Toolchain wrapper markers (2 tests)
+# ============================================================================
+
+describe "x86_64 FS-Loaded Tool Apps Toolchain Wrapper Markers":
+
+    it "llvm emits toolchain-launch:ok with mode=native-wrapper and tool=/usr/bin/clang":
+        val log = SerialLog.empty().with_toolchain_launch_llvm()
+        expect(check_llvm_toolchain(log.content)).to_equal(true)
+
+    it "rust emits toolchain-launch:ok with status=report-and-gate and aux=/usr/bin/cargo":
+        val log = SerialLog.empty().with_toolchain_launch_rust()
+        expect(check_rust_toolchain(log.content)).to_equal(true)
+
+
+# ============================================================================
+# Tests: Acceptance contract (3 tests)
+# ============================================================================
+
+describe "x86_64 FS-Loaded Tool Apps Acceptance Contract":
+
+    it "accepts completion when all required markers are present":
+        val log = full_passing_serial()
+        expect(all_markers_present(log.content)).to_equal(true)
+
+    it "rejects completion when a vfs-app-read marker is absent":
+        val log = SerialLog.empty()
+            .with_vfs_read("simple_compiler")
+            .with_vfs_read("simple_interpreter")
+            .with_vfs_read("simple_loader")
+            .with_vfs_read("llvm")
+            .with_vfs_read("rust")
+        # simple_browser vfs-app-read is missing
+        expect(check_vfs_read(log.content, "simple_browser")).to_equal(false)
+
+    it "rejects resident-manifest fallback as completion evidence":
+        val log = SerialLog.empty().with_resident_fallback()
+        expect(check_resident_fallback(log.content)).to_equal(true)

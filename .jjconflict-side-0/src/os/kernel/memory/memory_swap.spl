@@ -1,0 +1,215 @@
+# Deterministic swap-slot owner used by memory leveling.
+# Block drivers can adapt these transactions without owning leveling policy.
+
+struct MemorySwapSlot:
+    slot_id: u64
+    allocation_id: u64
+    page_index: u64
+    checksum: u64
+    occupied: bool
+
+struct MemorySwapResult:
+    ok: bool
+    reason: text
+    slot_id: u64
+    allocation_id: u64
+    page_index: u64
+    bytes: [u8]
+
+struct MemorySwapStats:
+    capacity_slots: u64
+    occupied_slots: u64
+    writes: u64
+    reads: u64
+    releases: u64
+    errors: u64
+
+class MemorySwapStore:
+    enabled: bool
+    capacity_slots: u64
+    slots: [MemorySwapSlot]
+    payloads: [[u8]]
+    writes: u64
+    reads: u64
+    releases: u64
+    errors: u64
+
+fn _memory_swap_bytes_copy(source: [u8]) -> [u8]:
+    var copied: [u8] = []
+    var i: i64 = 0
+    while i < source.len():
+        copied.push(source[i])
+        i = i + 1
+    copied
+
+fn memory_swap_checksum(bytes: [u8]) -> u64:
+    # FNV-1a keeps the owner deterministic in interpreter and native modes.
+    var hash: u64 = 1469598103934665603
+    var i: i64 = 0
+    while i < bytes.len():
+        hash = hash ^ (bytes[i] as u64)
+        hash = hash * 1099511628211
+        i = i + 1
+    hash
+
+fn _memory_swap_failure(reason: text) -> MemorySwapResult:
+    MemorySwapResult(
+        ok: false,
+        reason: reason,
+        slot_id: 0,
+        allocation_id: 0,
+        page_index: 0,
+        bytes: []
+    )
+
+fn memory_swap_store_new(enabled: bool, capacity_slots: u64) -> MemorySwapStore:
+    MemorySwapStore(
+        enabled: enabled,
+        capacity_slots: capacity_slots,
+        slots: [],
+        payloads: [],
+        writes: 0,
+        reads: 0,
+        releases: 0,
+        errors: 0
+    )
+
+impl MemorySwapStore:
+
+    me write(allocation_id: u64, page_index: u64, bytes: [u8]) -> MemorySwapResult:
+        if not me.enabled:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("swap-disabled")
+        if allocation_id == 0 or bytes.len() == 0:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("invalid-state")
+
+        var occupied: u64 = 0
+        var reusable_index: i64 = -1
+        var i: i64 = 0
+        while i < me.slots.len():
+            if me.slots[i].occupied:
+                occupied = occupied + 1
+            elif reusable_index < 0:
+                reusable_index = i
+            i = i + 1
+        if occupied >= me.capacity_slots:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("swap-full")
+
+        val slot_id = if reusable_index >= 0: (reusable_index as u64) + 1 else: (me.slots.len() as u64) + 1
+        val copied = _memory_swap_bytes_copy(bytes)
+        val slot = MemorySwapSlot(
+            slot_id: slot_id,
+            allocation_id: allocation_id,
+            page_index: page_index,
+            checksum: memory_swap_checksum(copied),
+            occupied: true
+        )
+        if reusable_index >= 0:
+            me.slots[reusable_index] = slot
+            me.payloads[reusable_index] = copied
+        else:
+            me.slots.push(slot)
+            me.payloads.push(copied)
+        me.writes = me.writes + 1
+        MemorySwapResult(
+            ok: true,
+            reason: "ok",
+            slot_id: slot_id,
+            allocation_id: allocation_id,
+            page_index: page_index,
+            bytes: []
+        )
+
+    me read(slot_id: u64, allocation_id: u64, page_index: u64) -> MemorySwapResult:
+        if not me.enabled:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("swap-disabled")
+        if slot_id == 0 or slot_id > (me.slots.len() as u64):
+            me.errors = me.errors + 1
+            return _memory_swap_failure("missing-slot")
+        val index = (slot_id - 1) as i64
+        val slot = me.slots[index]
+        if not slot.occupied:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("missing-slot")
+        if slot.allocation_id != allocation_id or slot.page_index != page_index:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("stale-mapping")
+        val payload: [u8] = me.payloads[index]
+        if memory_swap_checksum(payload) != slot.checksum:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("swap-checksum")
+        me.reads = me.reads + 1
+        val restored_bytes: [u8] = _memory_swap_bytes_copy(payload)
+        MemorySwapResult(
+            ok: true,
+            reason: "ok",
+            slot_id: slot.slot_id,
+            allocation_id: slot.allocation_id,
+            page_index: slot.page_index,
+            bytes: restored_bytes
+        )
+
+    me release(slot_id: u64, allocation_id: u64) -> MemorySwapResult:
+        if slot_id == 0 or slot_id > (me.slots.len() as u64):
+            me.errors = me.errors + 1
+            return _memory_swap_failure("missing-slot")
+        val index = (slot_id - 1) as i64
+        val slot = me.slots[index]
+        if not slot.occupied:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("missing-slot")
+        if slot.allocation_id != allocation_id:
+            me.errors = me.errors + 1
+            return _memory_swap_failure("not-owner")
+        me.slots[index] = MemorySwapSlot(
+            slot_id: slot.slot_id,
+            allocation_id: 0,
+            page_index: 0,
+            checksum: 0,
+            occupied: false
+        )
+        me.payloads[index] = []
+        me.releases = me.releases + 1
+        MemorySwapResult(
+            ok: true,
+            reason: "ok",
+            slot_id: slot_id,
+            allocation_id: allocation_id,
+            page_index: slot.page_index,
+            bytes: []
+        )
+
+    me corrupt_for_test(slot_id: u64) -> bool:
+        if slot_id == 0 or slot_id > (me.slots.len() as u64):
+            return false
+        val index = (slot_id - 1) as i64
+        val slot = me.slots[index]
+        if not slot.occupied:
+            return false
+        me.slots[index] = MemorySwapSlot(
+            slot_id: slot.slot_id,
+            allocation_id: slot.allocation_id,
+            page_index: slot.page_index,
+            checksum: slot.checksum ^ 1,
+            occupied: true
+        )
+        true
+
+    me snapshot() -> MemorySwapStats:
+        var occupied: u64 = 0
+        var i: i64 = 0
+        while i < me.slots.len():
+            if me.slots[i].occupied:
+                occupied = occupied + 1
+            i = i + 1
+        MemorySwapStats(
+            capacity_slots: me.capacity_slots,
+            occupied_slots: occupied,
+            writes: me.writes,
+            reads: me.reads,
+            releases: me.releases,
+            errors: me.errors
+        )

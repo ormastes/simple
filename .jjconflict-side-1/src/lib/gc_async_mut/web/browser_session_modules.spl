@@ -1,0 +1,452 @@
+# Browser session — JS module transform functions (core).
+#
+# Free functions for:
+# - extract_script_blocks: parse <script> tags from HTML into BrowserScriptBlock list
+# - extract_module_dependency_urls: find import/export-from URLs in module source
+# - transform_module_source: convert ESM to browser-session runtime object form
+# - transform_import_statement / transform_export_statement
+# - transform_module_reexport_bindings / transform_local_module_export_bindings
+# - module_object_ref / module_prop_access / module_symbol_suffix / is_module_symbol_char
+# - transform_simple_class_export / extract_constructor_body / find_matching_brace
+
+use std.js.types.pair.{Pair}
+use std.gc_async_mut.web.browser_session.{BrowserScriptBlock}
+use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url}
+use std.gc_async_mut.web.browser_session_html.{extract_attr_value, has_tag_attr}
+use std.gc_async_mut.web.browser_session_modules_helpers.{
+    split_module_statements, module_statement_source, module_import_clause,
+    split_import_bindings, split_text, normalize_module_binding_name,
+    split_export_binding_declarators, module_exported_names,
+    module_variable_decl_kind, normalize_module_variable_declarator,
+    declared_function_name, declared_class_name, declared_binding_name,
+    strip_trailing_semicolon, append_unique_text, text_in_list
+}
+
+fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
+    var blocks: [BrowserScriptBlock] = []
+    var pos = 0
+    val html_len = html.len()
+    val debug_runtime_ready = html.contains("Runtime Ready")
+    if debug_runtime_ready:
+        print "[BRS] extract scripts start"
+    while pos < html_len:
+        if debug_runtime_ready:
+            print "[BRS] extract scripts loop pos={pos}"
+        val start = find_text(html, "<script", pos)
+        if debug_runtime_ready:
+            print "[BRS] extract scripts start_idx={start}"
+        if start < 0:
+            return blocks
+        val tag_end = find_text(html, ">", start)
+        if debug_runtime_ready:
+            print "[BRS] extract scripts tag_end={tag_end}"
+        if tag_end < 0:
+            return blocks
+        val tag_content = html[start:tag_end + 1]
+        val close = find_text(html, "</script>", tag_end + 1)
+        if debug_runtime_ready:
+            print "[BRS] extract scripts close={close}"
+        val src_value = extract_attr_value(tag_content, "src")
+        val script_type = extract_attr_value(tag_content, "type").lower()
+        val is_async = has_tag_attr(tag_content, "async")
+        val is_defer = has_tag_attr(tag_content, "defer")
+        if src_value != "":
+            blocks.push(BrowserScriptBlock.with_attrs("external", "", src_value, script_type, is_async, is_defer))
+        else if close >= 0:
+            val content = html[tag_end + 1:close]
+            if content.trim().len() > 0:
+                blocks.push(BrowserScriptBlock.with_attrs("inline", content, "", script_type, is_async, is_defer))
+        if close < 0:
+            return blocks
+        pos = close + 9
+    blocks
+
+fn extract_module_dependency_urls(module_url: text, source: text) -> [text]:
+    var out: [text] = []
+    for stmt in split_module_statements(source):
+        val trimmed = stmt.trim()
+        if trimmed.starts_with("import "):
+            val dep = module_statement_source(trimmed)
+            if dep != "":
+                out = append_unique_text(out, resolve_relative_url(module_url, dep))
+        else if trimmed.starts_with("export ") and trimmed.contains(" from "):
+            val dep = module_statement_source(trimmed)
+            if dep != "":
+                out = append_unique_text(out, resolve_relative_url(module_url, dep))
+    out
+
+fn transform_module_source(module_url: text, source: text, module_cache: [Pair<text, text>]) -> text:
+    val module_ref = module_object_ref(module_url)
+    var body = "var {module_ref} = {};\nvar __simple_module = {module_ref};\n"
+    for stmt in split_module_statements(source):
+        val trimmed = stmt.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("import "):
+            body = body + transform_import_statement(module_url, trimmed)
+            continue
+        if trimmed.starts_with("export "):
+            body = body + transform_export_statement(module_url, trimmed, module_cache)
+            continue
+        body = body + stmt + "\n"
+    body
+
+fn transform_import_statement(module_url: text, stmt: text) -> text:
+    val source = module_statement_source(stmt)
+    if source == "":
+        return ""
+    val resolved = resolve_relative_url(module_url, source)
+    val resolved_ref = module_object_ref(resolved)
+    val clause = module_import_clause(stmt)
+    if clause == "":
+        return ""
+    var out = ""
+    val from_idx_for_named = find_text(stmt, " from ", 0)
+    val named_open = find_text(stmt, "{", 0)
+    val named_close = find_text(stmt, "}", named_open + 1)
+    if named_open >= 0 and named_close > named_open and (from_idx_for_named < 0 or named_close < from_idx_for_named):
+        # A leading default import may precede the named group:
+        # `import Foo, { a, b } from '...'`. Emit the default binding first.
+        val clause_brace = find_text(clause, "{", 0)
+        if clause_brace > 0:
+            var default_part = clause.slice(0, clause_brace).trim()
+            if default_part.ends_with(","):
+                default_part = default_part.slice(0, default_part.len() - 1).trim()
+            val default_name = normalize_module_binding_name(default_part)
+            if default_name != "":
+                out = out + "var {default_name} = {module_prop_access(resolved_ref, \"default\")};\n"
+        val inner = stmt.slice(named_open + 1, named_close)
+        for named in split_text(inner, ","):
+            val named_trimmed = named.trim()
+            if named_trimmed == "":
+                continue
+            val alias_idx = find_text(named_trimmed, " as ", 0)
+            if alias_idx >= 0:
+                val imported = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                val local = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+                out = out + "var {local} = {module_prop_access(resolved_ref, imported)};\n"
+            else:
+                val local = normalize_module_binding_name(named_trimmed)
+                out = out + "var {local} = {module_prop_access(resolved_ref, local)};\n"
+        return out
+    val normalized_clause = normalize_module_binding_name(clause)
+    if normalized_clause != clause.trim() and normalized_clause != "":
+        return "var {normalized_clause} = {module_prop_access(resolved_ref, normalized_clause)};\n"
+    for binding in split_import_bindings(clause):
+        val trimmed = binding.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("* as "):
+            val local = trimmed.slice(5, trimmed.len()).trim()
+            out = out + "var {local} = {resolved_ref};\n"
+        else if trimmed.starts_with("{") and trimmed.ends_with("}"):
+            val inner = trimmed.slice(1, trimmed.len() - 1)
+            for named in split_text(inner, ","):
+                val named_trimmed = named.trim()
+                if named_trimmed == "":
+                    continue
+                val alias_idx = find_text(named_trimmed, " as ", 0)
+                if alias_idx >= 0:
+                    val imported = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                    val local = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+                    out = out + "var {local} = {module_prop_access(resolved_ref, imported)};\n"
+                else:
+                    val local = normalize_module_binding_name(named_trimmed)
+                    out = out + "var {local} = {module_prop_access(resolved_ref, local)};\n"
+        else:
+            val local = normalize_module_binding_name(trimmed)
+            val default_ref = module_prop_access(resolved_ref, "default")
+            out = out + "var {local} = {default_ref};\n"
+    out
+
+fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<text, text>]) -> text:
+    val trimmed = strip_trailing_semicolon(stmt.trim())
+    if trimmed.starts_with("export default function "):
+        val decl = trimmed.slice(15, trimmed.len()).trim()
+        val name = normalize_module_binding_name(declared_function_name(decl))
+        val fn_expr = function_decl_to_expr(decl)
+        if name == "":
+            return "__simple_module.default = " + fn_expr + ";\n"
+        return "var " + name + " = " + fn_expr + ";\n__simple_module.default = " + name + ";\n"
+    if trimmed.starts_with("export default class "):
+        val decl = trimmed.slice(15, trimmed.len()).trim()
+        val name = normalize_module_binding_name(declared_class_name(decl))
+        val class_expr = class_decl_to_function_expr(decl)
+        if name == "":
+            return "__simple_module.default = " + class_expr + ";\n"
+        return "var " + name + " = " + class_expr + ";\n__simple_module.default = " + name + ";\n"
+    if trimmed.starts_with("export default "):
+        val expr = trimmed.slice(15, trimmed.len()).trim()
+        return "__simple_module.default = {expr};\n"
+    if trimmed.starts_with("export function "):
+        val decl = trimmed.slice(7, trimmed.len()).trim()
+        val name = normalize_module_binding_name(declared_function_name(decl))
+        if name == "":
+            return decl + "\n"
+        val export_ref = module_prop_access("__simple_module", name)
+        val fn_expr = function_decl_to_expr(decl)
+        return "var {name} = {fn_expr};\n{export_ref} = {name};\n"
+    if trimmed.starts_with("export class "):
+        val decl = trimmed.slice(7, trimmed.len()).trim()
+        val name = normalize_module_binding_name(declared_class_name(decl))
+        if name == "":
+            return decl + "\n"
+        val export_ref = module_prop_access("__simple_module", name)
+        val class_expr = class_decl_to_function_expr(decl)
+        return "var {name} = {class_expr};\n{export_ref} = {name};\n"
+    if trimmed.starts_with("export const ") or trimmed.starts_with("export let ") or trimmed.starts_with("export var "):
+        val decl = trimmed.slice(7, trimmed.len()).trim()
+        val kind = module_variable_decl_kind(decl)
+        var out = ""
+        for declarator in split_export_binding_declarators(decl):
+            val local_decl = normalize_module_variable_declarator(kind, declarator)
+            if local_decl != "":
+                out = out + local_decl + ";\n"
+            val name = normalize_module_binding_name(declared_binding_name(declarator))
+            if name != "":
+                val export_ref = module_prop_access("__simple_module", name)
+                out = out + "{export_ref} = {name};\n"
+        return out
+    if trimmed.starts_with("export {") and trimmed.contains(" from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val resolved_ref = module_object_ref(resolved)
+        val open = find_text(trimmed, "{", 0)
+        val close = find_text(trimmed, "}", open + 1)
+        if open < 0 or close < 0:
+            return ""
+        val inner = trimmed.slice(open + 1, close)
+        var out = ""
+        for named in split_text(inner, ","):
+            val named_trimmed = named.trim()
+            if named_trimmed == "":
+                continue
+            val alias_idx = find_text(named_trimmed, " as ", 0)
+            if alias_idx >= 0:
+                val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+                val export_ref = module_prop_access("__simple_module", exported)
+                val source_ref = module_prop_access(resolved_ref, local)
+                out = out + "{export_ref} = {source_ref};\n"
+            else:
+                val local = normalize_module_binding_name(named_trimmed)
+                val export_ref = module_prop_access("__simple_module", local)
+                val source_ref = module_prop_access(resolved_ref, local)
+                out = out + "{export_ref} = {source_ref};\n"
+        return out
+    if trimmed.starts_with("export <fn:") and trimmed.contains(" from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val from_idx = find_text(trimmed, " from ", 0)
+        if from_idx < 0:
+            return ""
+        val inner = normalize_module_binding_name(trimmed.slice(7, from_idx).trim())
+        return transform_module_reexport_bindings(inner, module_object_ref(resolved))
+    if trimmed.starts_with("export * as ") and trimmed.contains(" from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val resolved_ref = module_object_ref(resolved)
+        val from_idx = find_text(trimmed, " from ", 0)
+        if from_idx < 0:
+            return ""
+        val exported = normalize_module_binding_name(trimmed.slice(12, from_idx).trim())
+        if exported == "":
+            return ""
+        val export_ref = module_prop_access("__simple_module", exported)
+        return "{export_ref} = {resolved_ref};\n"
+    if trimmed.starts_with("export * from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val resolved_ref = module_object_ref(resolved)
+        var out = ""
+        if val Some(dep_source) = pair_value_text(module_cache, resolved):
+            for exported in module_exported_names(dep_source, false):
+                val export_ref = module_prop_access("__simple_module", exported)
+                val source_ref = module_prop_access(resolved_ref, exported)
+                # Local (already-assigned) exports take precedence over star
+                # re-exports. The JS subset drops mutations made inside an `if`
+                # body, so use a logical-or assignment instead of an `if` guard:
+                # keep the existing value when present, else pull from the dep.
+                out = out + export_ref + " = " + export_ref + " || " + source_ref + ";\n"
+        return out
+    if trimmed.starts_with("export {"):
+        val open = find_text(trimmed, "{", 0)
+        val close = find_text(trimmed, "}", open + 1)
+        if open < 0 or close < 0:
+            return ""
+        val inner = trimmed.slice(open + 1, close)
+        var out = ""
+        for named in split_text(inner, ","):
+            val named_trimmed = named.trim()
+            if named_trimmed == "":
+                continue
+            val alias_idx = find_text(named_trimmed, " as ", 0)
+            if alias_idx >= 0:
+                val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+                val export_ref = module_prop_access("__simple_module", exported)
+                out = out + "{export_ref} = {local};\n"
+            else:
+                val local = normalize_module_binding_name(named_trimmed)
+                val export_ref = module_prop_access("__simple_module", local)
+                out = out + "{export_ref} = {local};\n"
+        return out
+    if trimmed.starts_with("export <fn:"):
+        val inner = normalize_module_binding_name(strip_trailing_semicolon(trimmed.slice(7, trimmed.len()).trim()))
+        return transform_local_module_export_bindings(inner)
+    trimmed + "\n"
+
+fn transform_module_reexport_bindings(inner: text, resolved: text) -> text:
+    var out = ""
+    for named in split_text(inner, ","):
+        val named_trimmed = named.trim()
+        if named_trimmed == "":
+            continue
+        val alias_idx = find_text(named_trimmed, " as ", 0)
+        if alias_idx >= 0:
+            val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+            val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+            val export_ref = module_prop_access("__simple_module", exported)
+            val source_ref = module_prop_access(resolved, local)
+            out = out + "{export_ref} = {source_ref};\n"
+        else:
+            val local = normalize_module_binding_name(named_trimmed)
+            val export_ref = module_prop_access("__simple_module", local)
+            val source_ref = module_prop_access(resolved, local)
+            out = out + "{export_ref} = {source_ref};\n"
+    out
+
+fn transform_local_module_export_bindings(inner: text) -> text:
+    var out = ""
+    for named in split_text(inner, ","):
+        val named_trimmed = named.trim()
+        if named_trimmed == "":
+            continue
+        val alias_idx = find_text(named_trimmed, " as ", 0)
+        if alias_idx >= 0:
+            val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+            val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+            val export_ref = module_prop_access("__simple_module", exported)
+            out = out + "{export_ref} = {local};\n"
+        else:
+            val local = normalize_module_binding_name(named_trimmed)
+            val export_ref = module_prop_access("__simple_module", local)
+            out = out + "{export_ref} = {local};\n"
+    out
+
+fn module_object_ref(module_url: text) -> text:
+    "__simple_module_" + module_symbol_suffix(module_url)
+
+fn module_prop_access(module_ref: text, exported_name: text) -> text:
+    val prop = normalize_module_binding_name(exported_name)
+    if prop == "":
+        return module_ref + ".undefined"
+    module_ref + "." + prop
+
+fn module_symbol_suffix(value: text) -> text:
+    var out = ""
+    var i = 0
+    val value_len = value.len()
+    while i < value_len:
+        val ch = value.slice(i, i + 1)
+        if is_module_symbol_char(ch):
+            out = out + ch
+        else:
+            out = out + "_"
+        i = i + 1
+    if out == "":
+        return "root"
+    out
+
+fn is_module_symbol_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or
+    (ch >= "A" and ch <= "Z") or
+    (ch >= "0" and ch <= "9") or
+    ch == "_"
+
+fn transform_simple_class_export(decl: text, class_name: text) -> text:
+    val body = extract_constructor_body(decl)
+    "function {class_name}() { {body} }\n"
+
+# Rewrite a `function name(args) { body }` declaration into an anonymous
+# function expression `function(args) { body }`. The browser-session JS subset
+# cannot reference a hoisted function declaration by bare name as a value (e.g.
+# `module.default = name`), but a function expression bound to a `var` works, so
+# module exports route every function/class through expression form.
+fn function_decl_to_expr(decl: text) -> text:
+    val open = find_text(decl, "(", 0)
+    if open < 0:
+        return decl
+    "function" + decl.slice(open, decl.len())
+
+# Constructor parameter list for a `class X { constructor(params) { body } }`.
+fn class_constructor_params(decl: text) -> text:
+    val ctor = find_text(decl, "constructor", 0)
+    if ctor < 0:
+        return ""
+    val open = find_text(decl, "(", ctor)
+    if open < 0:
+        return ""
+    val close = find_text(decl, ")", open + 1)
+    if close <= open:
+        return ""
+    decl.slice(open + 1, close)
+
+# Rewrite a `class X { constructor(params) { body } }` declaration into a
+# constructor function expression `function(params) { body }`. Methods beyond
+# the constructor are not represented; module class exports in the supported
+# subset are constructor-only.
+fn class_decl_to_function_expr(decl: text) -> text:
+    val params = class_constructor_params(decl)
+    val body = extract_constructor_body(decl)
+    "function(" + params + ") \{ " + body + " \}"
+
+fn extract_constructor_body(decl: text) -> text:
+    val ctor = find_text(decl, "constructor", 0)
+    if ctor < 0:
+        return ""
+    val open = find_text(decl, "{", ctor)
+    if open < 0:
+        return ""
+    val close = find_matching_brace(decl, open)
+    if close <= open:
+        return ""
+    decl.slice(open + 1, close)
+
+fn find_matching_brace(source: text, open: i32) -> i32:
+    var depth = 0
+    var quote = ""
+    var i = open
+    val source_len = source.len()
+    while i < source_len:
+        val ch = source.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+            i = i + 1
+            continue
+        if ch == "\"" or ch == "'" or ch == "`":
+            quote = ch
+        else if ch == "{":
+            depth = depth + 1
+        else if ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+# Local re-export of pair_value for [Pair<text,text>] to avoid circular import.
+# transform_export_statement needs pair_value from module_cache.
+fn pair_value_text(pairs: [Pair<text, text>], key: text) -> text?:
+    var i = 0
+    val pair_count = pairs.len()
+    while i < pair_count:
+        val pair = pairs[i]
+        if pair.first == key:
+            return Some(pair.second)
+        i = i + 1
+    nil

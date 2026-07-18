@@ -1,0 +1,865 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+REPORT_DATE="${REPORT_DATE:-$(date -u +%F)}"
+BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_visible_display_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_visible_display_evidence_${REPORT_DATE}.md}"
+ENV_PATH="$BUILD_DIR/evidence.env"
+BUILD_LOG="$BUILD_DIR/native-build.log"
+DISPLAY_HELP="$BUILD_DIR/qemu-display-help.txt"
+QEMU_STDOUT_LOG="$BUILD_DIR/qemu.stdout.log"
+QEMU_STDERR_LOG="$BUILD_DIR/qemu.stderr.log"
+QMP_LOG="$BUILD_DIR/qmp-screendump.log"
+SERIAL_LOG="${SIMPLEOS_WM_VISIBLE_SERIAL_LOG:-$BUILD_DIR/serial.log}"
+PPM_PATH="${SIMPLEOS_WM_VISIBLE_PPM:-$BUILD_DIR/qmp-visible-display.ppm}"
+QMP_SOCKET="${SIMPLEOS_WM_VISIBLE_QMP_SOCKET:-/tmp/simpleos_wm_visible_$$_qmp.sock}"
+KERNEL_PATH="${SIMPLEOS_WM_VISIBLE_KERNEL:-build/os/simpleos_wm_simple_web_check_32.elf}"
+ENTRY_PATH="examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+MARKER_TIMEOUT_SECS="${SIMPLEOS_WM_VISIBLE_MARKER_TIMEOUT_SECS:-90}"
+BUILD_BACKEND="${SIMPLEOS_WM_VISIBLE_BUILD_BACKEND:-${SIMPLE_OS_BUILD_BACKEND:-cranelift}}"
+QEMU_PID=""
+
+status=fail
+reason=not-run
+simple_bin_status=pass
+simple_bin_source=explicit-env
+display_backend="${SIMPLEOS_WM_VISIBLE_DISPLAY:-}"
+display_reason=not-selected
+build_status=not-run
+build_reason=not-run
+qemu_launch_status=not-run
+qemu_launch_reason=not-run
+serial_marker_status=not-run
+serial_marker_reason=not-run
+qmp_capture_status=not-run
+qmp_capture_reason=not-run
+qmp_capture_method=not-run
+ppm_validation_status=not-run
+ppm_validation_reason=not-run
+ppm_width=0
+ppm_height=0
+ppm_nonblack_pixels=0
+ppm_unique_colors=0
+ppm_taskbar_item_colored_pixels=0
+ppm_taskbar_item_runs=0
+ppm_taskbar_sampled_item_regions=0
+ppm_readable_text_matches=0
+ppm_readable_text_expected=0
+ppm_sha256=
+marker_state="probe:false web:false backend:false present:false mdi:false windows:false top:false taskbar:false html:false render:false"
+qemu_command=
+display_surface_status=not-run
+display_surface_reason=not-selected
+rust_seed_fallback_status=pass
+rust_seed_fallback_reason=selected-simple-binary-not-under-src-compiler-rust
+simple_bin_resolved=
+cleanup_status=not-run
+cleanup_reason=not-run
+cleanup_qemu_process=not-started
+cleanup_qmp_socket=not-created
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$BUILD_LOG" "$DISPLAY_HELP" "$QEMU_STDOUT_LOG" "$QEMU_STDERR_LOG" "$QMP_LOG" "$PPM_PATH" "$SERIAL_LOG" "$QMP_SOCKET"
+
+resolve_simple_path() {
+    path="$1"
+    depth=0
+    while [ -L "$path" ] && [ "$depth" -lt 20 ]; do
+        target="$(readlink "$path" 2>/dev/null || true)"
+        [ "$target" = "" ] && break
+        case "$target" in
+            /*) path="$target" ;;
+            *) path="$(dirname -- "$path")/$target" ;;
+        esac
+        depth=$((depth + 1))
+    done
+    dir="$(dirname -- "$path")"
+    base="$(basename -- "$path")"
+    if [ -d "$dir" ]; then
+        dir="$(CDPATH= cd -- "$dir" && pwd -P)"
+        printf '%s/%s\n' "$dir" "$base"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    simple_bin_source=missing-self-hosted
+    for candidate in "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            simple_bin_source="repo-self-hosted:$candidate"
+            break
+        fi
+    done
+else
+    simple_bin_source=explicit-env
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" != "" ]; then
+    simple_bin_resolved="$(resolve_simple_path "$SIMPLE_BIN")"
+fi
+if [ "$SIMPLE_BIN" = "" ]; then
+    simple_bin_status=missing
+elif is_rust_seed_simple "$SIMPLE_BIN" || is_rust_seed_simple "$simple_bin_resolved"; then
+    simple_bin_status=forbidden
+    rust_seed_fallback_status=fail
+    rust_seed_fallback_reason=selected-simple-binary-is-rust-seed
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    simple_bin_status=missing
+fi
+
+cleanup() {
+    cleanup_status=pass
+    cleanup_reason=pass
+    if [ -n "$QEMU_PID" ]; then
+        if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+            kill "$QEMU_PID" >/dev/null 2>&1 || true
+            wait "$QEMU_PID" >/dev/null 2>&1 || true
+            if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+                cleanup_status=fail
+                cleanup_reason=qemu-process-still-running
+                cleanup_qemu_process=still-running
+            else
+                cleanup_qemu_process=terminated
+            fi
+        else
+            wait "$QEMU_PID" >/dev/null 2>&1 || true
+            cleanup_qemu_process=already-exited
+        fi
+    else
+        cleanup_qemu_process=not-started
+    fi
+    if [ -e "$QMP_SOCKET" ]; then
+        rm -f "$QMP_SOCKET" >/dev/null 2>&1 || true
+        if [ -e "$QMP_SOCKET" ]; then
+            cleanup_status=fail
+            cleanup_reason=qmp-socket-remove-failed
+            cleanup_qmp_socket=present
+        else
+            cleanup_qmp_socket=removed
+        fi
+    else
+        cleanup_qmp_socket=absent
+    fi
+}
+
+field() {
+    sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -n 1
+}
+
+have_marker() {
+    [ -f "$SERIAL_LOG" ] && grep -aFq "$1" "$SERIAL_LOG"
+}
+
+refresh_marker_state() {
+    probe=false
+    web=false
+    backend=false
+    present=false
+    mdi=false
+    windows=false
+    top=false
+    taskbar=false
+    html=false
+    render=false
+    have_marker "[GUI] mmio-probe-painted" && probe=true
+    have_marker "[web-demo] renderer=shared_mdi_framebuffer_scene" && web=true
+    have_marker "[backend-evidence] selected=qemu-framebuffer-cpu-simd renderer=shared_mdi_framebuffer_scene fallback=none" && backend=true
+    have_marker "[backend-evidence] present=direct-mmio-commit source=shared_mdi_framebuffer_scene" && present=true
+    have_marker "[mdi-demo] shared-mdi-ready surfaces=5" && mdi=true
+    have_marker "[mdi-demo] windows-ready count=5" && windows=true
+    have_marker "[mdi-demo] top-command-lane-ready" && top=true
+    have_marker "[mdi-demo] taskbar-ready" && taskbar=true
+    have_marker "[mdi-demo] html-renderable window=browser renderer=shared_mdi_framebuffer_scene" && html=true
+    have_marker "[integrated-demo] render-ready" && render=true
+    marker_state="probe:$probe web:$web backend:$backend present:$present mdi:$mdi windows:$windows top:$top taskbar:$taskbar html:$html render:$render"
+    [ "$probe" = true ] && [ "$web" = true ] && [ "$backend" = true ] && [ "$present" = true ] && [ "$mdi" = true ] && [ "$windows" = true ] && [ "$top" = true ] && [ "$taskbar" = true ] && [ "$html" = true ] && [ "$render" = true ]
+}
+
+write_outputs() {
+    emit_env="${1:-1}"
+    {
+        echo "simpleos_wm_visible_display_status=$status"
+        echo "simpleos_wm_visible_display_reason=$reason"
+        echo "simpleos_wm_visible_display_simple_bin=$SIMPLE_BIN"
+        echo "simpleos_wm_visible_display_simple_bin_resolved=$simple_bin_resolved"
+        echo "simpleos_wm_visible_display_simple_bin_source=$simple_bin_source"
+        echo "simpleos_wm_visible_display_simple_bin_status=$simple_bin_status"
+        echo "simpleos_wm_visible_display_rust_seed_fallback_status=$rust_seed_fallback_status"
+        echo "simpleos_wm_visible_display_rust_seed_fallback_reason=$rust_seed_fallback_reason"
+        echo "simpleos_wm_visible_display_qemu_bin=$QEMU_BIN"
+        echo "simpleos_wm_visible_display_backend=$display_backend"
+        echo "simpleos_wm_visible_display_backend_reason=$display_reason"
+        echo "simpleos_wm_visible_display_surface_status=$display_surface_status"
+        echo "simpleos_wm_visible_display_surface_reason=$display_surface_reason"
+        echo "simpleos_wm_visible_display_kernel=$KERNEL_PATH"
+        echo "simpleos_wm_visible_display_build_status=$build_status"
+        echo "simpleos_wm_visible_display_build_reason=$build_reason"
+        echo "simpleos_wm_visible_display_qemu_launch_status=$qemu_launch_status"
+        echo "simpleos_wm_visible_display_qemu_launch_reason=$qemu_launch_reason"
+        echo "simpleos_wm_visible_display_qemu_pid=$QEMU_PID"
+        echo "simpleos_wm_visible_display_qmp_socket=$QMP_SOCKET"
+        echo "simpleos_wm_visible_display_serial_log=$SERIAL_LOG"
+        echo "simpleos_wm_visible_display_stderr_log=$QEMU_STDERR_LOG"
+        echo "simpleos_wm_visible_display_ppm=$PPM_PATH"
+        echo "simpleos_wm_visible_display_marker_status=$serial_marker_status"
+        echo "simpleos_wm_visible_display_marker_reason=$serial_marker_reason"
+        echo "simpleos_wm_visible_display_marker_state=$marker_state"
+        echo "simpleos_wm_visible_display_qmp_capture_status=$qmp_capture_status"
+        echo "simpleos_wm_visible_display_qmp_capture_reason=$qmp_capture_reason"
+        echo "simpleos_wm_visible_display_qmp_capture_method=$qmp_capture_method"
+        echo "simpleos_wm_visible_display_ppm_validation_status=$ppm_validation_status"
+        echo "simpleos_wm_visible_display_ppm_validation_reason=$ppm_validation_reason"
+        echo "simpleos_wm_visible_display_ppm_width=$ppm_width"
+        echo "simpleos_wm_visible_display_ppm_height=$ppm_height"
+        echo "simpleos_wm_visible_display_ppm_nonblack_pixels=$ppm_nonblack_pixels"
+        echo "simpleos_wm_visible_display_ppm_unique_colors=$ppm_unique_colors"
+        echo "simpleos_wm_visible_display_ppm_taskbar_item_colored_pixels=$ppm_taskbar_item_colored_pixels"
+        echo "simpleos_wm_visible_display_ppm_taskbar_item_runs=$ppm_taskbar_item_runs"
+        echo "simpleos_wm_visible_display_ppm_taskbar_sampled_item_regions=$ppm_taskbar_sampled_item_regions"
+        echo "simpleos_wm_visible_display_ppm_readable_text_matches=$ppm_readable_text_matches"
+        echo "simpleos_wm_visible_display_ppm_readable_text_expected=$ppm_readable_text_expected"
+        echo "simpleos_wm_visible_display_ppm_sha256=$ppm_sha256"
+        echo "simpleos_wm_visible_display_cleanup_status=$cleanup_status"
+        echo "simpleos_wm_visible_display_cleanup_reason=$cleanup_reason"
+        echo "simpleos_wm_visible_display_cleanup_qemu_process=$cleanup_qemu_process"
+        echo "simpleos_wm_visible_display_cleanup_qmp_socket=$cleanup_qmp_socket"
+        echo "simpleos_wm_visible_display_report=$REPORT_PATH"
+        echo "simpleos_wm_visible_display_qemu_command=$qemu_command"
+    } >"$ENV_PATH"
+    {
+        echo "# SimpleOS WM Visible Display Evidence"
+        echo
+        echo "- date: $REPORT_DATE"
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- Simple binary: $SIMPLE_BIN"
+        echo "- Simple binary resolved: $simple_bin_resolved"
+        echo "- no Rust seed fallback: $rust_seed_fallback_status ($rust_seed_fallback_reason; source=$simple_bin_source; status=$simple_bin_status)"
+        echo "- display backend: $display_backend ($display_reason)"
+        echo "- real display surface: $display_surface_status ($display_surface_reason)"
+        echo "- kernel: $KERNEL_PATH"
+        echo "- serial markers: $serial_marker_status ($serial_marker_reason)"
+        echo "- shared-renderer serial evidence: web-demo renderer, backend selected, direct-mmio present, html renderable, render-ready"
+        echo "- marker state: $marker_state"
+        echo "- QMP capture: $qmp_capture_status ($qmp_capture_reason; method=$qmp_capture_method)"
+        echo "- PPM validation: $ppm_validation_status ($ppm_validation_reason)"
+        echo "- PPM: $PPM_PATH ${ppm_width}x${ppm_height}, nonblack=$ppm_nonblack_pixels, unique_colors=$ppm_unique_colors"
+        echo "- taskbar/item pixels: colored=$ppm_taskbar_item_colored_pixels, runs=$ppm_taskbar_item_runs, sampled_regions=$ppm_taskbar_sampled_item_regions"
+        echo "- readable text glyph matches: $ppm_readable_text_matches / $ppm_readable_text_expected"
+        echo "- cleanup: $cleanup_status ($cleanup_reason; qemu=$cleanup_qemu_process, qmp_socket=$cleanup_qmp_socket)"
+        echo "- serial log: $SERIAL_LOG"
+        echo "- QEMU stderr: $QEMU_STDERR_LOG"
+        echo "- command: \`$qemu_command\`"
+    } >"$REPORT_PATH"
+    if [ "$emit_env" = "1" ]; then
+        cat "$ENV_PATH"
+    fi
+}
+
+trap 'cleanup; write_outputs 0' EXIT
+trap 'cleanup; write_outputs 0; exit 130' INT
+trap 'cleanup; write_outputs 0; exit 143' TERM
+
+fail_now() {
+    reason="$1"
+    status=fail
+    cleanup
+    trap - EXIT INT TERM
+    write_outputs
+    exit 1
+}
+
+if [ "$simple_bin_status" = "forbidden" ]; then
+    fail_now "simple-bin-forbidden"
+fi
+if [ "$simple_bin_status" != "pass" ]; then
+    fail_now "simple-bin-$simple_bin_status"
+fi
+if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    fail_now "qemu-bin-missing"
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    fail_now "python3-missing"
+fi
+if ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    fail_now "grub-mkstandalone-not-found"
+fi
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+if [ ! -f "$OVMF_CODE" ]; then
+    fail_now "ovmf-code-not-found"
+fi
+if [ ! -f "$OVMF_VARS_SRC" ]; then
+    fail_now "ovmf-vars-not-found"
+fi
+
+display_supported() {
+    grep -Eq "(^|[[:space:]])$1([[:space:],]|$)" "$DISPLAY_HELP"
+}
+
+if [ "$display_backend" = "" ]; then
+    if ! "$QEMU_BIN" -display help >"$DISPLAY_HELP" 2>&1; then
+        display_reason=display-help-failed
+        fail_now "qemu-display-help-failed"
+    fi
+    host_os="$(uname -s)"
+    if [ "$host_os" = "Darwin" ] && display_supported cocoa; then
+        display_backend=cocoa
+        display_reason=macos-cocoa-preferred
+    elif display_supported gtk; then
+        display_backend=gtk
+        display_reason=gtk-supported
+    elif display_supported sdl; then
+        display_backend=sdl
+        display_reason=sdl-supported
+    elif display_supported cocoa; then
+        display_backend=cocoa
+        display_reason=cocoa-supported
+    else
+        display_reason=no-real-display-backend
+        fail_now "real-display-backend-unavailable"
+    fi
+else
+    display_reason=explicit-env
+fi
+
+case "$display_backend" in
+    none|none,*|curses|curses,*)
+        fail_now "display-backend-not-real-surface"
+        ;;
+esac
+display_surface_status=pass
+display_surface_reason="real-display-backend-$display_backend"
+
+objcopy_prefix() {
+    for prefix in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/lib/llvm-17/bin; do
+        if [ -x "$prefix/llvm-objcopy" ]; then
+            printf '%s\n' "$prefix"
+            return 0
+        fi
+    done
+    if command -v llvm-objcopy >/dev/null 2>&1; then
+        dirname "$(command -v llvm-objcopy)"
+        return 0
+    fi
+    return 1
+}
+
+write_log_config() {
+    mkdir -p build/os/generated/generated
+    rm -f build/os/generated/lib/simpleos_log_config.spl
+    if [ "${SIMPLE_OS_LOG_MODE:-off}" = "on" ]; then
+        compiled=true
+    else
+        compiled=false
+    fi
+    cat >build/os/generated/generated/simpleos_log_config.spl <<EOF
+val SIMPLEOS_LOG_COMPILED: bool = $compiled
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+EOF
+}
+
+need_build=0
+if [ "${SIMPLEOS_WM_VISIBLE_SKIP_BUILD:-0}" = "1" ]; then
+    build_status=skipped
+    build_reason=skip-build-env
+elif [ ! -f "$KERNEL_PATH" ]; then
+    need_build=1
+elif [ "$ENTRY_PATH" -nt "$KERNEL_PATH" ]; then
+    need_build=1
+fi
+
+if [ "$need_build" = "1" ]; then
+    obj_prefix="$(objcopy_prefix || true)"
+    if [ "$obj_prefix" = "" ]; then
+        build_status=fail
+        build_reason=llvm-objcopy-missing
+        fail_now "llvm-objcopy-missing"
+    fi
+    write_log_config
+    set +e
+    PATH="$obj_prefix:$PATH" \
+    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_LIB="$ROOT_DIR/src" \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    SIMPLE_OS_LOG_MODE="${SIMPLE_OS_LOG_MODE:-off}" \
+    SIMPLE_BINARY="$SIMPLE_BIN" \
+        "$SIMPLE_BIN" native-build \
+            --source build/os/generated \
+            --source src/os \
+            --source src/lib \
+            --source examples/09_embedded/simple_os \
+            --backend "$BUILD_BACKEND" \
+            --cpu x86-64-v1 \
+            --opt-level=none \
+            --log "${SIMPLE_OS_LOG_MODE:-off}" \
+            --timeout "${SIMPLEOS_WM_VISIBLE_BUILD_TIMEOUT_SECS:-870}" \
+            --entry-closure \
+            --entry "$ENTRY_PATH" \
+            --target x86_64-unknown-none \
+            -o "$KERNEL_PATH" \
+            --linker-script "$LINKER_SCRIPT" >"$BUILD_LOG" 2>&1
+    build_code=$?
+    set -e
+    if [ "$build_code" -ne 0 ] || [ ! -f "$KERNEL_PATH" ]; then
+        build_status=fail
+        build_reason=native-build-failed
+        fail_now "native-build-failed"
+    fi
+    build_status=pass
+    build_reason=built
+else
+    build_status=pass
+    build_reason=existing-kernel
+fi
+
+# --- Package the kernel as a self-contained UEFI boot app (OVMF pflash) -----
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path AND `isa-debug-exit`. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84). isa-debug-exit is dropped
+# entirely below (grep confirms this script never reads its exit code).
+UEFI_BUILD="$BUILD_DIR/uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM visible-display (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+set +e
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_PATH"
+grub_mkstandalone_code=$?
+set -e
+if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+    fail_now "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+fi
+
+qemu_command="$QEMU_BIN -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:$SERIAL_LOG -display $display_backend -no-reboot -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$OVMF_VARS -drive file=fat:rw:$ESP,format=raw,id=esp,if=none -device virtio-blk-pci,drive=esp,bootindex=0 -vga std -qmp unix:$QMP_SOCKET,server,nowait"
+set +e
+"$QEMU_BIN" \
+    -no-user-config \
+    -monitor none \
+    -net none \
+    -machine q35 \
+    -cpu qemu64 \
+    -m 2G \
+    -serial "file:$SERIAL_LOG" \
+    -display "$display_backend" \
+    -no-reboot \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -vga std \
+    -qmp "unix:$QMP_SOCKET,server,nowait" >"$QEMU_STDOUT_LOG" 2>"$QEMU_STDERR_LOG" &
+QEMU_PID=$!
+set -e
+qemu_launch_status=pass
+qemu_launch_reason=spawned
+
+i=0
+while [ ! -S "$QMP_SOCKET" ] && [ "$i" -lt 100 ]; do
+    if ! kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        qemu_launch_status=fail
+        qemu_launch_reason=exited-before-qmp
+        fail_now "qemu-exited-before-qmp"
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+if [ ! -S "$QMP_SOCKET" ]; then
+    qemu_launch_status=fail
+    qemu_launch_reason=qmp-socket-timeout
+    fail_now "qmp-socket-timeout"
+fi
+
+# --- Migration-correctness ladder (isolates OVMF boot-path success from
+# kernel render correctness, which is tracked separately) ---
+rung() { grep -aq "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
+
+waited=0
+while [ "$waited" -le "$MARKER_TIMEOUT_SECS" ]; do
+    if refresh_marker_state; then
+        serial_marker_status=pass
+        serial_marker_reason=pass
+        break
+    fi
+    if ! kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        serial_marker_status=fail
+        serial_marker_reason=qemu-exited-before-markers
+        fail_now "qemu-exited-before-markers"
+    fi
+    waited=$((waited + 1))
+    sleep 1
+done
+if [ "$serial_marker_status" != "pass" ]; then
+    refresh_marker_state || true
+    serial_marker_status=fail
+    serial_marker_reason=marker-timeout
+    fail_now "serial-marker-timeout"
+fi
+
+set +e
+python3 - "$QMP_SOCKET" "$PPM_PATH" >"$QMP_LOG" 2>&1 <<'PY'
+import hashlib
+import json
+import os
+import socket
+import sys
+import time
+
+sock_path, ppm_path = sys.argv[1], sys.argv[2]
+
+def emit(k, v):
+    print(f"{k}={v}")
+
+def send(f, obj):
+    f.write(json.dumps(obj).encode("utf-8") + b"\n")
+    f.flush()
+
+def recv_response(f, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        line = f.readline()
+        if not line:
+            break
+        msg = json.loads(line.decode("utf-8"))
+        if "return" in msg or "error" in msg:
+            return msg
+    return {"error": {"class": "Timeout", "desc": "timed out waiting for QMP response"}}
+
+def wait_ppm(path):
+    for _ in range(100):
+        if os.path.exists(path) and os.path.getsize(path) > 32:
+            return True
+        time.sleep(0.1)
+    return False
+
+def read_token(data, index):
+    n = len(data)
+    while index < n and data[index] in b" \t\r\n":
+        index += 1
+    while index < n and data[index] == ord("#"):
+        while index < n and data[index] not in b"\r\n":
+            index += 1
+        while index < n and data[index] in b" \t\r\n":
+            index += 1
+    start = index
+    while index < n and data[index] not in b" \t\r\n":
+        index += 1
+    return data[start:index].decode("ascii"), index
+
+def parse_ppm(path):
+    data = open(path, "rb").read()
+    magic, idx = read_token(data, 0)
+    width_s, idx = read_token(data, idx)
+    height_s, idx = read_token(data, idx)
+    max_s, idx = read_token(data, idx)
+    while idx < len(data) and data[idx] in b" \t\r\n":
+        idx += 1
+    if magic != "P6":
+        raise ValueError("invalid-magic")
+    width = int(width_s)
+    height = int(height_s)
+    maxv = int(max_s)
+    if maxv != 255:
+        raise ValueError("unsupported-maxval")
+    pix = data[idx:]
+    expected = width * height * 3
+    if len(pix) < expected:
+        raise ValueError("truncated-pixels")
+    return width, height, pix[:expected], hashlib.sha256(data).hexdigest()
+
+def near(rgb, target, tol=10):
+    return all(abs(rgb[i] - target[i]) <= tol for i in range(3))
+
+FONT_ROWS_PACKED = [
+    18842895918, 32801094206, 15620129326, 32801080894, 33840200223, 17734072863, 15621407278, 18842451505,
+    15170932878, 13507823687, 18879369809, 33840185872, 18842572657, 18842507057, 15621211694, 17734518334,
+    14585218606, 18879563326, 32247333391, 4433514655, 15621211697, 4648912433, 19182306865, 18593485137,
+    4433514833, 33831389247, 15629733422, 15170933124, 33831454254, 15604060255, 2247698626, 15603923487,
+    15621636358, 8866891839, 15621113390, 12953568814, 0, 4294967296, 8724152320, 134217856,
+    8724152448, 4295102596, 4299295278, 1015808, 33285996544, 2290360450, 8726317192, 15309480206,
+    15101659214, 17456826433, 1143087376, 8324, 10570, 139432064, 32537600, 368389098,
+    120853337, 455782988, 487282222, 5014436516, 2290622594, 8726284424, 521635264, 1025047056,
+    487080384, 521714721, 487572928, 277117190, 471320032, 588839440, 474099716, 421599234,
+    625758800, 474091660, 588961600, 588826560, 488162752, 554649536, 35112416, 554197696,
+    1008157152, 211035080, 456705568, 145278496, 358270496, 581052960, 471320096, 1048710112,
+]
+
+def glyph_index_for_code(code):
+    if 65 <= code <= 90:
+        return code - 65
+    if 48 <= code <= 57:
+        return 26 + (code - 48)
+    mapping = {32: 36, 46: 37, 44: 38, 58: 39, 59: 40, 33: 41, 63: 42, 45: 43,
+               95: 44, 40: 45, 41: 46, 91: 47, 93: 48, 47: 49, 92: 50,
+               39: 51, 34: 52, 43: 53, 61: 54, 35: 55, 37: 56, 38: 57,
+               64: 58, 42: 59, 60: 60, 62: 61}
+    if code in mapping:
+        return mapping[code]
+    if 97 <= code <= 122:
+        return 62 + (code - 97)
+    return -1
+
+def glyph_row_bits(gi, row):
+    packed = FONT_ROWS_PACKED[gi] if 0 <= gi < len(FONT_ROWS_PACKED) else 33874822719
+    return (packed >> (row * 5)) & 31
+
+def is_bright_text(rgb):
+    return rgb[0] > 210 and rgb[1] > 210 and rgb[2] > 210
+
+def rgb_at(pix, width, height, x, y):
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return (0, 0, 0)
+    off = (y * width + x) * 3
+    return (pix[off], pix[off + 1], pix[off + 2])
+
+def count_expected_title_glyph_matches(pix, width, height):
+    title_runs = [
+        (58 + 66, 76 + 6, "Terminal"),
+        (276 + 66, 120 + 6, "Editor"),
+        (150 + 66, 256 + 6, "Browser"),
+        (486 + 66, 250 + 6, "File Manager"),
+        (642 + 66, 82 + 6, "Calculator"),
+    ]
+    expected = 0
+    matches = 0
+    for base_x, base_y, text in title_runs:
+        cx = base_x
+        for ch in text:
+            gi = glyph_index_for_code(ord(ch))
+            for row in range(7):
+                bits = glyph_row_bits(gi, row)
+                for col in range(5):
+                    if bits & (1 << (4 - col)):
+                        for dy in range(2):
+                            for dx in range(2):
+                                expected += 1
+                                if is_bright_text(rgb_at(pix, width, height, cx + col * 2 + dx, base_y + row * 2 + 1 + dy)):
+                                    matches += 1
+            cx += 12
+    return matches, expected
+
+def validate_ppm(path):
+    width, height, pix, sha = parse_ppm(path)
+    total = width * height
+    unique = set()
+    nonblack = 0
+    for i in range(0, len(pix), 3):
+        rgb = (pix[i], pix[i + 1], pix[i + 2])
+        unique.add(rgb)
+        if max(rgb) > 4:
+            nonblack += 1
+
+    taskbar_bg = (21, 26, 32)
+    accent = (37, 99, 235)
+    title_unfocused = (37, 49, 58)
+    host_body = (30, 41, 59)
+    title_focused = (47, 128, 237)
+    item_targets = (accent, title_unfocused, host_body, title_focused)
+    y0 = max(0, height - 70)
+    dock_y = max(0, height - 62)
+    item_y0 = min(height, dock_y + 4)
+    item_y1 = min(height, dock_y + 40)
+    taskbar_bg_pixels = 0
+    item_pixels = 0
+    col_has_item = [False] * width
+    for y in range(y0, height):
+        row = y * width * 3
+        for x in range(width):
+            off = row + x * 3
+            rgb = (pix[off], pix[off + 1], pix[off + 2])
+            if near(rgb, taskbar_bg):
+                taskbar_bg_pixels += 1
+            if item_y0 <= y < item_y1 and any(near(rgb, target) for target in item_targets):
+                item_pixels += 1
+                col_has_item[x] = True
+
+    runs = 0
+    run_len = 0
+    min_run = max(8, width // 128)
+    for has in col_has_item + [False]:
+        if has:
+            run_len += 1
+        else:
+            if run_len >= min_run:
+                runs += 1
+            run_len = 0
+
+    sampled_regions = 0
+    expected_count = 5
+    if width > 120 and height > 100:
+        item_w = min((width - 80) // expected_count, 104)
+        dock_w = item_w * expected_count + 20
+        start = (width - dock_w) // 2 + 10
+        for idx in range(expected_count):
+            x0 = max(0, start + idx * item_w + 2)
+            x1 = min(width, start + idx * item_w + item_w - 2)
+            colored = 0
+            area = max(1, (x1 - x0) * max(1, item_y1 - item_y0))
+            for y in range(item_y0, item_y1):
+                row = y * width * 3
+                for x in range(x0, x1):
+                    off = row + x * 3
+                    rgb = (pix[off], pix[off + 1], pix[off + 2])
+                    if any(near(rgb, target) for target in item_targets):
+                        colored += 1
+            if colored >= max(32, area // 5):
+                sampled_regions += 1
+    text_matches, text_expected = count_expected_title_glyph_matches(pix, width, height)
+
+    reasons = []
+    if width < 320 or height < 200:
+        reasons.append("unexpected-size")
+    if nonblack < max(1024, total // 20):
+        reasons.append("nonblank-threshold")
+    if len(unique) < 8:
+        reasons.append("unique-color-threshold")
+    if taskbar_bg_pixels < max(256, width * 8):
+        reasons.append("taskbar-bg-missing")
+    if item_pixels < max(250, width):
+        reasons.append("taskbar-item-colored-pixels-missing")
+    if sampled_regions < 3 and runs < 3:
+        reasons.append("taskbar-item-runs-missing")
+    if text_expected < 200 or text_matches * 100 < text_expected * 60:
+        reasons.append("readable-title-glyphs-missing")
+
+    emit("ppm_width", width)
+    emit("ppm_height", height)
+    emit("ppm_nonblack_pixels", nonblack)
+    emit("ppm_unique_colors", len(unique))
+    emit("ppm_taskbar_bg_pixels", taskbar_bg_pixels)
+    emit("ppm_taskbar_item_colored_pixels", item_pixels)
+    emit("ppm_taskbar_item_runs", runs)
+    emit("ppm_taskbar_sampled_item_regions", sampled_regions)
+    emit("ppm_readable_text_matches", text_matches)
+    emit("ppm_readable_text_expected", text_expected)
+    emit("ppm_sha256", sha)
+    if reasons:
+        emit("ppm_validation_status", "fail")
+        emit("ppm_validation_reason", ",".join(reasons))
+        return 6
+    emit("ppm_validation_status", "pass")
+    emit("ppm_validation_reason", "pass")
+    return 0
+
+try:
+    if os.path.exists(ppm_path):
+        os.unlink(ppm_path)
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    s.connect(sock_path)
+    f = s.makefile("rwb", buffering=0)
+    f.readline()
+    send(f, {"execute": "qmp_capabilities"})
+    cap = recv_response(f)
+    if "error" in cap:
+        emit("qmp_capture_status", "fail")
+        emit("qmp_capture_reason", "qmp-capabilities-failed")
+        sys.exit(2)
+
+    method = "human-monitor-command"
+    send(f, {"execute": "human-monitor-command", "arguments": {"command-line": f"screendump {ppm_path}"}})
+    resp = recv_response(f, 10.0)
+    if "error" in resp:
+        method = "qmp-screendump"
+        send(f, {"execute": "screendump", "arguments": {"filename": ppm_path}})
+        resp = recv_response(f, 10.0)
+    if "error" in resp:
+        emit("qmp_capture_status", "fail")
+        emit("qmp_capture_reason", resp["error"].get("class", "screendump-failed"))
+        emit("qmp_capture_method", method)
+        sys.exit(3)
+    if not wait_ppm(ppm_path):
+        emit("qmp_capture_status", "fail")
+        emit("qmp_capture_reason", "ppm-timeout")
+        emit("qmp_capture_method", method)
+        sys.exit(4)
+    emit("qmp_capture_status", "pass")
+    emit("qmp_capture_reason", "pass")
+    emit("qmp_capture_method", method)
+    sys.exit(validate_ppm(ppm_path))
+except Exception as exc:
+    emit("qmp_capture_status", "fail")
+    emit("qmp_capture_reason", str(exc).replace(" ", "-"))
+    sys.exit(5)
+PY
+qmp_code=$?
+set -e
+cat "$QMP_LOG"
+
+qmp_capture_status="$(field qmp_capture_status "$QMP_LOG")"
+qmp_capture_reason="$(field qmp_capture_reason "$QMP_LOG")"
+qmp_capture_method="$(field qmp_capture_method "$QMP_LOG")"
+ppm_validation_status="$(field ppm_validation_status "$QMP_LOG")"
+ppm_validation_reason="$(field ppm_validation_reason "$QMP_LOG")"
+ppm_width="$(field ppm_width "$QMP_LOG")"
+ppm_height="$(field ppm_height "$QMP_LOG")"
+ppm_nonblack_pixels="$(field ppm_nonblack_pixels "$QMP_LOG")"
+ppm_unique_colors="$(field ppm_unique_colors "$QMP_LOG")"
+ppm_taskbar_item_colored_pixels="$(field ppm_taskbar_item_colored_pixels "$QMP_LOG")"
+ppm_taskbar_item_runs="$(field ppm_taskbar_item_runs "$QMP_LOG")"
+ppm_taskbar_sampled_item_regions="$(field ppm_taskbar_sampled_item_regions "$QMP_LOG")"
+ppm_readable_text_matches="$(field ppm_readable_text_matches "$QMP_LOG")"
+ppm_readable_text_expected="$(field ppm_readable_text_expected "$QMP_LOG")"
+ppm_sha256="$(field ppm_sha256 "$QMP_LOG")"
+
+if [ "$qmp_code" -ne 0 ] || [ "$qmp_capture_status" != "pass" ]; then
+    fail_now "${qmp_capture_reason:-qmp-capture-failed}"
+fi
+if [ "$ppm_validation_status" != "pass" ]; then
+    fail_now "${ppm_validation_reason:-ppm-validation-failed}"
+fi
+
+cleanup
+trap - EXIT INT TERM
+if [ "$cleanup_status" != "pass" ]; then
+    status=fail
+    reason=cleanup-failed
+    write_outputs
+    exit 1
+fi
+status=pass
+reason=pass
+write_outputs
+exit 0

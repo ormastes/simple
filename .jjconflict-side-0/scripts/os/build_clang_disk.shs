@@ -1,0 +1,245 @@
+#!/bin/sh
+# build_clang_disk.shs — compile /hello.c to an ELF object inside SimpleOS.
+#
+# 1. Build the FS-exec kernel with a functional self-hosted Simple compiler.
+# 2. Build a FAT32 NVMe image whose /FSEXEC.ELF is the 119 MB static
+#    clang_static: fsexec_mkimg_big.spl writes the structural prefix, then this
+#    script appends the raw ELF payload (at cluster 3, contiguous) and truncates
+#    to the full image size.
+# 3. Boot QEMU q35 with the image on NVMe, capture serial. The kernel streams
+#    clang into ring-3, runs `-cc1 -emit-obj`, and dumps /hello.o over serial.
+#
+# Env knobs: QEMU_MEM (default 4G), QEMU_TIMEOUT (default 180s).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+COMPILER="${SIMPLE_BUILD_COMPILER:-}"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_elf_exec_smoke_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+OUT_DIR="build/os/elfexec"
+KERNEL_OUTPUT="$OUT_DIR/fsexec_smoke.elf"
+CLANG_BIN="build/os/clang_static/bin/clang_static"
+IMG="$OUT_DIR/fat32-clang.img"
+LINK_IMG="$OUT_DIR/fat32-clang-link.img"
+PREFIX="$OUT_DIR/fat32-clang-prefix.bin"
+IMAGE_WRITER="$OUT_DIR/fsexec_mkimg_big"
+SERIAL_LOG="$OUT_DIR/clang_run.log"
+LINK_LOG="$OUT_DIR/clang_link_run.log"
+QEMU_MEM="${QEMU_MEM:-4G}"
+QEMU_TIMEOUT="${QEMU_TIMEOUT:-180}"
+QEMU_CPU="${QEMU_CPU:-qemu64}"
+
+fail() {
+    echo "[clang-disk] FAIL: $*" >&2
+    exit 1
+}
+
+run_guest() {
+    guest_img="$1"
+    guest_log="$2"
+    guest_phase="$3"
+    expected_rc="$4"
+    rm -f "$guest_log"
+    echo "[clang-disk] launching QEMU phase=$guest_phase (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s)"
+    set +e
+    timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+        -no-user-config -monitor none -net none -nographic -no-reboot \
+        -machine q35 -cpu "$QEMU_CPU" -m "$QEMU_MEM" \
+        -kernel "$KERNEL_OUTPUT" \
+        -serial "file:$guest_log" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$guest_img,if=none,id=nvme0ns1,format=raw" \
+        -device "nvme,id=nvme0,serial=SIMPLEOSCLANG" \
+        -device "nvme-ns,drive=nvme0ns1,bus=nvme0,nsid=1"
+    guest_rc=$?
+    set -e
+    echo "[clang-disk] qemu phase=$guest_phase exit rc=$guest_rc"
+    tail -60 "$guest_log" 2>/dev/null || echo "(no serial log)"
+    [ "$guest_rc" -eq "$expected_rc" ] \
+        || fail "QEMU phase=$guest_phase exit rc=$guest_rc expected=$expected_rc"
+}
+
+mkdir -p "$OUT_DIR" build/os/generated/generated
+
+[ -n "$COMPILER" ] || fail "set SIMPLE_BUILD_COMPILER to a proven self-hosted compiler"
+[ -x "$COMPILER" ] || fail "missing self-hosted compiler: $COMPILER"
+PROVENANCE="$(SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" "$COMPILER" --version 2>&1 || true)"
+case "$COMPILER:$PROVENANCE" in
+    *compiler_rust*|*simple_seed*|*"bootstrap seed only"*)
+        fail "refusing Rust bootstrap seed"
+        ;;
+esac
+NATIVE_HELP="$("$COMPILER" native-build --help 2>&1 || true)"
+printf '%s\n' "$NATIVE_HELP" | grep -q -- '--target' || fail "compiler lacks native-build --target: $COMPILER"
+command -v nm >/dev/null 2>&1 || fail "nm is required for compiler provenance"
+WEAK_FALLBACKS="$(nm "$COMPILER" | awk '
+    $2 == "W" && $3 !~ /^__module_init_/ &&
+    $3 !~ /^(__ashlti3|__floattidf|__lshrti3|__powidf2|__udivti3|cbrt|ceilf|floorf|fma|fmaf|fmax|fmaxf|fmin|fminf|fmod|fmodf|rint|rintf|round|roundf|trunc|truncf)$/ { print $3 }
+')"
+[ -z "$WEAK_FALLBACKS" ] || fail "compiler contains weak fallback definitions: $WEAK_FALLBACKS"
+[ "${SKIP_KERNEL:-0}" = "0" ] || fail "SKIP_KERNEL is forbidden in the live proof"
+[ "${SKIP_IMG:-0}" = "0" ] || fail "SKIP_IMG is forbidden in the live proof"
+
+echo "[clang-disk] building image writer -> $IMAGE_WRITER"
+rm -f "$IMAGE_WRITER"
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$COMPILER" native-build \
+    --source scripts/os --source src/lib --entry-closure \
+    --entry scripts/os/fsexec_mkimg_big.spl -o "$IMAGE_WRITER" \
+    || fail "image writer native-build failed"
+[ -x "$IMAGE_WRITER" ] || fail "image writer build produced no executable"
+
+run_image_writer() {
+    GEN_OUTPUT="$("$IMAGE_WRITER" 2>&1)" || fail "image generator failed"
+    printf '%s\n' "$GEN_OUTPUT" | grep -E 'fsexec_mkimg_big'
+    TOTAL="$(printf '%s\n' "$GEN_OUTPUT" | sed -n 's/.* total_bytes=\([0-9][0-9]*\).*/\1/p')"
+    [ -n "$TOTAL" ] || fail "image generator omitted total_bytes"
+    printf '%s\n' "$TOTAL" > "$OUT_DIR/fat32-clang-total.txt"
+}
+
+# ---- 1. Kernel -----------------------------------------------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/local/opt/llvm/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    echo "[clang-disk] building kernel -> $KERNEL_OUTPUT"
+    rm -f "$KERNEL_OUTPUT"   # never run a stale kernel if this link fails
+    BUILD_LOG="$OUT_DIR/fsexec_smoke_build.log"
+    if ! SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+        SIMPLE_NATIVE_CPU=x86-64-v1 \
+        SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+        PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$COMPILER" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --backend cranelift --opt-level=aggressive --log off \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" >"$BUILD_LOG" 2>&1; then
+        tail -20 "$BUILD_LOG"
+        fail "kernel native-build failed"
+    fi
+    tail -8 "$BUILD_LOG"
+    [ -s "$KERNEL_OUTPUT" ] || fail "kernel build produced no ELF"
+fi
+KERNEL_SHA="$(sha256sum "$KERNEL_OUTPUT" | awk '{print $1}')"
+echo "[clang-disk] artifact kernel=$KERNEL_OUTPUT sha256=$KERNEL_SHA"
+
+# ---- 2. Image ------------------------------------------------------------
+if [ "${SKIP_IMG:-0}" != "1" ]; then
+    [ -f "$CLANG_BIN" ] || { echo "[clang-disk] missing $CLANG_BIN"; exit 1; }
+    # Stage D: place a small C source (HELLO.C) on the FAT image for `clang -cc1`.
+    mkdir -p "$OUT_DIR/stageD"
+    rm -f "$OUT_DIR/stageD/hello.o"
+    cp examples/09_embedded/simpleos_hello_c/hello_fs.c "$OUT_DIR/stageD/hello.c"
+    SIZE="$(stat -c%s "$CLANG_BIN")"
+    echo "$SIZE" > "$OUT_DIR/payload_size.txt"
+    echo "[clang-disk] clang_static size=$SIZE bytes; writing FAT32 prefix"
+    rm -f "$PREFIX" "$OUT_DIR/fat32-clang-total.txt"
+    run_image_writer
+    [ -f "$PREFIX" ] || { echo "[clang-disk] prefix build FAILED"; exit 1; }
+    TOTAL="$(cat "$OUT_DIR/fat32-clang-total.txt")"
+    echo "[clang-disk] assembling image: prefix + payload -> $IMG (total=$TOTAL)"
+    cat "$PREFIX" "$CLANG_BIN" > "$IMG"
+    truncate -s "$TOTAL" "$IMG"
+    echo "[clang-disk] image size=$(stat -c%s "$IMG")"
+fi
+echo "[clang-disk] artifact image=$IMG sha256=$(sha256sum "$IMG" | awk '{print $1}')"
+
+# ---- 3. Compile in guest -------------------------------------------------
+run_guest "$IMG" "$SERIAL_LOG" compile 3
+
+# ---- 4. Reconstruct + verify the RAM-dumped .o ---------------------------
+RECON="$OUT_DIR/stageD/hello_recon.o"
+sed 's/\r$//' "$SERIAL_LOG" | grep -qx '\[syscall\] exit status=0' \
+    || fail "guest clang did not exit 0"
+grep -Eq '\[oo\] name=/hello\.o size=[1-9][0-9]*' "$SERIAL_LOG" \
+    || fail "missing nonempty /hello.o guest output"
+grep -q '\[oo-b64\]' "$SERIAL_LOG" 2>/dev/null \
+    || fail "missing [oo-b64] object dump"
+grep -q '\[oo-end\]' "$SERIAL_LOG" 2>/dev/null \
+    || fail "missing [oo-end] object dump terminator"
+command -v readelf >/dev/null 2>&1 || fail "readelf is required"
+
+echo "===== Stage D: reconstructing .o from serial base64 dump ====="
+rm -f "$RECON"
+tr -d '\r' < "$SERIAL_LOG" \
+    | sed -n '/^\[oo-b64\]$/,/^\[oo-end\]$/p' \
+    | sed '1d;$d' \
+    | base64 -d > "$RECON" 2>/dev/null \
+    || fail "object dump is not valid base64"
+[ -s "$RECON" ] || fail "reconstructed object is empty"
+
+HEADER="$(LC_ALL=C readelf -h "$RECON" 2>/dev/null)" \
+    || fail "guest dump is not an ELF file"
+printf '%s\n' "$HEADER" | grep -Eq 'Class:[[:space:]]+ELF64' \
+    || fail "guest dump is not ELF64"
+printf '%s\n' "$HEADER" | grep -Eq 'Type:[[:space:]]+REL ' \
+    || fail "guest dump is not relocatable ELF"
+printf '%s\n' "$HEADER" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64' \
+    || fail "guest dump is not x86-64"
+LC_ALL=C readelf -Ws "$RECON" 2>/dev/null \
+    | awk '$8 == "main" { found = 1 } END { exit(found ? 0 : 1) }' \
+    || fail "guest object has no main symbol"
+
+echo "[clang-disk] PASS guest_exit=0 object=$RECON format=ELF64 type=REL machine=x86-64 symbol=main"
+
+# ---- 5. Link the guest-produced object with embedded LLD -----------------
+cp "$RECON" "$OUT_DIR/stageD/hello.o"
+echo "$(stat -c%s "$CLANG_BIN")" > "$OUT_DIR/payload_size.txt"
+rm -f "$PREFIX" "$OUT_DIR/fat32-clang-total.txt"
+run_image_writer
+cat "$PREFIX" "$CLANG_BIN" > "$LINK_IMG"
+truncate -s "$(cat "$OUT_DIR/fat32-clang-total.txt")" "$LINK_IMG"
+echo "[clang-disk] artifact image=$LINK_IMG sha256=$(sha256sum "$LINK_IMG" | awk '{print $1}')"
+run_guest "$LINK_IMG" "$LINK_LOG" link 3
+
+LINKED="$OUT_DIR/stageD/hello_recon.elf"
+sed 's/\r$//' "$LINK_LOG" | grep -qx '\[syscall\] exit status=0' \
+    || fail "guest linker did not exit 0"
+grep -Eq '\[oo\] name=/hello\.elf size=[1-9][0-9]*' "$LINK_LOG" \
+    || fail "missing nonempty /hello.elf guest output"
+rm -f "$LINKED"
+tr -d '\r' < "$LINK_LOG" \
+    | sed -n '/^\[oo-b64\]$/,/^\[oo-end\]$/p' \
+    | sed '1d;$d' \
+    | base64 -d > "$LINKED" 2>/dev/null \
+    || fail "linked ELF dump is not valid base64"
+[ -s "$LINKED" ] || fail "reconstructed linked ELF is empty"
+LINK_HEADER="$(LC_ALL=C readelf -h "$LINKED" 2>/dev/null)" \
+    || fail "guest linker output is not ELF"
+printf '%s\n' "$LINK_HEADER" | grep -Eq 'Class:[[:space:]]+ELF64' \
+    || fail "guest linker output is not ELF64"
+printf '%s\n' "$LINK_HEADER" | grep -Eq 'Type:[[:space:]]+EXEC ' \
+    || fail "guest linker output is not executable"
+LC_ALL=C readelf -Ws "$LINKED" 2>/dev/null \
+    | awk '$8 == "_start" { found = 1 } END { exit(found ? 0 : 1) }' \
+    || fail "guest executable has no _start symbol"
+echo "[clang-disk] PASS guest_link=/hello.elf format=ELF64 type=EXEC symbol=_start"
+
+# ---- 6. Put that exact ELF on FAT32 and execute through the shared loader --
+EXEC_IMG="$OUT_DIR/fat32-guest-linked-hello.img"
+echo "$(stat -c%s "$LINKED")" > "$OUT_DIR/payload_size.txt"
+rm -f "$PREFIX" "$OUT_DIR/fat32-clang-total.txt"
+run_image_writer
+cat "$PREFIX" "$LINKED" > "$EXEC_IMG"
+truncate -s "$(cat "$OUT_DIR/fat32-clang-total.txt")" "$EXEC_IMG"
+echo "[clang-disk] artifact image=$EXEC_IMG sha256=$(sha256sum "$EXEC_IMG" | awk '{print $1}')"
+SIMPLE_BUILD_COMPILER="$COMPILER" FSEXEC_DISK="$ROOT_DIR/$EXEC_IMG" \
+    FSEXEC_PROFILE=execute-artifact \
+    FSEXEC_EXPECTED_OUTPUT=hello-from-simpleos-clang FSEXEC_EXPECTED_EXIT_STATUS=42 \
+    sh scripts/os/build_fsexec_prod_ring3.shs
+echo "[clang-disk] PASS guest_exec=/hello.elf output=hello-from-simpleos-clang"

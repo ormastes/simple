@@ -1,0 +1,88 @@
+# @tag: unit, desktop, baremetal, compositor
+# @cover src/os/desktop/shell_baremetal.spl 60%
+
+use std.spec.{describe, it, expect}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.desktop.shell_baremetal.{render_baremetal_shared_wm_scene}
+use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.window_scene.{WmContentFrame, WM_CONTENT_ORIGIN_SIMPLE_WEB, simple_gui_internal_window, simple_gui_internal_window_scene, wm_content_frame_checksum}
+
+class OverlayCaptureBackend:
+    w: i32
+    h: i32
+    clear_count: i64
+    fill_count: i64
+    text_count: i64
+    present_count: i64
+    last_text: text
+
+impl CompositorBackend for OverlayCaptureBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        self.clear_count = self.clear_count + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.fill_count = self.fill_count + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.text_count = self.text_count + 1
+        self.last_text = text_str
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.text_count = self.text_count + 1
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.fill_count = self.fill_count + 1
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.fill_count = self.fill_count + 1
+
+    me present():
+        self.present_count = self.present_count + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.present_count = self.present_count + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _capture_backend() -> OverlayCaptureBackend:
+    OverlayCaptureBackend(
+        w: 800,
+        h: 600,
+        clear_count: 0,
+        fill_count: 0,
+        text_count: 0,
+        present_count: 0,
+        last_text: ""
+    )
+
+fn _solid_pixels(count: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i = 0
+    while i < count:
+        pixels = pixels.push(color)
+        i = i + 1
+    pixels
+
+describe "baremetal shared WM backend contract":
+    it "renders a live rich scene through CompositorBackend":
+        var backend = _capture_backend()
+        val window = simple_gui_internal_window(
+            "surface-41", "41", 7001u64, "editor", "Live Editor",
+            80, 70, 420, 300, "document=notes.spl", false, true, 0
+        )
+        val scene = simple_gui_internal_window_scene(800, 600, "simpleos-compositor", [window])
+        val pixels = _solid_pixels(412 * 264, 0xFF102030u32)
+        val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        render_baremetal_shared_wm_scene(backend, scene, empty_taskbar_model(), [frame], 7, 9, "12:34")
+
+        expect(backend.clear_count).to_equal(1)
+        expect(backend.fill_count > 0).to_be(true)
+        expect(backend.text_count > 0).to_be(true)
+        expect(backend.present_count).to_equal(0)

@@ -1,0 +1,78 @@
+use std.io_runtime
+
+struct MemoryVault:
+    tokens: list<VaultToken>
+    next_id: int
+
+fn new_memory_vault() -> MemoryVault:
+    return MemoryVault { tokens: [], next_id: 1 }
+
+fn _generate_token_id(vault: MemoryVault) -> text:
+    return "tok_vault_" + _int_to_text(vault.next_id)
+
+fn _brand_to_text(brand: CardBrand) -> text:
+    if brand == CardBrand.Visa: return "Visa"
+    if brand == CardBrand.Mastercard: return "Mastercard"
+    if brand == CardBrand.Amex: return "Amex"
+    if brand == CardBrand.Discover: return "Discover"
+    if brand == CardBrand.JCB: return "JCB"
+    if brand == CardBrand.UnionPay: return "UnionPay"
+    return "Unknown"
+
+impl Vault for MemoryVault:
+    fn store_token(self, req: StoreRequest) -> VaultResult:
+        # Typed rebind so the seed's field-index resolver sees a concrete struct
+        val sreq: StoreRequest = req
+        if !luhn_check(sreq.card_number):
+            return VaultResult {
+                success: false,
+                token: VaultToken { token_id: "", card_last4: "", card_brand: "", expiry_month: 0, expiry_year: 0, created_at: "" },
+                error_message: "invalid card number (Luhn check failed)"
+            }
+        if !validate_expiry(sreq.expiry_month, sreq.expiry_year):
+            return VaultResult {
+                success: false,
+                token: VaultToken { token_id: "", card_last4: "", card_brand: "", expiry_month: 0, expiry_year: 0, created_at: "" },
+                error_message: "invalid expiry date"
+            }
+        val last4 = extract_last4(sreq.card_number)
+        val brand = detect_brand(sreq.card_number)
+        val brand_text = _brand_to_text(brand)
+        val token_id = _generate_token_id(self)
+        val token = VaultToken {
+            token_id: token_id,
+            card_last4: last4,
+            card_brand: brand_text,
+            expiry_month: sreq.expiry_month,
+            expiry_year: sreq.expiry_year,
+            created_at: "now"
+        }
+        return VaultResult { success: true, token: token, error_message: "" }
+
+    fn retrieve(self, token_id: text) -> VaultResult:
+        var i = 0
+        while i < self.tokens.length():
+            val t = self.tokens[i]
+            if t.token_id == token_id:
+                return VaultResult { success: true, token: t, error_message: "" }
+            i = i + 1
+        return VaultResult {
+            success: false,
+            token: VaultToken { token_id: "", card_last4: "", card_brand: "", expiry_month: 0, expiry_year: 0, created_at: "" },
+            error_message: "token not found"
+        }
+
+    fn delete(self, token_id: text) -> VaultDeleteResult:
+        var found = false
+        var i = 0
+        while i < self.tokens.length():
+            if self.tokens[i].token_id == token_id:
+                found = true
+                break
+            i = i + 1
+        if !found:
+            return VaultDeleteResult { success: false, error_message: "token not found" }
+        return VaultDeleteResult { success: true, error_message: "" }
+
+    fn list_tokens(self) -> list<VaultToken>:
+        return self.tokens

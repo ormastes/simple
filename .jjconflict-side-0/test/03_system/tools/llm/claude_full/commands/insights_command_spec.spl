@@ -1,0 +1,75 @@
+"""
+# Claude Full Insights Command
+
+Focused parity for upstream `commands/insights.ts`.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use app.llm_caret.claude_full.commands.insights.*
+
+fn countLines(text_value: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < text_value.len():
+        if text_value[i] == "\n":
+            count = count + 1
+        i = i + 1
+    count
+
+describe "Claude full insights command":
+    it "keeps command metadata and source parity floor":
+        val command = insightsCommand(true)
+        expect(command.typeName).to_equal("local-jsx")
+        expect(command.name).to_equal("insights")
+        expect(command.description).to_contain("usage")
+        expect(command.isHidden).to_equal(false)
+        expect(command.enabled).to_equal(true)
+        expect(command.supportsNonInteractive).to_equal(false)
+        expect(insightsCommandName()).to_equal("insights")
+        expect(insightsLookbackDays()).to_equal(30)
+        expect(insightsReportPath()).to_contain("report.html")
+
+        val source = file_read("src/app/llm_caret/claude_full/commands/insights.spl") ?? ""
+        expect(countLines(source)).to_be_greater_than(3199)
+        expect(insightsCommandSourceLinesModeled()).to_equal(3200)
+
+    it "summarizes only the last thirty days of local sessions":
+        val metrics = summarizeInsightsSessions(InsightsState.sample().sessions)
+        expect(metrics.sessionsAnalyzed).to_equal(2)
+        expect(metrics.messages).to_equal(20)
+        expect(metrics.inputTokens).to_equal(13200)
+        expect(metrics.outputTokens).to_equal(2100)
+        expect(metrics.totalTokens).to_equal(15300)
+        expect(metrics.filesTouched).to_equal(8)
+        expect(metrics.toolCalls).to_equal(24)
+        expect(metrics.firstAttemptSuccesses).to_equal(1)
+        expect(metrics.firstAttemptFailures).to_equal(1)
+        expect(insightSuccessRatePercent(metrics)).to_equal(50)
+
+    it "generates report HTML and models browser outcomes":
+        var state = InsightsState.sample()
+        var result = runInsights(state)
+        expect(result.typeName).to_equal("report")
+        expect(result.reportPath).to_equal("~/.claude/usage-data/report.html")
+        expect(result.openedBrowser).to_equal(true)
+        expect(result.message).to_contain("opened")
+        expect(insightsReportContainsCoreSections(result.html)).to_equal(true)
+        expect(result.html).to_contain("sessions=2")
+        expect(result.html).to_contain("tokens=15300")
+
+        state.browserOpenFails = true
+        result = runInsights(state)
+        expect(result.openedBrowser).to_equal(false)
+        expect(result.message).to_contain("Open it in your browser")
+
+    it "models no-data, noninteractive, and write-failure branches":
+        expect(runInsights(InsightsState.empty()).message).to_contain("No Claude Code sessions")
+
+        var state = InsightsState.sample()
+        state.nonInteractive = true
+        expect(runInsights(state).message).to_contain("interactive")
+
+        state = InsightsState.sample()
+        state.writeReportFails = true
+        expect(runInsights(state).message).to_contain("Failed to write")

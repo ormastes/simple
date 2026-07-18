@@ -1,0 +1,74 @@
+"""
+# Claude Full ToolSelector Component
+
+Checks modeled available tools, selected tools, toggles, filtering, disabled tools, summaries, and source helpers.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.agents.ToolSelector.{ToolSelectorTool, ToolSelectorState, ToolSelectorModel, sampleToolSelectorTools, createToolSelector, filterToolSelectorTools, visibleToolSelectorTools, findToolSelectorToolById, toolSelectorSourceDisplayName, toolSelectorSourceOptions, toolSelectorModeledSourceFile, toolSelectorModeledSourceHelper, toolSelectorModeledToggleHelper, toolSelectorModeledSummaryHelper, toolSelectorSourceLinesModeled}
+
+describe "Claude full ToolSelector component":
+    it "models available and selected tools":
+        step("Create a selector and add enabled tools")
+        val selector = createToolSelector(sampleToolSelectorTools())
+        expect(selector.tools.len()).to_equal(5)
+        expect(selector.summary()).to_equal("No tools selected")
+
+        val selected = selector.toggle("read").toggle("bash")
+        expect(selected.selectedTools().len()).to_equal(2)
+        expect(selected.summary()).to_equal("Selected 2 of 5: Bash, Read")
+        expect(selected.render()).to_contain("[x] Bash [Project] enabled")
+        expect(selected.render()).to_contain("[x] Read [Built-in] enabled")
+
+    it "toggles enabled tools and blocks disabled tools":
+        step("Toggle on, toggle off, and ignore disabled rows")
+        val selector = createToolSelector(sampleToolSelectorTools())
+        val added = selector.toggle("write")
+        expect(added.state.lastAction).to_equal("add write")
+        expect(added.selectedTools().len()).to_equal(1)
+
+        val removed = added.toggle("write")
+        expect(removed.state.lastAction).to_equal("remove write")
+        expect(removed.selectedTools().len()).to_equal(0)
+
+        val blocked = selector.toggle("web-fetch")
+        expect(blocked.state.lastAction).to_equal("blocked web-fetch")
+        expect(blocked.selectedTools().len()).to_equal(0)
+
+    it "filters by search source and disabled visibility":
+        step("Search available tools across text and source")
+        val tools = sampleToolSelectorTools()
+        expect(filterToolSelectorTools(tools, "workspace", "all", true).len()).to_equal(1)
+        expect(filterToolSelectorTools(tools, "shell", "project", true)[0].id).to_equal("bash")
+        expect(filterToolSelectorTools(tools, "", "builtin", true).len()).to_equal(2)
+
+        val visible = visibleToolSelectorTools(tools, ToolSelectorState.new("", "project", [], false, "filter"))
+        expect(visible.len()).to_equal(1)
+        expect(visible[0].id).to_equal("bash")
+        expect(findToolSelectorToolById(tools, "missing")).to_be_nil()
+
+    it "renders summary rows and empty states":
+        step("Render header, query badge, disabled badge, and empty filters")
+        val selector = createToolSelector(sampleToolSelectorTools()).filter("web", "user")
+        val output = selector.render()
+        expect(output).to_contain("Tools 1/5")
+        expect(output).to_contain("User")
+        expect(output).to_contain("search:web")
+        expect(output).to_contain("[ ] Web Fetch [User] disabled")
+
+        val empty = selector.hideDisabled().render()
+        expect(empty).to_equal("No tools match search \"web\" and source User and enabled tools")
+
+    it "exports source helper parity":
+        step("Pin source labels and upstream helper names")
+        expect(toolSelectorSourceDisplayName("built-in")).to_equal("Built-in")
+        expect(toolSelectorSourceDisplayName("project")).to_equal("Project")
+        expect(toolSelectorSourceOptions()).to_contain("all")
+        expect(toolSelectorSourceOptions()).to_contain("project")
+        expect(toolSelectorSourceOptions()).to_contain("user")
+        expect(toolSelectorSourceOptions()).to_contain("builtin")
+        expect(toolSelectorModeledSourceFile()).to_equal("src/components/agents/ToolSelector.tsx")
+        expect(toolSelectorModeledSourceHelper()).to_equal("getAvailableTools")
+        expect(toolSelectorModeledToggleHelper()).to_equal("toggleToolSelection")
+        expect(toolSelectorModeledSummaryHelper()).to_equal("getToolSelectionSummary")
+        expect(toolSelectorSourceLinesModeled()).to_equal(561)

@@ -1,0 +1,225 @@
+# Public Engine3D adapter for the dedicated native Vulkan font pipelines.
+
+use std.nogc_sync_mut.engine.render.backend3d.{
+    RenderBackend3D, PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle,
+    TextureFormat3D
+}
+use std.nogc_sync_mut.engine.render.vulkan_backend3d.{
+    VulkanRenderBackend3D, VulkanBackend3DDeviceEvidence
+}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.gpu.engine3d.font_hud_material.{font_hud_vertices, font_world_vertices}
+use std.gpu.engine3d.font_vulkan_spirv.{
+    font_hud_vulkan_vertex_spirv, font_world_vulkan_vertex_spirv,
+    font_vulkan_fragment_spirv
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+class VulkanFontAdapter3DEvidence:
+    ready: bool
+    reason: text
+    device: VulkanBackend3DDeviceEvidence
+    hud_pipeline_handle: i64
+    world_pipeline_handle: i64
+    atlas_handle: i64
+    atlas_owner_identity: text
+    atlas_generation: i64
+    atlas_payload_sha256: text
+    sampler_handle: i64
+    hud_draws: i64
+    world_draws: i64
+    pixels_rgba8: [u8]
+
+fn vulkan_font_atlas_upload_required(cached_owner: text, cached_generation: i64, batch: FontRenderBatch) -> bool:
+    cached_owner != batch.atlas_owner_identity() or cached_generation != batch.atlas_generation
+
+class VulkanFontAdapter3D:
+    backend: VulkanRenderBackend3D
+    hud_pipeline: PipelineHandle
+    world_pipeline: PipelineHandle
+    color: TextureHandle
+    depth: TextureHandle
+    atlas: TextureHandle
+    transient_vertices: [BufferHandle]
+    atlas_width: i32
+    atlas_height: i32
+    atlas_generation: i64
+    atlas_owner_identity: text
+    atlas_payload_sha256: text
+    pass_handle: RenderPassHandle
+    width: i32
+    height: i32
+    frame_active: bool
+    ready: bool
+    reason: text
+    hud_draws: i64
+    world_draws: i64
+    last_pixels: [u8]
+
+    static fn create(width: i32, height: i32) -> VulkanFontAdapter3D:
+        var backend = VulkanRenderBackend3D.create()
+        var ready = width > 0 and height > 0 and backend.init(width.to_i64(), height.to_i64())
+        var reason = if ready: "" else: "vulkan-font-adapter-init-failed"
+        var hud_pipeline = PipelineHandle.invalid()
+        var world_pipeline = PipelineHandle.invalid()
+        var color = TextureHandle.invalid()
+        var depth = TextureHandle.invalid()
+        if ready:
+            val fragment = font_vulkan_fragment_spirv()
+            hud_pipeline = backend.create_font_pipeline(font_hud_vulkan_vertex_spirv(), fragment)
+            world_pipeline = backend.create_font_world_pipeline(font_world_vulkan_vertex_spirv(), fragment)
+            color = backend.create_texture(width.to_i64(), height.to_i64(), TextureFormat3D.Rgba8Unorm)
+            depth = backend.create_texture(width.to_i64(), height.to_i64(), TextureFormat3D.Depth32Float)
+            ready = (backend.pipeline_native_handle(hud_pipeline) > 0 and
+                backend.pipeline_native_handle(world_pipeline) > 0 and
+                backend.texture_native_handle(color) > 0 and
+                backend.texture_native_handle(depth) > 0)
+            if not ready:
+                reason = "vulkan-font-pipeline-or-target-install-failed"
+        VulkanFontAdapter3D(
+            backend: backend,
+            hud_pipeline: hud_pipeline,
+            world_pipeline: world_pipeline,
+            color: color,
+            depth: depth,
+            atlas: TextureHandle.invalid(),
+            transient_vertices: [],
+            atlas_width: 0,
+            atlas_height: 0,
+            atlas_generation: -1,
+            atlas_owner_identity: "",
+            atlas_payload_sha256: "",
+            pass_handle: RenderPassHandle.invalid(),
+            width: width,
+            height: height,
+            frame_active: false,
+            ready: ready,
+            reason: reason,
+            hud_draws: 0,
+            world_draws: 0,
+            last_pixels: []
+        )
+
+    me begin_frame() -> bool:
+        if not self.ready or self.frame_active:
+            return false
+        self.backend.begin_frame()
+        if self.backend.command_handle <= 0:
+            self.reason = "vulkan-graphics-command-begin-failed"
+            return false
+        self.pass_handle = self.backend.begin_render_pass(self.color, self.depth)
+        if self.backend.recording_blocked:
+            self.reason = "vulkan-font-framebuffer-unavailable"
+            self.backend.end_frame()
+            return false
+        self.frame_active = true
+        self.hud_draws = 0
+        self.world_draws = 0
+        self.last_pixels = []
+        true
+
+    me _upload_atlas(batch: FontRenderBatch) -> bool:
+        if (not batch.material_supported() or batch.atlas_width <= 0 or batch.atlas_height <= 0 or
+            batch.atlas_pixels.len() != batch.atlas_width.to_i64() * batch.atlas_height.to_i64()):
+            return false
+        if (self.atlas.id < 0 or self.atlas_width != batch.atlas_width or
+            self.atlas_height != batch.atlas_height):
+            self.atlas = self.backend.create_texture(
+                batch.atlas_width.to_i64(), batch.atlas_height.to_i64(), TextureFormat3D.R8Unorm
+            )
+            self.atlas_width = batch.atlas_width
+            self.atlas_height = batch.atlas_height
+            self.atlas_generation = -1
+            self.atlas_owner_identity = ""
+            self.atlas_payload_sha256 = ""
+        if vulkan_font_atlas_upload_required(self.atlas_owner_identity, self.atlas_generation, batch):
+            var alpha: [u8] = []
+            for pixel in batch.atlas_pixels:
+                alpha.push(((pixel >> 24u32) & 255u32).to_u8())
+            if not self.backend.upload_texture_checked(self.atlas, alpha):
+                self.atlas_generation = -1
+                self.atlas_owner_identity = ""
+                self.atlas_payload_sha256 = ""
+                return false
+            self.atlas_generation = batch.atlas_generation
+            self.atlas_owner_identity = batch.atlas_owner_identity()
+            self.atlas_payload_sha256 = sha256_u8_hex(alpha)
+        self.atlas.id >= 0
+
+    me draw_hud(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> bool:
+        if not self.frame_active or not self._upload_atlas(batch):
+            return false
+        val bytes = font_hud_vertices(batch, origin_x, origin_y, self.width, self.height)
+        if bytes.len() == 0:
+            return false
+        val vertices = self.backend.create_vertex_buffer(bytes.len())
+        if not self.backend.upload_buffer_checked(vertices, bytes, 0):
+            self.backend.destroy_buffer(vertices)
+            return false
+        self.transient_vertices.push(vertices)
+        self.backend.set_pipeline(self.pass_handle, self.hud_pipeline)
+        self.backend.bind_vertex_buffer(self.pass_handle, vertices, 0)
+        self.backend.bind_font_texture(self.pass_handle, self.hud_pipeline, self.atlas)
+        val draws = bytes.len() / 20
+        self.backend.draw_font_vertices(self.pass_handle, draws)
+        self.hud_draws = self.hud_draws + draws
+        true
+
+    me draw_world(origin_x: i32, origin_y: i32, clip_z: f32, batch: FontRenderBatch) -> bool:
+        if not self.frame_active or not self._upload_atlas(batch):
+            return false
+        val bytes = font_world_vertices(batch, origin_x, origin_y, self.width, self.height, clip_z)
+        if bytes.len() == 0:
+            return false
+        val vertices = self.backend.create_vertex_buffer(bytes.len())
+        if not self.backend.upload_buffer_checked(vertices, bytes, 0):
+            self.backend.destroy_buffer(vertices)
+            return false
+        self.transient_vertices.push(vertices)
+        self.backend.set_pipeline(self.pass_handle, self.world_pipeline)
+        self.backend.bind_vertex_buffer(self.pass_handle, vertices, 0)
+        self.backend.bind_font_texture(self.pass_handle, self.world_pipeline, self.atlas)
+        val draws = bytes.len() / 24
+        self.backend.draw_font_vertices(self.pass_handle, draws)
+        self.world_draws = self.world_draws + draws
+        true
+
+    me end_frame() -> VulkanFontAdapter3DEvidence:
+        if self.frame_active:
+            self.backend.end_render_pass(self.pass_handle)
+            self.backend.end_frame()
+            self.frame_active = false
+        if not self.backend.completion_unknown:
+            for vertices in self.transient_vertices:
+                self.backend.destroy_buffer(vertices)
+            self.transient_vertices = []
+        val device = self.backend.device_evidence()
+        self.last_pixels = self.backend.readback_last_color_rgba8()
+        VulkanFontAdapter3DEvidence(
+            ready: device.status == "font-ready" and self.last_pixels.len() > 0,
+            reason: device.reason,
+            device: device,
+            hud_pipeline_handle: self.backend.pipeline_native_handle(self.hud_pipeline),
+            world_pipeline_handle: self.backend.pipeline_native_handle(self.world_pipeline),
+            atlas_handle: self.backend.texture_native_handle(self.atlas),
+            atlas_owner_identity: self.atlas_owner_identity,
+            atlas_generation: self.atlas_generation,
+            atlas_payload_sha256: self.atlas_payload_sha256,
+            sampler_handle: self.backend.sampler_handle,
+            hud_draws: if device.status == "font-ready": self.hud_draws else: 0,
+            world_draws: if device.status == "font-ready": self.world_draws else: 0,
+            pixels_rgba8: self.last_pixels
+        )
+
+    me shutdown():
+        self.backend.shutdown()
+        self.atlas = TextureHandle.invalid()
+        self.atlas_width = 0
+        self.atlas_height = 0
+        self.atlas_generation = -1
+        self.atlas_owner_identity = ""
+        self.atlas_payload_sha256 = ""
+        self.ready = false
+        self.frame_active = false
+
+export VulkanFontAdapter3D, VulkanFontAdapter3DEvidence, vulkan_font_atlas_upload_required

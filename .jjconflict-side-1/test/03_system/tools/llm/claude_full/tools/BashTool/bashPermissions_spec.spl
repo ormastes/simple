@@ -1,0 +1,40 @@
+"""
+# Claude Full Bash Permissions Slice
+
+Focused coverage for pure permission-prefix, wildcard, wrapper, env, and
+command-normalization routes from tools/BashTool/bashPermissions.ts.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.tools.BashTool.bashPermissions.*
+
+describe "Claude full bash permissions parity":
+    it "should model constants and rule prefix routes":
+        step("Check constants and prefixes")
+        expect(MAX_SUBCOMMANDS_FOR_SECURITY_CHECK).to_equal(50)
+        expect(MAX_SUGGESTED_RULES_FOR_COMPOUND).to_equal(5)
+        expect(permissionRuleExtractPrefix("npm:*")).to_equal("npm")
+        expect(permissionRuleExtractPrefix("git status")).to_equal("git")
+        expect(matchWildcardPattern("npm *", "npm status")).to_equal(true)
+        expect(matchWildcardPattern("git status", "git status")).to_equal(true)
+        expect(matchWildcardPattern("git status", "git diff")).to_equal(false)
+
+    it "should model wrappers env stripping and command prefixes":
+        step("Check wrapper and env routes")
+        expect(getSimpleCommandPrefix("NODE_ENV=prod npm run build")).to_equal("npm run")
+        expect(getSimpleCommandPrefix("MY_VAR=1 npm run build")).to_equal("")
+        expect(getFirstWordPrefix("git status")).to_equal("git")
+        expect(getFirstWordPrefix("sh -c 'git status'")).to_equal("")
+        expect(stripSafeWrappers("timeout 10 git status")).to_equal("git status")
+        expect(stripWrappersFromArgvRoute("timeout 10 git status")).to_equal("git status")
+        expect(stripAllLeadingEnvVarsRoute("LD_PRELOAD=x git status")).to_equal("blocked binary hijack env")
+        expect(binaryHijackVarRoute("PATH")).to_equal(true)
+
+    it "should model normalized git cd routes":
+        step("Check normalized command routes")
+        expect(isNormalizedGitCommand("git status")).to_equal(true)
+        expect(isNormalizedGitCommand("git push")).to_equal(false)
+        expect(isNormalizedCdCommand("cd /tmp")).to_equal(true)
+        expect(commandHasAnyCd("cd /tmp && git status")).to_equal(true)
+        expect(commandHasAnyCd("git status")).to_equal(false)
+        expect(bashPermissionsSourceLinesModeled()).to_equal(2621)

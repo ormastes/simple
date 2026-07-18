@@ -1,0 +1,140 @@
+# @cover src/os/apps/sshd/ssh_packet.spl 50%
+# Malformed-packet boundary specs: truncated, oversized, and zero-length inputs
+# through ssh_get_u32_checked, ssh_get_string, and ssh_packet_read.
+use std.spipe.*
+use os.apps.sshd.ssh_packet.{ssh_get_u32_checked, ssh_get_string, ssh_packet_read, ssh_packet_build}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        return c - 0x30
+    if c >= 0x61 and c <= 0x66:
+        return c - 0x61 + 10
+    if c >= 0x41 and c <= 0x46:
+        return c - 0x41 + 10
+    0
+
+fn _hex_decode(hex: text) -> [u8]:
+    val hex_bytes = rt_text_to_bytes(hex)
+    var result: [u8] = []
+    var i: u64 = 0
+    while i + 1 < hex_bytes.len():
+        val hi = _hex_nibble(hex_bytes[i])
+        val lo = _hex_nibble(hex_bytes[i + 1])
+        result.push((hi << 4) | lo)
+        i = i + 2
+    result
+
+describe "ssh_get_u32_checked bounds":
+    it "returns Err on empty input":
+        var empty: [u8] = []
+        val r = ssh_get_u32_checked(empty, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err on 3-byte input (truncated)":
+        val data = _hex_decode("010203")
+        val r = ssh_get_u32_checked(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when offset puts read past end":
+        val data = _hex_decode("0102030405")
+        # 5 bytes, but reading u32 at offset 3 needs bytes [3..6] — only 2 remain
+        val r = ssh_get_u32_checked(data, 3)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Ok on exactly 4 bytes at offset 0":
+        val data = _hex_decode("01020304")
+        val r = ssh_get_u32_checked(data, 0)
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap().to_u64()).to_equal(0x01020304)
+
+    it "returns Ok when 4 bytes are available at a non-zero offset":
+        val data = _hex_decode("AABB00000001CCDD")
+        val r = ssh_get_u32_checked(data, 2)
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap().to_u64()).to_equal(1)
+
+describe "ssh_get_string bounds":
+    it "returns Err on zero-length input":
+        var empty: [u8] = []
+        val r = ssh_get_string(empty, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when only 3 bytes available (truncated length field)":
+        val data = _hex_decode("000001")
+        val r = ssh_get_string(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when declared length exceeds available data":
+        # length field says 10 but only 2 data bytes follow
+        val data = _hex_decode("0000000A0102")
+        val r = ssh_get_string(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Ok for a zero-length SSH string (empty content)":
+        val data = _hex_decode("00000000")
+        val r = ssh_get_string(data, 0)
+        expect(r.is_ok()).to_equal(true)
+        val sr = r.unwrap()
+        expect(sr.data.len()).to_equal(0)
+        expect(sr.next_offset).to_equal(4)
+
+    it "returns Ok and correct content for a 3-byte SSH string":
+        # length=3, content=0x41 0x42 0x43
+        val data = _hex_decode("00000003414243")
+        val r = ssh_get_string(data, 0)
+        expect(r.is_ok()).to_equal(true)
+        val sr = r.unwrap()
+        expect(sr.data.len()).to_equal(3)
+        expect(_u8_at(sr.data, 0)).to_equal(0x41)
+        expect(_u8_at(sr.data, 1)).to_equal(0x42)
+        expect(_u8_at(sr.data, 2)).to_equal(0x43)
+        expect(sr.next_offset).to_equal(7)
+
+describe "ssh_packet_read malformed inputs":
+    it "returns Err for empty input":
+        var empty: [u8] = []
+        val r = ssh_packet_read(empty, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err for 4-byte input (too short for header)":
+        val data = _hex_decode("0000001C")
+        val r = ssh_packet_read(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when packet_length is 0 (below minimum of 2)":
+        val data = _hex_decode("0000000000")
+        val r = ssh_packet_read(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when packet_length is 1 (below minimum of 2)":
+        val data = _hex_decode("0000000105")
+        val r = ssh_packet_read(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when packet_length exceeds SSH_MAX_PACKET (35000)":
+        # packet_length = 0x00009000 = 36864 > 35000
+        val data = _hex_decode("000090000500000000000000000000000000000000000000000000000000000000000000")
+        val r = ssh_packet_read(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Err when declared packet_length implies more bytes than available":
+        # packet_length = 28 (0x1C) but only 5 bytes supplied
+        val data = _hex_decode("0000001C05")
+        val r = ssh_packet_read(data, 0)
+        expect(r.is_err()).to_equal(true)
+
+    it "round-trips a minimal valid packet":
+        var payload: [u8] = []
+        payload.push(0x05)
+        val packet = ssh_packet_build(payload, 0)
+        val r = ssh_packet_read(packet, 0)
+        expect(r.is_ok()).to_equal(true)
+        val pr = r.unwrap()
+        expect(pr.packet.payload.len()).to_equal(1)
+        expect(_u8_at(pr.packet.payload, 0)).to_equal(0x05)

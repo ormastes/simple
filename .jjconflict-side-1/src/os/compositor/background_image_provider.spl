@@ -1,0 +1,292 @@
+# Host BackgroundImageProvider — fs-backed BackgroundSpec kind:"image" resolver.
+#
+# Implements the Phase-2 provider design (plan item A,
+# doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md;
+# doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md
+# "Phase-2 Provider Design"): reads `source` from the filesystem via the
+# nogc_sync_mut fs facade, decodes it, resamples to the requested
+# (target_w, target_h, fit), and caches the decoded+scaled surface keyed by
+# (content_hash(source_bytes), target_w, target_h, fit) — mirroring the
+# WebRenderPixelArtifactCache precedent. On a resolve error after a prior
+# success it serves the last-good surface for that (source, target_w,
+# target_h, fit) with stale:true instead of flashing the desktop; only a
+# first-ever failure (no prior good surface) is reported as a hard failure so
+# the common.ui executor can fall through to the loud unresolved marker.
+#
+# This module is the "host provider + cache" the plan assigns to
+# src/os/compositor/**; common.ui.window_scene never imports it directly —
+# host wiring calls shared_wm_scene_register_background_image_provider(...)
+# with an instance of HostBackgroundImageProvider at startup.
+
+use common.ui.window_scene.{BackgroundImageProvider, BackgroundResolveOutcome, BackgroundSurface}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+use std.fs.{File}
+
+# ============================================================================
+# Content hash (non-cryptographic, integrity/cache-keying only — FNV-1a)
+# ============================================================================
+
+fn _bg_image_content_hash(data: [u8]) -> i64:
+    var h: u64 = 14695981039346656037u64
+    val prime: u64 = 1099511628211u64
+    val n = data.len()
+    var i: i64 = 0
+    while i < n:
+        h = h ^ data[i].to_u64()
+        h = h * prime
+        i = i + 1
+    (h & 0x7FFFFFFFFFFFFFFFu64).to_i64()
+
+# ============================================================================
+# Nearest-neighbor resampling per fit policy (pure array math — no FFI)
+# ============================================================================
+
+# Built via an explicit loop rather than the `[fill; count]` repeat-literal
+# form — that literal form has a known pre-existing `bin/simple check`
+# parser gap (see window_scene_draw_ir.spl's baselined [x;count] failures);
+# new files must stay parser-clean, so this file avoids the form entirely.
+fn _bg_image_filled_buffer(count: i32, fill: u32) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < count:
+        out.push(fill)
+        i = i + 1
+    out
+
+fn _bg_resample_index(dst_i: i32, dst_span: i32, src_span: i32) -> i32:
+    if dst_span <= 0 or src_span <= 0:
+        return 0
+    var idx = ((dst_i.to_f64() * src_span.to_f64()) / dst_span.to_f64()).to_i32()
+    if idx < 0:
+        idx = 0
+    if idx >= src_span:
+        idx = src_span - 1
+    idx
+
+fn _bg_image_stretch(image: PpmImage, target_w: i32, target_h: i32) -> [u32]:
+    var out: [u32] = _bg_image_filled_buffer(target_w * target_h, 0u32)
+    var dy = 0
+    while dy < target_h:
+        val sy = _bg_resample_index(dy, target_h, image.height)
+        var dx = 0
+        while dx < target_w:
+            val sx = _bg_resample_index(dx, target_w, image.width)
+            out[dy * target_w + dx] = image.pixels[sy * image.width + sx]
+            dx = dx + 1
+        dy = dy + 1
+    out
+
+# Uniform-scale crop: choose a source sub-rect with the target's aspect
+# ratio, centered, then stretch that sub-rect to the target size. Crops
+# excess instead of letterboxing.
+fn _bg_image_cover(image: PpmImage, target_w: i32, target_h: i32) -> [u32]:
+    val src_w = image.width
+    val src_h = image.height
+    var crop_w = src_w
+    var crop_h = (src_w.to_f64() * target_h.to_f64() / target_w.to_f64()).to_i32()
+    if crop_h > src_h:
+        crop_h = src_h
+        crop_w = (src_h.to_f64() * target_w.to_f64() / target_h.to_f64()).to_i32()
+    if crop_w < 1:
+        crop_w = 1
+    if crop_h < 1:
+        crop_h = 1
+    val crop_x = (src_w - crop_w) / 2
+    val crop_y = (src_h - crop_h) / 2
+    var out: [u32] = _bg_image_filled_buffer(target_w * target_h, 0u32)
+    var dy = 0
+    while dy < target_h:
+        val sy = crop_y + _bg_resample_index(dy, target_h, crop_h)
+        var dx = 0
+        while dx < target_w:
+            val sx = crop_x + _bg_resample_index(dx, target_w, crop_w)
+            out[dy * target_w + dx] = image.pixels[sy * src_w + sx]
+            dx = dx + 1
+        dy = dy + 1
+    out
+
+# Uniform-scale fit-inside: scale the whole image to fit within the target
+# preserving aspect ratio, letterboxing the remainder with the
+# desktop-chrome fill color (wm_chrome_theme().desktop_bg).
+fn _bg_image_contain(image: PpmImage, target_w: i32, target_h: i32) -> [u32]:
+    val src_w = image.width
+    val src_h = image.height
+    var scaled_w = target_w
+    var scaled_h = (src_h.to_f64() * target_w.to_f64() / src_w.to_f64()).to_i32()
+    if scaled_h > target_h:
+        scaled_h = target_h
+        scaled_w = (src_w.to_f64() * target_h.to_f64() / src_h.to_f64()).to_i32()
+    if scaled_w < 1:
+        scaled_w = 1
+    if scaled_h < 1:
+        scaled_h = 1
+    val offset_x = (target_w - scaled_w) / 2
+    val offset_y = (target_h - scaled_h) / 2
+    val letterbox = wm_chrome_theme().desktop_bg
+    var out: [u32] = _bg_image_filled_buffer(target_w * target_h, letterbox)
+    var dy = 0
+    while dy < scaled_h:
+        val sy = _bg_resample_index(dy, scaled_h, src_h)
+        var dx = 0
+        while dx < scaled_w:
+            val sx = _bg_resample_index(dx, scaled_w, src_w)
+            out[(dy + offset_y) * target_w + (dx + offset_x)] = image.pixels[sy * src_w + sx]
+            dx = dx + 1
+        dy = dy + 1
+    out
+
+# Repeat the intrinsic-size image across the target area — no scaling.
+fn _bg_image_tile(image: PpmImage, target_w: i32, target_h: i32) -> [u32]:
+    val src_w = image.width
+    val src_h = image.height
+    var out: [u32] = _bg_image_filled_buffer(target_w * target_h, 0u32)
+    var dy = 0
+    while dy < target_h:
+        val sy = dy % src_h
+        var dx = 0
+        while dx < target_w:
+            val sx = dx % src_w
+            out[dy * target_w + dx] = image.pixels[sy * src_w + sx]
+            dx = dx + 1
+        dy = dy + 1
+    out
+
+fn _bg_image_resample(image: PpmImage, target_w: i32, target_h: i32, fit: text) -> BackgroundSurface:
+    val pixels = if fit == "contain":
+        _bg_image_contain(image, target_w, target_h)
+    elif fit == "stretch":
+        _bg_image_stretch(image, target_w, target_h)
+    elif fit == "tile":
+        _bg_image_tile(image, target_w, target_h)
+    else:
+        _bg_image_cover(image, target_w, target_h)
+    BackgroundSurface(width: target_w, height: target_h, pixels: pixels)
+
+# ============================================================================
+# Content-hash-keyed cache + last-good (stale-serve) tracking
+#
+# State lives in module-level `var`s, not HostBackgroundImageProvider
+# instance fields. Verified during implementation: a `me` method reached
+# through a `BackgroundImageProvider?` trait-typed slot (i.e. exactly how
+# shared_wm_scene_resolve_background dispatches to the registered provider)
+# boxes the receiver by value on every call in this runtime — self-field
+# mutations do not persist across separate calls made through the slot, even
+# though the same concrete instance is registered throughout (confirmed with
+# a minimal single-field-counter repro: `self.n = self.n + 1` inside a trait
+# `me` method, called twice through a registered trait-typed var, left the
+# counter at 0). This is the same reason display_backend.spl's
+# GpuCompositorBackend and compositor_engine2d.spl's
+# Engine2dCompositorBackend keep their override/session state in bare module
+# `var`s (`_gpu_compositor_override_*`, `_engine2d_compositor_override_*`)
+# rather than instance fields — this module follows that established
+# pattern. Not re-diagnosing the interpreter bug here (out of scope for this
+# item); see the report for the filed bug reference.
+# ============================================================================
+
+struct _BgImageCacheEntry:
+    content_hash: i64
+    target_w: i32
+    target_h: i32
+    fit: text
+    surface: BackgroundSurface
+
+struct _BgImageLastGoodEntry:
+    source: text
+    target_w: i32
+    target_h: i32
+    fit: text
+    surface: BackgroundSurface
+
+var _host_bg_cache: [_BgImageCacheEntry] = []
+var _host_bg_last_good: [_BgImageLastGoodEntry] = []
+var _host_bg_hits: i32 = 0
+var _host_bg_misses: i32 = 0
+
+fn host_background_image_provider_hits() -> i32:
+    _host_bg_hits
+
+fn host_background_image_provider_misses() -> i32:
+    _host_bg_misses
+
+# Test/diagnostic hook: drop all cached + last-good entries and reset the
+# hit/miss counters. The module state is process-global (see the note
+# above), so specs that need a clean slate must call this at the start of
+# each `it` block instead of relying on a per-instance `.create()`.
+fn host_background_image_provider_reset():
+    _host_bg_cache = []
+    _host_bg_last_good = []
+    _host_bg_hits = 0
+    _host_bg_misses = 0
+
+fn _bg_cache_lookup(content_hash: i64, target_w: i32, target_h: i32, fit: text) -> BackgroundSurface?:
+    for entry in _host_bg_cache:
+        if entry.content_hash == content_hash and entry.target_w == target_w and entry.target_h == target_h and entry.fit == fit:
+            return entry.surface
+    nil
+
+fn _bg_last_good_lookup(source: text, target_w: i32, target_h: i32, fit: text) -> BackgroundSurface?:
+    for entry in _host_bg_last_good:
+        if entry.source == source and entry.target_w == target_w and entry.target_h == target_h and entry.fit == fit:
+            return entry.surface
+    nil
+
+fn _bg_remember_last_good(source: text, target_w: i32, target_h: i32, fit: text, surface: BackgroundSurface):
+    var updated: [_BgImageLastGoodEntry] = []
+    var replaced = false
+    for entry in _host_bg_last_good:
+        if entry.source == source and entry.target_w == target_w and entry.target_h == target_h and entry.fit == fit:
+            updated.push(_BgImageLastGoodEntry(source: source, target_w: target_w, target_h: target_h, fit: fit, surface: surface))
+            replaced = true
+        else:
+            updated.push(entry)
+    if not replaced:
+        updated.push(_BgImageLastGoodEntry(source: source, target_w: target_w, target_h: target_h, fit: fit, surface: surface))
+    _host_bg_last_good = updated
+
+# Nominal type implementing the BackgroundImageProvider trait so
+# shared_wm_scene_register_background_image_provider(...) has a concrete
+# instance to box — all resolve() state lives in the module vars above.
+class HostBackgroundImageProvider:
+    marker: i32
+
+impl HostBackgroundImageProvider:
+    static fn create() -> HostBackgroundImageProvider:
+        HostBackgroundImageProvider(marker: 0)
+
+impl BackgroundImageProvider for HostBackgroundImageProvider:
+    me resolve(source: text, target_w: i32, target_h: i32, fit: text) -> BackgroundResolveOutcome:
+        if source == "":
+            return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "empty background source")
+        if target_w <= 0 or target_h <= 0:
+            return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "invalid target size {target_w}x{target_h}")
+        # File.read_bytes is typed `-> [u8]?` but the runtime value on a
+        # missing/unreadable file is an actual Result::Err(...), not a plain
+        # `nil` Option — `if val` treats that Err as truthy (a live, unhealed
+        # Option/Result marshalling gap; see memory
+        # project_seed_crossmodule_field_option_poison_2026-06-14). Branch on
+        # it with `match Ok(...)/Err(...)` (the pattern already used by
+        # os.compositor.qemu_capture for decode_ppm_to_argb) instead of
+        # `if val`, so a missing source reliably falls to the unreadable path.
+        match File.read_bytes(source):
+            Ok(bytes):
+                val content_hash = _bg_image_content_hash(bytes)
+                if val cached = _bg_cache_lookup(content_hash, target_w, target_h, fit):
+                    _host_bg_hits = _host_bg_hits + 1
+                    _bg_remember_last_good(source, target_w, target_h, fit, cached)
+                    return BackgroundResolveOutcome(ok: true, surface: cached, stale: false, error_message: "")
+                match decode_ppm_to_argb(bytes):
+                    Ok(image):
+                        val surface = _bg_image_resample(image, target_w, target_h, fit)
+                        _host_bg_misses = _host_bg_misses + 1
+                        _host_bg_cache = _host_bg_cache.push(_BgImageCacheEntry(content_hash: content_hash, target_w: target_w, target_h: target_h, fit: fit, surface: surface))
+                        _bg_remember_last_good(source, target_w, target_h, fit, surface)
+                        return BackgroundResolveOutcome(ok: true, surface: surface, stale: false, error_message: "")
+                    Err(msg):
+                        if val last = _bg_last_good_lookup(source, target_w, target_h, fit):
+                            return BackgroundResolveOutcome(ok: true, surface: last, stale: true, error_message: "decode failed: {msg}; serving last-good")
+                        return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "decode failed: {msg}")
+            Err(read_error):
+                if val last = _bg_last_good_lookup(source, target_w, target_h, fit):
+                    return BackgroundResolveOutcome(ok: true, surface: last, stale: true, error_message: "source unreadable: {source} ({read_error}); serving last-good")
+                return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "source unreadable: {source} ({read_error})")

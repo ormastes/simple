@@ -1,0 +1,110 @@
+use std.spec
+use compress.lz4.{lz4_decompress_frame}
+use compress.types.{CompressionError}
+use compress.utilities.{xxhash32_bytes}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn _header_checksum(flg: u8, bd: u8) -> u8:
+    var desc: [u8] = [flg, bd]
+    ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
+
+fn _content_size_header_checksum(flg: u8, bd: u8, content_size: [u8]) -> u8:
+    var desc: [u8] = [flg, bd]
+    for byte in content_size:
+        desc.push(byte)
+    ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
+
+describe "LZ4 frame header validation":
+    it "rejects reserved frame descriptor flags":
+        val flg: u8 = 0x62u8
+        val bd: u8 = 0x40u8
+        var frame: [u8] = [
+            0x04u8, 0x22u8, 0x4Du8, 0x18u8,
+            flg, bd, _header_checksum(flg, bd),
+            0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ]
+        val decoded = lz4_decompress_frame(frame)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("descriptor flags"))
+            _:
+                check(false)
+
+    it "rejects invalid block descriptor codes":
+        val flg: u8 = 0x60u8
+        val bd: u8 = 0x00u8
+        var frame: [u8] = [
+            0x04u8, 0x22u8, 0x4Du8, 0x18u8,
+            flg, bd, _header_checksum(flg, bd),
+            0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ]
+        val decoded = lz4_decompress_frame(frame)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("block descriptor"))
+            _:
+                check(false)
+
+    it "rejects dictionary id frames as unsupported":
+        val flg: u8 = 0x61u8
+        val bd: u8 = 0x40u8
+        var frame: [u8] = [
+            0x04u8, 0x22u8, 0x4Du8, 0x18u8,
+            flg, bd, _header_checksum(flg, bd),
+            0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ]
+        val decoded = lz4_decompress_frame(frame)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.UnsupportedFeature(message):
+                check(message.contains("dictionary id"))
+            _:
+                check(false)
+
+    it "rejects blocks larger than the descriptor maximum":
+        val flg: u8 = 0x60u8
+        val bd: u8 = 0x40u8
+        var frame: [u8] = [
+            0x04u8, 0x22u8, 0x4Du8, 0x18u8,
+            flg, bd, _header_checksum(flg, bd),
+            0x01u8, 0x00u8, 0x01u8, 0x00u8
+        ]
+        val decoded = lz4_decompress_frame(frame)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("block size"))
+            _:
+                check(false)
+
+    it "rejects negative signed content sizes":
+        val flg: u8 = 0x68u8
+        val bd: u8 = 0x40u8
+        var content_size: [u8] = [
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x00u8, 0x00u8, 0x80u8
+        ]
+        var frame: [u8] = [
+            0x04u8, 0x22u8, 0x4Du8, 0x18u8,
+            flg, bd,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x00u8, 0x00u8, 0x80u8,
+            _content_size_header_checksum(flg, bd, content_size),
+            0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ]
+        val decoded = lz4_decompress_frame(frame)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("content size"))
+            _:
+                check(false)

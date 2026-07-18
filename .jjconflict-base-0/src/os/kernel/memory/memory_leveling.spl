@@ -1,0 +1,252 @@
+# SimpleOS memory-leveling policy model.
+#
+# This is pure policy logic. VMM, swap, GPU, NIC, and DMA drivers own real page
+# movement. The model gives those owners one small fail-closed contract to call.
+
+use std.memory_leveling.{
+    SimpleMemoryIntent,
+    SIMPLE_MEMORY_ARCH_X86,
+    SIMPLE_MEMORY_ARCH_ARM,
+    SIMPLE_MEMORY_ARCH_RISCV,
+    SIMPLE_MEMORY_BACKEND_CPU,
+    SIMPLE_MEMORY_BACKEND_VULKAN,
+    SIMPLE_MEMORY_BACKEND_METAL,
+    SIMPLE_MEMORY_BACKEND_CUDA,
+    SIMPLE_MEMORY_BACKEND_RDMA,
+    SIMPLE_MEMORY_EVIDENCE_REAL,
+    SIMPLE_MEMORY_EVIDENCE_VULKAN_READBACK,
+    SIMPLE_MEMORY_EVIDENCE_METAL_READBACK,
+    SIMPLE_MEMORY_EVIDENCE_CUDA_READBACK,
+    SIMPLE_MEMORY_PLACEMENT_CPU,
+    SIMPLE_MEMORY_PLACEMENT_GPU,
+    SIMPLE_MEMORY_PLACEMENT_NIC,
+    SIMPLE_MEMORY_PLACEMENT_DMA,
+    SIMPLE_MEMORY_PLACEMENT_UNKNOWN,
+    SIMPLE_MEMORY_HOTNESS_COLD
+}
+
+const MEMORY_PROFILE_BAREMETAL_STATIC = "baremetal_static"
+const MEMORY_PROFILE_SIMPLEOS_DEFAULT = "simpleos_default"
+const MEMORY_PROFILE_HETEROGENEOUS_DEVICE = "heterogeneous_device"
+
+const MEMORY_TIER_CPU = "cpu"
+const MEMORY_TIER_SWAP = "swap"
+const MEMORY_TIER_GPU = "gpu"
+const MEMORY_TIER_NIC = "nic"
+const MEMORY_TIER_UNKNOWN = "unknown"
+
+const MEMORY_HOTNESS_HOT = "hot"
+const MEMORY_HOTNESS_COLD = "cold"
+const MEMORY_HOTNESS_UNKNOWN = "unknown"
+
+const MEMORY_ACTION_KEEP = "keep"
+const MEMORY_ACTION_DEMOTE_COLD = "demote_cold"
+const MEMORY_ACTION_PIN_DEVICE = "pin_device"
+const MEMORY_ACTION_REJECT = "reject"
+
+struct MemoryLevelingProfile:
+    name: text
+    swap_enabled: bool
+    migration_enabled: bool
+    gpu_tier_enabled: bool
+    nic_tier_enabled: bool
+    dma_pin_enforced: bool
+    shadow_copy_enabled: bool
+
+struct MemoryLevelingPage:
+    page_id: u64
+    tier: text
+    hotness: text
+    dma_pinned: bool
+    nic_registered: bool
+    gpu_resident: bool
+    shadowed: bool
+    external_visible: bool
+
+struct MemoryLevelingDecision:
+    action: text
+    reason: text
+
+fn memory_profile_baremetal_static() -> MemoryLevelingProfile:
+    MemoryLevelingProfile(
+        name: MEMORY_PROFILE_BAREMETAL_STATIC,
+        swap_enabled: false,
+        migration_enabled: false,
+        gpu_tier_enabled: false,
+        nic_tier_enabled: false,
+        dma_pin_enforced: true,
+        shadow_copy_enabled: false
+    )
+
+fn memory_profile_simpleos_default() -> MemoryLevelingProfile:
+    MemoryLevelingProfile(
+        name: MEMORY_PROFILE_SIMPLEOS_DEFAULT,
+        swap_enabled: true,
+        migration_enabled: true,
+        gpu_tier_enabled: false,
+        nic_tier_enabled: false,
+        dma_pin_enforced: true,
+        shadow_copy_enabled: false
+    )
+
+fn memory_profile_heterogeneous_device() -> MemoryLevelingProfile:
+    MemoryLevelingProfile(
+        name: MEMORY_PROFILE_HETEROGENEOUS_DEVICE,
+        swap_enabled: true,
+        migration_enabled: true,
+        gpu_tier_enabled: true,
+        nic_tier_enabled: true,
+        dma_pin_enforced: true,
+        shadow_copy_enabled: true
+    )
+
+fn _bool_text(value: bool) -> text:
+    if value:
+        return "on"
+    "off"
+
+fn memory_profile_summary(profile: MemoryLevelingProfile) -> text:
+    "profile={profile.name} swap={_bool_text(profile.swap_enabled)} migration={_bool_text(profile.migration_enabled)} gpu={_bool_text(profile.gpu_tier_enabled)} nic={_bool_text(profile.nic_tier_enabled)} dma_pin={_bool_text(profile.dma_pin_enforced)} shadow={_bool_text(profile.shadow_copy_enabled)}"
+
+fn memory_leveling_evidence_scope() -> text:
+    "hardware-gated"
+
+fn memory_page_cpu_hot(page_id: u64) -> MemoryLevelingPage:
+    MemoryLevelingPage(
+        page_id: page_id,
+        tier: MEMORY_TIER_CPU,
+        hotness: MEMORY_HOTNESS_HOT,
+        dma_pinned: false,
+        nic_registered: false,
+        gpu_resident: false,
+        shadowed: false,
+        external_visible: false
+    )
+
+fn memory_page_cpu_cold(page_id: u64) -> MemoryLevelingPage:
+    MemoryLevelingPage(
+        page_id: page_id,
+        tier: MEMORY_TIER_CPU,
+        hotness: MEMORY_HOTNESS_COLD,
+        dma_pinned: false,
+        nic_registered: false,
+        gpu_resident: false,
+        shadowed: false,
+        external_visible: false
+    )
+
+fn memory_page_dma_pinned(page_id: u64) -> MemoryLevelingPage:
+    MemoryLevelingPage(
+        page_id: page_id,
+        tier: MEMORY_TIER_CPU,
+        hotness: MEMORY_HOTNESS_COLD,
+        dma_pinned: true,
+        nic_registered: false,
+        gpu_resident: false,
+        shadowed: false,
+        external_visible: true
+    )
+
+fn memory_page_nic_registered(page_id: u64) -> MemoryLevelingPage:
+    MemoryLevelingPage(
+        page_id: page_id,
+        tier: MEMORY_TIER_NIC,
+        hotness: MEMORY_HOTNESS_COLD,
+        dma_pinned: false,
+        nic_registered: true,
+        gpu_resident: false,
+        shadowed: false,
+        external_visible: true
+    )
+
+fn memory_page_gpu_resident(page_id: u64) -> MemoryLevelingPage:
+    MemoryLevelingPage(
+        page_id: page_id,
+        tier: MEMORY_TIER_GPU,
+        hotness: MEMORY_HOTNESS_COLD,
+        dma_pinned: false,
+        nic_registered: false,
+        gpu_resident: true,
+        shadowed: false,
+        external_visible: true
+    )
+
+fn memory_page_unknown(page_id: u64) -> MemoryLevelingPage:
+    MemoryLevelingPage(
+        page_id: page_id,
+        tier: MEMORY_TIER_UNKNOWN,
+        hotness: MEMORY_HOTNESS_UNKNOWN,
+        dma_pinned: false,
+        nic_registered: false,
+        gpu_resident: false,
+        shadowed: false,
+        external_visible: true
+    )
+
+fn memory_page_from_simple_intent(page_id: u64, intent: SimpleMemoryIntent) -> MemoryLevelingPage:
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_DMA:
+        return memory_page_dma_pinned(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_NIC:
+        return memory_page_nic_registered(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_GPU:
+        return memory_page_gpu_resident(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_CPU and not intent.externally_visible:
+        if intent.hotness == SIMPLE_MEMORY_HOTNESS_COLD:
+            return memory_page_cpu_cold(page_id)
+        return memory_page_cpu_hot(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_UNKNOWN:
+        return memory_page_unknown(page_id)
+    memory_page_unknown(page_id)
+
+fn _decision(action: text, reason: text) -> MemoryLevelingDecision:
+    MemoryLevelingDecision(action: action, reason: reason)
+
+fn memory_leveling_decide(profile: MemoryLevelingProfile, page: MemoryLevelingPage) -> MemoryLevelingDecision:
+    if page.dma_pinned:
+        return _decision(MEMORY_ACTION_REJECT, "dma-pinned-not-swappable")
+    if page.nic_registered:
+        return _decision(MEMORY_ACTION_REJECT, "nic-registered-not-swappable")
+    if page.gpu_resident:
+        return _decision(MEMORY_ACTION_REJECT, "gpu-resident-needs-coherence")
+    if page.external_visible and page.tier != MEMORY_TIER_CPU:
+        return _decision(MEMORY_ACTION_REJECT, "external-visible-unknown-owner")
+    if profile.name == MEMORY_PROFILE_BAREMETAL_STATIC:
+        return _decision(MEMORY_ACTION_KEEP, "baremetal-static-no-migration")
+    if page.tier == MEMORY_TIER_CPU:
+        if page.hotness == MEMORY_HOTNESS_COLD and profile.swap_enabled and profile.migration_enabled:
+            return _decision(MEMORY_ACTION_DEMOTE_COLD, "cold-cpu-page-to-swap")
+        return _decision(MEMORY_ACTION_KEEP, "cpu-page-kept")
+    _decision(MEMORY_ACTION_REJECT, "unknown-page-state")
+
+fn _supported_cpu_arch(intent: SimpleMemoryIntent) -> bool:
+    intent.hardware_arch == SIMPLE_MEMORY_ARCH_X86 or intent.hardware_arch == SIMPLE_MEMORY_ARCH_ARM or intent.hardware_arch == SIMPLE_MEMORY_ARCH_RISCV
+
+fn memory_leveling_real_hardware_decide(profile: MemoryLevelingProfile, intent: SimpleMemoryIntent) -> MemoryLevelingDecision:
+    if intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_REAL and intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_VULKAN_READBACK and intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_METAL_READBACK and intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_CUDA_READBACK:
+        return _decision(MEMORY_ACTION_REJECT, "real-hardware-evidence-required")
+    if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_CPU:
+        if _supported_cpu_arch(intent) and intent.placement == SIMPLE_MEMORY_PLACEMENT_CPU:
+            return memory_leveling_decide(profile, memory_page_from_simple_intent(0, intent))
+        return _decision(MEMORY_ACTION_REJECT, "unsupported-cpu-hardware-target")
+    if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_VULKAN:
+        if intent.hardware_evidence == SIMPLE_MEMORY_EVIDENCE_VULKAN_READBACK:
+            return _decision(MEMORY_ACTION_PIN_DEVICE, "vulkan-readback-backed-pinned")
+        return _decision(MEMORY_ACTION_REJECT, "vulkan-gpu-memory-pinned")
+    if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_METAL:
+        if intent.hardware_evidence == SIMPLE_MEMORY_EVIDENCE_METAL_READBACK:
+            return _decision(MEMORY_ACTION_PIN_DEVICE, "metal-readback-backed-pinned")
+        return _decision(MEMORY_ACTION_REJECT, "metal-gpu-memory-pinned")
+    if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_CUDA:
+        if intent.hardware_evidence == SIMPLE_MEMORY_EVIDENCE_CUDA_READBACK:
+            return _decision(MEMORY_ACTION_PIN_DEVICE, "cuda-readback-backed-pinned")
+        return _decision(MEMORY_ACTION_REJECT, "cuda-gpu-memory-pinned")
+    if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_RDMA:
+        return _decision(MEMORY_ACTION_REJECT, "rdma-registered-not-swappable")
+    _decision(MEMORY_ACTION_REJECT, "unsupported-hardware-backend")
+
+fn profile_summary_line(profile: MemoryLevelingProfile) -> text:
+    memory_profile_summary(profile)
+
+fn movement_decision_line(profile: MemoryLevelingProfile, page: MemoryLevelingPage) -> text:
+    val decision = memory_leveling_decide(profile, page)
+    "profile={profile.name} page={page.page_id} action={decision.action} reason={decision.reason}"

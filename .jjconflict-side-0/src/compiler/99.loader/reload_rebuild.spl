@@ -1,0 +1,149 @@
+# AC-8: reload resolvability tracking
+# AC-9: deterministic global-symbol rebuild verification
+
+use std.io_runtime
+
+class JitSymbolState:
+    name: text
+    owner_path: text
+    was_present_before: bool
+    survived_unload: bool
+    present_after_reload: bool
+
+    static fn tracked(name: text, owner: text) -> JitSymbolState:
+        JitSymbolState(
+            name: name,
+            owner_path: owner,
+            was_present_before: true,
+            survived_unload: false,
+            present_after_reload: false
+        )
+
+    me after_unload(survived: bool) -> JitSymbolState:
+        JitSymbolState(
+            name: self.name,
+            owner_path: self.owner_path,
+            was_present_before: self.was_present_before,
+            survived_unload: survived,
+            present_after_reload: self.present_after_reload
+        )
+
+    me after_reload(present: bool) -> JitSymbolState:
+        JitSymbolState(
+            name: self.name,
+            owner_path: self.owner_path,
+            was_present_before: self.was_present_before,
+            survived_unload: self.survived_unload,
+            present_after_reload: present
+        )
+
+    me is_resolvable() -> bool:
+        return self.present_after_reload
+
+class ReloadResolvability:
+    s0_name: text
+    s0_resolvable: bool
+    s1_name: text
+    s1_resolvable: bool
+    s2_name: text
+    s2_resolvable: bool
+    s3_name: text
+    s3_resolvable: bool
+    s4_name: text
+    s4_resolvable: bool
+    total: i32
+    resolvable_count: i32
+
+    static fn from_five(s0: JitSymbolState, s1: JitSymbolState, s2: JitSymbolState, s3: JitSymbolState, s4: JitSymbolState) -> ReloadResolvability:
+        var count = 0
+        if s0.is_resolvable():
+            count = count + 1
+        if s1.is_resolvable():
+            count = count + 1
+        if s2.is_resolvable():
+            count = count + 1
+        if s3.is_resolvable():
+            count = count + 1
+        if s4.is_resolvable():
+            count = count + 1
+        ReloadResolvability(
+            s0_name: s0.name,
+            s0_resolvable: s0.is_resolvable(),
+            s1_name: s1.name,
+            s1_resolvable: s1.is_resolvable(),
+            s2_name: s2.name,
+            s2_resolvable: s2.is_resolvable(),
+            s3_name: s3.name,
+            s3_resolvable: s3.is_resolvable(),
+            s4_name: s4.name,
+            s4_resolvable: s4.is_resolvable(),
+            total: 5,
+            resolvable_count: count
+        )
+
+    me all_resolvable() -> bool:
+        return self.resolvable_count == self.total
+
+    me loss_count() -> i32:
+        return self.total - self.resolvable_count
+
+class GlobalTableSnapshot:
+    snapshot_id: text
+    symbol_count: i32
+    s0: text
+    s1: text
+    s2: text
+    s3: text
+
+    static fn create(snap_id: text, count: i32, n0: text, n1: text, n2: text, n3: text) -> GlobalTableSnapshot:
+        GlobalTableSnapshot(
+            snapshot_id: snap_id,
+            symbol_count: count,
+            s0: n0,
+            s1: n1,
+            s2: n2,
+            s3: n3
+        )
+
+    me matches_count(other_count: i32) -> bool:
+        return self.symbol_count == other_count
+
+class DeterminismCheck:
+    before_count: i32
+    removed_count: i32
+    expected_after: i32
+    actual_after: i32
+    is_deterministic: bool
+
+    static fn check(before: GlobalTableSnapshot, removed: i32, after: GlobalTableSnapshot) -> DeterminismCheck:
+        val expected = before.symbol_count - removed
+        val det = after.symbol_count == expected
+        DeterminismCheck(
+            before_count: before.symbol_count,
+            removed_count: removed,
+            expected_after: expected,
+            actual_after: after.symbol_count,
+            is_deterministic: det
+        )
+
+    me passed() -> bool:
+        return self.is_deterministic
+
+class RebuildReport:
+    module_path: text
+    check_passed: bool
+    before_symbols: i32
+    after_symbols: i32
+    removed_symbols: i32
+
+    static fn from_check(path: text, dc: DeterminismCheck) -> RebuildReport:
+        RebuildReport(
+            module_path: path,
+            check_passed: dc.passed(),
+            before_symbols: dc.before_count,
+            after_symbols: dc.actual_after,
+            removed_symbols: dc.removed_count
+        )
+
+    me summary() -> text:
+        return "path: " + self.module_path + " before=" + self.before_symbols.to_text() + " removed=" + self.removed_symbols.to_text() + " after=" + self.after_symbols.to_text() + " deterministic=" + self.check_passed.to_text()

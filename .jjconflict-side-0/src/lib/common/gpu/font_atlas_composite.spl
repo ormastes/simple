@@ -1,0 +1,196 @@
+# Shared frozen sources for the versioned font-atlas composite kernel.
+# Compiler emitters and GPU runtimes compile these exact texts.
+
+val FONT_ATLAS_COMPOSITE_ENTRY: text = "simple_font_atlas_composite_v1_u32"
+val FONT_ATLAS_COMPOSITE_PROGRAM_VERSION: i64 = 1
+val FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION: i64 = 2
+
+fn font_atlas_composite_program_version_valid(version: i64) -> bool:
+    version == FONT_ATLAS_COMPOSITE_PROGRAM_VERSION
+
+fn font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
+                             atlas_x: i32, atlas_y: i32, width: i32, height: i32,
+                             color: u32) -> [u32]:
+    if atlas_width <= 0 or atlas_height <= 0 or width <= 0 or height <= 0:
+        return []
+    if atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height:
+        return []
+    if width > atlas_width - atlas_x or height > atlas_height - atlas_y:
+        return []
+    val atlas_count = atlas_width.to_i64() * atlas_height.to_i64()
+    val quad_count = width.to_i64() * height.to_i64()
+    if atlas_count <= 0 or atlas_count > 2147483647 or quad_count <= 0 or quad_count > 2147483647:
+        return []
+    if atlas_pixels.len().to_i64() < atlas_count:
+        return []
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    var pixels: [u32] = []
+    var row = 0
+    while row < height:
+        var col = 0
+        while col < width:
+            val source = (atlas_y + row).to_i64() * atlas_width.to_i64() + (atlas_x + col).to_i64()
+            val atlas_pixel = atlas_pixels[source]
+            val alpha = (((atlas_pixel >> 24) & 0xFFu32) * color_alpha + 127u32) / 255u32
+            pixels.push(if alpha == 0u32: 0u32 else: (alpha << 24) | rgb)
+            col = col + 1
+        row = row + 1
+    pixels
+
+fn font_destination_origin(origin: i32, offset: i32, extent: i32) -> i32?:
+    if extent <= 0:
+        return nil
+    val start = origin.to_i64() + offset.to_i64()
+    val end = start + extent.to_i64() - 1
+    if start < -2147483648 or start > 2147483647 or end < -2147483648 or end > 2147483647:
+        return nil
+    start as i32
+
+fn font_atlas_composite_opencl_source() -> text:
+    "__kernel void simple_font_atlas_composite_v1_u32(\n" +
+    "    __global const uint* atlas, __global uint* dst,\n" +
+    "    long atlas_width, long atlas_height, long atlas_count,\n" +
+    "    long atlas_x, long atlas_y, long quad_width, long quad_height,\n" +
+    "    long dst_width, long dst_height, long dst_count,\n" +
+    "    long dst_x, long dst_y, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    if (i < 0 || atlas_width > 2147483647L || atlas_height > 2147483647L ||\n" +
+    "        quad_width > 2147483647L || quad_height > 2147483647L ||\n" +
+    "        dst_width > 2147483647L || dst_height > 2147483647L) { return; }\n" +
+    "    if (atlas_width <= 0 || atlas_height <= 0 || atlas_count <= 0 ||\n" +
+    "        quad_width <= 0 || quad_height <= 0 || dst_width <= 0 ||\n" +
+    "        dst_height <= 0 || dst_count <= 0 || atlas_x < 0 || atlas_y < 0) { return; }\n" +
+    "    if (atlas_count != atlas_width * atlas_height || dst_count != dst_width * dst_height) { return; }\n" +
+    "    if (atlas_x > atlas_width || atlas_y > atlas_height ||\n" +
+    "        quad_width > atlas_width - atlas_x || quad_height > atlas_height - atlas_y) { return; }\n" +
+    "    if (dst_x < -quad_width || dst_y < -quad_height || dst_x >= dst_width || dst_y >= dst_height) { return; }\n" +
+    "    if (i >= quad_width * quad_height) { return; }\n" +
+    "    long sx = atlas_x + i % quad_width;\n" +
+    "    long sy = atlas_y + i / quad_width;\n" +
+    "    if (sx < 0 || sy < 0 || sx >= atlas_width || sy >= atlas_height) { return; }\n" +
+    "    long si = sy * atlas_width + sx;\n" +
+    "    if (si < 0 || si >= atlas_count) { return; }\n" +
+    "    long dx = i % quad_width + dst_x;\n" +
+    "    long dy = i / quad_width + dst_y;\n" +
+    "    if (dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height) { return; }\n" +
+    "    long di = (long)dy * dst_width + (long)dx;\n" +
+    "    if (di < 0 || di >= dst_count) { return; }\n" +
+    "    uint color_u32 = (uint)color;\n" +
+    "    uint mask_a = atlas[si] >> 24u;\n" +
+    "    uint sa = (mask_a * (color_u32 >> 24u) + 127u) / 255u;\n" +
+    "    if (sa == 0u) { return; }\n" +
+    "    uint d = dst[di];\n" +
+    "    uint da = d >> 24u;\n" +
+    "    uint inv = 255u - sa;\n" +
+    "    uint dst_weight = (da * inv) / 255u;\n" +
+    "    uint out_a = sa + dst_weight;\n" +
+    "    uint out_r = (((color_u32 >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n" +
+    "    uint out_g = (((color_u32 >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n" +
+    "    uint out_b = ((color_u32 & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n" +
+    "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
+    "}\n"
+
+fn font_atlas_composite_hip_source() -> text:
+    "#include <hip/hip_runtime.h>\n" +
+    "extern \"C\" __global__ void simple_font_atlas_composite_v1_u32(\n" +
+    "    const unsigned int* atlas, unsigned int* dst,\n" +
+    "    long atlas_width, long atlas_height, long atlas_count,\n" +
+    "    long atlas_x, long atlas_y, long quad_width, long quad_height,\n" +
+    "    long dst_width, long dst_height, long dst_count,\n" +
+    "    long dst_x, long dst_y, long color) {\n" +
+    "    long i = blockIdx.x * blockDim.x + threadIdx.x;\n" +
+    "    if (i < 0 || atlas_width > 2147483647L || atlas_height > 2147483647L ||\n" +
+    "        quad_width > 2147483647L || quad_height > 2147483647L ||\n" +
+    "        dst_width > 2147483647L || dst_height > 2147483647L) { return; }\n" +
+    "    if (atlas_width <= 0 || atlas_height <= 0 || atlas_count <= 0 ||\n" +
+    "        quad_width <= 0 || quad_height <= 0 || dst_width <= 0 ||\n" +
+    "        dst_height <= 0 || dst_count <= 0 || atlas_x < 0 || atlas_y < 0) { return; }\n" +
+    "    if (atlas_count != atlas_width * atlas_height || dst_count != dst_width * dst_height) { return; }\n" +
+    "    if (atlas_x > atlas_width || atlas_y > atlas_height ||\n" +
+    "        quad_width > atlas_width - atlas_x || quad_height > atlas_height - atlas_y) { return; }\n" +
+    "    if (dst_x < -quad_width || dst_y < -quad_height || dst_x >= dst_width || dst_y >= dst_height) { return; }\n" +
+    "    if (i >= quad_width * quad_height) { return; }\n" +
+    "    long sx = atlas_x + i % quad_width;\n" +
+    "    long sy = atlas_y + i / quad_width;\n" +
+    "    if (sx < 0 || sy < 0 || sx >= atlas_width || sy >= atlas_height) { return; }\n" +
+    "    long si = sy * atlas_width + sx;\n" +
+    "    if (si < 0 || si >= atlas_count) { return; }\n" +
+    "    long dx = i % quad_width + dst_x;\n" +
+    "    long dy = i / quad_width + dst_y;\n" +
+    "    if (dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height) { return; }\n" +
+    "    long di = dy * dst_width + dx;\n" +
+    "    if (di < 0 || di >= dst_count) { return; }\n" +
+    "    unsigned int color_u32 = (unsigned int)color;\n" +
+    "    unsigned int mask_a = atlas[si] >> 24u;\n" +
+    "    unsigned int sa = (mask_a * (color_u32 >> 24u) + 127u) / 255u;\n" +
+    "    if (sa == 0u) { return; }\n" +
+    "    unsigned int d = dst[di];\n" +
+    "    unsigned int da = d >> 24u;\n" +
+    "    unsigned int inv = 255u - sa;\n" +
+    "    unsigned int dst_weight = (da * inv) / 255u;\n" +
+    "    unsigned int out_a = sa + dst_weight;\n" +
+    "    unsigned int out_r = (((color_u32 >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n" +
+    "    unsigned int out_g = (((color_u32 >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n" +
+    "    unsigned int out_b = ((color_u32 & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n" +
+    "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
+    "}\n"
+
+fn font_atlas_composite_metal_source() -> text:
+    "#include <metal_stdlib>\nusing namespace metal;\n\nstruct FontAtlasCompositeParams {\n    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n    int dst_x;\n    int dst_y;\n    uint color;\n};\n\nkernel void simple_font_atlas_composite_v1_u32(\n    device const uint* atlas [[buffer(0)]],\n    device uint* dst [[buffer(1)]],\n    constant FontAtlasCompositeParams& p [[buffer(2)]],\n    uint i [[thread_position_in_grid]]) {\n    if (p.atlas_x > p.atlas_width || p.atlas_y > p.atlas_height ||\n        p.quad_width > p.atlas_width - p.atlas_x || p.quad_height > p.atlas_height - p.atlas_y) { return; }\n    if (i >= p.quad_width * p.quad_height) { return; }\n    uint sx = p.atlas_x + i % p.quad_width;\n    uint sy = p.atlas_y + i / p.quad_width;\n    if (sx >= p.atlas_width || sy >= p.atlas_height) { return; }\n    uint si = sy * p.atlas_width + sx;\n    if (si >= p.atlas_count) { return; }\n    int dx = int(i % p.quad_width) + p.dst_x;\n    int dy = int(i / p.quad_width) + p.dst_y;\n    if (dx < 0 || dy < 0 || dx >= int(p.dst_width) || dy >= int(p.dst_height)) { return; }\n    uint di = uint(dy) * p.dst_width + uint(dx);\n    if (di >= p.dst_count) { return; }\n    uint mask_a = atlas[si] >> 24u;\n    uint sa = (mask_a * (p.color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    uint d = dst[di];\n    uint da = d >> 24u;\n    uint inv = 255u - sa;\n    uint dst_weight = (da * inv) / 255u;\n    uint out_a = sa + dst_weight;\n    uint out_r = (((p.color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n    uint out_g = (((p.color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n    uint out_b = ((p.color & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n"
+
+fn font_atlas_composite_vulkan_glsl_source() -> text:
+    "#version 450\n\n" +
+    "layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;\n" +
+    "layout(std430, set = 0, binding = 0) readonly buffer AtlasBuffer { uint atlas[]; };\n" +
+    "layout(std430, set = 0, binding = 1) buffer DestinationBuffer { uint dst[]; };\n" +
+    "layout(std430, set = 0, binding = 2) readonly buffer ParamsBuffer {\n" +
+    "    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n" +
+    "    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n" +
+    "    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n" +
+    "    int dst_x;\n    int dst_y;\n    uint color;\n} p;\n\n" +
+    "void main() {\n" +
+    "    uint i = gl_GlobalInvocationID.x;\n" +
+    "    if (p.atlas_width == 0u || p.atlas_height == 0u || p.atlas_count == 0u ||\n" +
+    "        p.quad_width == 0u || p.quad_height == 0u || p.dst_width == 0u ||\n" +
+    "        p.dst_height == 0u || p.dst_count == 0u) { return; }\n" +
+    "    if (p.atlas_width > 2147483647u || p.atlas_height > 2147483647u ||\n" +
+    "        p.quad_width > 2147483647u || p.quad_height > 2147483647u ||\n" +
+    "        p.dst_width > 2147483647u || p.dst_height > 2147483647u) { return; }\n" +
+    "    if (p.atlas_width > 0xffffffffu / p.atlas_height ||\n" +
+    "        p.quad_width > 0xffffffffu / p.quad_height ||\n" +
+    "        p.dst_width > 0xffffffffu / p.dst_height) { return; }\n" +
+    "    if (p.atlas_count != p.atlas_width * p.atlas_height ||\n" +
+    "        p.dst_count != p.dst_width * p.dst_height) { return; }\n" +
+    "    if (p.atlas_x > p.atlas_width || p.atlas_y > p.atlas_height ||\n" +
+    "        p.quad_width > p.atlas_width - p.atlas_x ||\n" +
+    "        p.quad_height > p.atlas_height - p.atlas_y) { return; }\n" +
+    "    uint quad_count = p.quad_width * p.quad_height;\n" +
+    "    if (i >= quad_count) { return; }\n" +
+    "    uint local_x = i % p.quad_width;\n" +
+    "    uint local_y = i / p.quad_width;\n" +
+    "    uint sx = p.atlas_x + local_x;\n" +
+    "    uint sy = p.atlas_y + local_y;\n" +
+    "    uint si = sy * p.atlas_width + sx;\n" +
+    "    if (si >= p.atlas_count || si >= uint(atlas.length())) { return; }\n" +
+    "    if (p.dst_x > 2147483647 - int(local_x) || p.dst_y > 2147483647 - int(local_y)) { return; }\n" +
+    "    int dx = p.dst_x + int(local_x);\n" +
+    "    int dy = p.dst_y + int(local_y);\n" +
+    "    if (dx < 0 || dy < 0 || dx >= int(p.dst_width) || dy >= int(p.dst_height)) { return; }\n" +
+    "    uint di = uint(dy) * p.dst_width + uint(dx);\n" +
+    "    if (di >= p.dst_count || di >= uint(dst.length())) { return; }\n" +
+    "    uint mask_a = atlas[si] >> 24u;\n" +
+    "    uint sa = (mask_a * (p.color >> 24u) + 127u) / 255u;\n" +
+    "    if (sa == 0u) { return; }\n" +
+    "    uint d = dst[di];\n" +
+    "    uint da = d >> 24u;\n" +
+    "    uint inv = 255u - sa;\n" +
+    "    uint dst_weight = (da * inv) / 255u;\n" +
+    "    uint out_a = sa + dst_weight;\n" +
+    "    uint out_r = (((p.color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n" +
+    "    uint out_g = (((p.color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n" +
+    "    uint out_b = ((p.color & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n" +
+    "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
+    "}\n"
+
+export FONT_ATLAS_COMPOSITE_ENTRY, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin, font_atlas_composite_opencl_source, font_atlas_composite_hip_source, font_atlas_composite_metal_source, font_atlas_composite_vulkan_glsl_source

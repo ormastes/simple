@@ -1,0 +1,451 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mdi}"
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$ROOT_DIR/$BUILD_DIR" ;;
+esac
+PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
+ELECTRON_PROBE_RUNNER="$ROOT_DIR/scripts/check/ios_mdi_probe_electron_self_test.js"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "$ROOT_DIR"/bin/simple "$ROOT_DIR"/build/bootstrap/stage3/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ]; then
+        case "$(uname -s):$(uname -m)" in
+            Darwin:arm64) host_release_glob="$ROOT_DIR/release/aarch64-apple-darwin*/simple" ;;
+            Darwin:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-apple-darwin*/simple" ;;
+            Linux:arm64|Linux:aarch64) host_release_glob="$ROOT_DIR/release/aarch64-unknown-linux-gnu/simple" ;;
+            Linux:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-unknown-linux-gnu/simple" ;;
+            *) host_release_glob="" ;;
+        esac
+        for candidate in $host_release_glob; do
+            if [ -x "$candidate" ]; then
+                SIMPLE_BIN="$candidate"
+                SIMPLE_BIN_SOURCE="repo-host-release-fallback"
+                break
+            fi
+        done
+    fi
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
+SCREENSHOT="${IOS_MDI_SCREENSHOT:-$BUILD_DIR/ios_simulator_mdi.png}"
+case "$SCREENSHOT" in
+    /*) ;;
+    *) SCREENSHOT="$ROOT_DIR/$SCREENSHOT" ;;
+esac
+LOG_STREAM="$BUILD_DIR/ios_simulator_log_stream.txt"
+IOS_DEV_LOG="$BUILD_DIR/ios_tauri_dev.log"
+SERVER_LOG="$BUILD_DIR/ios_mdi_probe_server.log"
+PROOF_JSON="$BUILD_DIR/ios_mdi_probe_proof.json"
+SIMPLE_IPC_OUT="$BUILD_DIR/ios_mdi_simple_ipc.out"
+BROWSER_PROOF_JSON="$BUILD_DIR/ios_mdi_probe_browser_proof.json"
+BROWSER_SCREENSHOT="$BUILD_DIR/ios_mdi_probe_browser.png"
+BROWSER_LOG="$BUILD_DIR/ios_mdi_probe_browser.log"
+BROWSER_SIMPLE_IPC_OUT="$BUILD_DIR/ios_mdi_probe_browser_simple_ipc.out"
+TAURI_URL_PROOF_JSON="$BUILD_DIR/ios_mdi_probe_tauri_url_proof.json"
+TAURI_URL_LOG="$BUILD_DIR/ios_mdi_probe_tauri_url.log"
+TAURI_URL_SIMPLE_IPC_OUT="$BUILD_DIR/ios_mdi_probe_tauri_url_simple_ipc.out"
+TAURI_URL_SCREENSHOT="$BUILD_DIR/ios_mdi_probe_tauri_url.png"
+PORT="${IOS_MDI_PROBE_PORT:-$((41000 + ($$ % 10000)))}"
+BROWSER_PORT="${IOS_MDI_BROWSER_PROBE_PORT:-$((42000 + ($$ % 10000)))}"
+TAURI_URL_PORT="${IOS_MDI_TAURI_URL_PROBE_PORT:-$((43000 + ($$ % 10000)))}"
+TIMEOUT_SECS="${IOS_MDI_TIMEOUT_SECS:-60}"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+    exit 1
+}
+
+has_open_window_marker() {
+    window_id="$1"
+    grep -q "openWindow id=$window_id" "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null ||
+        grep -q "\"type\":\"openWindow\",\"windowId\":\"$window_id\"" "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null
+}
+
+echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    fail "simple-bin-forbidden"
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail "host Simple runtime missing: $SIMPLE_BIN"
+fi
+
+capture_simple_ipc() {
+    output_path="$1"
+    test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+    test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
+    "$SIMPLE_BIN" check "$SMOKE_SOURCE" > "$output_path.check.log" 2>&1 \
+        || fail "mobile MDI smoke source check failed"
+    "$SIMPLE_BIN" run "$SMOKE_SOURCE" --mode=interpreter --clean \
+        > "$output_path" 2> "$output_path.err" \
+        || fail "mobile MDI smoke source run failed"
+    open_count="$(grep -c '"type":"openWindow"' "$output_path" || true)"
+    if [ "$open_count" -lt 4 ]; then
+        fail "mobile MDI smoke emitted $open_count openWindow messages, expected at least 4"
+    fi
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --self-test
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "status=pass"
+    exit 0
+fi
+
+if [ "${1:-}" = "--browser-self-test" ]; then
+    command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not found"
+    test -f "$PROBE_HELPER" || fail "iOS MDI probe helper missing: $PROBE_HELPER"
+    test -f "$ELECTRON_PROBE_RUNNER" || fail "iOS MDI Electron probe runner missing: $ELECTRON_PROBE_RUNNER"
+    if [ -x "$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron" ]; then
+        ELECTRON_BIN="$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron"
+    elif [ -x "$ROOT_DIR/tools/electron-shell/node_modules/electron/dist/electron" ]; then
+        ELECTRON_BIN="$ROOT_DIR/tools/electron-shell/node_modules/electron/dist/electron"
+    else
+        fail "Electron dependency missing under tools/electron-shell/node_modules"
+    fi
+
+    mkdir -p "$BUILD_DIR"
+    rm -f "$BROWSER_PROOF_JSON" "$BROWSER_SCREENSHOT" "$BROWSER_SIMPLE_IPC_OUT"
+    capture_simple_ipc "$BROWSER_SIMPLE_IPC_OUT"
+
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter "$BROWSER_PORT" "$BROWSER_PROOF_JSON" "$BROWSER_SIMPLE_IPC_OUT" > "$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+    cleanup_browser() {
+        kill "$SERVER_PID" 2>/dev/null || true
+    }
+    trap cleanup_browser EXIT INT TERM
+
+    sleep 1
+    kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
+
+    BROWSER_URL="http://127.0.0.1:$BROWSER_PORT/ios_mdi_probe.html"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT_SECS" xvfb-run -a --server-args="-screen 0 420x880x24" \
+            "$ELECTRON_BIN" --no-sandbox --disable-gpu "$ELECTRON_PROBE_RUNNER" \
+            "$BROWSER_URL" "$BROWSER_PROOF_JSON" "$BROWSER_SCREENSHOT" "$((TIMEOUT_SECS * 1000))" \
+            > "$BROWSER_LOG" 2>&1 \
+            || fail "iOS MDI browser probe failed; see $BROWSER_LOG"
+    else
+        xvfb-run -a --server-args="-screen 0 420x880x24" \
+            "$ELECTRON_BIN" --no-sandbox --disable-gpu "$ELECTRON_PROBE_RUNNER" \
+            "$BROWSER_URL" "$BROWSER_PROOF_JSON" "$BROWSER_SCREENSHOT" "$((TIMEOUT_SECS * 1000))" \
+            > "$BROWSER_LOG" 2>&1 \
+            || fail "iOS MDI browser probe failed; see $BROWSER_LOG"
+    fi
+    test -s "$BROWSER_SCREENSHOT" || fail "iOS MDI browser screenshot is empty: $BROWSER_SCREENSHOT"
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate "$BROWSER_PROOF_JSON" "$BROWSER_LOG"
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-screenshot "$BROWSER_SCREENSHOT"
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-probe-mdi-screenshot "$BROWSER_SCREENSHOT" ios_mdi_probe_browser_screenshot_semantic
+    echo "ios_mdi_probe_browser_self_test=pass"
+    echo "ios_mdi_probe_browser_screenshot=$BROWSER_SCREENSHOT"
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "status=pass"
+    exit 0
+fi
+
+if [ "${1:-}" = "--tauri-url-self-test" ]; then
+    command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not found"
+    command -v xwd >/dev/null 2>&1 || fail "xwd not found"
+    command -v convert >/dev/null 2>&1 || fail "convert not found"
+    command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+    test -f "$PROBE_HELPER" || fail "iOS MDI probe helper missing: $PROBE_HELPER"
+
+    mkdir -p "$BUILD_DIR"
+    rm -f "$TAURI_URL_PROOF_JSON" "$TAURI_URL_SIMPLE_IPC_OUT" "$TAURI_URL_SCREENSHOT" "$TAURI_URL_SCREENSHOT.xwd"
+    capture_simple_ipc "$TAURI_URL_SIMPLE_IPC_OUT"
+
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter "$TAURI_URL_PORT" "$TAURI_URL_PROOF_JSON" "$TAURI_URL_SIMPLE_IPC_OUT" > "$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+    cleanup_tauri_url() {
+        kill "$SERVER_PID" 2>/dev/null || true
+    }
+    trap cleanup_tauri_url EXIT INT TERM
+
+    sleep 1
+    kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
+
+    TAURI_URL="http://127.0.0.1:$TAURI_URL_PORT/ios_mdi_probe.html"
+    tauri_url_code=0
+    WEBKIT_DISABLE_DMABUF_RENDERER=1 SIMPLE_DASHBOARD_URL="$TAURI_URL" \
+        xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        sh -c '
+            cd "$1"
+            log="$2"
+            proof="$3"
+            screenshot="$4"
+            timeout_secs="$5"
+            cargo run --quiet > "$log" 2>&1 &
+            app_pid=$!
+            end=$(( $(date +%s) + timeout_secs ))
+            while [ "$(date +%s)" -lt "$end" ]; do
+                if [ -s "$proof" ]; then
+                    break
+                fi
+                if ! kill -0 "$app_pid" 2>/dev/null; then
+                    wait "$app_pid" 2>/dev/null || true
+                    exit 11
+                fi
+                sleep 1
+            done
+            if [ ! -s "$proof" ]; then
+                kill "$app_pid" 2>/dev/null || true
+                wait "$app_pid" 2>/dev/null || true
+                exit 12
+            fi
+            xwd -root -silent -out "$screenshot.xwd" || {
+                kill "$app_pid" 2>/dev/null || true
+                wait "$app_pid" 2>/dev/null || true
+                exit 13
+            }
+            convert "$screenshot.xwd" "$screenshot" || {
+                kill "$app_pid" 2>/dev/null || true
+                wait "$app_pid" 2>/dev/null || true
+                exit 14
+            }
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+        ' tauri-url "$TAURI_DIR/src-tauri" "$TAURI_URL_LOG" "$TAURI_URL_PROOF_JSON" "$TAURI_URL_SCREENSHOT" "$TIMEOUT_SECS" \
+        || tauri_url_code=$?
+    if [ "$tauri_url_code" -ne 0 ]; then
+        fail "Tauri URL-mode probe failed with code $tauri_url_code; see $TAURI_URL_LOG"
+    fi
+    test -s "$TAURI_URL_PROOF_JSON" || fail "Tauri URL-mode proof not observed within ${TIMEOUT_SECS}s"
+    test -s "$TAURI_URL_SCREENSHOT" || fail "Tauri URL-mode screenshot is empty: $TAURI_URL_SCREENSHOT"
+
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate "$TAURI_URL_PROOF_JSON" "$TAURI_URL_LOG"
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-screenshot "$TAURI_URL_SCREENSHOT" ios_mdi_probe_tauri_url_screenshot
+    "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-probe-mdi-screenshot "$TAURI_URL_SCREENSHOT" ios_mdi_probe_tauri_url_screenshot_semantic
+    grep -q 'external_url: Some' "$TAURI_URL_LOG" \
+        || fail "Tauri URL-mode log missing external_url marker; see $TAURI_URL_LOG"
+    grep -q 'ios_mdi_probe.html' "$TAURI_URL_LOG" \
+        || fail "Tauri URL-mode log missing probe URL marker; see $TAURI_URL_LOG"
+    echo "ios_mdi_probe_tauri_url_self_test=pass"
+    echo "ios_mdi_probe_tauri_url_log=$TAURI_URL_LOG"
+    echo "ios_mdi_probe_tauri_url_screenshot=$TAURI_URL_SCREENSHOT"
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "status=pass"
+    exit 0
+fi
+
+mkdir -p "$BUILD_DIR"
+rm -f "$PROOF_JSON" "$SIMPLE_IPC_OUT"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "ios_tooling=unavailable"
+    echo "ios_reason=iOS simulator evidence requires macOS with Xcode; current host $(uname -s)"
+    echo "status=unavailable"
+    exit 0
+fi
+
+command -v xcrun >/dev/null 2>&1 || fail "xcrun not found; install Xcode"
+command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found; install Xcode"
+command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+command -v node >/dev/null 2>&1 || fail "node not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+cargo tauri --version >/dev/null 2>&1 || fail "cargo-tauri not found"
+test -f "$PROBE_HELPER" || fail "iOS MDI probe helper missing: $PROBE_HELPER"
+capture_simple_ipc "$SIMPLE_IPC_OUT"
+
+SIM_UDID="${IOS_SIM_UDID:-}"
+if [ -z "$SIM_UDID" ]; then
+    SIM_UDID="$(
+        xcrun simctl list devices available -j |
+        node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+const iphones = Object.values(devices).flat().filter((device) =>
+  String(device.name || "").includes("iPhone") && device.isAvailable
+);
+const booted = iphones.find((device) => String(device.state || "") === "Booted");
+const selected = booted || iphones[0];
+process.stdout.write(selected ? String(selected.udid || "") : "");
+'
+    )"
+fi
+test -n "$SIM_UDID" || fail "no available iPhone simulator found"
+SIM_DEVICE_NAME="$(
+    xcrun simctl list devices available -j |
+    node -e '
+const fs = require("fs");
+const target = process.argv[1];
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+for (const [runtime, runtimeDevices] of Object.entries(devices)) {
+  for (const device of runtimeDevices) {
+    if (device.udid === target) {
+      process.stdout.write(String(device.name || ""));
+      process.exit(0);
+    }
+  }
+}
+' "$SIM_UDID"
+)"
+test -n "$SIM_DEVICE_NAME" || fail "selected iPhone simulator name not found for $SIM_UDID"
+SIM_NAME="$(
+    xcrun simctl list devices available -j |
+    node -e '
+const fs = require("fs");
+const target = process.argv[1];
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+for (const [runtime, runtimeDevices] of Object.entries(devices)) {
+  for (const device of runtimeDevices) {
+    if (device.udid === target) {
+      process.stdout.write(String(device.name || "") + " (" + runtime + ")");
+      process.exit(0);
+    }
+  }
+}
+' "$SIM_UDID"
+)"
+
+"$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter "$PORT" "$PROOF_JSON" "$SIMPLE_IPC_OUT" > "$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+
+cleanup() {
+    kill "$SERVER_PID" 2>/dev/null || true
+    if [ -n "${LOG_PID:-}" ]; then
+        kill "$LOG_PID" 2>/dev/null || true
+    fi
+    if [ -n "${IOS_DEV_PID:-}" ]; then
+        kill "$IOS_DEV_PID" 2>/dev/null || true
+    fi
+    rm -f "$TAURI_DIR/src-tauri/mobile_probe_entry.txt" "$TAURI_DIR/src-tauri/mobile_entry_source.spl" "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
+}
+trap cleanup EXIT INT TERM
+
+sleep 1
+kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
+
+cd "$TAURI_DIR"
+printf 'mdi-smoke\n' > "$TAURI_DIR/src-tauri/mobile_probe_entry.txt"
+cp "$SMOKE_SOURCE" "$TAURI_DIR/src-tauri/mobile_entry_source.spl"
+printf 'http://127.0.0.1:%s/proof\n' "$PORT" > "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
+npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
+    || fail "npm prepare:dist failed; see $BUILD_DIR/ios_prepare_dist.log"
+if [ ! -d "src-tauri/gen/apple" ]; then
+    cargo tauri ios init > "$BUILD_DIR/ios_init.log" 2>&1 \
+        || fail "cargo tauri ios init failed; see $BUILD_DIR/ios_init.log"
+fi
+
+xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
+xcrun simctl bootstatus "$SIM_UDID" -b > "$BUILD_DIR/ios_bootstatus.log" 2>&1
+xcrun simctl terminate "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_pre_run_terminate.log" 2>&1 || true
+xcrun simctl uninstall "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_pre_run_uninstall.log" 2>&1 || true
+
+: > "$LOG_STREAM"
+xcrun simctl spawn "$SIM_UDID" log stream --style compact \
+    --predicate 'process CONTAINS "simple" OR eventMessage CONTAINS "tauri-shell" OR eventMessage CONTAINS "ios_mdi_probe"' \
+    > "$LOG_STREAM" 2>&1 &
+LOG_PID=$!
+
+SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke \
+SIMPLE_TAURI_MDI_PROOF_PATH="$PROOF_JSON" \
+SIMPLE_DASHBOARD_URL="http://127.0.0.1:$PORT/ios_mdi_probe.html" \
+    cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
+IOS_DEV_PID=$!
+
+launch_end=$(( $(date +%s) + 45 ))
+launch_status=fail
+while [ "$(date +%s)" -lt "$launch_end" ]; do
+    if xcrun simctl launch "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_manual_launch.log" 2>&1; then
+        launch_status=pass
+        break
+    fi
+    sleep 2
+done
+if [ "$launch_status" != "pass" ]; then
+    fail "failed to foreground com.simple.ui in iOS simulator; see $BUILD_DIR/ios_manual_launch.log"
+fi
+
+end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    if [ -s "$PROOF_JSON" ]; then
+        break
+    fi
+    sleep 2
+done
+
+sleep "${IOS_MDI_SCREENSHOT_SETTLE_SECS:-3}"
+xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
+    || fail "failed to capture iOS simulator screenshot"
+test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
+test -s "$PROOF_JSON" || fail "iOS MDI probe proof not observed within ${TIMEOUT_SECS}s"
+
+"$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate "$PROOF_JSON" "$LOG_STREAM" "$IOS_DEV_LOG"
+"$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-screenshot "$SCREENSHOT"
+"$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-probe-mdi-screenshot "$SCREENSHOT" ios_mdi_probe_simulator_screenshot_semantic
+if ! grep -q 'external_url: Some' "$IOS_DEV_LOG" || ! grep -q 'ios_mdi_probe.html' "$IOS_DEV_LOG"; then
+    grep -q 'simple-mobile-mdi-smoke.spl' "$IOS_DEV_LOG" "$LOG_STREAM" \
+        || fail "Tauri iOS log missing bundled MDI smoke entry marker; see $IOS_DEV_LOG"
+    has_open_window_marker terminal \
+        || fail "Tauri iOS log missing terminal openWindow marker; see $IOS_DEV_LOG"
+    has_open_window_marker files \
+        || fail "Tauri iOS log missing files openWindow marker; see $IOS_DEV_LOG"
+    has_open_window_marker tasks \
+        || fail "Tauri iOS log missing tasks openWindow marker; see $IOS_DEV_LOG"
+    has_open_window_marker settings \
+        || fail "Tauri iOS log missing settings openWindow marker; see $IOS_DEV_LOG"
+fi
+
+echo "ios_tooling=available"
+echo "ios_simulator=$SIM_UDID"
+echo "ios_simulator_name=$SIM_NAME"
+echo "ios_probe_url=http://127.0.0.1:$PORT/ios_mdi_probe.html"
+echo "ios_simple_ipc=$SIMPLE_IPC_OUT"
+echo "ios_screenshot=$SCREENSHOT"
+echo "ios_proof=$PROOF_JSON"
+echo "ios_log_stream=$LOG_STREAM"
+echo "ios_dev_log=$IOS_DEV_LOG"
+echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+echo "status=pass"

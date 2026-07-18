@@ -1,0 +1,146 @@
+"""
+QEMU System Test — x86_64 Tool Apps Serial Marker E2E Gate.
+
+Wires src/os/x86_64_fs_loaded_marker_contract.spl (tool_apps_required_marker_fragments /
+tool_apps_serial_accepts_completion) into a real QEMU boot instead of leaving it as an
+aspirational contract with zero callers repo-wide. Boots the x86_64-q35-nvme-fat32-smf
+fs-exec acceptance lane (src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl,
+qemu_acceptance_lane for x86_64-simpleos; kernel build/os/simpleos_x86_64_fs_exec.elf,
+image build/os/fat32-x86_64.img, entry examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl)
+and checks the real serial output for the process-backed:ok + vfs-app-read:ok fragments
+required for /sys/apps/simple_compiler, /sys/apps/simple_interpreter, and
+/sys/apps/simple_loader.
+
+**Feature IDs:** #QEMU-SYSTEST-MULTIARCH-AC2 (fs-exec lane), tool-apps marker contract
+**Category:** OS system test
+
+Gate: SIMPLEOS_QEMU_SMOKE=1 (same convention as test/03_system/os/port/e2e_qemu_smoke_spec.spl).
+  - Gate OFF (default): no QEMU boot. Prints that the boot is gated-off and instead
+    asserts the contract functions themselves lint/pass at the unit level (pure
+    text-in/text-out, no process spawn) so a typo in the marker vocabulary still
+    fails fast without a 60s QEMU boot.
+  - Gate ON: boots the real fs-exec lane once and FAILS — never skips — listing the
+    exact missing marker fragments when they are absent from serial.
+
+blocked-on: Phase-1 in-guest exec + a real SimpleOS-target simple binary staged as
+/sys/apps/simple_compiler, simple_interpreter, and simple_loader on the fs-exec disk
+image. As of 2026-07-06 examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl only
+emits the standard_smf_markers() set (ELF_LOAD_OK / SMF_CLI_LAUNCH_OK /
+SMF_WM_GUI_LAUNCH_OK / NATIVE_GUI_PROCESS_RENDER_OK / TEST PASSED) for a single
+hello_world.smf app — none of the tool-app process-backed:ok/vfs-app-read:ok markers
+are emitted yet. This spec is EXPECTED RED under SIMPLEOS_QEMU_SMOKE=1 until both land;
+it flips green once the lane stages and launches the three tool apps and emits their
+markers on COM1.
+
+Run:
+  bin/simple test test/03_system/os/port/x86_64_tool_apps_serial_e2e_spec.spl
+  SIMPLEOS_QEMU_SMOKE=1 bin/simple test test/03_system/os/port/x86_64_tool_apps_serial_e2e_spec.spl
+"""
+use std.spec.*
+use os.qemu_systest_contract.{
+    run_qemu_systest,
+    x86_64_kernel_path,
+    x86_64_image_path,
+    x86_64_qemu_bin,
+    x86_64_qemu_args,
+    x86_64_markers,
+    x86_64_timeout_ms,
+    SYSTEST_PASS
+}
+use os.x86_64_fs_loaded_marker_contract.{
+    tool_apps_required_marker_fragments,
+    tool_apps_serial_accepts_completion,
+    print_tool_apps_missing_markers,
+    vfs_app_read_marker,
+    process_backed_marker
+}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn qemu_smoke_gate() -> text:
+    """Return SIMPLEOS_QEMU_SMOKE env var, or empty string if unset."""
+    val v = rt_env_get("SIMPLEOS_QEMU_SMOKE")
+    if v == nil:
+        ""
+    else:
+        v
+
+describe "x86_64 tool apps serial marker e2e gate":
+
+    it "contract: tool_apps marker vocabulary lints and unit-passes without booting QEMU":
+        """
+        Always runs (independent of the SIMPLEOS_QEMU_SMOKE gate) — pure
+        text-in/text-out contract check, no process spawn. Guards the marker
+        vocabulary itself so a typo in the contract fails fast.
+        """
+        val markers = tool_apps_required_marker_fragments()
+        expect(markers.len()).to_be_greater_than(0)
+        expect(tool_apps_serial_accepts_completion("")).to_equal(false)
+
+        # Synthetic serial containing every required fragment must be accepted.
+        var synthetic = ""
+        var i: i32 = 0
+        while i < markers.len():
+            synthetic = synthetic + markers[i] + " ok\n"
+            i = i + 1
+        expect(tool_apps_serial_accepts_completion(synthetic)).to_equal(true)
+
+        # The three tool apps named in the task must each contribute both a
+        # vfs-app-read:ok and a process-backed:ok fragment to that vocabulary.
+        expect(synthetic.contains(vfs_app_read_marker("simple_compiler"))).to_equal(true)
+        expect(synthetic.contains(process_backed_marker("simple_compiler"))).to_equal(true)
+        expect(synthetic.contains(vfs_app_read_marker("simple_interpreter"))).to_equal(true)
+        expect(synthetic.contains(process_backed_marker("simple_interpreter"))).to_equal(true)
+        expect(synthetic.contains(vfs_app_read_marker("simple_loader"))).to_equal(true)
+        expect(synthetic.contains(process_backed_marker("simple_loader"))).to_equal(true)
+
+    it "x86_64 fs-exec lane emits tool-app serial markers for simple_compiler/simple_interpreter/simple_loader":
+        """
+        blocked-on: Phase-1 in-guest exec + real SimpleOS-target simple binary;
+        flips green when both land (see module docstring). Boots
+        build/os/simpleos_x86_64_fs_exec.elf against build/os/fat32-x86_64.img on
+        the q35+nvme fs-exec lane and requires tool_apps_serial_accepts_completion()
+        to hold against the real serial capture. Missing kernel/image or missing
+        markers is a diagnosed RED — never a skip() — once the gate is on.
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            # NOTE: the heavy QEMU-boot path lives entirely in the else branch
+            # below (not after an early return) because the interpreter test
+            # runner does not respect `return` inside `it` blocks — see
+            # .claude/memory/feedback_interpreter_test_limits.md. A bare
+            # early-return here would still fall through to the real boot.
+            print "[x86_64_tool_apps_e2e] SIMPLEOS_QEMU_SMOKE not set - QEMU boot GATED OFF. Run: SIMPLEOS_QEMU_SMOKE=1 bin/simple test test/03_system/os/port/x86_64_tool_apps_serial_e2e_spec.spl"
+            expect(true).to_equal(true)
+        else:
+            val kernel_present = rt_file_exists(x86_64_kernel_path())
+            val image_present = rt_file_exists(x86_64_image_path())
+            if not kernel_present:
+                print "[x86_64_tool_apps_e2e] MISSING KERNEL (expected RED): " + x86_64_kernel_path()
+            if not image_present:
+                print "[x86_64_tool_apps_e2e] MISSING IMAGE: " + x86_64_image_path()
+            expect(kernel_present).to_equal(true)
+            expect(image_present).to_equal(true)
+
+            val classification = run_qemu_systest(
+                "x86_64",
+                x86_64_kernel_path(),
+                x86_64_image_path(),
+                x86_64_qemu_bin(),
+                x86_64_qemu_args(),
+                x86_64_markers(),
+                x86_64_timeout_ms()
+            )
+            if classification != SYSTEST_PASS:
+                print "[x86_64_tool_apps_e2e] base fs-exec classification: " + classification
+
+            val serial = rt_file_read_text("build/os/systest/x86_64.serial.log")
+            val tool_apps_ok = tool_apps_serial_accepts_completion(serial)
+            if not tool_apps_ok:
+                print "[x86_64_tool_apps_e2e] tool-app serial markers missing:"
+                print_tool_apps_missing_markers(serial)
+
+            expect(classification).to_equal(SYSTEST_PASS)
+            expect(tool_apps_ok).to_equal(true)

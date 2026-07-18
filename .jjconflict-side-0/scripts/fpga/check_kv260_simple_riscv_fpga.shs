@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+ARCH="${1:-rv64}"
+WITH_GHDL=0
+if [ "${2:-}" = "--with-ghdl" ]; then
+    WITH_GHDL=1
+fi
+
+case "$ARCH" in
+    rv64)
+        BITSTREAM="${BITSTREAM:-build/build/xilinx_kv260/gateware/xilinx_kv260.bit}"
+        RUN_LOG="${RUN_LOG:-build/fpga/k26/rv64_simpleos_run.log}"
+        MARKER="${MARKER:-SimpleOS RV64 FPGA}"
+        GHDL_LOG="${GHDL_LOG:-build/fpga/k26/rv64_simpleos_ghdl.log}"
+        GHDL_CMD="sh scripts/fpga/ghdl_validate_rv64.shs --simulate"
+        ;;
+    rv32)
+        BITSTREAM="${BITSTREAM:-build/build/rv32_fpga/gateware/rv32_fpga.bit}"
+        RUN_LOG="${RUN_LOG:-build/fpga/rv32/rv32_simpleos_run.log}"
+        MARKER="${MARKER:-FPGA-RV32}"
+        GHDL_LOG="${GHDL_LOG:-build/fpga/rv32/rv32_simpleos_ghdl.log}"
+        GHDL_CMD="sh scripts/fpga/ghdl_validate_rv32.shs --simulate"
+        ;;
+    *)
+        echo "usage: $0 rv32|rv64 [--with-ghdl]" >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$(dirname "$RUN_LOG")"
+OUT_DIR="${OUT_DIR:-$(dirname "$RUN_LOG")/run_capture}"
+
+external_uart_count=0
+for link in /dev/serial/by-id/*; do
+    if [ -e "$link" ]; then
+        case "$link" in
+            *usb-Xilinx_ML_Carrier_Card_*) continue ;;
+        esac
+        external_uart_count=$((external_uart_count + 1))
+    fi
+done
+for port in ${UART_EXTRA_PORTS:-}; do
+    if [ -e "$port" ]; then
+        external_uart_count=$((external_uart_count + 1))
+    fi
+done
+
+if [ "${ALLOW_XILINX_ONLY_UART_CAPTURE:-0}" != "1" ] && [ "$external_uart_count" -eq 0 ]; then
+    {
+        echo "UART_EXTERNAL_PORT_STATUS=missing hint=attach_3v3_pmod_uart_to_H12_E10_or_set_UART_EXTRA_PORTS"
+        echo "PHYSICAL_RUN_STATUS=blocked reason=pl_uart_adapter_missing"
+    } >"$RUN_LOG"
+    if [ "$WITH_GHDL" = "1" ]; then
+        mkdir -p "$(dirname "$GHDL_LOG")"
+        if sh -c "$GHDL_CMD" >"$GHDL_LOG" 2>&1; then
+            echo "GHDL_EVIDENCE_STATUS=pass log=$GHDL_LOG" >>"$RUN_LOG"
+        else
+            echo "GHDL_EVIDENCE_STATUS=fail log=$GHDL_LOG" >>"$RUN_LOG"
+        fi
+    fi
+    echo "FAIL kv260_${ARCH}_simpleos_fpga_run marker=$MARKER log=$RUN_LOG rc=pl_uart_adapter_missing"
+    exit 1
+fi
+
+set +e
+OUT_DIR="$OUT_DIR" sh scripts/fpga/program_kv260_with_uart_capture.shs "$BITSTREAM" >"$RUN_LOG" 2>&1
+rc=$?
+set -e
+
+if [ "$WITH_GHDL" = "1" ]; then
+    mkdir -p "$(dirname "$GHDL_LOG")"
+    if sh -c "$GHDL_CMD" >"$GHDL_LOG" 2>&1; then
+        echo "GHDL_EVIDENCE_STATUS=pass log=$GHDL_LOG" >>"$RUN_LOG"
+    else
+        echo "GHDL_EVIDENCE_STATUS=fail log=$GHDL_LOG" >>"$RUN_LOG"
+    fi
+fi
+
+if grep -q "$MARKER" "$RUN_LOG"; then
+    echo "PASS kv260_${ARCH}_simpleos_fpga_run marker=$MARKER log=$RUN_LOG"
+    exit 0
+fi
+
+echo "FAIL kv260_${ARCH}_simpleos_fpga_run marker=$MARKER log=$RUN_LOG rc=$rc"
+exit 1

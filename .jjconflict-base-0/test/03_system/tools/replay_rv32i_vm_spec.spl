@@ -1,0 +1,220 @@
+# System Tests — RV32I vCPU and Virtual Memory
+#
+# Tests for the SReplay VM software CPU (Rv32iCpu) and flat physical memory
+# with page-level dirty tracking (VirtualMemory).
+
+use std.spec
+use std.nogc_sync_mut.replay.vm.vcpu.{Rv32iCpu}
+use std.nogc_sync_mut.replay.vm.vmem.{VirtualMemory}
+use std.nogc_sync_mut.replay.vm.vm_types.{VmState}
+
+# ============================================================================
+# Rv32iCpu — initial state
+# ============================================================================
+
+describe "Rv32iCpu initial state":
+    it "pc is zero after create":
+        var cpu = Rv32iCpu.create()
+        expect(cpu.pc).to_equal(0)
+
+    it "cycle_count is zero after create":
+        var cpu = Rv32iCpu.create()
+        expect(cpu.cycle_count).to_equal(0)
+
+    it "x0 is zero after create":
+        var cpu = Rv32iCpu.create()
+        expect(cpu.read_register(0)).to_equal(0)
+
+# ============================================================================
+# Rv32iCpu — register read/write
+# ============================================================================
+
+describe "Rv32iCpu write and read register":
+    it "read_register returns written value":
+        var cpu = Rv32iCpu.create()
+        cpu.write_register(1, 42)
+        expect(cpu.read_register(1)).to_equal(42)
+
+    it "write to x1 does not affect x2":
+        var cpu = Rv32iCpu.create()
+        cpu.write_register(1, 42)
+        expect(cpu.read_register(2)).to_equal(0)
+
+    it "write_register masks to 32 bits":
+        var cpu = Rv32iCpu.create()
+        # 0x1_FFFF_FFFF masked to 0xFFFF_FFFF
+        cpu.write_register(1, 0x1FFFFFFFF)
+        expect(cpu.read_register(1)).to_equal(0xFFFFFFFF)
+
+# ============================================================================
+# Rv32iCpu — x0 always zero
+# ============================================================================
+
+describe "Rv32iCpu x0 always zero":
+    it "x0 stays zero after write attempt":
+        var cpu = Rv32iCpu.create()
+        cpu.write_register(0, 999)
+        expect(cpu.read_register(0)).to_equal(0)
+
+# ============================================================================
+# Rv32iCpu — set_pc / get_pc
+# ============================================================================
+
+describe "Rv32iCpu set_pc and get_pc":
+    it "get_pc returns value set by set_pc":
+        var cpu = Rv32iCpu.create()
+        cpu.set_pc(0x1000)
+        expect(cpu.get_pc()).to_equal(0x1000)
+
+    it "set_pc to zero returns zero":
+        var cpu = Rv32iCpu.create()
+        cpu.set_pc(0x1000)
+        cpu.set_pc(0)
+        expect(cpu.get_pc()).to_equal(0)
+
+# ============================================================================
+# Rv32iCpu — read_all_registers
+# ============================================================================
+
+describe "Rv32iCpu read_all_registers":
+    it "result contains x0":
+        var cpu = Rv32iCpu.create()
+        val regs = cpu.read_all_registers()
+        val has_x0 = regs.contains_key("x0")
+        expect(has_x0).to_equal(true)
+
+    it "result contains x31":
+        var cpu = Rv32iCpu.create()
+        val regs = cpu.read_all_registers()
+        val has_x31 = regs.contains_key("x31")
+        expect(has_x31).to_equal(true)
+
+    it "result contains pc key":
+        var cpu = Rv32iCpu.create()
+        val regs = cpu.read_all_registers()
+        val has_pc = regs.contains_key("pc")
+        expect(has_pc).to_equal(true)
+
+    it "x0 value in map is zero":
+        var cpu = Rv32iCpu.create()
+        val regs = cpu.read_all_registers()
+        val x0_val = regs.get("x0") ?? -1
+        expect(x0_val).to_equal(0)
+
+    it "written register appears in map":
+        var cpu = Rv32iCpu.create()
+        cpu.write_register(5, 99)
+        val regs = cpu.read_all_registers()
+        val x5_val = regs.get("x5") ?? -1
+        expect(x5_val).to_equal(99)
+
+# ============================================================================
+# VirtualMemory — create
+# ============================================================================
+
+describe "VirtualMemory create":
+    it "size field matches requested size":
+        var mem = VirtualMemory.create(4096, 4096)
+        expect(mem.size).to_equal(4096)
+
+    it "page_size field matches requested page_size":
+        var mem = VirtualMemory.create(4096, 4096)
+        expect(mem.page_size).to_equal(4096)
+
+    it "all bytes are zero after create":
+        var mem = VirtualMemory.create(64, 64)
+        expect(mem.read(0, 1)).to_equal(0)
+
+# ============================================================================
+# VirtualMemory — write and read byte
+# ============================================================================
+
+describe "VirtualMemory write and read byte":
+    it "read back matches written byte":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0x42, 1)
+        expect(mem.read(0, 1)).to_equal(0x42)
+
+    it "write at offset 10 reads back correctly":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(10, 0xFF, 1)
+        expect(mem.read(10, 1)).to_equal(0xFF)
+
+    it "byte is masked to 8 bits":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0x1AB, 1)
+        expect(mem.read(0, 1)).to_equal(0xAB)
+
+# ============================================================================
+# VirtualMemory — write and read word
+# ============================================================================
+
+describe "VirtualMemory write and read word":
+    it "little-endian 32-bit write reads back same value":
+        var mem = VirtualMemory.create(4096, 4096)
+        # 0xDEADBEEF in i64 (positive): 3735928559
+        mem.write(0, 3735928559, 4)
+        expect(mem.read(0, 4)).to_equal(3735928559)
+
+    it "16-bit write reads back same value":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0xABCD, 2)
+        expect(mem.read(0, 2)).to_equal(0xABCD)
+
+    it "word write does not corrupt adjacent byte":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0xAABBCCDD, 4)
+        mem.write(4, 0x42, 1)
+        expect(mem.read(4, 1)).to_equal(0x42)
+
+# ============================================================================
+# VirtualMemory — dirty tracking
+# ============================================================================
+
+describe "VirtualMemory dirty tracking":
+    it "dirty_page_count is zero before any write":
+        var mem = VirtualMemory.create(4096, 4096)
+        expect(mem.dirty_page_count()).to_equal(0)
+
+    it "dirty_page_count greater than zero after write":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0x42, 1)
+        expect(mem.dirty_page_count()).to_be_greater_than(0)
+
+    it "clear_dirty resets dirty_page_count to zero":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0x42, 1)
+        mem.clear_dirty()
+        expect(mem.dirty_page_count()).to_equal(0)
+
+    it "data survives clear_dirty":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.write(0, 0x77, 1)
+        mem.clear_dirty()
+        expect(mem.read(0, 1)).to_equal(0x77)
+
+# ============================================================================
+# VirtualMemory — load_binary
+# ============================================================================
+
+describe "VirtualMemory load_binary":
+    it "first byte matches after load":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.load_binary(0, [0x42, 0x43, 0x44])
+        expect(mem.read(0, 1)).to_equal(0x42)
+
+    it "second byte matches after load":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.load_binary(0, [0x42, 0x43, 0x44])
+        expect(mem.read(1, 1)).to_equal(0x43)
+
+    it "third byte matches after load":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.load_binary(0, [0x42, 0x43, 0x44])
+        expect(mem.read(2, 1)).to_equal(0x44)
+
+    it "load at non-zero base address":
+        var mem = VirtualMemory.create(4096, 4096)
+        mem.load_binary(100, [0xAA, 0xBB])
+        expect(mem.read(100, 1)).to_equal(0xAA)
+        expect(mem.read(101, 1)).to_equal(0xBB)

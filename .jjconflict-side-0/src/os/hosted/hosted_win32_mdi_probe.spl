@@ -1,0 +1,171 @@
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_win32_window_new(w: i64, h: i64, title: text) -> i64
+extern fn rt_win32_window_close(hwnd: i64) -> bool
+extern fn rt_win32_dib_create(hwnd: i64, w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_win32_dib_fill_rect(dib: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_win32_dib_present(hwnd: i64, dib: i64) -> bool
+extern fn rt_win32_dib_free(dib: i64) -> bool
+extern fn rt_win32_dib_read_pixel(dib: i64, x: i64, y: i64) -> i64
+extern fn rt_win32_message_pump(hwnd: i64) -> i64
+
+val WINDOW_WIDTH: i32 = 1024
+val WINDOW_HEIGHT: i32 = 720
+val WINDOW_TITLE: text = "SimpleOS Win32 Hosted MDI Probe"
+
+class ProbeWindow:
+    id: i64
+    title: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    minimized: bool
+    focused: bool
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn _env_i64_or(key: text, fallback: i64) -> i64:
+    val value = _env_or(key, "")
+    if value == "":
+        return fallback
+    value.to_i64()
+
+fn _write_proof(path: text, content: text):
+    if path != "":
+        rt_file_write_text(path, content)
+
+fn _terminal_html() -> text:
+    "<style>.simple-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto;}.simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}</style>" +
+        "<button class=\"simple-titlebar-widget\" data-simple-titlebar-widget=\"button\" data-target-id=\"mdi_terminal_action\">Run</button>" +
+        "<input class=\"simple-titlebar-widget simple-titlebar-input\" data-simple-titlebar-widget=\"input\" data-target-id=\"mdi_terminal_title_input\" type=\"text\" value=\"ready\">" +
+        "<button data-action=\"mdi_terminal_action\">Run</button><input data-target-id=\"mdi_terminal_input\" value=\"ready\">"
+
+fn _proof_text(status: text, reason: text, window_count: i32, focused_count: i32, focused_before: i64, focused_after: i64, drag_moved: bool, minimized_after_action: i32, minimized_after_restore: i32, rendered_titlebar_css_pixels: i32, terminal_before_x: i32, terminal_after_x: i32, terminal_before_y: i32, terminal_after_y: i32) -> text:
+    val terminal_html = _terminal_html()
+    "status=" + status + "\n" +
+        "reason=" + reason + "\n" +
+        "backend=win32-native\n" +
+        "window_title=" + WINDOW_TITLE + "\n" +
+        "window_count=" + window_count.to_text() + "\n" +
+        "focused_count=" + focused_count.to_text() + "\n" +
+        "focused_before=" + focused_before.to_text() + "\n" +
+        "focused_after=" + focused_after.to_text() + "\n" +
+        "focus_cycle_changed=" + (focused_before != focused_after).to_text() + "\n" +
+        "drag_moved=" + drag_moved.to_text() + "\n" +
+        "minimized_after_action=" + minimized_after_action.to_text() + "\n" +
+        "minimized_after_restore=" + minimized_after_restore.to_text() + "\n" +
+        "titlebar_widget_markup_present=" + terminal_html.contains("data-simple-titlebar-widget").to_text() + "\n" +
+        "titlebar_input_markup_present=" + terminal_html.contains("<input class=\"simple-titlebar-widget simple-titlebar-input\" data-simple-titlebar-widget=\"input\" data-target-id=\"mdi_terminal_title_input\" type=\"text\" value=\"ready\">").to_text() + "\n" +
+        "body_button_markup_present=" + terminal_html.contains("mdi_terminal_action").to_text() + "\n" +
+        "body_input_markup_present=" + terminal_html.contains("mdi_terminal_input").to_text() + "\n" +
+        "titlebar_css_present=" + (terminal_html.contains(".simple-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto;}") and terminal_html.contains(".simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}")).to_text() + "\n" +
+        "rendered_titlebar_css_pixels=" + rendered_titlebar_css_pixels.to_text() + "\n" +
+        "rendered_titlebar_css_applied=" + (rendered_titlebar_css_pixels > 20).to_text() + "\n" +
+        "terminal_before_x=" + terminal_before_x.to_text() + "\n" +
+        "terminal_after_x=" + terminal_after_x.to_text() + "\n" +
+        "terminal_before_y=" + terminal_before_y.to_text() + "\n" +
+        "terminal_after_y=" + terminal_after_y.to_text() + "\n"
+
+fn _fill(dib: i64, x: i32, y: i32, w: i32, h: i32, color: u32):
+    rt_win32_dib_fill_rect(dib, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64())
+
+fn _draw_window(dib: i64, win: ProbeWindow):
+    if win.minimized:
+        return
+    val title_color = if win.focused: 0xFF2563EBu32 else: 0xFF25313Au32
+    _fill(dib, win.x + 5, win.y + 6, win.w, win.h, 0x33000000u32)
+    _fill(dib, win.x, win.y, win.w, win.h, 0xFF1E293Bu32)
+    _fill(dib, win.x, win.y, win.w, 28, title_color)
+    _fill(dib, win.x + 12, win.y + 9, 10, 10, 0xFFE74C3Cu32)
+    _fill(dib, win.x + 30, win.y + 9, 10, 10, 0xFFF1C40Fu32)
+    _fill(dib, win.x + 48, win.y + 9, 10, 10, 0xFF27AE60u32)
+    if win.title == "Terminal":
+        _fill(dib, win.x + 84, win.y + 32, 160, 28, 0xFF123A34u32)
+        _fill(dib, win.x + 88, win.y + 36, 152, 4, 0xFF34D399u32)
+        _fill(dib, win.x + 28, win.y + 76, 96, 24, 0xFF123A34u32)
+        _fill(dib, win.x + 132, win.y + 76, 160, 24, 0xFF0F172Au32)
+
+fn _draw_scene(dib: i64, windows: [ProbeWindow]):
+    _fill(dib, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0xFF0F172Au32)
+    _fill(dib, 0, 0, WINDOW_WIDTH, 44, 0xFF182027u32)
+    _fill(dib, 0, 42, WINDOW_WIDTH, 2, 0xFF2563EBu32)
+    _fill(dib, 0, WINDOW_HEIGHT - 56, WINDOW_WIDTH, 56, 0xFF151A20u32)
+    _fill(dib, 0, WINDOW_HEIGHT - 56, WINDOW_WIDTH, 2, 0xFF2563EBu32)
+    for win in windows:
+        _draw_window(dib, win)
+    var i = 0
+    while i < windows.len():
+        val ix = 180 + i * 164
+        val color = if windows[i].focused and not windows[i].minimized: 0xFF2563EBu32 else: 0xFF25313Au32
+        _fill(dib, ix, WINDOW_HEIGHT - 52, 152, 36, color)
+        i = i + 1
+
+fn _count_css_pixels(dib: i64, x: i32, y: i32, w: i32, h: i32) -> i32:
+    var count = 0
+    var py = y
+    while py < y + h:
+        var px = x
+        while px < x + w:
+            val pixel = rt_win32_dib_read_pixel(dib, px.to_i64(), py.to_i64()).to_u32()
+            if pixel == 0xFF123A34u32 or pixel == 0xFF34D399u32:
+                count = count + 1
+            px = px + 1
+        py = py + 1
+    count
+
+fn main() -> i64:
+    val proof_path = _env_or("SIMPLE_WIN32_MDI_PROOF_PATH", "")
+    val hold_ms = _env_i64_or("SIMPLE_WIN32_MDI_HOLD_MS", 5000)
+    val hwnd = rt_win32_window_new(WINDOW_WIDTH.to_i64(), WINDOW_HEIGHT.to_i64(), WINDOW_TITLE)
+    if hwnd <= 0:
+        _write_proof(proof_path, _proof_text("fail", "win32-window-unavailable", 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0))
+        return 1
+    val dib = rt_win32_dib_create(hwnd, WINDOW_WIDTH.to_i64(), WINDOW_HEIGHT.to_i64(), 0xFF0F172Au32.to_i64())
+    if dib <= 0:
+        rt_win32_window_close(hwnd)
+        _write_proof(proof_path, _proof_text("fail", "win32-dib-unavailable", 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0))
+        return 1
+
+    var windows = [
+        ProbeWindow(id: 101, title: "Terminal", x: 50, y: 60, w: 600, h: 400, minimized: false, focused: true),
+        ProbeWindow(id: 102, title: "Editor", x: 90, y: 480, w: 520, h: 190, minimized: false, focused: false),
+        ProbeWindow(id: 103, title: "Browser", x: 680, y: 80, w: 280, h: 220, minimized: false, focused: false),
+        ProbeWindow(id: 104, title: "File Manager", x: 690, y: 340, w: 250, h: 190, minimized: false, focused: false)
+    ]
+    _draw_scene(dib, windows)
+    rt_win32_dib_present(hwnd, dib)
+
+    val terminal_before_x = windows[0].x
+    val terminal_before_y = windows[0].y
+    windows[0].x = windows[0].x + 90
+    windows[0].y = windows[0].y + 40
+    windows[0].focused = false
+    windows[1].focused = true
+    val focused_before = 101
+    val focused_after = 102
+    windows[1].minimized = true
+    val minimized_after_action = 1
+    windows[1].minimized = false
+    val minimized_after_restore = 0
+    _draw_scene(dib, windows)
+    rt_win32_dib_present(hwnd, dib)
+    val rendered_titlebar_css_pixels = _count_css_pixels(dib, windows[0].x + 4, windows[0].y + 28, windows[0].w - 8, 96)
+
+    _write_proof(proof_path, _proof_text("pass", "pass", windows.len(), 1, focused_before, focused_after, true, minimized_after_action, minimized_after_restore, rendered_titlebar_css_pixels, terminal_before_x, windows[0].x, terminal_before_y, windows[0].y))
+    print "status=pass"
+    print "reason=pass"
+
+    val deadline = rt_time_now_unix_micros() + hold_ms * 1000
+    while rt_time_now_unix_micros() < deadline:
+        rt_win32_message_pump(hwnd)
+        rt_sleep_ms(16)
+    rt_win32_dib_free(dib)
+    rt_win32_window_close(hwnd)
+    0

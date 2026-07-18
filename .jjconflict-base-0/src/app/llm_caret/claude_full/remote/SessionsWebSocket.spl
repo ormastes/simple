@@ -1,0 +1,163 @@
+const RECONNECT_DELAY_MS = 2000
+const MAX_RECONNECT_ATTEMPTS = 5
+const PING_INTERVAL_MS = 30000
+const MAX_SESSION_NOT_FOUND_RETRIES = 3
+
+class SessionsMessage:
+    type: text
+    payload: text
+
+class SessionsWebSocket:
+    sessionId: text
+    orgUuid: text
+    accessToken: text
+    state: text
+    reconnectAttempts: i64
+    sessionNotFoundRetries: i64
+    pingIntervalActive: bool
+    reconnectTimerActive: bool
+    wsActive: bool
+    callbacks: [text]
+    messages: [text]
+    sent: [text]
+    errors: [text]
+    reconnectLabels: [text]
+
+impl SessionsWebSocket:
+    static fn new(sessionId: text, orgUuid: text, accessToken: text) -> SessionsWebSocket:
+        SessionsWebSocket(sessionId: sessionId, orgUuid: orgUuid, accessToken: accessToken, state: "closed", reconnectAttempts: 0, sessionNotFoundRetries: 0, pingIntervalActive: false, reconnectTimerActive: false, wsActive: false, callbacks: [], messages: [], sent: [], errors: [], reconnectLabels: [])
+
+    me connect(baseApiUrl: text) -> ():
+        if me.state == "connecting":
+            return
+        me.state = "connecting"
+        me.wsActive = true
+        me.sent.push("connect:" + websocketUrl(baseApiUrl, me.sessionId, me.orgUuid) + ":Bearer " + me.accessToken)
+
+    me open() -> ():
+        me.state = "connected"
+        me.reconnectAttempts = 0
+        me.sessionNotFoundRetries = 0
+        me.startPingInterval()
+        me.callbacks.push("connected")
+
+    me handleMessage(data: text) -> ():
+        val message = parseSessionsMessage(data)
+        if isSessionsMessage(message):
+            me.messages.push(message.type + ":" + message.payload)
+        else:
+            me.errors.push("Ignoring message type")
+
+    me handleParseError(data: text) -> ():
+        me.errors.push("Failed to parse message: " + data)
+
+    me handleClose(closeCode: i64) -> ():
+        me.stopPingInterval()
+        if me.state == "closed":
+            return
+        me.wsActive = false
+        val previousState = me.state
+        me.state = "closed"
+        if isPermanentCloseCode(closeCode):
+            me.callbacks.push("close")
+            return
+        if closeCode == 4001:
+            me.sessionNotFoundRetries = me.sessionNotFoundRetries + 1
+            if me.sessionNotFoundRetries > MAX_SESSION_NOT_FOUND_RETRIES:
+                me.callbacks.push("close")
+                return
+            me.scheduleReconnect(RECONNECT_DELAY_MS * me.sessionNotFoundRetries, "4001 attempt " + me.sessionNotFoundRetries.to_text() + "/" + MAX_SESSION_NOT_FOUND_RETRIES.to_text())
+            return
+        if previousState == "connected" and me.reconnectAttempts < MAX_RECONNECT_ATTEMPTS:
+            me.reconnectAttempts = me.reconnectAttempts + 1
+            me.scheduleReconnect(RECONNECT_DELAY_MS, "attempt " + me.reconnectAttempts.to_text() + "/" + MAX_RECONNECT_ATTEMPTS.to_text())
+        else:
+            me.callbacks.push("close")
+
+    me scheduleReconnect(delay: i64, label: text) -> ():
+        me.callbacks.push("reconnecting")
+        me.reconnectTimerActive = true
+        me.reconnectLabels.push(label + ":" + delay.to_text())
+
+    me startPingInterval() -> ():
+        me.stopPingInterval()
+        me.pingIntervalActive = true
+
+    me stopPingInterval() -> ():
+        me.pingIntervalActive = false
+
+    me ping() -> ():
+        if me.wsActive and me.state == "connected":
+            me.sent.push("ping")
+
+    me sendControlResponse(response: text) -> ():
+        if not me.wsActive or me.state != "connected":
+            me.errors.push("Cannot send: not connected")
+            return
+        me.sent.push("control_response:" + response)
+
+    me sendControlRequest(subtype: text) -> ():
+        if not me.wsActive or me.state != "connected":
+            me.errors.push("Cannot send: not connected")
+            return
+        me.sent.push("control_request:uuid:" + subtype)
+
+    me isConnected() -> bool:
+        me.state == "connected"
+
+    me close() -> ():
+        me.state = "closed"
+        me.stopPingInterval()
+        me.reconnectTimerActive = false
+        if me.wsActive:
+            me.sent.push("close")
+        me.wsActive = false
+
+    me reconnect() -> ():
+        me.reconnectAttempts = 0
+        me.sessionNotFoundRetries = 0
+        me.close()
+        me.reconnectTimerActive = true
+        me.reconnectLabels.push("force:500")
+
+fn isSessionsMessage(message: SessionsMessage) -> bool:
+    message.type != ""
+
+fn parseSessionsMessage(data: text) -> SessionsMessage:
+    val idx = data.find(":")
+    if idx < 0:
+        return SessionsMessage(type: data, payload: "")
+    SessionsMessage(type: data.slice(0, idx), payload: data.slice(idx + 1, data.len()))
+
+fn websocketUrl(baseApiUrl: text, sessionId: text, orgUuid: text) -> text:
+    baseApiUrl.replace("https://", "wss://") + "/v1/sessions/ws/" + sessionId + "/subscribe?organization_uuid=" + orgUuid
+
+fn isPermanentCloseCode(closeCode: i64) -> bool:
+    closeCode == 4003
+
+fn reconnectDelayMs() -> i64:
+    RECONNECT_DELAY_MS
+
+fn maxReconnectAttempts() -> i64:
+    MAX_RECONNECT_ATTEMPTS
+
+fn pingIntervalMs() -> i64:
+    PING_INTERVAL_MS
+
+fn maxSessionNotFoundRetries() -> i64:
+    MAX_SESSION_NOT_FOUND_RETRIES
+
+fn sessionsWebSocketSourceLinesModeled() -> i64:
+    403
+
+# ponytail: socket events are direct method calls; use a real WebSocket only when the Simple remote client owns network IO.
+# Source parity note: connecting state prevents duplicate connect attempts.
+# Source parity note: URL uses wss base and /v1/sessions/ws/{session}/subscribe organization query.
+# Source parity note: open resets reconnect and 4001 retry counters.
+# Source parity note: messages are accepted if they have a string type; downstream handlers decide unknown types.
+# Source parity note: permanent 4003 close stops reconnecting.
+# Source parity note: 4001 has a separate three-attempt retry budget.
+# Source parity note: connected transient closes reconnect up to five attempts.
+# Source parity note: ping interval runs only while connected.
+# Source parity note: sendControlResponse and sendControlRequest require connected websocket.
+# Source parity note: reconnect closes existing connection and schedules a 500ms reconnect.

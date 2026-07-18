@@ -1,0 +1,100 @@
+# @cover src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl 70%
+# @tag: unit, ui, font, rasterization
+#
+# Canonical bitmap-font rasterization policy spec.
+#
+# Glyphs are rasterized on CPU. GPU work begins after FontRenderer has prepared
+# its transient atlas batch, so environment-published pixels cannot enter the
+# canonical renderer or its cache.
+
+use std.spec.{describe, it, expect}
+use common.text_layout.font_renderer.{FontRenderer}
+use common.text_layout.font_rasterizer.{rasterize_bitmap}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+# Local replica of font_rasterizer `_vector_font_pixels_checksum` (private there).
+fn _bitmap_checksum(pixels: [u8], width: i32, height: i32, advance: i32) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        val alpha = pixels[i].to_i32().to_i64()
+        if alpha > 0:
+            sum = sum + alpha * ((i + 1) as i64)
+        i = i + 1
+    sum + (width.to_i64() * 31) + (height.to_i64() * 17) + advance.to_i64()
+
+fn _clear_rocm_bitmap_glyph_payload():
+    rt_env_set("ROCM_BITMAP_FONT_STATUS", "")
+    rt_env_set("ROCM_BITMAP_FONT_REASON", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_COUNT", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_CODEPOINT", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_FONT_SIZE", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_WIDTH", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_HEIGHT", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_ADVANCE", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_PIXELS", "")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_CHECKSUM", "")
+
+fn _set_rocm_bitmap_glyph_payload():
+    var px: [u8] = [255u8, 0u8, 0u8, 255u8]
+    val checksum = _bitmap_checksum(px, 2, 2, 3)
+    rt_env_set("ROCM_BITMAP_FONT_STATUS", "pass")
+    rt_env_set("ROCM_BITMAP_FONT_REASON", "rocm-bitmap-font-glyph-pixels-returned")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_COUNT", "1")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_CODEPOINT", "66")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_FONT_SIZE", "16")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_WIDTH", "2")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_HEIGHT", "2")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_ADVANCE", "3")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_PIXELS", "255,0,0,255")
+    rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_CHECKSUM", checksum.to_text())
+
+describe "canonical bitmap font rasterization":
+    it "keeps the built-in monochrome VGA glyph deterministic":
+        val glyph = rasterize_bitmap(65, 16)
+        expect(glyph.width).to_equal(8)
+        expect(glyph.height).to_equal(16)
+        expect(glyph.advance).to_equal(8)
+        expect(glyph.pixels.len()).to_equal(128)
+        expect(_bitmap_checksum(glyph.pixels, glyph.width, glyph.height, glyph.advance)).to_equal(563568)
+
+    it "ignores forged bitmap glyph environment when preparing a batch":
+        _clear_rocm_bitmap_glyph_payload()
+        var expected_renderer = FontRenderer.new()
+        expected_renderer.use_vector = false
+        expected_renderer.use_bitmap = true
+        val expected = expected_renderer.prepare_text("B", 0xFFFFFFFFu32, 16)
+        _set_rocm_bitmap_glyph_payload()
+        var renderer = FontRenderer.new()
+        renderer.use_vector = false
+        renderer.use_bitmap = true
+
+        val actual = renderer.prepare_text("B", 0xFFFFFFFFu32, 16)
+        expect(expected.valid).to_be(true)
+        expect(actual.valid).to_be(true)
+        expect(actual.program_version).to_equal(expected.program_version)
+        expect(actual.font_identity).to_equal(expected.font_identity)
+        expect(actual.render_config_identity).to_equal(expected.render_config_identity)
+        expect(actual.atlas_width).to_equal(expected.atlas_width)
+        expect(actual.atlas_height).to_equal(expected.atlas_height)
+        expect(expected.quads.len()).to_equal(1)
+        expect(actual.quads.len()).to_equal(1)
+        val expected_quad = expected.quads[0]
+        val actual_quad = actual.quads[0]
+        expect(actual_quad.width).to_equal(expected_quad.width)
+        expect(actual_quad.height).to_equal(expected_quad.height)
+        expect(actual_quad.dst_x).to_equal(expected_quad.dst_x)
+        expect(actual_quad.dst_y).to_equal(expected_quad.dst_y)
+        expect(actual_quad.atlas_x).to_equal(expected_quad.atlas_x)
+        expect(actual_quad.atlas_y).to_equal(expected_quad.atlas_y)
+        expect(actual_quad.color).to_equal(expected_quad.color)
+        val expected_pixels = font_atlas_subrect_pixels(expected.atlas_pixels, expected.atlas_width,
+            expected.atlas_height, expected_quad.atlas_x, expected_quad.atlas_y,
+            expected_quad.width, expected_quad.height, expected_quad.color)
+        val actual_pixels = font_atlas_subrect_pixels(actual.atlas_pixels, actual.atlas_width,
+            actual.atlas_height, actual_quad.atlas_x, actual_quad.atlas_y,
+            actual_quad.width, actual_quad.height, actual_quad.color)
+        expect(actual_pixels).to_equal(expected_pixels)
+        _clear_rocm_bitmap_glyph_payload()

@@ -1,0 +1,99 @@
+"""IPv4 (RFC 791) address, header checksum, and build/parse round-trip spec.
+
+Asserts: dotted-decimal formatting and octet round-trip for Ipv4Address;
+loopback/broadcast/subnet predicates; the canonical RFC/Wikipedia IPv4 header
+checksum vector (0xb861); and an ipv4_build -> ipv4_parse round-trip whose
+success also proves the emitted header checksum validates on parse.
+"""
+
+use os.services.netstack.ipv4.{Ipv4Address, Ipv4Packet, ipv4_parse, ipv4_build, ipv4_checksum}
+
+# Canonical IPv4 header (Wikipedia worked example), checksum field zeroed:
+# ver4 ihl5, tos0, total_len 0x0073, id0, flags DF, ttl64, proto UDP(17),
+# src 192.168.0.1, dst 192.168.0.199. Internet checksum over this = 0xb861.
+fn _canonical_header() -> [u8]:
+    [0x45u8, 0x00u8, 0x00u8, 0x73u8, 0x00u8, 0x00u8, 0x40u8, 0x00u8,
+     0x40u8, 0x11u8, 0x00u8, 0x00u8, 0xc0u8, 0xa8u8, 0x00u8, 0x01u8,
+     0xc0u8, 0xa8u8, 0x00u8, 0xc7u8]
+
+fn _sample_packet() -> [u8]:
+    val src = Ipv4Address.from_bytes(10u8, 0u8, 0u8, 1u8)
+    val dst = Ipv4Address.from_bytes(10u8, 0u8, 0u8, 2u8)
+    val payload: [u8] = [0xDEu8, 0xADu8, 0xBEu8, 0xEFu8]
+    ipv4_build(src, dst, 17u8, payload)
+
+# Round-trip extractors keep `match` out of it-blocks (runner bug workaround).
+fn _rt_protocol() -> i64:
+    match ipv4_parse(_sample_packet()):
+        case Ok(pkt): pkt.header.protocol.to_i64()
+        case Err(e): -1
+
+fn _rt_src_text() -> text:
+    match ipv4_parse(_sample_packet()):
+        case Ok(pkt): pkt.header.src.to_text()
+        case Err(e): "ERR"
+
+fn _rt_dst_text() -> text:
+    match ipv4_parse(_sample_packet()):
+        case Ok(pkt): pkt.header.dst.to_text()
+        case Err(e): "ERR"
+
+fn _rt_payload_len() -> i64:
+    match ipv4_parse(_sample_packet()):
+        case Ok(pkt): pkt.payload.len()
+        case Err(e): -1
+
+fn _rt_payload_first() -> i64:
+    match ipv4_parse(_sample_packet()):
+        case Ok(pkt): pkt.payload[0].to_i64()
+        case Err(e): -1
+
+fn _parse_too_short() -> i64:
+    val tiny: [u8] = [0x45u8, 0x00u8, 0x00u8]
+    match ipv4_parse(tiny):
+        case Ok(pkt): 0
+        case Err(e): 1
+
+describe "IPv4 address (RFC 791)":
+    it "formats dotted decimal":
+        expect(Ipv4Address.from_bytes(192u8, 168u8, 1u8, 1u8).to_text()).to_equal("192.168.1.1")
+
+    it "round-trips octets through to_bytes":
+        val b = Ipv4Address.from_bytes(192u8, 168u8, 1u8, 1u8).to_bytes()
+        expect(b[0].to_i64()).to_equal(192)
+        expect(b[3].to_i64()).to_equal(1)
+
+    it "detects loopback 127.x.x.x":
+        expect(Ipv4Address.from_bytes(127u8, 0u8, 0u8, 1u8).is_loopback()).to_equal(true)
+
+    it "detects limited broadcast":
+        expect(Ipv4Address.broadcast_all().is_broadcast()).to_equal(true)
+
+    it "matches subnet membership":
+        val a = Ipv4Address.from_bytes(192u8, 168u8, 1u8, 5u8)
+        val net = Ipv4Address.from_bytes(192u8, 168u8, 1u8, 0u8)
+        val mask = Ipv4Address.from_bytes(255u8, 255u8, 255u8, 0u8)
+        expect(a.in_subnet(net, mask)).to_equal(true)
+
+describe "IPv4 header checksum (RFC 1071)":
+    it "computes the canonical 0xb861 vector":
+        expect(ipv4_checksum(_canonical_header()).to_i64()).to_equal(47201)
+
+describe "IPv4 build/parse round-trip (RFC 791)":
+    it "preserves protocol":
+        expect(_rt_protocol()).to_equal(17)
+
+    it "preserves source address":
+        expect(_rt_src_text()).to_equal("10.0.0.1")
+
+    it "preserves destination address":
+        expect(_rt_dst_text()).to_equal("10.0.0.2")
+
+    it "preserves payload length":
+        expect(_rt_payload_len()).to_equal(4)
+
+    it "preserves payload bytes":
+        expect(_rt_payload_first()).to_equal(222)
+
+    it "rejects a truncated packet":
+        expect(_parse_too_short()).to_equal(1)
