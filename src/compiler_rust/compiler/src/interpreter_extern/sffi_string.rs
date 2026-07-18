@@ -9,6 +9,28 @@ use simple_runtime::value::RuntimeValue;
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{rt_string_new, rt_string_concat, rt_string_len, rt_string_eq};
 use simple_runtime::value::{rt_string_data};
+
+/// Resolve an interpreted `text` argument to the tagged `RuntimeValue` string
+/// the native runtime functions expect.
+///
+/// Most `text` locals reaching these `EXTERN_DISPATCH` handlers have already
+/// been boxed into a `RuntimeValue` (represented here as `Value::Int(raw_bits)`)
+/// by an earlier `rt_string_new` round-trip. A raw string *literal* passed
+/// directly at an extern call site (e.g. `cranelift_new_aot_module("bootstrap_main", ...)`
+/// in `cranelift_codegen_adapter.spl`), however, still arrives as a plain
+/// `Value::Str` that was never boxed. Box it on the fly so both shapes work.
+fn resolve_runtime_string(val: &Value) -> Result<RuntimeValue, CompileError> {
+    match val {
+        Value::Str(s) => {
+            let bytes = s.as_bytes();
+            Ok(rt_string_new(bytes.as_ptr(), bytes.len() as u64))
+        }
+        other => {
+            let raw = other.as_int()?;
+            Ok(RuntimeValue::from_raw(raw as u64))
+        }
+    }
+}
 // String builder SFFI functions are re-exported at the crate root (see lib.rs).
 use simple_runtime::{
     rt_string_builder_finish, rt_string_builder_free, rt_string_builder_len, rt_string_builder_new,
@@ -42,28 +64,19 @@ pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Concatenate two strings
 pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let a_raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_string_concat expects 2 arguments".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
+    let a = resolve_runtime_string(args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_string_concat expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?)?;
 
-    let b_raw = args
-        .get(1)
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_string_concat expects 2 arguments".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let a = RuntimeValue::from_raw(a_raw as u64);
-    let b = RuntimeValue::from_raw(b_raw as u64);
+    let b = resolve_runtime_string(args.get(1).ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_string_concat expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?)?;
 
     let rv = rt_string_concat(a, b);
     Ok(Value::Int(rv.to_raw() as i64))
@@ -71,19 +84,43 @@ pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get string length
 pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let str_raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_string_len expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
+    let string = resolve_runtime_string(args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_string_len expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?)?;
 
-    let string = RuntimeValue::from_raw(str_raw as u64);
     let len = rt_string_len(string);
     Ok(Value::Int(len))
+}
+
+/// Return the raw pointer to a `text` value's UTF-8 bytes as a plain i64.
+///
+/// Mirrors the runtime's native `rt_string_data` (`RuntimeFuncSpec::new("rt_string_data",
+/// &[I64], &[I64])`, see `codegen/runtime_sffi.rs`) used by the compiled/native
+/// path. Without this hand-written `EXTERN_DISPATCH` entry, interpreted calls to
+/// `extern fn rt_string_data(s: text) -> i64` fell through to
+/// `interpreter_extern::dynamic_sffi`'s dlopen-based fallback -- the same
+/// landmine class as `rt_string_bytes` (see
+/// `seed_flat_registry_len_i64_2026-07-17`): that fallback's `value_to_i64`
+/// marshals a `Value::Str` argument as a raw *leaked CString pointer*, not a
+/// tagged `RuntimeValue`, so the real native `rt_string_data` decodes garbage
+/// tag bits from an address that was never a `RuntimeValue` to begin with.
+/// This wall blocked every fresh-seed native-build through the pure-Simple
+/// cranelift-direct path (`cranelift_new_aot_module` in
+/// `cranelift_codegen_adapter.spl`), since `rt_string_data(name)` is the first
+/// call any AOT module creation makes for its literal module name.
+pub fn rt_string_data_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let string = resolve_runtime_string(args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_string_data expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?)?;
+
+    let ptr = rt_string_data(string);
+    Ok(Value::Int(ptr as i64))
 }
 
 /// Return the UTF-8 bytes of a `text` value as a real interpreter
@@ -119,28 +156,19 @@ pub fn rt_string_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Check if two strings are equal
 pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let a_raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_string_eq expects 2 arguments".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
+    let a = resolve_runtime_string(args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_string_eq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?)?;
 
-    let b_raw = args
-        .get(1)
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_string_eq expects 2 arguments".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let a = RuntimeValue::from_raw(a_raw as u64);
-    let b = RuntimeValue::from_raw(b_raw as u64);
+    let b = resolve_runtime_string(args.get(1).ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_string_eq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?)?;
 
     let result = rt_string_eq(a, b);
     // rt_string_eq returns i64 (1 for true, 0 for false)

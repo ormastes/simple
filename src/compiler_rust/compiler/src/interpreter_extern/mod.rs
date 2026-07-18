@@ -1649,6 +1649,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_string_builder_free", sffi_string::rt_string_builder_free_fn);
     // seed_flat_registry_len_i64_2026-07-17: native handler (fixes crash on interpreted array-returning extern calls)
     insert_simple!("rt_string_bytes", sffi_string::rt_string_bytes_fn);
+    insert_simple!("rt_string_data", sffi_string::rt_string_data_fn);
     insert_simple!("rt_string_eq", sffi_string::rt_string_eq_fn);
     insert_simple!("rt_string_len", sffi_string::rt_string_len_fn);
     insert_simple!("rt_string_new", sffi_string::rt_string_new_fn);
@@ -2606,5 +2607,62 @@ mod tests {
 
         let result = handler(&[Value::Int(42)], &mut env, &mut functions, &mut classes, &enums, &impl_methods);
         assert!(result.is_err(), "rt_string_bytes should reject a non-text argument, not silently misbehave");
+    }
+
+    /// Regression test for the `rt_string_data` `EXTERN_DISPATCH` gap that
+    /// blocked every fresh-seed native-build through the pure-Simple
+    /// cranelift-direct path (`cranelift_new_aot_module` calls
+    /// `rt_string_data(name)` on its literal module name before anything
+    /// else). Before this fix, `rt_string_data` had no dispatch entry and
+    /// fell through to `interpreter_extern::dynamic_sffi`'s dlopen-based
+    /// fallback, whose `value_to_i64` marshals a `Value::Str` argument as a
+    /// raw leaked-`CString` pointer instead of a tagged `RuntimeValue` --
+    /// same landmine class as `rt_string_bytes`
+    /// (`seed_flat_registry_len_i64_2026-07-17`). This asserts the dispatch
+    /// table has a native handler and that the returned pointer really does
+    /// point at the string's UTF-8 bytes.
+    #[test]
+    fn rt_string_data_dispatches_through_native_handler_rt_string_data_extern_dispatch_gap_2026_07_18() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_string_data"), "missing rt_string_data");
+
+        let handler = EXTERN_DISPATCH.get("rt_string_data").expect("registered handler");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        // Plain, never-boxed string literal -- the exact shape
+        // `cranelift_new_aot_module("bootstrap_main", ...)` passes.
+        let result = handler(
+            &[Value::text("abc")],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("rt_string_data should not error on a plain text argument");
+
+        let ptr = match result {
+            Value::Int(p) => p,
+            other => panic!("rt_string_data must return Value::Int(ptr), got {other:?}"),
+        };
+        assert_ne!(ptr, 0, "rt_string_data(\"abc\") must return a non-null pointer");
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, 3) };
+        assert_eq!(bytes, b"abc", "rt_string_data(\"abc\") must point at the real UTF-8 bytes, not garbage");
+    }
+
+    #[test]
+    fn rt_string_data_rejects_missing_argument() {
+        let handler = EXTERN_DISPATCH.get("rt_string_data").expect("registered handler");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let result = handler(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods);
+        assert!(result.is_err(), "rt_string_data should reject a missing argument, not silently misbehave");
     }
 }
