@@ -33,7 +33,8 @@ cranelift), generics erasure (#158 Phase B), Option ABI full implementation.
 - Native output must equal the oracle, **or** be correct-by-construction where the
   oracle is provably broken. A loud build failure is **never** silently converted
   to a wrong answer.
-- Gates: `native-smoke-matrix.shs` = `15/15 codegen_fallback_hits=0`;
+- Gates: `native-smoke-matrix.shs` = `native_smoke_matrix=true` (nonempty and
+  every selected case PASS, with no codegen fallback);
   `check-native-seed-parity.shs` = `native_seed_parity=true`. Every fix adds a
   parity case (inline, not via a sub-lane).
 - Land via FF-replay onto the `ls-remote` tip; verify with `ls-remote` +

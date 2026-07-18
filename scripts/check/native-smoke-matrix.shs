@@ -10,10 +10,8 @@
 #      self-hosted pure-Simple compiler, per repo default-tooling rule).
 #   3. Executes the resulting binary and compares its exit code (rc) to the
 #      expected value.
-#   4. Classifies the result as PASS / FAIL / XFAIL / XPASS. Cases marked
-#      XFAIL are known-broken today (match-on-enum, closures, Result `?`);
-#      they do not fail the run unless they start passing (XPASS), which is
-#      reported so we notice the moment a blocker clears.
+#   4. Classifies the result as PASS / FAIL / XFAIL / XPASS. The strict gate
+#      fails on every status except PASS, including stale XFAIL declarations.
 #   5. Scans build stderr for `CODEGEN-AMBIGUOUS-METHOD` / "falling back to
 #      interpreter" as a JIT-health signal and tallies hits across the run.
 #
@@ -496,6 +494,15 @@ printf '%s\n' "$CASES" >"$CASES_FILE"
 
 if [ -n "${NATIVE_SMOKE_CASES:-}" ]; then
     for want_id in $NATIVE_SMOKE_CASES; do
+        if ! awk -F'|' -v wanted="$want_id" '
+            $1 == wanted { found = 1 }
+            END { exit(found ? 0 : 1) }
+        ' "$CASES_FILE"; then
+            echo "native_smoke_matrix=false (unknown requested case: $want_id)"
+            exit 1
+        fi
+    done
+    for want_id in $NATIVE_SMOKE_CASES; do
         while IFS='|' read -r id desc writer rc xfail; do
             [ -z "$id" ] && continue
             [ "$id" = "$want_id" ] || continue
@@ -507,6 +514,11 @@ else
         [ -z "$id" ] && continue
         run_case "$id" "$desc" "$writer" "$rc" "$xfail"
     done <"$CASES_FILE"
+fi
+
+if [ "$TOTAL" -eq 0 ]; then
+    echo "native_smoke_matrix=false (no cases selected)"
+    exit 1
 fi
 
 echo ""
@@ -524,7 +536,7 @@ if [ "$XPASS_N" -gt 0 ]; then
     echo "NOTE: $XPASS_N case(s) marked XFAIL now PASS — promote them to real PASS cases."
 fi
 
-if [ "$FAIL_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
+if [ "$FAIL_N" -gt 0 ] || [ "$XFAIL_N" -gt 0 ] || [ "$XPASS_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
     echo "native_smoke_matrix=false"
     exit 1
 fi

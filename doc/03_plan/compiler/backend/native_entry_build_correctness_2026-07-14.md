@@ -11,7 +11,8 @@ failure is **never** silently converted to a wrong answer.
 - **Oracle:** `env -u SIMPLE_BOOTSTRAP bin/simple run p.spl` (seed interpreter).
 - **Native:** `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry p.spl -o out --clean`.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
-  `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
+  `native_smoke_matrix=true`: at least one selected case ran and every selected
+  case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
   defines **91 logical cases / 123 recorded checks** because strict-dual cases
@@ -59,8 +60,9 @@ failure is **never** silently converted to a wrong answer.
 | `e2c5d51014b` | sized unsigned/signed ints print + compare + divide correctly |
 | `11f116448d3` | keep explicit test-runner sources |
 
-~45 root causes fixed total (some pre-date this table). Matrix has held 15/15
-throughout.
+~45 root causes fixed total (some pre-date this table). The original 15-case
+matrix has grown to 21 registered cases; consumers trust its count-independent
+strict success receipt instead of copying that evolving total.
 
 ## Correctness-by-construction divergences (native ≠ seed, native is right)
 
