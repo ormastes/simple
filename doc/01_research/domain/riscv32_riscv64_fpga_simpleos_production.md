@@ -212,3 +212,16 @@ targets. They do not support replacing execution with metadata or PASS markers.
 The recommended strategy is compiler-first modular integration of the existing
 Simple models, with QEMU as artifact/platform oracle and VexRiscv as optional
 differential oracle, followed by generated-RTL and physical-board proof.
+
+## 2026-07-18 PMP Normative Recheck
+
+Implementation review used the current ratified Machine-Level ISA 1.13 text in
+the RISC-V specification library (`v20260120`).  It confirms that an
+implementation provides either zero, 16, or 64 lowest-numbered PMP entries;
+RV32 uses four configuration bytes per `pmpcfg` CSR while RV64 uses eight bytes
+in even-numbered `pmpcfg0`, `pmpcfg2`, and later CSRs.  It also confirms the
+first-any-byte priority rule, all-byte containment requirement, unlocked
+M-mode bypass, locked permission enforcement, S/U no-match denial, 34-bit RV32
+and 56-bit RV64 physical-address domains, and S-effective PMP checks for page
+table walks.  Source:
+[RISC-V Machine-Level ISA 1.13](https://docs.riscv.org/reference/isa/v20260120/priv/machine.html#machine-level-isa).

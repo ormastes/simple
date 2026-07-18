@@ -233,3 +233,15 @@ models, VHDL backend, manifests, and board wrappers. It removes the parallel
 empty/string-emitted CPU path and integrates one architecture capability at a
 time through the real compiler. An external core such as VexRiscv can remain a
 differential oracle, but cannot satisfy the final “Simple-generated CPU” row.
+
+## 2026-07-18 Attached-Board Evidence
+
+Read-only host enumeration now proves a live Xilinx FT4232H interface
+(`0403:6011`) with product `ML_Carrier_Card` and serial
+`XFL1OSWWFM2B`.  Interfaces 01, 02, and 03 enumerate as `/dev/ttyUSB1`,
+`/dev/ttyUSB2`, and `/dev/ttyUSB3`; interface 00 is the non-TTY JTAG lane.
+The current host exposes `openocd` but no `vivado`, `vitis`, or `xsct` on
+`PATH`.  AMD's KV260 platform documentation also names its board-side hardware
+as the ML carrier card, so KV260 remains the best-supported board identity, but
+the programming gate must still record an authoritative device/JTAG scan
+before treating that inference as final hardware identity.

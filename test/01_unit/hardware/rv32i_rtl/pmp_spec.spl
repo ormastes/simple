@@ -1,0 +1,159 @@
+# tag: only-compiled
+
+import std.spec
+use std.hardware.rv32i_rtl.pmp.{PmpEntries32, pmp32_check_entry, pmp32_check16, pmp32_gate_access}
+
+val CFG_R: u32 = 0x01
+val CFG_W: u32 = 0x02
+val CFG_X: u32 = 0x04
+val CFG_TOR: u32 = 0x08
+val CFG_NA4: u32 = 0x10
+val CFG_NAPOT: u32 = 0x18
+val CFG_L: u32 = 0x80
+
+val ACCESS_FETCH: u32 = 0
+val ACCESS_LOAD: u32 = 1
+val ACCESS_STORE: u32 = 2
+
+val PRIV_U: u32 = 0
+val PRIV_S: u32 = 1
+val PRIV_M: u32 = 3
+val NO_MATCH_INDEX: u32 = 16
+
+fn empty_entries() -> PmpEntries32:
+    PmpEntries32(
+        cfg_0: 0, cfg_1: 0, cfg_2: 0, cfg_3: 0,
+        cfg_4: 0, cfg_5: 0, cfg_6: 0, cfg_7: 0,
+        cfg_8: 0, cfg_9: 0, cfg_10: 0, cfg_11: 0,
+        cfg_12: 0, cfg_13: 0, cfg_14: 0, cfg_15: 0,
+        addr_0: 0, addr_1: 0, addr_2: 0, addr_3: 0,
+        addr_4: 0, addr_5: 0, addr_6: 0, addr_7: 0,
+        addr_8: 0, addr_9: 0, addr_10: 0, addr_11: 0,
+        addr_12: 0, addr_13: 0, addr_14: 0, addr_15: 0
+    )
+
+describe "RV32 PMP production owner":
+    it "matches OFF TOR NA4 and NAPOT entry modes":
+        val off = pmp32_check_entry(CFG_R, 0, 0x400, 0x1000, 0x1003, ACCESS_LOAD, PRIV_S)
+        expect(off.matched).to_equal(false)
+        expect(off.allowed).to_equal(false)
+
+        val tor = pmp32_check_entry(CFG_TOR | CFG_R, 0x400, 0x800, 0x1000, 0x1003, ACCESS_LOAD, PRIV_S)
+        expect(tor.matched).to_equal(true)
+        expect(tor.allowed).to_equal(true)
+
+        val na4 = pmp32_check_entry(CFG_NA4 | CFG_R | CFG_W, 0, 0x400, 0x1000, 0x1003, ACCESS_STORE, PRIV_S)
+        expect(na4.matched).to_equal(true)
+        expect(na4.allowed).to_equal(true)
+
+        # pmpaddr 0x401 encodes the 16-byte NAPOT region at 0x1000.
+        val napot = pmp32_check_entry(CFG_NAPOT | CFG_X, 0, 0x401, 0x1008, 0x100B, ACCESS_FETCH, PRIV_U)
+        expect(napot.matched).to_equal(true)
+        expect(napot.allowed).to_equal(true)
+
+        val full_space = pmp32_check_entry(CFG_NAPOT | CFG_R, 0, 0xFFFFFFFF, 0x3FFFFFFFF, 0x3FFFFFFFF, ACCESS_LOAD, PRIV_S)
+        expect(full_space.matched).to_equal(true)
+        expect(full_space.allowed).to_equal(true)
+
+    it "applies R W X and reserved W-without-R permissions":
+        val load = pmp32_check_entry(CFG_NAPOT | CFG_R, 0, 0x401, 0x1000, 0x1003, ACCESS_LOAD, PRIV_S)
+        val store = pmp32_check_entry(CFG_NAPOT | CFG_R, 0, 0x401, 0x1000, 0x1003, ACCESS_STORE, PRIV_S)
+        val fetch = pmp32_check_entry(CFG_NAPOT | CFG_X, 0, 0x401, 0x1000, 0x1003, ACCESS_FETCH, PRIV_S)
+        val reserved = pmp32_check_entry(CFG_NAPOT | CFG_W, 0, 0x401, 0x1000, 0x1003, ACCESS_STORE, PRIV_S)
+
+        expect(load.allowed).to_equal(true)
+        expect(store.allowed).to_equal(false)
+        expect(fetch.allowed).to_equal(true)
+        expect(reserved.matched).to_equal(true)
+        expect(reserved.allowed).to_equal(false)
+
+    it "bypasses unlocked M permissions but enforces lock and partial overlap":
+        val unlocked = pmp32_check_entry(CFG_NAPOT, 0, 0x400, 0x1000, 0x1003, ACCESS_LOAD, PRIV_M)
+        val locked = pmp32_check_entry(CFG_NAPOT | CFG_L, 0, 0x400, 0x1000, 0x1003, ACCESS_LOAD, PRIV_M)
+        val partial = pmp32_check_entry(CFG_NAPOT, 0, 0x400, 0x0FFC, 0x1003, ACCESS_LOAD, PRIV_M)
+
+        expect(unlocked.matched).to_equal(true)
+        expect(unlocked.allowed).to_equal(true)
+        expect(locked.matched).to_equal(true)
+        expect(locked.allowed).to_equal(false)
+        expect(partial.matched).to_equal(true)
+        expect(partial.allowed).to_equal(false)
+
+    it "uses the lowest overlapping entry even when a later entry allows":
+        var entries = empty_entries()
+        entries.cfg_0 = CFG_NA4 | CFG_R
+        entries.addr_0 = 0x400
+        entries.cfg_1 = CFG_NAPOT | CFG_R
+        entries.addr_1 = 0x3FF
+
+        val result = pmp32_check16(entries, 0x0FFC, 8, ACCESS_LOAD, PRIV_S)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(false)
+        expect(result.matched_index).to_equal(0)
+
+    it "uses the preceding pmpaddr as the TOR lower bound":
+        var entries = empty_entries()
+        entries.addr_0 = 0x400
+        entries.cfg_1 = CFG_TOR | CFG_R
+        entries.addr_1 = 0x800
+
+        val result = pmp32_check16(entries, 0x1000, 4, ACCESS_LOAD, PRIV_S)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(true)
+        expect(result.matched_index).to_equal(1)
+
+    it "reaches the final explicit entry after lower entries miss":
+        var entries = empty_entries()
+        entries.cfg_15 = CFG_NA4 | CFG_R
+        entries.addr_15 = 0x400
+
+        val result = pmp32_check16(entries, 0x1000, 4, ACCESS_LOAD, PRIV_S)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(true)
+        expect(result.matched_index).to_equal(15)
+
+    it "applies privilege defaults when no entry matches":
+        val entries = empty_entries()
+        val machine = pmp32_check16(entries, 0x1000, 4, ACCESS_LOAD, PRIV_M)
+        val supervisor = pmp32_check16(entries, 0x1000, 4, ACCESS_LOAD, PRIV_S)
+        val user = pmp32_check16(entries, 0x1000, 4, ACCESS_LOAD, PRIV_U)
+
+        expect(machine.matched).to_equal(false)
+        expect(machine.allowed).to_equal(true)
+        expect(machine.matched_index).to_equal(NO_MATCH_INDEX)
+        expect(supervisor.allowed).to_equal(false)
+        expect(user.allowed).to_equal(false)
+
+    it "fails closed for invalid sizes kinds privileges and 34-bit overflow":
+        val entries = empty_entries()
+        val zero = pmp32_check16(entries, 0x1000, 0, ACCESS_LOAD, PRIV_S)
+        val too_large = pmp32_check16(entries, 0x1000, 9, ACCESS_LOAD, PRIV_S)
+        val negative = pmp32_check16(entries, -1, 1, ACCESS_LOAD, PRIV_S)
+        val overflow = pmp32_check16(entries, 0x3FFFFFFFF, 2, ACCESS_LOAD, PRIV_S)
+        val bad_kind = pmp32_check16(entries, 0x1000, 4, 3, PRIV_S)
+        val bad_privilege = pmp32_check16(entries, 0x1000, 4, ACCESS_LOAD, 2)
+
+        expect(zero.allowed).to_equal(false)
+        expect(too_large.allowed).to_equal(false)
+        expect(negative.allowed).to_equal(false)
+        expect(overflow.allowed).to_equal(false)
+        expect(bad_kind.allowed).to_equal(false)
+        expect(bad_privilege.allowed).to_equal(false)
+        expect(overflow.matched).to_equal(false)
+        expect(overflow.matched_index).to_equal(NO_MATCH_INDEX)
+
+    it "suppresses bus issue for translation and PMP faults":
+        var entries = empty_entries()
+        entries.cfg_0 = CFG_NAPOT | CFG_R
+        entries.addr_0 = 0x401
+
+        val allowed = pmp32_gate_access(entries, 0x1000, 4, ACCESS_LOAD, PRIV_S, false, 0)
+        val denied = pmp32_gate_access(entries, 0x1000, 4, ACCESS_STORE, PRIV_S, false, 0)
+        val page_fault = pmp32_gate_access(entries, 0x1000, 4, ACCESS_LOAD, PRIV_S, true, 13)
+
+        expect(allowed.bus_valid).to_equal(true)
+        expect(allowed.fault).to_equal(false)
+        expect(denied.bus_valid).to_equal(false)
+        expect(denied.fault_cause).to_equal(7)
+        expect(page_fault.bus_valid).to_equal(false)
+        expect(page_fault.fault_cause).to_equal(13)
