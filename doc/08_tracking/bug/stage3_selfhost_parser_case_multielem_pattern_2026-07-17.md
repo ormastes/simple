@@ -165,17 +165,76 @@ parse_match_arms_common`, or `parse_call_arg_raw` /
 matches Rust-seed behavior, and the isolated repro proves it. Fix effort
 belongs in the flat-AST-bridge arena-reset hazard, not the parser grammar.**
 
-## ROOT CAUSE CONFIRMED (2026-07-18): cross-file module-global rebind not
-## propagating under the stage3 cranelift backend — fixed by inspection +
-## code-shape evidence, not by a full-closure trace (machine too contended)
+## UNRESOLVED (2026-07-18): rebind-vs-`.clear()` theory tested and REFUTED —
+## classified as a cranelift codegen/runtime-state miscompile, not a
+## contained-fix bug. Grammar is proven correct; do not reopen the parser.
+
+**Status: NOT FIXED.** A plausible, evidence-backed theory (below, kept for
+the historical record and because the evidence itself is still valid) was
+implemented, compiled in, and run end-to-end against the real stage4
+closure. The fix had **zero observable effect** — post-fix output was
+byte-identical to pre-fix output, down to the exact `idx` range and
+`arena_len`. The fix was therefore **reverted** (repo rule: no
+dead/ineffective code) via `git checkout -- decl_nodes.spl module_state.spl`.
+This is a step-5 outcome per the original task: source parser confirmed
+correct, no contained `.spl` fix was found to work, root cause is
+codegen-level and out of scope for a parser-level fix.
+
+### What was tried and how it was refuted
+
+The rebind-vs-`.clear()` theory below was implemented as `decl_reset()` in
+`decl_nodes.spl` (co-located with the vars, rebind + nil-guard + `.clear()`,
+mirroring `stmt_reset()`), called from `ast_reset()` in `module_state.spl`.
+Verified compiled-in via `strings build/s3fix-verify/stage3/.../simple |
+grep decl_reset` → `frontend__core___Ast__decl_nodes__decl_reset` present.
+Ran the **exact real pipeline** (`sh scripts/bootstrap/bootstrap-from-scratch.sh
+--backend=cranelift --full-cli`, isolated to `--output=build/s3fix-verify` to
+avoid colliding with 5+ other concurrent sessions' bootstrap runs on the
+shared `build/bootstrap/` tree) through stage2 → stage3 (both succeeded,
+sha256 logged) → stage4 native-build of the full closure with the FIXED
+stage3 binary. Result: **identical** `[stmt_get_tag] OOB idx=1706..1756
+arena_len=462` sequence, same count (26), same values, as the ORIGINAL
+pre-fix log. The fix changed nothing observable. (Process was killed after
+confirming the identical-signature OOB sequence reproduced; no need to wait
+for the downstream `parser_error` cascade to reconfirm — the discriminating
+evidence, byte-identical OOB, had already landed.)
+
+This means: co-location (same-file reset+read) does NOT fix it, AND adding
+`.clear()` does NOT fix it. Both axes of the original theory are eliminated
+by direct empirical test, not just superseded by a stronger theory.
+
+### Next-session lead (UNVALIDATED — do not assume, verify first)
+
+`decl_get_body(idx)` (`decl_nodes.spl:677`) reads `decl_body_stmts[idx]`
+**directly** — `decl_body_stmts: [[i64]]` is a nested-array field with no
+flat-text mirror. Compare `arm_get_body` (`decl_nodes.spl`, same file),
+which reads from `arm_body_flat: [text]` instead of `arm_body: [[i64]]`
+directly, with an explicit comment: *"the native-build seed erases the inner
+list of arm_body to a boxed i64 handle, so a direct arm_body[idx] read fails
+`.len()` with 'len on i64'... A flat [text] arena has no nested element to
+erase... it can never leak stale bodies across compilations."* — i.e. this
+exact class of nested-array corruption was already found and fixed for
+`arm_body`, with an explicit note that it prevents "stale bodies across
+compilations". `decl_body_stmts` never received the same treatment. This is
+the strongest untried lead: give `decl_body_stmts` the same flat-mirror
+treatment (`decl_body_stmts_flat: [text]`, encode/decode via
+`ast_i64_list_join`/`ast_i64_list_split`, same helpers `arm_get_body` already
+uses) and re-run the SAME real-pipeline verification (there is no cheaper
+repro — the 87-file closure through `collection_opt_core.spl` alone never
+reproduces this; only the real stage4 closure does, ~90 min under
+contention). Do NOT implement this speculatively without re-running the real
+pipeline to confirm — the rebind/`.clear()` theory looked equally solid and
+was refuted.
+
+### Original theory (REFUTED, kept for record — do not re-implement as-is)
 
 The full-closure trace repro (`SIMPLE_TRACE_AST_RESET=1`) could not be driven
 to completion in-session: the shared build host had 5+ OTHER concurrent
 bootstrap/native-build processes from parallel sessions (`wt_s58`, `wt_s54`,
 `pure-simple-tool-remain`, `bootstrap-goal`, etc.), load average ~9-10 on 32
 cores, making even a single-file `native-build` take minutes instead of
-seconds. Root cause was instead nailed by direct source inspection, which
-gives a decisive (not merely probable) read:
+seconds. Root cause was instead hypothesized via direct source inspection,
+which gave a decisive-*looking* (but ultimately wrong) read:
 
 - `stmt_reset()` (`ast_stmt.spl:137`) and `expr_reset()` (`ast_expr.spl`) each
   reset their arrays with **rebind + nil-guard + explicit `.clear()`** — e.g.
@@ -221,58 +280,75 @@ gives a decisive (not merely probable) read:
   same-process **cranelift codegen** cross-compilation-unit rebind-visibility
   gap, which is what this is.
 
-### Fix applied (contained, `.spl`-only)
+### Fix attempted, then REVERTED (empirically ineffective)
 
 - `src/compiler/10.frontend/core/_Ast/decl_nodes.spl`: added `decl_reset()`,
   co-located with the `decl_*`/`arm_*`/`elif_*`/`module_decls`/
   `module_decl_slots`/`module_path_slot`/`lexer_state_core_pos_slot`/
   `lexer_state_core_line_slot` var declarations, mirroring `stmt_reset()`'s
-  exact rebind + nil-guard + `.clear()` pattern for all ~38 vars (also added
-  `decl_impl_trait`/`decl_is_trait`/`decl_param_mut_text` to the reset, which
-  were previously missing from `ast_reset()`'s list entirely — a separate,
-  smaller pre-existing gap in the same function, fixed in passing since it's
-  the same one-line-per-var pattern already being rewritten).
-- `src/compiler/10.frontend/core/_Ast/module_state.spl`: `ast_reset()` now
-  calls `decl_reset()` instead of inlining the cross-file rebind + nil-guard
-  for those vars (the `lexer_state_core_col_slot`-and-later vars, which ARE
-  declared in `module_state.spl` itself, are untouched — same-file rebind is
-  not implicated by this bug and was left as-is).
-- Verified: `decl_reset()`/updated `ast_reset()` compile cleanly via the
-  stage3 binary's own `native-build` (87-file closure through
-  `compiler.mir_opt.mir_opt.collection_opt_core`, 0 failed, matching the
-  pre-fix baseline build time).
+  exact rebind + nil-guard + `.clear()` pattern.
+- `src/compiler/10.frontend/core/_Ast/module_state.spl`: `ast_reset()` called
+  `decl_reset()` instead of inlining the cross-file rebind + nil-guard.
+- Compiled clean (87-file sanity closure, 0 failed) and confirmed present in
+  the built stage3 binary (`strings ... | grep decl_reset` →
+  `frontend__core___Ast__decl_nodes__decl_reset`).
+- **Ran the real stage4 closure with this fix compiled in. Output was
+  byte-identical to the unfixed baseline** (same OOB idx range, same
+  arena_len, same count). **Reverted** via
+  `git checkout -- src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+  src/compiler/10.frontend/core/_Ast/module_state.spl` — both files are back
+  to their pre-investigation HEAD state. Do not re-apply this exact fix
+  without new evidence; it is disproven, not just unverified.
 
-### Underlying cranelift defect (documented, not separately fixed)
+### Underlying defect (documented, unresolved — classified as cranelift
+### miscompile / compiled-runtime state bug, NOT a source-level parser or
+### reset-logic gap)
 
-The durable defect is in the pure-Simple **cranelift backend**
-(`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` and related):
-a module-level `var` array **rebind** (`x = []`, replacing the array's
-identity/reference) does not reliably propagate to a reader in a different
-compilation unit/function, while an **in-place `.clear()`** (mutating the
-existing array's contents without changing its identity) does. This class of
-bug should be re-audited generally: any `ast_reset()`-shaped function élsewhere
-in the pure-Simple compiler that resets shared/global array state via bare
-rebind only (no accompanying `.clear()`), especially across a file boundary
-from the vars' own declaration, is a candidate for the same silent corruption.
-Per repo convention (`.claude/memory/ref_*`, `feedback_arrays_value_types.md`),
-this joins the existing catalogue of interpreter-vs-compiled and
-compiled-only semantic gaps around module-level `var` state in native
-binaries (see the pervasive `if X == nil: X = []` nil-guards already
-throughout this file, added for a related but distinct "initializer doesn't
-run in native binaries" gap).
+The evidence (byte-for-byte identical corruption regardless of reset
+mechanism or file co-location) rules out both "cross-file rebind doesn't
+propagate" and "missing `.clear()`" as the mechanism. What remains
+consistent with all evidence: some state involved in carrying a decl's
+captured statement-index list (`decl_body_stmts: [[i64]]`, a NESTED array)
+from one file's parse to a LATER file's conversion is corrupted at the
+**compiled-code / runtime-representation** level (see the untried
+"nested-array erasure" lead above — `arm_body` needed the same kind of
+workaround for a documented erasure bug), not at the reset-call-site level
+this investigation targeted. Per repo convention
+(`.claude/memory/ref_*`, `feedback_arrays_value_types.md`), this joins the
+existing catalogue of interpreter-vs-compiled and compiled-only semantic
+gaps around module-level `var`/array state in native binaries — but THIS
+specific instance is not yet root-caused to a single mechanism; two
+plausible mechanisms (rebind propagation, missing in-place clear) were
+tested and refuted.
 
 ### Verification status
 
-- Root cause: **confirmed by code-shape inspection** (asymmetric reset
-  pattern + OOB evidence), not by a full green bootstrap in-session — the
-  shared build host's contention (5+ concurrent native-build processes from
-  other sessions) made a full `--full-cli` bootstrap (30-60+ min even
-  uncontended) impractical to complete and observe within this session.
-- Fix is applied and syntax/compile-clean (verified via the 87-file closure
-  build above). **Full end-to-end stage1-4 bootstrap verification
-  (`sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift
-  --full-cli`) is launched but its outcome is NOT yet observed/confirmed in
-  this session** — do not treat this bug as closed until that run (or a
-  rerun under less contention) reports stage4 green with a working full-CLI
-  binary. Next agent/session: check for the launched run's log/PID, or
-  rerun the command fresh, and update this section with the actual result.
+- **Grammar/parser: confirmed correct.** Isolated repros (single file, and
+  the real `collection_opt_core.spl` reached through an 87-file closure)
+  both compile clean. Do not touch the case/pattern parser.
+- **Root cause: NOT resolved.** One specific, evidence-motivated theory
+  (cross-file rebind vs `.clear()`) was implemented and empirically refuted
+  via a full real-pipeline run (isolated to `--output=build/s3fix-verify` to
+  avoid colliding with other concurrent sessions on the shared
+  `build/bootstrap/` tree — 5+ other bootstrap processes were running
+  simultaneously on this host, load average ~9-10/32 cores). The fix is
+  reverted; the working tree has NO net change from this investigation
+  (bug-doc updates only).
+- **No contained `.spl` fix currently known.** Per the task's own step 5,
+  this is being left as a documented, evidence-rich blocker rather than
+  forcing a fix that doesn't work. Next session: try the `decl_body_stmts`
+  flat-mirror lead above, and/or investigate the pure-Simple cranelift
+  backend's handling of nested `[[i64]]` array module-globals directly
+  (`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`). There
+  is no cheap repro — validation requires the real stage4 closure
+  (~90 min under contention observed in this session); the 87-file
+  `collection_opt_core`-only closure never reproduces this bug regardless of
+  fix correctness, so it cannot be used to validate candidate fixes.
+
+### Unrelated latent gap noticed in passing (not fixed, preserved for record)
+
+While building the (reverted) `decl_reset()`, noticed `ast_reset()`
+(`module_state.spl`) never resets `decl_impl_trait`, `decl_is_trait`, or
+`decl_param_mut_text` (all declared in `decl_nodes.spl`) at all — not even
+via the old bare-rebind approach. Separate, smaller issue from this bug; not
+investigated further since the main fix attempt was reverted.
