@@ -4,6 +4,31 @@ Date: 2026-07-18
 
 Status: open
 
+## 2026-07-18 continuation
+
+The pure Cranelift call boundary was missing the LLVM backend's existing
+logical-process-extern mapping.  `cl_translate_call` now maps
+`rt_process_run`, `rt_process_run_bounded`, `rt_process_run_inherit`, and
+`rt_process_run_timeout` to their existing tuple/value facades before declaring
+an external import.  A focused source contract covers all four names.
+
+A current pure full CLI rebuilt from an underscore-only isolated workspace:
+
+- binary: `build/native_probe/simple-f1n3-cranelift-abi-fix-safe`;
+- result: `1360 compiled, 0 cached, 0 failed`;
+- startup: `--version` exits 0;
+- exact SPipe docgen: no exit-139 process crash, but after reporting the absent
+  sibling driver it made no in-process progress for 120 seconds and was stopped;
+- direct tracked Sv39 VHDL compilation: reports missing
+  `Result.unwrap_err`, then exits 139 before producing RTL.
+
+The source repair is therefore landed locally but not bootstrap-qualified.
+This bug remains open until docgen, one focused test, and one VHDL compile all
+exit 0 through a deployed pure-Simple CLI.  A hyphenated temporary workspace
+also exposed a separate init-symbol mangling defect at link time; using an
+underscore-only isolation path avoided conflating that defect with this ABI
+repair.
+
 ## Summary
 
 A current full CLI built by an isolated pure Stage3 compiler cannot execute
