@@ -30,3 +30,9 @@ proof remain pending.
 
 Portable pure-Simple tool discovery now also resolves `SIMPLE_OBJCOPY`,
 Homebrew LLVM/LLVM 18, versioned LLVM tools, and GNU `objcopy` in that order.
+
+The strict linker now uses those pieces to build a transaction-owned localized
+capsule: relocatable closure link, raw-symbol localization, constructor section
+removal, deterministic one-member archive creation, final inventory, and
+fail-closed cleanup. The raw Cargo archive remains read-only. Exact full symbol
+table equality and overlap checks against the staged providers remain open.

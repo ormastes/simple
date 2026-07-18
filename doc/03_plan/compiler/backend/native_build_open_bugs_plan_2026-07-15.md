@@ -252,7 +252,9 @@ Pure-Simple manifest and localization-list derivation now mirror the Rust
 producer without a hardcoded symbol count; filesystem/tool orchestration is the
 remaining localization step.
 The required pure-Simple portable `objcopy` resolver is now source-covered;
-transactional capsule production still remains.
+transactional capsule production is source-wired through deterministic
+one-member inventory and cleanup. Exact localized-object/archive symbol-table
+equality, provider overlap, selection, linking, and executable proof remain.
 
 ---
 

@@ -730,27 +730,78 @@ not-an-address W rt_malformed
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         expect(source).to_contain("if hosted_os == \"windows\": \"simple_native_all.lib\" else: \"libsimple_native_all.a\"")
 
-    it "inventories compiler backfill before creating strict Stage4 temporaries":
+    it "builds a private deterministic compiler backfill capsule from the derived manifest":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        val native_all_pos = source.find("if not stage4_requested and runtime_path != \"\" and not hosted_plan.requires_cross") ?? -1
-        val inventory_pos = source.last_index_of("llvm_stage4_inventory_compiler_backfill(runtime_path, hosted_os)") ?? -1
-        val runtime_compile_pos = source.find("# Step 1: Always compile the FRESH C runtime") ?? -1
-        val closure_pos = source.find("match llvm_stage4_final_requested_symbols(final_simple_objects)") ?? -1
+        val build_pos = source.find("fn llvm_stage4_build_compiler_backfill_capsule") ?? -1
+        val provider_pos = source.find("fn llvm_stage4_build_single_object_provider_archive") ?? -1
+        expect(build_pos).to_be_greater_than(-1)
+        expect(provider_pos).to_be_greater_than(build_pos)
+        val build_source = source.substring(build_pos, provider_pos)
+        val raw_scan_pos = build_source.find("process_run(nm, [\"-g\", \"-p\", raw_archive])") ?? -1
+        val manifest_pos = build_source.find("stage4_derive_compiler_backfill_manifest(raw_nm_out, object_format)") ?? -1
+        val closure_pos = build_source.find("process_run(hosted_cc, closure_args)") ?? -1
+        val localize_pos = build_source.find("stage4_compiler_backfill_localization_symbols(closure_nm_out, object_format, manifest)") ?? -1
+        val objcopy_pos = build_source.find("process_run(objcopy, objcopy_args)") ?? -1
+        val archive_pos = build_source.find("process_run(archiver, [\"rcsD\", capsule_path, localized_object])") ?? -1
+        val member_pos = build_source.find("members != \"compiler_backfill_local.o\"") ?? -1
+        val inventory_pos = build_source.find("llvm_stage4_candidate_archive_inventory([\"compiler_backfill\"], [capsule_path])") ?? -1
+        val envelope_pos = build_source.last_index_of("stage4_validate_compiler_backfill_symbol_envelope(scans[0], object_format)") ?? -1
+        expect(raw_scan_pos).to_be_greater_than(-1)
+        expect(manifest_pos).to_be_greater_than(raw_scan_pos)
+        expect(closure_pos).to_be_greater_than(manifest_pos)
+        expect(localize_pos).to_be_greater_than(closure_pos)
+        expect(objcopy_pos).to_be_greater_than(localize_pos)
+        expect(archive_pos).to_be_greater_than(objcopy_pos)
+        expect(member_pos).to_be_greater_than(archive_pos)
+        expect(inventory_pos).to_be_greater_than(member_pos)
+        expect(envelope_pos).to_be_greater_than(inventory_pos)
+        expect(build_source.substring(0, archive_pos).contains("llvm_stage4_candidate_archive_inventory")).to_be(false)
+        expect(build_source).to_contain("simple_stage4_compiler_backfill_{pid}_{output_path.hash()}")
+        expect(build_source).to_contain("if output_path.trim() == \"\"")
+        expect(build_source).to_contain("if raw_archive == capsule_path")
+        expect(build_source).to_contain("dir_remove_all(stage_dir)\n    if dir_exists(stage_dir):\n        return Err(\"Stage4 compiler backfill stale transaction cleanup failed")
+        expect(build_source).to_contain("var closure_args: [text] = [\"-nostdlib\", \"-Wl,-r\"]")
+        expect(build_source).to_contain("closure_args = closure_args.push(\"-no-pie\")")
+        expect(build_source).to_contain("closure_args = closure_args.push(\"-Wl,--gc-sections\")")
+        expect(build_source).to_contain("for symbol in manifest:\n            closure_args = closure_args.push(\"-Wl,--undefined={symbol}\")")
+        expect(build_source).to_contain("for symbol in manifest:\n            closure_args = closure_args.push(\"-Wl,-u,_{symbol}\")")
+        expect(build_source.contains("--whole-archive")).to_be(false)
+        expect(build_source.contains("-force_load")).to_be(false)
+        for flag in [
+            "\"--localize-symbols=\" + localize_path,",
+            "\"--remove-section=.init_array\",", "\"--remove-section=.init_array.*\",",
+            "\"--remove-section=.ctors\",", "\"--remove-section=.ctors.*\",",
+            "\"--remove-section=.fini_array\",", "\"--remove-section=.fini_array.*\",",
+            "\"--remove-section=.dtors\",", "\"--remove-section=.dtors.*\",",
+            "\"--remove-section=__mod_init_func\",", "\"--remove-section=__mod_term_func\",",
+            "\"--remove-section=__DATA,__mod_init_func\",", "\"--remove-section=__DATA,__mod_term_func\","
+        ]:
+            expect(build_source).to_contain(flag)
+        expect(build_source.split("\"--remove-section=").len() - 1).to_equal(12)
+        expect(build_source).to_contain("process_run(archiver, [\"t\", capsule_path])")
+        expect(build_source.contains("file_delete(raw_archive)")).to_be(false)
+        expect(build_source.contains("remove_file_if_exists(raw_archive)")).to_be(false)
+        expect(build_source.contains("file_copy(raw_archive")).to_be(false)
+        expect(build_source.contains("file_write(raw_archive")).to_be(false)
+        expect(build_source.contains("dir_remove_all(raw_archive")).to_be(false)
+
+    it "owns and cleans the compiler capsule only inside the strict Stage4 transaction":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val final_symbols_pos = source.find("match llvm_stage4_final_requested_symbols(final_simple_objects)") ?? -1
+        val capsule_pos = source.last_index_of("llvm_stage4_build_compiler_backfill_capsule(runtime_path, hosted_os, hosted_cc, pid, output)") ?? -1
         val provider_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
         val barrier_pos = source.find("remaining provider inventory and unique-owner selection are wired") ?? -1
-        expect(native_all_pos).to_be_greater_than(-1)
-        expect(inventory_pos).to_be_greater_than(native_all_pos)
-        expect(runtime_compile_pos).to_be_greater_than(inventory_pos)
-        expect(closure_pos).to_be_greater_than(runtime_compile_pos)
-        expect(provider_pos).to_be_greater_than(closure_pos)
+        expect(capsule_pos).to_be_greater_than(final_symbols_pos)
+        expect(provider_pos).to_be_greater_than(capsule_pos)
         expect(barrier_pos).to_be_greater_than(provider_pos)
-        expect(source).to_contain("if stage4_requested:\n        match llvm_stage4_inventory_compiler_backfill(runtime_path, hosted_os):\n            case Ok(()): ()\n            case Err(err): return Err(\"Stage4 compiler backfill inventory failed: \" + err)")
-        expect(source).to_contain("stage4_compiler_backfill_archive_file(target_os_name)")
-        expect(source).to_contain("stage4_compiler_backfill_object_format(target_os_name)")
-        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"compiler_backfill\"], [archive_path])")
-        expect(source).to_contain("stage4_validate_compiler_backfill_symbol_envelope(scans[0], object_format)")
-        expect(source.contains("file_delete(compiler_backfill")).to_be(false)
-        expect(source.contains("all_objects = all_objects.push(compiler_backfill")).to_be(false)
+        expect(source).to_contain("simple_stage4_compiler_backfill_{pid}_{output.hash()}")
+        expect(source.split("return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule,").len() - 1).to_equal(6)
+        expect(source.contains("all_objects = all_objects.push(compiler_backfill_capsule)")).to_be(false)
+        expect(source.contains("link_to_native(all_objects.push(compiler_backfill_capsule)")).to_be(false)
+        val step3_pos = source.find("# Step 3: Combine all objects and link") ?? -1
+        expect(step3_pos).to_be_greater_than(barrier_pos)
+        expect(source.substring(final_symbols_pos, step3_pos).split("compiler_backfill_capsule").len() - 1).to_equal(8)
+        expect(source.substring(step3_pos, source.len()).contains("compiler_backfill_capsule")).to_be(false)
 
     it "builds and validates the dedicated dynload archive before the strict fail-closed boundary":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
