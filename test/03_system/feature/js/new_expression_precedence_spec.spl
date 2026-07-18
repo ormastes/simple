@@ -1,0 +1,83 @@
+# `new` Expression Postfix-Precedence Tests
+#
+# Regression coverage for the subset JS engine's `new` parsing: a chained
+# member/call after `new Ctor(args)` (e.g. `new Ctor(args).method()`) must
+# bind to the *constructed instance*, not be swallowed into the `new`
+# expression's own argument list. Per JS semantics `new X().y` === `(new
+# X()).y` — `new` binds only to the immediately-following constructor call,
+# and anything chained after that applies to the result.
+#
+# Root cause (fixed): `_js_parser_expression`'s `new` handling parsed the
+# *entire* postfix chain after `new` (including any trailing `.method(...)`)
+# before splitting off arguments, so `new Ctor(args).method(args2)` was
+# mis-parsed as `new (Ctor(args).method)(args2)` instead of
+# `(new Ctor(args)).method(args2)`.
+#
+# @cover src/lib/nogc_sync_mut/js/engine/parser.spl
+
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.js.types.js_types.{JsValue}
+
+fn _run_js(source: text) -> text:
+    """Parse and execute a JS source string, returning its printed result.
+
+    Note: this subset engine's `parse_program()` returns `[JsStatement]`
+    directly (not `Result<[JsStatement], JsError>`) — do not wrap it in an
+    `Ok`/`Err` match.
+    """
+    val logger = Logger.new("new-expr-precedence", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    val stmts = parser.parse_program()
+    val interp = JsInterpreter.new(logger)
+    val result = interp.execute(stmts)
+    match result:
+        Ok(value):
+            return _display(value)
+        Err(e):
+            return "Error: {e.message}"
+
+fn _display(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "new expression postfix precedence":
+    describe "chained method call after new (the bug)":
+        it "new Ctor().method() runs the method on the constructed instance":
+            expect(_run_js(
+                "var Ctor = function(){ this.f = function(){ return 42; }; }; new Ctor().f()"
+            )).to_equal("42")
+
+        it "new Ctor(args).method() passes constructor args and chains the call":
+            expect(_run_js(
+                "var Ctor = function(a,b){ this.sum = a + b; this.f = function(){ return this.sum; }; }; new Ctor(2,3).f()"
+            )).to_equal("5")
+
+        it "new Ctor(args).prop reads a field off the constructed instance":
+            expect(_run_js(
+                "var Ctor = function(x){ this.x = x; }; new Ctor(5).x"
+            )).to_equal("5")
+
+    describe "no-chain regression guard":
+        it "new Ctor(args) alone still constructs normally":
+            expect(_run_js(
+                "var Ctor = function(x){ this.x = x; }; var c = new Ctor(5); c.x"
+            )).to_equal("5")
+
+        it "new Ctor with no arguments still constructs normally":
+            expect(_run_js(
+                "var Ctor = function(){ this.x = 9; }; var c = new Ctor(); c.x"
+            )).to_equal("9")
