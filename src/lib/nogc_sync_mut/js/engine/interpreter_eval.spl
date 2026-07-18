@@ -14,6 +14,7 @@ use std.js.node.buffer_module.{buffer_byteLength}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.js.builtins.array.{array_isArray, array_from_values}
+use std.js.builtins.regexp.{RegExpObj, regexp_exec}
 
 impl JsInterpreter:
     # ── JsExpression evaluation ────────────────────────────────────────────
@@ -187,6 +188,26 @@ impl JsInterpreter:
         # executor runs synchronously with bound resolve/reject callbacks.
         if self.ident_name(callee) == "Promise":
             return self._eval_new_promise(args, env)
+        if self.ident_name(callee) == "RegExp":
+            # new RegExp(pattern, flags) / new RegExp(existingRegExp, flags) —
+            # RegExp has no JsValue.Function representation (it isn't a real
+            # global, unlike Promise which at least gets a plain-object
+            # global), so short-circuit before the generic callee-evaluation
+            # path below, which would just see an undefined identifier and
+            # return Ok(JsValue.Undefined).
+            var pattern = ""
+            var flags = ""
+            if args.len() > 0:
+                val pattern_val = self.eval_expression(args.get(0), env)?
+                val pattern_obj_id = _get_obj_id(pattern_val)
+                if pattern_obj_id >= 0 and to_boolean(self.get_object_property(pattern_obj_id, "__simple_is_regexp")):
+                    pattern = js_to_string(self.get_object_property(pattern_obj_id, "source"))
+                    flags = js_to_string(self.get_object_property(pattern_obj_id, "flags"))
+                else:
+                    pattern = js_to_string(pattern_val)
+            if args.len() > 1:
+                flags = js_to_string(self.eval_expression(args.get(1), env)?)
+            return Ok(self._create_regex_value(pattern, flags))
         val callee_val = self.eval_expression(callee, env)?
         var arg_vals: [JsValue] = []
         var i = 0
@@ -612,6 +633,40 @@ impl JsInterpreter:
                 _: pass_dn
             if is_string:
                 return self._dispatch_string_method(str_val, member_method, args, env)
+
+        # RegExp.prototype.test / RegExp.prototype.exec — dispatched on the
+        # plain-object regex marker created by _create_regex_value (regex
+        # literals and `new RegExp(...)`). Mirrors the __simple_is_regexp
+        # check already used by String.prototype.replace/match/search/split.
+        if is_member and (member_method == "test" or member_method == "exec"):
+            val regex_val = self.eval_expression(member_obj_expr, env)?
+            val regex_obj_id = _get_obj_id(regex_val)
+            if regex_obj_id >= 0 and to_boolean(self.get_object_property(regex_obj_id, "__simple_is_regexp")):
+                var input = ""
+                if args.len() > 0:
+                    input = js_to_string(self.eval_expression(args.get(0), env)?)
+                val pattern = js_to_string(self.get_object_property(regex_obj_id, "source"))
+                val flags = js_to_string(self.get_object_property(regex_obj_id, "flags"))
+                var re = RegExpObj.create(pattern, flags)
+                re.last_index = f64_to_i64(to_number(self.get_object_property(regex_obj_id, "lastIndex")))
+                val result = regexp_exec(re, input)
+                if re.global:
+                    # Stateful lastIndex tracking for global regexes, matching
+                    # real JS test()/exec() iteration semantics.
+                    if result.matched:
+                        self.set_object_property(regex_obj_id, "lastIndex", JsValue.Number(v: (result.index + result.value.len()).to_f64()))
+                    else:
+                        self.set_object_property(regex_obj_id, "lastIndex", JsValue.Number(v: 0.0))
+                if member_method == "test":
+                    return Ok(JsValue.Boolean(v: result.matched))
+                if not result.matched:
+                    return Ok(JsValue.Null)
+                val match_id = self.create_object()
+                self.set_object_property(match_id, "0", JsValue.String(v: result.value))
+                self.set_object_property(match_id, "length", JsValue.Number(v: 1.0))
+                self.set_object_property(match_id, "index", JsValue.Number(v: result.index.to_f64()))
+                self.set_object_property(match_id, "input", JsValue.String(v: input))
+                return Ok(JsValue.Array(id: match_id))
 
         if is_member and member_method == "set":
             val dst_val = self.eval_expression(member_obj_expr, env)?

@@ -50,3 +50,42 @@ describe "JS engine builtin gaps: regex replace, Promise typeof, prototype intro
     it "still runs the working reference scripts from the bug report":
         expect(_runtime_eval_text("1 + 2")).to_equal("3")
         expect(_runtime_eval_text("[1,2,3].map(function(n){return n*2;}).join(',')")).to_equal("2,4,6")
+
+# Lane B2 — remaining deferred regex gaps from lane N5 (bac65baa7b1), all
+# wired through the existing regex engine at src/lib/common/js/builtins/regexp.spl:
+#   (a) chained regex-literal calls /re/.test(x) / /re/.exec(x)
+#   (b) .match/.search/.split/.replaceAll + RegExp.prototype.test/.exec
+#   (c) new RegExp(pattern, flags)
+describe "JS engine regex gaps (lane B2): chained literals, match/search/split/replaceAll, new RegExp":
+    it "recognizes a chained regex-literal .test() call (not just whole-expression usage)":
+        expect(_runtime_eval_text("/b/.test('abc')")).to_equal("true")
+        expect(_runtime_eval_text("/z/.test('abc')")).to_equal("false")
+
+    it "recognizes a chained regex-literal .exec() call and returns the match":
+        expect(_runtime_eval_text("/b/.exec('abc')[0]")).to_equal("b")
+        expect(_runtime_eval_text("/z/.exec('abc') === null")).to_equal("true")
+
+    it "String.prototype.match consumes a regex literal":
+        expect(_runtime_eval_text("'a1 b22'.match(/[0-9]+/)[0]")).to_equal("1")
+        expect(_runtime_eval_text("'abc'.match(/z/) === null")).to_equal("true")
+
+    it "String.prototype.search consumes a regex literal":
+        expect(_runtime_eval_text("'hello world'.search(/wor/)")).to_equal("6")
+        expect(_runtime_eval_text("'hello world'.search(/zzz/)")).to_equal("-1")
+
+    it "String.prototype.split consumes a regex literal":
+        expect(_runtime_eval_text("'a1b22c'.split(/[0-9]+/).length")).to_equal("3")
+        expect(_runtime_eval_text("'a1b22c'.split(/[0-9]+/)[2]")).to_equal("c")
+
+    it "String.prototype.replaceAll consumes a regex literal":
+        expect(_runtime_eval_text("'a1b2c3'.replaceAll(/[0-9]/, 'X')")).to_equal("aXbXcX")
+
+    it "RegExp.prototype.test/.exec work on a regex value stored in a variable":
+        expect(_runtime_eval_text("var re = /b/; re.test('abc')")).to_equal("true")
+        expect(_runtime_eval_text("var re = /b/; re.exec('abc')[0]")).to_equal("b")
+
+    it "new RegExp(pattern, flags) constructs a working regex value":
+        expect(_runtime_eval_text("var re = new RegExp('b', 'i'); re.test('ABC')")).to_equal("true")
+        expect(_runtime_eval_text("var re = new RegExp('b', 'gi'); re.source")).to_equal("b")
+        expect(_runtime_eval_text("var re = new RegExp('b', 'gi'); re.flags")).to_equal("gi")
+        expect(_runtime_eval_text("'abcabc'.replace(new RegExp('b', 'g'), 'X')")).to_equal("aXcaXc")

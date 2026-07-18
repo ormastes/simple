@@ -16,15 +16,20 @@ related: src/lib/common/js/builtins/regexp.spl
 
 # JS engine: regex String.replace is a no-op, Promise undefined, prototype methods not introspectable
 
-**Status:** PARTIAL (2026-07-18, lane N5). Do not close — real gaps remain.
-The three CONCRETE repros literally shown in this doc's "Summary" section now
-pass: regex-literal `String.prototype.replace`, `typeof Promise`, and `typeof`
-on array/string prototype methods. But this doc's own item 2 also claims
-"`new Promise`, ... `.then/.catch` ... fail" more broadly — `new Promise(executor)`
-construction is still broken (confirmed, see below) and is deliberately
-deferred, not fixed. Root causes and fixes below; see "Remaining / deferred"
-for everything intentionally left out — keep this doc open until that list is
-cleared or re-triaged into its own tracked item.
+**Status:** PARTIAL (2026-07-18, lanes N5 + B2). Do not close — real gaps
+remain. The three CONCRETE repros literally shown in this doc's "Summary"
+section now pass: regex-literal `String.prototype.replace`, `typeof Promise`,
+and `typeof` on array/string prototype methods (lane N5). Lane B2 then closed
+every regex gap N5 had deferred: chained regex-literal calls (`/re/.test(x)`,
+`/re/.exec(x)`), `String.prototype.match`/`.search`/`.split`/`.replaceAll`
+consuming a regex-literal argument, `RegExp.prototype.test`/`.exec`, and
+`new RegExp(pattern, flags)` — see "Remaining / deferred" for what's left.
+But this doc's own item 2 also claims "`new Promise`, ... `.then/.catch` ...
+fail" more broadly — `new Promise(executor)` construction is still broken
+(confirmed, see below) and is deliberately deferred, not fixed. Root causes
+and fixes below; see "Remaining / deferred" for everything intentionally left
+out — keep this doc open until that list is cleared or re-triaged into its
+own tracked item.
 
 Note: `related:` above corrects the original filing — the actual bound
 `std.js.types.ast_types` is the untiered `src/lib/js/types/ast_types.spl` (not
@@ -164,6 +169,60 @@ unmodified HEAD — not a regression from this change.
 parallel lanes (90s) and was **not run to completion** — treat it as
 unverified, not passing.
 
+## Lane B2 (2026-07-18) — closed the deferred regex gaps
+
+All four regex items N5 left in "Remaining / deferred" below are now fixed,
+wired through the existing `src/lib/common/js/builtins/regexp.spl` engine:
+
+- **Chained regex-literal calls.** `_js_parser_expression` only recognized a
+  regex literal spanning an entire expression, so `/re/.test(x)` fell through
+  to the multiplicative `/` scan and misparsed as division. Added
+  `_js_parser_try_regex_literal_chain` (parser.spl): when a regex literal is
+  followed by a member/call/computed-member chain that consumes the *rest* of
+  the expression, it's parsed as `RegexLiteral` + postfix chain instead
+  (factored the postfix loop into `_js_parser_postfix_continue` so it can
+  resume after the literal). Conservative by design: if something trails the
+  chain that it can't consume (e.g. `/re/.test(x) && y`), it returns nil and
+  defers to the pre-existing scanners — verified this composes correctly
+  in practice because the higher-precedence `&&`/`||`/etc. scans run *before*
+  the multiplicative `/` scan, splitting the expression first.
+- **`String.prototype.match`/`.search`/`.split`/`.replaceAll` +
+  `RegExp.prototype.test`/`.exec`.** All now detect the `__simple_is_regexp`
+  marker the same way `.replace` already did, calling `string_match`,
+  `regexp_exec`, `string_split_regex`, and `RegExpObj.create` respectively.
+  `.replaceAll` on a regex forces the `g` flag rather than throwing (this
+  subset interpreter doesn't have TypeError-on-missing-flag machinery).
+  `RegExp.prototype.test`/`.exec` (wired in `eval_call`, interpreter_eval.spl)
+  maintain `lastIndex` statefully for global regexes, matching real JS
+  iteration semantics.
+- **`new RegExp(pattern, flags)`.** `eval_new` special-cases
+  `ident_name(callee) == "RegExp"` and builds the same marker object as a
+  regex literal via the existing `_create_regex_value`; accepts either a
+  string pattern or an existing regex value (copy-with-new-flags) as the
+  first argument.
+
+Reproducing tests added to
+`test/01_unit/lib/common/js_runtime_builtins_regex_promise_prototype_spec.spl`
+(new `describe` block, 8 `it`s / 17 assertions). Confirmed red at baseline
+(0/17, via temporary revert of the 3 implementation files) and green after
+(17/17). Regression spot-check: all of N5's original 7 `it`s plus plain
+(non-regex) `.split`/`.replace`/`.replaceAll` and division expressions
+(`10 / 2`, `(4 / 2) / 2`) still pass (20/20).
+
+**New pre-existing gap noted (not fixed, out of scope):** `new Foo().method()`
+— calling a method chained directly onto a `new` expression without an
+intermediate variable — is mis-parsed for **any** constructor, not just
+`RegExp`. `_js_parser_expression`'s `"new "` handling runs
+`_js_parser_postfix` over the *entire* remainder and takes whichever `Call`
+node comes out outermost as the constructor's args, so `new RegExp(...).test(x)`
+parses as `NewExpr(callee: Member(Call(Identifier(RegExp), [...]), "test"),
+args: [x])` instead of `Call(Member(NewExpr(RegExp, [...]), "test"), [x])`.
+Confirmed with an unrelated user-defined constructor
+(`new F().m()` also throws `ReferenceError: F is not defined`) — a general
+parser-precedence bug predating this lane, unrelated to regex. Workaround:
+assign the `new` expression to a variable first (`var re = new RegExp(...);
+re.test(x)`), which is what the added tests use.
+
 ## Remaining / deferred (out of scope for this fix)
 
 - `new Promise(executor)` construction still returns `undefined`: `eval_new`
@@ -173,25 +232,13 @@ unverified, not passing.
   invoking the executor with bound `resolve`/`reject` callbacks tied to a
   specific pending-promise id) is a distinct, larger unit of work against the
   existing settle/handler infrastructure in `interpreter_native.spl`.
-- Regex literals are only recognized when they form a **whole** expression
-  (call argument / assignment RHS / statement). Chaining directly off a
-  literal (`/re/.test(x)`) is not parsed as a regex — the text-slicing parser
-  has no general notion of a regex span in its top-level operator/comma
-  scanners, only in `_js_parser_expression`'s new whole-literal check and the
-  pre-existing balance-checker. Use `new RegExp(...)`-free code that assigns
-  the literal to a variable first, or pass it directly as a call argument.
-- `String.prototype.match`/`.search`/`.split`/`.replaceAll` and
-  `RegExp.prototype.test`/`.exec` do not yet detect the regex marker object
-  (only `.replace` was wired, matching this doc's concrete repro). The
-  underlying `regexp.spl` functions (`string_match`, `regexp_test`,
-  `regexp_exec`, `string_split_regex`) already exist and can be wired the same
-  way `.replace` was.
-- `new RegExp(pattern, flags)` (constructing a regex from strings, not a
-  literal) is not implemented.
+- `new Foo().method()` direct-chain parsing (see "Lane B2" above) — a general,
+  pre-existing parser-precedence gap affecting any constructor, not specific
+  to regex.
 - This fix only touches the `nogc_sync_mut` JS engine copy (the one
   `run_page_scripts`/`JsRuntime` actually exercises). The sibling engine
   copies under `src/lib/gc_async_mut/js/engine/` and
   `src/lib/nogc_async_mut/js/engine/` are separate forks with the same latent
   gaps (no regex-literal AST support, same `typeof`/prototype-introspection
   shape) and were not touched — if those tiers are ever exercised directly,
-  expect the same three symptoms there.
+  expect the same symptoms there.
