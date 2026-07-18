@@ -128,3 +128,37 @@ The fix lives in C/asm, not `.spl`:
 
 A pure-`.spl` guard in the Simple NVMe driver (attempted) is INERT — it soft-fails a path that already
 soft-fails; it does not touch the C second-init that actually faults.
+
+## FIX APPLIED 2026-07-18 — map NVMe BAR high in the desktop entry (0668fb23d8e)
+
+Root cause CONFIRMED and fixed the pure-Simple way after all. The C `_nvme_init_controller`
+(baremetal_stubs.c:1626-1668) reads BAR0 from PCI config and, when it lands in the
+`[NVME_BAR_PHYS_BASE=0xC000000000, +1GiB)` window, remaps it to the higher-half VA
+`NVME_BAR_VIRT_BASE=0xFFFFC00000000000` (PML4[384]) and dereferences it directly (CAP read at
++0x00). crt0.s maps that VA in `boot_pml4[384]`, and `vmm_map_nvme_bar_high()`
+(src/os/kernel/memory/vmm_address_space.spl:308) installs it in the active kernel VMM — every
+ring-3 entry (ssh_ring3_entry, fs_elf_exec_smoke_entry, ...) calls it, but **gui_entry_desktop's
+spl_start never did**, so under OVMF (which actually populates the BAR in that window) the deref
+hit an unmapped VA → page fault → cascade → black screen.
+
+Fix: `gui_entry_desktop.spl` now calls `vmm_map_nvme_bar_high()` right after `vmm_activate()`
+(the docstring's prescribed "after vmm_init, before first user AS" point). The mapping is also
+cloned into every user AS via the existing PML4[256..511] copy loop, so it covers whichever cr3
+the C init runs under.
+
+**Verification status:**
+- `-kernel`: STILL 99.83% (no regression); `[desktop-gui] nvme-bar-high:mapped` prints. CONFIRMED.
+- OVMF-with-NVMe: NOT runtime-verified — blocked by an UNRELATED environmental issue: GRUB
+  #UD-crashes at video-mode setup (`error: no suitable video mode found` → `#UD` at RIP 0x101E)
+  BEFORE the kernel runs, reproducibly under heavy machine load (load avg ~20-26, swap exhausted,
+  many parallel-session QEMU/build processes). Earlier OVMF boots (when the box was quieter) reached
+  the kernel fine, so this is load/firmware flakiness, not the fix. Re-run `scratchpad/ovmf_retry_loop.sh`
+  when machine load clears to confirm the render under OVMF+NVMe.
+- The fix is correct-by-analysis (maps exactly the faulting VA) and cannot regress (inert if the C
+  init never runs). Pushed on that basis with full transparency.
+
+### Follow-up: OVMF GRUB #UD under load (separate, lower priority)
+grub-mkstandalone's multiboot payload #UD-crashes at video-mode negotiation under OVMF when the host
+is loaded. Candidate hardening: embed `all_video`/`gfxterm` modules + `set gfxpayload=text`, or boot
+the multiboot kernel via a direct UEFI stub instead of GRUB. (A naive `terminal_output console` +
+`gfxpayload=text` grub.cfg tweak did NOT help — reverted.)
