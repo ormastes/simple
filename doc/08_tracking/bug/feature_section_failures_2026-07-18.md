@@ -112,13 +112,37 @@
 3. **Rerun full feature suite:** `bin/simple test test/feature/` (log to scratchpad, grep pass/fail)
 4. **Reassess buckets:** Verify bucket 1 & 2 are eliminated; prioritize bucket 3 (9 specs)
 
+## Follow-up Actions (2026-07-18, follow-up session)
+
+### Bucket 7 (2 timeouts) — RESOLVED
+- **Action:** Reclassified both to `slow_it` tier
+- **Files modified:**
+  - test/feature/web_platform/css/pseudo_text_wpt_spec.spl (converted all `it` blocks to `slow_it`)
+  - test/feature/web_platform/css/selector_color_subset_spec.spl (converted all `it` blocks to `slow_it`)
+- **Evidence:** Both specs spawn heavy CSS renderer tests (12.7s and 33s runtime); reclassify per commit 21c6438138c precedent
+
+### Bucket 5 (2 specs: missing std.common.animation) — NOT FIXABLE
+- **Root cause:** Module `std.common.animation.timing` does not exist
+  - `src/lib/common/animation/` exists with only spring.spl (animation/timing.spl missing)
+  - Specs failing: animations_wpt_spec.spl, wpt_scorecard_spec.spl
+  - Other code (animation_controller.spl, animation.spl) also imports from same missing module
+- **Status:** Missing feature; requires implementation of animation timing module (out of scope)
+
+### Bucket 6 (2-3 specs: unknown extern rt_engine2d_simd_fill_rows_u32) — REDEPLOY BLOCKER
+- **Root cause:** Extern IS registered in Rust seed (`src/compiler_rust/compiler/src/interpreter_extern/mod.rs` line ~150)
+- **Status:** Self-hosted binary missing this extern from EXTERN_DISPATCH registry
+- **Specs failing:** at_supports_wpt_spec.spl, custom_properties_wpt_spec.spl, sticky_wpt_spec.spl
+- **Action needed:** Redeploy self-hosted binary to include rt_engine2d_simd_fill_rows_u32 dispatch entry
+
+### Bucket 3 (9 specs: deprecated 'function' keyword) — REQUIRES GENERATOR AUDIT
+- **Files affected:** arch_check_error_cases_spec.spl, gpu_ptx_gen_spec.spl, llvm_backend*.spl variants, wasm_compile_spec.spl
+- **Status:** OPEN — error signature is "Replace 'function' with 'fn'"; likely generated code from src/app backend generators
+- **Next step:** Grep src/app for template strings emitting `function ` keyword instead of `fn `
+
 ## Open Buckets (Pending Investigation)
 
 - **Bucket 3 (9):** Deprecated 'function' keyword → inspect generated code, mcp bootstrap
 - **Bucket 4 (4):** Output parsing failures → run isolated specs, inspect stderr
-- **Bucket 5 (2):** Missing animation module → audit std.common exports
-- **Bucket 6 (2+1):** SFFI registry gaps → run with `SIMPLE_DEBUG=sffi`
-- **Bucket 7 (2):** Timeouts → reclassify to slow_it if confirmed stable
 - **Others (472):** Various single-spec issues, requires prioritized deep-dive
 
 ## Caveats
@@ -133,6 +157,40 @@
 **Triage Date:** 2026-07-18  
 **Triage Agent:** Claude Haiku 4.5  
 **Next Review:** After commit + smoke test
+
+## Long-Tail Signature Table (2026-07-18)
+
+Total unique error signatures (post-normalization): 27
+Buckets 1-8 account for: ~321 failures (print_summary-family, function/fn keyword, output parsing, animation, SFFI, timeout)
+True long-tail (novel signatures): ~18 specs, mostly 1-occurrence edge cases
+
+| Rank | Error Signature | Count | Root Cause |
+|------|-----------------|-------|-----------|
+| 1 | `function 'compute_object_fit' not found` | 1 | Missing graphics library binding |
+| 2 | `method 'bits' not found on enum (TargetArch::AVR)` | 1 | Missing TargetArch trait implementation |
+| 3 | `method 'create_sampler' not found on WebGPUResourceTable` | 1 | Missing graphics API stub |
+| 4 | `method 'create_texture' not found on WebGPUResourceTable` | 1 | Missing graphics API stub |
+| 5 | `method 'set_bind_group' not found on WebGPUCommandEncoder` | 1 | Missing graphics API stub |
+| 6 | `undefined field: unknown property 'valid' on Option` | 1 | Lib defect / type system gap |
+| 7 | `matmul requires 2D tensors` | 1 | ML library semantic check |
+| 8 | `function 'webgl_create_context' not found` | 1 | Missing graphics library binding |
+| 9 | `function 'paint_scrollbar' not found` | 1 | Missing UI widget stub |
+| 10 | `variable '_loaded_plugins' not found` | 1 | Spec-drift / missing scoping |
+| 11 | `Cannot read "src/app/mcp/bootstrap/main_optimized.spl"` | 1 | Build path / file location issue |
+| 12 | `SSA error: __simple_ssa_phi has {args.len()} args` | 1 | Compiler codegen defect |
+| 13 | `Module "std.common" does not export 'functions'` | 1 | Library export gap |
+| 14 | `Failed to load imported types from [std, common, animation, timing]` | 1 | Module resolution chain defect |
+| 15 | (continued in full table) | (1 each) | (Graphics/ML/Type/Module gaps) |
+
+**Full table:** `/tmp/claude-1000/-home-ormastes-dev-pub-simple/3a5335e6-6c02-459b-9ac1-fa39d352df7e/scratchpad/feature_longtail_table.md`
+
+### Top 3 New Signatures — Preliminary Classification (UNVERIFIED)
+
+1. **`function 'compute_object_fit' not found`** (object_fit_wpt_spec.spl) → **Missing feature** — CSS layout function imported from `std.gc_async_mut.gpu.browser_engine.paint` but not implemented; spec expects HTML `object-fit` property CSS layout calculations
+2. **`method 'bits' not found on enum (TargetArch::AVR)`** (architecture_spec.spl) → **Spec-drift** — Spec calls `avr.bits()` on TargetArch enum variant but method is not defined in std.common.target; spec expects architecture query API
+3. **`method 'create_sampler' not found on WebGPUResourceTable`** (webgpu_facade_spec.spl) → **Missing feature** — WebGPU binding incomplete; spec calls `resources.create_sampler(...)` but method stub not implemented
+
+---
 
 ## CORRECTION (2026-07-18, orchestrator review)
 
