@@ -325,3 +325,108 @@ The canonical SimpleOS wrapper now creates a missing sysroot before target Simpl
 ## 2026-07-12 static LLVM guest-tool relink
 
 Current sysroot inputs require LLC/LLD relink rather than reuse of older binaries. The relinker must include full `libsimple_runtime.a` because current libc calls Simple runtime owners. LLC then narrowed to one strong undefined, `rt_math_pow`; SimpleOS libc now exports that ABI by delegating to its existing freestanding `pow`. Verification awaits a fresh libc/sysroot rebuild and capped LLC/LLD relink.
+
+## 2026-07-18 re-verification (lane N9): Blocker 1 confirmed still present in the currently-deployed artifact; source confirmed clean; regression tests added
+
+Re-ran the exact top-of-file repro under gdb against the release binary
+present in this environment (`release/x86_64-unknown-linux-gnu/simple`, a
+same-day build, birth timestamp 2026-07-18 14:01:38, sha256
+`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`, frozen to
+scratchpad before further testing to rule out a moving target from other
+parallel lanes). The crash is byte-for-byte the same signature already
+diagnosed under "Diagnosis (2026-07-11) / Blocker 1":
+
+```text
+Program received signal SIGSEGV in __strlen_avx2
+#1 __add_to_environ (name="SIMPLE_OS_LOG_MODE", value=0x12 <bad ptr>) setenv.c:131
+#2 rt_env_set ()
+#4 io.cli_ops.env_set ()
+#5 io___CliCompile__compile_targets__cli_native_build ()
+#6 cli___CliMain__main_and_help__main ()
+```
+
+**Source-level re-check (2026-07-18):** grepped every `rt_env_set` site in the
+current tree — `src/runtime/runtime_native.c:4522` (C, canonical 4-arg fat
+pointer), `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:1606`
+(`RuntimeFuncSpec::new("rt_env_set", &[I64, I64, I64, I64], &[I8])`), and
+`src/compiler_rust/runtime/src/value/sffi/env_process.rs:219` (Rust runtime,
+4-arg). All three agree; there is no 2-arg `rt_env_set` anywhere in source.
+This reconfirms the 2026-07-11 conclusion: **the crash is a stale/incomplete
+deployed artifact, not a live source regression.** Notably this deployed
+binary's own `spl_wffi_call_i64` body disassembles to a hardcoded
+`mov $0x3,%rax; ret` stub (not the real WFFI decode logic from the
+2026-07-18 fix above), so this specific artifact carries stub-fallback
+functions and should not be trusted as a verified production redeploy even
+apart from the `rt_env_set` crash.
+
+**This is unrelated to the struct_field/param-fn driver_pipeline fixes** from
+this same campaign (`9cebea7bd9f`, `6c7b2d75eda`): those touch MIR-lowering
+locals initialization, not the environment-variable FFI path. Confirmed by the
+gdb backtrace above, which never enters MIR lowering — the crash is 100%
+inside the compiler's own already-linked runtime.
+
+**Regression tests added** (this closes the "USER MANDATE: ensure a
+reproducing test exists" requirement):
+
+1. `test/01_unit/runtime/runtime_native_focus_test.c` — added a focused C-ABI
+   assertion that calls `rt_env_set`/`rt_env_get` with the exact
+   `SIMPLE_OS_LOG_MODE`/`"on"` key/value pair from the crash (plus a
+   short-key/long-value case), compiled and linked directly against the
+   *current* `runtime_native.c` + friends (no cached archives, no seed
+   binary). Verified: builds clean, runs clean, passes. This pins the C-level
+   ABI contract, but — since both caller and callee come from one translation
+   unit — it cannot by construction reproduce the original *link-time*
+   mismatch (a caller built against the 4-arg convention linked against a
+   stale 2-arg callee); a future signature regression here would be a
+   compile error, not a runtime crash.
+2. `test/03_system/compiler/native_build_simpleos_target_env_set_crash_spec.spl`
+   (new) — a real subprocess-level system spec that spawns
+   `release/x86_64-unknown-linux-gnu/simple native-build --target
+   x86_64-unknown-simpleos ...` (the exact top-of-file repro) and asserts the
+   subprocess exit code is **not** 139 (the env_set SIGSEGV signature).
+   Deliberately scoped to Blocker 1 only: it does not require exit 0 or a
+   probe-output artifact, because the build can still legitimately fail for
+   the separately tracked Blocker 2 (rt_enum_new ABI) or Blocker 3 (llvm-lib
+   DataLayout SIGSEGV) without that being *this* bug — requiring exit 0 here
+   would misattribute either of those open blockers to this one the next time
+   env_set is fixed but they still aren't. This is the faithful reproducing
+   test for the actual bug: it is currently **RED** (the raw repro command,
+   run directly under gdb above, yields exit 139; the spec's own subprocess
+   call has not been executed end-to-end — see below — but infers the same
+   139 from the identical invocation and binary). It doubles as the
+   redeploy-readiness gate the 2026-07-11 diagnosis asked for ("add a smoke
+   that calls rt_env_set from a native binary before trusting a redeploy") and
+   should go green immediately once a clean redeploy lands.
+   **Not dynamically executed end-to-end in this lane**: both available local
+   binaries (the degraded self-hosted release binary above, and the separate
+   Rust bootstrap seed at a sibling path) currently fail to run *any* `.spl`
+   test file at all — including a trivial one-line `expect(1+1).to_equal(2)`
+   spec, and `--help` itself — which matches the pre-existing, separately
+   tracked "self-hosted compiler tree outage" noted in the S19/S68/S78
+   native-build smoke campaign ("native-build is currently broken at this
+   commit for even the simplest program... independent of anything in this
+   file"). This is a broader, already-known, out-of-scope outage, not
+   something introduced by this change; the new spec was written to closely
+   mirror the already-working `_cli_process_run`-based pattern in
+   `test/03_system/app/lint_cli_contract_spec.spl` and had every imported
+   symbol (`env_set`, `file_exists`, `mkdir_p` from `std.io_runtime`,
+   `_cli_process_run` from `app.io.cli_ops`) individually confirmed to exist
+   with matching signatures, but its assertion has not been confirmed to
+   execute end-to-end — verify this first once the broader outage clears.
+
+**Verdict: BLOCKED on a safe redeploy window, not on hardware/QEMU.** No
+source change is required to close Blocker 1 (root cause is unchanged from
+2026-07-11: stale/degraded deployed artifact). Closing it requires a fully
+verified `bin/simple build bootstrap` (no stub-fallback) followed by a
+redeploy of `release/x86_64-unknown-linux-gnu/simple`, then a rerun of the new
+system spec to confirm it goes green (exit code no longer 139). This lane did
+not attempt that rebuild: system
+load at investigation time was 44+ (five-minute load average), far above the
+project's `<15` safety threshold for cargo/bootstrap work, so no build was
+attempted here. Resume command once load is safe:
+
+```sh
+bin/simple build bootstrap   # full 3-stage self-compile, current runtime
+# redeploy the produced stage3 binary to release/x86_64-unknown-linux-gnu/simple
+bin/simple test test/03_system/compiler/native_build_simpleos_target_env_set_crash_spec.spl
+```

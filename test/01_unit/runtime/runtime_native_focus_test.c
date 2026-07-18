@@ -80,6 +80,37 @@ int main(void) {
     assert(rt_string_char_at(short_source, 1) == one_a);
     assert(rt_slice(short_source, 1, 2, 1) == one_a);
 
+    /* Regression for doc/08_tracking/bug/self_hosted_simpleos_target_native_build_crash_2026-07-11.md
+     * (Blocker 1): a stale deployed self-hosted binary once linked a 2-argument
+     * rt_env_set(key, value) that read the SysV `rsi` register (which callers
+     * load with `key_len`) as the value pointer, so `native-build --target
+     * x86_64-unknown-simpleos` calling `env_set("SIMPLE_OS_LOG_MODE", "on")`
+     * crashed in __strlen_avx2 on address 0x12 (== strlen("SIMPLE_OS_LOG_MODE")).
+     * Current source already declares the 4-argument fat-pointer ABI
+     * (key_ptr, key_len, value_ptr, value_len) end to end (C runtime, Rust seed
+     * registry, Rust runtime); this pins that ABI against a future regression
+     * by exercising the exact key/value pair from the crash and requiring the
+     * real value (not the key length) to land in the environment. */
+    const char* env_key = "SIMPLE_OS_LOG_MODE";
+    const char* env_value = "on";
+    assert(rt_env_set((const uint8_t*)env_key, strlen(env_key),
+                       (const uint8_t*)env_value, strlen(env_value)));
+    const char* observed = getenv(env_key);
+    assert(observed != NULL && strcmp(observed, env_value) == 0);
+    int64_t fetched = rt_env_get((const uint8_t*)env_key, strlen(env_key));
+    assert(fetched != 0);
+    assert(strcmp((const char*)rt_string_data(fetched), env_value) == 0);
+    /* A longer value than the key (18 bytes) would not reproduce the original
+     * crash (which read the 18-length key as a bad pointer); assert this case
+     * too so any future ABI regression that swaps ptr/len arguments the other
+     * way is also caught. */
+    const char* env_key2 = "X";
+    const char* env_value2 = "much-longer-than-the-key-name";
+    assert(rt_env_set((const uint8_t*)env_key2, strlen(env_key2),
+                       (const uint8_t*)env_value2, strlen(env_value2)));
+    observed = getenv(env_key2);
+    assert(observed != NULL && strcmp(observed, env_value2) == 0);
+
     SplArray* wffi_args = rt_array_new(2);
     assert(rt_array_push(wffi_args, rt_value_int(0x24c7468)));
     assert(rt_array_push(wffi_args, rt_value_int(7)));

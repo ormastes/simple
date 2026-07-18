@@ -1,0 +1,80 @@
+# SimpleOS-target `native-build` crash regression
+#
+# Bug: doc/08_tracking/bug/self_hosted_simpleos_target_native_build_crash_2026-07-11.md
+# (Blocker 1). Spawns the real deployed release binary as a subprocess (no
+# stubs) and runs the exact repro from the bug doc:
+#
+#   release/x86_64-unknown-linux-gnu/simple native-build \
+#     --source examples/01_getting_started \
+#     --entry examples/01_getting_started/hello_native.spl \
+#     --backend=cranelift --target x86_64-unknown-simpleos \
+#     -o <probe-out> --clean
+#
+# Root cause (gdb-confirmed, 2026-07-11 and re-confirmed 2026-07-18): every
+# `native-build` invocation calls `io.cli_ops.env_set("SIMPLE_OS_LOG_MODE",
+# log_mode)` while preparing target env vars
+# (src/app/io/_CliCompile/compile_targets.spl ~line 831), which reaches the
+# extern `rt_env_set`. Current source declares the 4-argument fat-pointer ABI
+# `rt_env_set(key_ptr, key_len, value_ptr, value_len)` everywhere (C runtime
+# src/runtime/runtime_native.c, Rust seed registry
+# src/compiler_rust/compiler/src/codegen/runtime_sffi.rs, Rust runtime
+# src/compiler_rust/runtime/src/value/sffi/env_process.rs) and has done so
+# since 5e36474fde0 (2026-07-10). A deployed self-hosted binary that still
+# links an older 2-argument `rt_env_set(key, value)` reads the SysV `rsi`
+# register — which callers load with `key_len` — as the value pointer, so
+# `setenv("SIMPLE_OS_LOG_MODE", <key_len as a pointer>, 1)` SIGSEGVs inside
+# `__strlen_avx2` (observed faulting address 0x12 == strlen("SIMPLE_OS_LOG_MODE")).
+# This is a stale/incomplete deployed artifact, not a live source regression:
+# an isolated build of the current C runtime sources
+# (test/01_unit/runtime/runtime_native_focus_test.c) exercises this exact
+# key/value pair cleanly. See the bug doc for the full diagnosis and the
+# required redeploy (`bin/simple build bootstrap`, fully verified — not the
+# stub-fallback path) that closes this for good.
+#
+# This spec is scoped ONLY to Blocker 1 (the env_set SIGSEGV, exit 139). It
+# is deliberately RED while the crash is live and turns green once env_set
+# survives a real native-build invocation — regardless of whether the build
+# goes on to succeed or fail for one of the *other*, separately tracked
+# blockers in the same bug doc (Blocker 2 rt_enum_new ABI, Blocker 3 llvm-lib
+# DataLayout SIGSEGV). Do not broaden this to "exit 0" or attach a probe-output
+# check here: that would misattribute an unrelated open blocker to this one
+# the next time either of those is still open while env_set is fixed.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_set, file_exists, mkdir_p}
+use app.io.cli_ops.{_cli_process_run}
+
+val SIMPLE_BINARY = "release/x86_64-unknown-linux-gnu/simple"
+val PROBE_OUT = "build/tmp/simpleos_native_build_regression_probe"
+val ENV_SET_SIGSEGV_EXIT_CODE = 139  # 128 + SIGSEGV, via popen/pclose shell wait status
+
+describe "SimpleOS-target native-build crash regression (bug 2026-07-11, Blocker 1)":
+    """
+    Guards the `rt_env_set` 4-argument fat-pointer ABI reachable from every
+    `native-build --target x86_64-unknown-simpleos` invocation. RED (fails)
+    while the deployed binary still SIGSEGVs in env_set; GREEN once a clean
+    redeploy lands, independent of the other open blockers in the bug doc.
+    """
+
+    it "does not SIGSEGV in rt_env_set on a real native-build invocation":
+        if not file_exists(SIMPLE_BINARY):
+            print "[native_build_simpleos_target_env_set_crash_spec] {SIMPLE_BINARY} not deployed, skipping"
+            return
+
+        mkdir_p("build/tmp")
+        env_set("SIMPLE_NO_STUB_FALLBACK", "1")
+
+        val (stdout, stderr, code) = _cli_process_run(SIMPLE_BINARY, [
+            "native-build",
+            "--source", "examples/01_getting_started",
+            "--entry", "examples/01_getting_started/hello_native.spl",
+            "--backend=cranelift",
+            "--target", "x86_64-unknown-simpleos",
+            "-o", PROBE_OUT,
+            "--clean",
+        ])
+
+        # Scoped strictly to Blocker 1: the build may still legitimately fail
+        # for other, separately tracked reasons (Blockers 2/3) without that
+        # being this bug. Only the env_set SIGSEGV signature fails this spec.
+        expect(code == ENV_SET_SIGSEGV_EXIT_CODE).to_equal(false)
