@@ -370,6 +370,8 @@ var config = NativeLinkConfig(
     pie: true,
     debug: true,
     verbose: true,
+    allow_duplicate_definitions: true,
+    allow_cc_fallback: true,
     extra_flags: ["-O2"]
 )
 

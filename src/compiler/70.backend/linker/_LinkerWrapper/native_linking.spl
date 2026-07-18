@@ -59,6 +59,8 @@ struct NativeLinkConfig:
     pie: bool
     debug: bool
     verbose: bool
+    allow_duplicate_definitions: bool
+    allow_cc_fallback: bool
     extra_flags: [text]
 
 impl NativeLinkConfig:
@@ -70,6 +72,8 @@ impl NativeLinkConfig:
             pie: true,
             debug: false,
             verbose: false,
+            allow_duplicate_definitions: true,
+            allow_cc_fallback: true,
             extra_flags: []
         )
 
@@ -197,6 +201,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if trace:
         print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
     if linker_result.is_err():
+        if not config.allow_cc_fallback:
+            return Err("Direct native linker is required by the strict link profile")
         if trace:
             print "[LINKER] No direct linker found, falling back to cc"
         return link_native_cc(object_files, output, config)
@@ -218,6 +224,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if trace:
         print "[LINKER] crt.found={crt.found}"
     if not crt.found:
+        if not config.allow_cc_fallback:
+            return Err("Direct native linker CRT discovery is required by the strict link profile")
         debug("linker", "CRT files not found, falling back to cc")
         if config.verbose:
             print "[linker-wrapper] CRT files not found, falling back to cc"
@@ -254,8 +262,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("relro")
         args.push("-z")
         args.push("now")
-        for flag in unresolved_symbol_flags_for_unix_linker(os):
-            args.push(flag)
+        if config.allow_duplicate_definitions:
+            for flag in unresolved_symbol_flags_for_unix_linker(os):
+                args.push(flag)
 
     # Dead code elimination + deduplication (per-platform)
     if os == "macos" or os == "darwin":
@@ -368,6 +377,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Execute linker
     val exec_result = execute_linker(linker_path, args)
     if exec_result.is_err():
+        if not config.allow_cc_fallback:
+            return Err("Strict direct native link failed: " + exec_result.unwrap_err())
         # Fallback to cc on failure
         if config.verbose:
             print "[linker-wrapper] Direct linker failed, falling back to cc: {exec_result.unwrap_err()}"
@@ -634,7 +645,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-Wl,--no-as-needed")
         for flag in native_all_gnu_support_args(object_files, os_name, ""):
             args.push(flag)
-        args.push("-Wl,--allow-multiple-definition")
+        if config.allow_duplicate_definitions:
+            args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
         args.push("-o")
         args.push(output)
@@ -663,7 +675,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if not hosted_cross:
             args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
-        args.push("-Wl,--allow-multiple-definition")
+        if config.allow_duplicate_definitions:
+            args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
         if not hosted_cross:
             args.push("-Wl,--icf=safe")
@@ -740,7 +753,8 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
         extra.push("/OPT:REF,ICF")
     # Runtime library and compiled objects may define the same symbol.
     # Missing symbols remain fatal.
-    extra.push(msvc_duplicate_symbol_flag())
+    if config.allow_duplicate_definitions:
+        extra.push(msvc_duplicate_symbol_flag())
     msvc_config.extra_args = extra
 
     if config.verbose:

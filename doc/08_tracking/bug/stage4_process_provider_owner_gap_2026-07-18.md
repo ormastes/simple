@@ -31,7 +31,8 @@ continuing to derive archive members from `.c` inputs only.
 Focused tests pin the hosted archive/object-format matrix, missing/extra ABI
 rejection, canonical tagged POSIX argument access, transitive process-slice
 selection on POSIX and Windows, shared Windows quoting ownership, process
-staging and cleanup, and the retained projection barrier. Broader owner closure
-is not claimed complete. The staged archive is not yet projected or linked. No
+staging and cleanup, and exact requested-root projection. Broader owner closure
+is not claimed complete. Projection and strict final-link routing are
+source-implemented, but executable evidence remains pending. No
 Simple, C, Rust, Cargo, compiler, or native execution is claimed in this
 static-only session.

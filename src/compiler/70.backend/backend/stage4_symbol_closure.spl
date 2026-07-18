@@ -34,9 +34,14 @@ fn stage4_split_whitespace(value: text) -> [text]:
         parts = parts.push(value.substring(start))
     parts
 
+fn stage4_is_runtime_abi_symbol(name: text) -> bool:
+    name.starts_with("rt_") or name.starts_with("spl_") or name.starts_with("__simple_") or name == "g_memtrack_enabled"
+
 fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
-    if macho_prefixes and (name.starts_with("_rt_") or name.starts_with("_spl_")):
-        return name.substring(1)
+    if macho_prefixes and name.starts_with("_"):
+        val unprefixed = name.substring(1)
+        if stage4_is_runtime_abi_symbol(unprefixed):
+            return unprefixed
     name
 
 fn stage4_provider_symbol(name: text, object_format: text) -> text:
@@ -629,7 +634,7 @@ fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
     true
 
 pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) -> [text]:
-    """Return sorted strong rt_*/spl_* requests not defined by sibling objects."""
+    """Return sorted strong runtime ABI requests not defined by sibling objects."""
     var defined: Dict<text, bool> = {}
     var undefined: Dict<text, bool> = {}
     for line in nm_output.split("\n"):
@@ -639,7 +644,7 @@ pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) ->
         val type_index = parts.len() - 2
         val type_code = parts[type_index]
         val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
-        if not symbol.starts_with("rt_") and not symbol.starts_with("spl_"):
+        if not stage4_is_runtime_abi_symbol(symbol):
             continue
         if type_code == "U":
             undefined[symbol] = true
@@ -802,6 +807,48 @@ pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels
     match stage4_resolve_requested_archive_owners(requested, archive_labels, archive_nm_outputs, macho_prefixes):
         case Ok((selected, _)): Ok(selected)
         case Err(err): Err(err)
+
+pub fn stage4_projection_localization_symbols(nm_output: text, object_format: text, requested: [text]) -> Result<[text], text>:
+    """Return raw globals to localize so a Stage4 capsule exports only its requested roots."""
+    if object_format != "elf" and object_format != "macho":
+        return Err("Unsupported Stage4 projection object format '" + object_format + "'")
+    if requested.len() == 0:
+        return Err("Stage4 projection requested symbol set is empty")
+    var expected: Dict<text, bool> = {}
+    for symbol in requested:
+        if not stage4_is_runtime_abi_symbol(symbol):
+            return Err("Stage4 projection root '" + symbol + "' is not a runtime ABI symbol")
+        if expected.has(symbol):
+            return Err("Stage4 projection root '" + symbol + "' is repeated")
+        expected[symbol] = true
+
+    var counts: Dict<text, i64> = {}
+    var localize: [text] = []
+    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    for raw_symbol in raw_definitions:
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        counts[symbol] = (counts[symbol] ?? 0) + 1
+        if (counts[symbol] ?? 0) != 1:
+            return Err("Stage4 projection closure repeats global definition '" + symbol + "'")
+        if not expected.has(symbol):
+            localize = localize.push(raw_symbol)
+    for symbol in requested:
+        if (counts[symbol] ?? 0) != 1:
+            return Err("Stage4 projection root '" + symbol + "' must exist exactly once")
+    for raw_symbol in raw_undefined:
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if stage4_is_runtime_abi_symbol(symbol):
+            return Err("Stage4 projection closure retains unresolved runtime symbol '" + symbol + "'")
+    Ok(stage4_sorted_text(localize))
+
+pub fn stage4_validate_projection_symbol_contract(nm_output: text, object_format: text, requested: [text]) -> Result<(), text>:
+    """Require a projected capsule's global ABI to equal the requested roots exactly."""
+    val localize = match stage4_projection_localization_symbols(nm_output, object_format, requested):
+        case Ok(symbols): symbols
+        case Err(err): return Err(err)
+    if localize.len() != 0:
+        return Err("Stage4 projection retained unexpected global definitions: " + localize.join(", "))
+    Ok(())
 
 fn stage4_canonical_fingerprint_rows(group: text, rows: [text]) -> Result<[text], text>:
     if rows.len() == 0:

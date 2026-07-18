@@ -181,7 +181,9 @@ the shared binary — deploys require explicit user go-ahead).
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
   correctness campaign. Runtime-native's 18-symbol legacy dependency owner is
   now source-implemented as an exact localized compatibility provider. The
-  current source blocker is the fail-closed exact archive-projection/link step
-  after inventory and transitive requested-owner resolution, not the retired
-  seed enum/mcall diagnoses. See
+  exact archive projection and strict final-link routing are now
+  source-implemented after inventory and transitive requested-owner resolution.
+  The remaining blocker is execution evidence plus any concrete missing owner
+  reported by the complete compiler request closure, not the retired seed
+  enum/mcall diagnoses. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

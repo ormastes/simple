@@ -44,8 +44,9 @@ transitive cyclic ownership; and production wiring/cleanup.
 
 Static review and repository audits may run in this session. Native compiler,
 C, and bootstrap execution remain pending under the active execution
-restriction. The next Stage4 source blocker remains exact selected-archive
-projection and linking.
+restriction. Exact selected-archive projection and strict final-link routing
+are now source-implemented; complete requested-owner and executable evidence
+remain pending.
 
 Full strict Stage4 production is currently Linux/macOS native-host only because
 the compiler-backfill producer still rejects FreeBSD and Windows. FreeBSD ELF,
