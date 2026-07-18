@@ -18,6 +18,9 @@ fn hir_items_module_lowering_source() -> text:
 fn mir_module_lowering_source() -> text:
     rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
 
+fn mir_function_lowering_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
+
 fn method_calls_literals_source() -> text:
     rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
 
@@ -97,6 +100,21 @@ describe "bootstrap MIR binary lowering source":
         expect(source).to_contain("bare_func_name == \"spl_get_arg\"")
         expect(source).to_contain("self.emit_comparison(dest_name, ty, \"eq\", \"i64\", strcmp_result, \"0\")")
         expect(source).to_contain("self.emit_comparison(dest_name, ty, \"ne\", \"i64\", strcmp_result, \"0\")")
+
+    it "lowers raw-pointer offset as a typed, element-scaled MIR operation":
+        val type_source = mir_function_lowering_source()
+        val method_source = method_calls_literals_source()
+        val llvm_source = mir_to_llvm_core_source()
+
+        expect(type_source).to_contain("case Ptr(inner, mutable):")
+        expect(type_source).to_contain("MirType.ptr(self.lower_type(inner), mutable)")
+        expect(method_source).to_contain("if method == \"offset\" and args.len() == 1 and resolution_is_unresolved:")
+        expect(method_source).to_contain("case MirTypeKind.Ptr(pointee, _):")
+        expect(method_source).to_contain("val pointee_size = pointee.size_bytes()")
+        expect(method_source).to_contain("MirBinOp.Mul")
+        expect(method_source).to_contain("MirBinOp.Offset")
+        expect(llvm_source).to_contain("{dest_name} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
+        expect(llvm_source.contains("ptrtoint ptr {offset_ptr}")).to_equal(false)
 
     it "lowers bootstrap print calls through runtime println":
         val source = switch_operators_calls_source()

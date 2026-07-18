@@ -897,6 +897,41 @@ impl MirLowering:
             case Unresolved: true
             case _: false
 
+        # Raw-pointer `.offset(index)` is element-based, while MirBinOp.Offset
+        # is the backend-neutral byte-offset operation. Scale once here from
+        # the receiver's pointee type so every backend and the interpreter see
+        # the same byte displacement.
+        if method == "offset" and args.len() == 1 and resolution_is_unresolved:
+            val offset_receiver = self.lower_expr(receiver)
+            var offset_receiver_type = receiver_type
+            if val known_offset_type = self.local_mir_type_of(offset_receiver):
+                offset_receiver_type = known_offset_type
+            match offset_receiver_type.kind:
+                case MirTypeKind.Ptr(pointee, _):
+                    val offset_index = self.lower_expr(args[0].value)
+                    var byte_offset = offset_index
+                    val pointee_size = pointee.size_bytes()
+                    if pointee_size != 1:
+                        var offset_builder = self.builder
+                        val size_local = offset_builder.emit_const_int(pointee_size)
+                        byte_offset = offset_builder.emit_binop(
+                            MirBinOp.Mul,
+                            mir_operand_copy(offset_index),
+                            mir_operand_copy(size_local),
+                            MirType.i64()
+                        )
+                        self.builder = offset_builder
+                    var offset_builder = self.builder
+                    val offset_result = offset_builder.emit_binop(
+                        MirBinOp.Offset,
+                        mir_operand_copy(offset_receiver),
+                        mir_operand_copy(byte_offset),
+                        offset_receiver_type
+                    )
+                    self.builder = offset_builder
+                    return offset_result
+                case _: ()
+
         var receiver_is_dict = false
         if maybe_receiver_type_for_call != nil:
             val found_receiver_type = maybe_receiver_type_for_call
