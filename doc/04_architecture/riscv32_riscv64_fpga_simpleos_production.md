@@ -110,12 +110,15 @@ routes PMP CSRs through that owner and gates instruction and data bus calls at
 `soc_tick`; denied requests enter the precise machine trap path without calling
 the bus helper. Trap entry/MRET own M/S/U current-mode transitions, while the
 core derives MPRV/MPP only for explicit data access; fetch retains current
-privilege. The same gate remains after the pending Sv32 walker supplies a
-translated physical address. Machine state also canonically owns the sstatus
-alias and delegation masks; the supervisor owner stores only trap-vector and
-trap-context CSRs. S interrupt delegation and SATP remain WARL-zero until their
-delivery and walker owners are connected, so Bare execution cannot masquerade
-as protected Sv32.
+privilege. The clocked `sv32_walker` now supplies a 34-bit translated physical
+address, refills ASID/global/superpage-aware TLB entries, applies SUM/MXR and
+Svade A/D rules, and protects every PTE read with S-mode PMP. The existing
+final-access gate remains after translation when the pending RV32 memory
+frontend connects the walker to `soc_tick`. Machine state also canonically owns
+the sstatus alias and delegation masks; the supervisor owner stores only
+trap-vector and trap-context CSRs. S interrupt delegation and SATP remain
+WARL-zero until their delivery and the memory frontend are connected, so Bare
+execution cannot masquerade as protected Sv32.
 
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real

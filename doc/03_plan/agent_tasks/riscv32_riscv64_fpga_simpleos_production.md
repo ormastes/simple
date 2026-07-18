@@ -19,6 +19,7 @@ Date: 2026-07-18
 | `linux_fpga_audit` | smallest false-green removal | Keep bundle contract names but make CPU/testbench/formal execution fail with `GENERATED_RTL_NOT_IMPLEMENTED`; mark sidecars non-ready | accepted and implemented in Milestone 0 |
 | `rv64_mmu_audit` | supervisor interrupt ownership and priority | Canonical `mie`/`mip`/`mideleg`, masked S aliases, independent PLIC M/S contexts, and strict software/external `SEIP` OR semantics | accepted; primary implemented and owns final review |
 | `rv32_pmp_review` | canonical RV32 protection/privilege boundary | Move existing CSR/PMP owners into `CoreState`; gate Bare fetch/load/store once in `soc_tick`; add M/S/U stacks and delegated synchronous traps; keep interrupt/Sv32 controls WARL-zero until connected | reviewed during implementation; primary owns merge and final review |
+| `rv32_pmp_review` | clocked Sv32 production seam | Reject direct `RamState` translation; port RV64 request/response ownership, preserve 34-bit PA, apply SUM/MXR/Svade, superpage-aware ASID/global TLB, and PMP-check PTE reads | accepted; primary implements walker, then memory frontend/SATP/SFENCE |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

@@ -1,0 +1,237 @@
+# RV32 Sv32 request/response page-table walker.
+#
+# One PTE read may be outstanding.  PTE reads are physical S-mode loads and
+# pass through PMP before a bus request is exposed.  A/D bits use Svade: a
+# clear A, or clear D on store, raises the originating page fault.
+
+use std.hardware.rv32i_rtl.sv32_address.sv32_full_vpn
+use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, mmu_tlb_lookup}
+use std.hardware.rv32i_rtl.mmu_sv32.{mmu_tlb_paddr, mmu_tlb_insert_level}
+use std.hardware.rv32i_rtl.mmu_sv32.{pte_check_perms_ext, sv32_vpn1, sv32_vpn0}
+use std.hardware.rv32i_rtl.mmu_sv32.{pte_ppn0, pte_ppn_full}
+use std.hardware.rv32i_rtl.mmu_sv32.{pte_flags_extract, fault_cause_for}
+use std.hardware.rv32i_rtl.mmu_sv32.{SATP_MODE_BARE, SATP_MODE_SV32}
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.mmu_sv32.{PRIV_U, PRIV_S, PRIV_M}
+use std.hardware.rv32i_rtl.mmu_sv32.{PTE_V_MASK, PTE_R_MASK, PTE_W_MASK}
+use std.hardware.rv32i_rtl.mmu_sv32.{PTE_X_MASK, PTE_U_MASK, PTE_G_MASK}
+use std.hardware.rv32i_rtl.mmu_sv32.{PTE_A_MASK, PTE_D_MASK}
+use std.hardware.rv32i_rtl.pmp.{PmpEntries32, pmp32_gate_access}
+use std.hardware.rv32i_rtl.pmp.{PMP32_ACCESS_LOAD, PMP32_PRIV_S}
+use std.hardware.rv32i_rtl.pmp.{PMP32_NO_MATCH_INDEX}
+use std.hardware.rv32i_rtl.pmp.{PMP32_CAUSE_INSN_ACCESS_FAULT}
+use std.hardware.rv32i_rtl.pmp.{PMP32_CAUSE_LOAD_ACCESS_FAULT}
+use std.hardware.rv32i_rtl.pmp.{PMP32_CAUSE_STORE_ACCESS_FAULT}
+
+val SV32_WALK_IDLE: u32 = 0
+val SV32_WALK_REQUEST: u32 = 1
+val SV32_WALK_WAIT: u32 = 2
+val SV32_WALK_DONE: u32 = 3
+val SV32_WALK_FAULT: u32 = 4
+
+struct Sv32Walker:
+    phase: u32
+    level: u32
+    vaddr: u32
+    access_type: u32
+    privilege: u32
+    sum: bool
+    mxr: bool
+    table_ppn: u32
+    global_seen: bool
+    paddr: i64
+    fault_cause: u32
+    pmp_index: u32
+    tlb_hit: bool
+
+struct Sv32PteConsume:
+    walker: Sv32Walker
+    mmu: MmuState
+
+struct Sv32WalkCycle:
+    walker: Sv32Walker
+    mmu: MmuState
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    done: bool
+    fault: bool
+    paddr: i64
+    fault_cause: u32
+    fault_tval: u32
+    pmp_index: u32
+    tlb_hit: bool
+
+@hardware
+fn sv32_walker_reset() -> Sv32Walker:
+    Sv32Walker(phase: SV32_WALK_IDLE, level: 1, vaddr: 0,
+        access_type: ACCESS_LOAD, privilege: PRIV_S, sum: false, mxr: false,
+        table_ppn: 0, global_seen: false, paddr: 0, fault_cause: 0,
+        pmp_index: PMP32_NO_MATCH_INDEX, tlb_hit: false)
+
+@hardware
+fn sv32_walker_page_fault(state: Sv32Walker) -> Sv32Walker:
+    var out = state
+    out.phase = SV32_WALK_FAULT
+    out.paddr = 0
+    out.fault_cause = fault_cause_for(state.access_type)
+    out
+
+@hardware
+fn sv32_walker_access_fault_cause(access_type: u32) -> u32:
+    if access_type == ACCESS_FETCH:
+        return PMP32_CAUSE_INSN_ACCESS_FAULT
+    if access_type == ACCESS_STORE:
+        return PMP32_CAUSE_STORE_ACCESS_FAULT
+    PMP32_CAUSE_LOAD_ACCESS_FAULT
+
+@hardware
+fn sv32_walker_access_fault(state: Sv32Walker,
+                            pmp_index: u32) -> Sv32Walker:
+    var out = state
+    out.phase = SV32_WALK_FAULT
+    out.paddr = 0
+    out.fault_cause = sv32_walker_access_fault_cause(state.access_type)
+    out.pmp_index = pmp_index
+    out
+
+@hardware
+fn sv32_walker_start(mmu: MmuState, vaddr: u32, access_type: u32,
+                     privilege: u32, sum: bool, mxr: bool) -> Sv32Walker:
+    var out = sv32_walker_reset()
+    out.vaddr = vaddr
+    out.access_type = access_type
+    out.privilege = privilege
+    out.sum = sum
+    out.mxr = mxr
+
+    if access_type > ACCESS_STORE:
+        return sv32_walker_page_fault(out)
+    if privilege != PRIV_U and privilege != PRIV_S and privilege != PRIV_M:
+        return sv32_walker_page_fault(out)
+    if privilege == PRIV_M or mmu.satp_mode == SATP_MODE_BARE:
+        out.phase = SV32_WALK_DONE
+        out.paddr = vaddr as i64
+        return out
+    if mmu.satp_mode != SATP_MODE_SV32:
+        return sv32_walker_page_fault(out)
+
+    val hit = mmu_tlb_lookup(mmu, sv32_full_vpn(vaddr))
+    if hit.hit:
+        if not pte_check_perms_ext(hit.flags, access_type, privilege, sum, mxr):
+            return sv32_walker_page_fault(out)
+        out.phase = SV32_WALK_DONE
+        out.paddr = mmu_tlb_paddr(vaddr, hit.ppn, hit.level)
+        out.tlb_hit = true
+        return out
+
+    out.phase = SV32_WALK_REQUEST
+    out.level = 1
+    out.table_ppn = mmu.satp_ppn
+    out
+
+@hardware
+fn sv32_walker_pte_addr(state: Sv32Walker) -> i64:
+    val vpn_index = if state.level == 1:
+        sv32_vpn1(state.vaddr)
+    else:
+        sv32_vpn0(state.vaddr)
+    ((state.table_ppn as i64) << 12) + ((vpn_index as i64) << 2)
+
+@hardware
+fn sv32_walker_consume_pte(state: Sv32Walker, mmu: MmuState,
+                           pte: u32) -> Sv32PteConsume:
+    val flags = pte_flags_extract(pte)
+    val valid = (flags & PTE_V_MASK) != 0
+    val readable = (flags & PTE_R_MASK) != 0
+    val writable = (flags & PTE_W_MASK) != 0
+    val executable = (flags & PTE_X_MASK) != 0
+
+    if not valid or (writable and not readable):
+        return Sv32PteConsume(walker: sv32_walker_page_fault(state), mmu: mmu)
+
+    val leaf = readable or executable
+    if not leaf:
+        val reserved_nonleaf = (flags &
+            (PTE_U_MASK | PTE_A_MASK | PTE_D_MASK)) != 0
+        if state.level == 0 or reserved_nonleaf:
+            return Sv32PteConsume(walker: sv32_walker_page_fault(state),
+                mmu: mmu)
+        var next = state
+        next.phase = SV32_WALK_REQUEST
+        next.level = 0
+        next.table_ppn = pte_ppn_full(pte)
+        next.global_seen = state.global_seen or (flags & PTE_G_MASK) != 0
+        return Sv32PteConsume(walker: next, mmu: mmu)
+
+    if state.level == 1 and pte_ppn0(pte) != 0:
+        return Sv32PteConsume(walker: sv32_walker_page_fault(state), mmu: mmu)
+    if not pte_check_perms_ext(flags, state.access_type, state.privilege,
+                               state.sum, state.mxr):
+        return Sv32PteConsume(walker: sv32_walker_page_fault(state), mmu: mmu)
+
+    val paddr = mmu_tlb_paddr(state.vaddr, pte_ppn_full(pte), state.level)
+    val cached_flags = if state.global_seen:
+        flags | PTE_G_MASK
+    else:
+        flags
+    val next_mmu = mmu_tlb_insert_level(mmu, sv32_full_vpn(state.vaddr),
+        pte_ppn_full(pte), cached_flags, state.level)
+    var done = state
+    done.phase = SV32_WALK_DONE
+    done.paddr = paddr
+    done.fault_cause = 0
+    Sv32PteConsume(walker: done, mmu: next_mmu)
+
+@hardware
+fn sv32_walker_cycle(state: Sv32Walker, mmu: MmuState,
+                     pmp: PmpEntries32, request_ready: bool,
+                     response_valid: bool, response_error: bool,
+                     response_data: u32) -> Sv32WalkCycle:
+    var next = state
+    var next_mmu = mmu
+    var bus_valid = false
+    var bus_addr: i64 = 0
+
+    if state.phase == SV32_WALK_REQUEST:
+        bus_addr = sv32_walker_pte_addr(state)
+        val gate = pmp32_gate_access(pmp, bus_addr, 4, PMP32_ACCESS_LOAD,
+            PMP32_PRIV_S, false, 0)
+        if not gate.bus_valid:
+            next = sv32_walker_access_fault(state, gate.matched_index)
+        else:
+            bus_valid = true
+            if request_ready:
+                next.pmp_index = gate.matched_index
+                if response_valid:
+                    if response_error:
+                        next = sv32_walker_access_fault(state,
+                            gate.matched_index)
+                    else:
+                        val consumed = sv32_walker_consume_pte(state, mmu,
+                            response_data)
+                        next = consumed.walker
+                        next_mmu = consumed.mmu
+                else:
+                    next.phase = SV32_WALK_WAIT
+
+    else if state.phase == SV32_WALK_WAIT and response_valid:
+        if response_error:
+            next = sv32_walker_access_fault(state, state.pmp_index)
+        else:
+            val consumed = sv32_walker_consume_pte(state, mmu, response_data)
+            next = consumed.walker
+            next_mmu = consumed.mmu
+
+    val done = next.phase == SV32_WALK_DONE or next.phase == SV32_WALK_FAULT
+    Sv32WalkCycle(walker: next, mmu: next_mmu, bus_valid: bus_valid,
+        bus_addr: bus_addr, bus_size: 4, bus_write: false, done: done,
+        fault: next.phase == SV32_WALK_FAULT, paddr: next.paddr,
+        fault_cause: next.fault_cause, fault_tval: next.vaddr,
+        pmp_index: next.pmp_index, tlb_hit: next.tlb_hit)
+
+export Sv32Walker, Sv32WalkCycle
+export sv32_walker_reset, sv32_walker_start, sv32_walker_cycle
+export SV32_WALK_IDLE, SV32_WALK_REQUEST, SV32_WALK_WAIT
+export SV32_WALK_DONE, SV32_WALK_FAULT

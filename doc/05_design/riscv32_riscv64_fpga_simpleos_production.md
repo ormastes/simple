@@ -134,8 +134,16 @@ retirement. `mstatus` is the sole sstatus storage; `medeleg` routes implemented
 U/S synchronous exceptions into `sepc/scause/stval` and the S status stack, and
 SRET restores U/S state while clearing MPRV. `mideleg`, `sie`, and `sip` remain
 WARL-zero until supervisor interrupt delivery is connected. SATP likewise
-reads Bare and ignores Sv32 writes until the request/response walker lands; the
-RAM-backed translation adapter is not used as production RTL.
+reads Bare and ignores Sv32 writes until the request/response walker is wired
+into the clock path; the RAM-backed translation adapter is not used as
+production RTL.
+
+The request/response `sv32_walker` is now implemented by porting the proven
+RV64 walker ownership pattern. It preserves 34-bit physical addresses, tags
+TLB entries with ASID/leaf level, honors global mappings, applies SUM/MXR and
+Svade fault-on-clear A/D behavior, and subjects each physical PTE read to
+S-effective PMP. Its final fetch/data memory frontend and SATP/SFENCE plumbing
+remain the next integration slice.
 
 ### Translation algorithm
 
