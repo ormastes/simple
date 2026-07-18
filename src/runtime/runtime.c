@@ -1588,7 +1588,7 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
             !(find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
             rt_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push(result, rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
     } while (FindNextFileA(hFind, &find_data));
 
@@ -1614,7 +1614,7 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
         if (S_ISDIR(st.st_mode)) {
             rt_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push(result, rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
     }
     closedir(dir);
@@ -1622,7 +1622,7 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
 #endif
 
 SplArray* rt_dir_walk(const char* path) {
-    SplArray* result = spl_array_new();
+    SplArray* result = rt_array_new(0);
     if (!path) return result;
     rt_dir_walk_impl(path, result);
     return result;
