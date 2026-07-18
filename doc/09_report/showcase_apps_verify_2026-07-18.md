@@ -14,6 +14,20 @@ evidence bundle. Nothing fabricated; TIMEOUT/FAIL reported as such.
 | Web standards (`web_standards_showcase`) | TIMEOUT >280s all sizes (layout interpreter-bound; unblocking dep = JIT fix) | PARTIAL: bridge `create_window` 248x167 posts fine (bridge-first fix works), window opens; the 240x135 HTML layout+render is interpreter-bound — measured **>63min with no frame** (detached child left rendering 10:37→11:40, then stopped). Unblocking dep = JIT SIGSEGV fix, same as standalone | C8-gated |
 | GUI widget (`gui_widget_showcase`) | GREEN @320x240 (P6 PPM 230415B, 31 distinct bytes, 70s after param-detach sweep; 720p >900s, needs JIT) | **GREEN** @480x270 (4K design / scale 8): bridge `create_window` 488x302 posted 09:47, frame_seq=1, P6 PPM 388815B **37 distinct bytes** 09:52 — after (a) bridge-first client reorder + direct scaled render (c2ad0a81), (b) adapters ported off dead `rt_winit_*` externs onto the GuiRenderer dlopen facade (48b10efe) | C8-gated |
 
+**2026-07-19 update — OVMF real-firmware pass:** after the gate's migration
+to OVMF pflash boot (board-runnable rule), the harness now passes end-to-end
+under REAL FIRMWARE on the macOS host too: grub-mkstandalone BOOTX64.EFI →
+OVMF → multiboot → 4K scanout → NVMe font load → pinned oracle `ffbd5f76…`
+reproduced exactly → F11 maximize/restore correlated (19.8MB deltas).
+Three OVMF-specific defects fixed to get there (all pushed): (a) harness
+assumed Linux tool/firmware paths — now resolves homebrew
+x86_64-elf-grub-mkstandalone + qemu edk2 images (887e61e4); (b) BOTH PCI
+grant paths read only the low BAR dword — OVMF assigns 64-bit BARs above
+4GB (observed 0xC000004000), SeaBIOS/-kernel assigns below 4GB which masked
+it (36fa6cb7, 8b5e7536); (c) NVMe driver rejected map_bar success with
+`<= 0` — the pinned higher-half VA (PML4[384]) is negative as i64
+(8b5e7536).
+
 **SimpleOS WM surface status:** the WM itself passes its full fullscreen
 evidence harness end-to-end via the stage3 pure-Simple toolchain
 (2026-07-18: TTF NVMe load → sfnt validation → pure-sfnt-glyf taskbar clock →
