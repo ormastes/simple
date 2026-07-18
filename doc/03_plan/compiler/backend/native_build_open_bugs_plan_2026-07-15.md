@@ -251,6 +251,8 @@ localized one-member capsule production and executable proof remain pending.
 Pure-Simple manifest and localization-list derivation now mirror the Rust
 producer without a hardcoded symbol count; filesystem/tool orchestration is the
 remaining localization step.
+The required pure-Simple portable `objcopy` resolver is now source-covered;
+transactional capsule production still remains.
 
 ---
 

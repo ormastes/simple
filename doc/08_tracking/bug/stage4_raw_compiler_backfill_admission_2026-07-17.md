@@ -27,3 +27,6 @@ the raw symbols to localize directly from portable `nm` text. It mirrors the
 Rust producer's exact two/three-field row parser and rejects duplicate exports
 or runtime ownership outside the manifest. Tool orchestration and executable
 proof remain pending.
+
+Portable pure-Simple tool discovery now also resolves `SIMPLE_OBJCOPY`,
+Homebrew LLVM/LLVM 18, versioned LLVM tools, and GNU `objcopy` in that order.
