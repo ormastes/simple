@@ -4105,6 +4105,189 @@ fn test_re_exports_include_glob_imported_facade_symbols() {
 }
 
 #[test]
+fn test_package_selected_data_global_reaches_hir_and_mir() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let app = src_root.join("app");
+    let package = src_root.join("app/pkg");
+    let other = src_root.join("app/other");
+    let transparent = package.join("_Split");
+    let child = package.join("child");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::create_dir_all(&transparent).unwrap();
+    std::fs::create_dir_all(&child).unwrap();
+
+    let parent_facade = app.join("__init__.spl");
+    let parent_state = app.join("state.spl");
+    let facade = package.join("__init__.spl");
+    let state = package.join("state.spl");
+    let reader = package.join("reader.spl");
+    let transparent_reader = transparent.join("reader.spl");
+    let child_reader = child.join("reader.spl");
+    let clash_a = package.join("clash_a.spl");
+    let clash_b = package.join("clash_b.spl");
+    let clash_reader = package.join("clash_reader.spl");
+    let typo = package.join("typo.spl");
+    let unrelated = other.join("state.spl");
+    std::fs::write(&parent_facade, "export PARENT_FLAG\n").unwrap();
+    std::fs::write(&parent_state, "var PARENT_FLAG: bool = true\n").unwrap();
+    std::fs::write(&facade, "export FLAG, DYNAMIC_FLAG, ITEM, read\n").unwrap();
+    std::fs::write(
+        &state,
+        "struct Foo:\n    x: i64\nvar FLAG: bool = true\nvar PRIVATE_FLAG: bool = true\nvar DYNAMIC_FLAG = false\nvar ITEM: Foo = nil\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &reader,
+        "fn read() -> bool:\n    FLAG\nfn read_private() -> bool:\n    PRIVATE_FLAG\nfn read_parent() -> bool:\n    PARENT_FLAG\n",
+    )
+    .unwrap();
+    std::fs::write(&transparent_reader, "fn read_private() -> bool:\n    PRIVATE_FLAG\n").unwrap();
+    std::fs::write(&child_reader, "fn read_private() -> bool:\n    PRIVATE_FLAG\n").unwrap();
+    std::fs::write(&clash_a, "var CLASH: i64 = 1\n").unwrap();
+    std::fs::write(&clash_b, "var CLASH: i64 = 2\n").unwrap();
+    std::fs::write(&clash_reader, "fn read_clash() -> i64:\n    CLASH\n").unwrap();
+    std::fs::write(&typo, "fn typo() -> i64:\n    OUTSIDE_ONLY\n").unwrap();
+    std::fs::write(
+        &unrelated,
+        "struct Foo:\n    y: text\nvar FLAG: i64 = 1\nvar OUTSIDE_ONLY: i64 = 9\n",
+    )
+    .unwrap();
+
+    let paths = [
+        &parent_facade,
+        &parent_state,
+        &facade,
+        &state,
+        &reader,
+        &transparent_reader,
+        &child_reader,
+        &clash_a,
+        &clash_b,
+        &clash_reader,
+        &typo,
+        &unrelated,
+    ];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let source_dirs = vec![src_root.clone()];
+    let result = super::imports::build_import_map(&file_sources, &source_dirs, &src_root);
+    let expected_owner = format!("{}__FLAG", module_prefix_from_path(&state, &src_root));
+    let package_prefix = module_prefix_from_path(&package, &src_root);
+    let private_owner = format!("{}__PRIVATE_FLAG", module_prefix_from_path(&state, &src_root));
+    assert_eq!(
+        result
+            .package_data
+            .get(&package_prefix)
+            .and_then(|entries| entries.get("PRIVATE_FLAG")),
+        Some(&private_owner)
+    );
+    assert!(!result
+        .package_data
+        .get(&package_prefix)
+        .is_some_and(|entries| entries.contains_key("CLASH")));
+    assert_eq!(
+        result
+            .re_exports
+            .get(&package_prefix)
+            .and_then(|exports| exports.get("FLAG")),
+        Some(&expected_owner)
+    );
+    assert_eq!(
+        result.data_types.get(&expected_owner),
+        Some(&simple_parser::Type::Simple("bool".into()))
+    );
+    let dynamic_owner = format!("{}__DYNAMIC_FLAG", module_prefix_from_path(&state, &src_root));
+    assert_eq!(
+        result.data_types.get(&dynamic_owner),
+        Some(&simple_parser::Type::Simple("Any".into()))
+    );
+    let item_owner = format!("{}__ITEM", module_prefix_from_path(&state, &src_root));
+    assert_eq!(
+        result.data_types.get(&item_owner),
+        Some(&simple_parser::Type::Simple("Any".into()))
+    );
+    let parent_owner = format!("{}__PARENT_FLAG", module_prefix_from_path(&parent_state, &src_root));
+    assert_eq!(
+        result
+            .re_exports
+            .get(&module_prefix_from_path(&app, &src_root))
+            .and_then(|exports| exports.get("PARENT_FLAG")),
+        Some(&parent_owner)
+    );
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(result.map),
+        ambiguous_names: std::sync::Arc::new(result.ambiguous),
+        all_mangled: std::sync::Arc::new(result.all_mangled),
+        re_exports: std::sync::Arc::new(result.re_exports),
+        trait_impls: std::sync::Arc::new(result.trait_impls),
+        struct_defs: std::sync::Arc::new(result.struct_defs),
+        duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
+        enum_defs: std::sync::Arc::new(result.enum_defs),
+        data_exports: std::sync::Arc::new(result.data_exports),
+        data_types: std::sync::Arc::new(result.data_types),
+        package_data: std::sync::Arc::new(result.package_data),
+        fn_arities: std::sync::Arc::new(result.fn_arities),
+        fn_return_types: std::sync::Arc::new(result.fn_return_types),
+        populate_global_struct_defs: true,
+        populate_global_enum_defs: true,
+    };
+
+    let object = compile_file_to_object(
+        &std::fs::read_to_string(&reader).unwrap(),
+        &reader,
+        &project_root,
+        &src_root,
+        &source_dirs,
+        false,
+        crate::optimizations::NativeOptimizationLevel::None,
+        false,
+        &imports,
+    )
+    .unwrap();
+    assert!(!object.is_empty());
+
+    let transparent_object = compile_file_to_object(
+        &std::fs::read_to_string(&transparent_reader).unwrap(),
+        &transparent_reader,
+        &project_root,
+        &src_root,
+        &source_dirs,
+        false,
+        crate::optimizations::NativeOptimizationLevel::None,
+        false,
+        &imports,
+    )
+    .unwrap();
+    assert!(!transparent_object.is_empty());
+
+    for (path, missing) in [
+        (&child_reader, "PRIVATE_FLAG"),
+        (&clash_reader, "CLASH"),
+        (&typo, "OUTSIDE_ONLY"),
+    ] {
+        let error = compile_file_to_object(
+            &std::fs::read_to_string(path).unwrap(),
+            path,
+            &project_root,
+            &src_root,
+            &source_dirs,
+            false,
+            crate::optimizations::NativeOptimizationLevel::None,
+            false,
+            &imports,
+        )
+        .unwrap_err();
+        assert!(error.contains(&format!("Undefined global `{missing}`")), "{error}");
+    }
+}
+
+#[test]
 fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
@@ -4256,6 +4439,8 @@ int main(void) { app_call(); return 0; }
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4365,6 +4550,8 @@ void __module_init_security_registry(void) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4491,6 +4678,8 @@ int main(int argc, char** argv) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4595,6 +4784,8 @@ int main(void) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4662,6 +4853,8 @@ int main(void) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4723,6 +4916,8 @@ int main(void) { return (int)run_check(); }
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -5503,6 +5698,8 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -6118,6 +6315,8 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         duplicate_struct_defs: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
         data_exports: std::collections::HashSet::new(),
+        data_types: std::collections::HashMap::new(),
+        package_data: std::collections::HashMap::new(),
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),
     }

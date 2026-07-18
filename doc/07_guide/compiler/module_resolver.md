@@ -103,6 +103,22 @@ use app.ffi_gen.parser    # → resolved via source root fallback to src/app/ffi
 
 If `use X.Y.Z` doesn't resolve, the fix is to ensure the directory exists under `src/` — not to create symlinks.
 
+### Package data during native-project compilation
+
+Native-project compilation must seed HIR with the types of data declarations
+selected by the module's explicit imports and package visibility before strict
+MIR lowering. Current-package and ancestor-package exports are visible; an
+unqualified name must not bind merely because a declaration with that name is
+globally unique in another package. Package-private data is visible to direct
+siblings, and underscore-prefixed split directories are transparent to that
+package boundary; an ordinary child directory is a distinct package. Untyped
+mutable data is `Any`, constants use the same constant-evaluation typing as
+normal HIR lowering, and ambiguous named-type owners safely degrade to `Any`.
+
+Keep a negative regression for unrelated package data whenever this selection
+logic changes. Undefined names should remain compile errors rather than being
+silently satisfied by a global index.
+
 ### When `__init__.spl` is needed
 
 `__init__.spl` is only required for:

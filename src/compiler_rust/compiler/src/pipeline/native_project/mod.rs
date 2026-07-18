@@ -294,6 +294,11 @@ pub(crate) struct ModuleImports {
     /// misrouted through the function-import fast path (which would return
     /// the symbol's address as the "value").
     pub data_exports: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Mangled data symbol -> source type, used to seed selected package data
+    /// into each per-file HIR module before strict MIR validation.
+    pub data_types: std::sync::Arc<std::collections::HashMap<String, simple_parser::Type>>,
+    /// Effective package -> unique package-private data owners.
+    pub package_data: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
     /// Mangled function name → declared parameter count for cross-module free
     /// functions. Used to strip spurious nil receivers from module-qualified
     /// calls (see `ImportMapResult::fn_arities`).
@@ -725,6 +730,8 @@ impl NativeProjectBuilder {
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
                 data_exports: std::sync::Arc::new(result.data_exports),
+                data_types: std::sync::Arc::new(result.data_types),
+                package_data: std::sync::Arc::new(result.package_data),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
                 fn_return_types: std::sync::Arc::new(result.fn_return_types),
                 populate_global_struct_defs: true,
@@ -741,6 +748,8 @@ impl NativeProjectBuilder {
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+                data_types: std::sync::Arc::new(std::collections::HashMap::new()),
+                package_data: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
                 populate_global_struct_defs: false,
@@ -1363,6 +1372,16 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     }
     for k in result.data_exports.iter() {
         fp = fold_unordered(fp, hash_one(&("data", k)));
+    }
+    for (k, v) in result.data_types.iter() {
+        fp = fold_unordered(fp, hash_one(&("data-type", k, format!("{v:?}"))));
+    }
+    for (package, entries) in result.package_data.iter() {
+        let mut package_fp = 0;
+        for (name, owner) in entries {
+            package_fp = fold_unordered(package_fp, hash_one(&(name, owner)));
+        }
+        fp = fold_unordered(fp, hash_one(&("package-data", package, package_fp)));
     }
     for (k, v) in result.fn_arities.iter() {
         fp = fold_unordered(fp, hash_one(&(k, v)));

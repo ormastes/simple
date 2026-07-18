@@ -14,7 +14,7 @@ use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
-use super::imports::{build_suffix_index, build_use_map_from_ast};
+use super::imports::{build_suffix_index, build_use_map_from_ast, effective_package_prefix};
 use super::mangle::mangle_mir;
 use super::module_global_init::inject_freestanding_module_global_init;
 
@@ -336,7 +336,23 @@ pub(crate) fn compile_file_to_object(
     }
 
     // Build per-module use_map from AST `use` statements.
-    let use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let mut use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let package_prefix = effective_package_prefix(file_path, source_root);
+    if let Some(package_data) = imports.package_data.get(&package_prefix) {
+        for (name, owner) in package_data {
+            use_map.entry(name.clone()).or_insert_with(|| owner.clone());
+        }
+    }
+    if let Some(parent) = file_path.parent() {
+        for package in parent.ancestors().take_while(|path| path.starts_with(source_root)) {
+            let package_prefix = module_prefix_from_path(package, source_root);
+            if let Some(package_exports) = imports.re_exports.get(&package_prefix) {
+                for (name, owner) in package_exports {
+                    use_map.entry(name.clone()).or_insert_with(|| owner.clone());
+                }
+            }
+        }
+    }
 
     // Mono
     let ast = monomorphize_module(&ast);
@@ -404,6 +420,13 @@ pub(crate) fn compile_file_to_object(
     // reached via the global import map (no `use` import) get a real result
     // type instead of ANY (Pass 0.5c in module_pass.rs resolves them).
     lowerer.set_global_fn_return_types(std::sync::Arc::clone(&imports.fn_return_types));
+    let mut global_data_types = std::collections::HashMap::new();
+    for (name, owner) in &use_map {
+        if let Some(ty) = imports.data_types.get(owner) {
+            global_data_types.insert(name.clone(), ty.clone());
+        }
+    }
+    lowerer.set_global_data_types(std::sync::Arc::new(global_data_types));
     // W15-H: seed the lowerer with the project-wide enum table and
     // eagerly register every entry into `module.types` + `self.globals`
     // before `lower_module(&ast)` runs. Pass 0 of `module_pass.rs`

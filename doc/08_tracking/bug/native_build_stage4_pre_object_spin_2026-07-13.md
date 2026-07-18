@@ -816,3 +816,18 @@ runaway guard terminated it. This was the third bounded Stage 4 cycle, so no
 retry was made. The next fix must make the canonical Stage 4 wrapper use the
 same bounded pure-Simple closure path before strict provider/backfill linking;
 it must not re-enter the pre-object whole-tree bootstrap path.
+
+## 2026-07-18 Stage2 package-data narrowing
+
+The recovery path first failed strict MIR in 16 files because native-project
+HIR lowering had no types for selected package data. The seed now injects only
+explicit/current/ancestor package data before MIR; a focused Rust regression
+passes and the next cache-preserving Stage2 run narrowed the failure to five
+interpreter files. The remaining names (`val_arrays`, `val_struct_fields`, and
+`eval_implicit_new_stack`) are sibling-owned rather than ancestor-owned. A
+follow-up source patch now indexes unique data owners by effective package and
+treats underscore-prefixed split directories as transparent. Its focused Rust
+regression proves sibling and transparent access while rejecting ordinary
+children, unrelated packages, and duplicate owners. No Stage2 retry was made
+after the bounded gate failed; the next fresh cycle should rerun that gate once
+and must not restore global unique-name fallback.
