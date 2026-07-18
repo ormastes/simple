@@ -39,3 +39,7 @@ line numbers, which cost real time — diagnostics gap worth fixing alongside.
 
 - `bootstrap_stage1_entry_closure_spin_oom_2026-07-17.md` — separate Jul 16
   prebuilt-seed spin (fresh seed does NOT spin); both block stage1.
+
+## Status (2026-07-18)
+
+FIXED+PUSHED at 310bcdf1131 (strings.rs lexer fix) + 7a27c446582 (.spl hoists revert). Regression tests: 25/25 + 19/19 + 4/4 passed.

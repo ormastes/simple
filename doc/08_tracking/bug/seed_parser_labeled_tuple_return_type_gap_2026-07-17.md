@@ -128,3 +128,7 @@ is out of scope for this parse-blocker fix.
    (`mcp_main_lazy_json_standalone_compile_process_run_tuple_ambiguity_2026-07-17.md`)
    is reopened by this revert and needs a call-site-local fix (not a
    `process_run` signature change).
+
+## Status (2026-07-18)
+
+OPEN (parser gap in both seeds). Workaround applied aee3289936b: reverted process_run to unlabeled tuple. Stage-1 now proceeds to next blocker. Parser fix + seed redeploy remain pending; see cross-ref to mcp_main_lazy_json doc UNRESOLVABLE-at-call-site analysis.

@@ -118,59 +118,6 @@ the strategic dynSMF work:
 3. The self-hosted redeploy itself remains the real fix (do not race it; see
    memory/#99).
 
-## Current macOS GUI verification impact
-
-The same deployed-binary gap blocks focused verification of the new shared-MDI
-live host. Both `bin/simple check src/app/ui_shared_mdi` and the focused
-`macos_gui_live_window_gate_source_spec.spl` test stop at
-`unknown extern function: rt_cli_arg_count` before reaching the changed code.
-The GUI-feature seed can launch through the macOS app bundle, but its source-run
-path spent the complete 45-second evidence window traversing the renderer
-dependency closure and emitted 9,977 advisory lines before cleanup. This is not
-a live-window PASS and must not be hidden by substituting the seed as production
-tooling.
-
-The current clean pure-Simple Stage 3 is not a workaround for this deployment
-gap: `compile --format=smf ... -o <path>` returns zero but creates no file, and
-the bootstrap dispatcher rejects `run src/app/cli/compile_entry.spl ...` as an
-unknown command. The GUI evidence gate now fails closed unless compilation
-produces a nontrivial artifact, preventing this success-returning stub from
-being mistaken for a cached production launch.
-
-## Current Metal lifetime verification impact
-
-The deferred-submission owner now has a no-dispatch strict-native probe at
-`test/02_integration/rendering/metal_sffi_quarantine_native_probe.spl`. It
-checks the release predicate and submits a positive handle that is absent from
-the runtime registry; two reaper passes must both retain that unknown command.
-
-Three bounded self-hosted `native-build` attempts on 2026-07-17 failed before
-loading the probe. The broad attempt rejected the pre-existing parameter name
-`function` in `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl`; the
-first entry-closure attempt then stopped on the separate pre-existing
-nested-call diagnostic `method 'replace' not found on value of type str`.
-Renaming every executable `function` binding in that bootstrap owner and
-hoisting both MIR symbol-display receivers fixed the located source defects.
-The final bounded attempt cleared the reserved-word diagnostics but still
-reported the locationless nested-call `str.replace` failure before entry
-loading. The tree contains other known chained-replace compatibility sites,
-and the deployed Stage-4 interpreter predates their runtime support; do not
-guess-edit that broad unrelated set or retry beyond the cap. Stub fallback was
-disabled in all attempts. This is compiler/toolchain blocker evidence, not a
-Metal probe failure, so runtime TODO 555 remains open until the checked-in
-probe builds and prints `metal-sffi-quarantine: pass` under a current
-self-hosted host-GPU runtime.
-
-The canonical interpreter is not a substitute for that native proof. A bounded
-interpreter run logged missing `rt_metal_destroy_command_buffer` calls, coerced
-them to false, and initially let the unknown-handle retention oracle print PASS.
-Checking only `rt_metal_is_available` was also insufficient because that one
-extern is registered independently. The probe now performs a no-dispatch
-device→queue→command create/destroy registry roundtrip before the retention
-oracle; every exact lifecycle owner must work or the probe exits 8. Three
-bounded interpreter fix/verify cycles were consumed, so the strengthened
-roundtrip was checked in but not rerun in this session.
-
 ## How found
 
 Tooling-surface smoke matrix (check / sdoctest / md / doc / test / compile /
@@ -370,13 +317,6 @@ change required, out of scope here) — filing here rather than a new doc since
 it is the same "seed interpreter mode is not the real tool" family as this
 bug's title.
 
-## 2026-07-17 optimizer lane confirmation
+## Status (2026-07-18)
 
-The same deploy skew blocks the required optimizer pass for the Metal
-GPU-only hardening. Running the optimizer app through the deployed host tool
-reaches current source loading, then exits on `unknown extern function:
-rt_cli_arg_count`. The current Stage 3 compiler artifact has no `run` command,
-and the deployed CLI does not expose the newer top-level `optimize` command.
-This is additional evidence for the existing host-toolchain blocker, not a
-defect in the touched Metal sources. Re-run the O3 optimizer pass immediately
-after the pure-Simple CLI is redeployed.
+OPEN. Redeploy path advanced: stage1-3 GREEN (cargo bootstrap clean), stage4 blocked by flat-AST-bridge/cranelift issue (cross-ref stage3_selfhost_parser_case_multielem_pattern doc). Pure-Simple fmt/lint/doc-coverage paths confirmed runnable via standalone entry points; 3 root-cause bugs fixed in those tools (read_file collision, cli_run_* collision, missing run_lint_file). Self-hosted redeploy remains the strategic fix; do not race it.

@@ -56,3 +56,7 @@ or instrument the closure walk.
   deploy wall this blocks the exit from).
 - Memory note `project_native_build_cannot_emit_2026-07-08.md` — earlier "seed
   cannot emit" wall was bisect-don't-patch; same discipline applies.
+
+## Status (2026-07-18)
+
+SUPERSEDED/PARTIALLY RESOLVED. Fresh cargo seed (built 2026-07-17 from src/compiler_rust) runs stage1-3 cleanly (rc=0, no spin). Jul-16 prebuilt artifact remains defective; replace with fresh cargo build.

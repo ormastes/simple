@@ -1,6 +1,6 @@
 # main_lazy_json.spl standalone-compile: `process_run`'s unlabeled (text, text, i64) return trips a standalone-only tuple-ambiguity check
 
-**Status:** FIXED 2026-07-17 (Worker S) — see "Resolution" section at the end.
+**Status:** UNRESOLVABLE (call-site-local fix) — the import alone triggers the checker, making any fix within main_lazy_json.spl mechanically impossible. See "Resolution Retraction & Analysis" section at the end.
 
 **Date:** 2026-07-17
 **Scope:** `src/app/mcp/main_lazy_json.spl` (standalone-compile only); root
@@ -173,3 +173,39 @@ same standalone-compile limitation. Left as-is — out of this lane's scope
 (only `std.io_runtime`, the facade actually named in this bug's repro, was
 in scope). Flagging here so it isn't silently forgotten if someone next
 hits a standalone-compile failure through that module instead.
+
+## Resolution Retraction & Analysis (2026-07-18)
+
+**Earlier claim:** Worker S's labeled-return fix in `io_runtime.spl` (commit
+50c3393119e) was assumed to clear the standalone-compile ambiguity by labeling
+the tuple. That fix was then reverted due to the parser gap (unlabeled tuples
+cannot be parsed when labeled). A subsequent attempt to apply a "call-site-local
+fix" in `main_lazy_json.spl` was undertaken (creating wrapper structs,
+explicitly-typed locals, intermediate variables, etc.) to avoid the ambiguity.
+
+**Retraction:** Empirical testing revealed the check fires on the **declared
+return type alone**, not on field access or usage pattern:
+
+- Caller-side explicitly-typed locals (`val stdout: text = result.0`) — still
+  fires.
+- Wrapper functions returning structs that internally access `result.0/.1/.2` —
+  still fires (the field access is in the entry file).
+- Just importing `process_run` without any field access — still fires on the
+  import itself.
+
+**Conclusion:** The standalone-compile tuple-ambiguity check flags
+`process_run`'s declared return type whenever it appears in an entry file's
+import statement. No modification to code within `main_lazy_json.spl` can
+suppress this, because the type itself (`(text, text, i64)` with repeated
+fields) is what the checker examines — not how it's used.
+
+**Real fixes (both out of scope):**
+1. Label `process_run`'s return type in `io_runtime.spl` (`-> (stdout: text, stderr: text, exit_code: i64)`) — **blocked:** parser cannot parse labeled tuples in function signatures.
+2. Move all `process_run` callers to a sibling imported module (e.g., `main_lazy_json_helpers.spl`) — **blocked:** the check is entry-file-specific, so keeping helpers in a separate file clears it, but that violates the scope constraint ("edit only main_lazy_json.spl").
+
+**Impact:** None on the production server — full `main.spl` compiles and runs
+cleanly (`timeout 60 src/compiler_rust/target/bootstrap/simple check
+src/app/mcp/main.spl → "All checks passed"`). The standalone-compile error
+only affects ad-hoc per-file compile sweeps/bisection workflows that compile
+`main_lazy_json.spl` as an entry point, and only when using the frozen Rust
+seed (the pure-Simple `bin/simple` is not available until bootstrap completes).

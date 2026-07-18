@@ -40,3 +40,7 @@ GitHub's 100 MB limit; same class as already-tracked gnullvm libs). Alternatives
 if size is unacceptable: fetch these three crates non-vendored in the windows
 cross lane, or move the windows crate to `windows_raw_dylib`. Until one lands,
 the CI windows-gnu cross lane stays red.
+
+## Status (2026-07-18)
+
+FIXED+PUSHED at 310bcdf1131. Both defects resolved: signal.c _WIN32 guard + restored vendor libs (79 MB size decision accepted by commit). Cross-build verified: PE32+ simple.exe produced locally.
