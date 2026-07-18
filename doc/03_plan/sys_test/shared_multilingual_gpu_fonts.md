@@ -135,7 +135,7 @@ behavior.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, and wrapper/kernel/FAT32 hash recomputation are source-covered; expected pixel hash, hosted image/motion/nested parity, and retained QEMU PASS pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/7 canonical manual regenerations accepted; seven drafts exist; no retained candidate currently reaches valid runner/docgen completion |
+| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/11 canonical manual regenerations accepted: two manuals are missing, six are source-newer/stale, and three are present noncanonical drafts; no retained candidate currently reaches valid runner/docgen completion |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; no admitted pure-Simple runner currently reaches test results; the pre-bridge full CLI is not acceptance evidence |
 
 | NFR | Evidence | Pass condition | Current evidence |
@@ -185,9 +185,11 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run the seven feature specs in this order:
-manifest, shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA
-generated handoff, and native readback. Native specs require a declared promoted
+Use the self-hosted release binary. Run the eleven specs in this order: manifest,
+shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA generated
+handoff, native readback, `selected_devanagari_spec.spl`,
+`selected_arabic_spec.spl`, `install_font_assets_spec.spl`, and
+`release_archive_layout_spec.spl`. Native specs require a declared promoted
 graphics backend/driver; other backends may provide compile-only rows. Pin
 fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
 method.
@@ -198,6 +200,9 @@ For each changed spec, run native execution and generate its manual once:
 SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
 bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
+
+Run that canonical `spipe-docgen` command for every executable/manual pair and
+accept a manual only when the command completes and reports zero stubs.
 
 Focused interpreter execution must reuse `build_interpreter_result_wrapper`
 through the pure test runner or `src/app/test/font_evidence_runner.spl`. The
@@ -230,7 +235,7 @@ compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, seven zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, eleven zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or

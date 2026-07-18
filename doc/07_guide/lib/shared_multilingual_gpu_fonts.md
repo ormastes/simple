@@ -786,6 +786,12 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/s
 SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=native
 ```
 
+For each of the 11 pairs in the authoritative plan, generate its mirrored
+scenario manual after that executable spec passes with
+`bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`. Accept the
+manual only when docgen reports completion with `0 stubs`, it reads as a useful
+operator manual, and `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
+
 Interpreter runs are diagnostics only. These native source gates still do not
 substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
