@@ -173,8 +173,10 @@ the shared binary — deploys require explicit user go-ahead).
     owner. Nested value structs are isolated, embedded classes stay shared,
     and nil nested fields are guarded. A strict LLVM/Cranelift case runs in
     Linux's full board and the hosted macOS/Windows plus FreeBSD selections;
-    execution is pending. Array-of-class boxing and cyclic value layouts remain
-    separate.
+    execution is pending. The shared cross-target fixture repeats the local and
+    parameter isolation plus embedded-class sharing oracle for AArch64/RISC-V64
+    execution and ARM32/RV32/Windows ARM64 target objects. Array-of-class boxing
+    and cyclic value layouts remain separate.
   - Hosted `riscv32-unknown-linux-gnu` remains intentionally unsupported until
     a verified ILP32D linker/sysroot/CRT owner exists. The existing Linux
     architecture gate now exercises the original hosted target boundary with a

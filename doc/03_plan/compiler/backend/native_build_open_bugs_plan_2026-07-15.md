@@ -155,7 +155,10 @@ class-reference/struct-copy semantics were split: nested value-struct copies
 now recursively isolate local and plain-parameter copies while embedded class
 fields remain shared (`native_nested_struct_value_copy_alias_2026-07-17.md`).
 Its strict dual-backend case is selected on hosted macOS/Windows and FreeBSD;
-execution is pending. Array-of-class boxing remains separate.
+execution is pending. The shared cross-target fixture now repeats the exact
+local/parameter isolation and embedded-class sharing oracle for AArch64/RISC-V64
+execution plus ARM32/RV32/Windows ARM64 objects. Array-of-class boxing remains
+separate.
 
 ---
 
