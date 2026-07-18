@@ -12,9 +12,24 @@ describe "filesystem pure-Simple path helper ownership":
             expect(source).to_contain("use std.path.{parent_dir_option as std_path_parent_dir_option}")
             expect(source).to_contain("use std.path.{split_path as std_path_split_path}")
             expect(source).to_contain("use std.path.{stem as std_path_stem}")
+            expect(source).to_contain("use std.path.{with_extension as std_path_with_extension}")
             expect(source).to_contain("val value = std_path_stem(path_value.replace")
-            for helper in ["path_parent", "path_filename", "path_extension", "path_stem", "path_components"]:
+            val helpers = [
+                "path_parent", "path_filename", "path_extension", "path_stem",
+                "path_components", "path_with_extension"
+            ]
+            for helper in helpers:
                 expect(source.contains("extern fn {helper}")).to_equal(false)
+
+        for profile in ["nogc_sync_mut", "nogc_async_mut", "gc_async_mut"]:
+            val source = rt_file_read_text("src/lib/{profile}/path.spl") ?? ""
+            expect(source).to_contain("pub fn with_extension(path: text, ext: text) -> text:")
+
+        for profile in ["nogc_sync_mut", "nogc_async_mut"]:
+            val path_ops = rt_file_read_text("src/lib/{profile}/file_system/path_ops.spl") ?? ""
+            val path_class = rt_file_read_text("src/lib/{profile}/fs/path.spl") ?? ""
+            expect(path_ops).to_contain("path.with_extension(p, ext)")
+            expect(path_class).to_contain("Path(path: std_path_with_extension(self.path, ext))")
 
     it "preserves Unix Windows and empty-stem behavior":
         val archive = Path.new("/tmp/archive.tar")
@@ -50,3 +65,13 @@ describe "filesystem pure-Simple path helper ownership":
         expect(Path.new("../src").components()).to_equal(["..", "src"])
         expect(Path.new("C:\\tmp\\file").components()).to_equal(["C:", "tmp", "file"])
         expect(Path.new("\\\\server\\share\\dir").components()).to_equal(["/", "server", "share", "dir"])
+
+    it "replaces extensions without changing path prefixes":
+        expect(Path.new("file.txt").with_extension("md").to_string()).to_equal("file.md")
+        expect(Path.new("dir/archive.tar.gz").with_extension("xz").to_string()).to_equal("dir/archive.tar.xz")
+        expect(Path.new("C:\\tmp\\file.txt").with_extension(".md").to_string()).to_equal("C:\\tmp\\file.md")
+        expect(Path.new(".gitignore").with_extension("bak").to_string()).to_equal(".gitignore.bak")
+        expect(Path.new("name.").with_extension("txt").to_string()).to_equal("name.txt")
+        expect(Path.new("file.txt").with_extension("").to_string()).to_equal("file")
+        expect(Path.new("dir/").with_extension("txt").to_string()).to_equal("dir/")
+        expect(Path.new("").with_extension("txt").to_string()).to_equal("")
