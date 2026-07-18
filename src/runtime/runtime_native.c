@@ -2535,7 +2535,21 @@ char* rt_strreplace(const char* s, const char* old_s, const char* new_s) {
 }
 
 SplArray* rt_strsplit(const char* s, const char* delim) {
-    return spl_str_split(s, delim);
+    SplArray* out = rt_array_new(4);
+    if (!out || !s) return out;
+    if (!delim || !*delim) {
+        rt_array_push(out, rt_string_new((const uint8_t*)s, (uint64_t)strlen(s)));
+        return out;
+    }
+    size_t delim_len = strlen(delim);
+    const char* start = s;
+    const char* hit = NULL;
+    while ((hit = strstr(start, delim)) != NULL) {
+        rt_array_push(out, rt_string_new((const uint8_t*)start, (uint64_t)(hit - start)));
+        start = hit + delim_len;
+    }
+    rt_array_push(out, rt_string_new((const uint8_t*)start, (uint64_t)strlen(start)));
+    return out;
 }
 
 int64_t rt_strcmp(const char* a, const char* b) {
@@ -4958,13 +4972,12 @@ int rt_file_truncate(const char* path, uint64_t size) {
 SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len) {
     /* Create a byte array ([u8]) from a raw memory pointer.
      * Used by LLVM memory buffer emission to avoid temp file I/O. */
-    if (ptr == 0 || len <= 0) return spl_array_new();
-    SplArray* arr = spl_array_new_cap(len);
-    const unsigned char* src = (const unsigned char*)(uintptr_t)ptr;
-    for (int64_t i = 0; i < len; i++) {
-        spl_array_push_i64(arr, (int64_t)src[i]);
-    }
-    return arr;
+    if (ptr == 0 || len <= 0) return rt_byte_array_new_len(0);
+    SplArray* result = rt_byte_array_new_len((uint64_t)len);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array || !array->data) return result;
+    memcpy(array->data, (const void*)(uintptr_t)ptr, (size_t)len);
+    return result;
 }
 
 /* ================================================================

@@ -13,6 +13,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len);
+SplArray* rt_strsplit(const char* string, const char* delimiter);
+
 static int start_server(unsigned short* port, const char* body, int delay_ms) {
     int server = socket(AF_INET, SOCK_STREAM, 0);
     assert(server >= 0);
@@ -60,6 +63,26 @@ static int walk_contains(SplArray* paths, const char* expected) {
 }
 
 int main(void) {
+    const uint8_t raw_bytes[] = {0, 127, 255};
+    SplArray* canonical_bytes = rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
+    assert(rt_array_len(canonical_bytes) == 3);
+    assert(rt_array_get(canonical_bytes, 0) == 0);
+    assert(rt_array_get(canonical_bytes, 1) == 127);
+    assert(rt_array_get(canonical_bytes, 2) == 255);
+    assert(rt_array_len(rt_bytes_from_raw(0, 3)) == 0);
+
+    SplArray* split = rt_strsplit("a,,b", ",");
+    assert(rt_array_len(split) == 3);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "a") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 1)), "") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 2)), "b") == 0);
+    split = rt_strsplit("plain", ",");
+    assert(rt_array_len(split) == 1);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "plain") == 0);
+    split = rt_strsplit("plain", "");
+    assert(rt_array_len(split) == 1);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "plain") == 0);
+
     char walk_root[] = "/tmp/simple-dir-walk-XXXXXX";
     assert(mkdtemp(walk_root) != NULL);
     char walk_nested[256], walk_suffix_dir[256], walk_regular[256];

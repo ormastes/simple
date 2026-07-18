@@ -239,6 +239,12 @@ invalid for the strict profile, and provider ownership needs a separate link
 profile digest/cache namespace from the canonical input rather than changing
 per-module object keys.
 
+Raw `runtime_legacy_core.o` is also rejected even though it names current
+missing symbols: its legacy array/split ABI and no-op dictionary exports are
+not valid canonical owners. The reachable `rt_bytes_from_raw` and `rt_strsplit`
+bridges now build tagged arrays directly; a future compatibility capsule must
+localize every legacy array/dictionary/split export before admission.
+
 Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
 `lib*.a`: explicit linker flavor wins, then canonical `PLATFORM_ABI` preserves
 the public `--msvc`/`--mingw` selection. Static source coverage is present;
