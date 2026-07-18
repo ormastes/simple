@@ -979,6 +979,142 @@ fn test_entry_closure_follows_bare_export_facade_to_owner_only() {
     assert_eq!(files.len(), 4);
 }
 
+// Regression coverage for the `frontend_core` false-ambiguous-export bug
+// (doc/08_tracking/bug/frontend_core_ambiguous_export_regression_2026-07-13.md):
+// a stale `extern fn` re-declaration of an already-defined symbol must not
+// tie against the real definition and must not fail discovery. Real
+// same-name-different-symbol collisions must still be rejected.
+#[test]
+fn test_entry_closure_bare_export_prefers_definition_over_stale_extern() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    let package = src_dir.join("pkg");
+    std::fs::create_dir_all(src_dir.join("app")).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    let entry = src_dir.join("app/main.spl");
+    let init = package.join("__init__.spl");
+    let owner = package.join("owner.spl");
+    let stale = package.join("stale.spl");
+    std::fs::write(
+        &entry,
+        "use pkg.{get_members}\nfn main() -> i64:\n    return get_members()\n",
+    )
+    .unwrap();
+    std::fs::write(&init, "export get_members\n").unwrap();
+    std::fs::write(&owner, "fn get_members() -> i64:\n    return 1\n").unwrap();
+    // Stale forward declaration of the same symbol: a real fn already
+    // defines it elsewhere in the package, so this extern must be treated
+    // as a weak re-declaration, not a second provider.
+    std::fs::write(
+        &stale,
+        "extern fn get_members() -> i64\nfn use_it() -> i64:\n    return get_members()\n",
+    )
+    .unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry);
+    let files = builder
+        .discover_files()
+        .expect("stale extern re-declaration must not be flagged as an ambiguous package export");
+    assert!(files.iter().any(|path| same_file_path(path, &init)));
+    assert!(files.iter().any(|path| same_file_path(path, &owner)));
+}
+
+// Verifies the REAL production package named in the bug doc
+// (src/compiler/10.frontend/core, module path `compiler.core`) discovers
+// cleanly with no false ambiguous-export error, exercising the exact
+// resolver/tiering path native-build uses in production against the
+// actual ~450-export `__init__.spl` and its 48 sibling files.
+#[test]
+fn test_entry_closure_real_frontend_core_package_has_no_ambiguous_export() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent() // src/compiler_rust
+        .unwrap()
+        .parent() // src
+        .unwrap()
+        .parent() // repo root
+        .unwrap()
+        .to_path_buf();
+    let core_init = repo_root.join("src/compiler/10.frontend/core/__init__.spl");
+    assert!(
+        core_init.is_file(),
+        "expected real frontend core package at {}",
+        core_init.display()
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let entry = temp.path().join("entry.spl");
+    std::fs::write(
+        &entry,
+        "use compiler.core.{is_alpha}\nfn main() -> bool:\n    return is_alpha(\"a\")\n",
+    )
+    .unwrap();
+
+    let builder = NativeProjectBuilder::new(repo_root.clone(), temp.path().join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(repo_root.join("src"))
+        .entry_file(entry);
+    let files = builder.discover_files().expect(
+        "real src/compiler/10.frontend/core package must resolve without a false ambiguous-export error",
+    );
+    assert!(files.iter().any(|path| same_file_path(path, &core_init)));
+}
+
+#[test]
+fn test_entry_closure_bare_export_rejects_genuine_duplicate_definitions() {
+    // Guard against the SIMPLE_AMBIGUOUS_EXPORT_ALL escape hatch (discovery.rs)
+    // downgrading this to a warning if it happens to be set in the test process.
+    let previous_escape_hatch = std::env::var("SIMPLE_AMBIGUOUS_EXPORT_ALL").ok();
+    std::env::remove_var("SIMPLE_AMBIGUOUS_EXPORT_ALL");
+
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    let package = src_dir.join("pkg2");
+    std::fs::create_dir_all(src_dir.join("app")).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    let entry = src_dir.join("app/main.spl");
+    let init = package.join("__init__.spl");
+    let a = package.join("a.spl");
+    let b = package.join("b.spl");
+    std::fs::write(
+        &entry,
+        "use pkg2.{helper}\nfn main() -> i64:\n    return helper()\n",
+    )
+    .unwrap();
+    std::fs::write(&init, "export helper\n").unwrap();
+    // Two genuinely different symbols happen to share a name: this must
+    // still fail loudly rather than silently pick one.
+    std::fs::write(&a, "fn helper() -> i64:\n    return 1\n").unwrap();
+    std::fs::write(&b, "fn helper() -> i64:\n    return 2\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry);
+    let error = builder
+        .discover_files()
+        .expect_err("two real definitions of the same exported name must still be rejected as ambiguous");
+    match previous_escape_hatch {
+        Some(value) => std::env::set_var("SIMPLE_AMBIGUOUS_EXPORT_ALL", value),
+        None => std::env::remove_var("SIMPLE_AMBIGUOUS_EXPORT_ALL"),
+    }
+    assert!(error.contains("ambiguous package export"), "unexpected error: {error}");
+    assert!(error.contains("helper"), "unexpected error: {error}");
+}
+
 #[test]
 fn test_entry_closure_follows_extend_method_imports() {
     let temp = tempfile::tempdir().unwrap();
