@@ -12,6 +12,21 @@ use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCp
 use super::*;
 
 #[test]
+fn pure_simple_lambda_inline_helper_has_both_callers() {
+    let lowering = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl");
+    let methods = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl");
+    assert!(lowering.contains("me lower_inline_lambda_with_locals("));
+    assert!(lowering.contains("self.lower_inline_lambda_with_locals(params, body, arg_locals)"));
+    assert!(methods.contains("self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])"));
+}
+
+#[test]
+fn dim_solver_unit_result_constructor_has_unit_payload() {
+    let source = include_str!("../../../../../compiler/30.types/dim_constraints.spl");
+    assert!(!source.lines().any(|line| line.trim() == "Ok()"));
+}
+
+#[test]
 fn test_llvm_project_path_propagates_import_function_arities() {
     let compiler = include_str!("compiler.rs");
     assert!(
