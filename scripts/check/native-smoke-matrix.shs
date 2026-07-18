@@ -323,6 +323,72 @@ fn main() -> i64:
 EOF
 }
 
+# Lane S74 addition. Bug family S19/S53/S54
+# (doc/08_tracking/bug/native_build_class_array_field_mutation_param_segfault_2026-07-17.md):
+# a class-typed array PARAMETER ([TheClass]) SIGSEGVs on any field access on an
+# indexed/iterated element (read OR write), while the identical field access
+# on a LOCAL (non-parameter) array of the same class works fine. Root-cause
+# narrowing (lane S53, 2026-07-18 doc update) confirms this is class-vs-struct
+# specific: `decode_runtime_value` (expr_dispatch.spl) makes no class/struct
+# distinction at the argument-passing boundary, so a class (reference-type)
+# element's boxed handle gets dereferenced as a raw pointer. This case sums a
+# field across a `[Counter]` array parameter via a for-loop (the same
+# "iteration + field access on param" shape the bug doc's original repro
+# commit confirmed crashes at rc=139 on the source state that landed
+# 1aa210254d4/838ff688da4 -- a sibling lane not present in this lane's
+# history). Expected rc=42 (10+20+12).
+#
+# EMPIRICAL FINDING (lane S74, checkout 188941ed081c): this shape does NOT
+# reproduce on the deployed binary at this checkout -- it PASSES cleanly
+# (verified: not xfail). The documented S19/S53/S54 SIGSEGV is real (see the
+# doc's own gdb/SIMPLE_DUMP_MIR evidence) but was reproduced on a different
+# source state (this lane's HEAD does not contain 1aa210254d4/838ff688da4,
+# and may have unrelated intervening fixes). Kept as a real (non-xfail)
+# regression case going forward -- if this ever starts failing again, that
+# is this gap reopening.
+write_case_class_array_param() {
+    cat >"$1" <<'EOF'
+class Counter:
+    value: i64
+
+fn sum_values(items: [Counter]) -> i64:
+    var total = 0
+    for c in items:
+        total = total + c.value
+    return total
+
+fn main() -> i64:
+    val items = [Counter(value: 10), Counter(value: 20), Counter(value: 12)]
+    return sum_values(items)
+EOF
+}
+
+# Lane S74 addition. Bug family S59/S68
+# (doc/08_tracking/bug/s59_cranelift_dict_return_abi_root_cause_2026-07-17.md,
+# doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md):
+# a user function RETURNING a Dict built from a literal, called from another
+# function, had ZERO matrix coverage before this case (case 19,
+# dict_struct_value, only covers a Dict built and indexed INLINE in main --
+# never returned across a call boundary). The documented gap is specific to
+# the seed's cranelift `InterpCall` boxed-result bridge (any Dict-returning
+# function forced through the interpreter bridge for a FallbackReason other
+# than the now-fixed CollectionLiteral case gets its handle left boxed,
+# corrupting downstream Dict.len()/indexing). Expected rc=33 (11+22) on any
+# backend that round-trips the handle correctly; run this case under both
+# the default llvm backend and NATIVE_SMOKE_BACKEND=cranelift to check
+# whether the self-hosted compiler's own cranelift_codegen_adapter.spl
+# reproduces the same class of corruption.
+write_case_dict_fn_return() {
+    cat >"$1" <<'EOF'
+fn make_scores() -> Dict<text, i64>:
+    return {"a": 11, "b": 22}
+
+fn main() -> i64:
+    val d = make_scores()
+    return d["a"] + d["b"]
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -418,6 +484,8 @@ match_value_position|(16) value-position match (val r = match n)|write_case_matc
 match_value_position_return|(17) value-position match, arm returns|write_case_match_value_return|7|no
 trait_default|(18) trait default method dispatch (#157)|write_case_trait_default|42|no
 dict_struct_value|(19) struct-valued Dict m[k].field + keys() text (#189)|write_case_dict_struct_value|73|no
+class_array_param|(20) class-typed array param + field sum (S19/S53/S54)|write_case_class_array_param|42|no
+dict_fn_return|(21) fn returning Dict built from literal (S59/S68)|write_case_dict_fn_return|33|no
 "
 
 # NOTE: read from a file (not a pipe) so the loop body runs in THIS shell,
