@@ -634,7 +634,7 @@ fn greet(name: text):
 
 ### Multi-Return Tuples
 
-**NOTE:** Labeled-tuple returns (`-> (name: type, ...)`) are currently **NOT parseable** by either the seed or self-hosted parser. Use unlabeled tuples with `.0`/`.1` accessors instead. See [doc/08_tracking/bug/labeled_tuple_return_parser_gap_2026_07_17.md](../../08_tracking/bug/labeled_tuple_return_parser_gap_2026_07_17.md).
+**NOTE:** Labeled-tuple returns (`-> (name: type, ...)`) are currently **NOT parseable** by either the seed or self-hosted parser. Use unlabeled tuples with `.0`/`.1` accessors instead. See [doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md](../../08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md).
 
 ```simple
 fn div_rem(n: i64, d: i64) -> (i64, i64):

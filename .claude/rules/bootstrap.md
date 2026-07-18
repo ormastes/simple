@@ -66,7 +66,12 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 - The bootstrap wrapper itself runs the shared compiler sanity before using
   Stage 2 and before accepting Stage 3: exact bootstrap version, unsupported
   `run` rejection, and strict native build/execute of `p2_add.spl`.
-- Multiplatform bootstrap CI uses Cranelift for stages 2–3 (LLVM stage-2 link blocked by 62 undefined symbols; see doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md). Uploads only the resulting pure-Simple Stage 2/Stage 3 binaries, never the Rust seed as a platform artifact.
+- Multiplatform bootstrap CI exercises both LLVM and Cranelift through that
+  wrapper and uploads only the resulting pure-Simple Stage 2/Stage 3 binaries,
+  never the Rust seed as a platform artifact. Note (2026-07-18): the LLVM
+  stage-2 link currently fails with 62 undefined symbols (Windows CI runs that
+  step continue-on-error); Cranelift is the working stage-2/3 path. See
+  doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md.
 - The Linux Stage 3 artifact owns the strict x86_64/AArch64/RISC-V LLVM
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
