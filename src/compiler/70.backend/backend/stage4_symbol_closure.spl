@@ -37,13 +37,6 @@ fn stage4_split_whitespace(value: text) -> [text]:
 fn stage4_is_runtime_abi_symbol(name: text) -> bool:
     name.starts_with("rt_") or name.starts_with("spl_") or name.starts_with("__simple_") or name == "g_memtrack_enabled"
 
-fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
-    if macho_prefixes and name.starts_with("_"):
-        val unprefixed = name.substring(1)
-        if stage4_is_runtime_abi_symbol(unprefixed):
-            return unprefixed
-    name
-
 fn stage4_is_coff_feature_symbol(name: text, object_format: text) -> bool:
     (object_format == "coff-msvc" or object_format == "coff-mingw") and name == "@feat.00"
 
@@ -59,8 +52,11 @@ fn stage4_provider_symbol(name: text, object_format: text, import_reference: boo
         if import_reference and symbol.starts_with("__imp_"):
             imported = true
             symbol = symbol.substring(6)
-        if not symbol.starts_with("__imp_") and symbol.starts_with("_"):
-            symbol = symbol.substring(1)
+        if object_format == "coff-mingw" and not symbol.starts_with("__imp_") and symbol.starts_with("_"):
+            val unprefixed = symbol.substring(1)
+            val known_stdcall = unprefixed == "LoadLibraryA@4" or unprefixed == "GetProcAddress@8" or unprefixed == "FreeLibrary@4"
+            if stage4_is_runtime_abi_symbol(unprefixed) or (imported and known_stdcall):
+                symbol = unprefixed
         val decoration = symbol.last_index_of("@") ?? -1
         val known_stdcall_import = symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4"
         if imported and known_stdcall_import:
@@ -256,6 +252,8 @@ pub fn stage4_windows_c_object_uses_msvc_abi(target_os_name: text, target: text,
         return Err("Stage4 MinGW C compiler is incompatible with the MSVC linker policy")
     if target.contains("-") and target.ends_with("-pc-windows-msvc") and not msvc_driver:
         return Err("Stage4 MinGW C compiler is incompatible with explicit MSVC target '" + target + "'")
+    if target.contains("-") and target.ends_with("-pc-windows-gnu") and not mingw_driver:
+        return Err("Stage4 MSVC C compiler is incompatible with explicit MinGW target '" + target + "'")
     Ok(msvc_driver)
 
 fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
@@ -717,7 +715,7 @@ fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
         i = i + 1
     true
 
-pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) -> [text]:
+pub fn stage4_requested_from_nm_output_for_format(nm_output: text, object_format: text) -> [text]:
     """Return sorted strong runtime ABI requests not defined by sibling objects."""
     var defined: Dict<text, bool> = {}
     var undefined: Dict<text, bool> = {}
@@ -727,7 +725,11 @@ pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) ->
             continue
         val type_index = parts.len() - 2
         val type_code = parts[type_index]
-        val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
+        val raw_symbol = parts[parts.len() - 1]
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        val is_undefined = type_code == "U"
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, is_undefined)
         if not stage4_is_runtime_abi_symbol(symbol):
             continue
         if type_code == "U":
@@ -743,7 +745,10 @@ pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) ->
             requested = requested.push(symbol)
     stage4_sorted_text(requested)
 
-fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: bool, owner: text) -> Result<[text], text>:
+pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) -> [text]:
+    stage4_requested_from_nm_output_for_format(nm_output, if macho_prefixes: "macho" else: "elf")
+
+fn stage4_global_definitions_from_nm_output_for_format(nm_output: text, object_format: text, owner: text) -> Result<[text], text>:
     var seen: Dict<text, bool> = {}
     var definitions: [text] = []
     for line in nm_output.split("\n"):
@@ -754,7 +759,10 @@ fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: boo
         val type_code = parts[type_index]
         if type_code == "U" or not stage4_nm_has_address(parts, type_index):
             continue
-        val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
+        val raw_symbol = parts[parts.len() - 1]
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         if seen.has(symbol):
             return Err("Stage4 archive '" + owner + "' repeats global definition '" + symbol + "'")
         seen[symbol] = true
@@ -812,8 +820,10 @@ pub fn stage4_forbidden_archive_sections(section_headers: text) -> [text]:
             found.push(section)
     found
 
-pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<([i64], [text]), text>:
+pub fn stage4_resolve_requested_archive_owners_for_format(requested: [text], archive_labels: [text], archive_nm_outputs: [text], object_format: text) -> Result<([i64], [text]), text>:
     """Validate transitive runtime ownership and return selected archives plus owner rows."""
+    if not stage4_is_compiler_object_format(object_format):
+        return Err("Unsupported Stage4 owner-resolution object format '" + object_format + "'")
     if requested.len() == 0:
         return Err("Stage4 requested symbol closure is empty")
     if archive_labels.len() == 0 or archive_labels.len() != archive_nm_outputs.len():
@@ -829,7 +839,7 @@ pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels
         if labels_seen.has(label):
             return Err("Stage4 archive label '" + label + "' is repeated")
         labels_seen[label] = true
-        val definitions_result = stage4_global_definitions_from_nm_output(archive_nm_outputs[archive_i], macho_prefixes, label)
+        val definitions_result = stage4_global_definitions_from_nm_output_for_format(archive_nm_outputs[archive_i], object_format, label)
         val definitions = match definitions_result:
             case Ok(symbols): symbols
             case Err(err): return Err(err)
@@ -871,7 +881,7 @@ pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels
         owner_rows = owner_rows.push(symbol + "=" + archive_labels[owner_i])
         if not expanded_by_index.has(owner_i):
             expanded_by_index[owner_i] = true
-            val dependencies = stage4_requested_from_nm_output(archive_nm_outputs[owner_i], macho_prefixes)
+            val dependencies = stage4_requested_from_nm_output_for_format(archive_nm_outputs[owner_i], object_format)
             for dependency in dependencies:
                 if not queued.has(dependency):
                     queued[dependency] = true
@@ -885,6 +895,9 @@ pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels
             selected = selected.push(archive_i)
         archive_i = archive_i + 1
     Ok((selected, stage4_sorted_text(owner_rows)))
+
+pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<([i64], [text]), text>:
+    stage4_resolve_requested_archive_owners_for_format(requested, archive_labels, archive_nm_outputs, if macho_prefixes: "macho" else: "elf")
 
 pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<[i64], text>:
     """Validate unique symbol ownership and return selected archives in declared order."""

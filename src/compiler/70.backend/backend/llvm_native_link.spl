@@ -18,8 +18,8 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_sqlite_provider_archive_file, stage4_sqlite_provider_object_format, stage4_validate_sqlite_provider_symbol_contract, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
-use std.platform.{host_arch, host_os, is_macos}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_sqlite_provider_archive_file, stage4_sqlite_provider_object_format, stage4_validate_sqlite_provider_symbol_contract, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output_for_format, stage4_resolve_requested_archive_owners_for_format, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
@@ -28,7 +28,7 @@ use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, 
 fn llvm_link_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
-fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
+fn llvm_stage4_final_requested_symbols(objects: [text], object_format: text) -> Result<[text], text>:
     if objects.len() == 0:
         return Err("Stage4 final object closure is empty")
     val nm = find_nm_portable()
@@ -40,7 +40,7 @@ fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     val (nm_out, nm_err, nm_code) = process_run(nm, args)
     if nm_code != 0:
         return Err("Stage4 final object symbol scan failed: {nm_err}")
-    val requested = stage4_requested_from_nm_output(nm_out, is_macos())
+    val requested = stage4_requested_from_nm_output_for_format(nm_out, object_format)
     if requested.len() == 0:
         return Err("Stage4 final runtime symbol request closure is empty")
     Ok(requested)
@@ -87,11 +87,13 @@ fn llvm_stage4_projection_failure(stage_dir: text, message: text) -> Result<(tex
         return Err(message + "; Stage4 projection cleanup also failed")
     Err(message)
 
-fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_paths: [text], selected_indices: [i64], requested_symbols: [text], target_os_name: text, hosted_cc: text, pid: i64, output_path: text) -> Result<(text, text), text>:
+fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_paths: [text], selected_indices: [i64], requested_symbols: [text], target_os_name: text, hosted_cc: text, msvc_objects: bool, msvc_linker: bool, pid: i64, output_path: text) -> Result<(text, text), text>:
     """Partial-link selected exact archives and export only the original requested roots."""
-    if target_os_name != "linux" and target_os_name != "macos" and target_os_name != "freebsd":
-        return Err("Stage4 selected-archive projection requires native Linux, macOS, or FreeBSD")
-    match stage4_validate_candidate_archive_inputs_for_platform(candidate_labels, candidate_paths, false):
+    if target_os_name == "windows" and (msvc_objects or msvc_linker):
+        return Err("Stage4 selected-archive projection requires the MSVC DLL/import-library path")
+    if target_os_name != "linux" and target_os_name != "macos" and target_os_name != "freebsd" and target_os_name != "windows":
+        return Err("Stage4 selected-archive projection requires native Linux, macOS, FreeBSD, or MinGW Windows")
+    match stage4_validate_candidate_archive_inputs_for_platform(candidate_labels, candidate_paths, target_os_name == "windows"):
         case Err(err): return Err(err)
         case Ok(()): ()
     if selected_indices.len() == 0:
@@ -108,6 +110,8 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
             return Err("Stage4 selected-archive projection index is out of bounds")
         if index <= previous_index:
             return Err("Stage4 selected-archive projection indices must be unique and in candidate order")
+        if target_os_name == "windows" and candidate_labels[index] == "runtime_sqlite":
+            return Err("Stage4 MinGW SQLite projection requires sqlite3.dll neighbor staging")
         previous_index = index
         selected_paths = selected_paths.push(candidate_paths[index])
 
@@ -117,7 +121,7 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
     val archiver = find_archive_portable()
     if nm == "" or objcopy == "" or section_reader == "" or archiver == "":
         return Err("Stage4 selected-archive projection requires nm, objcopy, section-reader, and archive tools")
-    val object_format = match stage4_compiler_backfill_object_format(target_os_name, false):
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name, msvc_objects):
         case Ok(format): format
         case Err(err): return Err(err)
     val stage_dir = "{_get_temp_dir()}/simple_stage4_selected_projection_{pid}_{output_path.hash()}"
@@ -132,8 +136,9 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
         return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive projection directory creation failed")
 
     var closure_args: [text] = ["-nostdlib", "-Wl,-r"]
-    if target_os_name == "linux" or target_os_name == "freebsd":
-        closure_args = closure_args.push("-no-pie")
+    if target_os_name == "linux" or target_os_name == "freebsd" or target_os_name == "windows":
+        if target_os_name != "windows":
+            closure_args = closure_args.push("-no-pie")
         closure_args = closure_args.push("-Wl,--gc-sections")
         for symbol in requested_symbols:
             closure_args = closure_args.push("-Wl,--undefined={symbol}")
@@ -171,6 +176,8 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
         "--remove-section=.dtors", "--remove-section=.dtors.*",
         "--remove-section=__mod_init_func", "--remove-section=__mod_term_func",
         "--remove-section=__DATA,__mod_init_func", "--remove-section=__DATA,__mod_term_func",
+        "--remove-section=.CRT$XI*", "--remove-section=.CRT$XC*",
+        "--remove-section=.CRT$XP*", "--remove-section=.CRT$XT*", "--remove-section=.CRT$XL*",
         closure_object, localized_object
     ]
     val (_, objcopy_err, objcopy_code) = process_run(objcopy, objcopy_args)
@@ -241,8 +248,8 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
         return Err("Stage4 compiler backfill capsule requires SIMPLE_RUNTIME_PATH")
     if output_path.trim() == "":
         return Err("Stage4 compiler backfill capsule requires a final output path")
-    if target_os_name == "windows":
-        return Err("Stage4 compiler backfill capsule requires Windows projection support")
+    if target_os_name == "windows" and (msvc_objects or msvc_linker):
+        return Err("Stage4 compiler backfill capsule requires the MSVC DLL/import-library path")
     val archive_file = match stage4_compiler_backfill_archive_file(target_os_name, msvc_linker):
         case Ok(file): file
         case Err(err): return Err(err)
@@ -288,8 +295,9 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
         return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill staging directory creation failed")
 
     var closure_args: [text] = ["-nostdlib", "-Wl,-r"]
-    if target_os_name == "linux" or target_os_name == "freebsd":
-        closure_args = closure_args.push("-no-pie")
+    if target_os_name == "linux" or target_os_name == "freebsd" or target_os_name == "windows":
+        if target_os_name != "windows":
+            closure_args = closure_args.push("-no-pie")
         closure_args = closure_args.push("-Wl,--gc-sections")
         for symbol in manifest:
             closure_args = closure_args.push("-Wl,--undefined={symbol}")
@@ -329,6 +337,11 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
         "--remove-section=__mod_term_func",
         "--remove-section=__DATA,__mod_init_func",
         "--remove-section=__DATA,__mod_term_func",
+        "--remove-section=.CRT$XI*",
+        "--remove-section=.CRT$XC*",
+        "--remove-section=.CRT$XP*",
+        "--remove-section=.CRT$XT*",
+        "--remove-section=.CRT$XL*",
         closure_object,
         localized_object
     ]
@@ -816,16 +829,8 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
     # current explicit RISC-V target contract is Linux-only.
     if not target.contains("-"):
         return not is_riscv64 or host_os_name == "linux"
-
-    val canonical_suffix = match host_os_name:
-        case "linux": "-unknown-linux-gnu"
-        case "macos" | "darwin": "-apple-darwin"
-        case "windows": "-pc-windows-msvc"
-        case "freebsd": if is_riscv64: "" else: "-unknown-freebsd"
-        case _: ""
-    if canonical_suffix == "":
-        return false
-    target.substring(target_arch_text.len()) == canonical_suffix
+    val plan = hosted_c_compiler_plan(target, host_os_name, host_arch_name)
+    plan.supported and not plan.requires_cross
 
 # ============================================================================
 # C-Based Entry Point Compiler (no llc needed)
@@ -1040,10 +1045,14 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     var stage4_msvc_linker = false
     var stage4_msvc_objects = false
+    var stage4_object_format = ""
     if stage4_requested:
         stage4_msvc_linker = hosted_os == "windows" and not _is_mingw()
         match stage4_windows_c_object_uses_msvc_abi(hosted_os, hosted_target, hosted_cc, stage4_msvc_linker):
             case Ok(msvc): stage4_msvc_objects = msvc
+            case Err(err): return Err(err)
+        match stage4_compiler_backfill_object_format(hosted_os, stage4_msvc_objects):
+            case Ok(format): stage4_object_format = format
             case Err(err): return Err(err)
 
     # Outside strict Stage4, link the Rust native_all archive whenever
@@ -1130,7 +1139,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         for object in user_objects:
             final_simple_objects = final_simple_objects.push(object)
         final_simple_objects = final_simple_objects.push(entry_obj_path)
-        match llvm_stage4_final_requested_symbols(final_simple_objects):
+        match llvm_stage4_final_requested_symbols(final_simple_objects, stage4_object_format):
             case Ok(symbols):
                 stage4_requested_symbols = symbols
             case Err(err):
@@ -1284,24 +1293,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 combined candidate inventory failed: " + err)
-        val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os, stage4_msvc_objects):
-            case Ok(format): format
-            case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                file_delete(sqlite_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+        val compiler_backfill_object_format = stage4_object_format
         match stage4_validate_compiler_backfill_provider_disjoint(candidate_scans[0], candidate_labels[1:], candidate_scans[1:], compiler_backfill_object_format):
             case Ok(()): ()
             case Err(err):
@@ -1320,7 +1312,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
-        val (selected_archive_indices, owner_rows) = match stage4_resolve_requested_archive_owners(stage4_requested_symbols, candidate_labels, candidate_scans, hosted_os == "macos"):
+        val (selected_archive_indices, owner_rows) = match stage4_resolve_requested_archive_owners_for_format(stage4_requested_symbols, candidate_labels, candidate_scans, stage4_object_format):
             case Ok(resolution): resolution
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -1345,7 +1337,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                     stage4_system_library_paths = ["/usr/local/lib"]
         if trace:
             print "[LLVM-LINK] Stage4 selected archives: {selected_archive_indices.len()}, owners: {owner_rows.len()}"
-        val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, pid, output):
+        val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, stage4_msvc_objects, stage4_msvc_linker, pid, output):
             case Ok(value): value
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
