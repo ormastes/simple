@@ -500,6 +500,15 @@ capture achieved (12.64% non-background pixels), fault storm reduced from 81
 faults to 1 after NVMe/interpreter fixes; remaining fault = nil indirect call 
 in render_commands (C8 lane debugging in progress).
 
+**RENDER MILESTONE ACHIEVED — full desktop 99.83% non-black coverage:** the 
+committed software_backend wiring fix (77acb3e4b8b) eliminated the leaky 
+per-window offscreen allocation storm, eliminating both heap panic (192MB → 0 
+allocs) and the truncated blit that left frames black. QMP/OVMF screendump 
+now renders 3840×2160 desktop with 13 colors, reaching `[desktop-gui] 
+first-frame-rendered` and `[desktop-gui] desktop-ready` gates. Remaining 
+polish: font-text glyphs still render via bitmap fallback (selected-font 
+unavailable), not yet using the chosen font provider.
+
 ### Recent (2026-07-18) Knowledge Links
 
 **Heap exhaustion root cause:** `render_baremetal_first_frame` first-frame 

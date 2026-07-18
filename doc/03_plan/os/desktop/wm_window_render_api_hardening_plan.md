@@ -452,6 +452,18 @@ confirmed as downstream of cross-module field-index shift (access.rs patch ready
 
 **Open blocker:** compose retry-recovery leak — alloc sz 8MB per `create_offscreen` → ~5 faults exhausts heap → boot halts.
 
+### D.3 — 2026-07-18 status (full desktop render milestone achieved)
+
+**MILESTONE — SimpleOS glass desktop (gui_entry_desktop.spl) renders with 99.83% non-black framebuffer coverage (up from 0.00%)**, reaching `[desktop-gui] first-frame-rendered` AND `[desktop-gui] desktop-ready` gates. 13 distinct colors observed; heap allocation: **0** (was panicking at 192MB before fix).
+
+**Root fix landed (77acb3e4b8b):** wiring `software_backend: sw` in `Engine2D.create_offscreen()` constructor eliminated the leaky per-window offscreen scratch path that caused both the heap panic AND the truncated blit. Evidence: QMP screendump + serial transcript at `scratchpad/goal_evidence_20260718/` (this session).
+
+**Remaining polish (NOT blocking first-frame milestone):** real font text glyphs — the 13-colors frame still shows `font-evidence-unavailable reason=selected-font-unavailable`, so text rendering uses bitmap fallback rather than the selected font.
+
+**Board-runnable confirmed separately:** full SimpleOS desktop kernel boots under OVMF pflash (not QEMU `-kernel` semantics); boot stall regression (bug doc `desktop_kernel_ovmf_grub_boot_stall...2026-07-18`) is RESOLVED.
+
+**Acceptance (D.3).** `check-simpleos-wm-fullscreen-evidence.shs` captures 3840×2160 screendump with >50% non-black coverage (test: `>0.5` via QMP dimensions), AND the pure-Simple bootstrap gate still passes (3-stage verify).
+
 ---
 
 ## E — fb-lane trait unification remainder (CompositorBackend vs RenderBackend)
