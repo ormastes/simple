@@ -14,6 +14,7 @@ alwaysApply: false
 - **Built-in matchers:** `to_equal`, `to_be`, `to_be_nil`, `to_be_truthy`, `to_be_falsy`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`. NOTE: `to_be_true`/`to_be_false` are REJECTED by the runner on bool receivers (two lanes verified 2026-07-05) — use `assert_true`/`assert_false` or `to_equal(true)`.
 - **Standalone assertions:** `assert_true`, `assert_false`, `assert_equal`, `assert_not_equal`, `assert_contains`, `assert_nil` -- use these for bare boolean/equality checks instead of `expect(x).to_equal(true)`
 - **Interpreter mode limitation:** Test runner only verifies file loading, NOT `it` block execution
+- **Binary identity caveat:** Test evidence is only as good as the binary that produced it. Before trusting test results, verify which binary ran: `bin/simple --version` checks for a seed warning banner; `readlink -f bin/simple` shows whether you're on a stale bootstrap seed. A seed + old mtime means findings apply to SEED, not self-hosted — attribute accordingly. Known mode: `simple test` on a stale seed hangs (see `deployed_seed_test_runner_init_hang_2026-07-17.md`).
 - **Live API tests:** `test/03_system/llm_caret_live_comprehensive_spec.spl` requires `CLAUDECODE=` env var (~$1-2 per run)
 
 ## Modern SSpec

@@ -49,6 +49,15 @@ stale PASS artifact.
 
 > **Test runner operational caveats.** Section/directory test runs must be SEQUENTIAL (parallel database access corrupts state); only the final `Results:` summary line is authoritative (intermediate diagnostics mislead); single-file targets use the Rust-embedded runner (reliable), directory targets use the Pure-Simple daemon (known fresh-seed hang). See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats" for F1–F4 facts and remedies.
 
+> **Verify which binary produced your evidence.** `bin/simple` resolves through
+> `bin/release/<triple>/simple`, which can be a stale seed rather than the
+> self-hosted binary. Before trusting or attributing test/run evidence: run
+> `<binary> --version` and check for the seed warning banner, and `readlink -f`
+> the path. A seed banner + old mtime means findings apply to the SEED, not the
+> self-hosted compiler — attribute accordingly. Known failure mode: universal
+> single-file `simple test` hang on a stale seed (see
+> `doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md`).
+
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**
