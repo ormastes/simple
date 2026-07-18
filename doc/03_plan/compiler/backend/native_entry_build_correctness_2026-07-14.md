@@ -213,6 +213,16 @@ the shared binary — deploys require explicit user go-ahead).
   repeats that exact value-and-count oracle for default LLVM and explicit
   Cranelift on FreeBSD/AArch64/RISC-V64; ARM32/RV32 and Windows ARM64 require
   nonempty target objects from the same source.
+- The Engine2D host-runtime queue symbol bug now has one incremental
+  gate that builds the existing no-GPU probe with the host-GPU bundle under
+  flagless LLVM or explicit Cranelift, compares native output byte-for-byte
+  with the interpreter, and pins payload/overflow ABI values. The same probe
+  traverses Draw IR SDN generation; its two dynamic text-array joins now use
+  one pure-Simple newline loop instead of bootstrap's unsupported nonliteral
+  array `.join()` lowering. Linux, macOS
+  arm64/x64, Windows x64, and FreeBSD x86_64 schedule it; first staged
+  execution remains pending. Cross-target objects are not counted as proof for
+  this host link/runtime defect.
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
   correctness campaign. Runtime-native's 18-symbol legacy dependency owner is
   now source-implemented as an exact localized compatibility provider. The

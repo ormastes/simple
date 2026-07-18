@@ -13,6 +13,7 @@ for script in \
   scripts/bootstrap/bootstrap-from-scratch.sh \
   scripts/check/check-bootstrap-essential-tools-smoke.shs \
   scripts/check/check-freebsd-bootstrap-qemu.shs \
+  scripts/check/check-native-runtime-queue.shs \
   scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
   scripts/setup/platform-detect.shs \
   scripts/setup/setup.shs; do
@@ -333,6 +334,69 @@ grep -Fq '[ "$PARITY_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.s
 [ "$(grep -Fc "grep -qx 'native_seed_parity=true'" scripts/check/check-freebsd-bootstrap-qemu.shs)" -eq 2 ] || fail "FreeBSD Option and selected parity success receipts missing"
 grep -Fq "NATIVE_PARITY_CASES='class_array_field_mutation nested_struct_value_copy text_option_unwrap_present text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch dynload_tagged_text module_global_static_init option_is_none_map'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity cases missing"
 grep -Fq '[ "$SELECTED_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity exit status is not enforced"
+runtime_queue_check=scripts/check/check-native-runtime-queue.shs
+for required in \
+  'SOURCE=test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl' \
+  'run_bounded interpreter "$INTERPRETER_TIMEOUT_S"' \
+  '"$SIMPLE_BIN" run "$SOURCE" --mode=interpreter' \
+  'run_bounded build "$BUILD_TIMEOUT_S"' \
+  'run_bounded native-run "$RUN_TIMEOUT_S"' \
+  'COMPILER_ID=$(cksum "$SIMPLE_BIN"' \
+  '--source src/lib --entry-closure' \
+  '--runtime-bundle host-gpu --runtime-path "$RUNTIME_PATH"' \
+  '--backend=cranelift' \
+  'cmp "$WORK_DIR/oracle.out" "$WORK_DIR/native.out"' \
+  'test ! -s "$WORK_DIR/native.err"' \
+  "'queue_nonzero_backend_last_backend_handle=7'" \
+  "'queue_nonzero_backend_last_payload_hash=98765'" \
+  "'queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend'" \
+  "'queue_overflow_capacity=1024'" \
+  "'queue_overflow_accepted=1024'" \
+  "'queue_overflow_packet_id=0'" \
+  "'queue_overflow_drained=1024'" \
+  "'queue_draw_ir_dispatched=true'" \
+  "'queue_draw_ir_backend_handle=7'" \
+  "'queue_draw_ir_payload_nonempty=true'" \
+  "'queue_draw_ir_payload_has_schema=true'" \
+  "'queue_draw_ir_runtime_payload_has_schema=true'"; do
+  grep -Fq -- "${required}" "${runtime_queue_check}" || fail "native runtime queue gate missing: ${required}"
+done
+[ "$(grep -Fc -- '--backend=' "${runtime_queue_check}")" -eq 1 ] || fail "native runtime queue gate must keep LLVM flagless and select only Cranelift explicitly"
+draw_ir_sdn=src/lib/common/ui/draw_ir_sdn.spl
+grep -Fq 'fn _draw_ir_sdn_join_lines(lines: [text]) -> text:' "${draw_ir_sdn}" || fail "Draw IR SDN lacks the native-safe dynamic line join owner"
+[ "$(grep -Fc '_draw_ir_sdn_join_lines(lines)' "${draw_ir_sdn}")" -eq 2 ] || fail "Draw IR SDN emitters do not share the native-safe line join"
+if grep -Fq 'lines.join("\n")' "${draw_ir_sdn}"; then
+  fail "Draw IR SDN still routes dynamic text arrays through unsupported bootstrap join lowering"
+fi
+queue_probe=test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl
+if grep -Fq '    print(' "${queue_probe}"; then
+  fail "runtime queue probe must use backend-stable println records"
+fi
+for required in \
+  'engine2d_draw_ir_runtime_queue_dispatch_only(draw_batch, true, draw_queue)' \
+  'queue_draw_ir_payload_nonempty=' \
+  'queue_draw_ir_payload_has_schema=' \
+  'queue_draw_ir_runtime_payload_has_schema='; do
+  grep -Fq -- "${required}" "${queue_probe}" || fail "runtime queue probe lacks production Draw IR oracle: ${required}"
+done
+grep -Fq 'for QUEUE_BACKEND in llvm cranelift; do' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue gate does not cover both backends"
+grep -Fq 'NATIVE_RUNTIME_QUEUE_BACKEND=${QUEUE_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue backend selection missing"
+grep -Fq 'native_runtime_queue=true backend=${QUEUE_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue success receipt missing"
+grep -Fq '[ "$QUEUE_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue exit status is not enforced"
+grep -Fq 'timeout 900 sh scripts/check/check-native-runtime-queue.shs' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue gate is not independently bounded"
+[ "$(grep -Fc "'scripts/check/check-native-runtime-queue.shs'" "${multiplatform}")" -eq 2 ] || fail "hosted runtime queue checker must trigger push and pull-request matrices"
+[ "$(grep -Fc "'test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl'" "${multiplatform}")" -eq 2 ] || fail "runtime queue probe must trigger push and pull-request matrices"
+grep -Fq 'NATIVE_RUNTIME_QUEUE_BACKEND=${{ matrix.backend }}' "${multiplatform}" || fail "hosted runtime queue matrix backend selection missing"
+for required in \
+  'timeout-minutes: 15' \
+  'SIMPLE_BIN="$stage3"' \
+  'SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap"' \
+  'sh scripts/check/check-native-runtime-queue.shs'; do
+  grep -Fq -- "${required}" "${multiplatform}" || fail "hosted runtime queue invocation missing: ${required}"
+done
+freebsd_workflow=.github/workflows/freebsd-build.yml
+[ "$(grep -Fc "'scripts/check/check-native-runtime-queue.shs'" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD runtime queue checker must trigger push and pull-request workflows"
+[ "$(grep -Fc "'test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl'" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD runtime queue probe must trigger push and pull-request workflows"
 [ "$(grep -c "test/fixtures/compiler/llvm_simd_row_native_probe.spl" "${multiplatform}")" -eq 2 ] || fail "native architecture probe trigger missing"
 [ "$(grep -c "test/fixtures/compiler/stage4_struct_enum_array_probe.spl" "${multiplatform}")" -eq 2 ] || fail "Cranelift aggregate probe trigger missing"
 core_pipeline=.github/workflows/core-mcp-dev-pipeline.yml

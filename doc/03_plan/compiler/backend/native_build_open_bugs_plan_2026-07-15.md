@@ -307,8 +307,8 @@ runtime-native capsule from silently reopening it.
 
 | # | Bug | Note |
 |---|-----|------|
-| 20 | `native_engine2d_runtime_queue_symbols` | Runtime SFFI now registers `rt_host_gpu_queue_emit_payload_text` with a focused ABI regression; end-to-end native Engine2D queue execution remains pending. |
-| 21 | `native_renderdoc_inspector_else_parse` | `Else` parse failure in the RenderDoc inspector source — parser edge case. |
+| 20 | `native_engine2d_runtime_queue_symbols` | Runtime SFFI registers `rt_host_gpu_queue_emit_payload_text`; Draw IR SDN avoids unsupported dynamic-array `.join()` lowering; a focused incremental host-runtime gate traverses the production producer/dispatch path and compares interpreter/native queue output under default LLVM and explicit Cranelift on Linux, macOS arm64/x64, Windows x64, and FreeBSD x86_64. First staged execution is pending. |
+| 21 | `native_renderdoc_inspector_else_parse` | Source-fixed in the Rust bootstrap parser with focused continuation-chain coverage; full inspector execution remains blocked by the separately tracked CLI wrapper failure. |
 
 ---
 
