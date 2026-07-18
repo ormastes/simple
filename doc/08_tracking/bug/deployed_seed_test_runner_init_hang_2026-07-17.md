@@ -60,3 +60,42 @@ lane S63) so the true self-hosted binary can be redeployed.
 - app.io.mod import cycle — refuted; see the refutation section in
   `S61_interpreter_stack_overflow_app_io_mod_2026-07-17.md`.
 - Test-runner infra importing the suspect modules — repo-wide grep negative.
+
+## 2026-07-18 S88 evidence lane: fresh-seed capability check
+
+**Worktree:** `/home/ormastes/dev/wt_q_text_return`  
+**Commit:** 356a3c058dc (2026-07-18 06:45:34) — current source code  
+**Goal:** Build a fresh seed from current source and verify it handles test infrastructure better than the stale Jul-11 seed.
+
+### Stale seed (Jul-11) baseline
+
+- **Binary:** `/home/ormastes/.local/bin/simple` (symlink to `bin/release/x86_64-unknown-linux-gnu/simple`)
+- **SHA256:** `561767c6615bc013b546dc98065c0a85aff00c522b8bc427045525c72c8e2d6c`
+- **Size:** 46,170,032 bytes
+- **Test:** Single-file trivial spec (`spec.describe/it` with `spec.assert_true(true)`)
+
+**Result:**
+```
+Command: timeout 120 simple test trivial.spl
+Output: Module loads, 44 gc-warnings emitted, then semantic error
+Error: "semantic: unknown extern function: rt_cli_arg_count"
+Exit: 0 (exits cleanly on semantic error)
+Behavior: FAILS FAST on missing extern (does NOT hang as originally reported)
+```
+
+**Interpretation:** The stale seed is missing `rt_cli_arg_count` registration. Current source has this extern registered (added after Jul-11). This confirms the hypothesis: **stale seed lacks extern registrations added to current source**.
+
+### Fresh seed build status
+
+Attempting to build fresh seed: `cd src/compiler_rust && cargo build --release` (driver crate)
+- Started 2026-07-18 ~08:00 UTC
+- Target: `/home/ormastes/dev/wt_q_text_return/src/compiler_rust/driver/target/release/simple`
+- Dependencies cached (libs already compiled in earlier pass)
+- **[PENDING] Awaiting fresh binary for full evidence matrix**
+
+### Preliminary conclusion (pending fresh seed)
+
+- **Stale seed confirmed:** Missing `rt_cli_arg_count` (among likely others) vs. current source
+- **Fresh seed expectation:** Should NOT fail on rt_cli_arg_count; should proceed further in test initialization
+- **Viability:** Fresh-seed refresh appears **viable for interim tooling** — fresh build from current source should eliminate extern-registration mismatches
+- **Deployment recommendation (if fresh seed passes matrix):** Rebuild seed at `bin/release/x86_64-unknown-linux-gnu/simple`, document rebuild date; this is temporary pending #79 redeploy unblock
