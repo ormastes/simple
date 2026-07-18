@@ -87,6 +87,43 @@ describe "Engine2D embedded render surface":
             parent.shutdown()
             child.shutdown()
 
+        it "wires software_backend so draw_software_offscreen_opacity_consume takes the fast in-place path and blends correctly":
+            # Regression guard for 77acb3e4b8b (create_offscreen() must set
+            # software_backend, or draw_software_offscreen_opacity_consume
+            # silently returns false and every translucent-window composite
+            # falls through to draw_engine_opacity()'s two full-surface
+            # scratch allocations — the leaky path that caused first-frame
+            # heap exhaustion and truncated blit coverage before the fix).
+            var dst = Engine2D.create_with_backend(2, 2, "cpu")
+            dst.clear(rgb(0, 0, 0))
+            var offscreen = Engine2D.create_offscreen(2, 2)
+
+            # 1. Wiring guard: the ctor must have set software_backend. If
+            # this regresses to nil, the fast path is unreachable again even
+            # though the blend below might still "work" via the (unwired)
+            # fallback — so this assertion is the direct guard on the fix.
+            expect(offscreen.software_backend != nil).to_be(true)
+
+            offscreen.draw_rect_filled(0, 0, 2, 2, RED)
+
+            # 2. Behavior guard: the fast in-place path must both be TAKEN
+            # (return true, not fall through to draw_engine_opacity) and
+            # composite the correct pixel. Opaque RED (alpha 255) scaled by
+            # opacity_milli=930 -> alpha 237 (integer (255*930)/1000);
+            # Porter-Duff src-over onto opaque black resolves exactly to
+            # rgba(237, 0, 0, 255) (see color.spl `blend`).
+            val consumed = dst.draw_software_offscreen_opacity_consume(0, 0, offscreen, 930)
+            expect(consumed).to_be(true)
+
+            val pixel = dst.read_pixels()[0]
+            expect(color_a(pixel)).to_equal(255)
+            expect(color_r(pixel)).to_equal(237)
+            expect(color_g(pixel)).to_equal(0)
+            expect(color_b(pixel)).to_equal(0)
+
+            dst.shutdown()
+            offscreen.shutdown()
+
     context "Draw IR batch embedding.surface_id activates the offscreen path":
 
         it "renders offscreen and blits at (x,y), clipped to the surface's own bounds":
