@@ -3,11 +3,13 @@
 
 ## Scope
 
-Seven SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D batch,
-Web/GUI/WM routing, portable emission, generated CUDA handoff, and native
-graphics readback. The first five exercise host-available contracts; the sixth
-is a focused conditional CUDA gate, and the seventh is a fail-closed promotion
-gate whose three independent live evidence rows remain unavailable.
+Eleven executable/manual pairs comprise seven system SSpecs for manifest/assets,
+exact-face shaping, shared 2D/3D batch, Web/GUI/WM routing, portable emission,
+generated CUDA handoff, and native graphics readback, plus four focused unit
+gates for selected Arabic/Devanagari faces and release asset layout. Among the
+system SSpecs, the first five exercise host-available contracts; the sixth is a
+focused conditional CUDA gate, and the seventh is a fail-closed promotion gate
+whose three independent live evidence rows remain unavailable.
 Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
