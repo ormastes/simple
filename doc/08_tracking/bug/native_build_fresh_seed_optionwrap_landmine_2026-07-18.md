@@ -1,10 +1,15 @@
 # Fresh cargo-built seed: `native-build` failed on trivial entries — FIXED
-# (rt_file_read_bytes returned an Option-wrapped array where callers expected
-# bare `[u8]`; param_add.spl's parameterized-function symptom is a SEPARATE,
-# still-open defect — see the 2026-07-18 follow-up section below)
+# for both the noparam.spl symptom (P3) AND the param_add.spl
+# INTERPRETED-execution symptom (lane KEY2). A THIRD, newly-discovered, still
+# OPEN defect in NATIVE (compiled, non-interpreted) struct-spread lowering is
+# documented below under "2026-07-18 lane KEY2 follow-up" -- read the
+# "IMPORTANT SCOPE CORRECTION" note there before assuming the redeploy
+# keystone is fully closed.
 
 Lane: P3 (parallel bug-fix campaign), worktree `wt_p3` detached at
-`a79a52ba8178e1e4fee4adfc24e101dd3de87d3c`.
+`a79a52ba8178e1e4fee4adfc24e101dd3de87d3c`. param_add.spl's interpreted-path
+half fixed by lane KEY2, worktree `wt_key2`; a separate native-codegen
+struct-spread defect found by the same lane remains open (see below).
 
 ## 2026-07-18 FOLLOW-UP: FIXED for the `noparam.spl` symptom (verified rc=7);
 `param_add.spl` is a SEPARATE, still-open defect
@@ -403,7 +408,144 @@ it only proves the two Rust-side functions implicated (`rt_file_read_bytes`,
 `constructor_value_matches_type`) are textually unchanged since before
 07-11 (see "Age of the defect" above).
 
-## Secondary, not-fully-localized finding: `param_add.spl`'s distinct symptom
+## 2026-07-18 lane KEY2 follow-up: `param_add.spl` FIXED (root-caused + verified rc=7)
+
+**Root cause found and fixed.** The `Value::Object{class:"MirFunction"}`
+reaching `Value::as_int()` (flagged below as "not yet traced to its exact
+file:line call site") is now traced precisely:
+
+- The self-hosted compiler's own MIR-rewrite passes (only exercised once a
+  program has a real function *call* — hence `noparam.spl`, which has none,
+  never hit this) rebuild a `MirFunction` via paren-form struct
+  spread/update: `MirFunction(..func, blocks: new_blocks)` (seen identically
+  in `src/compiler/60.mir_opt/mir_opt/{dce,cse,gvn,tco,...}.spl`,
+  `mir_aop_injection.spl`, etc. — dozens of call sites, all the same shape).
+- Paren-form call arguments have **no dedicated spread token** in the parser
+  (`src/compiler_rust/parser/src/expressions/helpers.rs::parse_arguments`).
+  Only the *brace*-form struct literal parser (`Name { ..base, field: val }`,
+  in `parser/src/expressions/primary/identifiers.rs` and
+  `parser/src/expressions/postfix.rs`) special-cases a leading `..` token and
+  produces `Expr::StructInit { spread: Some(base_expr), .. }`.
+- So `..func` inside `MirFunction(..func, blocks: new_blocks)` parses through
+  the ordinary expression grammar, where a bare leading `..` is valid syntax
+  for an open-start range literal: `Expr::Range { start: None, end:
+  Some(func_expr), bound }`. It becomes an ordinary, unlabeled `Argument`.
+- `eval_collection_expr`'s `Expr::StructInit` handler (`interpreter/expr/
+  collections.rs:138`) *does* already special-case `spread` correctly for
+  brace-form construction. But paren-form construction (`Ctor(args...)`,
+  used when `Ctor` is called like a function) goes through a *different*
+  function, `instantiate_class`
+  (`interpreter_call/core/class_instantiation.rs`), which had **no spread
+  handling at all** — a parity gap between the two constructor-evaluation
+  paths. Its field-based construction loop evaluated every argument eagerly
+  via `evaluate_expr` before checking name/position
+  (`class_instantiation.rs:273`, pre-fix), so the unlabeled Range argument's
+  `end` operand — the *whole* base `MirFunction` object, not an int — hit
+  `Value::as_int()`'s catch-all arm and produced "type mismatch: cannot
+  convert object to int".
+- Confirmed via a temporary `eprintln!` + `std::backtrace::Backtrace::
+  force_capture()` in `Value::as_int()`'s catch-all arm (reverted): the
+  1-deep-Range-arg diagnostic showed `end expr=Some(Identifier("func"))`,
+  `value_debug=Object { class: "MirFunction", ... }` flowing out of
+  `instantiate_class` <- `evaluate_call` <- `eval_call_expr`, exactly matching
+  this theory (not the brace-form path, which was never on the call stack).
+
+**The fix** (`interpreter_call/core/class_instantiation.rs`, in
+`instantiate_class`'s per-argument loop): detect the same paren-form spread
+shape — an unlabeled argument whose value is `Expr::Range { start: None, end:
+Some(base_expr), .. }` — and merge `base_expr`'s evaluated `Object`/`Dict`
+fields into the constructed object (mirroring collections.rs's brace-form
+spread handling exactly), instead of falling through to the generic
+`evaluate_expr` + positional/named binding. The spread argument does not
+consume a positional field slot, matching brace-form semantics (later
+explicit fields still override spread fields).
+
+**Verification:**
+```
+cd src/compiler_rust && cargo build --release --bin simple
+env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH src/compiler_rust/target/release/simple \
+  native-build --entry scratch_key2/param_add.spl -o scratch_key2/param_bin --backend llvm --clean
+# now: rc=0 (was: error: semantic: type mismatch: cannot convert object to int)
+scratch_key2/param_bin; echo "rc=$?"   # rc=7 (3 + 4)
+```
+`noparam.spl` re-verified unaffected (still rc=7). Added a Rust unit test,
+`interpreter_call::core::class_instantiation::tests::
+paren_form_struct_spread_merges_base_fields_instead_of_as_int`, exercising
+`instantiate_class` directly with a hand-built `Point(..base, y: 99)` call
+(base `x:1,y:2,z:3`, expects `x:1,y:99,z:3`) — passes with the fix, and by
+construction cannot pass without it (pre-fix, the same shape errors in
+`as_int()` before any field merge happens). Full `cargo test --release -p
+simple-compiler --lib` run: 3140 passed, 251 failed (deterministic count
+across two separate runs). The baseline (this worktree without this change)
+was NOT independently re-run to confirm all 251 pre-exist -- what IS
+confirmed: every failing test name falls in `codegen::`/`mir::`/
+`pipeline::`/`lint::`/`hir::`/`linker::`/`value::`/`runtime_bridge::`/
+`compilability::`, zero match `instantiat|class|spread|struct_construct`,
+and this diff touches only `class_instantiation.rs` (one function inside
+it). That module-isolation plus the zero-match grep is why this change is
+judged safe, not a claim that the 251 are pre-existing fact.
+
+**IMPORTANT SCOPE CORRECTION — the redeploy keystone is NOT fully closed.**
+The fix above only covers the code path exercised when the self-hosted
+compiler's own MIR-rewrite passes are *interpreted* by a fresh Rust seed
+(exactly what a first-stage `native-build` does, since the seed has no
+compiled copy of the compiler yet — this is the actual reported symptom and
+is genuinely fixed). It does **not** cover the *native-compiled* path: when
+any `.spl` program (including, eventually, the self-hosted compiler itself,
+once a later bootstrap stage compiles it natively rather than interpreting
+it) uses the same paren-form struct-spread syntax, native codegen mishandles
+it too — a **separate, still-open** bug, found and localized (not fixed) by
+this lane:
+
+- Repro: `scratch_key2/spread_repro.spl` (`struct Point: x,y,z: i64`;
+  `make_base()` returns `Point(x:1,y:2,z:3)`; `main` returns
+  `Point(..base, y: 99).{x+y+z}`, correct answer 103).
+  `native-build --entry scratch_key2/spread_repro.spl --backend llvm --clean`
+  succeeds (rc=0, no error) but the binary returns **rc=102**, not 103 — a
+  silent wrong-answer miscompile, not a loud failure.
+- Root cause, precisely localized: `lower_struct_construct`
+  (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1628`)
+  separates constructor args into `named_args` (matched by name) and
+  `positional_args` (consumed in declared-field order) — it has **no
+  spread/`..base` concept at all** (unlike the brace-form interpreter path
+  this lane fixed above). The unlabeled `..base` argument becomes
+  `positional_args[0]`, consumed for the struct's *first* declared field
+  (`x`) via `self.lower_expr(chosen)` at line ~1720, where `chosen` is the
+  HIR-level `Range{start:None, end:Some(base)}` node (same mis-parse as the
+  interpreter case: paren-form call args have no dedicated spread token,
+  `parser/src/expressions/helpers.rs::parse_arguments`). `lower_expr` routes
+  this to `lower_range` (`src/compiler/50.mir/_MirLowering/
+  function_lowering.spl:591`), which lowers `start=None` to a zero constant
+  and `end=base` to `base`'s own lowered value (its aggregate pointer), then
+  emits a runtime call `rt_range(0, <base's pointer bits>)` — a nonsense
+  call whose result becomes field `x`'s stored value (empirically resolves
+  to `3`, the codebase's canonical raw nil-sentinel payload — see
+  `ensure_option_handle`'s comment on payload `3` — suggesting `rt_range`
+  degenerates to a nil-like handle for this bogus input). Meanwhile the
+  struct's *last* field (`z`) is never claimed by any positional or named
+  arg (the spread consumed the single positional slot) and gets zero-filled
+  by the "omitted field" path (line ~1676-1700) instead of inheriting from
+  `base`. Net: `x=3` (garbage), `y=99` (correct, named), `z=0` (should be 3,
+  omitted) → `3+99+0=102`.
+- **Why this matters for the keystone claim:** `MirFunction(..func, blocks:
+  new_blocks)` — the exact pattern that broke the interpreted path — is used
+  pervasively across the self-hosted compiler's own MIR optimization passes
+  (`src/compiler/60.mir_opt/mir_opt/*.spl`, `mir_aop_injection.spl`,
+  `mir_debug_trace_injection.spl`, etc: ~25 call sites, same shape). Once a
+  later bootstrap stage compiles the self-hosted compiler *natively* (rather
+  than interpreting it, which is what today's fresh-seed `native-build`
+  does), those same call sites run through this broken
+  `lower_struct_construct`, not through the (now-fixed) interpreter path —
+  so a natively-compiled compiler binary would silently corrupt its own MIR
+  rewrites (wrong field values, not a crash — worse than a loud failure).
+  This was NOT chased to a fix in this session (a proper fix needs
+  `lower_struct_construct`'s positional/named-arg split reworked so a spread
+  argument fills every field neither named nor otherwise positioned, mirror-
+  ing the interpreter fix's semantics, rather than being naively treated as
+  one more positional slot) — flagging as a new, precisely-localized,
+  high-priority follow-up bug, not a re-open of this doc's original scope.
+
+## Secondary, not-fully-localized finding: `param_add.spl`'s distinct symptom (ORIGINAL, now superseded by the fix above — kept for the record)
 
 `scratch_p3/param_add.spl` (`fn add(a: i64, b: i64) -> i64: return a + b`,
 `fn main() -> i64: return add(3, 4)`) fails with a *different* message:
@@ -511,18 +653,28 @@ real fix site turns out to be.
 
 ## Resume commands
 
-**Verify the fix (current, post-2026-07-18-follow-up):**
+**Verify the fix (current, post-2026-07-18 KEY2 follow-up — the reported
+`native-build` symptom is fixed for both entries; the deeper native-codegen
+struct-spread defect described above remains open):**
 ```
 cd src/compiler_rust && cargo build --release --bin simple && cd ..
 env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH src/compiler_rust/target/release/simple \
   native-build --entry scratch_p3/noparam.spl -o /tmp/noparam_bin --backend llvm --clean
 /tmp/noparam_bin; echo "rc=$?"   # rc=7 (was: error: unknown static method object on class CodegenOutput)
 
-# param_add.spl is a SEPARATE, still-open defect -- expected to still fail:
+# param_add.spl -- now FIXED (was: error: semantic: type mismatch: cannot convert object to int):
 env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH src/compiler_rust/target/release/simple \
   native-build --entry scratch_p3/param_add.spl -o /tmp/param_bin --backend llvm --clean
-# error: semantic: type mismatch: cannot convert object to int
+/tmp/param_bin; echo "rc=$?"   # rc=7 (3 + 4)
+
+# STILL OPEN (native-codegen struct spread, see "SCOPE CORRECTION" above):
+env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH src/compiler_rust/target/release/simple \
+  native-build --entry scratch_key2/spread_repro.spl -o /tmp/spread_bin --backend llvm --clean
+/tmp/spread_bin; echo "rc=$?"   # currently rc=102 (should be 103) -- silent wrong-answer miscompile
 ```
+Regression test: `cargo test --release -p simple-compiler --lib
+paren_form_struct_spread_merges_base_fields_instead_of_as_int` (in
+`interpreter_call/core/class_instantiation.rs`).
 
 The original (pre-fix) HEAD failure, for reference:
 ```
