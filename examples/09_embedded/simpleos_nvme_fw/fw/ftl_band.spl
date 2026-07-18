@@ -243,6 +243,19 @@ impl BandAlloc:
             me.blk_valid[blk] = me.valid_counter_next(blk)
             me.blk_state[blk] = BLK_CLOSED
 
+    # Recovery: a block that holds NO live L2P page but whose NAND was never erased before
+    # the crash (its pages are still physically programmed) must NOT be left BLK_FREE — the
+    # allocator would hand it out and the erase-before-program NAND would reject the write,
+    # wrongly retiring a healthy block. Mark it CLOSED with zero valid pages so the normal
+    # gc_once()/reclaim_block() path erases it before it can be reused.
+    me rebuild_close_stale(blk: i64):
+        if not me.block_ready(blk):
+            return
+        if me.blk_state[blk] != BLK_FREE:
+            return
+        me.blk_valid[blk] = 0
+        me.blk_state[blk] = BLK_CLOSED
+
     # Recovery: retire a persistently-bad block so the allocator never selects it.
     me set_bad(blk: i64):
         if not me.block_ready(blk):

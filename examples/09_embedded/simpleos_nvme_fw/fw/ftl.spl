@@ -212,7 +212,10 @@ impl Ftl:
     #     (new_ppn == UNMAP) clear the entry. Records <= the last checkpoint are
     #     already durable in the L2P; replaying them is idempotent.
     #  2. Reconstruct the band valid bitmap from the now-authoritative L2P.
-    #  3. Re-apply persistently-retired blocks so the allocator skips them.
+    #  3. Re-apply persistently-retired blocks so the allocator skips them, and reclassify
+    #     any unreferenced-but-still-programmed block (fully stale, never GC'd before the
+    #     crash) as GC-eligible CLOSED so it is erased before reuse — leaving it FREE would
+    #     let the allocator reprogram an un-erased page and wrongly retire a healthy block.
     me recover():
         val n: i64 = me.journal.wal_len()
         var seq_floor: i64 = me.journal.ckpt_seq
@@ -241,6 +244,8 @@ impl Ftl:
         while blk < NUM_BLOCKS:
             if me.fil.block_bad(blk):
                 me.band.set_bad(blk)
+            elif me.band.block_state(blk) == BLK_FREE and me.fil.block_programmed(blk):
+                me.band.rebuild_close_stale(blk)
             blk = blk + 1
         me.band.rebuild_finalize()
 

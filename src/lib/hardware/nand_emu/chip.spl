@@ -1,0 +1,742 @@
+# ============================================================================
+# nand_emu — NeChip: the composed host-facing emulator
+# ============================================================================
+#
+# NeChip composes geometry + Vt array + metadata + command FSM + status + fault
+# state and exposes the host-facing pin API plus the test/introspection API.
+#
+# Timing is MODEL mode only in v1: "busy" is emulated by advancing an
+# emulated-ns counter by the datasheet-typical op time (tR / tPROG / tBERS /
+# tRST, doc §1.6) and then reporting READY immediately — there is no wall clock
+# and no lingering busy period between host calls. Mutating methods follow the
+# "return the object" rule — they return the updated NeChip and the caller must
+# reassign — except `data_out`, which streams a byte and must advance an internal
+# counter, so it is a `me` method that mutates self in place.
+#
+# Time units: `now_ns` and the per-page `last_prog_time` are NANOSECONDS. The
+# retention physics (physics.spl) treats its time delta as SECONDS, so this file
+# converts ns -> s at the physics boundary (ne_ns_per_s). Sub-second busy times
+# therefore contribute no retention, which is correct: a 200 µs program does not
+# age a page.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+#   §1.3 command set, §1.4 status, §1.5 ID, §1.6 timing, §3.1 Vt encoding,
+#   §3.4 lazy drift + materialize-on-program, §6 HW/SW interface,
+#   §7 firmware design, §8 scenarios, §9.4 public API.
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.{NeGeometry, NeProfile, NeChipState, NeStatus}
+use std.hardware.nand_emu.nand_types.{NeCellParams, NeOobPolicy, NeFault, NeFaultKind, NeOpKind}
+use std.hardware.nand_emu.nand_types.{NePageMeta, NeBlockMeta, NeSenseResult}
+use std.hardware.nand_emu.nand_types.{ne_default_cell_params, ne_default_status}
+use std.hardware.nand_emu.nand_types.{ne_page_meta_new, ne_block_meta_new}
+use std.hardware.nand_emu.nand_types.{ne_vref_default, ne_erased_byte, ne_vt_prog_mean}
+use std.hardware.nand_emu.nand_types.{ne_id_maker, ne_id_device, ne_id_3rd, ne_id_4th, ne_id_5th}
+use std.hardware.nand_emu.geometry.{ne_profile_geometry, ne_cell_index}
+use std.hardware.nand_emu.geometry.{ne_decode_address, ne_decode_address_erase}
+use std.hardware.nand_emu.geometry.{ne_col_effective, ne_row_effective, NeAddress}
+use std.hardware.nand_emu.vt_array.{ne_vt_array_new, ne_cell_seed}
+use std.hardware.nand_emu.vt_array.{ne_page_meta_get, ne_page_meta_set}
+use std.hardware.nand_emu.vt_array.{ne_block_meta_get, ne_block_meta_set}
+use std.hardware.nand_emu.physics.{ne_sense, ne_program_cell, ne_erase_cell}
+use std.hardware.nand_emu.physics.{ne_retention_delta, ne_disturb_delta}
+use std.hardware.nand_emu.cmd_fsm.{ne_fsm_ctx_new, ne_step_command, NeFsmStep, ne_on_address}
+use std.hardware.nand_emu.cmd_fsm.{ne_state_text, ne_state_addr_cmd, ne_state_addr_got, ne_page_nop_bump}
+use std.hardware.nand_emu.status.{ne_status_70, ne_status_f1, ne_status_7b}
+use std.hardware.nand_emu.fault.{ne_fault_none, ne_fault_forces_program_fail, ne_fault_forces_erase_fail}
+use std.hardware.nand_emu.badblock.{ne_factory_bad_map, ne_bad_marker_column}
+
+# ----------------------------------------------------------------------------
+# NeChip — the composed emulator state.
+# ----------------------------------------------------------------------------
+
+pub struct NeChip:
+    """The whole emulated NAND chip (doc §7). Composition, not inheritance.
+
+    geometry     — resolved shrink-profile geometry.
+    state        — command FSM state.
+    status       — decoded status flags (70h / F1h / 7Bh source).
+    cell_params  — Vt physics coefficients.
+    oob_policy   — out-of-window address behaviour.
+    chip_seed    — per-die seed (change => different physical die, same firmware).
+    now_ns       — emulated-ns clock; busy is modelled by advancing this.
+    vref_offset  — signed read-reference offset (read-retry support).
+    col_counter  — serial-access column counter (survives CE don't-care).
+    vt           — Vt byte array (empty until lazily allocated on first op).
+    page_metas   — per-page metadata array (empty until lazily allocated).
+    block_metas  — per-block metadata array (empty until lazily allocated).
+    last_fault   — the currently-armed fault injection descriptor.
+    page_buffer  — the page register: sensed data (read) or data-to-program (write).
+    cur_row      — the currently addressed row/page (survives across cmd/addr calls).
+    sel_status_reg — the currently selected status register (70h / F1h / 7Bh).
+    id_idx       — Read-ID output stream position (0..4, then repeats the last byte).
+    addr_buf     — address-cycle accumulator during an address-latch phase.
+    """
+    geometry: NeGeometry
+    state: NeChipState
+    status: NeStatus
+    cell_params: NeCellParams
+    oob_policy: NeOobPolicy
+    chip_seed: i64
+    now_ns: i64
+    vref_offset: i64
+    col_counter: i64
+    vt: [u8]
+    page_metas: [NePageMeta]
+    block_metas: [NeBlockMeta]
+    last_fault: NeFault
+    page_buffer: [u8]
+    cur_row: i64
+    sel_status_reg: i64
+    id_idx: i64
+    addr_buf: [i64]
+
+# ----------------------------------------------------------------------------
+# Construction (doc §9.4 attach/load_profile) — cheap: no Vt allocation here.
+# ----------------------------------------------------------------------------
+
+pub fn ne_chip_new(profile: NeProfile) -> NeChip:
+    """Construct an idle chip for a shrink profile (doc §9.4).
+
+    Geometry is resolved from the profile; the Vt array and metadata arrays are
+    left EMPTY here and allocated lazily on the first read/program/erase so that
+    construction is cheap. The chip is Idle, ready, write-enabled, with the
+    Appendix B default physics, the Alias OOB policy, and the 70h status register
+    selected (so read_status on a fresh chip returns the 70h byte, doc §1.4)."""
+    val geo = ne_profile_geometry(profile)
+    val empty_vt: [u8] = []
+    val empty_pm: [NePageMeta] = []
+    val empty_bm: [NeBlockMeta] = []
+    val empty_buf: [u8] = []
+    val empty_addr: [i64] = []
+    NeChip(
+        geometry: geo,
+        state: NeChipState.Idle,
+        status: ne_default_status(true),
+        cell_params: ne_default_cell_params(),
+        oob_policy: NeOobPolicy.Alias,
+        chip_seed: 0,
+        now_ns: 0,
+        vref_offset: 0,
+        col_counter: 0,
+        vt: empty_vt,
+        page_metas: empty_pm,
+        block_metas: empty_bm,
+        last_fault: ne_fault_none(),
+        page_buffer: empty_buf,
+        cur_row: 0,
+        sel_status_reg: 0x70,
+        id_idx: 0,
+        addr_buf: empty_addr)
+
+# ----------------------------------------------------------------------------
+# MODEL-mode busy times (doc §1.6 timing budget) — fn-returning-literal (ns).
+# ----------------------------------------------------------------------------
+
+pub fn ne_ns_per_s() -> i64: 1000000000     # 1 s = 1e9 ns
+fn ne_t_read_ns() -> i64: 25000             # tR   = 25 µs typ (cell -> register)
+fn ne_t_prog_ns() -> i64: 200000            # tPROG = 200 µs typ
+fn ne_t_erase_ns() -> i64: 1500000          # tBERS = 1.5 ms typ
+fn ne_t_reset_ns() -> i64: 5000             # tRST = 5 µs (read/idle path)
+
+# ----------------------------------------------------------------------------
+# Small local helpers (private to the chip composition).
+# ----------------------------------------------------------------------------
+
+fn ne_chip_clamp(x: i64) -> i64:
+    """Clamp an integer Vt code into the u8 domain [0, 255] (physics ne_clamp_code
+    is module-private, so the chip carries its own copy of the clamp)."""
+    if x < 0:
+        0
+    elif x > 255:
+        255
+    else:
+        x
+
+fn ne_block_of(row: i64, geo: NeGeometry) -> i64:
+    """The block containing a row (Appendix A layout: blocks of pages_per_block)."""
+    row / geo.pages_per_block
+
+fn ne_id_byte_at(idx: i64) -> i64:
+    """The Read-ID byte at stream position idx (doc §1.5: EC D3 10 A6 64). Positions
+    at or beyond the 5th byte repeat the last byte (0x64), matching a host that
+    over-reads the ID window."""
+    if idx <= 0:
+        ne_id_maker()
+    elif idx == 1:
+        ne_id_device()
+    elif idx == 2:
+        ne_id_3rd()
+    elif idx == 3:
+        ne_id_4th()
+    else:
+        ne_id_5th()
+
+fn ne_ff_page(geo: NeGeometry) -> [u8]:
+    """A page-sized buffer of FFh (erased). The page register is preset to FFh at
+    Page Program start (80h) so any column the host does not overwrite programs to
+    FF, i.e. is left erased (doc §7.2)."""
+    var b: [u8] = []
+    var i = 0
+    while i < geo.page_bytes:
+        b = b.push(ne_erased_byte() as u8)
+        i = i + 1
+    b
+
+fn ne_meta_seconds(m: NePageMeta) -> NePageMeta:
+    """A copy of a page meta with last_prog_time converted ns -> s, for handing to
+    the seconds-domain retention physics (see the file header on time units)."""
+    var mm = m
+    mm.last_prog_time = m.last_prog_time / ne_ns_per_s()
+    mm
+
+fn ne_spo_ispp_max(f: NeFault, row: i64, default_max: i64) -> i64:
+    """Effective ISPP pulse budget for a program of `row` under a possibly-armed
+    Sudden-Power-Off fault (doc §8 scenario 5). A SPO armed at pulse N aborts the
+    ISPP loop once `pulse >= N` (fault.ne_fault_aborts_pulse), i.e. exactly N-1
+    pulses complete; running ne_program_cell with ispp_max = N-1 reproduces the
+    same partial program while reusing the pure physics primitive (no per-pulse
+    hook needed). SPO at pulse 1 => 0 pulses => cells left where they are (erased),
+    so the page reads back NOT-programmed. Faults not targeting this program leave
+    the budget unchanged."""
+    if f.kind != NeFaultKind.SuddenPowerOff:
+        return default_max
+    if f.op != NeOpKind.Program:
+        return default_max
+    if f.target_row != -1 and f.target_row != row:
+        return default_max
+    val cap = f.at_pulse - 1
+    if cap < 0:
+        0
+    elif cap < default_max:
+        cap
+    else:
+        default_max
+
+# ----------------------------------------------------------------------------
+# Lazy allocation (doc §9.4: construction cheap, arrays on first op).
+# ----------------------------------------------------------------------------
+
+fn ne_chip_ensure_arrays(chip: NeChip) -> NeChip:
+    """Allocate the Vt array and per-page / per-block metadata on first touch.
+    A freshly-allocated Vt array is entirely in the erased distribution
+    (ne_vt_array_new), so a never-programmed page senses FFh — the same value an
+    unallocated (all-zero, sub-vref) array would sense, but now backed for
+    programming."""
+    var nc = chip
+    if nc.vt.len() == 0:
+        nc.vt = ne_vt_array_new(nc.geometry)
+    if nc.page_metas.len() == 0:
+        var pm: [NePageMeta] = []
+        var i = 0
+        while i < nc.geometry.total_pages:
+            pm = pm.push(ne_page_meta_new())
+            i = i + 1
+        nc.page_metas = pm
+    if nc.block_metas.len() == 0:
+        var bm: [NeBlockMeta] = []
+        var j = 0
+        while j < nc.geometry.blocks:
+            bm = bm.push(ne_block_meta_new())
+            j = j + 1
+        nc.block_metas = bm
+    nc
+
+# ----------------------------------------------------------------------------
+# Neighbor disturb counters (doc §3.2 / §3.4). Page-level counters; a neighbor
+# op is one counter increment, not an array sweep.
+# ----------------------------------------------------------------------------
+
+fn ne_chip_bump_disturb(chip: NeChip, row: i64, geo: NeGeometry, is_read: bool) -> NeChip:
+    """Bump the read-disturb (is_read) or program-disturb counter on the two page
+    neighbours (row-1, row+1) that share the block with `row` (doc §3.4). Cells
+    outside the block are not disturbed by Vpass on this page."""
+    var nc = chip
+    val blk = ne_block_of(row, geo)
+    var nb = row - 1
+    while nb <= row + 1:
+        if nb != row and nb >= 0 and nb < geo.total_pages and ne_block_of(nb, geo) == blk:
+            var m = ne_page_meta_get(nc.page_metas, nb)
+            if is_read:
+                m.rd_count = m.rd_count + 1
+            else:
+                m.pd_count = m.pd_count + 1
+            nc.page_metas = ne_page_meta_set(nc.page_metas, nb, m)
+        nb = nb + 1
+    nc
+
+# ----------------------------------------------------------------------------
+# Materialize lazy drift into stored Vt (doc §3.4 materialize-on-program).
+# ----------------------------------------------------------------------------
+
+fn ne_chip_materialize_page(chip: NeChip, row: i64) -> NeChip:
+    """Fold the accumulated retention + disturb deltas of a page into its stored
+    Vt, then reset its disturb counters (doc §3.4: deltas are materialised only
+    when a page is programmed or erased). On a fresh page with no elapsed time and
+    no neighbour activity every delta is zero, so this is a no-op."""
+    var nc = ne_chip_ensure_arrays(chip)
+    val geo = nc.geometry
+    val meta = ne_page_meta_get(nc.page_metas, row)
+    val blk = ne_block_meta_get(nc.block_metas, ne_block_of(row, geo))
+    val now_s = nc.now_ns / ne_ns_per_s()
+    val last_s = meta.last_prog_time / ne_ns_per_s()
+    val dt_s: f64 = (now_s - last_s) as f64
+    var vt = nc.vt
+    var col = 0
+    while col < geo.page_bytes:
+        var bit = 0
+        while bit < 8:
+            val idx = ne_cell_index(row, col, bit, geo.page_bytes)
+            val stored = vt[idx] as i64
+            val ret = ne_retention_delta(dt_s, blk.pe_cycles, stored, nc.cell_params)
+            val dis = ne_disturb_delta(meta.rd_count, meta.pd_count, nc.cell_params)
+            vt[idx] = (ne_chip_clamp(stored + ret + dis)) as u8
+            bit = bit + 1
+        col = col + 1
+    nc.vt = vt
+    var m = meta
+    m.rd_count = 0
+    m.pd_count = 0
+    nc.page_metas = ne_page_meta_set(nc.page_metas, row, m)
+    nc
+
+# ----------------------------------------------------------------------------
+# Busy-op execution (MODEL mode): sense / program / erase run synchronously,
+# advancing now_ns by the datasheet-typical op time and reporting ready.
+# ----------------------------------------------------------------------------
+
+fn ne_chip_do_read(chip: NeChip) -> NeChip:
+    """30h/35h read: sense every cell of the addressed page through the physics
+    (lazy retention/disturb drift applied at read time, doc §7.3) into the page
+    buffer, bump read-disturb on the block neighbours, advance now_ns by tR, and
+    land in ReadOut with data available. col_counter (the serial-output start
+    column set by the address latch) is preserved so data_out streams from it."""
+    var nc = ne_chip_ensure_arrays(chip)
+    val geo = nc.geometry
+    val row = nc.cur_row
+    val vref = ne_vref_default() + nc.vref_offset
+    val meta = ne_meta_seconds(ne_page_meta_get(nc.page_metas, row))
+    val blk = ne_block_meta_get(nc.block_metas, ne_block_of(row, geo))
+    val now_s = nc.now_ns / ne_ns_per_s()
+    val vtlocal = nc.vt
+    var buf: [u8] = []
+    var col = 0
+    while col < geo.page_bytes:
+        var bval = 0
+        var bit = 0
+        while bit < 8:
+            val idx = ne_cell_index(row, col, bit, geo.page_bytes)
+            val stored = vtlocal[idx] as i64
+            val sr = ne_sense(stored, meta, blk, nc.cell_params, vref, now_s)
+            if sr.bit:
+                bval = bval | (1 << bit)
+            bit = bit + 1
+        buf = buf.push(bval as u8)
+        col = col + 1
+    nc.page_buffer = buf
+    nc = ne_chip_bump_disturb(nc, row, geo, true)
+    nc.now_ns = nc.now_ns + ne_t_read_ns()
+    nc.state = NeChipState.ReadOut
+    nc
+
+fn ne_chip_do_program(chip: NeChip) -> NeChip:
+    """10h program: materialise pending drift first (doc §3.4), then ISPP-program
+    the page buffer into the addressed page's Vt (doc §7.3). Programming from the
+    current stored Vt naturally ANDs data into an unerased page (a 0 cannot be
+    turned back into a 1). An armed SPO fault caps the ISPP budget (partial
+    program); an armed ProgramFail fault sets the status fail bit. Updates the page
+    Nop / last-program-time / programmed flag and bumps program-disturb on the
+    neighbours. Advances now_ns by tPROG and returns to Idle."""
+    var nc = ne_chip_ensure_arrays(chip)
+    val geo = nc.geometry
+    val row = nc.cur_row
+    nc = ne_chip_materialize_page(nc, row)
+    val prog_fail = ne_fault_forces_program_fail(nc.last_fault, row)
+    val spo_here = (nc.last_fault.kind == NeFaultKind.SuddenPowerOff)
+    var params = nc.cell_params
+    params.ispp_max = ne_spo_ispp_max(nc.last_fault, row, nc.cell_params.ispp_max)
+    var vt = nc.vt
+    var col = 0
+    while col < geo.page_bytes:
+        var dbyte = ne_erased_byte()
+        if col < nc.page_buffer.len():
+            dbyte = nc.page_buffer[col] as i64
+        var bit = 0
+        while bit < 8:
+            val target_bit = ((dbyte >> bit) & 1) == 1
+            val idx = ne_cell_index(row, col, bit, geo.page_bytes)
+            val stored = vt[idx] as i64
+            val seed = ne_cell_seed(row, col, bit, nc.chip_seed)
+            val newv = ne_program_cell(stored, target_bit, params, seed)
+            vt[idx] = (newv & 0xFF) as u8
+            bit = bit + 1
+        col = col + 1
+    nc.vt = vt
+    var meta = ne_page_meta_get(nc.page_metas, row)
+    meta = ne_page_nop_bump(meta)
+    meta.last_prog_time = nc.now_ns
+    meta.flags = meta.flags | 1
+    nc.page_metas = ne_page_meta_set(nc.page_metas, row, meta)
+    nc = ne_chip_bump_disturb(nc, row, geo, false)
+    if prog_fail:
+        nc.status.pass = false
+    else:
+        nc.status.pass = true
+    # One-shot faults: consume after the program they targeted so a later program
+    # is not silently re-aborted / re-failed.
+    if prog_fail or (spo_here and nc.last_fault.op == NeOpKind.Program):
+        nc.last_fault = ne_fault_none()
+    nc.now_ns = nc.now_ns + ne_t_prog_ns()
+    nc.state = NeChipState.Idle
+    nc
+
+fn ne_chip_do_erase(chip: NeChip) -> NeChip:
+    """D0h erase: reset every cell of the addressed block into the erased
+    distribution (doc §7.3), widening with wear via the block's pe_cycles, then
+    increment pe_cycles and reset the block's page metas. An armed EraseFail fault
+    leaves the block intact and sets the status fail bit (block retire, doc §8
+    scenario 8). Advances now_ns by tBERS and returns to Idle."""
+    var nc = ne_chip_ensure_arrays(chip)
+    val geo = nc.geometry
+    val row = nc.cur_row
+    val blk_idx = ne_block_of(row, geo)
+    if ne_fault_forces_erase_fail(nc.last_fault, blk_idx):
+        nc.status.pass = false
+        nc.last_fault = ne_fault_none()
+        nc.now_ns = nc.now_ns + ne_t_erase_ns()
+        nc.state = NeChipState.Idle
+        return nc
+    var blk = ne_block_meta_get(nc.block_metas, blk_idx)
+    val pe = blk.pe_cycles
+    val first_page = blk_idx * geo.pages_per_block
+    var vt = nc.vt
+    var p = 0
+    while p < geo.pages_per_block:
+        val prow = first_page + p
+        var col = 0
+        while col < geo.page_bytes:
+            var bit = 0
+            while bit < 8:
+                val idx = ne_cell_index(prow, col, bit, geo.page_bytes)
+                val stored = vt[idx] as i64
+                val seed = ne_cell_seed(prow, col, bit, nc.chip_seed)
+                val newv = ne_erase_cell(stored, nc.cell_params, pe, seed)
+                vt[idx] = (newv & 0xFF) as u8
+                bit = bit + 1
+            col = col + 1
+        nc.page_metas = ne_page_meta_set(nc.page_metas, prow, ne_page_meta_new())
+        p = p + 1
+    nc.vt = vt
+    blk.pe_cycles = blk.pe_cycles + 1
+    blk.last_erase_time = nc.now_ns
+    nc.block_metas = ne_block_meta_set(nc.block_metas, blk_idx, blk)
+    nc.status.pass = true
+    nc.now_ns = nc.now_ns + ne_t_erase_ns()
+    nc.state = NeChipState.Idle
+    nc
+
+fn ne_chip_run_busy(chip: NeChip) -> NeChip:
+    """If the last command drove the FSM into a busy op, execute it synchronously
+    (MODEL mode). Non-busy states pass through unchanged."""
+    val stext = ne_state_text(chip.state)
+    if stext == "read_busy":
+        ne_chip_do_read(chip)
+    elif stext == "prog_busy":
+        ne_chip_do_program(chip)
+    elif stext == "erase_busy":
+        ne_chip_do_erase(chip)
+    else:
+        chip
+
+# ----------------------------------------------------------------------------
+# Per-command bookkeeping the pure FSM leaves to the "data-buffer layer".
+# ----------------------------------------------------------------------------
+
+fn ne_chip_post_command(chip: NeChip, byte: i64, prev: NeChipState) -> NeChip:
+    """Buffer / address-accumulator bookkeeping that the pure command FSM
+    (cmd_fsm.spl) deliberately leaves to the data-buffer layer (doc §7.2):
+      - 00h/60h/05h begin an address phase => clear the address accumulator;
+      - 80h Page Program preloads the page register to FFh (unwritten columns
+        stay erased) and clears the accumulator;
+      - 85h from Idle begins Copy-Back Program: clear the accumulator but KEEP the
+        page buffer (it holds the source page sensed by the preceding 35h read);
+      - 85h during a load phase is Random Data Input (a column re-address): clear
+        the accumulator to collect the 2 column bytes, and — if this is a copy-back
+        (CopyLoad) — a sub-sector random input invalidates the on-chip EDC
+        (7Bh I/O2 = 0, doc §7.2 last rule / §8 scenario 13);
+      - 90h Read ID resets the ID output stream position."""
+    var nc = chip
+    if byte == 0x00 or byte == 0x60 or byte == 0x05:
+        nc.addr_buf = []
+        return nc
+    if byte == 0x80:
+        nc.addr_buf = []
+        nc.page_buffer = ne_ff_page(nc.geometry)
+        return nc
+    if byte == 0x85:
+        nc.addr_buf = []
+        val ptext = ne_state_text(prev)
+        if ptext == "copy_load":
+            nc.status.edc_valid = false
+        return nc
+    if byte == 0x90:
+        nc.id_idx = 0
+        return nc
+    nc
+
+fn ne_chip_addr_complete(chip: NeChip, ns: NeChipState) -> NeChip:
+    """Decode the latched address once an address phase completes and set cur_row /
+    col_counter (doc §1.2 cycle map, §4 shrink decode):
+      - read confirms hold AddrLatch(00h, 5): decode the full 5-cycle address;
+      - program / copy-back advance to ProgLoad / CopyLoad on the 5th cycle;
+      - erase advances to EraseSetup on its 3rd (row-only) cycle;
+      - the random-out column (05h) holds AddrLatch(05h, 2): decode the 2 column
+        cycles into a new serial-output column pointer."""
+    var nc = chip
+    val geo = nc.geometry
+    val stext = ne_state_text(ns)
+    if stext == "prog_load" or stext == "copy_load":
+        if nc.addr_buf.len() >= 5:
+            val a = ne_decode_address(nc.addr_buf[0], nc.addr_buf[1], nc.addr_buf[2], nc.addr_buf[3], nc.addr_buf[4])
+            nc.cur_row = ne_row_effective(a.row, geo, nc.oob_policy)
+            nc.col_counter = ne_col_effective(a.col, geo)
+            nc.addr_buf = []
+        return nc
+    if stext == "erase_setup":
+        if nc.addr_buf.len() >= 3:
+            val a = ne_decode_address_erase(nc.addr_buf[0], nc.addr_buf[1], nc.addr_buf[2])
+            nc.cur_row = ne_row_effective(a.row, geo, nc.oob_policy)
+            nc.addr_buf = []
+        return nc
+    if stext == "addr_latch":
+        val c = ne_state_addr_cmd(ns)
+        val g = ne_state_addr_got(ns)
+        if c == 0x00 and g == 5 and nc.addr_buf.len() >= 5:
+            val a = ne_decode_address(nc.addr_buf[0], nc.addr_buf[1], nc.addr_buf[2], nc.addr_buf[3], nc.addr_buf[4])
+            nc.cur_row = ne_row_effective(a.row, geo, nc.oob_policy)
+            nc.col_counter = ne_col_effective(a.col, geo)
+            nc.addr_buf = []
+        elif c == 0x05 and g == 2 and nc.addr_buf.len() >= 2:
+            val col = (nc.addr_buf[0] & 0xFF) | ((nc.addr_buf[1] & 0x1F) << 8)
+            nc.col_counter = ne_col_effective(col, geo)
+            nc.addr_buf = []
+        return nc
+    nc
+
+# ----------------------------------------------------------------------------
+# Host-facing pin API (doc §6, §7).
+# ----------------------------------------------------------------------------
+
+impl NeChip:
+    fn cmd(byte: i64) -> NeChip:
+        """Drive a command byte (CLE latch, doc §7.2). Reset (FFh) always works and
+        restores the post-reset status (C0h WP-high / 40h WP-low, doc §1.4).
+        Otherwise the pure FSM computes the next state and the data-buffer layer
+        does the buffer / busy bookkeeping; any command that begins a busy op runs
+        it synchronously (MODEL mode). Returns the updated chip (return-the-object)."""
+        var nc = self
+        val prev = nc.state
+        if byte == 0xFF:
+            nc.state = NeChipState.Idle
+            nc.status = ne_default_status(nc.status.wp_enabled)
+            nc.sel_status_reg = 0x70
+            nc.id_idx = 0
+            nc.addr_buf = []
+            nc.now_ns = nc.now_ns + ne_t_reset_ns()
+            return nc
+        val ctx = ne_fsm_ctx_new(nc.status.wp_enabled)
+        val step = ne_step_command(nc.state, byte, ctx)
+        nc.state = step.state
+        if step.ctx.status_reg != 0:
+            nc.sel_status_reg = step.ctx.status_reg
+        nc = ne_chip_post_command(nc, byte, prev)
+        nc = ne_chip_run_busy(nc)
+        nc
+
+    fn addr(byte: i64) -> NeChip:
+        """Drive an address byte (ALE latch, doc §1.2). During Read ID the single
+        sub-address byte is absorbed (stays IdOut). During a program/copy-back load
+        phase two address bytes are a Random Data Input column re-address (they move
+        the column pointer). Otherwise the byte advances the address latch and, once
+        the phase completes, decodes cur_row / col_counter. Returns the updated chip."""
+        var nc = self
+        val prev = nc.state
+        val ptext = ne_state_text(prev)
+        if ptext == "id_out":
+            return nc
+        if ptext == "prog_load" or ptext == "copy_load":
+            nc.addr_buf = nc.addr_buf.push(byte)
+            if nc.addr_buf.len() >= 2:
+                val col = (nc.addr_buf[0] & 0xFF) | ((nc.addr_buf[1] & 0x1F) << 8)
+                nc.col_counter = ne_col_effective(col, nc.geometry)
+                nc.addr_buf = []
+            return nc
+        val ctx = ne_fsm_ctx_new(nc.status.wp_enabled)
+        val ns = ne_on_address(prev, byte, ctx)
+        nc.state = ns
+        nc.addr_buf = nc.addr_buf.push(byte)
+        nc = ne_chip_addr_complete(nc, ns)
+        nc
+
+    fn data_in(byte: i64) -> NeChip:
+        """Drive a data byte into the page buffer at the current column, advancing
+        the column counter (doc §7.2). Legal only in a program / copy-back load
+        phase; a data latch elsewhere is ignored at this layer (the FSM records the
+        sequence violation). Returns the updated chip."""
+        var nc = self
+        val stext = ne_state_text(nc.state)
+        if stext == "prog_load" or stext == "copy_load":
+            if nc.col_counter >= 0 and nc.col_counter < nc.page_buffer.len():
+                var buf = nc.page_buffer
+                buf[nc.col_counter] = (byte & 0xFF) as u8
+                nc.page_buffer = buf
+                nc.col_counter = nc.col_counter + 1
+        nc
+
+    me data_out() -> i64:
+        """Read the next serial-output byte, advancing the column counter (doc §5.1
+        output pre-fetch). In ReadOut it streams the sensed page buffer from the
+        current column; in IdOut it streams the 5 ID bytes then repeats the last;
+        anywhere else the bus idles high (FFh). Mutates self in place (a `me`
+        method) because the streaming counter must persist across calls."""
+        val stext = ne_state_text(self.state)
+        if stext == "read_out":
+            if self.col_counter >= 0 and self.col_counter < self.page_buffer.len():
+                val b = self.page_buffer[self.col_counter] as i64
+                self.col_counter = self.col_counter + 1
+                b
+            else:
+                ne_erased_byte()
+        elif stext == "id_out":
+            val b = ne_id_byte_at(self.id_idx)
+            self.id_idx = self.id_idx + 1
+            b
+        else:
+            ne_erased_byte()
+
+    fn read_status() -> i64:
+        """Return the current status byte for the selected register (doc §1.4):
+        70h (chip P/F + ready + WP), F1h (adds plane P/F), or 7Bh (adds EDC error +
+        EDC validity). MODEL mode completes ops synchronously, so the ready bit is
+        set except transiently within a single cmd() call."""
+        if self.sel_status_reg == 0xF1:
+            ne_status_f1(self.status)
+        elif self.sel_status_reg == 0x7B:
+            ne_status_7b(self.status)
+        else:
+            ne_status_70(self.status)
+
+    # -- test / introspection API (doc §9.4) --------------------------------
+
+    fn advance_time_s(seconds: f64) -> NeChip:
+        """Advance the emulated clock by `seconds` (retention/disturb driver,
+        doc §3.4). now_ns is nanoseconds, so this adds seconds * 1e9. The drift is
+        applied lazily at the next sense / materialised at the next program.
+        Returns the updated chip."""
+        var nc = self
+        nc.now_ns = nc.now_ns + ((seconds * (ne_ns_per_s() as f64)) as i64)
+        nc
+
+    fn inject(f: NeFault) -> NeChip:
+        """Arm a fault-injection descriptor (doc §8). A TimeAdvance fault is applied
+        immediately (its ns are added to the clock); SPO / ProgramFail / EraseFail
+        are latched and consumed by the next matching program/erase. Returns the
+        updated chip."""
+        var nc = self
+        nc.last_fault = f
+        if f.kind == NeFaultKind.TimeAdvance:
+            nc.now_ns = nc.now_ns + f.arg_ns
+        nc
+
+    fn vt_histogram(page: i64) -> [i64]:
+        """Return the 256-bin stored-Vt distribution for a page — the observability
+        payoff impossible on real silicon (doc §9.4). Bin i counts cells whose
+        stored Vt code == i. A half-programmed page shows two lobes: an erased lobe
+        near the erase mean and a programmed lobe at/above the program-verify level."""
+        val nc = ne_chip_ensure_arrays(self)
+        val geo = nc.geometry
+        val vtlocal = nc.vt
+        var hist: [i64] = []
+        var i = 0
+        while i < 256:
+            hist = hist.push(0)
+            i = i + 1
+        var col = 0
+        while col < geo.page_bytes:
+            var bit = 0
+            while bit < 8:
+                val idx = ne_cell_index(page, col, bit, geo.page_bytes)
+                val code = vtlocal[idx] as i64
+                hist[code] = hist[code] + 1
+                bit = bit + 1
+            col = col + 1
+        hist
+
+    fn read_margin(page: i64) -> i64:
+        """Return the read margin of a page: the gap (in Vt codes) between the top
+        of the erased lobe and the bottom of the programmed lobe (doc §9.4 "valley
+        width between the two lobes"). Positive when the two distributions are
+        cleanly separated; 0 when the page has only one lobe (all erased or all
+        programmed). The split is the default read reference (128): erased cells sit
+        below it, programmed cells at/above it."""
+        val hist = self.vt_histogram(page)
+        val split = ne_vref_default()
+        var hi_erased = -1
+        var lo_prog = -1
+        var code = 0
+        while code < 256:
+            if hist[code] > 0:
+                if code < split:
+                    hi_erased = code
+                elif lo_prog == -1:
+                    lo_prog = code
+            code = code + 1
+        if hi_erased == -1 or lo_prog == -1:
+            0
+        else:
+            lo_prog - hi_erased
+
+    fn set_vref_offset(offset: i64) -> NeChip:
+        """Set the signed read-reference offset for read-retry (doc §3.2 / §7.4).
+        Applied at sense time: vref = 128 + offset. Returns the updated chip."""
+        var nc = self
+        nc.vref_offset = offset
+        nc
+
+    fn set_wp(enabled: bool) -> NeChip:
+        """Drive the write-protect pin (doc §1.4 / §7.2). WP low (enabled = false)
+        silently refuses program/erase and reads status bit 7 = 0. Modelled as a
+        pin because the byte-level host API has no dedicated WP command. Returns the
+        updated chip."""
+        var nc = self
+        nc.status.wp_enabled = enabled
+        nc
+
+    fn set_factory_bad_blocks(count: i64, seed: i64) -> NeChip:
+        """Stamp a deterministic factory bad-block map (doc §9.4 API, §8 scenario 9).
+        `count` blocks are chosen from `seed` via badblock.ne_factory_bad_map (block
+        0 is never selected), and each factory-bad block gets a non-FFh marker at the
+        bad-block marker column of pages 0 and 1 (doc §8: "non-FFh at column 4,096 of
+        page 0/1"). The marker cells are set directly into the programmed
+        distribution (a factory state, not a host ISPP program), so they sense 0 and
+        read a non-FFh byte; a good block reads FFh there. Returns the updated chip."""
+        var nc = ne_chip_ensure_arrays(self)
+        val geo = nc.geometry
+        val bad = ne_factory_bad_map(geo, count, seed)
+        val mcol = ne_bad_marker_column(geo)
+        var vt = nc.vt
+        var blk = 0
+        while blk < geo.blocks:
+            if bad[blk] and mcol < geo.page_bytes:
+                var pg = 0
+                while pg < 2 and pg < geo.pages_per_block:
+                    val row = blk * geo.pages_per_block + pg
+                    var bit = 0
+                    while bit < 8:
+                        val idx = ne_cell_index(row, mcol, bit, geo.page_bytes)
+                        vt[idx] = ne_vt_prog_mean() as u8
+                        bit = bit + 1
+                    pg = pg + 1
+            blk = blk + 1
+        nc.vt = vt
+        nc

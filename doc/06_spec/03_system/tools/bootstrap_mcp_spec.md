@@ -1,18 +1,18 @@
-# Bootstrap MCP Deployed Layout Specification
+# Bootstrap MCP Deployment Sanity Specification
 
-> Verify that bootstrap deployment leaves executable MCP/LSP release artifacts
-> and executable `bin/` launchers. Protocol behavior belongs to the canonical
-> command-line handshake spec and fresh native smoke checker.
+> Verify that bootstrap deployment leaves admitted MCP/LSP release artifacts,
+> matching integrity sidecars, and working `bin/` launchers.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 ## Scope
 
 This manual mirrors
-`test/03_system/tools/bootstrap_mcp_spec.spl`. It covers deployed file layout
-only. It does not duplicate MCP framing, handshake, or feature-call behavior.
+`test/03_system/tools/bootstrap_mcp_spec.spl`. It covers deployed layout,
+artifact integrity, the MCP native probe, and one bounded LSP initialize.
+It does not duplicate full feature-call behavior.
 
 The executable protocol owners are:
 
@@ -27,8 +27,11 @@ The executable protocol owners are:
 |-------------|-----------|
 | MCP release artifact | `bin/release/<triple>/simple_mcp_server` exists and is executable |
 | LSP release artifact | `bin/release/<triple>/simple_lsp_mcp_server` exists and is executable |
+| Integrity admission | Both release artifacts have matching `.sha256` sidecars |
 | MCP launcher | `bin/simple_mcp_server` exists and is executable |
 | LSP launcher | `bin/simple_lsp_mcp_server` exists and is executable |
+| MCP startup | `bin/simple_mcp_server --probe` reports `probe ok` |
+| LSP startup | A bounded `initialize` returns a correlated result |
 
 Missing artifacts fail the scenarios. There are no environment skips,
 placeholder passes, source fallbacks, or masked process failures.
@@ -46,6 +49,11 @@ require `test -x` to return exit code `0`.
 
 Resolve the host platform triple, require the release artifact to exist, then
 require `test -x` to return exit code `0`.
+
+#### native MCP binaries have matching integrity sidecars
+
+Require each sibling `.sha256` file to exist and equal the executable's
+computed SHA-256 digest.
 
 ### Bootstrap MCP — deployed launchers
 
@@ -65,6 +73,17 @@ Require `test -x bin/simple_mcp_server` to return exit code `0`.
 
 Require `test -x bin/simple_lsp_mcp_server` to return exit code `0`.
 
+#### deployed MCP launcher passes its native startup probe
+
+Run the deployed MCP wrapper with `--probe`, require exit code `0`, and require
+the native server's `probe ok` marker.
+
+#### deployed LSP MCP launcher completes initialize
+
+Send one JSON-RPC `initialize` request through the deployed LSP wrapper with a
+10-second `timeout`, `gtimeout`, or Perl alarm bound. Fail when no bound is
+available. Require exit code `0` and a correlated `bootstrap-lsp-probe` result.
+
 ## Protocol Evidence
 
 Every bootstrap route that reaches the full server-producing Stage 5 deletes
@@ -80,5 +99,5 @@ malformed frames, JSON-RPC errors, and MCP `isError` results fail closed.
 - Requirement: `doc/02_requirements/app/build/bootstrap.md`
 - Handshake guide: `doc/07_guide/tooling/mcp_handshake_regression.md`
 
-Manual synchronized on 2026-07-15. Regenerate with the pure-Simple SPipe
-docgen after a fresh self-hosted CLI is available.
+Manual synchronized on 2026-07-18. Regenerate with the pure-Simple SPipe
+docgen after the fresh self-hosted MCP artifacts are deployed.

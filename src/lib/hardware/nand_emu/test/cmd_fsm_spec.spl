@@ -1,0 +1,474 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Command FSM spec (single-plane v1 command matrix)
+# ============================================================================
+#
+# A command-matrix table walk over the NeChipState sequencer (cmd_fsm.spl).
+# Every legal sequence in the single-plane v1 set reaches its documented state;
+# every illegal sequence produces the exact NeViolationKind and drops to
+# Undefined where the datasheet says so; and FFh reset always lands Idle,
+# including from Undefined / ProgBusy / EraseBusy.
+#
+# All oracles are absolute, traced to
+# doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §1.3 (command
+# set), §6.2 (event ring), §7.2 (command FSM) — never self-comparison. States
+# and violations are asserted through the ne_*_text label helpers so the checks
+# stay absolute-value, not enum self-equality.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.{NeChipState, NeViolationKind, NeEventKind, ne_page_meta_new}
+use hardware.nand_emu.cmd_fsm.{
+    NeFsmCtx,
+    ne_fsm_ctx_new, ne_on_command, ne_on_address, ne_on_ready,
+    ne_step_command, ne_step_data, ne_data_latch_legal,
+    ne_reject, ne_classify_violation,
+    ne_check_page_order, ne_check_nop, ne_program_violation_kind_text,
+    ne_page_nop_bump, ne_page_nop_reset,
+    ne_record_event, ne_record_violation,
+    ne_state_text, ne_state_addr_cmd, ne_state_addr_got, ne_state_status_reg,
+    ne_violation_kind_text, ne_violation_kind_ord, ne_cmd_is_unsupported
+}
+
+# ----------------------------------------------------------------------------
+# Sequence helpers — pure state drivers (return the next NeChipState).
+# ----------------------------------------------------------------------------
+
+fn latch(st: NeChipState, ctx: NeFsmCtx, n: i64) -> NeChipState:
+    """Feed `n` address cycles (value is irrelevant to the sequencer — only the
+    count matters, doc §1.2)."""
+    var s = st
+    var i = 0
+    while i < n:
+        s = ne_on_address(s, 0, ctx)
+        i = i + 1
+    s
+
+fn prog_load(wp: bool) -> NeChipState:
+    """Drive Idle -> 80h -> 5 address cycles -> ProgLoad."""
+    val c = ne_fsm_ctx_new(wp)
+    val a = ne_on_command(NeChipState.Idle, 0x80, c)
+    latch(a, c, 5)
+
+fn erase_setup(wp: bool) -> NeChipState:
+    """Drive Idle -> 60h -> 3 address cycles -> EraseSetup."""
+    val c = ne_fsm_ctx_new(wp)
+    val a = ne_on_command(NeChipState.Idle, 0x60, c)
+    latch(a, c, 3)
+
+fn read_out() -> NeChipState:
+    """Drive Idle -> 00h -> 5 addr -> 30h -> ReadBusy -> (ready) -> ReadOut."""
+    val c = ne_fsm_ctx_new(true)
+    val a = ne_on_command(NeChipState.Idle, 0x00, c)
+    val a5 = latch(a, c, 5)
+    val rb = ne_on_command(a5, 0x30, c)
+    ne_on_ready(rb)
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # Read: 00h -> AddrLatch (5 cyc) -> 30h ReadBusy; 00h..35h copy-back read.
+    # ------------------------------------------------------------------
+    describe("Read command sequence"):
+        it("latches a read command into the address phase"):
+            """doc §1.3 / §7.2: 00h from Idle enters the 5-cycle address latch
+            carrying command 00h with zero cycles seen so far."""
+            val c = ne_fsm_ctx_new(true)
+            val a = ne_on_command(NeChipState.Idle, 0x00, c)
+            expect(ne_state_text(a)).to_equal("addr_latch")
+            expect(ne_state_addr_cmd(a)).to_equal(0x00)
+            expect(ne_state_addr_got(a)).to_equal(0)
+
+        it("confirms a read into ReadBusy after five address cycles"):
+            """doc §1.3: Read is 00h + 5 address cycles + 30h. The 30h confirm
+            once the full address is latched drives the chip busy (ReadBusy)."""
+            val c = ne_fsm_ctx_new(true)
+            val a = ne_on_command(NeChipState.Idle, 0x00, c)
+            val a5 = latch(a, c, 5)
+            expect(ne_state_addr_got(a5)).to_equal(5)
+            val rb = ne_on_command(a5, 0x30, c)
+            expect(ne_state_text(rb)).to_equal("read_busy")
+
+        it("confirms a read-for-copy-back into ReadBusy with 35h"):
+            """doc §1.3: Read for Copy-Back is 00h..35h — the 35h confirm also
+            reads the page into the buffer (ReadBusy), differing only in the
+            copy-back intent tracked downstream."""
+            val c = ne_fsm_ctx_new(true)
+            val a = ne_on_command(NeChipState.Idle, 0x00, c)
+            val a5 = latch(a, c, 5)
+            val rb = ne_on_command(a5, 0x35, c)
+            expect(ne_state_text(rb)).to_equal("read_busy")
+
+    # ------------------------------------------------------------------
+    # Program: 80h -> AddrLatch (5 cyc) -> ProgLoad -> 10h ProgBusy.
+    # Copy-back program: 85h..10h. Random data input: 85h in ProgLoad.
+    # ------------------------------------------------------------------
+    describe("Program command sequence"):
+        it("moves to the data-load phase after the program address"):
+            """doc §1.3 / §7.2: Page Program is 80h + 5 address cycles, after
+            which the sequencer waits in ProgLoad for data then the 10h
+            confirm."""
+            expect(ne_state_text(prog_load(true))).to_equal("prog_load")
+
+        it("confirms a program into ProgBusy with 10h"):
+            """doc §1.3: 10h after the data load commits the page program and
+            drives the chip busy (ProgBusy)."""
+            val c = ne_fsm_ctx_new(true)
+            val pb = ne_on_command(prog_load(true), 0x10, c)
+            expect(ne_state_text(pb)).to_equal("prog_busy")
+
+        it("moves a copy-back program to the copy-load phase then ProgBusy"):
+            """doc §1.3: Copy-Back Program is 85h + address + 10h. The address
+            phase ends in CopyLoad, and 10h commits it as a program (ProgBusy)."""
+            val c = ne_fsm_ctx_new(true)
+            val a = ne_on_command(NeChipState.Idle, 0x85, c)
+            val cl = latch(a, c, 5)
+            expect(ne_state_text(cl)).to_equal("copy_load")
+            val pb = ne_on_command(cl, 0x10, c)
+            expect(ne_state_text(pb)).to_equal("prog_busy")
+
+        it("keeps the load phase across a random-data-input 85h"):
+            """doc §1.3 / §7.2: Random Data Input (85h) during a program load
+            re-addresses the column and keeps loading — the sequencer stays in
+            ProgLoad rather than starting a new operation."""
+            val c = ne_fsm_ctx_new(true)
+            val ri = ne_on_command(prog_load(true), 0x85, c)
+            expect(ne_state_text(ri)).to_equal("prog_load")
+
+    # ------------------------------------------------------------------
+    # Erase: 60h -> 3 address cycles -> EraseSetup -> D0h EraseBusy.
+    # ------------------------------------------------------------------
+    describe("Erase command sequence"):
+        it("collects the 3-cycle row address into EraseSetup"):
+            """doc §1.2 / §1.3: Block Erase uses only the 3 row-address cycles
+            (cyc3-5); after them the sequencer waits in EraseSetup for D0h."""
+            expect(ne_state_text(erase_setup(true))).to_equal("erase_setup")
+
+        it("confirms an erase into EraseBusy with D0h"):
+            """doc §1.3: D0h confirms Block Erase and drives the chip busy
+            (EraseBusy)."""
+            val c = ne_fsm_ctx_new(true)
+            val eb = ne_on_command(erase_setup(true), 0xD0, c)
+            expect(ne_state_text(eb)).to_equal("erase_busy")
+
+    # ------------------------------------------------------------------
+    # Status / ID reads: 70h / F1h / 7Bh -> StatusOut(reg); 90h -> IdOut.
+    # ------------------------------------------------------------------
+    describe("Status and ID commands"):
+        it("selects the 70h status register"):
+            """doc §1.3 / §1.4: 70h enters StatusOut selecting the 70h register."""
+            val c = ne_fsm_ctx_new(true)
+            val s = ne_on_command(NeChipState.Idle, 0x70, c)
+            expect(ne_state_text(s)).to_equal("status_out")
+            expect(ne_state_status_reg(s)).to_equal(0x70)
+
+        it("selects the F1h and 7Bh status registers"):
+            """doc §1.4: F1h is the two-plane status register and 7Bh the
+            copy-back EDC status register; each selects its own StatusOut."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_state_status_reg(ne_on_command(NeChipState.Idle, 0xF1, c))).to_equal(0xF1)
+            expect(ne_state_status_reg(ne_on_command(NeChipState.Idle, 0x7B, c))).to_equal(0x7B)
+
+        it("enters IdOut on 90h"):
+            """doc §1.5: 90h (+addr 00h) reads the 5 ID bytes; the sequencer
+            enters IdOut to serialize them."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_state_text(ne_on_command(NeChipState.Idle, 0x90, c))).to_equal("id_out")
+
+    # ------------------------------------------------------------------
+    # Address cycle counting (doc §1.2): 5 for read/program, 3 for erase.
+    # ------------------------------------------------------------------
+    describe("Address cycle counting"):
+        it("counts exactly five cycles for a read/program address"):
+            """doc §1.2: the full address is 5 cycles. Each ne_on_address latches
+            one cycle; the count reaches 5 and holds for a read confirm."""
+            val c = ne_fsm_ctx_new(true)
+            val a = ne_on_command(NeChipState.Idle, 0x00, c)
+            expect(ne_state_addr_got(ne_on_address(a, 0, c))).to_equal(1)
+            expect(ne_state_addr_got(latch(a, c, 5))).to_equal(5)
+
+        it("counts three cycles for an erase address"):
+            """doc §1.2: Block Erase latches only the 3 row-address cycles, after
+            which the sequencer leaves the address phase for EraseSetup."""
+            val c = ne_fsm_ctx_new(true)
+            val a = ne_on_command(NeChipState.Idle, 0x60, c)
+            expect(ne_state_addr_got(latch(a, c, 2))).to_equal(2)
+            expect(ne_state_text(latch(a, c, 3))).to_equal("erase_setup")
+
+    # ------------------------------------------------------------------
+    # Busy completion (R/B ready edge) and random data output.
+    # ------------------------------------------------------------------
+    describe("Busy completion and random data output"):
+        it("moves ReadBusy to ReadOut when the read completes"):
+            """doc §1.6 tR: when the read busy time elapses the R/B line goes
+            ready and the page is available for output (ReadOut)."""
+            expect(ne_state_text(ne_on_ready(NeChipState.ReadBusy))).to_equal("read_out")
+
+        it("returns ProgBusy and EraseBusy to Idle when the op completes"):
+            """doc §1.6 tPROG / tBERS: a completed program or erase returns the
+            chip to the idle, ready state."""
+            expect(ne_state_text(ne_on_ready(NeChipState.ProgBusy))).to_equal("idle")
+            expect(ne_state_text(ne_on_ready(NeChipState.EraseBusy))).to_equal("idle")
+
+        it("resumes output through a 05h..E0h random data out"):
+            """doc §1.3: Random Data Output is 05h + a 2-cycle column address +
+            E0h, which repositions the serial output and returns to ReadOut."""
+            val c = ne_fsm_ctx_new(true)
+            val ro = read_out()
+            expect(ne_state_text(ro)).to_equal("read_out")
+            val rc = ne_on_command(ro, 0x05, c)
+            expect(ne_state_addr_cmd(rc)).to_equal(0x05)
+            val rc2 = latch(rc, c, 2)
+            expect(ne_state_addr_got(rc2)).to_equal(2)
+            expect(ne_state_text(ne_on_command(rc2, 0xE0, c))).to_equal("read_out")
+
+    # ------------------------------------------------------------------
+    # Reset (FFh) — works from ANY state, including busy, and escapes Undefined.
+    # ------------------------------------------------------------------
+    describe("Reset from any state"):
+        it("resets to Idle from Undefined"):
+            """doc §7.2: only FFh escapes Undefined — every other command in
+            Undefined stays there. FFh always lands Idle."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_state_text(ne_on_command(NeChipState.Undefined, 0xFF, c))).to_equal("idle")
+
+        it("keeps a non-FFh command trapped in Undefined"):
+            """doc §7.2: the flip side of "only FFh escapes" — a 00h read command
+            issued in Undefined does not recover; the FSM stays Undefined until a
+            reset arrives."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_state_text(ne_on_command(NeChipState.Undefined, 0x00, c))).to_equal("undefined")
+
+        it("resets to Idle from ProgBusy and clears busy"):
+            """doc §1.3 / §7.2: Reset is legal during busy (tRST). From ProgBusy
+            it aborts the program, returns Idle, and drops the busy flag."""
+            var c = ne_fsm_ctx_new(true)
+            c.busy = true
+            val step = ne_step_command(NeChipState.ProgBusy, 0xFF, c)
+            expect(ne_state_text(step.state)).to_equal("idle")
+            expect(step.ctx.busy).to_equal(false)
+
+        it("resets to Idle from EraseBusy and clears busy"):
+            """doc §1.3 / §7.2: Reset during an erase busy (tRST erase = 500 µs)
+            aborts and returns Idle, ready."""
+            var c = ne_fsm_ctx_new(true)
+            c.busy = true
+            val step = ne_step_command(NeChipState.EraseBusy, 0xFF, c)
+            expect(ne_state_text(step.state)).to_equal("idle")
+            expect(step.ctx.busy).to_equal(false)
+
+    # ------------------------------------------------------------------
+    # Command-during-busy legality gate (doc §7.2): only 70h/F1h/7Bh/FFh legal.
+    # ------------------------------------------------------------------
+    describe("Command-during-busy legality"):
+        it("rejects a read command issued during erase busy"):
+            """doc §7.2: a non-status command while busy is a CmdDuringBusy
+            violation and drops the FSM to Undefined."""
+            val c = ne_fsm_ctx_new(true)
+            val eb = ne_step_command(erase_setup(true), 0xD0, c)
+            expect(ne_state_text(eb.state)).to_equal("erase_busy")
+            expect(eb.ctx.busy).to_equal(true)
+            val dur = ne_step_command(eb.state, 0x00, eb.ctx)
+            expect(ne_state_text(dur.state)).to_equal("undefined")
+            expect(dur.ctx.violation_count).to_equal(1)
+            expect(ne_violation_kind_text(dur.ctx.last_violation.kind)).to_equal("cmd_during_busy")
+
+        it("allows a 70h status read during busy without leaving the busy op"):
+            """doc §7.2: Read Status is legal during busy — it selects the
+            register and keeps the running operation (still EraseBusy), raising
+            no violation."""
+            val c = ne_fsm_ctx_new(true)
+            val eb = ne_step_command(erase_setup(true), 0xD0, c)
+            val st = ne_step_command(eb.state, 0x70, eb.ctx)
+            expect(ne_state_text(st.state)).to_equal("erase_busy")
+            expect(st.ctx.busy).to_equal(true)
+            expect(st.ctx.violation_count).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Illegal command sequences -> exact violation kind + Undefined.
+    # ------------------------------------------------------------------
+    describe("Illegal command sequences"):
+        it("flags an erase confirm with no erase setup as IllegalLatch"):
+            """doc §7.2: D0h without a preceding 60h has no valid transition —
+            the FSM logs an illegal-sequence violation and drops to Undefined
+            rather than guessing an erase."""
+            val c = ne_fsm_ctx_new(true)
+            val d = ne_step_command(NeChipState.Idle, 0xD0, c)
+            expect(ne_state_text(d.state)).to_equal("undefined")
+            expect(ne_violation_kind_text(d.ctx.last_violation.kind)).to_equal("illegal_latch")
+
+        it("accepts a data latch during the program load phase"):
+            """doc §7.2: data input is legal in ProgLoad — the byte accumulates
+            in the page buffer and the sequencer holds the load state with no
+            violation."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_data_latch_legal(prog_load(true))).to_equal(true)
+            val d = ne_step_data(prog_load(true), c)
+            expect(ne_state_text(d.state)).to_equal("prog_load")
+            expect(d.ctx.violation_count).to_equal(0)
+
+        it("flags a data latch in Idle as IllegalLatch"):
+            """doc §7.2: a data-input latch with no program in progress (Idle) is
+            an illegal sequence — IllegalLatch, dropping to Undefined."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_data_latch_legal(NeChipState.Idle)).to_equal(false)
+            val d = ne_step_data(NeChipState.Idle, c)
+            expect(ne_state_text(d.state)).to_equal("undefined")
+            expect(ne_violation_kind_text(d.ctx.last_violation.kind)).to_equal("illegal_latch")
+
+    # ------------------------------------------------------------------
+    # Write-ordering rules (doc §7.2): LSB->MSB page order + Nop <= 4.
+    # ------------------------------------------------------------------
+    describe("Write-ordering rules"):
+        it("accepts an ascending page order and the first program of a block"):
+            """doc §7.2: pages must be programmed LSB -> MSB. Page 0 of a fresh
+            block (last = -1) and any strictly higher page are forward steps."""
+            expect(ne_check_page_order(0, -1)).to_equal(true)
+            expect(ne_check_page_order(6, 5)).to_equal(true)
+            expect(ne_program_violation_kind_text(6, 5, 0)).to_equal("ok")
+
+        it("flags a regress to a lower page as RandomPageProgram"):
+            """doc §7.2: programming page 5 then page 2 regresses the page
+            pointer — a RandomPageProgram violation (real chips corrupt)."""
+            expect(ne_check_page_order(2, 5)).to_equal(false)
+            expect(ne_program_violation_kind_text(2, 5, 0)).to_equal("random_page_program")
+
+        it("allows up to four partial programs then flags the fifth"):
+            """doc §7.2: Nop <= 4 partial programs per page. The 4th partial
+            (nop_count 3) is still legal; the 5th (nop_count 4) is NopExceeded."""
+            expect(ne_check_nop(3)).to_equal(true)
+            expect(ne_check_nop(4)).to_equal(false)
+            expect(ne_program_violation_kind_text(5, 5, 3)).to_equal("ok")
+            expect(ne_program_violation_kind_text(5, 5, 4)).to_equal("nop_exceeded")
+
+        it("counts partial programs through NePageMeta.nop_count and resets on erase"):
+            """doc §7.2: nop_count on the page metadata is the partial-program
+            counter. A fresh page starts at 0; each partial program bumps it;
+            four are within budget and the fifth is out; an erase resets it to 0
+            so the erased page's budget is fresh again."""
+            var m = ne_page_meta_new()
+            expect(m.nop_count).to_equal(0)
+            expect(ne_check_nop(m.nop_count)).to_equal(true)
+            m = ne_page_nop_bump(m)
+            m = ne_page_nop_bump(m)
+            m = ne_page_nop_bump(m)
+            expect(m.nop_count).to_equal(3)
+            expect(ne_check_nop(m.nop_count)).to_equal(true)
+            m = ne_page_nop_bump(m)
+            expect(m.nop_count).to_equal(4)
+            expect(ne_check_nop(m.nop_count)).to_equal(false)
+            m = ne_page_nop_reset(m)
+            expect(m.nop_count).to_equal(0)
+            expect(ne_check_nop(m.nop_count)).to_equal(true)
+
+    # ------------------------------------------------------------------
+    # Two-plane / 2 KB commands are recognized-but-unsupported, never faked.
+    # ------------------------------------------------------------------
+    describe("Unsupported two-plane and 2KB commands"):
+        it("recognizes the two-plane program markers 11h and 81h"):
+            """doc §1.3: 11h and 81h only appear in two-plane / 2 KB sequences;
+            v1 recognizes them as unsupported rather than mis-decoding them."""
+            expect(ne_cmd_is_unsupported(0x11)).to_equal(true)
+            expect(ne_cmd_is_unsupported(0x81)).to_equal(true)
+            expect(ne_cmd_is_unsupported(0x80)).to_equal(false)
+
+        it("logs UnsupportedCommand for an 11h two-plane program marker"):
+            """doc §1.3 / architecture note: an unsupported command is logged as
+            an UnsupportedCommand violation and drops to Undefined — never faked
+            into a success."""
+            val c = ne_fsm_ctx_new(true)
+            val d = ne_step_command(NeChipState.Idle, 0x11, c)
+            expect(ne_state_text(d.state)).to_equal("undefined")
+            expect(ne_violation_kind_text(d.ctx.last_violation.kind)).to_equal("unsupported_command")
+
+        it("logs UnsupportedCommand for a 60h..60h two-plane erase"):
+            """doc §1.3: a second 60h during an erase address phase is the
+            two-plane erase/read marker — recognized as unsupported (single-plane
+            v1)."""
+            val c = ne_fsm_ctx_new(true)
+            val e0 = ne_on_command(NeChipState.Idle, 0x60, c)
+            val d = ne_step_command(e0, 0x60, c)
+            expect(ne_state_text(d.state)).to_equal("undefined")
+            expect(ne_violation_kind_text(d.ctx.last_violation.kind)).to_equal("unsupported_command")
+
+    # ------------------------------------------------------------------
+    # Write-protect: WP low silently refuses program/erase (status bit 7 = 0).
+    # ------------------------------------------------------------------
+    describe("Write-protect refusal"):
+        it("silently refuses a program when WP is low"):
+            """doc §7.2: with WP low the 10h program confirm is silently refused —
+            no busy, no violation — and the write-protect refusal is latched so
+            status bit 7 reports protected."""
+            val c = ne_fsm_ctx_new(false)
+            val step = ne_step_command(prog_load(false), 0x10, c)
+            expect(ne_state_text(step.state)).to_equal("idle")
+            expect(step.ctx.busy).to_equal(false)
+            expect(step.ctx.wp_refused).to_equal(true)
+            expect(step.ctx.violation_count).to_equal(0)
+
+        it("silently refuses an erase when WP is low"):
+            """doc §7.2: with WP low the D0h erase confirm is silently refused —
+            the block is untouched and no busy op starts."""
+            val c = ne_fsm_ctx_new(false)
+            val step = ne_step_command(erase_setup(false), 0xD0, c)
+            expect(ne_state_text(step.state)).to_equal("idle")
+            expect(step.ctx.wp_refused).to_equal(true)
+            expect(step.ctx.violation_count).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Event ring (doc §6.2): bounded, overflow is a hard flag, not a drop.
+    # ------------------------------------------------------------------
+    describe("Event ring emission and overflow"):
+        it("pushes a StateChange event on a legal transition"):
+            """doc §6.2: every accepted command pushes one event; a legal
+            transition raises no violation."""
+            val c = ne_fsm_ctx_new(true)
+            val step = ne_step_command(NeChipState.Idle, 0x00, c)
+            expect(step.ctx.events.len()).to_equal(1)
+            expect(step.ctx.violation_count).to_equal(0)
+
+        it("records a page-order violation into the ring with its kind"):
+            """doc §6.2 / §7.2: a RandomPageProgram detected by the write-order
+            classifier is pushed to the ring with its kind latched in
+            last_violation."""
+            val c = ne_fsm_ctx_new(true)
+            expect(ne_program_violation_kind_text(2, 5, 0)).to_equal("random_page_program")
+            val c1 = ne_record_violation(c, NeViolationKind.RandomPageProgram, 0x10)
+            expect(c1.violation_count).to_equal(1)
+            expect(c1.events.len()).to_equal(1)
+            expect(ne_violation_kind_text(c1.last_violation.kind)).to_equal("random_page_program")
+
+        it("latches ring_overflow instead of dropping events silently"):
+            """doc §6.2: the ring is bounded (64 entries); the 65th push latches
+            ring_overflow (EVT_LOST) rather than silently losing a command
+            event — a lost event would desync the firmware FSM from the pins."""
+            var c = ne_fsm_ctx_new(true)
+            var i = 0
+            while i < 70:
+                c = ne_record_event(c, NeEventKind.StateChange, 0, 0)
+                i = i + 1
+            expect(c.events.len()).to_equal(64)
+            expect(c.ring_overflow).to_equal(true)
+
+    # ------------------------------------------------------------------
+    # Violation classification helpers (ne_reject / ne_classify_violation).
+    # ------------------------------------------------------------------
+    describe("Violation classification"):
+        it("rejects an out-of-sequence command as IllegalLatch"):
+            """doc §7.2: ne_reject builds the violation for an illegal (state,
+            cmd) pair — D0h in Idle classifies as IllegalLatch, carrying the
+            offending byte."""
+            val c = ne_fsm_ctx_new(true)
+            val v = ne_reject(NeChipState.Idle, 0xD0, c)
+            expect(ne_violation_kind_text(v.kind)).to_equal("illegal_latch")
+            expect(v.cmd).to_equal(0xD0)
+
+        it("classifies an unsupported marker with the UnsupportedCommand ordinal"):
+            """doc §6.2: the event-ring ordinal for UnsupportedCommand is 9
+            (nand_types declaration order), and ne_classify_violation maps 11h
+            to it."""
+            val c = ne_fsm_ctx_new(true)
+            val k = ne_classify_violation(NeChipState.Idle, 0x11, c)
+            expect(ne_violation_kind_ord(k)).to_equal(9)
+            expect(ne_violation_kind_text(k)).to_equal("unsupported_command")

@@ -6,7 +6,7 @@
 **Feature IDs:** REQ-MCP-CMD-002
 **Category:** Tooling
 **Difficulty:** 3/5
-**Status:** Draft
+**Status:** Implemented
 **Requirements:** doc/02_requirements/app/build/bootstrap.md
 **Plan:** doc/03_plan/sys_test/mcp_cmdline_handshake.md
 **Design:** N/A
@@ -31,7 +31,9 @@ own protocol and feature-call acceptance.
 ## Behavior
 
 - After bootstrap --deploy, both platform release binaries are executable
+- After bootstrap --deploy, both native binaries have matching integrity sidecars
 - After bootstrap --deploy, both bin/ launchers are executable wrappers
+- Both deployed launchers complete startup checks
 - The --no-mcp flag skips MCP server compilation entirely
 
 ## Related Specifications
@@ -46,7 +48,7 @@ own protocol and feature-call acceptance.
 # tag: system, slow
 
 use std.spec
-use std.io_runtime.{file_exists, process_run}
+use std.io_runtime.{file_exists, file_hash_sha256, file_read, process_run}
 
 # ============================================================================
 # Helpers
@@ -64,7 +66,7 @@ fn detect_platform() -> text:
     if os == "linux":
         return "{arch}-unknown-linux-gnu"
     elif os == "darwin":
-        return "{arch}-apple-darwin-macho"
+        return "{arch}-apple-darwin"
     "unknown"
 
 fn mcp_binary_path(name: text) -> text:
@@ -95,6 +97,13 @@ describe "Bootstrap MCP — binary existence":
         val (_, _, rc) = process_run("test", ["-x", path])
         expect(rc).to_equal(0)
 
+    it "native MCP binaries have matching integrity sidecars":
+        for name in ["simple_mcp_server", "simple_lsp_mcp_server"]:
+            val binary = mcp_binary_path(name)
+            val sidecar = binary + ".sha256"
+            expect(file_exists(sidecar)).to_equal(true)
+            expect(file_read(sidecar).trim()).to_equal(file_hash_sha256(binary))
+
 
 # ============================================================================
 # Test Group 2: Deployed launchers (AC-3)
@@ -121,3 +130,15 @@ describe "Bootstrap MCP — deployed launchers":
     it "bin/simple_lsp_mcp_server is executable":
         val (_, _, rc) = process_run("test", ["-x", "bin/simple_lsp_mcp_server"])
         expect(rc).to_equal(0)
+
+    it "deployed MCP launcher passes its native startup probe":
+        val (out, err, rc) = process_run("bin/simple_mcp_server", ["--probe"])
+        expect(rc).to_equal(0)
+        expect(out + err).to_contain("probe ok")
+
+    it "deployed LSP MCP launcher completes initialize":
+        val request = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-lsp-probe\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bootstrap\",\"version\":\"1\"}}}"
+        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; printf '%s\\n' '" + request + "' | $runner bin/simple_lsp_mcp_server"
+        val (out, err, rc) = process_run("sh", ["-c", command])
+        expect(rc).to_equal(0)
+        expect(out + err).to_contain("\"id\":\"bootstrap-lsp-probe\",\"result\":")

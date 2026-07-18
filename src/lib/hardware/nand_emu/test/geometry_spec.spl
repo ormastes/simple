@@ -1,0 +1,215 @@
+#![allow(primitive_api)]
+
+# @cover src/lib/hardware/nand_emu/geometry.spl 80%
+# @req REQ-NAND-EMU-GEOMETRY-001
+"""
+# NAND Emulator — Geometry (Address Latch + Shrink Decode)
+
+**Category:** Hardware / Emulation
+**Status:** Implemented
+**Design:** doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+
+## Overview
+
+`geometry.spl` reassembles the 5-cycle NAND address latch (doc §1.2) into a
+column + row pair, applies the address-shrink masks that let a small model
+stand in for the full 262,144-page device (doc §4), and computes the flat
+byte offset into the per-cell Vt array (Appendix A). Every oracle below is an
+absolute, hand-computed value traced to the datasheet cycle map or the
+shrink-profile table — never a self-comparison.
+"""
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.{NeProfile, NeOobPolicy}
+use hardware.nand_emu.geometry.{
+    ne_profile_geometry, ne_make_geometry, ne_decode_address,
+    ne_decode_address_erase, ne_col_effective, ne_row_effective,
+    ne_row_in_window, ne_cell_index
+}
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # 5-cycle address latch decode (doc §1.2)
+    # ------------------------------------------------------------------
+    describe("ne_decode_address"):
+        it("round-trips col 0x123 / row 0x1F through the exact cycle map"):
+            """doc §1.2: cyc1 = A0-A7 (col low byte), cyc2 bits 0-4 = A8-A12
+            (col high 5 bits), cyc3 = A13-A20 (row low byte), cyc4 = A21-A28
+            (row mid byte), cyc5 bits 0-1 = A29-A30 (row top 2 bits).
+
+            col = 0x123 (291) splits as cyc1 = 0x23, cyc2 = 0x01.
+            row = 0x1F  (31)  splits as cyc3 = 0x1F, cyc4 = 0x00, cyc5 = 0x00.
+            """
+            val addr = ne_decode_address(0x23, 0x01, 0x1F, 0x00, 0x00)
+            expect(addr.col).to_equal(0x123)
+            expect(addr.row).to_equal(0x1F)
+            expect(addr.cycles).to_equal(5)
+
+        it("decodes the S3 page-boundary column 4223 (last valid A0-A12 value)"):
+            """doc §1.1: column range is A0-A12, 0..4,223 for the real
+            (and S3-shaped) 4,224 B page. 4223 = 0x107F splits as
+            cyc1 = 0x7F, cyc2 = 0x10 (0x10 has only col bits 8-12 set,
+            i.e. bit 4 of cyc2 = A12)."""
+            val addr = ne_decode_address(0x7F, 0x10, 0x00, 0x00, 0x00)
+            expect(addr.col).to_equal(4223)
+            expect(addr.row).to_equal(0)
+
+        it("masks off don't-care 'L' bits above the documented field width"):
+            """doc §1.2: cyc2 bits 5-7 and cyc5 bits 2-7 are 'L' (low /
+            don't-care). Garbage in those bit positions must never leak
+            into col/row: cyc2 = 0xFF still yields only A8-A12 (0x1F) and
+            cyc5 = 0xFF still yields only A29-A30 (0x3)."""
+            val addr = ne_decode_address(0x00, 0xFF, 0x00, 0x00, 0xFF)
+            expect(addr.col).to_equal(0x1F00)
+            expect(addr.row).to_equal(0x30000)
+
+        it("decodes the 3-cycle erase variant from the row cycles only"):
+            """doc §1.2: 'Erase uses cyc3-5 only.' The Block Erase (60h)
+            command latches exactly the 3 bytes that would be cyc3/cyc4/cyc5
+            of a full address: row 0x30021 splits as cyc1' = 0x21,
+            cyc2' = 0x00, cyc3' = 0x03. No column cycles are sent."""
+            val addr = ne_decode_address_erase(0x21, 0x00, 0x03)
+            expect(addr.col).to_equal(0)
+            expect(addr.row).to_equal(0x30021)
+            expect(addr.cycles).to_equal(3)
+
+    # ------------------------------------------------------------------
+    # Address shrinking — column mask (doc §4)
+    # ------------------------------------------------------------------
+    describe("ne_col_effective"):
+        it("passes through S1's own column mask unchanged (boundary identity)"):
+            """doc §4: COL_MASK = page_bytes - 1. For S1 (528 B page) that is
+            527 (0x20F). A column value equal to the mask ANDs with itself,
+            so the last valid S1 column (527) maps to itself exactly."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(geo.col_mask).to_equal(527)
+            expect(ne_col_effective(527, geo)).to_equal(527)
+            expect(ne_col_effective(0, geo)).to_equal(0)
+
+        it("passes through the S3 page-boundary column 4223 unchanged"):
+            """doc §4.1: S3 uses the real 4,224 B page, so COL_MASK = 4223 —
+            the exact top of the real A0-A12 range. col & col_mask at the
+            boundary is an identity (4223 & 4223 = 4223)."""
+            val geo = ne_profile_geometry(NeProfile.S3)
+            expect(geo.col_mask).to_equal(4223)
+            expect(ne_col_effective(4223, geo)).to_equal(4223)
+
+        it("CHARACTERIZES: literal & does not fold like modulo, even in-range (known doc gap)"):
+            """doc §4 defines col_eff literally as `col & COL_MASK`. Because
+            page_bytes (528 for S1) is not a power of two, COL_MASK (527) is
+            not a contiguous low-bit mask, so `&` is NOT equivalent to
+            `col % page_bytes` — even for an in-range S1 column: 0x123 (291)
+            is well inside [0, 527], yet 291 & 527 = 3, hand-verified bit by
+            bit (0b100100011 & 0b1000001111 = 0b0000000011). This is the
+            doc's literal formula, faithfully reproduced; it is recorded as
+            a discrepancy for the doc owner (repo law: record, don't
+            silently normalize), NOT asserted as intended shrink-fold
+            behavior."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(ne_col_effective(0x123, geo)).to_equal(3)
+
+    # ------------------------------------------------------------------
+    # Address shrinking — row mask / OOB policy (doc §4)
+    # ------------------------------------------------------------------
+    describe("ne_row_effective / ne_row_in_window — S1 masks"):
+        it("resolves S1's row mask to 31 (32 backed pages)"):
+            """doc §4.1: S1 backs 4 pages/blk * 8 blocks = 32 pages, so
+            ROW_MASK = total_pages - 1 = 31."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(geo.row_mask).to_equal(31)
+            expect(geo.row_base).to_equal(0)
+
+        it("reports the last backed row (31) as inside the window"):
+            """31 & ~31 == 0 == ROW_BASE: row 31 is the top of the S1
+            window and must read as in-window."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(ne_row_in_window(31, geo)).to_equal(true)
+
+        it("reports the first row past the window (32) as out of window"):
+            """32 & ~31 == 32, which is != ROW_BASE (0): row 32 is the
+            first row past the 32-page S1 window."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(ne_row_in_window(32, geo)).to_equal(false)
+
+        it("ALIAS-wraps an out-of-window row into the backed window"):
+            """doc §4 ALIAS policy: 'wrap into the window.' Row 35 on the
+            32-page S1 window wraps to 35 & 31 = 3."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val row_eff = ne_row_effective(35, geo, NeOobPolicy.Alias)
+            expect(row_eff).to_equal(3)
+
+        it("ALIAS-wraps a full window multiple back to the top row"):
+            """Row 63 = 32 + 31 wraps to 63 & 31 = 31, the last in-window
+            row, under ALIAS."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val row_eff = ne_row_effective(63, geo, NeOobPolicy.Alias)
+            expect(row_eff).to_equal(31)
+
+        it("WINDOW policy passes an in-window row through unchanged"):
+            """doc §4 WINDOW policy backs only the window; an in-window row
+            (31) still resolves normally, identical to ALIAS for in-window
+            rows."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val row_eff = ne_row_effective(31, geo, NeOobPolicy.Window)
+            expect(row_eff).to_equal(31)
+
+        it("WINDOW policy signals -1 (unbacked) for an out-of-window row"):
+            """doc §4 WINDOW policy: 'only the window is backed; outside
+            reads FFh, status pass, no cell state.' geometry.spl has no
+            cell storage access, so it signals the unbacked condition with
+            -1 for the caller (vt_array / chip) to synthesize the FFh
+            read."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val row_eff = ne_row_effective(32, geo, NeOobPolicy.Window)
+            expect(row_eff).to_equal(-1)
+
+        it("TRAP policy also signals -1 for an out-of-window row"):
+            """doc §4 TRAP policy: 'raise an event; firmware decides.'
+            geometry.spl has no event-ring access (pure function), so it
+            reports the same -1 unbacked signal as WINDOW; the caller (with
+            NeEvent access) is responsible for raising the actual event."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val row_eff = ne_row_effective(32, geo, NeOobPolicy.Trap)
+            expect(row_eff).to_equal(-1)
+
+        it("TRAP policy passes an in-window row through unchanged"):
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val row_eff = ne_row_effective(0, geo, NeOobPolicy.Trap)
+            expect(row_eff).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Vt-array cell index (Appendix A)
+    # ------------------------------------------------------------------
+    describe("ne_cell_index"):
+        it("computes the exact flat offset for a hand-computed cell"):
+            """Appendix A: cell_index(row, col, bit) =
+            ((row * page_bytes) + col) * 8 + bit.
+            For row=5, col=10, bit=3, page_bytes=528 (S1):
+            ((5 * 528) + 10) * 8 + 3 = (2640 + 10) * 8 + 3
+                                      = 2650 * 8 + 3 = 21200 + 3 = 21203."""
+            val idx = ne_cell_index(5, 10, 3, 528)
+            expect(idx).to_equal(21203)
+
+        it("is monotonically increasing across bit, then column, then row"):
+            """Within one page, incrementing bit must never overtake the
+            next column's base index, and within one row, incrementing
+            column must never overtake the next row's base index — the
+            Vt array must be a strictly ordered, non-overlapping layout."""
+            val bit0 = ne_cell_index(0, 0, 0, 528)
+            val bit7 = ne_cell_index(0, 0, 7, 528)
+            val col1 = ne_cell_index(0, 1, 0, 528)
+            val row1 = ne_cell_index(1, 0, 0, 528)
+            expect(bit0).to_equal(0)
+            expect(bit7).to_equal(7)
+            expect(col1).to_equal(8)
+            expect(row1).to_equal(4224)
+            expect(bit7).to_be_less_than(col1)
+            expect(col1).to_be_less_than(row1)
+
+        it("spans exactly the S1 Vt array size across the last cell"):
+            """doc §4.1: S1 Vt RAM = page_bytes * 8 * pages = 528 * 8 * 32 =
+            135,168 bytes. The last cell (row=31, col=527, bit=7) must sit
+            at the last valid offset, 135,167."""
+            val idx = ne_cell_index(31, 527, 7, 528)
+            expect(idx).to_equal(135167)

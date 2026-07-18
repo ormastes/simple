@@ -1,0 +1,143 @@
+# ============================================================================
+# nand_emu — Geometry: profile tables, address latch, shrink decode
+# ============================================================================
+#
+# Owns the shrink-profile geometry table (doc §4.1), the 5-cycle address latch
+# decode (doc §1.2), the page-shaped column / row masks and OOB policy
+# (doc §4), and the Vt-array cell index (Appendix A).
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.{NeGeometry, NeProfile, NeOobPolicy}
+
+# ----------------------------------------------------------------------------
+# Profile table (doc §4.1) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_profile_geometry(profile: NeProfile) -> NeGeometry:
+    """Return the resolved geometry for a shrink profile (doc §4.1).
+
+    S1 nano  : 528 B page, 1 sector,  4 pages/blk,  8 blocks -> 32 pages.
+    S2 micro : 528 B page, 1 sector,  8 pages/blk, 32 blocks -> 256 pages.
+    S3 small : 4224 B page, 8 sectors, 8 pages/blk, 16 blocks -> 128 pages.
+
+    col_mask = page_bytes - 1, row_mask = total_pages - 1, row_base = 0
+    (doc §4 shrink decode).
+    """
+    match profile:
+        case S1:
+            ne_make_geometry(528, 1, 4, 8)
+        case S2:
+            ne_make_geometry(528, 1, 8, 32)
+        case S3:
+            ne_make_geometry(4224, 8, 8, 16)
+
+pub fn ne_make_geometry(page_bytes: i64, sectors_per_page: i64, pages_per_block: i64, blocks: i64) -> NeGeometry:
+    """Assemble an NeGeometry from primitive dimensions (doc §1.1 / §4)."""
+    val total_pages = pages_per_block * blocks
+    NeGeometry(
+        page_bytes: page_bytes,
+        sector_bytes: 528,
+        sectors_per_page: sectors_per_page,
+        pages_per_block: pages_per_block,
+        blocks: blocks,
+        total_pages: total_pages,
+        col_mask: page_bytes - 1,
+        row_mask: total_pages - 1,
+        row_base: 0)
+
+# ----------------------------------------------------------------------------
+# Vt-array cell index (Appendix A) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_cell_index(row: i64, col: i64, bit: i64, page_bytes: i64) -> i64:
+    """cell_index(row, col, bit) = ((row * page_bytes) + col) * 8 + bit.
+    Appendix A memory layout: one Vt byte per cell, laid out page-major,
+    column-minor, bit least-significant."""
+    ((row * page_bytes) + col) * 8 + bit
+
+# ----------------------------------------------------------------------------
+# 5-cycle address latch decode (doc §1.2) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub struct NeAddress:
+    """Decoded column + row address from the address latch (doc §1.2)."""
+    col: i64
+    row: i64
+    cycles: i64
+
+pub fn ne_decode_address(cyc1: i64, cyc2: i64, cyc3: i64, cyc4: i64, cyc5: i64) -> NeAddress:
+    """Reassemble col (A0-A12) and row (A13-A30) from the 5 address cycles per
+    the exact cycle map in doc §1.2:
+
+        cyc1: A0  A1  A2  A3  A4  A5  A6  A7        (col bits 0-7)
+        cyc2: A8  A9  A10 A11 A12 L   L   L          (col bits 8-12)
+        cyc3: A13 A14 A15 A16 A17 A18 A19 A20        (row bits 0-7)
+        cyc4: A21 A22 A23 A24 A25 A26 A27 A28        (row bits 8-15)
+        cyc5: A29 A30 L   L   L   L   L   L          (row bits 16-17)
+
+    Each cycle argument carries only its 8 latched I/O bits (0-255); the "L"
+    (low / don't-care) bits above the documented field width are masked off
+    here so garbage in unused upper bits of a cycle byte can never leak into
+    col/row.
+    """
+    val col = (cyc1 & 0xFF) | ((cyc2 & 0x1F) << 8)
+    val row = (cyc3 & 0xFF) | ((cyc4 & 0xFF) << 8) | ((cyc5 & 0x3) << 16)
+    NeAddress(col: col, row: row, cycles: 5)
+
+pub fn ne_decode_address_erase(cyc1: i64, cyc2: i64, cyc3: i64) -> NeAddress:
+    """Block Erase (60h) latches only 3 address cycles — the row cycles (doc
+    §1.2: 'Erase uses cyc3-5 only'). The 3 bytes here are exactly what would
+    be cyc3/cyc4/cyc5 of the full 5-cycle sequence (A13-A30); no column
+    cycles are sent, so col is 0 and cycles is 3."""
+    val row = (cyc1 & 0xFF) | ((cyc2 & 0xFF) << 8) | ((cyc3 & 0x3) << 16)
+    NeAddress(col: 0, row: row, cycles: 3)
+
+# ----------------------------------------------------------------------------
+# Address shrinking (doc §4) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_col_effective(col: i64, geo: NeGeometry) -> i64:
+    """col_eff = col & COL_MASK (doc §4, literal bitwise AND with
+    COL_MASK = page_bytes - 1), reproduced exactly as the doc's formula
+    specifies.
+
+    CAUTION (known doc discrepancy, not fixed here — see geometry_spec.spl
+    "characterizes" tests): page_bytes is not a power of two for any v1
+    profile (528 / 4224), so COL_MASK is not a contiguous low-bit mask.
+    `&` is then NOT equivalent to `col % page_bytes` even for IN-RANGE
+    columns, e.g. col=291 (< 528, a perfectly valid S1 column) gives
+    291 & 527 = 3, not 291. A true shrink-fold of full-device column
+    traffic into a narrower window would want `%`, not `&`. This function
+    stays literal-to-doc per repo law (fix at the spec/doc, not by
+    silently substituting a different operator); flagged as a blocker in
+    the geometry lane's task report."""
+    col & geo.col_mask
+
+pub fn ne_row_effective(row: i64, geo: NeGeometry, policy: NeOobPolicy) -> i64:
+    """row_eff = (row & ROW_MASK) | ROW_BASE, or aliased / windowed / trapped
+    per NeOobPolicy (doc §4):
+
+        Alias  — always wraps into the backed window (never OOB).
+        Window — in-window rows wrap normally; out-of-window rows are
+                 unbacked (caller must synthesize the FFh / no-state read).
+        Trap   — in-window rows wrap normally; out-of-window rows are
+                 unbacked (caller raises the NeEvent and decides the
+                 firmware-visible outcome; this pure function has no event
+                 ring access).
+
+    Returns -1 to signal a trapped/unbacked row (Window/Trap OOB case).
+    """
+    val wrapped = (row & geo.row_mask) | geo.row_base
+    if policy == NeOobPolicy.Alias:
+        return wrapped
+    if ne_row_in_window(row, geo):
+        return wrapped
+    return -1
+
+pub fn ne_row_in_window(row: i64, geo: NeGeometry) -> bool:
+    """True when (row & ~ROW_MASK) == ROW_BASE, i.e. the row is inside the
+    backed window (doc §4): clearing the low ROW_MASK bits of row leaves
+    exactly ROW_BASE."""
+    (row & ~geo.row_mask) == geo.row_base

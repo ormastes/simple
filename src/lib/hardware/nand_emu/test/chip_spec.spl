@@ -1,0 +1,423 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — NeChip pin-level round-trip spec
+# ============================================================================
+#
+# Absolute-oracle pin-level round trips against the composed emulator (chip.spl):
+# drive real CLE/ALE/data byte sequences (00/30 read, 80/10 program, 60/D0 erase,
+# 90 read-id, 05/E0 random out, 35+85/10 copy-back) and assert known values at
+# known points — never self-comparison. Every oracle is traced to
+# doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md:
+#   §1.3 command set, §1.4 status, §1.5 ID, §3.1 Vt encoding / erased = FFh,
+#   §3.4 lazy drift, §7.2/§7.3 firmware, §8 scenario 5 (SPO), §9.4 API.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.{NeProfile, NeFault, NeOpKind}
+use hardware.nand_emu.chip.{NeChip, ne_chip_new}
+use hardware.nand_emu.fault.ne_fault_spo
+
+# ----------------------------------------------------------------------------
+# Pin-sequence drivers (host-controller style; absolute cycle maps, doc §1.2).
+# ----------------------------------------------------------------------------
+
+fn drive_addr5(chip: NeChip, col: i64, row: i64) -> NeChip:
+    """Drive the 5-cycle read/program address (doc §1.2): 2 column cycles then
+    3 row cycles, masked to the documented field widths."""
+    var c = chip
+    c = c.addr(col & 0xFF)
+    c = c.addr((col >> 8) & 0x1F)
+    c = c.addr(row & 0xFF)
+    c = c.addr((row >> 8) & 0xFF)
+    c = c.addr((row >> 16) & 0x3)
+    c
+
+fn drive_addr_erase(chip: NeChip, row: i64) -> NeChip:
+    """Drive the 3-cycle block-erase (row-only) address (doc §1.2)."""
+    var c = chip
+    c = c.addr(row & 0xFF)
+    c = c.addr((row >> 8) & 0xFF)
+    c = c.addr((row >> 16) & 0x3)
+    c
+
+fn read_bytes(chip: NeChip, n: i64) -> [i64]:
+    """Stream n serial-output bytes from the chip's current output position."""
+    var c = chip
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out = out.push(c.data_out())
+        i = i + 1
+    out
+
+fn read_page_bytes(chip: NeChip, row: i64, start_col: i64, n: i64) -> [i64]:
+    """Full 00h/30h read: address the page, sense it, and stream n bytes from
+    start_col. Takes the chip by value (a read must not perturb the caller's
+    programmed state)."""
+    var c = chip
+    c = c.cmd(0x00)
+    c = drive_addr5(c, start_col, row)
+    c = c.cmd(0x30)
+    read_bytes(c, n)
+
+fn program_page(chip: NeChip, row: i64, start_col: i64, data: [i64]) -> NeChip:
+    """Full 80h/10h Page Program: address the page, load `data` into the page
+    register from start_col, and confirm. Returns the updated chip."""
+    var c = chip
+    c = c.cmd(0x80)
+    c = drive_addr5(c, start_col, row)
+    var i = 0
+    while i < data.len():
+        c = c.data_in(data[i])
+        i = i + 1
+    c = c.cmd(0x10)
+    c
+
+fn erase_block(chip: NeChip, row: i64) -> NeChip:
+    """Full 60h/D0h Block Erase of the block containing `row`. Returns the chip."""
+    var c = chip
+    c = c.cmd(0x60)
+    c = drive_addr_erase(c, row)
+    c = c.cmd(0xD0)
+    c
+
+fn read_id(chip: NeChip, n: i64) -> [i64]:
+    """Full 90h Read ID: command + 00h sub-address, then stream n ID bytes."""
+    var c = chip
+    c = c.cmd(0x90)
+    c = c.addr(0x00)
+    read_bytes(c, n)
+
+fn status_of(chip: NeChip, reg: i64) -> i64:
+    """Select a status register (70h/F1h/7Bh) and read it back (doc §1.4)."""
+    var c = chip
+    c = c.cmd(reg)
+    c.read_status()
+
+fn make_bytes(value: i64, n: i64) -> [i64]:
+    """A length-n array of a repeated byte value (page-buffer test fixtures)."""
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out = out.push(value)
+        i = i + 1
+    out
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # Fresh read (doc §3.1: erased cell senses 1 -> FFh)
+    # ------------------------------------------------------------------
+    describe("NeChip fresh read"):
+        it("reads FFh at every column of a never-programmed page"):
+            """doc §3.1: an erased cell senses logical 1, so a freshly-constructed
+            chip's page reads FFh everywhere before any programming."""
+            val chip = ne_chip_new(NeProfile.S1)
+            val bytes = read_page_bytes(chip, 0, 0, 16)
+            var i = 0
+            while i < 16:
+                expect(bytes[i]).to_equal(255)
+                i = i + 1
+
+    # ------------------------------------------------------------------
+    # Read ID (doc §1.5: EC D3 10 A6 64)
+    # ------------------------------------------------------------------
+    describe("NeChip Read ID"):
+        it("returns the exact 5 datasheet ID bytes then repeats the last"):
+            """doc §1.5: 90h + 00h -> EC D3 10 A6 64 (maker, device, 3rd, 4th, 5th).
+            A host that over-reads the ID window sees the 5th byte (64h) repeat."""
+            val chip = ne_chip_new(NeProfile.S1)
+            val id = read_id(chip, 6)
+            expect(id[0]).to_equal(0xEC)
+            expect(id[1]).to_equal(0xD3)
+            expect(id[2]).to_equal(0x10)
+            expect(id[3]).to_equal(0xA6)
+            expect(id[4]).to_equal(0x64)
+            expect(id[5]).to_equal(0x64)
+
+    # ------------------------------------------------------------------
+    # Program round trip (doc §7)
+    # ------------------------------------------------------------------
+    describe("NeChip program round trip"):
+        it("reads back a 16-byte pattern programmed into an erased page exactly"):
+            """doc §7: erase the block, Page Program a known 16-byte pattern, then
+            read it back through the sense path — every byte survives the round
+            trip. Bytes 00h (all programmed) and FFh (all erased) are the extremes."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            val pattern = [0xA5, 0x5A, 0xFF, 0x00, 0x12, 0x34, 0x56, 0x78,
+                           0x9A, 0xBC, 0xDE, 0xF0, 0x0F, 0x81, 0x18, 0xC3]
+            chip = program_page(chip, 0, 0, pattern)
+            val bytes = read_page_bytes(chip, 0, 0, 16)
+            var i = 0
+            while i < 16:
+                expect(bytes[i]).to_equal(pattern[i])
+                i = i + 1
+
+    # ------------------------------------------------------------------
+    # Program without erase ANDs (doc §7.2: 0 cannot become 1)
+    # ------------------------------------------------------------------
+    describe("NeChip program without erase"):
+        it("ANDs data into an unerased page (F0h then 0Fh reads 00h)"):
+            """doc §7.2: a cell already at 0 cannot be turned back to 1 without an
+            erase, so a second program without an intervening erase ANDs with the
+            existing data. F0h then 0Fh => F0h & 0Fh = 00h."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0xF0])
+            val mid = read_page_bytes(chip, 0, 0, 1)
+            expect(mid[0]).to_equal(0xF0)
+            chip = program_page(chip, 0, 0, [0x0F])
+            val bytes = read_page_bytes(chip, 0, 0, 1)
+            expect(bytes[0]).to_equal(0x00)
+
+    # ------------------------------------------------------------------
+    # Erase restores FFh (doc §3.1 / §7.3)
+    # ------------------------------------------------------------------
+    describe("NeChip erase"):
+        it("restores FFh after a page has been programmed to 00h"):
+            """doc §7.3: erase resets cells into the erased distribution regardless
+            of prior charge, so a page programmed to 00h reads FFh again after a
+            block erase."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0x00, 0x00, 0x00, 0x00])
+            val programmed = read_page_bytes(chip, 0, 0, 4)
+            expect(programmed[0]).to_equal(0x00)
+            chip = erase_block(chip, 0)
+            val bytes = read_page_bytes(chip, 0, 0, 4)
+            expect(bytes[0]).to_equal(255)
+            expect(bytes[1]).to_equal(255)
+            expect(bytes[2]).to_equal(255)
+            expect(bytes[3]).to_equal(255)
+
+    # ------------------------------------------------------------------
+    # Write-protect (doc §1.4 / §7.2)
+    # ------------------------------------------------------------------
+    describe("NeChip write protect"):
+        it("refuses a program when WP is low, leaving data intact and bit7 = 0"):
+            """doc §7.2: WP low silently refuses program/erase (status I/O7 = 0). A
+            program attempted with WP low must not change the page, and the 70h
+            status must read 40h (ready, pass, WP protected)."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0xC3])
+            val a = read_page_bytes(chip, 0, 0, 1)
+            expect(a[0]).to_equal(0xC3)
+            chip = chip.set_wp(false)
+            chip = program_page(chip, 0, 0, [0x3C])
+            val bytes = read_page_bytes(chip, 0, 0, 1)
+            expect(bytes[0]).to_equal(0xC3)
+            val st = status_of(chip, 0x70)
+            expect(st).to_equal(0x40)
+            expect(st & 0x80).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Sudden power-off during program (doc §8 scenario 5)
+    # ------------------------------------------------------------------
+    describe("NeChip SPO during program"):
+        it("leaves the page not-programmed on SPO at pulse 1 (reads FFh)"):
+            """doc §8 scenario 5: a sudden power-off aborts ISPP mid-pulse and
+            leaves cells where they are. SPO armed at pulse 1 completes zero pulses,
+            so target-0 cells stay erased: a 00h target reads back FFh (NOT the
+            programmed value). SPO is not a program failure, so status stays C0h
+            (ready, pass) — the partial program is detected by the readback/scan,
+            not by the status byte."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = chip.inject(ne_fault_spo(NeOpKind.Program, 1, 0))
+            chip = program_page(chip, 0, 0, [0x00])
+            val bytes = read_page_bytes(chip, 0, 0, 1)
+            expect(bytes[0]).to_equal(0xFF)
+            val st = status_of(chip, 0x70)
+            expect(st).to_equal(0xC0)
+
+    # ------------------------------------------------------------------
+    # Status register busy / ready bits (doc §1.4, §1.6 MODEL timing)
+    # ------------------------------------------------------------------
+    describe("NeChip read status"):
+        it("reports C0h (ready + WP + pass) on a fresh chip"):
+            """doc §1.4: after reset with WP high the 70h status reads C0h — I/O6
+            ready = 1, I/O7 WP = 1, I/O0 pass = 0."""
+            val chip = ne_chip_new(NeProfile.S1)
+            val st = status_of(chip, 0x70)
+            expect(st).to_equal(0xC0)
+            expect(st & 0x40).to_equal(0x40)
+
+        it("models busy time by advancing the emulated-ns clock across an op"):
+            """doc §1.6 / MODEL mode: busy is emulated by advancing an ns counter by
+            the datasheet-typical op time (here tBERS for an erase) and then
+            reporting ready immediately. The clock must advance past 0 across the
+            erase while the ready bit stays set."""
+            var chip = ne_chip_new(NeProfile.S1)
+            expect(chip.now_ns).to_equal(0)
+            chip = erase_block(chip, 0)
+            expect(chip.now_ns).to_be_greater_than(0)
+            val st = status_of(chip, 0x70)
+            expect(st & 0x40).to_equal(0x40)
+
+    # ------------------------------------------------------------------
+    # Vt histogram / read margin (doc §9.4 observability)
+    # ------------------------------------------------------------------
+    describe("NeChip vt_histogram"):
+        it("shows two lobes for a half-programmed page and a positive read margin"):
+            """doc §9.4: the 256-bin Vt histogram is the observability payoff
+            impossible on silicon. A page programmed with 55h (every byte 4 bits
+            erased, 4 programmed) shows an erased lobe near the erase mean (88) and a
+            programmed lobe at/above the program-verify level (148), with a positive
+            read margin (a clean valley) between them."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, make_bytes(0x55, 64))
+            val hist = chip.vt_histogram(0)
+            var erased_lobe = 0
+            var c = 60
+            while c < 120:
+                erased_lobe = erased_lobe + hist[c]
+                c = c + 1
+            var prog_lobe = 0
+            c = 140
+            while c < 210:
+                prog_lobe = prog_lobe + hist[c]
+                c = c + 1
+            expect(erased_lobe).to_be_greater_than(0)
+            expect(prog_lobe).to_be_greater_than(0)
+            expect(chip.read_margin(0)).to_be_greater_than(0)
+
+    # ------------------------------------------------------------------
+    # Random data output (doc §1.3: 05h / E0h)
+    # ------------------------------------------------------------------
+    describe("NeChip random data output"):
+        it("re-positions the output column with 05h/E0h"):
+            """doc §1.3: Random Data Output (05h + column + E0h) moves the serial
+            output pointer within the sensed page. After reading a known 4-byte
+            pattern from column 0, a 05h/E0h jump to column 2 outputs 33h."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0x11, 0x22, 0x33, 0x44])
+            var c = chip
+            c = c.cmd(0x00)
+            c = drive_addr5(c, 0, 0)
+            c = c.cmd(0x30)
+            expect(c.data_out()).to_equal(0x11)
+            c = c.cmd(0x05)
+            c = c.addr(2 & 0xFF)
+            c = c.addr((2 >> 8) & 0x1F)
+            c = c.cmd(0xE0)
+            expect(c.data_out()).to_equal(0x33)
+
+    # ------------------------------------------------------------------
+    # Copy-back (doc §1.3: 00h/35h read + 85h/10h program)
+    # ------------------------------------------------------------------
+    describe("NeChip copy-back"):
+        it("copies a page to another page via 35h read + 85h/10h program"):
+            """doc §1.3: Copy-Back reads a source page for copy-back (00h/35h) into
+            the page register, then programs it to a destination page (85h/10h)
+            without the data crossing the host bus. Page 0's DE AD BE EF appears at
+            page 1 after the copy-back."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0xDE, 0xAD, 0xBE, 0xEF])
+            var c = chip
+            c = c.cmd(0x00)
+            c = drive_addr5(c, 0, 0)
+            c = c.cmd(0x35)
+            c = c.cmd(0x85)
+            c = drive_addr5(c, 0, 1)
+            c = c.cmd(0x10)
+            val bytes = read_page_bytes(c, 1, 0, 4)
+            expect(bytes[0]).to_equal(0xDE)
+            expect(bytes[1]).to_equal(0xAD)
+            expect(bytes[2]).to_equal(0xBE)
+            expect(bytes[3]).to_equal(0xEF)
+
+    # ------------------------------------------------------------------
+    # Factory bad blocks (doc §8 scenario 9, §9.4 API)
+    # ------------------------------------------------------------------
+    describe("NeChip factory bad blocks"):
+        it("stamps a non-FFh marker at the bad-marker column of factory-bad blocks"):
+            """doc §8 scenario 9: factory-bad blocks carry a non-FFh marker at the
+            bad-block marker column of pages 0/1; good blocks (and block 0, always
+            valid) read FFh there. For (S1, count=3, seed=1) the map marks blocks
+            {3, 5, 6} — matching the badblock module's own oracle — so page 0 of
+            block 3 (row 12) reads non-FFh at column 512 while block 0 (row 0) and a
+            good block read FFh."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = chip.set_factory_bad_blocks(3, 1)
+            val bad3 = read_page_bytes(chip, 12, 512, 1)
+            expect(bad3[0]).to_equal(0x00)
+            val good0 = read_page_bytes(chip, 0, 512, 1)
+            expect(good0[0]).to_equal(255)
+            val good1 = read_page_bytes(chip, 4, 512, 1)
+            expect(good1[0]).to_equal(255)
+
+    # ------------------------------------------------------------------
+    # Read reference offset / read-retry (doc §3.2 / §7.4)
+    # ------------------------------------------------------------------
+    describe("NeChip read reference offset"):
+        it("re-senses programmed cells as erased when vref is raised above their Vt"):
+            """doc §3.2/§7.4 read-retry: sense compares effective Vt < vref.
+            Programmed cells sit near the program-verify level (~148); raising the
+            reference well above them (offset +40 => vref 168) makes them sense as
+            erased. A page programmed to 00h thus reads 00h at the default reference
+            and FFh at the shifted reference — the mechanism the DUT's read-retry
+            loop drives against."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0x00, 0x00])
+            val at_default = read_page_bytes(chip, 0, 0, 2)
+            expect(at_default[0]).to_equal(0x00)
+            expect(at_default[1]).to_equal(0x00)
+            chip = chip.set_vref_offset(40)
+            val at_high = read_page_bytes(chip, 0, 0, 2)
+            expect(at_high[0]).to_equal(255)
+            expect(at_high[1]).to_equal(255)
+
+    # ------------------------------------------------------------------
+    # Retention clock advance (doc §3.4 lazy drift; ns<->s conversion)
+    # ------------------------------------------------------------------
+    describe("NeChip retention time advance"):
+        it("preserves a freshly programmed page across a short retention interval"):
+            """doc §3.4: retention drift is applied lazily from the emulated clock.
+            A 1-second interval is far below the scale that moves a programmed cell,
+            so a page programmed to 00h still reads 00h after advance_time_s(1.0),
+            exercising the nanosecond<->second clock conversion and the lazy sense
+            path without a spurious bit flip. (Large-magnitude retention flips
+            require multi-decade time at high wear — the physics-lane scenario
+            territory, not a bounded pin round-trip.)"""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0x00, 0x00])
+            chip = chip.advance_time_s(1.0)
+            val bytes = read_page_bytes(chip, 0, 0, 2)
+            expect(bytes[0]).to_equal(0x00)
+            expect(bytes[1]).to_equal(0x00)
+
+    # ------------------------------------------------------------------
+    # Copy-back EDC invalidation (doc §7.2 last rule, §8 scenario 13)
+    # ------------------------------------------------------------------
+    describe("NeChip copy-back EDC invalidation"):
+        it("clears the 7Bh EDC validity bit on sub-sector random data input"):
+            """doc §7.2 last rule / §8 scenario 13: a random data input at
+            sub-sector granularity before a copy-back program corrupts the on-chip
+            EDC, so the emulator marks the 7Bh EDC validity bit (I/O2) invalid. After
+            a 35h copy-back read and an 85h random data input during the copy-back
+            load phase, 7Bh reads I/O2 = 0 (the DUT must then fall back to
+            read-modify-write)."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0x12, 0x34, 0x56, 0x78])
+            var c = chip
+            c = c.cmd(0x00)
+            c = drive_addr5(c, 0, 0)
+            c = c.cmd(0x35)
+            c = c.cmd(0x85)
+            c = drive_addr5(c, 0, 1)
+            c = c.cmd(0x85)
+            c = c.addr(1 & 0xFF)
+            c = c.addr((1 >> 8) & 0x1F)
+            c = c.data_in(0xAA)
+            c = c.cmd(0x10)
+            val st7b = status_of(c, 0x7B)
+            expect(st7b & 0x04).to_equal(0)

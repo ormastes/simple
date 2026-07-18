@@ -25,6 +25,7 @@ use ftl.*
 use power_thermal.*
 use dram.*
 use openssd_config.*
+use firmware.*
 
 # Result of dispatching one admin command. `post` is false only for an Async Event
 # Request held outstanding (its completion is posted later, when an event is raised).
@@ -475,6 +476,13 @@ impl NvmeController:
             me.qset.cq_post(cqid, cpl)
             n = n + 1
             guard = guard + 1
+            # Mirror firmware.spl's service_tick: at most one background GC step per
+            # iteration whenever free space drops below the low watermark. Without this,
+            # this multi-queue path never drains GC (unlike the sibling Hil/firmware.spl
+            # path), so the FTL's GC reserve exhausts and every write cliffs into
+            # SC_NS_NOT_READY forever.
+            if me.ftl.free_blocks() < GC_LOW_WATERMARK:
+                me.ftl.gc_once()
             qid = me.qset.next_pending_sq()
         n
 
