@@ -303,6 +303,21 @@ pub(super) fn eval_literal_expr(
             if let Some(val) = global_val {
                 return Ok(Some(val));
             }
+            // Implicit-self field read: inside a `me`/`fn` method, a bare-name
+            // identifier that matches a declared field of `self` resolves to
+            // `self.<name>`. This mirrors the implicit-self field WRITE (see
+            // `node_exec.rs`'s `Expr::Identifier` assignment-target arm) so
+            // read-modify-write patterns like `count = count + 1` work. Only
+            // consulted after locals/functions/classes/enums/globals/units all
+            // miss, so it can only turn today's "variable not found" errors
+            // into successes. See bug
+            // interp_implicit_self_field_assignment_silent_noop_2026-07-17.
+            if let Some(Value::Object { fields, .. }) = env.get("self") {
+                if let Some(val) = fields.get(name) {
+                    return Ok(Some(val.clone()));
+                }
+            }
+
             // Last-chance unit lookup: a bare lowercase identifier like
             // `kmph` may refer to a registered unit symbol used as a type
             // annotation. If the catalog entry exists and a matching
