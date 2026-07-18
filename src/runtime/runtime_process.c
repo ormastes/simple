@@ -491,13 +491,13 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
  * Returns the child PID on success, -1 on error.
  */
 int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
-    int64_t argc = args ? spl_array_len(args) : 0;
+    int64_t argc = args ? rt_array_len(args) : 0;
     char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
     if (!argv) return -1;
     argv[0] = (char*)cmd;
     for (int64_t i = 0; i < argc; i++) {
-        SplValue v = spl_array_get(args, i);
-        argv[i + 1] = (char*)(v.tag == SPL_STRING ? spl_as_str(v) : "");
+        const uint8_t* data = rt_string_data(rt_array_get(args, i));
+        argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
     }
     argv[argc + 1] = NULL;
     int64_t pid = rt_process_spawn_piped_argv(cmd, argv);

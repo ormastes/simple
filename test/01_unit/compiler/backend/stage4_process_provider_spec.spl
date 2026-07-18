@@ -24,18 +24,25 @@ describe "Stage4 process provider":
         expect(stage4_validate_process_provider_symbol_contract(windows + "0010 T rt_extra\n", "coff-mingw").is_err()).to_be(true)
         expect(stage4_validate_process_provider_symbol_contract(windows, "wasm").is_err()).to_be(true)
 
-    it "fails closed when the POSIX process dependency needs the missing core owner":
-        val error = stage4_resolve_requested_archive_owners(
+    it "resolves the POSIX process slice through tagged runtime and fork owners":
+        val (selected, owner_rows) = stage4_resolve_requested_archive_owners(
             ["rt_process_run_timeout"],
-            ["runtime_native", "runtime_process", "runtime_fork"],
+            ["runtime_native", "runtime_process", "runtime_memtrack", "runtime_fork"],
             [
-                "0001 T rt_array_new",
-                "0001 T rt_process_run_timeout\n                 U rt_array_new\n                 U rt_fork_child_setup\n                 U spl_array_len",
-                "0001 T rt_fork_child_setup"
+                "0001 T rt_array_get\n0002 T rt_array_len\n0003 T rt_array_new\n0004 T rt_array_push\n0005 T rt_string_data\n0006 T rt_string_new\n0007 T rt_value_int",
+                "0001 T rt_process_run_timeout\n                 U rt_array_get\n                 U rt_array_len\n                 U rt_array_new\n                 U rt_array_push\n                 U rt_fork_child_exit\n                 U rt_fork_child_setup\n                 U rt_fork_parent_signaled\n                 U rt_fork_parent_stderr\n                 U rt_fork_parent_stdout\n                 U rt_fork_parent_timed_out\n                 U rt_fork_parent_wait\n                 U rt_string_data\n                 U rt_string_new\n                 U rt_value_int",
+                "0001 T spl_memtrack_record\n0002 T spl_memtrack_unrecord",
+                "0001 T rt_fork_child_exit\n0002 T rt_fork_child_setup\n0003 T rt_fork_parent_signaled\n0004 T rt_fork_parent_stderr\n0005 T rt_fork_parent_stdout\n0006 T rt_fork_parent_timed_out\n0007 T rt_fork_parent_wait\n                 U spl_memtrack_record\n                 U spl_memtrack_unrecord"
             ],
             false
-        ).unwrap_err()
-        expect(error).to_contain("archive 'runtime_process' runtime dependency 'spl_array_len' has no archive owner")
+        ).unwrap()
+        expect(selected).to_equal([0, 1, 2, 3])
+        expect(owner_rows.len()).to_equal(17)
+        val owners = owner_rows.join("\n")
+        expect(owners).to_contain("rt_array_len=runtime_native")
+        expect(owners).to_contain("rt_fork_child_setup=runtime_fork")
+        expect(owners).to_contain("rt_process_run_timeout=runtime_process")
+        expect(owners).to_contain("spl_memtrack_record=runtime_memtrack")
 
     it "fails closed when the Windows process dependency has no owner":
         val error = stage4_resolve_requested_archive_owners(
