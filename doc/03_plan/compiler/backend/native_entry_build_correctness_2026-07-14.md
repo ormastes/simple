@@ -120,8 +120,16 @@ the shared binary — deploys require explicit user go-ahead).
     direct, and unresolved-method cases select flagless LLVM or explicit
     Cranelift on hosted Linux/macOS/Windows and FreeBSD x86_64. ARM32 default
     LLVM and Windows ARM64 LLVM/Cranelift require successful, nonempty target
-    objects without the retired fail-closed diagnostic. Execution is pending.
-    The flat payload-3 collision and uniform tagged Option ABI remain open.
+    objects without the retired fail-closed diagnostic. Commit `cd68cb9af439`
+    removes the flat payload-3 collision in source by using one enum-id-1
+    handle (`Some=0`, `None=1`) at typed producers, returns, direct/indirect
+    calls, lets/assignments, struct fields, and `if`/`match` merges. Focused
+    runnable tests cover the Rust MIR interpreter, raw-bool `Option.map`, the C
+    runtime contract, and pure-runtime rejection of raw heap-tag collisions.
+    The exact LLVM/Cranelift fixture remains opt-in pending current-source
+    execution: the available seed-hosted worker emitted a multi-million-token
+    parser-hint flood and was terminated before native lowering rather than
+    risking a runaway or crash.
   - The cross-module `Result<[u8], E>` control now routes both its Ok and Err
     paths through `?`. Existing LLVM and Cranelift gates schedule it on FreeBSD
     x86_64 and AArch64/RISC-V QEMU without adding another cross build; execution
