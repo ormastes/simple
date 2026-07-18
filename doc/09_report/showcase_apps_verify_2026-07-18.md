@@ -10,9 +10,9 @@ evidence bundle. Nothing fabricated; TIMEOUT/FAIL reported as such.
 
 | App | Standalone | Host-WM | SimpleOS WM |
 |---|---|---|---|
-| 2D graphics (`graphics_2d_showcase`) | GREEN @320x240 (76789/76800 nonzero px, semantic gate 4/4, 217s interpret; 720p blocked by JIT SIGSEGV + interp perf) | BLOCKED: child bridge >420s (interpreter perf) | C8-gated (see below) |
-| Web standards (`web_standards_showcase`) | TIMEOUT >280s all sizes (unchanged; layout interpreter-bound) | BLOCKED: same child-bridge gate (+96x96 canvas defect FIXED) | C8-gated |
-| GUI widget (`gui_widget_showcase`) | TIMEOUT >280s @720p (REGRESSION: 96s PASS on 07-14 — extern crash FIXED first, then perf wall) | BLOCKED: same child-bridge gate (module-limit hard-fail FIXED first) | C8-gated |
+| 2D graphics (`graphics_2d_showcase`) | GREEN @320x240 (76789/76800 nonzero px, semantic gate 4/4, 217s interpret; 720p blocked by JIT SIGSEGV + interp perf) | BLOCKED: WM-client child never posts bridge (silent; 420s direct test) — distinct client-branch defect | C8-gated (see below) |
+| Web standards (`web_standards_showcase`) | TIMEOUT >280s all sizes (layout interpreter-bound; unblocking dep = JIT fix) | BLOCKED: same child-bridge gate (+96x96 canvas defect FIXED) | C8-gated |
+| GUI widget (`gui_widget_showcase`) | GREEN @320x240 (P6 PPM 230415B, 31 distinct bytes, 70s after param-detach sweep; 720p >900s, needs JIT) | BLOCKED: same child-bridge gate (module-limit hard-fail FIXED first) | C8-gated |
 
 **SimpleOS WM surface status:** the WM itself passes its full fullscreen
 evidence harness end-to-end via the stage3 pure-Simple toolchain
