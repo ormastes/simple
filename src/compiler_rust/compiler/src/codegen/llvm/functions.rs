@@ -2908,6 +2908,52 @@ mod tests {
     }
 
     #[test]
+    fn direct_string_calls_use_runtime_symbols() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("direct_string_runtime_redirects").unwrap();
+
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for (dest, value) in [(VReg(0), 0), (VReg(1), 1), (VReg(2), 2)] {
+            func.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        for (dest, name, args) in [
+            (VReg(3), "substring", vec![VReg(0), VReg(1), VReg(2)]),
+            (VReg(4), "str.bytes", vec![VReg(0)]),
+            (VReg(5), "str.chars", vec![VReg(0)]),
+            (VReg(6), "str.ord", vec![VReg(0)]),
+            (VReg(7), "rt_string_contains", vec![VReg(0), VReg(0)]),
+        ] {
+            func.blocks[0].instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: CallTarget::from_name(name),
+                args,
+            });
+        }
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        for symbol in [
+            "@rt_slice",
+            "@rt_string_bytes",
+            "@rt_string_chars",
+            "@rt_string_char_code_at",
+            "@rt_contains",
+        ] {
+            assert!(ir.contains(symbol), "missing {symbol}:\n{ir}");
+        }
+        for raw in ["@substring(", "str.bytes", "str.chars", "str.ord", "rt_string_contains"] {
+            assert!(!ir.contains(raw), "raw call {raw} leaked:\n{ir}");
+        }
+        backend.verify().unwrap();
+    }
+
+    #[test]
     fn direct_call_dest_uses_callee_return_type() {
         let mut func = MirFunction::new(
             "caller".to_string(),

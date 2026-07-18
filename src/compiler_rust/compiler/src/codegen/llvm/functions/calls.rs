@@ -24,6 +24,7 @@ fn map_sffi_name(func_name: &str) -> &str {
         "rt_file_delete" => "rt_file_remove",
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
+        "rt_string_contains" => "rt_contains",
         _ => base,
     }
 }
@@ -31,10 +32,9 @@ fn map_sffi_name(func_name: &str) -> &str {
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
         "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_to_float" | "rt_string_to_upper"
-        | "rt_string_to_lower" | "rt_string_trim" | "rt_array_pop" | "rt_array_sort" | "rt_array_reverse"
-        | "rt_array_clear" | "rt_dict_keys" | "rt_dict_values" | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => {
-            Some(1)
-        }
+        | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_array_pop"
+        | "rt_array_sort" | "rt_array_reverse" | "rt_array_clear" | "rt_dict_keys" | "rt_dict_values"
+        | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
         | "rt_string_ends_with"
         | "rt_contains"
@@ -1864,25 +1864,29 @@ impl LlvmBackend {
             return Ok(());
         }
 
-        // Special case: substring(text, start) → rt_slice(text, start, rt_len(text), 1)
+        // Special case: substring(text, start[, end]) → rt_slice(text, start, end, 1)
         // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
-        if func_name_raw == "substring" && args.len() == 2 {
+        if func_name_raw == "substring" && matches!(args.len(), 2 | 3) {
             let text_val = self.get_vreg(&args[0], vreg_map)?;
             let text_casted = self.coerce_value_to_type(text_val, Some(i64_type.into()), builder)?;
             let start_val = self.get_vreg(&args[1], vreg_map)?;
             let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
-            // Call rt_len(text) to get the end index
-            let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-            let len_func = module
-                .get_function("rt_len")
-                .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
-            let len_call = builder
-                .build_call(len_func, &[text_casted.into()], "text_len")
-                .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
-            let end_val = len_call
-                .try_as_basic_value()
-                .left()
-                .unwrap_or_else(|| i64_type.const_int(0, false).into());
+            let end_val = if args.len() == 3 {
+                let value = self.get_vreg(&args[2], vreg_map)?;
+                self.coerce_value_to_type(value, Some(i64_type.into()), builder)?
+            } else {
+                let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                let len_func = module
+                    .get_function("rt_len")
+                    .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
+                let len_call = builder
+                    .build_call(len_func, &[text_casted.into()], "text_len")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
+                len_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into())
+            };
             let step_val = i64_type.const_int(1, false);
             // Call rt_slice(text, start, end, step) — 4 args
             let slice_fn_type = i64_type.fn_type(
@@ -2050,11 +2054,32 @@ impl LlvmBackend {
                 return Ok(());
             }
 
+            if matches!(method, "ord" | "codepoint" | "code_point") && args.len() == 1 {
+                let recv = self.get_vreg(&args[0], vreg_map)?;
+                let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
+                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                let rt_func = module
+                    .get_function("rt_string_char_code_at")
+                    .unwrap_or_else(|| module.add_function("rt_string_char_code_at", fn_type, None));
+                let zero = i64_type.const_zero();
+                let call_site = builder
+                    .build_call(rt_func, &[recv.into(), zero.into()], "qualified_ord")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified ord call", &e))?;
+                if let Some(d) = dest {
+                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        vreg_map.insert(d, ret_val);
+                    }
+                }
+                return Ok(());
+            }
+
             let qualified_rt_redirect: Option<&str> = match method {
                 "starts_with" => Some("rt_string_starts_with"),
                 "ends_with" => Some("rt_string_ends_with"),
                 "contains" | "contains_key" | "has_key" => Some("rt_contains"),
                 "split" => Some("rt_string_split"),
+                "bytes" => Some("rt_string_bytes"),
+                "chars" => Some("rt_string_chars"),
                 "trim" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
