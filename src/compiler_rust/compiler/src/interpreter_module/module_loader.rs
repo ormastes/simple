@@ -374,29 +374,34 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
     }
 }
 
-/// Loose text probe: does `path`'s source plausibly provide identifier
-/// `name` at all — either as a definition (`fn name(`, `class name`, ...,
-/// matched by [`sibling_might_define_requested_names`]) or as a member of an
+/// Loose text probe: does `path`'s source plausibly provide any of `names` —
+/// either as a definition (`fn name(`, `class name`, ..., matched by
+/// [`sibling_might_define_requested_names`]) or as a member of an
 /// `export`/`use ... {.., name, ..}` re-export list (e.g. a thin shim like
 /// `export use std.nogc_sync_mut.spec.{.., print_summary, ..}`, which has no
-/// `fn print_summary(` of its own)? Tokenizes on non-identifier characters so
-/// `name` must appear as a whole token, not merely as a substring of a
-/// longer identifier. Deliberately loose/best-effort: a false positive here
-/// just falls back to the existing "package wins" default below, not a
-/// wrong resolution.
-fn file_plausibly_provides_name(path: &Path, name: &str) -> bool {
+/// `fn print_summary(` of its own)? Returns the subset of `names` found.
+/// Tokenizes on non-identifier characters so a name must appear as a whole
+/// token, not merely as a substring of a longer identifier. Reads the file
+/// once regardless of how many names are probed. Deliberately loose/
+/// best-effort: a false positive here just falls back to the existing
+/// "package wins" default below, not a wrong resolution.
+fn file_plausibly_provides_names(path: &Path, names: &[String]) -> std::collections::HashSet<String> {
     let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > max_check_bytes {
-            return false;
+            return std::collections::HashSet::new();
         }
     }
     let Ok(source) = fs::read_to_string(path) else {
-        return false;
+        return std::collections::HashSet::new();
     };
-    source
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .any(|token| token == name)
+    let tokens: std::collections::HashSet<&str> =
+        source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+    names
+        .iter()
+        .filter(|name| tokens.contains(name.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
@@ -415,19 +420,30 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
                     // `use std.spec.{print_summary, ...}` resolved the FILE
                     // `spec.spl`, which defines them, then got redirected here to
                     // the sibling `spec/__init__.spl` PACKAGE, which doesn't).
-                    // Withhold the (otherwise unconditional) package-init
-                    // preference only when we can positively confirm the package
-                    // lacks every requested name AND the file positively has at
-                    // least one; an empty/ambiguous probe on either side falls
-                    // back to the existing "package wins" default (see
+                    // The check must be PER-NAME, not "package has any match at
+                    // all": a re-export shim can list a large mixed group where
+                    // the package legitimately covers *some* names (e.g. a BDD
+                    // facade re-exporting both the framework's own `print_summary`
+                    // AND decorator/env-detect names like `is_windows`/`skip_it`
+                    // that genuinely live in the sibling package) while still
+                    // lacking others the file uniquely provides. A coarse "package
+                    // has ANY requested name" test still redirected in that mixed
+                    // case and re-lost `print_summary`. So: withhold the
+                    // (otherwise unconditional) package-init preference as soon as
+                    // ANY single requested name is positively confirmed on the
+                    // file but NOT on the package; an empty/ambiguous probe on
+                    // both sides for a given name doesn't count either way and
+                    // falls back to the existing "package wins" default (see
                     // `prefers_package_init_for_group_imports_when_both_exist`).
                     if let ImportTarget::Group(_) = &use_stmt.target {
                         if let Some(requested) = requested_group_import_names(use_stmt) {
-                            if !requested.is_empty()
-                                && !requested.iter().any(|name| file_plausibly_provides_name(&package_init, name))
-                                && requested.iter().any(|name| file_plausibly_provides_name(module_path, name))
-                            {
-                                return module_path.to_path_buf();
+                            if !requested.is_empty() {
+                                let file_names = file_plausibly_provides_names(module_path, &requested);
+                                let package_names = file_plausibly_provides_names(&package_init, &requested);
+                                let file_has_unique_name = file_names.iter().any(|name| !package_names.contains(name));
+                                if file_has_unique_name {
+                                    return module_path.to_path_buf();
+                                }
                             }
                         }
                     }
