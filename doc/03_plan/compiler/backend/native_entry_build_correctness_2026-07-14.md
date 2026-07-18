@@ -167,7 +167,10 @@ the shared binary — deploys require explicit user go-ahead).
     visibility of that array handle through an alias captured before mutation.
     The exact native-build shapes were re-verified locally; Linux runs the case
     in the full gate, while macOS arm64/x64, Windows x64, and FreeBSD select it
-    explicitly. First staged platform-matrix execution is pending.
+    explicitly. The shared cross-target fixture repeats the non-first-field
+    push/index-write and pre-mutation alias oracle for AArch64/RISC-V64
+    execution plus ARM32/RV32/Windows ARM64 objects. First staged
+    platform-matrix execution is pending.
   - `native_nested_struct_value_copy_alias_2026-07-17.md` is source-fixed by
     routing local and plain-parameter value copies through one recursive MIR
     owner. Nested value structs are isolated, embedded classes stay shared,

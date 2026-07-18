@@ -150,7 +150,10 @@ and visibility of that array handle through an alias captured before mutation.
 The case contributes one logical case and two recorded checks; LLVM and
 Cranelift native-build shapes were re-verified locally. Linux runs the case in
 the full gate; macOS arm64/x64, Windows x64, and FreeBSD now select it
-explicitly, with first staged platform-matrix execution pending. Broader
+explicitly. The shared cross-target fixture repeats its push/index-write and
+pre-mutation alias oracle for AArch64/RISC-V64 execution and
+ARM32/RV32/Windows ARM64 objects, with first staged platform-matrix execution
+pending. Broader
 class-reference/struct-copy semantics were split: nested value-struct copies
 now recursively isolate local and plain-parameter copies while embedded class
 fields remain shared (`native_nested_struct_value_copy_alias_2026-07-17.md`).
