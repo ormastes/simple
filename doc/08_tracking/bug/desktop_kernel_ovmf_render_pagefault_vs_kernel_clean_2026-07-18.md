@@ -1,8 +1,17 @@
 # Desktop renders 99.83% under -kernel but page-faults to black (0%) under OVMF real firmware
 
 **Date:** 2026-07-18
-**Status:** OPEN — board-runnability blocker (real-firmware render divergence)
-**Severity:** high (blocks board evidence for the glass desktop; `-kernel` result does not reproduce on the board-runnable proxy)
+**Status:** OPEN — isolated to NVMe storage init (the RENDER is board-runnable, proven below). Fix scoped.
+**Severity:** high (blocks board evidence WITH NVMe attached; real hardware has NVMe)
+
+## CONFIRMED 2026-07-18: the render IS board-runnable; NVMe init is the sole blocker
+
+Booting the SAME `desktop.elf` under OVMF pflash **with the NVMe device detached** renders
+**99.83% non-black** (nonblack=8280330/8294400, 13 colors), reaching `first-frame-rendered` +
+`desktop-ready`, with only 2 stray fault lines (vs a 7.4MB `[fault]` cascade when NVMe is attached).
+So under REAL FIRMWARE the desktop render is identical to `-kernel` — the render is board-runnable.
+The ONLY thing that breaks OVMF-with-NVMe is `_nvme_init_controller` faulting on the OVMF-relocated
+high-half BAR. Fix that one guard and OVMF-with-NVMe renders too. (Repro: `scratchpad/boot_ovmf_nonvme.sh`.)
 
 ## Symptom
 
