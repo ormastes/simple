@@ -831,3 +831,38 @@ regression proves sibling and transparent access while rejecting ordinary
 children, unrelated packages, and duplicate owners. No Stage2 retry was made
 after the bounded gate failed; the next fresh cycle should rerun that gate once
 and must not restore global unique-name fallback.
+
+## 2026-07-18 phase-one allocation localization
+
+The corrected package visibility and bootstrap-only hosted runtime bridge now
+produce sane Stage2 and Stage3 compilers. Stage4 still reached about 11.3 GiB
+RSS before parsing. Phase profiling localized the peak to
+`phase1:load_sources`; a 20-second trace scanned 905 distinct files totaling
+11.8 MiB with no duplicate physical paths.
+
+The closure import scanner counted triple-quote delimiters by calling
+`substring(scan_pos, scan_pos + 3)` for every source character. Native lowering
+allocates a raw C string for each slice, and those transient slices are not
+reclaimed during phase one. The scanner now advances between actual `\"\"\"`
+matches, so ordinary lines allocate no slices while odd/even docstring behavior
+is preserved. A regression covers block and same-line docstrings, real imports,
+and removal of the per-character slice. The Stage2 cycle cap prevented another
+rebuild in this session; the next fresh cycle must embed the patch and use one
+profiled Stage4 run before claiming the runaway fixed.
+
+### Follow-up profile and corrected dominant cause
+
+Fresh Stage2 and Stage3 builds embedded the delimiter-search change and passed
+their sanity gates. A single bounded Stage4 profile still remained in
+`phase1:load_sources:start`, reaching about 6.0 GiB at 39 seconds and 13.7 GiB
+at 81 seconds. The delimiter change removes a real per-character allocation,
+but it is not the complete fix.
+
+Stage3 disassembly shows `_driver_text_bucket_index` checking the Simple-core
+string-header magic before hashing. Rust-hosted Stage3 strings use a different
+header, so every key hashes to zero and all 8192 logical buckets collapse into
+bucket zero. Each membership probe then calls `bucket.split("\n")` over the
+entire growing set, producing the observed quadratic retained allocations. The
+next bounded cycle must use a runtime-compatible text hash, prove multi-bucket
+distribution with the actual Stage3 executable, and make at most one final
+profiled Stage4 attempt.
