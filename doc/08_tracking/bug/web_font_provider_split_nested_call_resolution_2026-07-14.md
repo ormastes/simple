@@ -48,3 +48,12 @@ The seed method resolver must resolve builtin `str`/`text` methods (`split`,
 positions, so the natural compact form parses without a forced intermediate.
 Related: the decode_string mangler single-candidate defect
 (`selfhost`/`mangle.rs`) is the same family of erased-receiver method binding.
+
+## Additional reproduction (2026-07-18)
+
+After focused runner scenarios passed, automatic SPipe doc generation failed
+with the same `str.split` nested-call diagnostic while compiling
+`src/app/spipe_docgen`. This proves the defect is shared compiler semantics,
+not font-specific. The prevention test should be one minimal nested
+`text.split` expression under the same interpreter path; SPipe docgen must then
+complete with the selected runtime and zero placeholder manuals.

@@ -18,6 +18,10 @@ EOF, and file reads never block on another process's open fd. (Also fixes a
 second latent bug found during verification: `rt_process_wait`'s timeout
 argument is silently ignored by the interpreter backend, always blocking
 until real exit — so the fix does not rely on that argument at all.)
+The 2026-07-18 follow-up also prefixes the redirected command with `exec`,
+removing the otherwise redundant shell child. Its focused six-scenario source
+contract passes. This narrows the process tree but does not propagate death of
+the Simple parent, so the reopened status below is unchanged.
 `src/app/io/_CliCompile/compile_targets.spl`: `cli_native_build`'s single
 `CompileResult.Success` funnel now hard-fails with a loud error if the
 output binary doesn't exist on disk, instead of returning 0.

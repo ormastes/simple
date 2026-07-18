@@ -35,17 +35,17 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | Corrected Stage 2 reaches the final link with function-level GC and only 10 unique unresolved names (25 relocations), down from the prior broad module-section frontier. Focused fixes now cover eight names; pointer `offset` lowering and HIR lambda capture ownership remain | Finish the two shared semantic roots, rebuild the seed, reuse the Stage 2 cache, then atomically deploy | P0 |
-| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The fresh-seed Stage 2 now reaches a later LLVM import/linkage frontier | Fix the remaining bootstrap frontier, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
+| Production runtime | BLOCKED | Corrected Stage 2 reached the final link with 10 unique unresolved names (25 relocations). Nine names are now source-fixed, including typed pointer `offset`; HIR lambda capture ownership remains and the link frontier has not been rerun | Finish HIR capture ownership, rebuild the seed, reuse the Stage 2 cache, then atomically deploy | P0 |
+| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | Green/red/empty contracts pass under the seed runner; timeout launch now `exec`s its GNU wrapper instead of retaining an extra shell. Parent interruption can still orphan the wrapper and worker, and fresh pure-Simple qualification remains blocked | Add narrowly owned process-tree cleanup without changing generic async-child lifetime, then qualify on the fresh CLI | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending an aggregate scanner owner; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Run the retained directory-walk spec, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
-| Bootstrap essential tools | SOURCE WIRED | The exact fresh Stage 4 CLI now gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd; raw-source duplicate dispatch is structurally forbidden | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
+| Bootstrap essential tools | SOURCE GUARDED | The exact fresh Stage 4 CLI gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd. The aggregate now sets `SIMPLE_FRONTEND_DELEGATED=1`, preventing lint from silently using the sibling Rust seed | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
 | Native directory walk | OWNER TESTED | C/core-C, Rust SFFI, and Rust interpreter return non-directory entries without following symlink cycles; exact cycle fixtures pass and core-C now exports the formerly missing symbol | Run the retained Simple source spec after pure-runner admission | P0 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files and generic casts are safe; the corrupting indentation-repair prepass is deleted | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | PARTIAL | Driver API Check stops after fatal HIR analysis; production parse/policy workers now apply SSpec guidance equally in human and JSON modes. CLI can still false-green HIR-invalid code and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
-| SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
+| SPipe/docgen | SOURCE BUG / DEPLOY BLOCKED | Focused specs pass, then automatic docgen fails with `method 'split' not found on value of type str in nested call context`; the runner also hardcodes `bin/simple` for docgen | Fix shared nested builtin-method resolution, add one `text.split` regression, and pass the selected runtime explicitly before requiring zero-stub manuals | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
 | MCP CLI passthrough | SOURCE FIXED | Binary and every JSON-derived argument are shell quoted; structured argv is still preferable when response capture supports it | Run hostile apostrophe/metacharacter protocol fixtures after runtime admission | P0 |
@@ -113,7 +113,9 @@ so executable qualification is still blocked.
    `str.ord`, `str.chars`, `rt_string_contains`, `Ok`,
    `MirLowering.lower_inline_lambda_with_locals`, and
    `HirExpr.free_variables` (10 unique names,
-   25 relocations total).
+   25 relocations total). The subsequent typed pointer-offset fix removes
+   `offset` from the source frontier; HIR capture remains before the cached
+   Stage 2 link can be rerun.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -638,3 +640,5 @@ so executable qualification is still blocked.
   normalization (`substring`, bytes/chars/ord, contains), a real missing
   whitespace tokenizer, two stale semantic helper calls, one `Ok()` source
   typo, pointer `offset` lowering, and missing HIR lambda capture ownership.
+  Pointer offset lowering is now source-fixed; HIR capture is the remaining
+  semantic root, so no updated Stage 2 admission claim is made.
