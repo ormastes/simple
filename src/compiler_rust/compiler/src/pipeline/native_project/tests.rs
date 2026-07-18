@@ -1064,6 +1064,9 @@ fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
     assert!(!files
         .iter()
         .any(|path| path.starts_with(repo_root.join("src/app/leak_finder"))));
+    assert!(!files
+        .iter()
+        .any(|path| path.starts_with(repo_root.join("src/compiler_rust/lib/std/src"))));
 }
 
 #[test]

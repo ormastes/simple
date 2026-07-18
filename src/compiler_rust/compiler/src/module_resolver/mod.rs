@@ -103,6 +103,26 @@ mod tests {
     }
 
     #[test]
+    fn test_bare_compiler_namespace_prefers_project_compiler() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let app = src.join("app");
+        let compiler = src.join("compiler");
+        let seed_compiler = src.join("compiler_rust/lib/std/src/compiler");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&compiler).unwrap();
+        fs::create_dir_all(&seed_compiler).unwrap();
+        fs::write(compiler.join("__init__.spl"), "export compiler.driver.*\n").unwrap();
+        fs::write(seed_compiler.join("__init__.spl"), "export compiler.lexer.*\n").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), app.clone());
+        let path = ModulePath::new(vec!["compiler".into()]);
+        let resolved = resolver.resolve(&path, &app.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, compiler.join("__init__.spl"));
+    }
+
+    #[test]
     fn test_resolve_directory_module() {
         let dir = create_test_project();
         let src = dir.path().join("src");

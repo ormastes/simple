@@ -525,11 +525,15 @@ impl ModuleResolver {
         // with symlink aliases (e.g. `frontend`), and routing these imports
         // through the current file's parent first can strand resolution inside
         // alias directories like `src/compiler/frontend/core/compiler`.
-        if (segments[0] == "compiler" || segments[0] == "compiler_shared") && segments.len() > 1 {
+        if segments[0] == "compiler" || segments[0] == "compiler_shared" {
             for root in ordered_source_roots(self) {
                 let namespace_dir = root.join(&segments[0]);
                 if namespace_dir.is_dir() {
-                    if let Ok(resolved) = self.resolve_from_base(&namespace_dir, &segments[1..], path) {
+                    if segments.len() == 1 {
+                        if let Some(resolved) = resolve_exact_directory_module(&namespace_dir, path) {
+                            return Ok(resolved);
+                        }
+                    } else if let Ok(resolved) = self.resolve_from_base(&namespace_dir, &segments[1..], path) {
                         return Ok(resolved);
                     }
                 }
@@ -537,7 +541,11 @@ impl ModuleResolver {
 
             let alt_namespace_dir = self.project_root.join("src").join(&segments[0]);
             if alt_namespace_dir.is_dir() {
-                if let Ok(resolved) = self.resolve_from_base(&alt_namespace_dir, &segments[1..], path) {
+                if segments.len() == 1 {
+                    if let Some(resolved) = resolve_exact_directory_module(&alt_namespace_dir, path) {
+                        return Ok(resolved);
+                    }
+                } else if let Ok(resolved) = self.resolve_from_base(&alt_namespace_dir, &segments[1..], path) {
                     return Ok(resolved);
                 }
             }
