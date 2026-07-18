@@ -239,6 +239,20 @@ scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli
 scripts/bootstrap/bootstrap-from-scratch.sh --release
 ```
 
+### Cranelift Bootstrap Path (2026-07-18)
+
+The Cranelift backend now completes stages 2–3 successfully as an alternative to LLVM:
+
+```bash
+# Bootstrap with Cranelift backend (stages 2–3)
+sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift
+```
+
+**Notes:**
+- Cranelift stages 2–3 complete reliably; full-CLI (`--full-cli`) requires `--full-bootstrap` to avoid stale-backfill rejection (the driver rejects a stage-3 binary built by a pre-fix seed).
+- **LLVM path status:** Stage 2 link has 62 residual undefined symbols blocking LLVM bootstrap. See [doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md](../../08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md).
+- **Stage-4 caveat:** Hours-long spins observed when stage-3 was built by pre-fix seed. Root: InterpCall handicap in Cranelift (symbol lowering delay). See [doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md](../../08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md).
+
 `--release` implies deployment and fails unless the deployed self-hosted
 binary passes `simple test test --whole --mode=interpreter`, including long
 specs, source-comment doctests, and Markdown embedded-code tests.

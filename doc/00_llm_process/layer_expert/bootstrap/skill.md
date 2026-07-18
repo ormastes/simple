@@ -26,6 +26,14 @@ bootstrap-blocking regressions.
   after stage3 hand-off, seed not executed by default).
 - Unit specs: `test/01_unit/compiler/80.driver/` (e.g. `driver_bootstrap_spec.spl`).
 
+## Cranelift Bootstrap Path & LLVM Redeploy Status (2026-07-18)
+
+**Cranelift Path Working:** `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift` completes stages 2–3 reliably. Full-CLI requires `--full-bootstrap` to avoid driver stale-backfill rejection. See [doc/07_guide/compiler/build.md § Cranelift Bootstrap Path](../../../../doc/07_guide/compiler/build.md).
+
+**LLVM Path Blocked:** Stage 2 link has 62 residual undefined symbols (method lowering gap). See [doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md](../../../../doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md).
+
+**Stage-4 Caveat:** Hours-long spins observed when stage-3 was built by pre-fix seed. Root: InterpCall handicap in Cranelift (symbol lowering delay). See [doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md](../../../../doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md).
+
 ## Redeploy #79 Status (2026-07-10)
 
 **Wall:** short-circuit `and`/`or` undef dominance (#135, not yet fixed).

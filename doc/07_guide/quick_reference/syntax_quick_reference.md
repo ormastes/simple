@@ -634,13 +634,15 @@ fn greet(name: text):
 
 ### Multi-Return Tuples
 
+**NOTE:** Labeled-tuple returns (`-> (name: type, ...)`) are currently **NOT parseable** by either the seed or self-hosted parser. Use unlabeled tuples with `.0`/`.1` accessors instead. See [doc/08_tracking/bug/labeled_tuple_return_parser_gap_2026_07_17.md](../../08_tracking/bug/labeled_tuple_return_parser_gap_2026_07_17.md).
+
 ```simple
-fn div_rem(n: i64, d: i64) -> (quotient: i64, remainder: i64):
-    return (quotient: n / d, remainder: n % d)
+fn div_rem(n: i64, d: i64) -> (i64, i64):
+    return (n / d, n % d)
 
 val r = div_rem(10, 3)
-print r.quotient
-print r.remainder
+print r.0  # quotient
+print r.1  # remainder
 ```
 
 **⚠️ WARNING: Labeled-tuple return syntax is currently unparseable.** Both seed and self-hosted compilers reject `-> (label: type, ...)` syntax. See `doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md` for details. Use the anonymous tuple form below + destructure with typed bindings as the current workaround.
