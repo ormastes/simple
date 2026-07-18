@@ -14,7 +14,8 @@ use app.io.dir_ops (dir_create)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use compiler.driver.driver_source_loading.{
     _driver_text_bucket_set_new, _driver_text_bucket_set_has,
-    _driver_text_bucket_set_add
+    _driver_text_bucket_set_add, _driver_entry_import_dirname,
+    _driver_resolve_entry_import
 }
 use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
 use lazy app.compile.native (compile_native)
@@ -445,6 +446,7 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
         val content = rt_file_read_text(f) ?? ""
+        val closure_dir = _driver_entry_import_dirname(f)
         if trace_closure and f == entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
@@ -463,13 +465,15 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if mp == "":
                 continue
             val segs = mp.split(".")
-            val seg_key = _nb_join_segments(segs)
+            val seg_key = closure_dir + "\t" + _nb_join_segments(segs)
             var rp = ""
             val (cached, cached_value) = _nb_text_cache_get(resolve_cache, seg_key)
             if cached:
                 rp = cached_value
             else:
                 rp = _nb_resolve_segs(segs, closure_source_dirs)
+                if rp == "":
+                    rp = _driver_resolve_entry_import(mp, closure_dir)
                 resolve_cache = _nb_text_cache_add(resolve_cache, seg_key, rp)
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
@@ -482,13 +486,16 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 while di < segs.len() - 1:
                     drop = drop.push(segs[di])
                     di = di + 1
-                val drop_key = _nb_join_segments(drop)
+                val drop_module_key = _nb_join_segments(drop)
+                val drop_key = closure_dir + "\t" + drop_module_key
                 var drop_rp = ""
                 val (drop_cached, drop_cached_value) = _nb_text_cache_get(resolve_cache, drop_key)
                 if drop_cached:
                     drop_rp = drop_cached_value
                 else:
                     drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
+                    if drop_rp == "":
+                        drop_rp = _driver_resolve_entry_import(drop_module_key.replace("/", "."), closure_dir)
                     resolve_cache = _nb_text_cache_add(resolve_cache, drop_key, drop_rp)
                 if drop_rp != "" and not _driver_text_bucket_set_has(discovered, drop_rp):
                     queue = queue.push(drop_rp)

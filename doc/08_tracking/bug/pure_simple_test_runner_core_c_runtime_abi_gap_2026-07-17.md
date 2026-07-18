@@ -35,6 +35,16 @@ Representative missing groups include process/file/fd operations
 3. Add a runner-specific runtime-symbol inventory gate, then build and execute
    `simple-test` with stub fallback disabled.
 
+## Progress 2026-07-18
+
+- Fixed the CLI preclosure feature-family owner omission: a cache miss now
+  falls back to the existing bounded driver resolver, with a
+  directory-sensitive cache preventing reuse across source directories.
+- Added focused source and behavior regressions for that resolver path.
+- A native runner link rerun is still pending. The core-C fd ABI trio
+  (`rt_fd_close`, `rt_fd_read_until`, and `rt_fd_write`) and fresh link/runtime
+  evidence remain open.
+
 ## Acceptance
 
 - Core-C runner link has zero unresolved symbols.
