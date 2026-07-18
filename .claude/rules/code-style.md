@@ -5,6 +5,7 @@ alwaysApply: true
 
 - **NEVER over-engineer** - only make requested changes
 - **NEVER add unused code** - delete completely
+- **Logs are NOT unused code** — never delete debug/probe/perf log inserts during cleanup; convert them to level-gated logs (default off). Delete only one-off non-reusable dumps. See doc/07_guide/infra/logging/log_retention_policy.md
 - **DO NOT ADD REPORT TO GIT** unless requested
 - **NEVER convert TODO/FIXME to NOTE** - implement or delete entirely
 - For MCP/LSP/tool-server work: review startup path, hot request paths, cache strategy, startup/latency/RSS targets
