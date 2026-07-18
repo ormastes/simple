@@ -15,6 +15,11 @@
 
 SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len);
 SplArray* rt_strsplit(const char* string, const char* delimiter);
+int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
+
+static int64_t add_i64_args(int64_t left, int64_t right) {
+    return left + right;
+}
 
 static int start_server(unsigned short* port, const char* body, int delay_ms) {
     int server = socket(AF_INET, SOCK_STREAM, 0);
@@ -63,6 +68,12 @@ static int walk_contains(SplArray* paths, const char* expected) {
 }
 
 int main(void) {
+    SplArray* wffi_args = rt_array_new(2);
+    assert(rt_array_push(wffi_args, rt_value_int(0x24c7468)));
+    assert(rt_array_push(wffi_args, rt_value_int(7)));
+    assert(spl_wffi_call_i64(
+        (int64_t)(uintptr_t)add_i64_args, (int64_t)wffi_args, 2) == 0x24c746f);
+
     const uint8_t raw_bytes[] = {0, 127, 255};
     SplArray* canonical_bytes = rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
     assert(rt_array_len(canonical_bytes) == 3);

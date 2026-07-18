@@ -2847,7 +2847,7 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
     RtCoreArray* args = rt_core_as_array(args_value);
     if (nargs > 0 && (!args || args->flags & RT_CORE_ARRAY_FLAG_BYTES || !args->data || nargs > args->len)) return 0;
     int64_t raw[8] = {0};
-    for (int64_t i = 0; i < nargs; i++) raw[i] = ((int64_t*)args->data)[i];
+    for (int64_t i = 0; i < nargs; i++) raw[i] = rt_core_as_int(((int64_t*)args->data)[i]);
     switch (nargs) {
         case 0: return ((Fn0)(uintptr_t)fptr)();
         case 1: return ((Fn1)(uintptr_t)fptr)(raw[0]);

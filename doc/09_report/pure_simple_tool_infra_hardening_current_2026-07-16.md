@@ -595,6 +595,12 @@ release-blocking correctness defects. Stage 2 now links and answers
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
+- The core-C WFFI bridge was forwarding tagged `[i64]` elements without
+  decoding them, corrupting every positive foreign pointer/integer argument.
+  It now matches the Rust provider by decoding each element before dispatch;
+  the existing native-C focus harness includes a real two-argument regression.
+  This repairs the pure-Simple LLVM wrapper path, while the direct packaged
+  Rust/inkwell module-creation crash remains a separate Stage 3 blocker.
 - A fresh current-seed Stage 2 admission compiled every source module and
   reached the final linker. It produced no earlier LLVM verifier,
   undeclared-global, imported-enum, `String.smf`, or call-arity failure. Object

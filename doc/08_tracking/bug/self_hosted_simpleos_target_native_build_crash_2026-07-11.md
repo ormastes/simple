@@ -231,6 +231,22 @@ Ubuntu LLVM 18.1.8 (AlignTypeEnum still exists in 18, so no version mixing).
 Matches the "native-build cannot emit on ANY backend" broad-regression memory —
 bisect, don't patch.
 
+### Follow-up (2026-07-18): pure-Simple WFFI argument corruption fixed; packaged LLVM crash remains separate
+
+The core-C implementation of `spl_wffi_call_i64` copied tagged Simple integer
+array elements directly across the C ABI. Every positive pointer/integer
+argument was therefore shifted left by the three tag bits. The Rust provider
+already decoded the same contract with `RuntimeValue::as_int()`. The C provider
+now mirrors it with `rt_core_as_int()`, and the native focus test sends two
+tagged integers through a real two-argument function pointer and requires the
+raw sum.
+
+This explains the pure-Simple `_lc2 -> LLVMSetDataLayout` invalid-handle crash,
+but not the direct Rust/inkwell `LLVMModuleCreateWithNameInContext` crash above,
+which does not traverse WFFI. The stripped/whole-archive LLVM packaging path
+therefore remains independently open and must pass a one-module child-process
+probe before Stage 3 is accepted.
+
 ### Binary inventory — what can native-build src/app right now?
 
 | Binary | Status |
