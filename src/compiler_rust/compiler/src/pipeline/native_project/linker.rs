@@ -412,56 +412,6 @@ impl NativeProjectBuilder {
         Ok(symbols)
     }
 
-    fn is_libm_symbol(sym: &str) -> bool {
-        matches!(
-            sym,
-            "acos"
-                | "acosf"
-                | "asin"
-                | "asinf"
-                | "atan"
-                | "atan2"
-                | "atan2f"
-                | "atanf"
-                | "ceil"
-                | "ceilf"
-                | "cos"
-                | "cosf"
-                | "exp"
-                | "exp2"
-                | "exp2f"
-                | "expf"
-                | "fabs"
-                | "fabsf"
-                | "floor"
-                | "floorf"
-                | "fmod"
-                | "fmodf"
-                | "log"
-                | "log10"
-                | "log10f"
-                | "log2"
-                | "log2f"
-                | "logf"
-                | "pow"
-                | "powf"
-                | "round"
-                | "roundf"
-                | "sin"
-                | "sinf"
-                | "sqrt"
-                | "sqrtf"
-                | "tan"
-                | "tanf"
-                | "trunc"
-                | "truncf"
-        )
-    }
-
-    fn is_runtime_math_symbol(sym: &str) -> bool {
-        sym.starts_with("rt_math_") || matches!(sym, "rt_sin" | "rt_cos" | "rt_sqrt" | "rt_pow")
-    }
-
     fn is_openssl_runtime_symbol(sym: &str) -> bool {
         matches!(sym, "rt_net_https_openssl_local_probe")
     }
@@ -470,16 +420,8 @@ impl NativeProjectBuilder {
         sym.starts_with("rt_sqlite_") || sym.starts_with("sqlite3_")
     }
 
-    fn entry_objects_require_libm(object_paths: &[PathBuf]) -> Result<bool, String> {
-        for input in object_paths {
-            if Self::read_undefined_symbol_set(input)?
-                .iter()
-                .any(|sym| Self::is_libm_symbol(sym) || Self::is_runtime_math_symbol(sym))
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    fn should_omit_platform_library(lib: &str, omit_unwind: bool, omit_sqlite: bool) -> bool {
+        (omit_unwind && lib == "unwind") || (omit_sqlite && lib == "sqlite3")
     }
 
     fn entry_objects_require_openssl(object_paths: &[PathBuf]) -> Result<bool, String> {
@@ -1388,12 +1330,6 @@ int main(int argc, char** argv) {
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
             && self.runtime_bundle_prefers_core_lane();
-        let omit_libm = cfg!(target_os = "linux")
-            && selected_runtime
-                .as_ref()
-                .is_some_and(|(_, is_native_all)| !is_native_all)
-            && self.runtime_bundle_prefers_core_lane()
-            && !Self::entry_objects_require_libm(object_paths)?;
         let require_openssl = cfg!(target_os = "linux") && Self::entry_objects_require_openssl(object_paths)?;
         let omit_sqlite = cfg!(target_os = "linux")
             && selected_runtime
@@ -1402,13 +1338,7 @@ int main(int argc, char** argv) {
             && !Self::entry_objects_require_sqlite(object_paths)?;
         if is_clang_cl {
             for lib in &link_config.libraries {
-                if omit_unwind && *lib == "unwind" {
-                    continue;
-                }
-                if omit_libm && *lib == "m" {
-                    continue;
-                }
-                if omit_sqlite && *lib == "sqlite3" {
+                if Self::should_omit_platform_library(lib, omit_unwind, omit_sqlite) {
                     continue;
                 }
                 cmd.arg(format!("{}.lib", lib));
@@ -1419,13 +1349,7 @@ int main(int argc, char** argv) {
                 cmd.arg("-Wl,--as-needed");
             }
             for lib in &link_config.libraries {
-                if omit_unwind && *lib == "unwind" {
-                    continue;
-                }
-                if omit_libm && *lib == "m" {
-                    continue;
-                }
-                if omit_sqlite && *lib == "sqlite3" {
+                if Self::should_omit_platform_library(lib, omit_unwind, omit_sqlite) {
                     continue;
                 }
                 cmd.arg(format!("-l{}", lib));
@@ -2419,40 +2343,17 @@ mod linker_tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn link_inputs_require_libm_detects_math_symbols_only_when_referenced() {
-        let temp = tempfile::tempdir().unwrap();
-        let plain_c = temp.path().join("plain.c");
-        let math_c = temp.path().join("math.c");
-        let plain_o = temp.path().join("plain.o");
-        let math_o = temp.path().join("math.o");
-
-        std::fs::write(&plain_c, "int plain(void) { return 1; }\n").unwrap();
-        std::fs::write(
-            &math_c,
-            "extern double sqrt(double); double mathy(double x) { return sqrt(x); }\n",
-        )
-        .unwrap();
-
-        let plain_status = std::process::Command::new("cc")
-            .args(["-c", "-O0"])
-            .arg(&plain_c)
-            .arg("-o")
-            .arg(&plain_o)
-            .status()
-            .unwrap();
-        assert!(plain_status.success());
-
-        let math_status = std::process::Command::new("cc")
-            .args(["-c", "-O0", "-fno-builtin-sqrt"])
-            .arg(&math_c)
-            .arg("-o")
-            .arg(&math_o)
-            .status()
-            .unwrap();
-        assert!(math_status.success());
-
-        assert!(!NativeProjectBuilder::entry_objects_require_libm(&[plain_o]).unwrap());
-        assert!(NativeProjectBuilder::entry_objects_require_libm(&[math_o]).unwrap());
+    fn core_lane_keeps_platform_libm() {
+        assert!(simple_common::platform::link_config::PlatformLinkConfig::for_host()
+            .libraries
+            .contains(&"m"));
+        assert!(!NativeProjectBuilder::should_omit_platform_library("m", true, true));
+        assert!(NativeProjectBuilder::should_omit_platform_library(
+            "unwind", true, false
+        ));
+        assert!(NativeProjectBuilder::should_omit_platform_library(
+            "sqlite3", false, true
+        ));
     }
 
     #[cfg(target_os = "linux")]
