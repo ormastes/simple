@@ -601,3 +601,106 @@ fn test_value_position_match_arm_return_actually_returns() {
         "match-arm return did not reach MIR as a Return terminator: {mir_repr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// B10: sibling sweep for the ExistsCheck-not-unwrapped bug class (N6,
+// b1ee7fbaad1). Every `let_pattern`-bearing construct checked for the same
+// "expr.? combined with a val binding must unwrap one ExistsCheck layer"
+// requirement, plus the positions that look similar but must NOT unwrap
+// (locked here so a future "fix" doesn't wrongly apply the unwrap there).
+// ---------------------------------------------------------------------------
+
+/// `elif val b = y.?:` chained after `if val a = x.?:` -- both conditions are
+/// independent ExistsCheck-wrapped subjects and both must unwrap. Covers the
+/// nested/chained if-elif case: the primary `if` and every `elif` branch each
+/// run through their own copy of the unwrap fix (`Node::If`'s let-pattern arm
+/// and `lower_elif_chain` respectively) -- this test locks that they agree.
+#[test]
+fn test_nested_if_elif_val_exists_check_chain_binds_unwrapped_values() {
+    let source =
+        "fn present(x: i64?, y: i64?) -> i64:\n    if val a = x.?:\n        return a\n    elif val b = y.?:\n        return b\n    return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::Let { ty: if_subject_ty, .. } = &func.body[0] else {
+        panic!("expected if-let subject store as first statement: {:?}", func.body)
+    };
+    assert_ne!(
+        *if_subject_ty,
+        TypeId::BOOL,
+        "if-branch subject kept the ExistsCheck's bool type instead of unwrapping: {:?}",
+        func.body
+    );
+
+    let HirStmt::If {
+        else_block: Some(else_stmts),
+        ..
+    } = &func.body[1]
+    else {
+        panic!(
+            "expected lowered if-val statement with an elif-carrying else block: {:?}",
+            func.body
+        )
+    };
+
+    let HirStmt::Let {
+        ty: elif_subject_ty, ..
+    } = &else_stmts[0]
+    else {
+        panic!(
+            "expected elif-let subject store as first statement of else block: {:?}",
+            else_stmts
+        )
+    };
+    assert_ne!(
+        *elif_subject_ty,
+        TypeId::BOOL,
+        "elif-branch subject kept the ExistsCheck's bool type instead of unwrapping: {:?}",
+        else_stmts
+    );
+}
+
+/// `val v = x.?` (plain binding position, no `if`/`while`/`match`) is NOT a
+/// let-pattern construct -- there's no combined "bind + presence-test"
+/// idiom here, just an ordinary expression assigned to a name. `.?` is
+/// documented (`lower_exists_check`) as a standalone presence-check operator
+/// that always yields bool. This must keep binding a bool; "fixing" it to
+/// unwrap would silently change `val v = x.?` from a presence check into an
+/// unwrap-or-crash, breaking every existing use of the operator this way.
+#[test]
+fn test_plain_val_exists_check_binds_bool_by_design() {
+    let source = "fn present(x: i64?) -> i64:\n    val v = x.?\n    if v:\n        return 1\n    return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::Let { ty, .. } = &func.body[0] else {
+        panic!("expected plain val binding as first statement: {:?}", func.body)
+    };
+    assert_eq!(
+        *ty,
+        TypeId::BOOL,
+        "plain `val v = x.?` must keep binding the ExistsCheck's bool result by design: {:?}",
+        func.body
+    );
+}
+
+/// `match x.?:` has no `let_pattern` field on `MatchStmt` at all -- the
+/// subject IS the presence-check result, matched directly against arm
+/// patterns (e.g. a boolean discriminant). There is no separate binding to
+/// unwrap into, so the subject must stay bool, unlike if-val/while-val.
+#[test]
+fn test_match_exists_check_subject_stays_bool_not_unwrapped() {
+    let source = "fn present(x: i64?) -> i64:\n    match x.?:\n        case _:\n            return 1\n    return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::Let { ty, .. } = &func.body[0] else {
+        panic!("expected $match_subject store as first statement: {:?}", func.body)
+    };
+    assert_eq!(
+        *ty,
+        TypeId::BOOL,
+        "`match x.?:` subject must stay the ExistsCheck's bool result (no let_pattern to unwrap into): {:?}",
+        func.body
+    );
+}
