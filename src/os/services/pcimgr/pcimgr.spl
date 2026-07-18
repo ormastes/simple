@@ -478,8 +478,18 @@ fn pcimgr_get_bar(dev_idx: u64, bar_num: u8) -> PciBar:
     val is_mmio = (raw & 1) == 0
     # Bit 3 (memory BARs only): prefetchable
     val is_prefetchable = is_mmio and ((raw & 0x8) != 0)
+    # Bits [2:1] (memory BARs only): 0b10 = 64-bit BAR; the next BAR register
+    # holds the high dword. Firmware (OVMF) assigns 64-bit BARs ABOVE 4GB, so
+    # dropping the high half maps low RAM instead of the device (NVMe CAP then
+    # reads zeros -> bogus "missing-nvm-command-set" refusal). SeaBIOS/-kernel
+    # boots assign below 4GB, which masked this.
+    val is_64bit = is_mmio and ((raw >> 1) & 3u32) == 2u32
+    val bar_high: u64 = if is_64bit and bar_num < 5u8:
+        pci_read_bar(bus, dev, func, bar_num + 1u8).to_u64()
+    else:
+        0u64
     val phys_addr = if is_mmio:
-        (raw & 0xFFFFFFF0).to_u64()
+        (bar_high << 32) | (raw & 0xFFFFFFF0).to_u64()
     else:
         (raw & 0xFFFFFFFC).to_u64()
     val size = pcimgr_bar_size(dev_idx, bar_num)
