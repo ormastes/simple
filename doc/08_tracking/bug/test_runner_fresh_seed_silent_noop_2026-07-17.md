@@ -364,3 +364,14 @@ duplicated-parse defect is fixed later and output sizes grow further.
 - this doc (root cause + verification)
 
 No Rust changes were needed or made; no VCS operations were performed.
+
+### 2026-07-18 current-source native-worker recurrence
+
+A bounded bootstrap-interpreter launch of
+`src/app/cli/native_build_worker.spl` reproduced the same diagnostic-flood
+class while loading the current compiler tree: more than two million tokens
+of repeated parser style hints were emitted before native lowering began.
+The run was interrupted rather than allowed to exhaust memory or logs. A
+future fix should deduplicate parser hints by `(path, span, message)` and
+provide a bootstrap-worker quiet mode; until then, do not use this seed-hosted
+path as an unattended current-source native sanity check.

@@ -6,6 +6,10 @@ extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 
+# ponytail: linear registry is enough for bootstrap-sized enum sets; replace
+# with a hash set only if profiles show enum validation on a hot path.
+var enum_registry_head: i64 = 0
+
 fn store_u32_le(ptr: i64, offset: i64, value: i64):
     spl_store_u8(ptr, offset, value & 255)
     spl_store_u8(ptr, offset + 1, (value >> 8) & 255)
@@ -13,29 +17,33 @@ fn store_u32_le(ptr: i64, offset: i64, value: i64):
     spl_store_u8(ptr, offset + 3, (value >> 24) & 255)
 
 fn load_u32_le(ptr: i64, offset: i64) -> i64:
-    return spl_load_u8(ptr, offset) |
-        (spl_load_u8(ptr, offset + 1) << 8) |
-        (spl_load_u8(ptr, offset + 2) << 16) |
-        (spl_load_u8(ptr, offset + 3) << 24)
+    return spl_load_u8(ptr, offset) | (spl_load_u8(ptr, offset + 1) << 8) | (spl_load_u8(ptr, offset + 2) << 16) | (spl_load_u8(ptr, offset + 3) << 24)
 
 fn enum_ptr(value: i64) -> i64:
     if value < 4096:
         return 0
     if (value & 7) != 1:
         return 0
-    val ptr = value & -8
-    if spl_load_u8(ptr, 0) != 4:
-        return 0
-    return ptr
+    val candidate = value & -8
+    var current = enum_registry_head
+    while current > 0:
+        if current == candidate:
+            if spl_load_u8(current, 0) == 4:
+                return current
+            return 0
+        current = spl_load_i64(current, 24)
+    return 0
 
 pub fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
-    val value = calloc(1, 24)
+    val value = calloc(1, 32)
     if value < 1:
         return 3
     spl_store_u8(value, 0, 4)
     store_u32_le(value, 4, enum_id)
     store_u32_le(value, 8, discriminant)
     spl_store_i64(value, 16, payload)
+    spl_store_i64(value, 24, enum_registry_head)
+    enum_registry_head = value
     return value | 1
 
 pub fn rt_enum_discriminant(value: i64) -> i64:

@@ -1209,7 +1209,11 @@ impl LlvmBackend {
                                 .map_err(|e| format!("pattern zext: {e}"))?
                         }
                     },
-                    crate::mir::MirPattern::Variant { variant_name, .. } => {
+                    crate::mir::MirPattern::Variant {
+                        enum_name,
+                        variant_name,
+                        ..
+                    } => {
                         // Get discriminant and compare
                         let rt_enum_disc = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -1222,7 +1226,13 @@ impl LlvmBackend {
                             .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
-                        let expected = {
+                        let expected = if enum_name == "Option" {
+                            if variant_name == "Some" {
+                                0
+                            } else {
+                                1
+                            }
+                        } else {
                             use std::collections::hash_map::DefaultHasher;
                             use std::hash::{Hash, Hasher};
                             let mut hasher = DefaultHasher::new();
@@ -1478,13 +1488,7 @@ impl LlvmBackend {
             MirInst::OptionSome { dest, value } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
-                let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Some".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
-                };
+                let disc = 0;
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
@@ -1510,13 +1514,7 @@ impl LlvmBackend {
             MirInst::OptionNone { dest } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
-                let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "None".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
-                };
+                let disc = 1;
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)

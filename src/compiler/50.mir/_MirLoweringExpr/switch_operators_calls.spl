@@ -114,6 +114,37 @@ fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
 # ============================================================================
 
 impl MirLowering:
+    me ensure_option_handle(local: LocalId, option_type: HirType) -> LocalId:
+        """Promote a typed Optional value to the canonical enum-id-1 handle."""
+        if self.option_value_locals.has(local.id):
+            self.runtime_value_locals[local.id] = true
+            self.local_hir_types[local.id] = option_type
+            return local
+        # Nil and the valid raw i64 payload 3 share the same bits. Only the
+        # lowering provenance can distinguish them; never guess at runtime.
+        val disc = if self.nil_locals.has(local.id): 1 else: 0
+        var b = self.builder
+        val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
+        val disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
+        var payload_local = local
+        if disc == 1:
+            payload_local = b.emit_const_int(3)
+        val ctor = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val result = b.emit_call(ctor, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
+        self.builder = b
+        if val raw = result:
+            val tagged = self.tag_enum_construct_result(raw)
+            self.option_value_locals[tagged.id] = true
+            self.runtime_value_locals[tagged.id] = true
+            self.local_hir_types[tagged.id] = option_type
+            return tagged
+        local
+
     me emit_resolved_direct_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
         var b = self.builder
         if return_type.kind != MirTypeKind.Unit:
@@ -166,7 +197,7 @@ impl MirLowering:
         val span = hi - lo
         span >= 0 and span <= 1024
 
-    me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?) -> LocalId:
+    me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
         """Emit a MirTerminator.Switch for a dense int match. Each arm
         lowers into its own block, stores its result into a shared temp,
         and jumps to a merge block. Mirrors lower_if's
@@ -201,7 +232,7 @@ impl MirLowering:
             var b_arm = self.builder
             b_arm.switch_to_block(arm_block)
             self.builder = b_arm
-            val arm_result = self.lower_block(arm_body)
+            val arm_result = self.lower_block_expected(arm_body, expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
             # NOTHING more into this block. set_terminator would clobber the
@@ -230,7 +261,7 @@ impl MirLowering:
                 self.error("match default binding has no resolved symbol", nil)
             else:
                 self.local_map[default_symbol.id] = scrut_local
-        val def_result = self.lower_block(default_body)
+        val def_result = self.lower_block_expected(default_body, expected_type)
         var b_d2 = self.builder
         # Same post-terminator guard as the arm loop above.
         if not b_d2.current_block_has_explicit_terminator():
@@ -252,9 +283,18 @@ impl MirLowering:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b_m
 
+        if val found_expected = expected_type:
+            match found_expected.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.runtime_value_locals[result.id] = true
+                    self.local_hir_types[result.id] = found_expected
+                case _:
+                    ()
+
         result
 
-    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?) -> LocalId:
+    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
         """Emit a nested If chain for sparse / small int matches.
         Cheaper than a jump table when arms < 4 or key span > 1024."""
         var b = self.builder
@@ -286,7 +326,7 @@ impl MirLowering:
             var b_arm = self.builder
             b_arm.switch_to_block(arm_block)
             self.builder = b_arm
-            val arm_result = self.lower_block(body)
+            val arm_result = self.lower_block_expected(body, expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
             # NOTHING more into this block. set_terminator would clobber the
@@ -318,7 +358,7 @@ impl MirLowering:
                 self.error("match default binding has no resolved symbol", nil)
             else:
                 self.local_map[default_symbol.id] = scrut_local
-        val def_result = self.lower_block(default_body)
+        val def_result = self.lower_block_expected(default_body, expected_type)
         var b_def = self.builder
         # Same post-terminator guard as the arm loop above.
         if not b_def.current_block_has_explicit_terminator():
@@ -338,6 +378,15 @@ impl MirLowering:
         if not result_defined:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b_m
+
+        if val found_expected = expected_type:
+            match found_expected.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.runtime_value_locals[result.id] = true
+                    self.local_hir_types[result.id] = found_expected
+                case _:
+                    ()
 
         result
 
@@ -835,7 +884,7 @@ impl MirLowering:
                 case _: ()
         nil
 
-    me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
+    me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
         rt_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
@@ -1024,7 +1073,7 @@ impl MirLowering:
                     if val gl = gr:
                         self.local_map[bind_syms[fi].id] = gl
                     fi = fi + 1
-            val arm_result = self.lower_block(enum_bodies[ci])
+            val arm_result = self.lower_block_expected(enum_bodies[ci], expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
             # NOTHING more into this block. set_terminator would clobber the
@@ -1045,7 +1094,7 @@ impl MirLowering:
             ci = ci + 1
 
         if has_default:
-            val dres = self.lower_block(default_body)
+            val dres = self.lower_block_expected(default_body, expected_type)
             var b_d2 = self.builder
             # Same post-terminator guard as the arm loop above.
             if not b_d2.current_block_has_explicit_terminator():
@@ -1063,6 +1112,14 @@ impl MirLowering:
         if not result_defined:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b_m
+        if val found_expected = expected_type:
+            match found_expected.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.runtime_value_locals[result.id] = true
+                    self.local_hir_types[result.id] = found_expected
+                case _:
+                    ()
         result
 
     me lower_try_expr(base: HirExpr) -> LocalId:
@@ -1326,8 +1383,10 @@ impl MirLowering:
         val variant_names = self.enum_variant_index[enum_name]
         val disc = enum_variant_disc(variant_names, variant)
         var b = self.builder
-        val enum_id_local = b.emit_const_int(0)
-        val disc_local = b.emit_const_int(disc)
+        val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(enum_id_local, MirConstValue.Int(if enum_name == "Option": 1 else: 0), MirType(kind: MirTypeKind.I32))
+        val disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
         self.builder = b
         var payload_local = LocalId(id: 0)
         var has_payload = false
@@ -1359,13 +1418,16 @@ impl MirLowering:
             self.builder = bz
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b2 = self.builder
         val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
         self.builder = b2
         if val r = result:
-            return self.tag_enum_construct_result(r)
+            val tagged = self.tag_enum_construct_result(r)
+            if enum_name == "Option":
+                self.option_value_locals[tagged.id] = true
+            return tagged
         payload_local
 
     me tag_enum_construct_result(r: LocalId) -> LocalId:
@@ -1413,8 +1475,10 @@ impl MirLowering:
         val variant_names = self.enum_variant_index[enum_name]
         val disc = enum_variant_disc(variant_names, variant)
         var b = self.builder
-        val enum_id_local = b.emit_const_int(0)
-        val disc_local = b.emit_const_int(disc)
+        val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(enum_id_local, MirConstValue.Int(if enum_name == "Option": 1 else: 0), MirType(kind: MirTypeKind.I32))
+        val disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
         self.builder = b
         var payload_local = LocalId(id: 0)
         if args.len() == 1:
@@ -1451,7 +1515,7 @@ impl MirLowering:
             self.builder = bz
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b2 = self.builder
         val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
@@ -1461,7 +1525,10 @@ impl MirLowering:
             # lower_enum_lit just above) -- same fix for the MethodCall-style
             # construction path (`Shape.Circle(7)` via receiver=Shape,
             # method=Circle).
-            return self.tag_enum_construct_result(r)
+            val tagged = self.tag_enum_construct_result(r)
+            if enum_name == "Option":
+                self.option_value_locals[tagged.id] = true
+            return tagged
         payload_local
 
     me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
@@ -1470,6 +1537,9 @@ impl MirLowering:
         otherwise falls back to positional order. Yields a pointer to the
         constructed storage (see backend translate_aggregate Struct branch)."""
         val field_names = self.struct_field_order[struct_name]
+        var field_hir_types: [HirType] = []
+        if self.struct_field_hir_type.has(struct_name):
+            field_hir_types = self.struct_field_hir_type[struct_name]
         # ROOT FIX (mirrors seed bug
         # simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16,
         # Symptom A -- "lower struct-init fields by declared order with nil
@@ -1514,7 +1584,23 @@ impl MirLowering:
                 # positional arg left to consume): zero/nil-fill instead of
                 # bleeding an unrelated arg's value into this slot (matches
                 # the "unsupported initializer" fallback just below).
-                ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+                var omitted_local = LocalId(id: 0)
+                var omitted_is_option = false
+                if fi < field_hir_types.len():
+                    match field_hir_types[fi].kind:
+                        case HirTypeKind.Optional(_):
+                            omitted_is_option = true
+                        case _:
+                            ()
+                if omitted_is_option:
+                    var omitted_b = self.builder
+                    val raw_nil = omitted_b.emit_const_int(3)
+                    self.builder = omitted_b
+                    self.nil_locals[raw_nil.id] = true
+                    omitted_local = self.ensure_option_handle(raw_nil, field_hir_types[fi])
+                    ops = ops.push(mir_operand_copy(omitted_local))
+                else:
+                    ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
                 field_type_names.push("")
                 fi = fi + 1
                 continue
@@ -1537,12 +1623,18 @@ impl MirLowering:
             # then SIGSEGVs at runtime for the exact same box/unbox concern.
             # Staying guard-only here for the same reason: a clean loud build
             # failure, never a crash, is the only difference this fix makes.
-            val v = self.lower_expr(chosen)
+            var v = self.lower_expr(chosen)
             if v == nil:
                 self.error("unsupported struct field initializer (cannot lower to a value)", nil)
                 ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
                 field_type_names.push("")
             else:
+                if fi < field_hir_types.len():
+                    match field_hir_types[fi].kind:
+                        case HirTypeKind.Optional(_):
+                            v = self.ensure_option_handle(v, field_hir_types[fi])
+                        case _:
+                            ()
                 ops = ops.push(mir_operand_copy(v))
                 val arg_struct = self.struct_value_syms.get(v.id)
                 field_type_names.push(arg_struct ?? "")
@@ -2366,7 +2458,19 @@ impl MirLowering:
                 return self.lower_struct_construct(direct_symbol, direct_name, args)
 
         var arg_operands: [MirOperand] = []
+        var call_param_types: [HirType] = []
+        if is_direct:
+            call_param_types = self.resolved_call_hir_param_types(direct_symbol)
+        elif callee.has_type_:
+            match callee.type_.kind:
+                case HirTypeKind.Function(params, _, _):
+                    call_param_types = params
+                case _:
+                    ()
+        var direct_arg_index = 0
         for arg in args:
+            val current_arg_index = direct_arg_index
+            direct_arg_index = direct_arg_index + 1
             val arg_value: HirExpr = arg.value
             val arg_kind: HirExprKind = arg_value.kind
             val fallback_arg_symbol = SymbolId(id: -1)
@@ -2392,7 +2496,16 @@ impl MirLowering:
                 if lambda_operand != nil:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
-            val arg_local = self.lower_expr(arg_value)
+            var arg_local = self.lower_expr(arg_value)
+            if current_arg_index < call_param_types.len():
+                val declared_param_type = call_param_types[current_arg_index]
+                match declared_param_type.kind:
+                    case HirTypeKind.Optional(_):
+                        # Producer-side provenance is the only authority that
+                        # can distinguish raw payload 3 from the nil sentinel.
+                        arg_local = self.ensure_option_handle(arg_local, declared_param_type)
+                    case _:
+                        ()
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:

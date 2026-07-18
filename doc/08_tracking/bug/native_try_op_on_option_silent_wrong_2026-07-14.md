@@ -160,8 +160,33 @@ pending; the payload-3 collision and uniform tagged Option ABI remain open.
 
 The exact open ABI matrix is preserved in
 `test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl`. It covers
-raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`, and
-raw/explicit `Some(0)` controls. Set `NATIVE_OPEN_BUG_REPROS=1` on the native
-parity harness to run it under default LLVM and explicit Cranelift; expected
-output is `3377777700`. It remains opt-in and red until all typed boundaries
-share the uniform tagged representation.
+raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`,
+raw/explicit `Some(0)` controls, annotated locals and aliases, typed calls,
+provided/defaulted fields, direct and function-value calls, and Option-valued
+`if`/`match` control-flow merges. Set
+`NATIVE_OPEN_BUG_REPROS=1` on the native parity harness to run it under default
+LLVM and explicit Cranelift; expected output is
+`3377777700333777033777377737773777`. It stays opt-in until both backends pass the
+current-source incremental run.
+
+## Incremental tagged-return slice (2026-07-18)
+
+The first no-bootstrap migration slice now uses one `i64` Option handle,
+reserved enum id `1`, and ordinal `Some = 0` / `None = 1` for explicit
+constructors and typed function returns. Direct-call return provenance marks
+those handles so `unwrap`/`unwrap_or` extract `rt_enum_payload` without
+double-wrapping or decoding raw `0`/`3` payloads as tagged integers.
+
+The C, pure-Simple, Rust, and freestanding predicate owners now classify only
+the raw nil sentinel or `(enum_id=1, discriminant=1)` as None. LLVM declarations
+use the portable `rt_enum_new(i32, i32, i64)` ABI, and the new Rust LLVM emitter
+reuses that API instead of nonexistent `rt_option_some`/`rt_option_none`
+symbols. Focused Rust Option-map and C runtime contracts pass incrementally.
+
+Typed lets, assignments, returns, parameters, and struct fields now share the
+same promotion helper. Its unproven-local path is runtime-idempotent, which
+also handles Option-valued control-flow merges without double-wrapping.
+Focused runnable checks cover the Rust MIR interpreter's canonical encoding,
+raw-bool `Option.map`, and pure-runtime rejection of raw 4097/-7 heap-tag
+collisions without a crash. The strict dual-backend fixture remains opt-in
+only until its current-source incremental LLVM and Cranelift executions pass.

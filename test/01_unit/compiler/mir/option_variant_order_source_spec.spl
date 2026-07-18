@@ -35,15 +35,52 @@ describe "MIR Option variant order":
         expect(dispatch_source).to_contain("self.local_hir_types[local.id] = found_type")
         expect(harness).to_contain("run_native_authoritative_case option_try_unresolved_method_loud write_case_option_try_unresolved_method_loud \"6\"")
 
-    it "keeps the uniform tagged ABI bug exactly reproducible":
+    it "pins the uniform tagged ABI migration and exact behavioral gate":
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl") ?? ""
         val harness = rt_file_read_text("scripts/check/check-native-seed-parity.shs") ?? ""
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        val types = rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
+        val methods = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+        val statements = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        val core_enum = rt_file_read_text("src/runtime/simple_core/core_enum.spl") ?? ""
+        val runtime = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
+        val llvm = rt_file_read_text("src/compiler/70.backend/backend/llvm_backend.spl") ?? ""
+        val split_llvm = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl") ?? ""
+        val rust_llvm = rt_file_read_text("src/compiler_rust/compiler/src/codegen/llvm/emitter.rs") ?? ""
+        val rust_llvm_legacy = rt_file_read_text("src/compiler_rust/compiler/src/codegen/llvm/functions.rs") ?? ""
+        val cranelift = rt_file_read_text("src/compiler_rust/compiler/src/codegen/instr/result.rs") ?? ""
+        val cranelift_calls = rt_file_read_text("src/compiler_rust/compiler/src/codegen/instr/calls.rs") ?? ""
 
         expect(fixture).to_contain("fn raw_three() -> i64?:")
         expect(fixture).to_contain("fn explicit_three() -> Option<i64>:")
         expect(fixture).to_contain("Some(3)")
         expect(fixture).to_contain("fn explicit_none() -> Option<i64>:")
+        expect(fixture).to_contain("fn through_argument(value: i64?) -> i64:")
+        expect(fixture).to_contain("val local_three: i64? = 3")
+        expect(fixture).to_contain("val alias = local_three")
+        expect(fixture).to_contain("struct OptionHolder:")
+        expect(fixture).to_contain("val empty_holder = OptionHolder()")
         expect(fixture).to_contain("None")
         expect(fixture).to_contain("unwrap_or(777)")
+        expect(types).to_contain("case Optional(inner):")
+        expect(types).to_contain("# Canonical Option ABI is one tagged rt_enum_new handle.")
+        expect(lowering).to_contain("me ensure_option_handle(local: LocalId, option_type: HirType)")
+        expect(lowering).to_contain("me ensure_option_argument(local: LocalId, option_type: HirType)")
+        expect(lowering).to_contain("if enum_name == \"Option\": 1 else: 0")
+        expect(methods).to_contain("MirConstValue.Str(\"rt_unwrap_or_self\")")
+        expect(statements).to_contain("self.option_value_locals[local.id] = true")
+        expect(core_enum).to_contain("var enum_registry_head: i64 = 0")
+        expect(core_enum).to_contain("while current > 0:")
+        expect(runtime).to_contain("rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1")
+        expect(llvm).to_contain("declare i64 @rt_enum_new(i32, i32, i64)")
+        expect(split_llvm).to_contain("declare i64 @rt_enum_new(i32, i32, i64)")
+        expect(rust_llvm).to_contain("self.call_enum_new(1, 0, val)")
+        expect(rust_llvm.contains("rt_option_some")).to_equal(false)
+        expect(rust_llvm.contains("rt_option_none")).to_equal(false)
+        expect(rust_llvm_legacy).to_contain("let disc = 0;")
+        expect(rust_llvm_legacy).to_contain("let disc = 1;")
+        expect(cranelift).to_contain("create_enum_value(ctx, builder, dest, 1, 0, Some(value))")
+        expect(cranelift).to_contain("create_enum_value(ctx, builder, dest, 1, 1, None)")
+        expect(cranelift_calls).to_contain("if is_option { 1 } else { 0 }")
         expect(harness).to_contain("NATIVE_OPEN_BUG_REPROS")
-        expect(harness).to_contain("run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl \"3377777700\"")
+        expect(harness).to_contain("run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl \"3377777700333777033777\"")

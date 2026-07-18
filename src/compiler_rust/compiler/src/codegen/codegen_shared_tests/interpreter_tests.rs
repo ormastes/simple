@@ -144,7 +144,7 @@ mod interpreter_value_checks {
     }
 
     #[test]
-    fn option_some_tagged() {
+    fn option_some_uses_canonical_enum_abi() {
         let insts = vec![
             MirInst::ConstInt {
                 dest: VReg(0),
@@ -155,14 +155,22 @@ mod interpreter_value_checks {
                 value: VReg(0),
             },
         ];
-        // Tagged: (42 << 1) | 1 = 85
-        assert_eq!(interpreter_value(&insts, VReg(1)), 85);
+        let value = simple_runtime::RuntimeValue::from_raw(interpreter_value(&insts, VReg(1)) as u64);
+        assert_eq!(simple_runtime::rt_enum_id(value), 1);
+        assert_eq!(simple_runtime::rt_enum_discriminant(value), 0);
+        assert_eq!(simple_runtime::rt_enum_payload(value).to_raw(), 42);
     }
 
     #[test]
-    fn option_none_is_zero() {
+    fn option_none_uses_canonical_enum_abi() {
         let insts = vec![MirInst::OptionNone { dest: VReg(0) }];
-        assert_eq!(interpreter_value(&insts, VReg(0)), 0);
+        let value = simple_runtime::RuntimeValue::from_raw(interpreter_value(&insts, VReg(0)) as u64);
+        assert_eq!(simple_runtime::rt_enum_id(value), 1);
+        assert_eq!(simple_runtime::rt_enum_discriminant(value), 1);
+        assert_eq!(
+            simple_runtime::rt_enum_payload(value),
+            simple_runtime::RuntimeValue::NIL
+        );
     }
 }
 
