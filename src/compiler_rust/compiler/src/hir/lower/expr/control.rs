@@ -784,14 +784,36 @@ impl Lowerer {
                 return self.lower_expr(expr, ctx);
             }
             if let simple_parser::ast::Node::Return(ret_stmt) = &body.statements[0] {
-                if let Some(expr) = &ret_stmt.value {
-                    return self.lower_expr(expr, ctx);
-                } else {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::Nil,
-                        ty: TypeId::NIL,
-                    });
-                }
+                // S70 root cause (native-smoke-matrix `match_value_position_return`):
+                // an arm body that is a genuine `return <expr>` must stay a real
+                // function-level return, not collapse into the arm's *value*.
+                // The previous `return self.lower_expr(expr, ctx)` silently
+                // discarded the `return` — the enclosing `HirExprKind::If` chain
+                // built by `lower_match_arms` for `val r = match n: ...` then
+                // stored that value into the match's result temp and fell
+                // through to whatever followed the `match` (e.g. `return r + 1`
+                // ran even though the arm said `return 7`, yielding 8 instead of
+                // 7). Wrapping the return in a one-statement `Block` preserves
+                // the terminator: MIR's `HirStmt::Return` handling sets a real
+                // `Terminator::Return` on the current block, and
+                // `finalize_block_jump`'s existing Unreachable-only guard
+                // (mirroring the pure-Simple fix in f10db44f0f4) already stops
+                // `lower_if_expr` from clobbering it with a merge-block jump.
+                // `ty` still reports the returned expression's type (not NIL)
+                // so callers that read the arm's type (e.g. the overall match
+                // expression's inferred type) see the same type as before.
+                let (value, ty) = match &ret_stmt.value {
+                    Some(expr) => {
+                        let lowered = self.lower_expr(expr, ctx)?;
+                        let ty = lowered.ty;
+                        (Some(lowered), ty)
+                    }
+                    None => (None, TypeId::NIL),
+                };
+                return Ok(HirExpr {
+                    kind: HirExprKind::Block(vec![crate::hir::HirStmt::Return(value)]),
+                    ty,
+                });
             }
         }
 
@@ -842,17 +864,24 @@ impl Lowerer {
                     block_stmts.push(crate::hir::HirStmt::Expr(expr));
                 }
                 simple_parser::ast::Node::Return(ret_stmt) => {
-                    if let Some(expr) = &ret_stmt.value {
-                        let expr = self.lower_expr(expr, ctx)?;
-                        result_ty = expr.ty;
-                        block_stmts.push(crate::hir::HirStmt::Expr(expr));
-                    } else {
-                        block_stmts.push(crate::hir::HirStmt::Expr(HirExpr {
-                            kind: HirExprKind::Nil,
-                            ty: TypeId::NIL,
-                        }));
-                        result_ty = TypeId::NIL;
-                    }
+                    // S70 root cause (native-smoke-matrix `match_value_position_return`):
+                    // same class of bug as the single-statement case in
+                    // `lower_match_arm_body` above — a `return <expr>` inside a
+                    // multi-statement do-block/match-arm body must stay a real
+                    // function-level return (`HirStmt::Return`, which MIR turns
+                    // into an actual block `Terminator::Return`), not a plain
+                    // `HirStmt::Expr` that the enclosing if-chain just treats as
+                    // this block's tail value and falls through past.
+                    let (value, ty) = match &ret_stmt.value {
+                        Some(expr) => {
+                            let lowered = self.lower_expr(expr, ctx)?;
+                            let ty = lowered.ty;
+                            (Some(lowered), ty)
+                        }
+                        None => (None, TypeId::NIL),
+                    };
+                    result_ty = ty;
+                    block_stmts.push(crate::hir::HirStmt::Return(value));
                 }
                 _ => block_stmts.extend(self.lower_node(stmt, ctx)?),
             }

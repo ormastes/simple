@@ -521,3 +521,83 @@ fn test_expression_match_mutable_binding_preserves_mutability() {
         .iter()
         .any(|local| local.name == "bound" && local.mutability == simple_parser::ast::Mutability::Mutable));
 }
+
+/// S70 root cause (native-smoke-matrix `option_nil_check`): `if val v = x.?:`
+/// parses `x.?` as `Expr::ExistsCheck` (a standalone presence-check operator
+/// that normally yields bool). Combined with a `val` binding, the intent is
+/// the same as the bare `if val v = x:` idiom -- bind `v` to the unwrapped
+/// Option value, not to the ExistsCheck's bool result. Before the fix, the
+/// subject was `lower_expr(ExistsCheck(x))` (a bool), so `v` bound to `1`
+/// (true) instead of x's real value -- `return v` returned 1 instead of 7.
+#[test]
+fn test_if_val_exists_check_binds_unwrapped_option_value() {
+    let source = "fn present(x: i64?) -> i64:\n    if val v = x.?:\n        return v\n    return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::Let {
+        local_index: subject_idx,
+        ty: subject_ty,
+        ..
+    } = &func.body[0]
+    else {
+        panic!("expected subject store as first statement: {:?}", func.body)
+    };
+    assert_ne!(
+        *subject_ty,
+        TypeId::BOOL,
+        "if-val subject kept the ExistsCheck's bool type instead of unwrapping to the Option's own type: {:?}",
+        func.body
+    );
+
+    let HirStmt::If { then_block, .. } = &func.body[1] else {
+        panic!("expected lowered if-val statement: {:?}", func.body)
+    };
+    let binds_v_to_subject = then_block.iter().any(|stmt| {
+        matches!(
+            stmt,
+            HirStmt::Let {
+                value: Some(HirExpr {
+                    kind: HirExprKind::Local(idx),
+                    ..
+                }),
+                ..
+            } if idx == subject_idx
+        )
+    });
+    assert!(
+        binds_v_to_subject,
+        "`v` binding did not copy the unwrapped subject (local {subject_idx}): {then_block:?}"
+    );
+}
+
+/// S70 root cause (native-smoke-matrix `match_value_position_return`): a
+/// match-as-EXPRESSION arm body that is `return <expr>` must lower to a real
+/// `HirStmt::Return` (a genuine function-level early return), not be
+/// flattened into the arm's plain value. Before the fix,
+/// `lower_match_arm_body`'s single-statement Return case discarded the
+/// `return` and just used `lower_expr(expr)` as the arm's value, so
+/// `val r = match n: case 2: return 7 ...` silently fell through to `return
+/// r + 1` instead of actually returning 7 (observed rc=8 instead of 7).
+#[test]
+fn test_value_position_match_arm_return_actually_returns() {
+    let source = "fn pick(n: i64) -> i64:\n    val r = match n:\n        case 1:\n            return 5\n        case 2:\n            return 7\n        case _:\n            return 99\n    return r + 1\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+    let hir_repr = format!("{:?}", func.body);
+
+    assert!(
+        hir_repr.contains("Return(Some(HirExpr { kind: Integer(7)"),
+        "match arm `return 7` was not lowered as a real HirStmt::Return: {hir_repr}"
+    );
+
+    // Confirm MIR lowering accepts this shape and actually emits a Return
+    // terminator for the arm (not just a value store that falls through to
+    // the enclosing `return r + 1`).
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(
+        mir_repr.contains("Return(Some("),
+        "match-arm return did not reach MIR as a Return terminator: {mir_repr}"
+    );
+}

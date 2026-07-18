@@ -66,7 +66,15 @@ impl Lowerer {
     ) -> LowerResult<Option<Vec<HirStmt>>> {
         for (pattern, condition, body) in branches.iter().rev() {
             if let Some(pattern) = pattern {
-                let subject = self.lower_expr(condition, ctx)?;
+                // `elif val v = expr.?:` has the same ExistsCheck-unwrap
+                // requirement as the main `if val v = expr.?:` path above (S70
+                // root cause for native-smoke-matrix `option_nil_check`) — see
+                // the comment on the `Node::If` let_pattern branch.
+                let condition_expr = match condition {
+                    Expr::ExistsCheck(inner) => inner.as_ref(),
+                    other => other,
+                };
+                let subject = self.lower_expr(condition_expr, ctx)?;
                 let subject_ty = subject.ty;
                 let subject_idx = ctx.locals.len();
                 ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
@@ -295,8 +303,23 @@ impl Lowerer {
                     // if val Some(x) = expr: / if var Ok(v) = expr:
                     // Lower as pattern match (same mechanism as match arms)
 
-                    // 1. Lower subject (the condition expr is the value to match)
-                    let subject_hir = self.lower_expr(&if_stmt.condition, ctx)?;
+                    // 1. Lower subject (the condition expr is the value to match).
+                    // `if val v = expr.?:` parses `expr.?` as `Expr::ExistsCheck`
+                    // (a standalone presence-check operator that normally yields a
+                    // bool). Combined with a `val` binding the intent is "bind v to
+                    // the unwrapped value of expr if present" — the same idiom as
+                    // the bare `if val v = expr:` form. Unwrap one ExistsCheck layer
+                    // here so the subject is `expr` itself (Option-typed), not the
+                    // bool presence check; otherwise `v` gets bound to the
+                    // ExistsCheck's bool result instead of the unwrapped value
+                    // (S70 root cause for native-smoke-matrix `option_nil_check`:
+                    // `if val v = x.?: return v` returned 1 (true, boxed) instead
+                    // of the unwrapped 7).
+                    let condition_expr = match &if_stmt.condition {
+                        Expr::ExistsCheck(inner) => inner.as_ref(),
+                        other => other,
+                    };
+                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
                     let subject_ty = subject_hir.ty;
 
                     // 2. Create temp local for subject value
