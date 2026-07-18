@@ -90,6 +90,11 @@ TLB, page walker, and XLEN-specific PMP state. Only typed ports, RVFI, and
 profile/status values leave the capsule. Internal flat TLB layouts and walker
 states remain tree-private.
 
+Instruction-width adaptation is also capsule-private. RV64C expands into the
+existing RV64 base decoder, but original 2/4-byte length and fault parcel remain
+clocked core state so PC, link, trap, and semihost behavior cannot be inferred
+from the expanded instruction.
+
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real
 compiled call sites reveal a smaller common interface.

@@ -261,5 +261,19 @@ implementation-milestone-2-in-progress
   embeddings no longer advertise/execute A without the exclusive-bus contract,
   and the MMIO PMA scenario now proves a populated UART RX FIFO is not consumed.
 - Checks remain unexecuted because the tracked pure-Simple full-CLI crash exits
-  139 before diagnostics. C, supervisor interrupt contexts, and RV32 parity
-  remain open.
+  139 before diagnostics. Supervisor interrupt contexts, MPRV data privilege,
+  and RV32 parity remain open.
+- Connected integer RV64C through a fail-closed decompressor and the existing
+  base decoder. Original instruction length now survives all clock phases;
+  sequential/link PCs, JALR alignment, EPC alignment, illegal-parcel trap
+  values, cross-page high-parcel faults, and semihost discrimination follow the
+  16-bit contract. Reusable/exclusive MISA profiles now advertise IMC/IMAC.
+- Replaced the disconnected approximate compressed spec with exact GNU
+  assembler/disassembler fixtures and protected clock-path scenarios. These
+  repository scenarios are intentionally recorded as unexecuted until the
+  pure-Simple CLI crash is repaired.
+- Post-fix sidecar review found and closed two RV64C/semihost blockers:
+  unsupported long prefixes now report zero instead of a partial nonzero
+  `mtval`, and unmatched semihost sequences no longer bypass ordinary
+  SYSTEM/CSR/return dispatch. The review then reported no remaining production
+  blocker; its requested CJ/CB/stack-access and IALIGN test gaps were added.

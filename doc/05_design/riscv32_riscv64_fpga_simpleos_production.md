@@ -154,7 +154,15 @@ connected. M is multi-cycle; A uses translated physical reservations and
 interrupt-free read/conditional-write phases. Only DRAM accepts atomic-tagged
 requests, so ROM/MMIO rejection occurs before target side effects. The reusable
 core profile leaves A clear; only `core64_init_single_master()` enables it for
-this exclusive-bus SoC. C remains clear.
+this exclusive-bus SoC.
+
+RV64C is a fail-closed 16-to-32-bit expansion layer feeding the same base
+decoder. `CoreState64.instruction_bytes` preserves the original length through
+loads, stores, M, and A phases. Sequential PC and control-flow link values use
+`pc + instruction_bytes`; JALR clears bit zero; trap EPCs align to two bytes;
+illegal compressed instructions report the original parcel. Compressed EBREAK
+cannot participate in the 32-bit semihost sequence. The reusable profile is
+RV64IMC+S/U and the exclusive-bus SoC profile is RV64IMAC+S/U.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

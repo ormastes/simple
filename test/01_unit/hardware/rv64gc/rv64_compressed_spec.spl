@@ -1,150 +1,142 @@
-"""
-# RV64 Compressed Instructions Unit Tests
+use std.spipe.*
+use std.hardware.rv64gc_rtl.compressed.rvc64_decompress
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_cycle}
+use std.hardware.rv64gc_rtl.regfile.{regfile64_read, regfile64_write}
+use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
 
-**Feature IDs:** #RV64-COMPRESSED-001
-**Category:** Hardware
-**Difficulty:** 2/5
-**Status:** Draft
+fn expect_expansion(parcel: u32, instruction: u32):
+    val decoded = rvc64_decompress(parcel)
+    expect(decoded.valid).to_be(true)
+    expect(decoded.instruction).to_equal(instruction)
 
-## Overview
+fn execute32(state: CoreState64, instruction: u32) -> CoreState64:
+    val low = core64_cycle(state, true, true, false,
+        (instruction & 0xFFFF) as i64)
+    core64_cycle(low.state, true, true, false,
+        ((instruction >> 16) & 0xFFFF) as i64).state
 
-Unit tests for RV64C compressed instruction detection and decompression.
-16-bit instructions expand to 32-bit equivalents.
-"""
+describe "RV64C integer decompression":
+    it "matches exact GNU assembler expansions across quadrants":
+        # Each compressed/base pair was independently assembled and
+        # disassembled with the RISC-V GNU toolchain. The set covers CIW, CL,
+        # CS, CI, CJ, CB, CSS, and CR formats.
+        expect_expansion(0x0800, 0x01010413)  # c.addi4spn x8, sp, 16
+        expect_expansion(0x4544, 0x00C52483)  # c.lw x9, 12(x10)
+        expect_expansion(0x6E0C, 0x01863583)  # c.ld x11, 24(x12)
+        expect_expansion(0xF714, 0x02D73423)  # c.sd x13, 40(x14)
+        expect_expansion(0x157D, 0xFFF50513)  # c.addi x10, -1
+        expect_expansion(0x2585, 0x0015859B)  # c.addiw x11, 1
+        expect_expansion(0x713D, 0xFE010113)  # c.addi16sp sp, -32
+        expect_expansion(0x050E, 0x00351513)  # c.slli x10, 3
+        expect_expansion(0x65E2, 0x01813583)  # c.ldsp x11, 24(sp)
+        expect_expansion(0xF432, 0x02C13423)  # c.sdsp x12, 40(sp)
+        expect_expansion(0x8502, 0x00050067)  # c.jr x10
+        expect_expansion(0x9582, 0x000580E7)  # c.jalr x11
+        expect_expansion(0x9002, 0x00100073)  # c.ebreak
+        expect_expansion(0xBFFD, 0xFFFFF06F)  # c.j -2
+        expect_expansion(0xDC7D, 0xFE040FE3)  # c.beqz x8, -2
+        expect_expansion(0xFCFD, 0xFE049FE3)  # c.bnez x9, -2
+        expect_expansion(0x4542, 0x01012503)  # c.lwsp x10, 16(sp)
+        expect_expansion(0xCA2E, 0x00B12A23)  # c.swsp x11, 20(sp)
 
-import std.spec
+    it "fails closed for reserved integer encodings":
+        expect(rvc64_decompress(0x0000).valid).to_be(false)  # zero ADDI4SPN
+        expect(rvc64_decompress(0x2001).valid).to_be(false)  # ADDIW rd=x0
+        expect(rvc64_decompress(0x4002).valid).to_be(false)  # LWSP rd=x0
+        expect(rvc64_decompress(0x6002).valid).to_be(false)  # LDSP rd=x0
+        expect(rvc64_decompress(0x9C61).valid).to_be(false)  # reserved CA word op
+        expect(rvc64_decompress(0x2000).valid).to_be(false)  # C.FLD unsupported
+        expect(rvc64_decompress(0xA000).valid).to_be(false)  # C.FSD unsupported
+        expect(rvc64_decompress(0x2002).valid).to_be(false)  # C.FLDSP unsupported
+        expect(rvc64_decompress(0xA002).valid).to_be(false)  # C.FSDSP unsupported
 
-use hardware.rv64gc.core.rv64_compressed.{is_compressed, decompress_rvc, rvc_reg}
+describe "RV64C protected clock path":
+    it "commits a compressed ADDI after one parcel and advances by two":
+        val reset_pc: i64 = 0x8000_0000
+        val cycle = core64_cycle(core64_init(reset_pc), true, true, false,
+            0x157D)
+        expect(cycle.state.pc).to_equal(reset_pc + 2)
+        expect(cycle.state.instruction_bytes).to_equal(2)
+        expect(regfile64_read(cycle.state.rf, 10, 0).rs1_data).to_equal(-1)
 
-describe "Compressed Detection":
-    """
-    ## 16-bit vs 32-bit Instruction Detection
+    it "uses pc plus two for C.JALR link and clears target bit zero":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init(reset_pc)
+        state.rf = regfile64_write(state.rf, 11, 0x8000_0101, true)
+        val cycle = core64_cycle(state, true, true, false, 0x9582)
+        expect(cycle.state.pc).to_equal(0x8000_0100)
+        expect(regfile64_read(cycle.state.rf, 1, 0).rs1_data).to_equal(
+            reset_pc + 2)
 
-    Bits [1:0] != 11 indicates compressed (16-bit) instruction.
-    """
+    it "retains two-byte length through a compressed load transaction":
+        val reset_pc: i64 = 0x8000_0000
+        val data_addr: i64 = 0x8000_0200
+        var state = core64_init(reset_pc)
+        state.rf = regfile64_write(state.rf, 12, data_addr - 24, true)
+        val fetch = core64_cycle(state, true, true, false, 0x6E0C)
+        expect(fetch.state.pc).to_equal(reset_pc)
+        val load = core64_cycle(fetch.state, true, true, false,
+            0x1122_3344_5566_7788)
+        expect(load.bus_addr).to_equal(data_addr)
+        expect(load.state.pc).to_equal(reset_pc + 2)
+        expect(regfile64_read(load.state.rf, 11, 0).rs1_data).to_equal(
+            0x1122_3344_5566_7788)
 
-    it "16-bit instruction detected (bits 1:0 = 00)":
-        expect(is_compressed(0x4000)).to_equal(true)
+    it "reports the original parcel for an illegal compressed instruction":
+        val reset_pc: i64 = 0x8000_0002
+        val cycle = core64_cycle(core64_init(reset_pc), true, true, false,
+            0x2001)
+        expect(cycle.state.csr_m.mcause).to_equal(2)
+        expect(cycle.state.csr_m.mepc).to_equal(reset_pc)
+        expect(cycle.state.csr_m.mtval).to_equal(0x2001)
 
-    it "32-bit instruction not compressed (bits 1:0 = 11)":
-        expect(is_compressed(0x00A00513)).to_equal(false)
+    it "reports zero mtval when an unsupported long prefix has only 16 bits":
+        val reset_pc: i64 = 0x8000_0000
+        val cycle = core64_cycle(core64_init(reset_pc), true, true, false,
+            0x001F)
+        expect(cycle.state.csr_m.mcause).to_equal(2)
+        expect(cycle.state.csr_m.mepc).to_equal(reset_pc)
+        expect(cycle.state.csr_m.mtval).to_equal(0)
 
-describe "Register Mapping":
-    """
-    ## CIW/CL/CS Register Mapping
+    it "treats compressed EBREAK as a trap, not a semihost marker":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init(reset_pc)
+        state.semi_phase = 1
+        val cycle = core64_cycle(state, true, true, false, 0x9002)
+        expect(cycle.state.csr_m.mcause).to_equal(3)
+        expect(cycle.state.csr_m.mepc).to_equal(reset_pc)
+        expect(cycle.state.semi_trigger).to_be(false)
 
-    3-bit register field maps to x8-x15.
-    """
+    it "does not start semihosting when a C hint expands to its entry marker":
+        val reset_pc: i64 = 0x8000_0000
+        # C.SLLI x0, 31 expands to the semihost entry instruction, but the
+        # architectural parcel is only two bytes and is merely a C hint.
+        val cycle = core64_cycle(core64_init(reset_pc), true, true, false,
+            0x007E)
+        expect(cycle.state.pc).to_equal(reset_pc + 2)
+        expect(cycle.state.semi_phase).to_equal(0)
+        expect(cycle.state.semi_trigger).to_be(false)
 
-    it "rvc_reg(0) = 8":
-        expect(rvc_reg(0)).to_equal(8)
+    it "still advances through the complete 32-bit semihost sequence":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init(reset_pc)
+        state.rf = regfile64_write(state.rf, 10, SYS_EXIT as i64, true)
+        state = execute32(state, SEMI_ENTRY)
+        expect(state.pc).to_equal(reset_pc + 4)
+        expect(state.semi_phase).to_equal(1)
+        state = execute32(state, SEMI_BREAK)
+        expect(state.pc).to_equal(reset_pc + 8)
+        expect(state.semi_phase).to_equal(2)
+        state = execute32(state, SEMI_EXIT)
+        expect(state.halt).to_be(true)
+        expect(state.semi_trigger).to_be(true)
 
-    it "rvc_reg(7) = 15":
-        expect(rvc_reg(7)).to_equal(15)
-
-describe "Quadrant 0 Decompression":
-    """
-    ## C.ADDI4SPN, C.LW, C.LD, C.SW, C.SD
-    """
-
-    it "C.ADDI4SPN: expands to ADDI rd', x2, nzuimm":
-        # C.ADDI4SPN x8, sp, 16 => ADDI x8, x2, 16
-        val compressed = 0x0040  # C.ADDI4SPN rd'=0(x8), nzuimm=16
-        val expanded = decompress_rvc(compressed)
-        # Verify opcode is OP_IMM (0x13)
-        expect(expanded and 0x7F).to_equal(0x13)
-
-    it "C.LW: expands to LW rd', offset(rs1')":
-        val compressed = 0x4188  # C.LW
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x03)  # LOAD opcode
-
-    it "C.LD: expands to LD rd', offset(rs1') (RV64 only)":
-        val compressed = 0x6188  # C.LD
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x03)  # LOAD opcode
-
-    it "C.SD: expands to SD rs2', offset(rs1') (RV64 only)":
-        val compressed = 0xE188  # C.SD
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x23)  # STORE opcode
-
-describe "Quadrant 1 Decompression":
-    """
-    ## C.NOP, C.ADDI, C.ADDIW, C.LI, C.LUI, C.SRLI, C.SRAI, C.ANDI, etc.
-    """
-
-    it "C.NOP: expands to ADDI x0, x0, 0":
-        val compressed = 0x0001  # C.NOP
-        val expanded = decompress_rvc(compressed)
-        expect(expanded).to_equal(0x00000013)  # ADDI x0, x0, 0
-
-    it "C.ADDI: expands to ADDI rd, rd, nzimm":
-        val compressed = 0x0505  # C.ADDI x10, 1
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x13)  # OP_IMM
-
-    it "C.ADDIW: expands to ADDIW rd, rd, imm (RV64 only)":
-        val compressed = 0x2505  # C.ADDIW x10, 1
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x1B)  # OP_IMM_32
-
-    it "C.J: expands to JAL x0, offset":
-        val compressed = 0xA001  # C.J offset
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x6F)  # JAL
-
-    it "C.BEQZ: expands to BEQ rs1', x0, offset":
-        val compressed = 0xC001  # C.BEQZ
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x63)  # BRANCH
-
-    it "C.BNEZ: expands to BNE rs1', x0, offset":
-        val compressed = 0xE001  # C.BNEZ
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x63)  # BRANCH
-
-describe "Quadrant 2 Decompression":
-    """
-    ## C.SLLI, C.LDSP, C.LWSP, C.JR, C.MV, C.ADD, C.SDSP, C.SWSP
-    """
-
-    it "C.SLLI: expands to SLLI rd, rd, shamt":
-        val compressed = 0x0502  # C.SLLI x10, 1 (approx encoding)
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x13)  # OP_IMM
-
-    it "C.LDSP: expands to LD rd, offset(x2) (RV64 only)":
-        val compressed = 0x6502  # C.LDSP x10, offset
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x03)  # LOAD
-
-    it "C.LWSP: expands to LW rd, offset(x2)":
-        val compressed = 0x4502  # C.LWSP x10, offset
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x03)  # LOAD
-
-    it "C.SDSP: expands to SD rs2, offset(x2) (RV64 only)":
-        val compressed = 0xE50A  # C.SDSP x10, offset
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x23)  # STORE
-
-    it "C.SWSP: expands to SW rs2, offset(x2)":
-        val compressed = 0xC50A  # C.SWSP x10, offset
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x23)  # STORE
-
-    it "C.JR: expands to JALR x0, 0(rs1)":
-        val compressed = 0x8502  # C.JR x10
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x67)  # JALR
-
-    it "C.MV: expands to ADD rd, x0, rs2":
-        val compressed = 0x850A  # C.MV x10, x10 (approx)
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x33)  # OP
-
-    it "C.ADD: expands to ADD rd, rd, rs2":
-        val compressed = 0x950A  # C.ADD x10, x10 (approx)
-        val expanded = decompress_rvc(compressed)
-        expect(expanded and 0x7F).to_equal(0x33)  # OP
+    it "keeps the original PC when the high parcel faults across a page":
+        val reset_pc: i64 = 0x8000_0FFE
+        val low = core64_cycle(core64_init(reset_pc), true, true, false,
+            0x0093)
+        expect(low.state.pc).to_equal(reset_pc)
+        val fault = core64_cycle(low.state, true, true, true, 0)
+        expect(fault.state.csr_m.mcause).to_equal(1)
+        expect(fault.state.csr_m.mepc).to_equal(reset_pc)
+        expect(fault.state.csr_m.mtval).to_equal(0x8000_1000)

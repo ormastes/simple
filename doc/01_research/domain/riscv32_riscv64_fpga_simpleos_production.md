@@ -243,3 +243,21 @@ AMOs for a physical region, so the current single-master SoC permits tagged
 atomics only in DRAM and rejects ROM/MMIO before invoking a target. Sources:
 [RISC-V Machine-Level ISA 1.13](https://docs.riscv.org/reference/isa/priv/machine.html),
 [RISC-V Supervisor-Level ISA 1.13](https://docs.riscv.org/reference/isa/priv/supervisor.html).
+
+## 2026-07-18 C-Extension Normative Recheck
+
+The C extension defines 16-bit parcels by low bits other than `11`, changes
+`IALIGN` to 16 bits, and requires compressed control-flow links and sequential
+PC updates to use the instruction's two-byte length. `C.JR`/`C.JALR` expand to
+`JALR`, whose target clears bit zero. Reserved encodings must remain illegal;
+integer hints may execute as architecturally harmless base instructions. The
+RV64-only compressed word operations expand to `*W` base instructions.
+Source: [RISC-V C extension 2.0](https://docs.riscv.org/reference/isa/unpriv/c-st-ext.html).
+
+The implementation therefore fetches one 16-bit parcel first, fetches the
+second parcel only for a 32-bit encoding, retains the original PC if the second
+parcel faults, writes the original illegal parcel to `mtval`/`stval`, and
+guards the three-instruction semihosting marker by original length. Exact
+decompression fixtures were independently assembled/disassembled with the GNU
+RISC-V toolchain; repository execution remains pending the tracked pure-Simple
+CLI repair.
