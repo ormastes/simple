@@ -493,6 +493,13 @@ Hard-won lessons for this live lane (each cost hours):
   as the chained-methods landmine); worked around with an intermediate
   `val eq = a == b` before the `expect`.
 
+## Session update 2026-07-18
+
+**Glass desktop screendump progress (SimpleOS x86_64):** first non-black 
+capture achieved (12.64% non-background pixels), fault storm reduced from 81 
+faults to 1 after NVMe/interpreter fixes; remaining fault = nil indirect call 
+in render_commands (C8 lane debugging in progress).
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

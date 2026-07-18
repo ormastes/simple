@@ -769,3 +769,11 @@ is already built (easy to lose): cross clang/lld at
 `/home/ormastes/llvm-project`, sysroot at `build/os/sysroot/`. Compile+link
 works; in-guest exec is blocked. Full guide + verified commands:
 `doc/07_guide/os/simpleos_llvm_toolchain.md`.
+
+## Session update 2026-07-18
+
+SimpleOS desktop bring-up continues through the C1-C8 baremetal codegen 
+landmine catalog (doc/08_tracking/bug/). Recent fixes shipped: seed 
+import-alias resolution, receiver-binding under --entry-closure, NVMe DMA 
+zero-address guard, interpreter stack overflow, i64 print precision. Canonical 
+reference guide (in progress): doc/07_guide/os/baremetal_simple_codegen_landmines.md.

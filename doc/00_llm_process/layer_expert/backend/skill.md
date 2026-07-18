@@ -77,6 +77,21 @@ trim, lower, to_lower, split, replace, rfind. Caveat: rfind returns -1 (not
 nil) on the fallback path due to C linkage compatibility.
 See: [src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl](../../../../src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl).
 
+## Session update 2026-07-18
+
+**Seed import-alias bug fixed (origin 3f0acf071cf):** `use {Real as Alias}` + 
+`Alias.new()` constructed the wrong class; seed static-method lowering now 
+resolves aliases like type annotations do. This fix unblocked the SimpleOS C8 
+boot fault storm. Related: `doc/08_tracking/bug/` for C1-C8 catalog.
+
+**Receiver-binding miscompile under --entry-closure x86_64-unknown-none 
+(94a893e77b9):** instance-method calls could pass the callee's own address as 
+self under freestanding codegen. FontRenderConfig methods converted to free 
+functions as workaround; seed-side root fix still pending.
+
+**i64 print truncation fixed (5c71ca50c00):** 61-bit tag-box was truncating 
+large i64 values. Bypass via `rt_raw_i64_to_string` now restores full precision.
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill

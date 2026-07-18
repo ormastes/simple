@@ -61,6 +61,17 @@ handoff notes.
   independent SimpleOS QEMU framebuffer crop. Synthetic composition tests and
   serial markers are supporting evidence only.
 
+## Session update 2026-07-18
+
+**OVMF pflash migration (board-runnable rule enforcement):** evidence-gate 
+scripts migrating from QEMU `-kernel` to OVMF pflash per board-runnable rule; 
+desktop kernel stalls pre-spl_start under OVMF but not `-kernel` (divergence 
+open for investigation).
+
+**Glass desktop screendump progress:** first non-black capture (12.64%), fault 
+storm reduced 81→1 after NVMe/font fixes; last fault = nil indirect call in 
+render_commands (debugging in progress).
+
 ## Historical Handoff Notes (2026-07-03)
 
 - At that point both WM lanes routed through the shared CSS/GUI-web renderer

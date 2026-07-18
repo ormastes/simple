@@ -1266,3 +1266,11 @@ or behavior-breaking variant.
 manifest validation (excludes the `auto` sentinel), active candidate roots, and
 the resolved candidate file for a stable import. Use it in verify evidence
 instead of hand-tracing resolution.
+
+## Session update 2026-07-18
+
+SimpleOS desktop bring-up knowledge lives in the C1-C8 baremetal codegen 
+landmine catalog (doc/08_tracking/bug/). Canonical reference: 
+doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent 
+fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure, 
+NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.

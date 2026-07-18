@@ -113,6 +113,20 @@ the env var points to the correct seed target.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
 
+## Session update 2026-07-18
+
+**Release-mode interpreter stack-overflow guard now default-ON:** interpreter 
+detects stack exhaust and returns an error instead of crashing, improving 
+robustness in production builds.
+
+**fs_helpers file_exists self-shadow recursion fixed:** file_exists no longer 
+calls itself recursively, resolving stack issues in filesystem operations.
+
+**NEW OPEN BUG — implicit-self field assignment (doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md):** 
+in `me` methods, field assignments without explicit `self.` prefix silently 
+no-op, while the lint recommends the implicit form. This is a semantic error 
+that needs investigation.
+
 ## Update Rule
 
 After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill
