@@ -2,16 +2,11 @@
 # SoC RTL Top-Level — RV64GC System-on-Chip (64-bit)
 # ============================================================================
 #
-# Wires together the RV64GC core, CLINT, UART16550, and RAM into a complete
-# single-cycle SoC targeting the QEMU virt memory map.
+# Wires the clocked RV64 core to the QEMU-virt ROM, DRAM, CLINT, PLIC, and UART.
 #
 # soc_top_64_tick() is the main simulation entry point.  Each call = 1 cycle.
-# Minimal pipeline (interpreter-safe subset):
-#   1. Advance CLINT mtime
-#   2. Advance core PC by 4 (NOP step when no instruction memory wired)
-#
-# Full RV64GC pipeline (compiled mode): requires core64_combinational +
-# core64_update + full Wishbone64 dispatch (see soc_top.spl for RV32 pattern).
+# Bus responses are latched for one cycle. The core stalls until the accepted
+# request completes, so page walks, fetches, and data accesses share one path.
 #
 # Dependencies:
 #   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init
@@ -26,14 +21,23 @@
 # ============================================================================
 
 # -- Core
-use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init}
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_cycle}
+use std.hardware.rv64gc_rtl.csr.csr64_update_mip
 
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick}
-use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init}
+use std.hardware.soc_rtl.clint.{clint_mmio_read, clint_mmio_write}
+use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_tick}
+use std.hardware.soc_rtl.uart16550.{uart_mmio_read, uart_mmio_read_update, uart_mmio_write}
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_set_pending, plic_check_interrupt}
+use std.hardware.soc_rtl.plic.{plic_mmio_read, plic_mmio_read_update, plic_mmio_write}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
+use std.hardware.soc_rtl.bootrom.bootrom64_read
 
 # -- Wishbone64 interconnect
-use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_qemu_virt_regions, wb64_init}
+use std.hardware.soc_rtl.wb64_interconnect.{Wb64Interconnect, wb64_qemu_virt_regions, wb64_init, wb64_request}
+use std.hardware.soc_rtl.wb64_interconnect.{WB64_PID_BOOTROM, WB64_PID_CLINT, WB64_PID_PLIC, WB64_PID_UART, WB64_PID_DRAM}
+use std.hardware.soc_rtl.wb64_interconnect.{WB64_BOOTROM_BASE, WB64_CLINT_BASE, WB64_PLIC_BASE, WB64_UART_BASE, WB64_DRAM_BASE}
 
 # Reset vector matches QEMU virt boot ROM base
 val SOC64_RESET_VECTOR: i64 = 0x1000
@@ -47,7 +51,13 @@ struct SocTop64State:
     core:  CoreState64     # RV64GC core (pc, priv_mode, halt, ...)
     ram:   Ram64State      # DRAM
     clint: ClintState      # CLINT (mtime, mtimecmp, msip)
+    plic: PlicState
+    uart: Uart16550State
     ic:    Wb64Interconnect  # Address decode table (read-only after init)
+    response_valid: bool
+    response_error: bool
+    response_data: i64
+    uart_tx: u32
 
 # ============================================================================
 # Create / Reset
@@ -65,29 +75,120 @@ fn soc_top_64_init(dram_size: i64) -> SocTop64State:
         core:  core64_init(SOC64_RESET_VECTOR),
         ram:   ram64_init(dram_size),
         clint: clint_create(),
-        ic:    wb64_init(regions)
+        plic:  plic_create(),
+        uart:  uart_create(),
+        ic:    wb64_init(regions),
+        response_valid: false,
+        response_error: false,
+        response_data: 0,
+        uart_tx: 1
     )
+
+fn soc64_bootrom_read(addr: i64, size_bytes: u32) -> i64:
+    val aligned = addr & -4
+    val word = bootrom64_read(aligned) as i64
+    if size_bytes == 8:
+        return word | ((bootrom64_read(aligned + 4) as i64) << 32)
+    val shifted = word >> ((addr & 3) * 8)
+    if size_bytes == 1:
+        return shifted & 0xFF
+    if size_bytes == 2:
+        return shifted & 0xFFFF
+    shifted & 0xFFFFFFFF
+
+fn soc64_clint_read(state: ClintState, offset: u32, size_bytes: u32) -> i64:
+    val low = clint_mmio_read(state, offset) as i64
+    if size_bytes == 8:
+        val high = clint_mmio_read(state, offset + 4) as i64
+        return low | (high << 32)
+    low
+
+fn soc64_clint_write(state: ClintState, offset: u32, size_bytes: u32,
+                     data: i64) -> ClintState:
+    var out = clint_mmio_write(state, offset, data as u32)
+    if size_bytes == 8:
+        out = clint_mmio_write(out, offset + 4, (data >> 32) as u32)
+    out
 
 # ============================================================================
 # SoC Tick — one clock cycle
 # ============================================================================
 
 fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
-    """Execute one clock cycle of the RV64GC SoC.
-
-    Minimal interpreter-safe implementation:
-      1. Tick CLINT (increments mtime)
-      2. Advance PC by 4 (NOP instruction step)
-
-    Full pipeline (compiled mode): add core64_combinational + core64_update
-    + Wishbone64 dispatch following the RV32 soc_tick pattern."""
+    """Execute one stalled core/bus/peripheral clock cycle."""
     var out = soc
 
-    # Step 1: Tick CLINT — increments mtime
     val ct = clint_tick(out.clint)
     out.clint = ct.state
+    val ut = uart_tick(out.uart)
+    out.uart = ut.state
+    out.uart_tx = ut.tx_out
+    out.plic = plic_set_pending(out.plic, 10, ut.irq)
+    val external = plic_check_interrupt(out.plic)
+    out.core.csr_m = csr64_update_mip(out.core.csr_m, ct.mtip,
+        ct.msip_out, external.meip)
 
-    # Step 2: Advance PC (NOP step — boot ROM returns NOP 0x00000013)
-    out.core.pc = out.core.pc + 4
+    val core_result = core64_cycle(out.core, true, out.response_valid,
+        out.response_error, out.response_data)
+    out.core = core_result.state
+    out.response_valid = false
+    out.response_error = false
+    out.response_data = 0
+
+    if core_result.bus_valid:
+        val decoded = wb64_request(out.ic, core_result.bus_addr,
+            core_result.bus_wdata, core_result.bus_write, 0)
+        out.response_valid = true
+        out.response_error = decoded.err
+
+        if not decoded.err:
+            val pid = decoded.peripheral_id
+            if pid == WB64_PID_BOOTROM:
+                if core_result.bus_write:
+                    out.response_error = true
+                else:
+                    out.response_data = soc64_bootrom_read(core_result.bus_addr,
+                        core_result.bus_size)
+
+            else if pid == WB64_PID_DRAM:
+                val offset = core_result.bus_addr - WB64_DRAM_BASE
+                if offset < 0 or offset + (core_result.bus_size as i64) > out.ram.size:
+                    out.response_error = true
+                else if core_result.bus_write:
+                    out.ram = ram64_write(out.ram, offset,
+                        core_result.bus_size as i64, core_result.bus_wdata)
+                else:
+                    out.response_data = ram64_read(out.ram, offset,
+                        core_result.bus_size as i64)
+
+            else if pid == WB64_PID_CLINT:
+                val offset = (core_result.bus_addr - WB64_CLINT_BASE) as u32
+                if core_result.bus_write:
+                    out.clint = soc64_clint_write(out.clint, offset,
+                        core_result.bus_size, core_result.bus_wdata)
+                else:
+                    out.response_data = soc64_clint_read(out.clint, offset,
+                        core_result.bus_size)
+
+            else if pid == WB64_PID_UART:
+                val offset = (core_result.bus_addr - WB64_UART_BASE) as u32
+                if core_result.bus_write:
+                    out.uart = uart_mmio_write(out.uart, offset,
+                        core_result.bus_wdata as u32)
+                else:
+                    out.response_data = uart_mmio_read(out.uart, offset) as i64
+                    out.uart = uart_mmio_read_update(out.uart, offset)
+
+            else if pid == WB64_PID_PLIC:
+                val offset = (core_result.bus_addr - WB64_PLIC_BASE) as u32
+                if core_result.bus_write:
+                    out.plic = plic_mmio_write(out.plic, offset,
+                        core_result.bus_wdata as u32)
+                else:
+                    out.response_data = plic_mmio_read(out.plic, offset) as i64
+                    out.plic = plic_mmio_read_update(out.plic, offset)
+
+            else:
+                out.response_error = true
 
     out

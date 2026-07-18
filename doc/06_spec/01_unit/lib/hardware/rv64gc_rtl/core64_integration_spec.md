@@ -2,7 +2,8 @@
 
 > **Stale generated mirror:** the pure-Simple doc generator is blocked by the
 > tracked full-CLI crash. The executable spec has removed the permissive
-> `lsu64_access` scenario; do not use the legacy section below as evidence.
+> `lsu64_access` and PC-only `core64_step` scenarios; do not use the legacy
+> sections below as evidence.
 
 > Tests for RV64GC core integration: CSR/trap/privilege wiring, MMU Sv39 through LSU, decoder SRET/SFENCE.VMA paths, mul_div unsigned division fix, and S-mode delegation in trap handler.
 

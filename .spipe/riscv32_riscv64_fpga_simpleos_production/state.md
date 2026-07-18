@@ -236,3 +236,18 @@ implementation-milestone-2-in-progress
   Focused cases cover Bare M allow, Bare S deny, translated request ordering,
   walker-allowed/final-PMP-denied suppression, and precise misaligned stores.
   Core state/commit arbitration has not yet consumed this frontend.
+## 2026-07-18 RV64 clock-path integration
+
+- Added `core64_cycle` as the single production RV64 clock path with persistent
+  register state, two 16-bit fetch parcels, stalled data access, and precise
+  Sv39/PMP trap entry.
+- Replaced `soc_top_64_tick`'s manual PC increment with one-cycle-latched routing
+  to the existing ROM, DRAM, CLINT, PLIC, and UART owners.
+- Deleted the PC-only `core64_step`, `SocBus64`, and raw `core64_ports` bypasses.
+- Added focused executable scenarios for register commit, exactly-once stores,
+  no-bus PMP faults, and RV64 reset-ROM handoff.
+- High-capability review found and fixed three pre-commit blockers: M/A/C are no
+  longer falsely advertised, reserved encodings fail closed before memory, and
+  CLINT/PLIC pending signals now reach boundary-precise interrupt entry.
+- Checks remain unexecuted because the tracked pure-Simple full-CLI crash exits
+  139 before diagnostics. C, M, A, interrupt entry, and RV32 parity remain open.

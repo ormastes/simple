@@ -1,0 +1,98 @@
+use std.spipe.*
+use std.hardware.rv64gc_rtl.core.{core64_init, core64_cycle, CORE64_FETCH_LOW, CORE64_DATA_ACCESS}
+use std.hardware.rv64gc_rtl.regfile.{regfile64_read, regfile64_write}
+use std.hardware.rv64gc_rtl.memory_access.memory64_start
+use std.hardware.rv64gc_rtl.mmu_sv39.ACCESS_FETCH_64
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MTIP_MASK}
+use std.hardware.rv64gc_rtl.trap.cause_mti
+
+describe "RV64 clocked protected-memory core":
+    it "advertises only extensions connected to this clock path":
+        val misa = core64_init(0x8000_0000).csr_m.misa
+        val unsupported: i64 = (1 << 12) | (1 << 2) | 1
+        expect(misa & unsupported).to_equal(0)
+
+    it "commits ADDI only after both instruction parcels return":
+        val reset_pc: i64 = 0x8000_0000
+        val low = core64_cycle(core64_init(reset_pc), true, true, false, 0x0093)
+        expect(low.bus_valid).to_be(true)
+        expect(low.bus_addr).to_equal(reset_pc)
+        expect(low.bus_size).to_equal(2)
+        expect(low.state.pc).to_equal(reset_pc)
+
+        val high = core64_cycle(low.state, true, true, false, 0x0050)
+        expect(high.bus_valid).to_be(true)
+        expect(high.bus_addr).to_equal(reset_pc + 2)
+        expect(high.state.pc).to_equal(reset_pc + 4)
+        expect(regfile64_read(high.state.rf, 1, 0).rs1_data).to_equal(5)
+
+    it "routes a store through the shared data transaction before commit":
+        val reset_pc: i64 = 0x8000_0000
+        val data_addr: i64 = 0x8000_0100
+        var state = core64_init(reset_pc)
+        state.rf = regfile64_write(state.rf, 1, data_addr, true)
+        state.rf = regfile64_write(state.rf, 2, 0x1122_3344, true)
+
+        val low = core64_cycle(state, true, true, false, 0xA023)
+        val high = core64_cycle(low.state, true, true, false, 0x0020)
+        expect(high.state.pipeline_phase).to_equal(CORE64_DATA_ACCESS)
+        expect(high.state.pc).to_equal(reset_pc)
+
+        val store = core64_cycle(high.state, true, true, false, 0)
+        expect(store.bus_valid).to_be(true)
+        expect(store.bus_addr).to_equal(data_addr)
+        expect(store.bus_size).to_equal(4)
+        expect(store.bus_write).to_be(true)
+        expect(store.bus_wdata).to_equal(0x1122_3344)
+        expect(store.state.pc).to_equal(reset_pc + 4)
+
+    it "writes back a sign-extended load response":
+        val reset_pc: i64 = 0x8000_0000
+        val data_addr: i64 = 0x8000_0100
+        var state = core64_init(reset_pc)
+        state.rf = regfile64_write(state.rf, 1, data_addr, true)
+
+        val low = core64_cycle(state, true, true, false, 0x8183)
+        val high = core64_cycle(low.state, true, true, false, 0x0000)
+        val load = core64_cycle(high.state, true, true, false, 0x80)
+        expect(load.bus_addr).to_equal(data_addr)
+        expect(load.bus_size).to_equal(1)
+        expect(regfile64_read(load.state.rf, 3, 0).rs1_data).to_equal(-128)
+
+    it "turns a supervisor fetch PMP denial into a precise no-bus trap":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init(reset_pc)
+        state.priv_mode = 1
+        state.memory = memory64_start(state.mmu, state.pmp, reset_pc,
+            ACCESS_FETCH_64, 2, 1, false, false, 0)
+
+        val denied = core64_cycle(state, true, false, false, 0)
+        expect(denied.bus_valid).to_be(false)
+        expect(denied.state.priv_mode).to_equal(3)
+        expect(denied.state.csr_m.mcause).to_equal(1)
+        expect(denied.state.csr_m.mtval).to_equal(reset_pc)
+
+    it "traps a reserved load encoding before starting data access":
+        val reset_pc: i64 = 0x8000_0000
+        val low = core64_cycle(core64_init(reset_pc), true, true, false, 0x7083)
+        val illegal = core64_cycle(low.state, true, true, false, 0x0000)
+        expect(illegal.state.csr_m.mcause).to_equal(2)
+        expect(illegal.state.csr_m.mtval).to_equal(0x00007083)
+        expect(illegal.state.pipeline_phase).to_equal(CORE64_FETCH_LOW)
+        val trap_fetch = core64_cycle(illegal.state, false, false, false, 0)
+        expect(trap_fetch.bus_addr).to_equal(illegal.state.pc)
+
+    it "commits an instruction before taking a pending timer interrupt":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init(reset_pc)
+        state.csr_m.mtvec = 0x100
+        state.csr_m.mstatus = MSTATUS_MIE_MASK
+        state.csr_m.mie = MIP_MTIP_MASK
+        state.csr_m.mip = MIP_MTIP_MASK
+
+        val low = core64_cycle(state, true, true, false, 0x0093)
+        val interrupted = core64_cycle(low.state, true, true, false, 0x0050)
+        expect(interrupted.state.pc).to_equal(0x100)
+        expect(interrupted.state.csr_m.mepc).to_equal(reset_pc + 4)
+        expect(interrupted.state.csr_m.mcause).to_equal(cause_mti())
+        expect(regfile64_read(interrupted.state.rf, 1, 0).rs1_data).to_equal(5)

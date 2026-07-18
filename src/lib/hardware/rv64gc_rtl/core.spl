@@ -17,23 +17,33 @@
 # ============================================================================
 
 use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
-use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM}
+use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_MISC_MEM}
+use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AMO}
 use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
 use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
 use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64}
 use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
-use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_read}
+use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.lsu.lsu64_load
 use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready}
 use std.hardware.rv64gc_rtl.atomics.AtomicsState
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
 use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
-use std.hardware.rv64gc_rtl.trap.{trap64_enter, trap64_state_init, CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT}
+use std.hardware.rv64gc_rtl.trap.{InterruptCheckResult64, trap64_enter, trap64_state_init}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_mei, cause_msi, cause_mti}
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
+use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
+use std.hardware.rv64gc_rtl.memory_access.MemoryAccessState64
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start, memory64_cycle}
 use std.hardware.rv64gc_rtl.pmp.PmpEntries64
 use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_entries_reset, pmp64_csr_read, pmp64_csr_write}
-use std.hardware.rv64gc_rtl.pkg.{SocBus64, soc_bus64_init}
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+
+val CORE64_FETCH_LOW: u32 = 0
+val CORE64_FETCH_HIGH: u32 = 1
+val CORE64_DATA_ACCESS: u32 = 2
 
 # ============================================================================
 # Core sequential state (clocked registers)
@@ -55,6 +65,11 @@ struct CoreState64:
     csr_s: CsrSMode64   # S-mode CSR file
     mmu: MmuState64      # Sv39 MMU state, including TLB
     pmp: PmpEntries64    # Machine-owned physical memory protection state
+    rf: RegFile64         # Architectural integer register file
+    memory: MemoryAccessState64  # One protected fetch/data transaction
+    pipeline_phase: u32   # Fetch low parcel, fetch high parcel, or data
+    fetch_low: u32        # Low 16-bit instruction parcel
+    instruction: u32      # Current 32-bit instruction during data access
 
 struct CoreCsrAccess64:
     """One legal CSR read/modify/write result for the clocked core."""
@@ -64,6 +79,16 @@ struct CoreCsrAccess64:
     csr_s: CsrSMode64
     mmu: MmuState64
     pmp: PmpEntries64
+
+struct Core64CycleResult:
+    """One clock result and the canonical physical bus request."""
+    state: CoreState64
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: i64
+    bus_is_pte: bool
 
 # ============================================================================
 # Combinational result bundle
@@ -107,30 +132,6 @@ struct CoreCombResult64:
     imem_addr: i64
 
 # ============================================================================
-# External port bundle (top-level I/O)
-# ============================================================================
-
-struct CorePorts64:
-    """Top-level external port signals for the core."""
-    # Instruction memory interface
-    imem_addr: i64
-
-    # Data memory interface
-    dmem_addr: i64
-    dmem_wdata: i64
-    dmem_we: bool
-    dmem_re: bool
-    dmem_width: u32
-
-    # Status
-    halted: bool
-
-    # Semihosting interface
-    semi_trigger: bool
-    semi_op: i64
-    semi_param: i64
-
-# ============================================================================
 # Signed comparison helpers for branch evaluation
 # ============================================================================
 
@@ -172,6 +173,78 @@ fn eval_branch_64(funct3: u32, rs1_data: i64, rs2_data: i64) -> bool:
     if funct3 == BR_BGEU:
         return i64_unsigned_ge(rs1_data, rs2_data)
     false
+
+@hardware
+fn core64_instruction_legal(instruction: u32, dec: DecodeResult64) -> bool:
+    """Fail closed for every encoding the current integer datapath accepts."""
+    val op = dec.opcode
+    val f3 = dec.funct3
+    val f7 = dec.funct7
+
+    if op == OP_LUI or op == OP_AUIPC or op == OP_JAL:
+        return true
+    if op == OP_JALR:
+        return f3 == 0
+    if op == OP_BRANCH:
+        return f3 == 0 or f3 == 1 or f3 == 4 or f3 == 5 or f3 == 6 or f3 == 7
+    if op == OP_LOAD:
+        return f3 <= 6
+    if op == OP_STORE:
+        return f3 <= 3
+
+    if op == OP_IMMED:
+        if f3 == 1:
+            return ((instruction >> 26) & 0x3F) == 0
+        if f3 == 5:
+            val funct6 = (instruction >> 26) & 0x3F
+            return funct6 == 0 or funct6 == 0x10
+        return f3 == 0 or f3 == 2 or f3 == 3 or f3 == 4 or f3 == 6 or f3 == 7
+
+    if op == OP_REG:
+        if f7 == 0 or f7 == 1:
+            return true
+        return f7 == 0x20 and (f3 == 0 or f3 == 5)
+
+    if op == OP_OP_IMM_32:
+        if f3 == 0:
+            return true
+        if f3 == 1:
+            return f7 == 0
+        if f3 == 5:
+            return f7 == 0 or f7 == 0x20
+        return false
+
+    if op == OP_OP_32:
+        if f7 == 1:
+            return true
+        if f7 == 0:
+            return f3 == 0 or f3 == 1 or f3 == 5
+        return f7 == 0x20 and (f3 == 0 or f3 == 5)
+
+    if op == OP_MISC_MEM:
+        if f3 == 0:
+            return dec.rd == 0 and dec.rs1 == 0
+        return instruction == 0x0000100F
+
+    if op == OP_SYSTEM:
+        if dec.is_sfence_vma:
+            return dec.rd == 0
+        if dec.is_csr or dec.is_mret or dec.is_sret:
+            return true
+        return instruction == 0x00000073 or instruction == 0x00100073
+
+    # A is recognized so the extension gate below can raise a precise illegal
+    # instruction until its reservation/bus path is connected.
+    op == OP_AMO
+
+@hardware
+fn core64_privileged_instruction_legal(state: CoreState64,
+                                       dec: DecodeResult64) -> bool:
+    if dec.is_mret:
+        return state.priv_mode == 3
+    if dec.is_sret or dec.is_sfence_vma:
+        return state.priv_mode == 1 or state.priv_mode == 3
+    true
 
 # ============================================================================
 # Privileged CSR routing
@@ -372,6 +445,7 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
     var new_csr_s = state.csr_s
     var new_mmu = state.mmu
     var new_pmp = state.pmp
+    var new_rf = state.rf
 
     if state.halt == false:
         if imem_data == SEMI_ENTRY and state.semi_phase == 0:
@@ -461,6 +535,8 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_semi_suppress = false
             new_pc = comb.pc_next
 
+        new_rf = regfile64_write(state.rf, comb.dec.rd, comb.rd_data, comb.rd_write)
+
     CoreState64(
         pc: new_pc,
         halt: new_halt,
@@ -475,7 +551,12 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
         csr_m: new_csr_m,
         csr_s: new_csr_s,
         mmu: new_mmu,
-        pmp: new_pmp
+        pmp: new_pmp,
+        rf: new_rf,
+        memory: state.memory,
+        pipeline_phase: state.pipeline_phase,
+        fetch_low: state.fetch_low,
+        instruction: state.instruction
     )
 
 # ============================================================================
@@ -487,30 +568,13 @@ fn core64_semi_triggered(state: CoreState64, imem_data: u32) -> bool:
     imem_data == SEMI_EXIT and state.semi_phase == 2
 
 # ============================================================================
-# External port extraction
-# ============================================================================
-
-fn core64_ports(state: CoreState64, comb: CoreCombResult64) -> CorePorts64:
-    """Extract top-level port signals from the core state and combinational results."""
-    CorePorts64(
-        imem_addr: comb.imem_addr,
-        dmem_addr: comb.dmem_addr,
-        dmem_wdata: comb.dmem_wdata,
-        dmem_we: comb.dmem_we,
-        dmem_re: comb.dmem_re,
-        dmem_width: comb.dmem_width,
-        halted: state.halt,
-        semi_trigger: state.semi_trigger,
-        semi_op: state.semi_op,
-        semi_param: state.semi_param
-    )
-
-# ============================================================================
 # Reset state
 # ============================================================================
 
 fn core64_reset(reset_addr: i64) -> CoreState64:
     """Create initial core state after reset."""
+    val mmu = mmu64_create()
+    val pmp = pmp64_entries_reset()
     CoreState64(
         pc: reset_addr,
         halt: false,
@@ -524,8 +588,13 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
         priv_mode: 3,
         csr_m: csr64_create(0),
         csr_s: csr_s64_create(),
-        mmu: mmu64_create(),
-        pmp: pmp64_entries_reset()
+        mmu: mmu,
+        pmp: pmp,
+        rf: regfile64_create(),
+        memory: memory64_start(mmu, pmp, reset_addr, ACCESS_FETCH_64, 2, 3, false, false, 0),
+        pipeline_phase: CORE64_FETCH_LOW,
+        fetch_low: 0,
+        instruction: 0
     )
 
 # ============================================================================
@@ -535,6 +604,8 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
 fn core64_init(reset_vec: i64) -> CoreState64:
     """Create full initial core state with privilege mode and CSR state.
     Starts in M-mode (priv_mode=3) with all CSRs zeroed."""
+    val mmu = mmu64_create()
+    val pmp = pmp64_entries_reset()
     CoreState64(
         pc: reset_vec,
         halt: false,
@@ -548,22 +619,172 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         priv_mode: 3,
         csr_m: csr64_create(0),
         csr_s: csr_s64_create(),
-        mmu: mmu64_create(),
-        pmp: pmp64_entries_reset()
+        mmu: mmu,
+        pmp: pmp,
+        rf: regfile64_create(),
+        memory: memory64_start(mmu, pmp, reset_vec, ACCESS_FETCH_64, 2, 3, false, false, 0),
+        pipeline_phase: CORE64_FETCH_LOW,
+        fetch_low: 0,
+        instruction: 0
     )
 
 # ============================================================================
-# Core step result
+# Clocked protected-memory core path
 # ============================================================================
 
-struct Core64StepResult:
-    """Result of a single core step (one clock cycle)."""
-    state: CoreState64
+@hardware
+fn core64_sum_enabled(state: CoreState64) -> bool:
+    (state.csr_s.sstatus & SSTATUS_SUM_MASK_64) != 0
 
-fn core64_step(state: CoreState64, bus: SocBus64) -> Core64StepResult:
-    """Advance the core by one clock cycle.
-    For interpreter-mode testing: increments PC by 4 unconditionally.
-    Full RTL simulation requires compiled mode with memory bus."""
-    var new_state = state
-    new_state.pc = state.pc + 4
-    Core64StepResult(state: new_state)
+@hardware
+fn core64_mxr_enabled(state: CoreState64) -> bool:
+    (state.csr_s.sstatus & SSTATUS_MXR_MASK_64) != 0
+
+@hardware
+fn core64_data_size(funct3: u32) -> u32:
+    val width = funct3 & 0x3
+    if width == 0:
+        return 1
+    if width == 1:
+        return 2
+    if width == 2:
+        return 4
+    8
+
+@hardware
+fn core64_restart_fetch(state: CoreState64) -> CoreState64:
+    var out = state
+    out.pipeline_phase = CORE64_FETCH_LOW
+    out.fetch_low = 0
+    out.memory = memory64_start(out.mmu, out.pmp, out.pc, ACCESS_FETCH_64, 2,
+        out.priv_mode as u32, core64_sum_enabled(out), core64_mxr_enabled(out), 0)
+    out
+
+@hardware
+fn core64_raise_exception(state: CoreState64, cause: i64, tval: i64) -> CoreState64:
+    val trap = trap64_enter(trap64_state_init(), cause, tval, state.pc,
+        state.priv_mode, state.csr_m, state.csr_s)
+    var out = state
+    out.pc = trap.trap_pc
+    out.priv_mode = trap.target_mode
+    out.csr_m = trap.csr
+    out.csr_s = trap.csr_s
+    out.semi_phase = 0
+    out.semi_suppress = false
+    core64_restart_fetch(out)
+
+@hardware
+fn core64_interrupt_enabled(state: CoreState64, bit: i64) -> bool:
+    if state.priv_mode != 0 and state.priv_mode != 1 and state.priv_mode != 3:
+        return false
+    val delegated = (state.csr_m.mideleg & bit) != 0
+    if delegated:
+        if state.priv_mode == 3 or (state.csr_s.sie & bit) == 0:
+            return false
+        return state.priv_mode == 0 or (state.priv_mode == 1 and
+            (state.csr_s.sstatus & SSTATUS_SIE_MASK_64) != 0)
+
+    if (state.csr_m.mie & bit) == 0:
+        return false
+    state.priv_mode < 3 or (state.priv_mode == 3 and
+        (state.csr_m.mstatus & MSTATUS_MIE_MASK) != 0)
+
+@hardware
+fn core64_pending_interrupt(state: CoreState64) -> InterruptCheckResult64:
+    val pending = state.csr_m.mip
+    if (pending & MIP_MEIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MEIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_mei())
+    if (pending & MIP_MSIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MSIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_msi())
+    if (pending & MIP_MTIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MTIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_mti())
+    InterruptCheckResult64(pending: false, cause: 0)
+
+@hardware
+fn core64_finish_instruction(state: CoreState64) -> CoreState64:
+    if state.halt:
+        return state
+    val interrupt = core64_pending_interrupt(state)
+    if interrupt.pending:
+        return core64_raise_exception(state, interrupt.cause, 0)
+    core64_restart_fetch(state)
+
+@hardware
+fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
+                response_error: bool, response_data: i64) -> Core64CycleResult:
+    """Advance the only production RV64 core path by one clock.
+
+    Fetches two 16-bit parcels so a 32-bit instruction may cross a page. Data
+    accesses reuse the same Sv39/PMP frontend and one-outstanding bus contract.
+    """
+    var out = state
+    var bus_valid = false
+    var bus_addr: i64 = 0
+    var bus_size: u32 = 1
+    var bus_write = false
+    var bus_wdata: i64 = 0
+    var bus_is_pte = false
+
+    if state.halt:
+        return Core64CycleResult(state: state, bus_valid: false, bus_addr: 0,
+            bus_size: 1, bus_write: false, bus_wdata: 0, bus_is_pte: false)
+
+    out.semi_trigger = false
+
+    val mem = memory64_cycle(state.memory, state.mmu, state.pmp, request_ready,
+        response_valid, response_error, response_data)
+    out.memory = mem.state
+    out.mmu = mem.mmu
+    bus_valid = mem.bus_valid
+    bus_addr = mem.bus_addr
+    bus_size = mem.bus_size
+    bus_write = mem.bus_write
+    bus_wdata = mem.bus_wdata
+    bus_is_pte = mem.bus_is_pte
+
+    if mem.done:
+        if mem.fault:
+            out = core64_raise_exception(out, mem.fault_cause, mem.fault_tval)
+
+        else if state.pipeline_phase == CORE64_FETCH_LOW:
+            val parcel = (mem.read_data & 0xFFFF) as u32
+            if (parcel & 0x3) != 0x3:
+                out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, parcel as i64)
+            else:
+                out.fetch_low = parcel
+                out.pipeline_phase = CORE64_FETCH_HIGH
+                out.memory = memory64_start(out.mmu, out.pmp, out.pc + 2,
+                    ACCESS_FETCH_64, 2, out.priv_mode as u32,
+                    core64_sum_enabled(out), core64_mxr_enabled(out), 0)
+
+        else if state.pipeline_phase == CORE64_FETCH_HIGH:
+            val insn = state.fetch_low | (((mem.read_data & 0xFFFF) as u32) << 16)
+            out.instruction = insn
+            val comb = core64_combinational(out, insn, 0, out.rf)
+            val legal = (core64_instruction_legal(insn, comb.dec) and
+                core64_privileged_instruction_legal(out, comb.dec))
+            if not legal:
+                out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, insn as i64)
+            else if comb.dec.is_muldiv or comb.dec.is_amo:
+                out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, insn as i64)
+            else if comb.dec.mem_read or comb.dec.mem_write:
+                val access_type = if comb.dec.mem_write: ACCESS_STORE_64 else: ACCESS_LOAD_64
+                out.pipeline_phase = CORE64_DATA_ACCESS
+                out.memory = memory64_start(out.mmu, out.pmp, comb.dmem_addr,
+                    access_type, core64_data_size(comb.dec.funct3),
+                    out.priv_mode as u32, core64_sum_enabled(out),
+                    core64_mxr_enabled(out), comb.dmem_wdata)
+            else:
+                out = core64_update(out, insn, comb, comb.a0_val, comb.a1_val)
+                out = core64_finish_instruction(out)
+
+        else:
+            val comb = core64_combinational(out, state.instruction,
+                mem.read_data, out.rf)
+            out = core64_update(out, state.instruction, comb,
+                comb.a0_val, comb.a1_val)
+            out = core64_finish_instruction(out)
+
+    Core64CycleResult(state: out, bus_valid: bus_valid, bus_addr: bus_addr,
+        bus_size: bus_size, bus_write: bus_write, bus_wdata: bus_wdata,
+        bus_is_pte: bus_is_pte)

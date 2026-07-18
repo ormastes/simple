@@ -117,9 +117,11 @@ instruction and ALU addresses. Searches found no production calls to
 non-Bare SATP modes. `core64_step()` only increments PC by four.
 
 Implementation note (2026-07-18): this paragraph records the initial audit.
-The production API is now `sv39_walker64_start/cycle`; the weaker direct-RAM
-function was renamed `mmu64_translate_ram_test_adapter` and removed from the
-package production exports. Core fetch/data arbitration remains incomplete.
+The production APIs are now `sv39_walker64_start/cycle`,
+`memory64_start/cycle`, and `core64_cycle`; the weaker direct-RAM function was
+renamed `mmu64_translate_ram_test_adapter`, and the identity LSU, raw core-port,
+and PC-only step paths were removed. The clocked SoC now routes ROM, DRAM,
+CLINT, PLIC, and UART requests. C/M/A execution and interrupts remain open.
 
 The walker uses the 32-bit-addressed `RamState`, while the RV64 SoC uses
 `Ram64State`; the types cannot form a real RV64 page-table bus without an owner
