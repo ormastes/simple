@@ -435,18 +435,20 @@ correct under interpret — pre-existing JIT FFI marshalling bug for (text,bool)
 (follow-up bug candidate). (2) Several rt_ symbols exist in runtime.c/runtime_native.c but are
 missing from runtime.h declarations (rt_file_read_bytes/write_bytes/move, rt_dir_delete/walk/list).
 
-## Follow-up status (2026-07-18): walk/glob stubs removed
+## Follow-up status (2026-07-18): walk/glob/path-stem stubs removed
 
-`walk_dir`, `glob_find`, and `glob_matches` now stay in pure Simple and reuse the
-existing `rt_dir_walk` plus shared `std.glob` matcher; no new glob runtime ABI was
-added. The core-C `rt_dir_walk` owner now returns the canonical `rt_array_*` /
+`walk_dir`, `glob_find`, `glob_matches`, and `path_stem` now stay in pure Simple.
+They reuse the existing `rt_dir_walk`, shared `std.glob` matcher, and
+`std.path.stem`; no new runtime ABI was added. The core-C `rt_dir_walk` owner now returns the canonical `rt_array_*` /
 `rt_string_*` representation consumed by native Simple iteration instead of the
 legacy `spl_array_*` representation. The remaining live unresolvable entries are
-the six path helpers and `file_metadata` (7 total); the three dead path declarations
+five path helpers and `file_metadata` (6 total); the three dead path declarations
 remain separate cleanup.
 
 Focused evidence: both fs/glob profile twins pass incremental source checking; a
 pure Stage2 LLVM matcher probe and a core-C-bootstrap `Glob.matches()` /
 `matches_path()` facade probe compile and run successfully. The C runtime focus
 contract and source parity spec now assert canonical directory-walk array access.
-The full stage4 gate was intentionally not rerun in this incremental slice.
+A focused source/behavior spec now defines Unix/Windows-form and empty-path
+`Path.stem` coverage;
+staged native execution and the full Stage4 gate remain pending.

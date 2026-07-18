@@ -243,6 +243,9 @@ the shared binary — deploys require explicit user go-ahead).
   falling into Mach-O flags, and direct strict linking reuses the established
   base-system `/usr/lib` CRT directory. Its full Stage4 QEMU execution remains
   pending.
+  The executed Stage4 unresolved preview's bare `path_stem` is also removed in
+  both filesystem profiles by reusing `std.path.stem`; no new C provider was
+  added. Five live path helpers plus `file_metadata` remain in that stub family.
   Windows COFF projection and DLL staging remain a separate source-open lane.
   The remaining blocker is execution evidence plus any concrete missing owner
   reported by the complete compiler request closure, not the retired seed
