@@ -6,7 +6,7 @@
 #   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
 #     examples/06_io/ui/wm_graphics_2d_showcase_gui.spl
 
-use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_wait_input}
+use std.nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiEvent, GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_KEYBOARD, GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_MOVED}
 use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, file_write, dir_create_all, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
@@ -72,13 +72,60 @@ fn write_wm_trace(trace_path: text, phase: text):
     if trace_path != "":
         file_write(trace_path, "phase={phase}\n")
 
-fn should_close(input: WinitInput) -> bool:
+# Aggregated-batch shape equivalent to the old WinitInput, built by draining
+# GuiEvent.poll_event() below — keeps apply_wm_input()'s body unchanged.
+struct GuiInputBatch:
+    close: bool
+    keys: [i64]
+    mouse_x: f64
+    mouse_y: f64
+    click_buttons: [i64]
+    click_pressed: [bool]
+    click_x: [f64]
+    click_y: [f64]
+
+fn should_close(input: GuiInputBatch) -> bool:
     if input.close:
         return true
     for k in input.keys:
         if k == 27 or k == 113 or k == 81:
             return true
     false
+
+# Wait up to wait_ms for the first GuiEvent (poll + short sleep, since
+# GuiRenderer.poll_event() never blocks), then non-blockingly drain any
+# remaining queued events — matches winit_wait_input's "block for first event,
+# poll-drain the rest" semantics.
+fn poll_gui_input(gui: GuiRenderer, wait_ms: i64) -> GuiInputBatch:
+    var close = false
+    var keys: [i64] = []
+    var mx = 0.0
+    var my = 0.0
+    var click_buttons: [i64] = []
+    var click_pressed: [bool] = []
+    var click_x: [f64] = []
+    var click_y: [f64] = []
+    val deadline = time_now_unix_micros() + wait_ms * 1000
+    var ev = gui.poll_event()
+    while ev.kind == GUI_EVT_NONE and time_now_unix_micros() < deadline:
+        sleep_ms(4)
+        ev = gui.poll_event()
+    while ev.kind != GUI_EVT_NONE:
+        if ev.kind == GUI_EVT_CLOSE:
+            close = true
+        elif ev.kind == GUI_EVT_KEYBOARD:
+            if ev.pressed:
+                keys.push(ev.keycode)
+        elif ev.kind == GUI_EVT_MOUSE_MOVED:
+            mx = ev.x
+            my = ev.y
+        elif ev.kind == GUI_EVT_MOUSE_BUTTON:
+            click_buttons.push(ev.btn)
+            click_pressed.push(ev.pressed)
+            click_x.push(mx)
+            click_y.push(my)
+        ev = gui.poll_event()
+    GuiInputBatch(close: close, keys: keys, mouse_x: mx, mouse_y: my, click_buttons: click_buttons, click_pressed: click_pressed, click_x: click_x, click_y: click_y)
 
 fn wait_for_bridge(path: text, timeout_ms: i64) -> text:
     val deadline = time_now_unix_micros() + timeout_ms * 1000
@@ -241,7 +288,7 @@ fn pack_pixels(pixels: [u32]) -> [i64]:
         i = i + 1
     packed
 
-fn render_and_present(win: WinitWindow, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_path: text, state: text, trace_path: text) -> bool:
+fn render_and_present(gui: GuiRenderer, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_path: text, state: text, trace_path: text) -> bool:
     write_wm_trace(trace_path, "render_compose_start")
     val base_pixels = compose_pixels(comp, trace_path)
     write_wm_trace(trace_path, "render_compose_done")
@@ -259,9 +306,9 @@ fn render_and_present(win: WinitWindow, comp: HostCompositor, frame_w: i32, fram
     write_wm_trace(trace_path, "render_pack_start")
     val packed = pack_pixels(present_pixels)
     write_wm_trace(trace_path, "render_pack_done")
-    write_wm_trace(trace_path, "render_winit_present_start")
-    winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
-    write_wm_trace(trace_path, "render_winit_present_done")
+    write_wm_trace(trace_path, "render_gui_present_start")
+    gui.present_rgba(W.to_i64(), H.to_i64(), packed)
+    write_wm_trace(trace_path, "render_gui_present_done")
     if state != "hold":
         print "[wm-graphics-2d] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=wm-pixel-compositor requested_child={frame_w}x{frame_h}"
     true
@@ -296,7 +343,7 @@ fn child_needs_press_stream(x: i32, y: i32) -> bool:
     (x >= 268 and x < 398 and y >= 186 and y < 214) or
     (x >= 134 and x < 199 and y >= 93 and y < 107)
 
-fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame_w: i32, frame_h: i32) -> WmLoopState:
+fn apply_wm_input(state: WmLoopState, input: GuiInputBatch, event_path: text, frame_w: i32, frame_h: i32) -> WmLoopState:
     var out = state.comp
     var mx = state.mouse_x
     var my = state.mouse_y
@@ -403,11 +450,10 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         showcase_source_path
     ])
 
-fn cleanup(child_pid: i64, win: WinitWindow, lp: WinitLoop):
+fn cleanup(child_pid: i64, gui: GuiRenderer):
     if child_pid > 0:
         process_kill(child_pid)
-    winit_window_free(win)
-    winit_loop_free(lp)
+    gui.close()
 
 fn main() -> i64:
     print "WM Graphics 2D Showcase GUI - launching same source from filesystem"
@@ -451,20 +497,14 @@ fn main() -> i64:
     val child_seq_path = if req.frame_seq_path != "": req.frame_seq_path else: seq_path
     var last_frame_seq = read_frame_seq(child_seq_path)
 
-    write_wm_trace(trace_path, "before_loop_new")
-    val lp = winit_loop_new()
-    if not lp.is_valid:
+    write_wm_trace(trace_path, "before_gui_create")
+    val gui_opt = GuiRenderer.create("auto", W, H, "Simple WM - Graphics 2D Showcase")
+    if not gui_opt.?:
         print "[wm-graphics-2d] error=no-gui-runtime"
         process_kill(child_pid)
         return 1
-    write_wm_trace(trace_path, "after_loop_new")
-    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Simple WM - Graphics 2D Showcase")
-    if not win.is_valid:
-        print "[wm-graphics-2d] error=window-create-failed"
-        winit_loop_free(lp)
-        process_kill(child_pid)
-        return 1
-    write_wm_trace(trace_path, "after_window_new")
+    val gui = gui_opt ?? GuiRenderer.empty()
+    write_wm_trace(trace_path, "after_gui_create")
     write_wm_trace(trace_path, "after_pixel_compositor_create")
 
     val backend = HeadlessHostCompositorBackend.new(W, H)
@@ -472,11 +512,11 @@ fn main() -> i64:
     comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, req.title, 54, 70, req.window_w, req.window_h, req.content, req.pid, req.app_id)
     print "[wm-graphics-2d] launched source={req.source_path} child_pid={child_pid} bridge_pid={req.pid} app_id={req.app_id} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
     if comp.windows.len() != 1:
-        cleanup(child_pid, win, lp)
+        cleanup(child_pid, gui)
         return 1
     write_wm_trace(trace_path, "before_first_present")
-    if not render_and_present(win, comp, frame_w, frame_h, frame_path, "launched", trace_path):
-        cleanup(child_pid, win, lp)
+    if not render_and_present(gui, comp, frame_w, frame_h, frame_path, "launched", trace_path):
+        cleanup(child_pid, gui)
         return 1
     write_wm_trace(trace_path, "loop_start")
 
@@ -485,7 +525,7 @@ fn main() -> i64:
     var frames = 0
     while state.running and frames < 2000000:
         val wait_ms = if state.child_refresh_pending: 20 else: 80
-        val input = winit_wait_input(lp, wait_ms)
+        val input = poll_gui_input(gui, wait_ms)
         state = apply_wm_input(state, input, child_event_path, frame_w, frame_h)
         val now = time_now_unix_micros()
         if state.child_refresh_pending and state.child_refresh_deadline == 0:
@@ -515,12 +555,12 @@ fn main() -> i64:
             write_wm_trace(trace_path, "frame_refresh:{last_frame_seq}")
             print "[wm-graphics-2d] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
         if state.dirty:
-            if not render_and_present(win, state.comp, frame_w, frame_h, frame_path, "hold", trace_path):
-                cleanup(child_pid, win, lp)
+            if not render_and_present(gui, state.comp, frame_w, frame_h, frame_path, "hold", trace_path):
+                cleanup(child_pid, gui)
                 return 1
             state.dirty = false
             sleep_ms(16)
         frames = frames + 1
 
-    cleanup(child_pid, win, lp)
+    cleanup(child_pid, gui)
     return 0
