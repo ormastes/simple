@@ -35,7 +35,7 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | A fresh-seed bounded Stage 2 admits the imported-enum, `String.smf`, and function-arity repairs and compiles every module, then fails at the final link because LLVM places a module's functions in one non-discardable `.text` section and some cross-module method calls retain semantic dotted names; no fresh CLI exists | Emit discardable per-function LLVM sections, normalize desugared method imports, rebuild, admit, and atomically deploy | P0 |
+| Production runtime | BLOCKED | The last compiling Stage 2 admitted the imported-enum, `String.smf`, and function-arity repairs before final-link failures. Dotted method normalization and per-function LLVM sections are now focused-test PASS, but the current fresh seed stalls before its first cache/object write for both supported runtime bundles; no fresh CLI exists | Diagnose the pre-build native-build stall, then run one bounded admission and atomically deploy | P0 |
 | Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The fresh-seed Stage 2 now reaches a later LLVM import/linkage frontier | Fix the remaining bootstrap frontier, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending an aggregate scanner owner; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Run the retained directory-walk spec, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
@@ -98,9 +98,11 @@ so executable qualification is still blocked.
    such as `TreeSitter.match_token` did not try the discovered desugared export
    `treesitter_match_token`, and LLVM emitted all functions in a module into one
    `.text` section, preventing `--gc-sections` from discarding unreachable
-   functions with obsolete runtime references. The method normalization is
-   fixed and regression-tested; per-function LLVM sections remain the immediate
-   bootstrap blocker.
+   functions with obsolete runtime references. Both roots are fixed and have
+   focused regressions. Current admission is instead blocked earlier: the fresh
+   seed emits only runtime-provider fallback and memory-guard notices, then
+   creates no cache entry or object before the 900-second deadline with either
+   `simple-core` or canonical `core-c-bootstrap`.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -612,3 +614,11 @@ so executable qualification is still blocked.
   `rt_*`, primitive-method, or bare-name references. Strict mode did not hide
   these with fallback stubs: its one generated object was a resolved-symbol
   compatibility jump, and its diagnostic now names that accurately.
+- After the method and function-section fixes, the current seed was rebuilt
+  successfully. Two bounded admission commands then timed out before native
+  project compilation: both `simple-core` and canonical `core-c-bootstrap`
+  produced the same two-line log, left the dedicated cache at zero bytes, and
+  created no output binary. The commands were stopped by `timeout 900`; no
+  retry or third bundle variation was run. This is now tracked as a distinct
+  pre-build startup/progress bug, so the function-section fix remains
+  unit-qualified but not Stage-2-admitted.
