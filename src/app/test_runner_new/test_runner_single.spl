@@ -168,6 +168,15 @@ fn find_simple_binary() -> text:
         return raw[0]
     if rt_file_exists("bin/simple"):
         return "bin/simple"
+    # Reuse the currently-running interpreter binary. In a detached worktree
+    # `bin/release/<triple>/simple` (the `bin/simple` symlink target) is
+    # gitignored and absent, so the two checks above both miss and the child
+    # `simple run` launch fails (code=-1, empty output) — which the caller then
+    # mislabels as "no examples executed", false-FAILing every spec. This is the
+    # same /proc/self/exe fallback test_runner_client.spl's simple_binary()
+    # already carries; the two had drifted (bug: test_runner_single_worktree_no_binary_false_fail).
+    if rt_file_exists("/proc/self/exe"):
+        return "/proc/self/exe"
     "./bin/simple"
 
 fn file_has_di_test_tag(file_path: text) -> bool:
@@ -318,6 +327,17 @@ fn main() -> i64:
         failed = 1
         passed = 0
         print "error: test-runner: file timed out"
+    elif code == -1 and stdout == "" and stderr == "":
+        # The child interpreter never launched (or was killed before emitting
+        # anything) for a reason other than the timeout budget above: e.g. the
+        # resolved `binary` path is not an executable. Report the launch failure
+        # honestly instead of letting the empty output fall through to the
+        # zero-executed branch and read as "no examples executed" — that message
+        # blames the spec for a runner/environment fault and hides the real
+        # cause. Bug: test_runner_single_worktree_no_binary_false_fail.
+        failed = 1
+        passed = 0
+        print "error: test-runner: failed to launch test binary '{binary}' (child code={code}, no output); set SIMPLE_BINARY to a valid simple executable"
     elif real_executed == 0 and (has_summary == 0 or summary_failed == 0):
         # Fail-closed zero-executed check: a spec whose only content is
         # pending()/an orphan describe with no real `it` executions must not
