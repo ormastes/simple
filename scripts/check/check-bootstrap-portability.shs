@@ -25,6 +25,11 @@ help=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --help)
 printf '%s\n' "${help}" | grep -q -- '--full-cli' || fail "missing --full-cli help"
 printf '%s\n' "${help}" | grep -q -- '--full-bootstrap' || fail "missing --full-bootstrap help"
 printf '%s\n' "${help}" | grep -q -- 'default: llvm; cranelift also supported' || fail "LLVM default/backend support missing from help"
+printf '%s\n' "${help}" | grep -Fq -- 'supported on native Linux, macOS, FreeBSD, and Windows hosts' || fail "full CLI host support help is stale"
+grep -Fq 'Linux|Darwin|FreeBSD|MINGW*|MSYS*|CYGWIN*|Windows*) ;;' scripts/bootstrap/bootstrap-from-scratch.sh || fail "full CLI host gate omits a supported native host"
+if grep -Fq 'Stage 4 full-CLI capsule preparation requires native Linux or macOS' scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "stale Linux/macOS-only full CLI rejection remains"
+fi
 
 grep -q 'command -v shasum' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS SHA-256 fallback"
 grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS timeout fallback"
@@ -135,10 +140,51 @@ grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runn
 [ "$(grep -Fc "scripts/check/check-native-seed-parity.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option parity trigger missing"
 [ "$(grep -Fc "test/fixtures/compiler/native_option_try_*_loud.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option fixture trigger missing"
 [ "$(grep -Fc "test/fixtures/native_crossmodule_result_u8/**" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Result try fixture trigger missing"
-grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "Linux LLVM fresh MCP bootstrap lane missing"
+grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "full CLI bootstrap lane missing"
 grep -Fq 'mcp_flag=--no-mcp' "${multiplatform}" || fail "non-proof bootstrap lanes do not skip duplicate MCP builds"
-grep -Fq 'if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then' "${multiplatform}" || fail "fresh MCP proof is not scoped to Linux LLVM"
 grep -Fq '"$mcp_flag" \' "${multiplatform}" || fail "bootstrap does not receive the selected MCP mode"
+windows_dependencies_body=$(awk '
+$0 == "      - name: Install dependencies (Windows)" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+for required in \
+  'choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade' \
+  '"LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV' \
+  '"C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH'; do
+  printf '%s\n' "${windows_dependencies_body}" | grep -Fq -- "${required}" || fail "Windows LLVM companion tools missing: ${required}"
+done
+if printf '%s\n' "${windows_dependencies_body}" | grep -Fq 'matrix.backend'; then
+  fail "Windows LLVM companion tools remain backend-conditional"
+fi
+seed_build_body=$(awk '
+$0 == "      - name: Build seed and native_all library" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+printf '%s\n' "${seed_build_body}" | grep -Fq 'if [ "$RUNNER_OS" = "Windows" ] || [ "${{ matrix.backend }}" = "llvm" ]; then' || fail "Windows Cranelift compiler backfill build gate missing"
+printf '%s\n' "${seed_build_body}" | grep -Fq 'cargo build --profile bootstrap -p simple-compiler-backfill' || fail "compiler backfill build missing"
+bootstrap_body=$(awk '
+$0 == "      - name: Build and sanity-check pure-Simple stages" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+for required in \
+  'if [ "$RUNNER_OS" = "Windows" ]; then' \
+  'export SIMPLE_LINKER_FLAVOR=msvc' \
+  'export SIMPLE_WINDOWS_ABI=msvc' \
+  'mcp_flag=--full-cli' \
+  'full_dir=build/bootstrap/full/x86_64-pc-windows-msvc' \
+  'test -s "$full_dir/simple.exe"' \
+  'set -- "$full_dir"/simple_stage4_*.dll' \
+  '[ "$#" -eq 1 ]' \
+  'test -s "$1"' \
+  'test -s "$full_dir/sqlite3.dll"'; do
+  printf '%s\n' "${bootstrap_body}" | grep -Fq -- "${required}" || fail "Windows Stage4 execution receipt missing: ${required}"
+done
+if printf '%s\n' "${bootstrap_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
+  fail "Windows Stage4 execution evidence is optional"
+fi
 [ "$(grep -c "scripts/check/check-mcp-native-smoke.shs" "${multiplatform}")" -eq 2 ] || fail "fresh MCP smoke workflow triggers missing"
 [ "$(grep -c "src/app/mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "MCP source workflow triggers missing"
 [ "$(grep -c "src/app/simple_lsp_mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "LSP MCP source workflow triggers missing"

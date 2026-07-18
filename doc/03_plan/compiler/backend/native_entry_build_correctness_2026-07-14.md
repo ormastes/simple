@@ -252,8 +252,12 @@ the shared binary — deploys require explicit user go-ahead).
   provider was added. `file_metadata` now uses one opaque runtime stat handle,
   constructs the record in pure Simple, and releases the handle; no live
   unresolvable entry remains in that stub family.
-  Windows COFF projection and DLL staging remain a separate source-open lane.
-  The remaining blocker is execution evidence plus any concrete missing owner
+  Windows COFF projection is now source-implemented for both linker families:
+  MinGW keeps the exact static capsule, while MSVC links the selected owners
+  once into an exact-export DLL/import library and hash-verifies the Stage4 and
+  SQLite DLL neighbors beside the final executable. The Windows LLVM/Cranelift
+  full-CLI matrix now schedules nonempty artifact receipts. The remaining
+  blocker is first execution evidence plus any concrete missing owner
   reported by the complete compiler request closure, not the retired seed
   enum/mcall diagnoses. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

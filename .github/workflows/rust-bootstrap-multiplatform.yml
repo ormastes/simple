@@ -171,11 +171,9 @@ jobs:
           "INCLUDE=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/include;$env:INCLUDE" >> $env:GITHUB_ENV
           "LIB=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib;$env:LIB" >> $env:GITHUB_ENV
           "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
-          if ("${{ matrix.backend }}" -eq "llvm") {
-            choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade
-            "LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
-            "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-          }
+          choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade
+          "LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
+          "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -195,10 +193,12 @@ jobs:
           if [ "${{ matrix.backend }}" = "llvm" ]; then
             cargo build --profile bootstrap -p simple-driver --features llvm
             cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
-            cargo build --profile bootstrap -p simple-compiler-backfill
           else
             cargo build --profile bootstrap -p simple-driver
             cargo build --profile bootstrap -p simple-native-all --features driver-compat
+          fi
+          if [ "$RUNNER_OS" = "Windows" ] || [ "${{ matrix.backend }}" = "llvm" ]; then
+            cargo build --profile bootstrap -p simple-compiler-backfill
           fi
 
       - name: Test
@@ -213,8 +213,9 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             export SIMPLE_LINKER_FLAVOR=msvc
-          fi
-          if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
+            export SIMPLE_WINDOWS_ABI=msvc
+            mcp_flag=--full-cli
+          elif [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
             mcp_flag=--full-cli
           else
             mcp_flag=--no-mcp
@@ -224,6 +225,14 @@ jobs:
             --mode=dynload \
             "$mcp_flag" \
             --jobs=2
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            full_dir=build/bootstrap/full/x86_64-pc-windows-msvc
+            test -s "$full_dir/simple.exe"
+            set -- "$full_dir"/simple_stage4_*.dll
+            [ "$#" -eq 1 ]
+            test -s "$1"
+            test -s "$full_dir/sqlite3.dll"
+          fi
 
       - name: Validate hosted Stage4 dynload provider archive
         if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'

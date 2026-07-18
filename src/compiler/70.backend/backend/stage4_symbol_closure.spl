@@ -271,6 +271,16 @@ pub fn stage4_compiler_backfill_object_format(target_os_name: text, msvc_objects
     """Return the portable-nm contract for a supported compiler capsule."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
+pub fn stage4_compiler_backfill_manifest_scan(nm_output: text, object_format: text) -> Result<text, text>:
+    """Reduce a raw compiler archive scan to its exact public runtime owners."""
+    val manifest = match stage4_derive_compiler_backfill_manifest(nm_output, object_format):
+        case Ok(symbols): symbols
+        case Err(err): return Err(err)
+    var rows: [text] = []
+    for symbol in manifest:
+        rows = rows.push("00000000 T " + symbol)
+    Ok(rows.join("\n"))
+
 pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: text) -> Result<[text], text>:
     """Derive the exact compiler-capsule export manifest from a portable nm scan."""
     if not stage4_is_compiler_object_format(object_format):
@@ -820,6 +830,14 @@ pub fn stage4_forbidden_archive_sections(section_headers: text) -> [text]:
             found.push(section)
     found
 
+pub fn stage4_forbidden_coff_dll_sections(section_headers: text) -> [text]:
+    """Reject merged PE initializer and TLS sections that cannot run with /NOENTRY."""
+    var found = stage4_forbidden_archive_sections(section_headers)
+    for section in [".CRT", ".tls"]:
+        if section_headers.contains(section) and not found.contains(section):
+            found = found.push(section)
+    found
+
 pub fn stage4_resolve_requested_archive_owners_for_format(requested: [text], archive_labels: [text], archive_nm_outputs: [text], object_format: text) -> Result<([i64], [text]), text>:
     """Validate transitive runtime ownership and return selected archives plus owner rows."""
     if not stage4_is_compiler_object_format(object_format):
@@ -947,6 +965,57 @@ pub fn stage4_validate_projection_symbol_contract(nm_output: text, object_format
         case Err(err): return Err(err)
     if localize.len() != 0:
         return Err("Stage4 projection retained unexpected global definitions: " + localize.join(", "))
+    Ok(())
+
+pub fn stage4_coff_dll_exports_from_objdump(objdump_output: text) -> Result<[text], text>:
+    """Parse the named PE export table emitted by llvm-objdump -p."""
+    var in_names = false
+    var exports: [text] = []
+    var seen: Dict<text, bool> = {}
+    for line in objdump_output.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.contains("[Ordinal/Name Pointer] Table"):
+            in_names = true
+            continue
+        if not in_names or trimmed == "":
+            continue
+        if not trimmed.starts_with("["):
+            if exports.len() > 0:
+                break
+            continue
+        val close = trimmed.index_of("]") ?? -1
+        if close < 0:
+            continue
+        val symbol = trimmed.substring(close + 1).trim()
+        if symbol == "":
+            continue
+        if seen.has(symbol):
+            return Err("Stage4 MSVC projection repeats DLL export '" + symbol + "'")
+        seen[symbol] = true
+        exports = exports.push(symbol)
+    if not in_names or exports.len() == 0:
+        return Err("Stage4 MSVC projection DLL has no named export table")
+    Ok(stage4_sorted_text(exports))
+
+pub fn stage4_validate_coff_dll_export_contract(objdump_output: text, requested: [text]) -> Result<(), text>:
+    """Require the final MSVC DLL export ABI to equal the requested roots."""
+    if requested.len() == 0:
+        return Err("Stage4 MSVC projection requested symbol set is empty")
+    var expected: Dict<text, bool> = {}
+    for symbol in requested:
+        if not stage4_is_runtime_abi_symbol(symbol):
+            return Err("Stage4 MSVC projection root '" + symbol + "' is not a runtime ABI symbol")
+        if expected.has(symbol):
+            return Err("Stage4 MSVC projection root '" + symbol + "' is repeated")
+        expected[symbol] = true
+    val exports = match stage4_coff_dll_exports_from_objdump(objdump_output):
+        case Ok(symbols): symbols
+        case Err(err): return Err(err)
+    if exports.len() != requested.len():
+        return Err("Stage4 MSVC projection DLL exports differ from the requested ABI: " + exports.join(", "))
+    for symbol in exports:
+        if not expected.has(symbol):
+            return Err("Stage4 MSVC projection DLL retained unexpected export '" + symbol + "'")
     Ok(())
 
 fn stage4_canonical_fingerprint_rows(group: text, rows: [text]) -> Result<[text], text>:
