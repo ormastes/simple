@@ -4,12 +4,27 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.types.syscall_types.{SyscallArgs}
-use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState}
+use os.kernel.types.capability_types.{CapabilitySet}
 
 fn rv64_args(id: u64, arg0: u64, arg1: u64, arg2: u64, arg4: u64) -> SyscallArgs:
     SyscallArgs(id: id, arg0: arg0, arg1: arg1, arg2: arg2, arg3: 0, arg4: arg4, arg5: 0)
 
 describe "RV64 arch-local IPC syscalls":
+    it "exit marks the selected task zombie with the requested code":
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x400000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        expect(scheduler.get_current()).to_equal(task)
+
+        val exited = rv64_syscall_handler_state(rv64_args(0, 37, 0, 0, 0), scheduler, IpcManager.new(), KernelLog.new(8))
+        val exited_task = exited.scheduler.get_task(task)
+        expect(exited.result.value).to_equal(0)
+        expect(exited_task != nil).to_equal(true)
+        val zombie = exited_task.unwrap()
+        expect(zombie.state).to_equal(TaskState.Zombie)
+        expect(zombie.exit_code).to_equal(37)
+
     it "create/connect preserves IPC state without the common syscall stack":
         val scheduler = Scheduler.new()
         val ipc = IpcManager.new()

@@ -25,6 +25,29 @@ use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags, phys_a
 use os.kernel.memory.user_address_space.{alloc_user_page_frame, map_user_page_in}
 use os.kernel.memory.vmm.{vmm_copy_bytes_to_phys, vmm_zero_phys_range}
 
+@cfg(arm64)
+extern fn rt_arm_array_len_u32(bytes: [u8]) -> u32
+
+@cfg(arm64)
+extern fn rt_arm_array_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64) -> u64
+
+@cfg(arm64)
+fn _stack_byte_len(bytes: [u8]) -> u64:
+    rt_arm_array_len_u32(bytes).to_u64()
+
+@cfg(not(arm64))
+fn _stack_byte_len(bytes: [u8]) -> u64:
+    bytes.len() as u64
+
+@cfg(arm64)
+fn _copy_stack_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64) -> bool:
+    rt_arm_array_copy_bytes_to_phys(dst_phys, src, src_offset, len) == len
+
+@cfg(not(arm64))
+fn _copy_stack_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64) -> bool:
+    vmm_copy_bytes_to_phys(dst_phys, src, src_offset, len)
+    true
+
 # ============================================================================
 # ELF program-header permission bits (PF_*)
 # ============================================================================
@@ -160,10 +183,10 @@ fn _copy_segment_page(page_phys: u64, page_va: u64, seg_va: u64, file_size: u64,
     if zero_len > 0:
         vmm_zero_phys_range(page_phys + page_off + file_len, zero_len)
 
-fn _copy_stack_page(page_phys: u64, page_va: u64, frame_start: u64, stack_top: u64, stack_bytes: [u8]):
+fn _copy_stack_page(page_phys: u64, page_va: u64, frame_start: u64, stack_top: u64, stack_bytes: [u8]) -> bool:
     """Copy the initial stack bytes that overlap one mapped stack page."""
-    if stack_bytes.len() == 0:
-        return
+    if _stack_byte_len(stack_bytes) == 0:
+        return true
 
     val page_end = page_va + PAGE_SIZE
     var copy_start = page_va
@@ -173,12 +196,12 @@ fn _copy_stack_page(page_phys: u64, page_va: u64, frame_start: u64, stack_top: u
     if copy_end > stack_top:
         copy_end = stack_top
     if copy_start >= copy_end:
-        return
+        return true
 
     val page_off = copy_start - page_va
     val src_off = copy_start - frame_start
     val len = copy_end - copy_start
-    vmm_copy_bytes_to_phys(page_phys + page_off, stack_bytes, src_off, len)
+    _copy_stack_bytes_to_phys(page_phys + page_off, stack_bytes, src_off, len)
 
 # ============================================================================
 # Public API
@@ -230,14 +253,15 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
 
 fn map_stack(as_handle: AddressSpace, stack_top: u64, stack_size: u64, stack_bytes: [u8]) -> Result<i32, text>:
     """Map the user stack and copy the serialized initial stack frame."""
+    val stack_byte_len = _stack_byte_len(stack_bytes)
     if stack_size == 0:
         return Err("stack_size must be nonzero")
-    if (stack_bytes.len() as u64) > stack_size:
+    if stack_byte_len > stack_size:
         return Err("initial stack frame exceeds stack size")
     if stack_top < stack_size:
         return Err("stack range underflows")
 
-    val frame_start = stack_top - (stack_bytes.len() as u64)
+    val frame_start = stack_top - stack_byte_len
     val stack_bottom = stack_top - stack_size
     if frame_start < stack_bottom:
         return Err("initial stack frame below stack range")
@@ -259,7 +283,8 @@ fn map_stack(as_handle: AddressSpace, stack_top: u64, stack_size: u64, stack_byt
         val ok = map_user_page_in(as_handle, VirtAddr(addr: va), phys, flags)
         if not ok:
             return Err("map_user_page_in failed for user stack page")
-        _copy_stack_page(phys_addr_value(phys), va, frame_start, stack_top, stack_bytes)
+        if not _copy_stack_page(phys_addr_value(phys), va, frame_start, stack_top, stack_bytes):
+            return Err("copy initial stack bytes failed")
         mapped = mapped + 1
         va = va + PAGE_SIZE
 

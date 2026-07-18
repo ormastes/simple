@@ -1,4 +1,48 @@
-describe "Lexer Contextual Keywords":
-    it "skipped":
-        val pending_reason = "assertion failures - runtime behavior differs in interpreter mode"
-        expect(pending_reason.len()).to_be_greater_than(0)
+use std.spec.*
+use compiler.core.parser.{parse_module, parser_has_errors}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+describe "contextual loop keyword parsing", tag: ["only-compiled"]:
+    it "should parse loop as an identifier before member access":
+        val source = "fn read(loop: LoopInfo) -> i64:\n    return loop.header.id\n"
+        val module = parse_and_build_module(source, "contextual_loop_member.spl")
+
+        expect(parser_has_errors()).to_be(false)
+        expect(module.functions.contains("read")).to_be(true)
+        val read = module.functions["read"] ?? panic("missing read function")
+        expect(read.body.stmts.len()).to_equal(1)
+
+    it "should retain statement-form loop syntax":
+        val source = "fn spin():\n    loop:\n        break\n"
+        val module = parse_and_build_module(source, "statement_loop.spl")
+
+        expect(parser_has_errors()).to_be(false)
+        val spin = module.functions["spin"] ?? panic("missing spin function")
+        expect(spin.body.stmts.len()).to_equal(1)
+
+    it "should reject unsupported loop expressions":
+        val source = "fn invalid():\n    val result = loop:\n        break\n"
+        parse_module(source, "loop_expression.spl")
+        expect(parser_has_errors()).to_be(true)
+
+    it "should consume mut on a non-first free-function parameter":
+        val source = "fn count_inst_uses(inst: MirInst, mut counts: Dict<i64, i64>):\n    return\n"
+        val module = parse_and_build_module(source, "mut_non_first_parameter.spl")
+
+        expect(parser_has_errors()).to_be(false)
+        val function = module.functions["count_inst_uses"] ?? panic("missing count_inst_uses function")
+        expect(function.params.len()).to_equal(2)
+        expect(function.params[0].name).to_equal("inst")
+        expect(function.params[0].is_mutable).to_be(false)
+        expect(function.params[1].name).to_equal("counts")
+        expect(function.params[1].is_mutable).to_be(true)
+
+    it "should keep mut as a legal parameter name before a colon":
+        val source = "fn keep(mut: i64):\n    return\n"
+        val module = parse_and_build_module(source, "mut_parameter_name.spl")
+
+        expect(parser_has_errors()).to_be(false)
+        val function = module.functions["keep"] ?? panic("missing keep function")
+        expect(function.params.len()).to_equal(1)
+        expect(function.params[0].name).to_equal("mut")
+        expect(function.params[0].is_mutable).to_be(false)

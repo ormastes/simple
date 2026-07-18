@@ -18,7 +18,7 @@ use os.kernel.types.task_types.{
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
-use os.kernel.loader.segment_mapper.{map_all, map_stack, stage_raw_image, stage_elf64_load_image, direct_load_entry_point, verify_direct_load_entry}
+use os.kernel.loader.segment_mapper.{map_all, map_stack, _stack_byte_len, stage_raw_image, stage_elf64_load_image, direct_load_entry_point, verify_direct_load_entry}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.scheduler.green_carrier.{GreenCarrierExecutionState, GreenCarrierParallelismState}
 
@@ -266,11 +266,18 @@ pub fn _map_user_process_image(
         log_raw_println("[scheduler] map_user_process_image: synthetic address space root={space.phys_root} id={space.id}")
         return 0
     if _scheduler_uses_direct_load_arena():
+        if stack_top == 0 or stack_size == 0 or _stack_byte_len(initial_stack_bytes) == 0:
+            log_raw_println("[scheduler] map_user_process_image: arm64 direct-load invalid stack frame")
+            return -22
         var staged = stage_elf64_load_image(space, file_bytes)
         if staged <= 0:
             staged = stage_raw_image(space, file_bytes)
         if staged <= 0:
             log_raw_println("[scheduler] map_user_process_image: arm64 direct-load stage failed root={space.phys_root}")
+            return -12
+        val direct_stack_result = map_stack(space, stack_top, stack_size, initial_stack_bytes)
+        if direct_stack_result.is_err():
+            log_raw_println("[scheduler] map_user_process_image: arm64 direct-load stack map failed")
             return -12
         log_raw_println("[scheduler] map_user_process_image: arm64 direct-load ok root={space.phys_root} staged={staged} id={space.id}")
         return 0

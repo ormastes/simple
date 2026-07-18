@@ -1,0 +1,137 @@
+# Bootstrap native AST arena isolation regression.
+#
+# @cover src/compiler/10.frontend/core/ast_stmt.spl
+# @cover src/compiler/10.frontend/core/_AstExpr/nodes.spl
+# @cover src/compiler/10.frontend/core/_AstExpr/accessors.spl
+
+use compiler.core.ast.{ast_reset, decl_get_body, module_decl_at}
+use compiler.core.ast_expr.{
+    EXPR_INT_LIT, expr_count, expr_get_int, expr_get_tag, expr_int_lit, expr_tag
+}
+use compiler.core.ast_stmt.{
+    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag, stmt_tag
+}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.*
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn first_body_int(module: Module, name: text) -> i64:
+    val fn_ = module.functions[name] ?? panic("missing fn " + name)
+    if fn_.body.stmts.len() == 0:
+        return -1
+    match fn_.body.stmts[0].kind:
+        case StmtKind.Expr(expr):
+            match expr.kind:
+                case ExprKind.IntLit(value):
+                    return value
+                case ExprKind.NilLit:
+                    return -2
+                case _:
+                    return -3
+        case _:
+            return -4
+
+fn expect_current_native_arena(value: i64):
+    expect(stmt_count()).to_equal(stmt_tag.len())
+    expect(expr_count()).to_equal(expr_tag.len())
+
+    val body = decl_get_body(module_decl_at(0))
+    expect(body.len()).to_equal(1)
+    val stmt_id = body[0]
+    expect(stmt_id).to_equal(0)
+    expect(stmt_id).to_be_less_than(stmt_count())
+    expect(stmt_get_tag(stmt_id)).to_equal(STMT_EXPR)
+
+    val expr_id = stmt_get_expr(stmt_id)
+    expect(expr_id).to_equal(0)
+    expect(expr_id).to_be_less_than(expr_count())
+    expect(expr_get_tag(expr_id)).to_equal(EXPR_INT_LIT)
+    expect(expr_get_int(expr_id)).to_equal(value)
+
+describe "bootstrap native AST arena isolation":
+    it "ignores stale env IDs and tags across sequential module resets":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
+        val old_expr_count = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? ""
+        val old_stmt_tag = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? ""
+        val old_stmt_expr = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_EXPR") ?? ""
+        val old_expr_tag = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? ""
+        val old_expr_int = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? ""
+        defer:
+            ast_reset()
+            rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+            rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)
+            rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", old_stmt_count)
+            rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", old_expr_count)
+            rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", old_stmt_tag)
+            rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", old_stmt_expr)
+            rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", old_expr_tag)
+            rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", old_expr_int)
+
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "1706")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", "2048")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "5")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", "1706")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "5")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", "99")).to_equal(true)
+
+        val first = parse_and_build_module("fn first():\n    7\n", "first_native_arena.spl")
+        expect_current_native_arena(7)
+        expect(first_body_int(first, "first")).to_equal(7)
+
+        val second = parse_and_build_module("fn second():\n    9\n", "second_native_arena.spl")
+        expect_current_native_arena(9)
+        expect(first_body_int(second, "second")).to_equal(9)
+        expect(second.functions.contains("first")).to_equal(false)
+
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "").to_equal("1706")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "").to_equal("2048")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? "").to_equal("5")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_EXPR") ?? "").to_equal("1706")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? "").to_equal("5")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? "").to_equal("99")
+
+    it "preserves interpreter bootstrap env mirrors when native arena is disabled":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
+        val old_expr_count = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? ""
+        val old_stmt_tag = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? ""
+        val old_stmt_expr = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_EXPR") ?? ""
+        val old_expr_tag = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? ""
+        val old_expr_int = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? ""
+        defer:
+            ast_reset()
+            rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+            rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)
+            rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", old_stmt_count)
+            rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", old_expr_count)
+            rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", old_stmt_tag)
+            rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", old_stmt_expr)
+            rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", old_expr_tag)
+            rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", old_expr_int)
+
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "")).to_equal(true)
+        ast_reset()
+
+        val expr_id = expr_int_lit(7, 0)
+        val stmt_id = stmt_expr_stmt(expr_id, 0)
+        expect(expr_id).to_equal(0)
+        expect(stmt_id).to_equal(0)
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "").to_equal("1")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "").to_equal("1")
+
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "5")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", "77")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "5")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", "88")).to_equal(true)
+        expect(stmt_get_tag(stmt_id)).to_equal(5)
+        expect(stmt_get_expr(stmt_id)).to_equal(77)
+        expect(expr_get_tag(expr_id)).to_equal(5)
+        expect(expr_get_int(expr_id)).to_equal(88)

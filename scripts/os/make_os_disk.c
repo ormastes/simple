@@ -776,6 +776,7 @@ int main(int argc, char **argv)
     put_dir_entry(root, &root_n, "HELLO   TXT", hello_txt_cluster, hello_txt.len, 0x20);
     put_dir_entry(root, &root_n, "NUMBERS TXT", numbers_cluster, numbers_txt.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   SPL", hello_spl_cluster, hello_spl.len, 0x20);
+    put_dir_entry(root, &root_n, "HELLO   C  ", clang_c_cluster, clang_c.len, 0x20);
     if (hello_object_cluster)
         put_dir_entry(root, &root_n, "HELLO   O  ", hello_object_cluster, hello_object_payload.len, 0x20);
     if (hello_ir_cluster)
@@ -837,8 +838,9 @@ int main(int argc, char **argv)
     put_named_dir_entry(apps, &apps_n, "SINTSMF SMF", "simple_interpreter.smf", interpreter_cluster, simple_interpreter.len, 0x20);
     put_named_dir_entry(apps, &apps_n, "SLOADSMFSMF", "simple_loader.smf", loader_cluster, simple_loader.len, 0x20);
     put_named_dir_entry(apps, &apps_n, "SIMPLSTCSMF", "simple.smf", simple_cluster, simple_cli.len, 0x20);
-    if (simple_usr_cluster) {
+    if (simple_usr_cluster || clang_bin_cluster || llc_bin_cluster || lld_bin_cluster)
         put_dir_entry(usr, &usr_n, "BIN        ", usr_bin_cluster, 0, 0x10);
+    if (simple_usr_cluster) {
         put_dir_entry(usr, &usr_n, "LIB        ", usr_lib_cluster, 0, 0x10);
         put_dir_entry(usr_bin, &usr_bin_n, "SIMPLE     ", simple_usr_cluster, simple_payload.len, 0x20);
         put_named_dir_entry(usr_bin, &usr_bin_n, "SIMPLE  SMF", "simple.smf", simple_usr_smf_cluster, simple_cli.len, 0x20);

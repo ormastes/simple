@@ -2911,6 +2911,33 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
     }
 }
 
+#[test]
+fn test_core_c_bootstrap_entry_builds_runtime_when_explicit_path_has_only_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "core-c-bootstrap".to_string();
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("simple")).config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/bootstrap_main.spl"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_ne!(selected, native_all);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
+    assert!(!is_native_all);
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {

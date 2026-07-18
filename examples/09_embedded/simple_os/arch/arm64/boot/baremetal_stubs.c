@@ -3090,6 +3090,46 @@ RuntimeValue rt_arm_array_len_u32(RuntimeValue arr)
     return 0;
 }
 
+RuntimeValue rt_arm_text_array_len_u32(RuntimeValue arr)
+{
+    return rt_arm_array_len_u32(arr);
+}
+
+RuntimeValue rt_arm_text_array_get(RuntimeValue arr, RuntimeValue idx_val)
+{
+    uint64_t idx = (uint64_t)idx_val;
+    RuntimeArray *a = IS_HEAP(arr) ? (RuntimeArray *)DECODE_PTR(arr) :
+        (RuntimeArray *)(uintptr_t)(uint64_t)arr;
+    if (!a || !arm64_heap_contains(a, sizeof(RuntimeArray)) ||
+        a->hdr.type != HEAP_ARRAY || a->len > a->cap || idx >= a->len)
+        return NIL_VALUE;
+    RuntimeValue value = a->items[idx];
+    if (IS_HEAP(value)) return value;
+    RuntimeString *raw = (RuntimeString *)(uintptr_t)(uint64_t)value;
+    if (raw && arm64_heap_contains(raw, sizeof(RuntimeString)) &&
+        raw->hdr.type == HEAP_STRING)
+        return ENCODE_PTR(raw);
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm_array_copy_bytes_to_phys(
+    RuntimeValue dst_phys_val,
+    RuntimeValue src_val,
+    RuntimeValue src_offset_val,
+    RuntimeValue len_val)
+{
+    uint64_t dst_phys = (uint64_t)dst_phys_val;
+    uint64_t src_offset = (uint64_t)src_offset_val;
+    uint64_t len = (uint64_t)len_val;
+    if (!dst_phys || len == 0) return 0;
+    uint64_t src_len = (uint64_t)rt_arm_array_len_u32(src_val);
+    if (src_offset > src_len || len > src_len - src_offset) return 0;
+    volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_phys;
+    for (uint64_t i = 0; i < len; i++)
+        dst[i] = (uint8_t)arm64_array_byte_at_raw_index(src_val, src_offset + i);
+    return (RuntimeValue)len;
+}
+
 RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
 {
     uint64_t idx = (uint64_t)idx_val;
@@ -3286,6 +3326,8 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
 #define ARM64_TCR_IRGN0_WBWA (1ULL << 8)
 #define ARM64_TCR_VALUE (ARM64_TCR_T0SZ | ARM64_TCR_TG0_4KB | ARM64_TCR_SH0_INNER | ARM64_TCR_ORGN0_WBWA | ARM64_TCR_IRGN0_WBWA)
 #define ARM64_SCTLR_M 1ULL
+#define ARM64_USER_ENTRY_FRAME_BYTES 128ULL
+#define ARM64_LOWER_EL_FRAME_BYTES 272ULL
 
 typedef struct {
     uint64_t root;
@@ -3306,6 +3348,10 @@ extern char _vectors[];
 extern char _stack_top[];
 extern char _sbss[];
 extern void _lower_el_aarch64_sync_handler(void);
+extern uint64_t arm64_enter_user_virtual(uint64_t root, uint64_t entry,
+                                         uint64_t user_sp, uint64_t mair,
+                                         uint64_t tcr);
+extern void arm64_user_exit_resume(void);
 
 RuntimeValue rt_arm64_user_as_map_page(RuntimeValue root_val, RuntimeValue virt_val, RuntimeValue phys_val, RuntimeValue flags_val);
 RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt_val);
@@ -3387,7 +3433,15 @@ static int arm64_user_as_kernel_window_prepare(uint64_t root)
     }
     if (!arm64_user_as_map_identity_el1(root, uart, rw_el1_nx)) return 0;
     if (!arm64_user_as_map_identity_el1(root, stack_top - 1ULL, rw_el1_nx)) return 0;
-    if (!arm64_user_as_map_identity_el1(root, current_sp, rw_el1_nx)) return 0;
+    uint64_t return_stack_bytes = ARM64_USER_ENTRY_FRAME_BYTES + ARM64_LOWER_EL_FRAME_BYTES;
+    if (current_sp < return_stack_bytes) return 0;
+    uint64_t return_page = (current_sp - return_stack_bytes) & ~4095ULL;
+    uint64_t current_sp_page = current_sp & ~4095ULL;
+    while (return_page <= current_sp_page) {
+        if (!arm64_user_as_map_identity_el1(root, return_page, rw_el1_nx)) return 0;
+        if (return_page == current_sp_page) break;
+        return_page += 4096ULL;
+    }
     return 1;
 }
 
@@ -3430,6 +3484,14 @@ static int arm64_user_as_virtual_entry_preflight(uint64_t root, uint64_t entry, 
     }
     if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)rt_arm64_enter_recorded_user_live) == 0) {
         serial_puts("[arm64-user] preflight handoff failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)arm64_enter_user_virtual) == 0) {
+        serial_puts("[arm64-user] preflight entry trampoline failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)arm64_user_exit_resume) == 0) {
+        serial_puts("[arm64-user] preflight exit resume failed\r\n");
         return 0;
     }
     if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)0x09000000ULL) == 0) {
@@ -3579,61 +3641,33 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
     (void)elr;
     (void)esr;
     if (id == 0) {
-        serial_puts("[arm64-user] svc exit ok\r\n");
-        serial_puts("[arm-fs-exec] vfs:ok\r\n");
-        serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
-        serial_puts("[arm-fs-exec] user-svc-exit:ok\r\n");
-        serial_puts("TEST PASSED\r\n");
-        rt_qemu_exit_success();
+        serial_puts("[arm64-user] svc exit ok code=");
+        serial_put_dec((int64_t)a0);
+        serial_puts("\r\n[arm-fs-exec] user-svc-exit:ok code=");
+        serial_put_dec((int64_t)a0);
+        serial_puts("\r\n");
+        return a0;
     }
     return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
-static void arm64_enter_user_virtual(uint64_t root, uint64_t entry, uint64_t sp)
-{
-    __asm__ volatile(
-        "msr mair_el1, %0\n\t"
-        "msr tcr_el1, %1\n\t"
-        "dsb sy\n\t"
-        "isb\n\t"
-        "msr ttbr0_el1, %2\n\t"
-        "dsb sy\n\t"
-        "tlbi vmalle1\n\t"
-        "dsb sy\n\t"
-        "isb\n\t"
-        "mrs x3, sctlr_el1\n\t"
-        "orr x3, x3, #1\n\t"
-        "msr sctlr_el1, x3\n\t"
-        "isb\n\t"
-        "msr sp_el0, %3\n\t"
-        "msr elr_el1, %4\n\t"
-        "msr spsr_el1, xzr\n\t"
-        "isb\n\t"
-        "eret\n\t"
-        :
-        : "r"(ARM64_MAIR_VALUE), "r"(ARM64_TCR_VALUE), "r"(root), "r"(sp), "r"(entry)
-        : "x3", "memory"
-    );
-    for (;;) __asm__ volatile("wfe");
-}
-
 RuntimeValue rt_arm64_enter_recorded_user_live(void)
 {
-    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return 0;
+    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return (RuntimeValue)-14;
     serial_puts("[arm64-user] live virtual eret enter\r\n");
     uint64_t entry = arm64_recorded_user_entry;
     uint64_t sp = arm64_recorded_user_sp;
     uint64_t root = arm64_recorded_user_root;
     if (!arm64_user_as_find(root) || !entry || !sp) {
         serial_puts("[arm64-user] live virtual invalid handoff\r\n");
-        return 0;
+        return (RuntimeValue)-22;
     }
     if (!arm64_user_as_virtual_entry_preflight(root, entry, sp)) {
         serial_puts("[arm64-user] live virtual preflight failed\r\n");
-        return 0;
+        return (RuntimeValue)-14;
     }
-    arm64_enter_user_virtual(root, entry, sp);
-    return 0;
+    return (RuntimeValue)arm64_enter_user_virtual(
+        root, entry, sp, ARM64_MAIR_VALUE, ARM64_TCR_VALUE);
 }
 
 /* --- genuine EL0 execution: stage REAL aarch64 code and eret into it ---
@@ -3641,9 +3675,8 @@ RuntimeValue rt_arm64_enter_recorded_user_live(void)
  * (no svc), so it can only be load-proofed, not run. This maps actual EL0
  * instructions (mov x8,#0; svc #0) into a fresh user address space and eret's
  * to EL0. The svc traps via vbar_el1 (crt0.S, EC=0x15) into
- * rt_arm64_handle_user_svc(id=0), which prints [arm-fs-exec] user-svc-exit:ok +
- * TEST PASSED and exits — proving real EL0 usercode execution + a syscall
- * round-trip. Returns 0 only if AS setup / preflight fails (no eret taken). */
+ * rt_arm64_handle_user_svc(id=0), which returns the user's exit code through
+ * the blocking EL1 trampoline. Negative values report setup/preflight failure. */
 RuntimeValue rt_arm64_exec_probe_live_real(void)
 {
     uint64_t root = (uint64_t)rt_arm64_user_as_create();
