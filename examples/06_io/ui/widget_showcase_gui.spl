@@ -832,10 +832,14 @@ fn consume_wm_event(event_path: text, last_seq: i64, state: ShowcaseState, coord
     (next_state, ev.seq, not showcase_state_same(next_state, state))
 
 fn build_wm_pixels(w: i32, h: i32, state: ShowcaseState, frame_scale: i32) -> [u32]:
-    val full = build_frame_state(w, h, state)
+    # Render DIRECTLY at the output size instead of rendering the full 4K
+    # design frame and downsampling: the interpreted 4K render takes >>300s,
+    # so the WM client never reached its bridge post (silent host-side
+    # child-bridge-timeout, 2026-07-18). build_frame_state scales honestly
+    # to any target size.
     if frame_scale > 1:
-        return downsample_nearest(full, w, h, frame_scale)
-    full
+        return build_frame_state(w / frame_scale, h / frame_scale, state)
+    build_frame_state(w, h, state)
 
 fn run_wm_client() -> i64:
     val bridge_path = env_get(WM_BRIDGE_FILE_ENV) ?? ""
@@ -852,16 +856,20 @@ fn run_wm_client() -> i64:
     val frame_scale = showcase_ppm_scale()
     val frame_w = W / frame_scale
     val frame_h = H / frame_scale
-    val pixels = build_wm_pixels(W, H, state, frame_scale)
-    if pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, pixels):
-        print "[wm-showcase-client] error=frame-write-failed path={frame_path}"
-        return 1
-    write_wm_state(state_path, state, 0, frame_seq, frame_scale)
+    # Bridge FIRST, frame second: the host's window/bridge wait must not sit
+    # behind the (interpreted, slow) first render. Dimensions are known
+    # up-front; the host polls frame_seq separately and tolerates the first
+    # frame arriving after the window opens.
     val pid = getpid()
     val req = wm_widget_showcase_bridge_request_sized(pid, frame_path, frame_w + 8, frame_h + 32)
     if not file_write(bridge_path, wm_fs_bridge_encode(req)):
         print "[wm-showcase-client] error=bridge-write-failed path={bridge_path}"
         return 1
+    val pixels = build_wm_pixels(W, H, state, frame_scale)
+    if pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, pixels):
+        print "[wm-showcase-client] error=frame-write-failed path={frame_path}"
+        return 1
+    write_wm_state(state_path, state, 0, frame_seq, frame_scale)
     wm_client_log("[wm-showcase-client] source={WIDGET_SHOWCASE_APP_SOURCE} pid={pid} bridge={bridge_path} frame={frame_path} event={event_path} seq={seq_path}")
     if (env_get(WM_CLIENT_HOLD_ENV) ?? "") == "1":
         var ticks = 0
