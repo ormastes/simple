@@ -24,7 +24,6 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
-use std.alloc.sffi.{rt_dict_keys, rt_dict_values}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -77,7 +76,6 @@ impl MirLowering:
             class_type_names: {},
             struct_field_type_name: {},
             struct_field_repr_name: {},
-            struct_field_hir_type: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -89,13 +87,7 @@ impl MirLowering:
             runtime_array_locals: {},
             runtime_dict_locals: {},
             array_element_struct_syms: {},
-            boxed_tuple_shape_fields: {},
-            boxed_tuple_shape_nested: {},
-            boxed_tuple_local_shapes: {},
-            array_element_boxed_tuple_shapes: {},
-            next_boxed_tuple_shape_id: 1,
             runtime_value_locals: {},
-            option_value_locals: {},
             nil_locals: {},
             enum_variant_index: {},
             lambda_bindings: {},
@@ -146,14 +138,10 @@ impl MirLowering:
                 doc_comment: "",
                 span: Span.empty()
             )
-        val function_values: [HirFunction] = rt_dict_values(module.functions)
-        var function_idx = 0
-        while function_idx < function_values.len():
-            val fn_ = function_values[function_idx]
+        for fn_ in module.functions.values():
             val fn_id = self.symbol_id_value(fn_.symbol)
             if fn_id == target_id:
                 return fn_
-            function_idx = function_idx + 1
         HirFunction(
             symbol: symbol,
             name: "",
@@ -242,11 +230,6 @@ impl MirLowering:
         self.local_hir_types = {}
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
-        self.boxed_tuple_shape_fields = {}
-        self.boxed_tuple_shape_nested = {}
-        self.boxed_tuple_local_shapes = {}
-        self.array_element_boxed_tuple_shapes = {}
-        self.next_boxed_tuple_shape_id = 1
         self.runtime_value_locals = {}
         self.nil_locals = {}
         val signature = self.bootstrap_function_signature(name)
@@ -396,7 +379,7 @@ impl MirLowering:
         nested struct (`state.driver.width`, bug #166 mechanism) resolves
         too — the construct-site prescan that normally fills that map runs
         per-module and hits the same ordering gap."""
-        val prescan_struct_values: [HirStruct] = rt_dict_values(module.structs)
+        val prescan_struct_values = module.structs.values()
         var psi = 0
         while psi < prescan_struct_values.len():
             val struct_def = prescan_struct_values[psi]
@@ -409,7 +392,7 @@ impl MirLowering:
             # 2026-07-17) -- no separate inline loop needed here.
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
             psi = psi + 1
-        val prescan_class_values: [HirClass] = rt_dict_values(module.classes)
+        val prescan_class_values = module.classes.values()
         psi = 0
         while psi < prescan_class_values.len():
             val class_def = prescan_class_values[psi]
@@ -419,21 +402,18 @@ impl MirLowering:
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         var function_names: [text] = []
-        val current_function_values: [HirFunction] = rt_dict_values(module.functions)
-        var current_function_idx = 0
-        while current_function_idx < current_function_values.len():
-            function_names.push(current_function_values[current_function_idx].name)
-            current_function_idx = current_function_idx + 1
+        for func in module.functions.values():
+            function_names.push(func.name)
         self.current_function_names = function_names
         # Cross-module prescans keep the first definition. The module being
         # lowered is authoritative for its own same-name struct/class.
-        val local_struct_values: [HirStruct] = rt_dict_values(module.structs)
+        val local_struct_values = module.structs.values()
         var local_meta_i = 0
         while local_meta_i < local_struct_values.len():
             val struct_def = local_struct_values[local_meta_i]
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
             local_meta_i = local_meta_i + 1
-        val local_class_values: [HirClass] = rt_dict_values(module.classes)
+        val local_class_values = module.classes.values()
         local_meta_i = 0
         while local_meta_i < local_class_values.len():
             val class_def = local_class_values[local_meta_i]
@@ -495,7 +475,7 @@ impl MirLowering:
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
             bootstrap_mir_functions_reset()
-            val bootstrap_function_keys: [SymbolId] = rt_dict_keys(module.functions)
+            val bootstrap_function_keys = module.functions.keys()
             val bootstrap_function_count = bootstrap_function_keys.len()
             if bootstrap_trace:
                 print "[mir-lower] functions:count {bootstrap_function_count}"
@@ -530,7 +510,7 @@ impl MirLowering:
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
-        val struct_values: [HirStruct] = rt_dict_values(module.structs)
+        val struct_values = module.structs.values()
         var si = 0
         while si < struct_values.len():
             val struct_def = struct_values[si]
@@ -549,7 +529,7 @@ impl MirLowering:
 
         # Build enum variant-index registry (enum NAME -> ordered variant names).
         # A variant's index is its runtime discriminant. Name-keyed like structs.
-        val enum_values: [HirEnum] = rt_dict_values(module.enums)
+        val enum_values = module.enums.values()
         var ei = 0
         while ei < enum_values.len():
             val enum_def = enum_values[ei]
@@ -586,7 +566,7 @@ impl MirLowering:
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
         var static_method_symbol_ids: Dict<i64, bool> = {}
-        val module_fn_values: [HirFunction] = rt_dict_values(module.functions)
+        val module_fn_values = module.functions.values()
         var mfi = 0
         while mfi < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
@@ -607,7 +587,7 @@ impl MirLowering:
                         impl_type_name = impl_type_symbol.name
                 case _: ()
             if impl_type_name != "":
-                val impl_method_names: [text] = rt_dict_keys(impl_def.methods)
+                val impl_method_names = impl_def.methods.keys()
                 var mni = 0
                 while mni < impl_method_names.len():
                     val impl_method_name = impl_method_names[mni]
@@ -635,7 +615,7 @@ impl MirLowering:
                     mni = mni + 1
             impl_mi = impl_mi + 1
 
-        val class_values: [HirClass] = rt_dict_values(module.classes)
+        val class_values = module.classes.values()
         var ci = 0
         while ci < class_values.len():
             val class_def = class_values[ci]
@@ -661,7 +641,7 @@ impl MirLowering:
             self.class_type_names[class_def.name] = true
             ci = ci + 1
 
-        val bitfield_values: [HirBitfield] = rt_dict_values(module.bitfields)
+        val bitfield_values = module.bitfields.values()
         var bi = 0
         while bi < bitfield_values.len():
             val bitfield_def = bitfield_values[bi]
@@ -673,13 +653,13 @@ impl MirLowering:
             bi = bi + 1
 
         # Lower type definitions so headers/export wrappers can consume real MIR types.
-        val struct_type_values: [HirStruct] = rt_dict_values(module.structs)
+        val struct_type_values = module.structs.values()
         var sti = 0
         while sti < struct_type_values.len():
             self.lower_struct_type(struct_type_values[sti])
             sti = sti + 1
 
-        val class_type_values: [HirClass] = rt_dict_values(module.classes)
+        val class_type_values = module.classes.values()
         var cti = 0
         while cti < class_type_values.len():
             self.lower_class_type(class_type_values[cti])
@@ -700,7 +680,7 @@ impl MirLowering:
         # function body lowered below, module-wide (order-independent, same
         # rationale as the struct/class/enum prep above and the prescan
         # pass right after this).
-        val const_vals: [HirConstant] = rt_dict_values(module.constants)
+        val const_vals = module.constants.values()
         var coni = 0
         while coni < const_vals.len():
             self.lower_const(const_vals[coni])
@@ -715,11 +695,11 @@ impl MirLowering:
         # (`q.inner.y` where `q = outer()` and `outer`'s OWN body constructs
         # `Q(inner: make(3), ...)`) previously depended on whether
         # module.functions happened to lower `outer` before `main` --
-        # Runtime dictionary value iteration order is not guaranteed
+        # `module.functions.values()` iteration order is not guaranteed
         # stable, so `q.inner.y` nondeterministically read field 0 (`x`)
         # instead of field 1 (`y`) on runs where the populating function
         # (`outer`) had not yet been visited by the real lowering loop below.
-        val prescan_fn_values: [HirFunction] = rt_dict_values(module.functions)
+        val prescan_fn_values = module.functions.values()
         var psi = 0
         while psi < prescan_fn_values.len():
             if not prescan_fn_values[psi].is_extern:
@@ -727,7 +707,7 @@ impl MirLowering:
             psi = psi + 1
 
         # Lower functions (skip extern declarations - they have no body)
-        val fn_values: [HirFunction] = rt_dict_values(module.functions)
+        val fn_values = module.functions.values()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         var fni = 0
@@ -906,8 +886,7 @@ impl MirLowering:
             return "Result"
         if name == "Some" or name == "None":
             return "Option"
-        val enum_variant_names: [text] = rt_dict_keys(self.enum_variant_index)
-        for ename in enum_variant_names:
+        for ename in self.enum_variant_index.keys():
             if enum_variant_disc(self.enum_variant_index[ename], name) >= 0:
                 return ename
         ""
@@ -926,19 +905,14 @@ impl MirLowering:
             self.prescan_expr_for_struct_types(block.value)
 
     me prescan_stmt_for_struct_types(stmt: HirStmt):
-        val prescan_stmt_kind: HirStmtKind = stmt.kind
-        match prescan_stmt_kind:
-            case HirStmtKind.Expr(extracted_expr):
-                val expr: HirExpr = extracted_expr
+        match stmt.kind:
+            case Expr(expr):
                 self.prescan_expr_for_struct_types(expr)
-            case HirStmtKind.Let(_, _, extracted_init):
-                val init: HirExpr = extracted_init
+            case Let(_, _, init):
                 self.prescan_expr_for_struct_types(init)
-            case HirStmtKind.Assign(_, _, extracted_value):
-                val value: HirExpr = extracted_value
+            case Assign(_, _, value):
                 self.prescan_expr_for_struct_types(value)
-            case HirStmtKind.Block(extracted_block):
-                val inner_block: HirBlock = extracted_block
+            case Block(inner_block):
                 self.prescan_block_for_struct_types(inner_block)
             case _:
                 ()
@@ -949,16 +923,14 @@ impl MirLowering:
         Named struct), or "" when unknown. Recurses into Call args, Return,
         Block, and If so a `return Q(inner: make(3), tag: 99)`-shaped function
         body (the exact case this pre-pass exists for) is fully covered."""
-        val prescan_expr_kind: HirExprKind = expr.kind
-        match prescan_expr_kind:
-            case HirExprKind.Call(callee, args, _):
+        match expr.kind:
+            case Call(callee, args, _):
                 var name = ""
-                val prescan_callee_kind: HirExprKind = callee.kind
-                match prescan_callee_kind:
-                    case HirExprKind.Var(extracted_sym):
-                        val sym: SymbolId = extracted_sym
-                        name = self.symbols.symbol_display_name(sym, "")
-                    case HirExprKind.NamedVar(_, n):
+                match callee.kind:
+                    case Var(sym):
+                        val s = self.symbols.get_symbol(sym)
+                        if s.?: name = s.name
+                    case NamedVar(_, n):
                         name = n
                     case _:
                         ()
@@ -1012,47 +984,45 @@ impl MirLowering:
                 # Not a direct struct construct: maybe a call to a known
                 # function whose declared return type is a Named struct
                 # (mirrors resolved_call_return_type's own symbol lookup).
-                var callee_symbol = SymbolId(id: -1)
-                match prescan_callee_kind:
-                    case HirExprKind.Var(extracted_sym2):
-                        val sym2: SymbolId = extracted_sym2
-                        callee_symbol = sym2
-                    case HirExprKind.NamedVar(extracted_sym2, _):
-                        val sym2: SymbolId = extracted_sym2
-                        callee_symbol = sym2
+                var callee_symbol: SymbolId? = nil
+                match callee.kind:
+                    case Var(sym2):
+                        callee_symbol = Some(sym2)
+                    case NamedVar(sym2, _):
+                        callee_symbol = Some(sym2)
                     case _:
                         ()
-                if callee_symbol.id >= 0:
-                    val fn_type = self.symbols.get_symbol_type(callee_symbol)
-                    if fn_type.?:
-                        val resolved_fn_type: HirType = fn_type.unwrap()
-                        match resolved_fn_type.kind:
-                            case HirTypeKind.Function(_, ret, _):
-                                val return_kind: HirTypeKind = ret.kind
-                                match return_kind:
-                                    case HirTypeKind.Named(extracted_ret_sym, _):
-                                        val ret_sym: SymbolId = extracted_ret_sym
-                                        return self.symbols.symbol_display_name(ret_sym, "")
-                                    case _:
-                                        ()
-                            case _:
-                                ()
+                if val cs = callee_symbol:
+                    val fn_sym = self.symbols.get_symbol(cs)
+                    if fn_sym.?:
+                        if val fn_type = fn_sym.type_:
+                            match fn_type.kind:
+                                case HirTypeKind.Function(_, ret, _):
+                                    match ret.kind:
+                                        case Named(ret_sym, _):
+                                            val ret_symbol = self.symbols.get_symbol(ret_sym)
+                                            if ret_symbol.?:
+                                                return ret_symbol.name
+                                        case _:
+                                            ()
+                                case _:
+                                    ()
                 ""
-            case HirExprKind.Return(value):
+            case Return(value):
                 if value.is_some():
                     self.prescan_expr_for_struct_types(value.unwrap())
                 else:
                     ""
-            case HirExprKind.Block(inner_block):
+            case Block(inner_block):
                 self.prescan_block_for_struct_types(inner_block)
                 ""
-            case HirExprKind.If(cond, then_, else_):
+            case If(cond, then_, else_):
                 self.prescan_expr_for_struct_types(cond)
                 self.prescan_block_for_struct_types(then_)
                 if val eb = else_:
                     self.prescan_block_for_struct_types(eb)
                 ""
-            case HirExprKind.MethodCall(mc_receiver, mc_method, mc_args, _):
+            case MethodCall(mc_receiver, mc_method, mc_args, _):
                 # Dot-qualified enum construction (`Shape.Circle(make(9))`)
                 # actually arrives as a MethodCall (receiver=Shape,
                 # method=Circle), reclassified into enum construction only at
@@ -1062,12 +1032,11 @@ impl MirLowering:
                 # node. Recurse into args either way so a struct-returning
                 # call passed as a plain method argument is still discovered.
                 var mc_recv_enum_name = ""
-                val mc_receiver_kind: HirExprKind = mc_receiver.kind
-                match mc_receiver_kind:
-                    case HirExprKind.Var(extracted_mc_rsym):
-                        val mc_rsym: SymbolId = extracted_mc_rsym
-                        mc_recv_enum_name = self.symbols.symbol_display_name(mc_rsym, "")
-                    case HirExprKind.NamedVar(_, mc_rname):
+                match mc_receiver.kind:
+                    case Var(mc_rsym):
+                        val mc_rs = self.symbols.get_symbol(mc_rsym)
+                        if mc_rs.?: mc_recv_enum_name = mc_rs.name
+                    case NamedVar(_, mc_rname):
                         mc_recv_enum_name = mc_rname
                     case _:
                         ()
@@ -1086,24 +1055,22 @@ impl MirLowering:
                         self.prescan_expr_for_struct_types(mc_args[mc_ai].value)
                         mc_ai = mc_ai + 1
                 ""
-            case HirExprKind.EnumLit(type_, variant, payload):
+            case EnumLit(type_, variant, payload):
                 # Dot-qualified enum construction (`Shape.Circle(make(9))`)
                 # arrives as a distinct HirExprKind.EnumLit node, NOT a Call --
                 # the Call-shaped enum-owner check above never sees this shape
                 # at all. Same struct-value chain fix, mirrors lower_enum_lit's
                 # own single-value Tuple payload handling.
                 var elit_enum_name = ""
-                val elit_type_kind: HirTypeKind = type_.kind
-                match elit_type_kind:
-                    case HirTypeKind.Named(extracted_elit_sym, _):
-                        val elit_sym: SymbolId = extracted_elit_sym
-                        elit_enum_name = self.symbols.symbol_display_name(elit_sym, "")
+                match type_.kind:
+                    case Named(elit_sym, _):
+                        val elit_s = self.symbols.get_symbol(elit_sym)
+                        if elit_s.?: elit_enum_name = elit_s.name
                     case _:
                         ()
                 if val elit_payload = payload:
-                    val prescan_enum_payload: HirEnumPayload = elit_payload
-                    match prescan_enum_payload:
-                        case HirEnumPayload.Tuple(elit_values):
+                    match elit_payload:
+                        case Tuple(elit_values):
                             if elit_values.len() == 1 and elit_enum_name != "":
                                 val elit_nested = self.prescan_expr_for_struct_types(elit_values[0])
                                 if elit_nested != "":

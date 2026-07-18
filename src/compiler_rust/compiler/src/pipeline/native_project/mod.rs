@@ -61,86 +61,6 @@ fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<
         .map_err(|e| format!("create native object staging in {}: {e}", staging_parent.display()))
 }
 
-fn native_object_io_error(action: &str, source: Option<&Path>, target: &Path, error: std::io::Error) -> std::io::Error {
-    let detail = match source {
-        Some(source) => format!("{action} {} to {}: {error}", source.display(), target.display()),
-        None => format!("{action} {}: {error}", target.display()),
-    };
-    std::io::Error::new(error.kind(), detail)
-}
-
-fn materialize_native_objects_into<F>(
-    directory: &Path,
-    cached_objects: &[(usize, PathBuf)],
-    fresh_objects: &[(usize, Vec<u8>)],
-    after_cached: &mut F,
-) -> std::io::Result<Vec<(usize, PathBuf)>>
-where
-    F: FnMut(&Path),
-{
-    let mut all_paths = Vec::with_capacity(cached_objects.len() + fresh_objects.len());
-
-    for (index, source) in cached_objects {
-        let target = directory.join(format!("mod_{index}.o"));
-        std::fs::copy(source, &target)
-            .map_err(|error| native_object_io_error("copy cached object", Some(source), &target, error))?;
-        all_paths.push((*index, target));
-    }
-
-    after_cached(directory);
-
-    for (index, object) in fresh_objects {
-        let target = directory.join(format!("mod_{index}.o"));
-        std::fs::write(&target, object)
-            .map_err(|error| native_object_io_error("write fresh object", None, &target, error))?;
-        all_paths.push((*index, target));
-    }
-
-    Ok(all_paths)
-}
-
-pub(crate) fn materialize_native_objects_with_initial_and_hook<F>(
-    initial: tempfile::TempDir,
-    cached_objects: &[(usize, PathBuf)],
-    fresh_objects: &[(usize, Vec<u8>)],
-    mut after_cached: F,
-) -> Result<(tempfile::TempDir, Vec<(usize, PathBuf)>), String>
-where
-    F: FnMut(&Path),
-{
-    match materialize_native_objects_into(initial.path(), cached_objects, fresh_objects, &mut after_cached) {
-        Ok(all_paths) => Ok((initial, all_paths)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            drop(initial);
-            let replacement =
-                tempfile::tempdir().map_err(|error| format!("create replacement object tempdir: {error}"))?;
-            let all_paths =
-                materialize_native_objects_into(replacement.path(), cached_objects, fresh_objects, &mut after_cached)
-                    .map_err(|error| {
-                    format!(
-                        "rematerialize native objects in {}: {error}",
-                        replacement.path().display()
-                    )
-                })?;
-            Ok((replacement, all_paths))
-        }
-        Err(error) => Err(format!(
-            "materialize native objects in {}: {error}",
-            initial.path().display()
-        )),
-    }
-}
-
-fn materialize_native_objects(
-    cache_base_dir: &Path,
-    cache_dir: &Path,
-    cached_objects: &[(usize, PathBuf)],
-    fresh_objects: &[(usize, Vec<u8>)],
-) -> Result<(tempfile::TempDir, Vec<(usize, PathBuf)>), String> {
-    let initial = native_object_staging_dir(cache_base_dir, cache_dir)?;
-    materialize_native_objects_with_initial_and_hook(initial, cached_objects, fresh_objects, |_| {})
-}
-
 /// Initialize the rayon global thread pool with appropriate stack size and
 /// thread count for compilation workloads.
 ///
@@ -294,11 +214,6 @@ pub(crate) struct ModuleImports {
     /// misrouted through the function-import fast path (which would return
     /// the symbol's address as the "value").
     pub data_exports: std::sync::Arc<std::collections::HashSet<String>>,
-    /// Mangled data symbol -> source type, used to seed selected package data
-    /// into each per-file HIR module before strict MIR validation.
-    pub data_types: std::sync::Arc<std::collections::HashMap<String, simple_parser::Type>>,
-    /// Effective package -> unique package-private data owners.
-    pub package_data: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
     /// Mangled function name → declared parameter count for cross-module free
     /// functions. Used to strip spurious nil receivers from module-qualified
     /// calls (see `ImportMapResult::fn_arities`).
@@ -678,6 +593,13 @@ impl NativeProjectBuilder {
             std::fs::create_dir_all(&objects_dir).map_err(|e| format!("create cache dir: {e}"))?;
         }
 
+        // 3. Stage .o files beside the cache so system-temp and cache cleanup cannot remove them.
+        let mut temp_dir = Some(native_object_staging_dir(&cache_base_dir, &cache_dir)?);
+        let temp_dir_path = temp_dir
+            .as_ref()
+            .map(|dir| dir.path().to_path_buf())
+            .ok_or_else(|| "tempdir unexpectedly missing".to_string())?;
+
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();
         // Deduplicate files for compilation (symlink aliases compile once, but
@@ -730,8 +652,6 @@ impl NativeProjectBuilder {
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
                 data_exports: std::sync::Arc::new(result.data_exports),
-                data_types: std::sync::Arc::new(result.data_types),
-                package_data: std::sync::Arc::new(result.package_data),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
                 fn_return_types: std::sync::Arc::new(result.fn_return_types),
                 populate_global_struct_defs: true,
@@ -748,8 +668,6 @@ impl NativeProjectBuilder {
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-                data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-                package_data: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
                 populate_global_struct_defs: false,
@@ -818,8 +736,12 @@ impl NativeProjectBuilder {
                     };
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if cached_o.exists() {
-                        cached_objects.push((i, cached_o));
-                        continue;
+                        // Cache hit: copy to temp dir
+                        let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
+                        if std::fs::copy(&cached_o, &obj_path).is_ok() {
+                            cached_objects.push((i, obj_path));
+                            continue;
+                        }
                     }
                 }
                 to_compile.push((i, path.clone(), source.clone()));
@@ -866,25 +788,31 @@ impl NativeProjectBuilder {
 
         // 5. Compile dirty files
         let results = if self.config.parallel {
-            self.compile_entries_parallel(&to_compile, &canonical_entry, &imports)
+            self.compile_entries_parallel(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         } else {
-            self.compile_entries_sequential(&to_compile, &canonical_entry, &imports)
+            self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
         let compile_time = compile_start.elapsed();
 
         // Collect results
+        let mut object_paths_with_indices: Vec<(usize, PathBuf)> = cached_objects;
         let mut failures = Vec::new();
-        let mut freshly_compiled: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut freshly_compiled: Vec<(usize, PathBuf)> = Vec::new();
 
         for result in results {
             match result {
-                Ok((idx, object)) => freshly_compiled.push((idx, object)),
+                Ok((idx, path)) => {
+                    freshly_compiled.push((idx, path.clone()));
+                    object_paths_with_indices.push((idx, path));
+                }
                 Err((path, msg)) => failures.push((path, msg)),
             }
         }
 
-        let fresh_count = freshly_compiled.len();
-        let compiled = cached_count + fresh_count;
+        object_paths_with_indices.sort_by_key(|(idx, _)| *idx);
+        let mut object_paths: Vec<PathBuf> = object_paths_with_indices.into_iter().map(|(_, path)| path).collect();
+
+        let compiled = object_paths.len();
         let failed = failures.len();
 
         // Always log individual failures when present (bootstrap visibility).
@@ -910,22 +838,15 @@ impl NativeProjectBuilder {
                 compiled,
                 files.len(),
                 cached_count,
-                fresh_count,
+                freshly_compiled.len(),
                 failed,
                 compile_time.as_secs_f64()
             );
         }
 
-        if compiled == 0 {
+        if object_paths.is_empty() {
             return Err(format!("All {0} files failed to compile", files.len()));
         }
-
-        let (owned_temp_dir, mut object_paths_with_indices) =
-            materialize_native_objects(&cache_base_dir, &cache_dir, &cached_objects, &freshly_compiled)?;
-        object_paths_with_indices.sort_by_key(|(idx, _)| *idx);
-        let mut object_paths: Vec<PathBuf> = object_paths_with_indices.into_iter().map(|(_, path)| path).collect();
-        let temp_dir_path = owned_temp_dir.path().to_path_buf();
-        let mut temp_dir = Some(owned_temp_dir);
 
         if let Some(security_registry_o) = self.generate_security_registry_init_object(&temp_dir_path, &file_sources)? {
             object_paths.push(security_registry_o);
@@ -933,7 +854,7 @@ impl NativeProjectBuilder {
 
         // 6. Cache freshly compiled objects
         if use_incremental {
-            for (idx, object) in &freshly_compiled {
+            for (idx, obj_path) in &freshly_compiled {
                 if let Some((path, source)) = file_sources.get(*idx) {
                     let is_entry = is_entry_file(path, &canonical_entry);
                     let per_file_root = self.effective_source_root_for(path);
@@ -953,7 +874,7 @@ impl NativeProjectBuilder {
                         base_hash
                     };
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
-                    let _write_result = std::fs::write(cached_o, object);
+                    let _copy_result = std::fs::copy(obj_path, cached_o);
                 }
             }
         }
@@ -969,9 +890,9 @@ impl NativeProjectBuilder {
                 .and_then(|prev| gfp.changed_reason(&prev));
             let rebuilt = freshly_compiled.len();
             match reason {
-                Some(why) => {
-                    eprintln!("[native-incremental] {cached_count} reused / {rebuilt} rebuilt (full rebuild: {why})")
-                }
+                Some(why) => eprintln!(
+                    "[native-incremental] {cached_count} reused / {rebuilt} rebuilt (full rebuild: {why})"
+                ),
                 None => eprintln!("[native-incremental] {cached_count} reused / {rebuilt} rebuilt"),
             }
             let _ = std::fs::write(&manifest_path, gfp.to_manifest_line());
@@ -1029,7 +950,7 @@ impl NativeProjectBuilder {
 
         Ok(NativeBuildResult {
             output: self.output,
-            compiled: fresh_count,
+            compiled: freshly_compiled.len(),
             failed,
             cached: cached_count,
             compile_time,
@@ -1372,16 +1293,6 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     }
     for k in result.data_exports.iter() {
         fp = fold_unordered(fp, hash_one(&("data", k)));
-    }
-    for (k, v) in result.data_types.iter() {
-        fp = fold_unordered(fp, hash_one(&("data-type", k, format!("{v:?}"))));
-    }
-    for (package, entries) in result.package_data.iter() {
-        let mut package_fp = 0;
-        for (name, owner) in entries {
-            package_fp = fold_unordered(package_fp, hash_one(&(name, owner)));
-        }
-        fp = fold_unordered(fp, hash_one(&("package-data", package, package_fp)));
     }
     for (k, v) in result.fn_arities.iter() {
         fp = fold_unordered(fp, hash_one(&(k, v)));

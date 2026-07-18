@@ -141,48 +141,10 @@ to the virtual address. PMP denial produces the matching access fault.
 ## Milestone 2 — RV64 Sv39/PMP
 
 Extend `CoreState64` with RV64-local PMP state. Connect decoded CSR operations,
-SATP writes, `core64_update`, `mmu64_set_satp`, `sv39_walker64_start/cycle`,
+SATP writes, `core64_update`, `mmu64_set_satp`, `mmu64_translate`,
 `mmu64_flush`, trap delegation, and SRET/MRET to the emitted state machine.
-`core64_cycle` replaces the PC-only step and clocks the canonical memory
-frontend through two-parcel fetch, decode/commit, and stalled data access. The
-permissive `lsu64_access` identity product path is deleted. The SoC latches one
-bus response and routes accepted physical requests exactly once.
-The clock path validates encodings before starting data access, samples
-CLINT/PLIC pending state into `mip`, and takes enabled interrupts only after an
-instruction commits. `misa` grows only when the corresponding execution path is
-connected. M is multi-cycle; A uses translated physical reservations and
-interrupt-free read/conditional-write phases. Only DRAM accepts atomic-tagged
-requests, so ROM/MMIO rejection occurs before target side effects. The reusable
-core profile leaves A clear; only `core64_init_single_master()` enables it for
-this exclusive-bus SoC.
-
-RV64C is a fail-closed 16-to-32-bit expansion layer feeding the same base
-decoder. `CoreState64.instruction_bytes` preserves the original length through
-loads, stores, M, and A phases. Sequential PC and control-flow link values use
-`pc + instruction_bytes`; JALR clears bit zero; trap EPCs align to two bytes;
-illegal compressed instructions report the original parcel. Compressed EBREAK
-cannot participate in the 32-bit semihost sequence. The reusable profile is
-RV64IMC+S/U and the exclusive-bus SoC profile is RV64IMAC+S/U.
-
-For explicit data accesses, `core64_effective_data_privilege` selects MPP only
-when the current mode is M and MPRV is set. Fetch and trap entry always use the
-current mode. The selected privilege, SUM, and MXR are latched in the memory
-transaction and reused by both AMO phases. The S-mode CSR owner owns the
-SIE/SPIE/SPP/SUM/MXR alias; machine CSR reads/writes and trap transitions merge
-that view into `mstatus`. SXL/UXL are fixed RV64 fields, MPP=2 coerces to U, and
-the current direct-only trap owner clears unsupported vector modes.
-
-Supervisor interrupt state is canonical in the machine CSR file. `sie` exposes
-only delegated supervisor enable bits; `sip` permits supervisor software to
-write delegated `SSIP`, while machine firmware can inject `SSIP`, `STIP`, and a
-software `SEIP` latch. The software `SEIP` latch is ORed with the independent
-PLIC S-context line; CSR read/modify/write operates on the hidden software
-latch while returning the combined architectural bit. The PLIC provides the
-standard context-1 enable, threshold, and claim/complete windows and excludes
-an in-service source from both contexts until its owning context completes it.
-Delivery checks all machine-target causes before all supervisor-target causes,
-orders S causes as external/software/timer, suppresses
-delegated interrupts in M-mode, and treats global SIE as implicit below S-mode.
+Replace `core64_step` PC-only behavior and `lsu64_access` identity behavior in
+the product path.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

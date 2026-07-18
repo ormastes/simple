@@ -5,7 +5,6 @@
 use std.spec.*
 use std.memory_leveling.{
     MEMORY_DMA_DIRECTION_BIDIRECTIONAL,
-    MEMORY_LEVELING_ALLOCATION_METADATA_BYTES,
     simple_memory_iso_cpu_cold,
     simple_memory_device_gpu,
     simple_memory_placement_config_from_intent,
@@ -31,7 +30,7 @@ use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_mig
 
 describe "SimpleOS GPU NIC DMA memory leveling":
 
-    it "REQ-001 REQ-002 NFR-006 keeps language and kernel configurations separate":
+    it "REQ-001 REQ-002 keeps language and kernel configurations separate":
         step("Create an independently owned language placement configuration")
         val intent = simple_memory_iso_cpu_cold()
         var placement = simple_memory_placement_config_from_intent(intent)
@@ -47,7 +46,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(os_config.pressure_batch_limit).to_equal(5)
         expect(os_config.swap_enabled).to_equal(true)
 
-    it "REQ-003 REQ-005 REQ-006 NFR-003 enforces identity ownership pins and DMA order":
+    it "REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order":
         step("Allocate a tracked cold CPU buffer with stable identity")
         val intent = simple_memory_iso_cpu_cold()
         val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
@@ -72,7 +71,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.sync_for_cpu(allocation.allocation_id, 91).state).to_equal("syncing_for_cpu")
         expect(manager.unmap_device(allocation.allocation_id, 91).state).to_equal("cpu_owned")
 
-    it "REQ-008 REQ-014 NFR-001 NFR-002 bounds pressure and reports incremental counters":
+    it "REQ-008 REQ-014 bounds pressure and reports incremental counters":
         step("Configure a pressure batch larger than the hard safety bound")
         var config = simpleos_memory_leveling_config_default()
         config.pressure_batch_limit = 1000
@@ -92,11 +91,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         val stats = manager.snapshot()
         expect(stats.allocation_count).to_equal(70)
         expect(stats.cpu_bytes).to_equal(70 * 4096)
-        expect(stats.cpu_cold_bytes).to_equal(70 * 4096)
         expect(stats.candidate_count).to_equal(70)
-        expect(stats.pressure_level).to_equal("critical")
-        expect(stats.metadata_record_count).to_equal(70)
-        expect(stats.metadata_bytes).to_equal(70u64 * MEMORY_LEVELING_ALLOCATION_METADATA_BYTES)
 
     it "REQ-007 preserves CPU and device reservations":
         step("Configure CPU GPU NIC and DMA reservations over shared capacity")
@@ -122,28 +117,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 10, 1, 2).ok).to_equal(true)
         expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 1, 1, 2).reason).to_equal("reservation-protected")
 
-        step("Raise pressure when remaining CPU bytes cross the high watermark")
-        expect(manager.apply_pressure("normal").level).to_equal("elevated")
-
-    it "NFR-005 retains a cold candidate until cooldown expires":
-        step("Touch a reclaimable CPU allocation to establish cooldown")
-        val intent = simple_memory_iso_cpu_cold()
-        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
-        val allocation = manager.request(simple_memory_placement_config_from_intent(intent), memory_leveling_policy_from_intent(intent), 4096, 1, 30)
-        expect(manager.touch(allocation.allocation_id, 30).ok).to_equal(true)
-
-        step("Skip the candidate before expiry without dropping it")
-        val cooling = manager.apply_pressure("critical")
-        expect(cooling.inspected).to_equal(1)
-        expect(cooling.selected).to_equal(0)
-        expect(cooling.skipped).to_equal(1)
-
-        step("Select the retained candidate when cooldown expires")
-        val cooled = manager.apply_pressure("critical")
-        expect(cooled.inspected).to_equal(1)
-        expect(cooled.selected).to_equal(1)
-
-    it "REQ-009 NFR-004 preserves bytes across committed swap transitions":
+    it "REQ-009 preserves bytes across committed swap transitions":
         step("Prepare a cold allocation for swap")
         val intent = simple_memory_iso_cpu_cold()
         val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
@@ -164,7 +138,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.commit_restore(allocation.allocation_id, 31).state).to_equal("cpu_owned")
         expect(store.release(written.slot_id, allocation.allocation_id).ok).to_equal(true)
 
-    it "REQ-004 REQ-011 validates scatter DMA metadata and synchronization":
+    it "REQ-011 validates scatter DMA metadata and synchronization":
         step("Create a DMA descriptor with two explicit physical segments")
         val buffer = SharedDmaBuffer(
             cpu_virt_addr: 0x1000,
@@ -214,7 +188,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.release(502, 13).ok).to_equal(true)
         expect(memory_leveling_device_migration_unavailable(502).reason).to_equal("migration-unavailable")
 
-    it "REQ-013 REQ-015 NFR-009 reports QEMU support without hardware overclaim":
+    it "REQ-013 REQ-015 reports QEMU support without hardware overclaim":
         step("Inspect the QEMU virtio capability report")
         val capabilities = memory_leveling_qemu_capabilities()
         expect(capabilities.virtio_gpu_backing).to_equal(true)

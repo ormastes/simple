@@ -320,35 +320,3 @@ boots is not a reliable signal. Instead grep for **stable content markers**:
   printed — a pre-completion screendump can look "less black" purely because
   more (unfinished, partially-corrupt) compositing happened before the boot
   stalled, not because the frame is more correct.
-
-## 8. Offscreen opacity-consume path & cross-module target-dims misread (2026-07-18)
-
-- **Offscreen opacity-consume path affects COVERAGE, not just heap.** A leaky
-  per-window offscreen scratch path (`Engine2D.create_offscreen()` not wiring
-  a `software_backend`) doesn't just exhaust the heap — it can also truncate
-  the blitted footprint to whatever partial region the leaky scratch buffer
-  happened to cover. On the SimpleOS x86_64 glass desktop, wiring
-  `software_backend: sw` into `Engine2D.create_offscreen()`'s constructor
-  (`engine.spl:348`) activated the `draw_software_offscreen_opacity_consume`
-  fast path and fixed BOTH problems in one change: non-black screendump
-  coverage went 12.64% -> 99.83%, and the heap panic disappeared. When
-  debugging a partial/truncated render, check the offscreen consume wiring
-  before assuming the truncation and any co-occurring heap issue are separate
-  bugs — they can be the same root cause.
-- **Cross-module field-offset misread can hit target dims silently.** The
-  gated `[route-dbg]` probe in `draw_ir_adv.spl`
-  (`_engine2d_route_dbg`/`ENGINE2D_DRAW_IR_ROUTE_DBG`, around line 38) caught
-  `_engine2d_draw_ir_render_batch_embedded`'s `target_width`/`target_height`
-  (from `eng.width()`/`eng.height()`, i.e. `Engine2D.w`/`.h`) reading garbage
-  cross-module (`tw=158239601 th=3840` instead of `3840`/`2160`) while the
-  same batch's embedding dims and opacity read correctly — the same
-  receiver-blind ambiguous-field-index class documented in
-  `doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md`.
-  Currently harmless (`baremetal_direct` routing overrides it for opaque
-  full-page batches), but it defeats the `fills_target_exactly` fast path
-  silently — see
-  `doc/08_tracking/bug/engine2d_draw_ir_target_dims_crossmodule_field_offset_misread_2026-07-18.md`.
-  Reuse the same gated route-dbg probe (flip the bool, rebuild, grep serial
-  for `[route-dbg]`) as the go-to diagnostic any time a Draw IR routing
-  decision looks wrong — comparing the always-correct embedding dims against
-  the suspect target dims is what pinned this one.

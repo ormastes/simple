@@ -5,7 +5,7 @@ use super::di_injection::resolve_injected_args;
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn};
 use crate::value::*;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, SelfMode};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
 use simple_runtime::value::diagram_sffi;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -270,61 +270,6 @@ pub(crate) fn instantiate_class(
     // Used when there's no `__init__` or `new` method with special attributes
     let mut positional_idx = 0;
     for arg in args {
-        // Paren-form struct spread/update: `Ctor(..base_expr, field: value)`.
-        // The parser has no dedicated spread token for paren-form call arguments
-        // (only the brace-form `Name { ..base_expr, ... }` parser -- identifiers.rs
-        // / postfix.rs -- special-cases the leading `..`); a bare `..base_expr`
-        // argument here parses through the ordinary expression grammar as an
-        // open-start `Expr::Range { start: None, end: Some(base_expr) }`, since
-        // that is otherwise valid range syntax. eval_collection_expr's
-        // `Expr::StructInit` handler (collections.rs) already special-cases this
-        // for brace-form construction; this call-based path (paren-form, used by
-        // e.g. `MirFunction(..func, blocks: new_blocks)` in the self-hosted
-        // compiler's own MIR-rewrite passes) never got the equivalent handling,
-        // so the unlabeled Range argument fell through to the generic
-        // `evaluate_expr` below and its `end` operand (a whole base-struct value,
-        // not an int) blew up in `Value::as_int()` with "cannot convert object to
-        // int" -- the fresh-seed native-build parameterized-function keystone bug.
-        // Detect the same shape here and merge fields from the base value instead
-        // of evaluating it as a numeric range bound. Spread never consumes a
-        // positional field slot, matching brace-form semantics.
-        if arg.name.is_none() {
-            if let Expr::Range {
-                start: None,
-                end: Some(base_expr),
-                ..
-            } = &arg.value
-            {
-                let base_val = evaluate_expr(base_expr, env, functions, classes, enums, impl_methods)?;
-                match &base_val {
-                    Value::Object {
-                        fields: base_fields, ..
-                    } => {
-                        for (k, v) in base_fields.as_ref() {
-                            fields.insert(k.clone(), v.clone());
-                        }
-                    }
-                    Value::Dict(base_map) => {
-                        for (k, v) in base_map.iter() {
-                            fields.insert(k.clone(), v.clone());
-                        }
-                    }
-                    _ => {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::TYPE_MISMATCH)
-                            .with_help("struct spread (..) requires an object or dict value as base");
-                        return Err(CompileError::semantic_with_context(
-                            format!(
-                                "type mismatch: struct spread requires object or dict, got {}",
-                                base_val.type_name()
-                            ),
-                            ctx,
-                        ));
-                    }
-                }
-                continue;
-            }
-        }
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
             if !fields.contains_key(name) {
@@ -402,7 +347,7 @@ fn has_inject_attr(method: &FunctionDef) -> bool {
         .iter()
         .any(|attr| attr.name == "inject" || attr.name == "sys_inject");
     let has_decorator = method.decorators.iter().any(|decorator| match &decorator.name {
-        Expr::Identifier(name) => name == "inject" || name == "sys_inject",
+        simple_parser::ast::Expr::Identifier(name) => name == "inject" || name == "sys_inject",
         _ => false,
     });
     let has_param_inject = method.params.iter().any(|param| param.inject);
@@ -415,123 +360,4 @@ fn has_inject_attr(method: &FunctionDef) -> bool {
 /// This should be called between test runs to prevent memory leaks.
 pub fn clear_class_instantiation_state() {
     IN_NEW_METHOD.with(|cell| cell.borrow_mut().clear());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use simple_parser::ast::{Node, RangeBound};
-    use simple_parser::Parser;
-
-    /// Build a `ClassDef` for a 3-field struct the same way the interpreter's
-    /// own `Node::Struct` module-registration path does (see
-    /// `interpreter_eval.rs`), so this test tracks the real `ClassDef` shape.
-    fn make_point_class() -> Arc<ClassDef> {
-        let mut parser = Parser::new("struct Point:\n    x: i64\n    y: i64\n    z: i64\n");
-        let module = parser.parse().expect("parse Point struct");
-        let s = module
-            .items
-            .iter()
-            .find_map(|node| match node {
-                Node::Struct(s) => Some(s.clone()),
-                _ => None,
-            })
-            .expect("Point struct node");
-        Arc::new(ClassDef {
-            span: s.span,
-            name: s.name.clone(),
-            generic_params: Vec::new(),
-            where_clause: vec![],
-            fields: s.fields.clone(),
-            methods: s.methods.clone(),
-            parent: None,
-            visibility: s.visibility,
-            effects: Vec::new(),
-            attributes: Vec::new(),
-            doc_comment: None,
-            invariant: None,
-            macro_invocations: Vec::new(),
-            mixins: vec![],
-            is_generic_template: false,
-            specialization_of: None,
-            type_bindings: HashMap::new(),
-            is_value_type: true,
-        })
-    }
-
-    /// Regression test for the fresh-seed native-build parameterized-function
-    /// keystone bug (`native_build_fresh_seed_optionwrap_landmine_2026-07-18.md`,
-    /// "param_add.spl" symptom): the self-hosted compiler's MIR-rewrite passes
-    /// use paren-form struct spread/update, `MirFunction(..func, blocks: new)`,
-    /// to build an updated MIR function from an existing one. The paren-form
-    /// call-argument parser has no dedicated spread token (only brace-form
-    /// `Name { ..base, .. }` does), so `..func` parses as an ordinary
-    /// open-start `Expr::Range { start: None, end: Some(func) }` argument.
-    /// Before this fix, `instantiate_class`'s field-based construction loop
-    /// evaluated every argument eagerly via the generic numeric-range path,
-    /// which called `Value::as_int()` on the whole base-struct value and blew
-    /// up with "type mismatch: cannot convert object to int" -- this is
-    /// exactly what broke a fresh Rust seed compiling any parameterized
-    /// function (any real function call triggers a MIR optimization pass that
-    /// rebuilds the callee via this spread pattern). Confirms `Point(..base,
-    /// y: 99)` now merges `base`'s fields, overridden by the explicit `y`.
-    #[test]
-    fn paren_form_struct_spread_merges_base_fields_instead_of_as_int() {
-        let class_def = make_point_class();
-        let mut classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
-        classes.insert("Point".to_string(), class_def);
-        let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
-        let enums: Enums = HashMap::new();
-        let impl_methods: ImplMethods = HashMap::new();
-
-        let mut base_fields = HashMap::new();
-        base_fields.insert("x".to_string(), Value::Int(1));
-        base_fields.insert("y".to_string(), Value::Int(2));
-        base_fields.insert("z".to_string(), Value::Int(3));
-        let base = Value::Object {
-            class: "Point".to_string(),
-            fields: Arc::new(base_fields),
-        };
-
-        let mut env = Env::new();
-        env.insert("base".to_string(), base);
-
-        let spread_arg = Argument::new(
-            None,
-            Expr::Range {
-                start: None,
-                end: Some(Box::new(Expr::Identifier("base".to_string()))),
-                bound: RangeBound::Exclusive,
-            },
-        );
-        let y_arg = Argument::new(Some("y".to_string()), Expr::Integer(99));
-        let args = vec![spread_arg, y_arg];
-
-        let result = instantiate_class(
-            "Point",
-            &args,
-            &mut env,
-            &mut functions,
-            &mut classes,
-            &enums,
-            &impl_methods,
-        )
-        .expect("instantiate_class must merge spread fields, not error in as_int()");
-
-        let Value::Object { fields, .. } = result else {
-            panic!("expected Value::Object");
-        };
-        match fields.get("x") {
-            Some(Value::Int(1)) => {}
-            other => panic!("expected x to come from spread base (1), got {:?}", other),
-        }
-        match fields.get("y") {
-            Some(Value::Int(99)) => {}
-            other => panic!("expected y to come from the explicit override (99), got {:?}", other),
-        }
-        match fields.get("z") {
-            Some(Value::Int(3)) => {}
-            other => panic!("expected z to come from spread base (3), got {:?}", other),
-        }
-    }
 }

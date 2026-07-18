@@ -12,18 +12,8 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
-extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_dict_get_i64_raw(dict: i64, key: i64) -> i64
-extern fn rt_dict_set_i64_raw(dict: i64, key: i64, value: i64) -> bool
-extern fn rt_dict_remove(dict: i64, key: Any)
-extern fn rt_value_int(value: i64) -> i64
-
-fn mir_stmt_dict_contains_i64(dict: i64, key: i64) -> bool:
-    rt_dict_get_i64_raw(dict, key) != 0
-
-fn mir_stmt_dict_remove_i64(dict: i64, key: i64):
-    rt_dict_remove(dict, rt_value_int(key))
 
 fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
     match symbol:
@@ -37,6 +27,23 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
 
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     rt_enum_discriminant(k)
+
+fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
+    """True when a HIR expression is a PLACE read -- it evaluates to the
+    SAME memory an existing binding already owns (a plain variable read,
+    a field projection, an index/tuple-index projection) rather than a
+    freshly-constructed value (a struct literal, a call result, ...).
+    Used by Bug #177's struct local-alias fix (see
+    MirLowering.maybe_copy_struct_value below): structs are
+    pointer-represented, so binding a NEW name straight to a place read's
+    result (as the bitfield/struct pass-through does for a genuinely
+    fresh aggregate) makes the new and old names literal aliases of the
+    same struct memory."""
+    match k:
+        case Var(_) | NamedVar(_, _) | Field(_, _, _) | Index(_, _) | TupleIndex(_, _):
+            true
+        case _:
+            false
 
 # ============================================================================
 # Statement Lowering
@@ -97,6 +104,255 @@ impl MirLowering:
                     case _: false
             case nil: false
 
+    me copy_struct_value_recursive(init_local: LocalId, struct_type_name: text, type_symbol: SymbolId, copy_chain: [text]) -> LocalId:
+        """Rebuild a value struct, recursively copying nested value structs."""
+        val field_names = self.struct_field_order[struct_type_name]
+        val nested_names = self.struct_field_type_name.get(struct_type_name) ?? []
+        var copy_ops: [MirOperand] = []
+        var cfi = 0
+        while cfi < field_names.len():
+            var field_type = MirType.i64()
+            var nested_name = ""
+            var nested_symbol = SymbolId(id: -1)
+            var copy_nested = false
+            if cfi < nested_names.len():
+                nested_name = nested_names[cfi]
+            # Classes remain shared references. Cyclic value layouts are not
+            # recursively expanded: their back-edge stays shared until the
+            # type checker rejects cyclic value structs.
+            # ponytail: reject cyclic value structs before deep-copying cycles.
+            if nested_name != "" and not self.class_type_names.has(nested_name) and not copy_chain.contains(nested_name):
+                nested_symbol = self.symbols.lookup_or_invalid(nested_name)
+                if nested_symbol.is_valid() and self.struct_field_order.has(nested_name):
+                    field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
+                    copy_nested = true
+
+            var field_bldr = self.builder
+            val field_val = field_bldr.emit_get_field(mir_operand_copy(init_local), cfi, field_type)
+            self.builder = field_bldr
+            var copied_field = field_val
+
+            if copy_nested:
+                # Preserve a nil nested field instead of dereferencing it.
+                var guard_bldr = self.builder
+                val result_slot = guard_bldr.emit_entry_alloc(field_type)
+                guard_bldr.emit_store(mir_operand_copy(result_slot), mir_operand_copy(field_val))
+                val null_value = guard_bldr.new_temp(field_type)
+                guard_bldr.emit_const(null_value, MirConstValue.Zero, field_type)
+                val has_value = guard_bldr.emit_binop(MirBinOp.Ne, mir_operand_copy(field_val), mir_operand_copy(null_value), MirType.bool())
+                val copy_block = guard_bldr.new_block(Some("structcopy_nested"))
+                val merge_block = guard_bldr.new_block(Some("structcopy_merge"))
+                guard_bldr.terminate_if(mir_operand_copy(has_value), copy_block, merge_block)
+                guard_bldr.switch_to_block(copy_block)
+                self.builder = guard_bldr
+
+                var nested_chain: [text] = []
+                for seen_name in copy_chain:
+                    nested_chain.push(seen_name)
+                nested_chain.push(nested_name)
+                val nested_copy = self.copy_struct_value_recursive(field_val, nested_name, nested_symbol, nested_chain)
+
+                var merge_bldr = self.builder
+                merge_bldr.emit_store(mir_operand_copy(result_slot), mir_operand_copy(nested_copy))
+                merge_bldr.terminate_goto(merge_block)
+                merge_bldr.switch_to_block(merge_block)
+                copied_field = merge_bldr.emit_load(mir_operand_copy(result_slot), field_type)
+                self.builder = merge_bldr
+
+            copy_ops.push(mir_operand_copy(copied_field))
+            cfi = cfi + 1
+
+        var agg_bldr = self.builder
+        val copy_local = agg_bldr.emit_aggregate(
+            AggregateKind.Struct(type_symbol),
+            copy_ops,
+            MirType(kind: MirTypeKind.Struct(type_symbol))
+        )
+        self.builder = agg_bldr
+        self.struct_value_syms[copy_local.id] = struct_type_name
+        copy_local
+
+    me maybe_copy_struct_value(init_local: LocalId, struct_sym: text?, init_is_place: bool) -> LocalId?:
+        """Bug #177 (native struct local-alias copy missing): `var b = a` /
+        `val b = a` for a struct-typed `a` used to alias the binding's
+        symbol straight to `a`'s own local (the same `bf_sym != nil or
+        struct_sym != nil: self.local_map[symbol] = init_local` pass-through
+        the bitfield/fresh-aggregate case correctly uses to skip a redundant
+        copy) -- correct when the initializer is a FRESH aggregate (a struct
+        literal, a call result: no other name can alias that memory yet),
+        but wrong when it is a PLACE read of an EXISTING binding (a plain
+        variable read, `outer.child`, `arr[i]`, ...): structs are
+        pointer-represented (see the struct_sym computation just above each
+        caller), so aliasing there made `b.x = 41` write through to `a.x` /
+        `outer.child.n` too. Structs are VALUE types (mirrors Bug #167's
+        by-value struct PARAM copy and the interpreter's Value.Struct
+        copy-on-bind); classes stay reference types (Bug s19's
+        class_type_names), so this copy is skipped for anything registered
+        there -- `var d = someClassInstance; d.x = 41` must still leak into
+        `someClassInstance.x`. Returns the fresh per-binding copy's LocalId
+        when a copy was materialized, nil when the caller should fall back
+        to its existing alias/plain-copy behavior (non-struct, class, or a
+        fresh-construction initializer -- keeps the redundant-copy cost
+        confined to the one case that actually needs it)."""
+        if struct_sym == nil or not init_is_place:
+            return nil
+        val struct_type_name = struct_sym ?? ""
+        if struct_type_name == "" or self.class_type_names.has(struct_type_name):
+            return nil
+        if not self.struct_field_order.has(struct_type_name):
+            return nil
+        val struct_symbol_id: SymbolId? = match self.local_mir_type_of(init_local):
+            case Some(t):
+                match t.kind:
+                    case MirTypeKind.Struct(sym): Some(sym)
+                    case _: nil
+            case nil: nil
+        if val type_symbol = struct_symbol_id:
+            return Some(self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name]))
+        nil
+
+    me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId?:
+        """Bug #186 (native array local-alias copy missing): sibling to Bug
+        #177's struct local-alias fix (maybe_copy_struct_value above), for
+        runtime arrays' separate rt_array mechanism -- struct_value_syms /
+        struct_field_order don't cover arrays (struct_sym is nil for an
+        array-typed binding), so #177's struct-scoped guard correctly left
+        this case untouched (see #177's commit message, "Known out-of-scope
+        finding"). `var c = arr` / `val c = arr` for an array-typed `arr`
+        fell into the ordinary new_local + emit_copy pass-through (the
+        `else` branch below, taken whenever bf_sym/struct_sym are both nil)
+        for ANY non-struct/non-bitfield initializer: runtime arrays are
+        heap-allocated, POINTER-represented handles (core_array_ops.spl's
+        SplArray header -- ptr/items/len/cap fields reached via array_ptr/
+        array_items), so `emit_copy` there only duplicates the i64 HANDLE
+        value, not the backing element buffer -- `c[0] = 99` then calls
+        rt_array_set on the exact SAME heap array `arr` still points to (a
+        true alias, not a copy), violating the repo's "arrays are value
+        types" rule. Correct when the initializer is a FRESH aggregate (an
+        array literal, a call result: nothing else names that heap array
+        yet, so aliasing the fresh local is harmless) -- wrong when it is a
+        PLACE read of an EXISTING array binding (a plain variable read,
+        `outer.items` where `items` is a struct's array field, `arr[i]`
+        when `arr` holds nested arrays, ...).
+
+        Materializes a private per-binding copy with a synthesized counted
+        loop (rt_array_len -> rt_array_new(len) -> per-index rt_array_get +
+        rt_array_push), the EXACT same shape as lower_array_map/
+        lower_array_filter in method_calls_literals.spl -- NOT a call to
+        core_array_ops.spl's `rt_array_copy`, even though that helper exists
+        and does the equivalent memcpy in one call: this project's default
+        native-build link step compiles/links the hand-written C runtime
+        (src/runtime/runtime_native.c), not the pure-Simple `simple_core`
+        layer, and runtime_native.c implements rt_array_len/rt_array_new/
+        rt_array_get/rt_array_push but NOT rt_array_copy -- a first attempt
+        wiring a bare `rt_array_copy` call hit "undefined symbol:
+        rt_array_copy" at the ld.lld link step. Adding rt_array_copy to
+        runtime_native.c was avoided on purpose (repo hard rule: never wire
+        a new `extern fn rt_*` into a CLI-closure module here); the loop
+        form needs zero new runtime surface. Mirrors lower_array_filter's
+        "push the ORIGINAL tagged element unchanged" step (not
+        lower_array_map's decode/re-box round trip): a copy must preserve
+        every element's raw tagged word bit-for-bit, matching
+        rt_array_copy's own memcpy semantics -- this remains a SHALLOW array
+        copy (an array of structs copies each element's pointer, not the
+        pointed-to struct). Nested fields inside a directly copied struct use
+        copy_struct_value_recursive above; array element depth is separate.
+        Returns the fresh copy's LocalId (already flag-propagated -- NOT yet
+        bound into local_map, unlike maybe_copy_struct_value, since the
+        caller's two call sites bind local_map slightly differently) when a
+        copy was materialized; nil when the caller should fall back to its
+        existing new_local+emit_copy behavior (non-array, or a
+        fresh-construction initializer -- keeps the extra loop confined to
+        the one case that actually needs it, per repo perf-review rules)."""
+        if not init_is_place or not self.local_is_runtime_array(init_local):
+            return nil
+        val loop_ty = MirType.i64()
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(init_local)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        # Pre-size the result at the source's exact length (unlike
+        # lower_array_map/filter, which start from an unknown-length 0-cap
+        # array since a map/filter result length isn't known up front) --
+        # a copy's length IS known up front, so allocate it once instead of
+        # growing via push reallocation.
+        var b_new = self.builder
+        val new_call = b_new.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: effective_type, is_variadic: false)))
+        )), [mir_operand_copy(len_local)], effective_type)
+        val result_arr = new_call ?? b_new.new_temp(effective_type)
+        self.builder = b_new
+        self.runtime_array_locals[result_arr.id] = true
+        self.runtime_value_locals[result_arr.id] = true
+
+        var b_init = self.builder
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.new_temp(loop_ty)
+        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.new_temp(loop_ty)
+        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
+        self.builder = b_init
+
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("arrcopy_cond"))
+        val body_block = b_blocks.new_block(Some("arrcopy_body"))
+        val inc_block = b_blocks.new_block(Some("arrcopy_inc"))
+        val exit_block = b_blocks.new_block(Some("arrcopy_exit"))
+        self.builder = b_blocks
+
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(init_local), mir_operand_copy(counter)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+
+        var b_push = self.builder
+        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr), mir_operand_copy(elem_tagged)], MirType(kind: MirTypeKind.I8))
+        self.builder = b_push
+
+        var b_body_end = self.builder
+        if not b_body_end.current_block_has_explicit_terminator():
+            b_body_end.terminate_goto(inc_block)
+        self.builder = b_body_end
+
+        var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
+        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        self.builder = b_exit
+
+        if self.nil_locals.has(init_local.id):
+            self.nil_locals[result_arr.id] = true
+        if self.local_hir_types.has(init_local.id):
+            self.local_hir_types[result_arr.id] = self.local_hir_types[init_local.id]
+        val ael_sym = self.array_element_struct_syms.get(init_local.id)
+        if ael_sym != nil:
+            val ael_name = ael_sym ?? ""
+            if ael_name != "":
+                self.array_element_struct_syms[result_arr.id] = ael_name
+        Some(result_arr)
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
         # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
@@ -117,13 +373,6 @@ impl MirLowering:
                 val stmt_kind_value: HirStmtKind = stmt.kind
                 val fallback_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
-                val fallback_block = HirBlock(stmts: [], has: false, value: fallback_expr, span: span)
-                val block_disc = mir_hir_stmt_kind_disc(HirStmtKind.Block(fallback_block))
-                if mir_hir_stmt_kind_disc(stmt_kind_value) == block_disc:
-                    val block_payload = rt_enum_payload(stmt_kind_value)
-                    val nested_block: HirBlock = block_payload
-                    self.lower_block(nested_block)
-                    return
                 val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
                 if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:
                     val let_symbol = match stmt_kind_value:
@@ -251,7 +500,39 @@ impl MirLowering:
                         val effective_type = if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_runtime_dict(init_local):
-                            self.local_mir_type_of(init_local) ?? mir_type
+                            # Bug #189 (native struct-valued Dict access
+                            # SIGSEGV): an empty dict literal (`{}`) has no
+                            # entries to infer key/value types from, so
+                            # lower_dict_lit (method_calls_literals.spl)
+                            # defaults BOTH to plain i64 -- discarding the
+                            # real value type (e.g. Struct(S) for `Dict<text,
+                            # S>`, or `text` for the key). Blindly trusting
+                            # the initializer's inferred type here (as the
+                            # array/str/float/bool siblings do, where an
+                            # untyped initializer's OWN type is still the
+                            # best info available) then poisoned every later
+                            # read of this binding: `local_mir_type_of`
+                            # reported Dict(I64,I64), so expr_dispatch.spl's
+                            # dict-index-read applied `decode_runtime_value`'s
+                            # boxed-INTEGER `raw >> 3` decode to a real heap
+                            # struct pointer from `rt_dict_get` (mangling the
+                            # address -> SIGSEGV on the next `.field` GEP/
+                            # load), and `.keys()`/`.values()`
+                            # (method_calls_literals.spl) misdecoded text
+                            # keys as garbage ints the same way. When an
+                            # explicit `var x: Dict<K, V> = ...` annotation is
+                            # present and resolves to a Dict, it is always at
+                            # least as informative as the initializer (Simple
+                            # requires the annotation to type an empty `{}`
+                            # literal in the first place) -- prefer it over
+                            # the initializer's inferred type in that case.
+                            val annotated_is_dict = match mir_type.kind:
+                                case MirTypeKind.Dict(_, _): true
+                                case _: false
+                            if let_type != nil and annotated_is_dict:
+                                mir_type
+                            else:
+                                self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_str(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_float(init_local):
@@ -260,50 +541,68 @@ impl MirLowering:
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
-                        val has_bf_sym = mir_stmt_dict_contains_i64(self.bitfield_value_syms, init_local_id)
+                        val bf_sym = self.bitfield_value_syms.get(init_local_id)
                         # Struct values are pointer-represented; alias the binding
                         # straight to the constructed local (like the bitfield
                         # pass-through) so struct_value_syms (keyed by that local's
-                        # .id) stays valid for a later `p.x` field read.
-                        val has_struct_sym = mir_stmt_dict_contains_i64(self.struct_value_syms, init_local.id)
-                        if has_bf_sym or has_struct_sym:
-                            self.bind_local(symbol_value_id, init_local)
+                        # .id) stays valid for a later `p.x` field read. Bug #177:
+                        # that alias is only safe when `init_local` is a FRESH
+                        # aggregate -- when the initializer is a PLACE read of an
+                        # existing struct binding (`var b = a`, `var inner =
+                        # outer.child`), maybe_copy_struct_value materializes a
+                        # private per-binding copy instead (skipped for classes,
+                        # which keep reference semantics).
+                        val struct_sym = self.struct_value_syms.get(init_local.id)
+                        val struct_copy = self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
+                        if val copy_local = struct_copy:
+                            self.local_map[symbol_value_id] = copy_local
+                        elif bf_sym != nil or struct_sym != nil:
+                            self.local_map[symbol_value_id] = init_local
                         else:
-                            var b = self.builder
-                            val local = b.new_local(nil, effective_type, LocalKind.Var)
-                            self.builder = b
-                            self.local_map[symbol_value_id] = local
-                            if mir_stmt_dict_contains_i64(self.runtime_array_locals, init_local.id):
-                                self.runtime_array_locals[local.id] = true
-                            if self.runtime_dict_locals.has(init_local.id):
-                                self.runtime_dict_locals[local.id] = true
-                            if self.runtime_value_locals.has(init_local.id):
-                                self.runtime_value_locals[local.id] = true
-                            self.copy_boxed_tuple_provenance(init_local, local)
-                            if self.nil_locals.has(init_local.id):
-                                self.nil_locals[local.id] = true
-                            if self.local_hir_types.has(init_local.id):
-                                self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
-                            # Bug (array-of-structs field misread), CONFLICT-FLAG
-                            # (mir_lowering_stmts.spl is fenced, touched per the
-                            # fence rule's "CONFLICT-FLAG if must touch"
-                            # allowance): array_element_struct_syms (see
-                            # lower_array_lit / expr_dispatch.spl's Index case)
-                            # must propagate the SAME way runtime_array_locals
-                            # does above -- otherwise `val pts = [Point(...),
-                            # ...]` rebinds the array literal's result to a NEW
-                            # local id that has no entry in
-                            # array_element_struct_syms, silently losing the
-                            # element struct name and reverting `pts[i].y` to
-                            # the field-index-0 misread this fix exists to stop.
-                            if mir_stmt_dict_contains_i64(self.array_element_struct_syms, init_local.id):
-                                val ael_sym = self.array_element_struct_syms[init_local.id]
-                                val ael_name = ael_sym ?? ""
-                                if ael_name != "":
-                                    self.array_element_struct_syms[local.id] = ael_name
-                            var b2 = self.builder
-                            b2.emit_copy(local, init_local)
-                            self.builder = b2
+                            # Bug #186: array-typed place-read local-alias fix
+                            # (maybe_copy_array_value, sibling to #177's struct
+                            # fix above) -- fires only for a PLACE read of an
+                            # EXISTING runtime-array binding; a fresh array
+                            # literal/call-result initializer falls through to
+                            # the unchanged new_local+emit_copy path below.
+                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind))
+                            if val array_copy_local = array_copy:
+                                self.local_map[symbol_value_id] = array_copy_local
+                            else:
+                                var b = self.builder
+                                val local = b.new_local(nil, effective_type, LocalKind.Var)
+                                self.builder = b
+                                self.local_map[symbol_value_id] = local
+                                if self.runtime_array_locals.has(init_local.id):
+                                    self.runtime_array_locals[local.id] = true
+                                if self.runtime_dict_locals.has(init_local.id):
+                                    self.runtime_dict_locals[local.id] = true
+                                if self.runtime_value_locals.has(init_local.id):
+                                    self.runtime_value_locals[local.id] = true
+                                if self.nil_locals.has(init_local.id):
+                                    self.nil_locals[local.id] = true
+                                if self.local_hir_types.has(init_local.id):
+                                    self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
+                                # Bug (array-of-structs field misread), CONFLICT-FLAG
+                                # (mir_lowering_stmts.spl is fenced, touched per the
+                                # fence rule's "CONFLICT-FLAG if must touch"
+                                # allowance): array_element_struct_syms (see
+                                # lower_array_lit / expr_dispatch.spl's Index case)
+                                # must propagate the SAME way runtime_array_locals
+                                # does above -- otherwise `val pts = [Point(...),
+                                # ...]` rebinds the array literal's result to a NEW
+                                # local id that has no entry in
+                                # array_element_struct_syms, silently losing the
+                                # element struct name and reverting `pts[i].y` to
+                                # the field-index-0 misread this fix exists to stop.
+                                val ael_sym = self.array_element_struct_syms.get(init_local.id)
+                                if ael_sym != nil:
+                                    val ael_name = ael_sym ?? ""
+                                    if ael_name != "":
+                                        self.array_element_struct_syms[local.id] = ael_name
+                                var b2 = self.builder
+                                b2.emit_copy(local, init_local)
+                                self.builder = b2
                     else:
                         self.error("let binding has no resolved symbol", Some(span))
                     return
@@ -395,9 +694,11 @@ impl MirLowering:
                         # materializing an intermediate I64 local.
                         var has_init = false
                         var init_local = LocalId(id: 0)
+                        var init_is_place = false
                         if val init_expr = init:
                             init_local = self.lower_expr(init_expr)
                             has_init = true
+                            init_is_place = mir_expr_kind_is_place(init_expr.kind)
 
                         # Bitfield construction (`val inst = BitfieldType(raw)`)
                         # is a bit-identical identity pass-through: alias the
@@ -419,7 +720,7 @@ impl MirLowering:
                             if init_local_id < 0:
                                 self.error("let initializer produced no local", Some(span))
                                 return
-                        val has_bf_sym = has_init and mir_stmt_dict_contains_i64(self.bitfield_value_syms, init_local_id)
+                        val bf_sym: i64? = if has_init: self.bitfield_value_syms.get(init_local_id) else: nil
                         # Struct values are pointer-represented; aliasing the
                         # binding straight to the constructed local (like the
                         # bitfield pass-through) keeps struct_value_syms (keyed
@@ -427,7 +728,7 @@ impl MirLowering:
                         # `p.x` field read can recover the field ordering.
                         # Key on init_local.id directly to match how
                         # lower_struct_construct writes the map.
-                        val has_struct_sym = has_init and mir_stmt_dict_contains_i64(self.struct_value_syms, init_local.id)
+                        val struct_sym: text? = if has_init: self.struct_value_syms.get(init_local.id) else: nil
                         # See the disc==1 early-Let path: a `val`/`var xs = ...`
                         # must inherit the initializer's real Array/Slice/Bool type
                         # (unconditionally -- a non-nil-but-Infer-defaulted
@@ -446,41 +747,53 @@ impl MirLowering:
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
-                        if has_bf_sym or has_struct_sym:
-                            self.bind_local(symbol_id, init_local)
+                        # Bug #177: same struct-value-copy guard as the disc==1
+                        # early-Let path above -- kept in sync (this arm is dead
+                        # today, see the comment above effective_type).
+                        val struct_copy2 = self.maybe_copy_struct_value(init_local, struct_sym, init_is_place)
+                        if val copy_local2 = struct_copy2:
+                            self.local_map[symbol_id] = copy_local2
+                        elif bf_sym != nil or struct_sym != nil:
+                            self.local_map[symbol_id] = init_local
                         else:
-                            var b = self.builder
-                            val local = b.new_local(nil, effective_type, LocalKind.Var)
-                            self.builder = b
-                            self.local_map[symbol_id] = local
-                            if has_init and mir_stmt_dict_contains_i64(self.runtime_array_locals, init_local.id):
-                                self.runtime_array_locals[local.id] = true
-                            if has_init and self.runtime_dict_locals.has(init_local.id):
-                                self.runtime_dict_locals[local.id] = true
-                            if has_init and self.runtime_value_locals.has(init_local.id):
-                                self.runtime_value_locals[local.id] = true
-                            if has_init:
-                                self.copy_boxed_tuple_provenance(init_local, local)
-                            if has_init and self.nil_locals.has(init_local.id):
-                                self.nil_locals[local.id] = true
-                            if has_init and self.local_hir_types.has(init_local.id):
-                                self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
-                            # Bug (array-of-structs field misread), CONFLICT-FLAG
-                            # (mir_lowering_stmts.spl is fenced): mirror the same
-                            # array_element_struct_syms propagation as the other
-                            # Let-lowering arm above, so `val pts = [Point(...),
-                            # ...]` (this Let path) doesn't lose the element
-                            # struct name when it rebinds to a fresh local id.
-                            if has_init:
-                                if mir_stmt_dict_contains_i64(self.array_element_struct_syms, init_local.id):
-                                    val ael_sym2 = self.array_element_struct_syms[init_local.id]
-                                    val ael_name2 = ael_sym2 ?? ""
-                                    if ael_name2 != "":
-                                        self.array_element_struct_syms[local.id] = ael_name2
-                            if has_init:
-                                var b2 = self.builder
-                                b2.emit_copy(local, init_local)
-                                self.builder = b2
+                            # Bug #186: same array-value-copy guard as the
+                            # disc==1 early-Let path above -- kept in sync
+                            # (this arm is dead today, see the comment above
+                            # effective_type).
+                            val array_copy2 = if has_init: self.maybe_copy_array_value(init_local, effective_type, init_is_place) else: nil
+                            if val array_copy2_local = array_copy2:
+                                self.local_map[symbol_id] = array_copy2_local
+                            else:
+                                var b = self.builder
+                                val local = b.new_local(nil, effective_type, LocalKind.Var)
+                                self.builder = b
+                                self.local_map[symbol_id] = local
+                                if has_init and self.runtime_array_locals.has(init_local.id):
+                                    self.runtime_array_locals[local.id] = true
+                                if has_init and self.runtime_dict_locals.has(init_local.id):
+                                    self.runtime_dict_locals[local.id] = true
+                                if has_init and self.runtime_value_locals.has(init_local.id):
+                                    self.runtime_value_locals[local.id] = true
+                                if has_init and self.nil_locals.has(init_local.id):
+                                    self.nil_locals[local.id] = true
+                                if has_init and self.local_hir_types.has(init_local.id):
+                                    self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
+                                # Bug (array-of-structs field misread), CONFLICT-FLAG
+                                # (mir_lowering_stmts.spl is fenced): mirror the same
+                                # array_element_struct_syms propagation as the other
+                                # Let-lowering arm above, so `val pts = [Point(...),
+                                # ...]` (this Let path) doesn't lose the element
+                                # struct name when it rebinds to a fresh local id.
+                                if has_init:
+                                    val ael_sym2 = self.array_element_struct_syms.get(init_local.id)
+                                    if ael_sym2 != nil:
+                                        val ael_name2 = ael_sym2 ?? ""
+                                        if ael_name2 != "":
+                                            self.array_element_struct_syms[local.id] = ael_name2
+                                if has_init:
+                                    var b2 = self.builder
+                                    b2.emit_copy(local, init_local)
+                                    self.builder = b2
 
                     case Assign(target, op, value):
                         val value_local = self.lower_expr(value)
@@ -500,7 +813,7 @@ impl MirLowering:
         (shared by the `Var` and `NamedVar` lvalue cases)."""
         if symbol_id < 0:
             self.error("assignment target has no resolved symbol", Some(span))
-        elif mir_stmt_dict_contains_i64(self.global_symbol_ids, symbol_id) and self.find_global_static(symbol_id).?:
+        elif self.global_symbol_ids.has(symbol_id) and self.find_global_static(symbol_id).?:
             # mutglobal2 lane (module-level `var` mutation end-to-end, see
             # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report):
             # `g = ...` / `g += ...` where `g` is a module-level `var`
@@ -552,7 +865,7 @@ impl MirLowering:
                 var b_store = self.builder
                 b_store.emit(MirInst(kind: MirInstKind.StoreGlobal(global_symbol, mir_operand_copy(value_local)), span: Some(span)))
                 self.builder = b_store
-        elif mir_stmt_dict_contains_i64(self.local_map, symbol_id):
+        elif self.local_map.has(symbol_id):
             val local = self.local_map[symbol_id]
             # Use the positive `op.?` presence test, NOT `if val assign_op = op`:
             # the seed interpreter's `if val <pat> = <optional>` presence check
@@ -569,48 +882,45 @@ impl MirLowering:
                 val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
                 b.emit_copy(local, result)
                 self.builder = b
-                mir_stmt_dict_remove_i64(self.runtime_value_locals, local.id)
-                mir_stmt_dict_remove_i64(self.nil_locals, local.id)
-                mir_stmt_dict_remove_i64(self.runtime_array_locals, local.id)
-                mir_stmt_dict_remove_i64(self.runtime_dict_locals, local.id)
-                mir_stmt_dict_remove_i64(self.boxed_tuple_local_shapes, local.id)
-                mir_stmt_dict_remove_i64(self.array_element_boxed_tuple_shapes, local.id)
-                mir_stmt_dict_remove_i64(self.local_hir_types, local.id)
+                self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                self.nil_locals = self.nil_locals.remove(local.id)
+                self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
+                self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
+                self.local_hir_types = self.local_hir_types.remove(local.id)
             else:
                 var b = self.builder
                 b.emit_copy(local, value_local)
                 self.builder = b
-                if mir_stmt_dict_contains_i64(self.runtime_value_locals, value_local.id):
+                if self.runtime_value_locals.has(value_local.id):
                     self.runtime_value_locals[local.id] = true
                 else:
-                    mir_stmt_dict_remove_i64(self.runtime_value_locals, local.id)
-                if mir_stmt_dict_contains_i64(self.runtime_array_locals, value_local.id):
+                    self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                if self.runtime_array_locals.has(value_local.id):
                     self.runtime_array_locals[local.id] = true
                 else:
-                    mir_stmt_dict_remove_i64(self.runtime_array_locals, local.id)
-                if mir_stmt_dict_contains_i64(self.runtime_dict_locals, value_local.id):
+                    self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
+                if self.runtime_dict_locals.has(value_local.id):
                     self.runtime_dict_locals[local.id] = true
                 else:
-                    mir_stmt_dict_remove_i64(self.runtime_dict_locals, local.id)
-                self.copy_boxed_tuple_provenance(value_local, local)
-                if mir_stmt_dict_contains_i64(self.nil_locals, value_local.id):
+                    self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
+                if self.nil_locals.has(value_local.id):
                     self.nil_locals[local.id] = true
                 else:
-                    mir_stmt_dict_remove_i64(self.nil_locals, local.id)
-                if mir_stmt_dict_contains_i64(self.local_hir_types, value_local.id):
+                    self.nil_locals = self.nil_locals.remove(local.id)
+                if self.local_hir_types.has(value_local.id):
                     self.local_hir_types[local.id] = self.local_hir_types[value_local.id]
                 else:
-                    mir_stmt_dict_remove_i64(self.local_hir_types, local.id)
+                    self.local_hir_types = self.local_hir_types.remove(local.id)
                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                 # (mir_lowering_stmts.spl is fenced): a `var`-reassignment
                 # (`pts = pts.push(...)`, etc.) must carry
                 # array_element_struct_syms forward the same way
                 # runtime_array_locals does above, or a reassigned
                 # array-of-structs variable loses its element struct name.
-                if mir_stmt_dict_contains_i64(self.array_element_struct_syms, value_local.id):
+                if self.array_element_struct_syms.has(value_local.id):
                     self.array_element_struct_syms[local.id] = self.array_element_struct_syms[value_local.id]
                 else:
-                    mir_stmt_dict_remove_i64(self.array_element_struct_syms, local.id)
+                    self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
         """Lower assignment."""
@@ -1191,10 +1501,13 @@ impl MirLowering:
         """
         # Step 1: Lower the iterable expression
         val collection_local = self.lower_expr(iter)
-        # The collection MIR type below is authoritative. Avoid consulting the
-        # nullable loop symbol here: native flat-option lowering can expose a
-        # present-looking nil Symbol before its optional type_ field is read.
         var element_type = MirType.i64()
+        if val loop_symbol = self.symbols.get_symbol(var_):
+            match loop_symbol.type_:
+                case Some(loop_symbol_type):
+                    element_type = self.lower_type(loop_symbol_type)
+                case nil:
+                    ()
 
         # The loop-variable symbol's HIR type is frequently nil on this
         # pipeline (native-build's lower_to_mir runs without a full
@@ -1213,13 +1526,20 @@ impl MirLowering:
         # index-read path `arr[i]` already reads element type off
         # `base_mir_type.kind` (see expr_dispatch.spl `case Index`). Mirror
         # that here so `for x in arr` and `arr[i]` agree on the element type.
-        for collection_item in self.builder.locals:
-            if collection_item.id.id == collection_local.id:
-                match collection_item.type_.kind:
-                    case MirTypeKind.Array(elem_t, _) | MirTypeKind.Slice(elem_t):
-                        element_type = elem_t
-                    case _:
-                        ()
+        if self.local_hir_types.has(collection_local.id):
+            val collection_hir_type = self.local_hir_types[collection_local.id]
+            match collection_hir_type.kind:
+                case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
+                    element_type = self.lower_type(elem_t)
+                case _: ()
+        if val coll_mir_type = self.local_mir_type_of(collection_local):
+            match coll_mir_type.kind:
+                case MirTypeKind.Array(elem_t, _):
+                    element_type = elem_t
+                case MirTypeKind.Slice(elem_t):
+                    element_type = elem_t
+                case _:
+                    ()
 
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array
@@ -1273,11 +1593,14 @@ impl MirLowering:
             MirConstValue.Str("rt_array_len"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
-        val len_local = self.emit_resolved_direct_call(
-            len_func,
-            [mir_operand_copy(collection_local)],
-            MirType.i64()
-        )
+        var b_len = self.builder
+        val len_call = b_len.emit_call(len_func, [mir_operand_copy(collection_local)], MirType.i64())
+        var len_local: LocalId = 0
+        if val len_value = len_call:
+            len_local = len_value
+        else:
+            len_local = b_len.new_temp(MirType.i64())
+        self.builder = b_len
 
         # Counter: var i = 0
         var b_init = self.builder
@@ -1329,11 +1652,18 @@ impl MirLowering:
             MirConstValue.Str("rt_array_get"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
-        val elem_local = self.emit_resolved_direct_call(
+        var b_get = self.builder
+        val get_call = b_get.emit_call(
             get_func,
             [mir_operand_copy(collection_local), mir_operand_copy(counter)],
             MirType.i64()
         )
+        var elem_local: LocalId = 0
+        if val get_value = get_call:
+            elem_local = get_value
+        else:
+            elem_local = b_get.new_temp(MirType.i64())
+        self.builder = b_get
 
         # rt_array_get returns a TAGGED runtime value (value << 3 for small
         # ints, boxed handle otherwise). Decode it to the element's primitive
@@ -1343,12 +1673,29 @@ impl MirLowering:
         # against untagged literals are wrong (e.g. `x == 3` never matches a
         # tagged element, and `total + x` accumulates value<<3). Regression
         # introduced when array elements began carrying tagged runtime values.
-        var decoded_elem = elem_local
-        if mir_stmt_dict_contains_i64(self.array_element_boxed_tuple_shapes, collection_local.id):
-            rt_dict_set_i64_raw(self.boxed_tuple_local_shapes, elem_local.id, rt_dict_get_i64_raw(self.array_element_boxed_tuple_shapes, collection_local.id))
-            self.runtime_value_locals[elem_local.id] = true
+        #
+        # Bug s54/s54c/s54d: when array_element_struct_syms has a REAL
+        # registered element struct name (not "" / not the
+        # "__runtime_array__" placeholder used for plain value-typed
+        # arrays), decode via an Opaque placeholder instead of trusting
+        # element_type -- same gated fix as expr_dispatch.spl's Index case,
+        # now safe because s54d's frontend fix (parser.spl's `[T]`
+        # array-type branch + convert_flat_type's array-generic-tag decode)
+        # makes function_lowering.spl's param-array Named-element case
+        # populate this map for class/struct-typed PARAMS too, not just
+        # local array literals. Gating strictly on a real name keeps this a
+        # no-op for int/text/bool arrays (an earlier unconditional version
+        # corrupted int-array for-in sums by leaving them tagged <<3).
+        val for_elem_struct_name = self.array_element_struct_syms.get(collection_local.id)
+        val fesn = for_elem_struct_name ?? ""
+        val for_has_real_struct_name = fesn != "" and fesn != "__runtime_array__"
+        val decode_elem_type = if for_has_real_struct_name:
+            MirType(kind: MirTypeKind.Opaque(fesn))
         else:
-            decoded_elem = self.decode_runtime_value(elem_local, element_type)
+            element_type
+        if for_has_real_struct_name:
+            self.runtime_value_locals[elem_local.id] = true
+        val decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
 
         # Bind loop variable to the (decoded) element
         var b_bind = self.builder
@@ -1360,7 +1707,6 @@ impl MirLowering:
             self.error("for loop variable has no resolved symbol", Some(body.span))
         else:
             self.local_map[loop_var_id] = loop_var
-            self.copy_boxed_tuple_provenance(decoded_elem, loop_var)
             # Bug (array-of-structs field misread), CONFLICT-FLAG
             # (mir_lowering_stmts.spl is fenced): `for p in pts` over an
             # array of structs desugars to this counted-index loop, whose
@@ -1371,11 +1717,9 @@ impl MirLowering:
             # the loop body silently defaulted to field index 0 (reading
             # `.x`'s slot) exactly like the standalone `pts[i].y` bug this
             # lane fixed, just reached via the for-loop desugaring instead.
-            if mir_stmt_dict_contains_i64(self.array_element_struct_syms, collection_local.id):
-                val for_elem_struct_name = self.array_element_struct_syms[collection_local.id]
-                val fesn = for_elem_struct_name ?? ""
-                if fesn != "":
-                    self.struct_value_syms[loop_var.id] = fesn
+            # Reuses for_elem_struct_name/fesn computed above the decode.
+            if for_has_real_struct_name:
+                self.struct_value_syms[loop_var.id] = fesn
 
         # Lower the loop body
         self.lower_block(body)

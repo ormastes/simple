@@ -1947,11 +1947,20 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 int8_t rt_is_none(int64_t value) {
-    /* Keep the raw nil sentinel as a migration fallback. Canonical typed
-     * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
-     * a valid present payload and other enum types are never classified nil. */
+    /* Bug (native_i64opt_some0_collapses_to_nil): the `value == 0` fallback
+     * used to treat ANY raw zero as None, colliding with a real `Some(0)`
+     * payload on the flat (non-boxed) primitive `i64?`/`bool?` lane, where
+     * ints/bools are passed through as their bare bit pattern (not the
+     * NaN-boxed RT_VALUE_TAG_INT scheme -- a boxed int 0 would also be 0,
+     * so a bare `value == 0` check can never safely stand in for "is this
+     * the nil sentinel" once nil itself is *not* 0). The MIR-side NilLit
+     * materialization (expr_dispatch.spl `case NilLit:`) now emits the
+     * runtime's actual reserved nil sentinel (`rt_core_nil()`, bit pattern
+     * 3) instead of a bare 0, so nil and Some(0) are now distinct raw
+     * values -- test ONLY against rt_core_nil(); a properly-constructed
+     * Option never legitimately carries raw 0 as its nil marker anymore. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
+    return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
@@ -3636,47 +3645,6 @@ int64_t rt_dict_entries(int64_t dict) {
         rt_array_push(arr, pair);
     }
     return (int64_t)(uintptr_t)arr;
-}
-
-/* Array helpers for .zip() and .enumerate() on native runtime.
- * Keep tuple shape consistent with dict entry exports and runtime ABI.
- */
-int64_t rt_array_zip(int64_t a, int64_t b) {
-    RtCoreArray* left = rt_core_as_array(a);
-    RtCoreArray* right = rt_core_as_array(b);
-    if (!left || !right) return 0;
-    int64_t result_len = left->len;
-    if (right->len < result_len) result_len = right->len;
-    SplArray* result = rt_array_new(result_len);
-    if (!result) return 0;
-    int64_t i = 0;
-    while (i < result_len) {
-        int64_t pair = rt_tuple_new(2);
-        if (pair == rt_core_nil()) return 0;
-        rt_tuple_set(pair, 0, rt_array_get((SplArray*)left, i));
-        rt_tuple_set(pair, 1, rt_array_get((SplArray*)right, i));
-        rt_array_push(result, pair);
-        i = i + 1;
-    }
-    return (int64_t)(uintptr_t)result;
-}
-
-int64_t rt_array_enumerate(int64_t array) {
-    RtCoreArray* source = rt_core_as_array(array);
-    if (!source) return 0;
-    int64_t len = source->len;
-    SplArray* result = rt_array_new(len);
-    if (!result) return 0;
-    int64_t i = 0;
-    while (i < len) {
-        int64_t pair = rt_tuple_new(2);
-        if (pair == rt_core_nil()) return 0;
-        rt_tuple_set(pair, 0, rt_value_int(i));
-        rt_tuple_set(pair, 1, rt_array_get((SplArray*)source, i));
-        rt_array_push(result, pair);
-        i = i + 1;
-    }
-    return (int64_t)(uintptr_t)result;
 }
 
 /* Normalize an iterable for index-based for-loops (mirrors the Rust/JIT runtime).

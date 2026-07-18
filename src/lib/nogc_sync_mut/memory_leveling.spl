@@ -70,15 +70,6 @@ const MEMORY_DMA_DIRECTION_TO_DEVICE = "to_device"
 const MEMORY_DMA_DIRECTION_FROM_DEVICE = "from_device"
 const MEMORY_DMA_DIRECTION_BIDIRECTIONAL = "bidirectional"
 
-# Fourteen retained allocation slots plus one queued candidate id fit below the
-# selected 128-byte per-allocation metadata ceiling.
-const MEMORY_LEVELING_ALLOCATION_METADATA_BYTES: u64 = 120
-const MEMORY_ALLOCATION_FLAG_COHERENT: u64 = 1
-const MEMORY_ALLOCATION_FLAG_RECLAIMABLE: u64 = 2
-const MEMORY_ALLOCATION_FLAG_CANDIDATE_QUEUED: u64 = 4
-const MEMORY_ALLOCATION_PAGE_COUNT_SHIFT: u64 = 3
-const MEMORY_ALLOCATION_MAX_PAGE_COUNT: u64 = 0x1FFFFFFFFFFFFFFF
-
 struct MemoryTier:
     name: text
     device_visible: bool
@@ -114,7 +105,9 @@ struct MemoryLevelingPolicy:
 struct MemoryAllocation:
     allocation_id: u64
     byte_length: u64
+    page_count: u64
     owner_id: u64
+    owner: text
     domain: MemoryDomain
     tier: MemoryTier
     state: MemoryPageState
@@ -122,10 +115,13 @@ struct MemoryAllocation:
     in_flight_count: u64
     mapping_count: u64
     dma_direction: text
+    coherent: bool
     access_epoch: u64
     cooldown_epoch: u64
+    reclaimable: bool
+    contiguous: bool
+    physical_base: u64
     swap_slot_id: u64
-    metadata_flags: u64
 
 struct MemoryLevelingStats:
     allocation_count: u64
@@ -147,15 +143,6 @@ struct MemoryLevelingStats:
     swap_read_count: u64
     swap_write_count: u64
     swap_error_count: u64
-    cpu_hot_bytes: u64
-    cpu_cold_bytes: u64
-    gpu_local_bytes: u64
-    gpu_coherent_bytes: u64
-    nic_buffer_bytes: u64
-    dma_pinned_bytes: u64
-    pressure_level: text
-    metadata_record_count: u64
-    metadata_bytes: u64
 
 fn memory_tier(name: text, device_visible: bool, reclaimable: bool) -> MemoryTier:
     MemoryTier(name: name, device_visible: device_visible, reclaimable: reclaimable)
@@ -268,37 +255,14 @@ fn memory_leveling_policy_from_intent(intent: SimpleMemoryIntent) -> MemoryLevel
         cooldown_epochs: 0
     )
 
-fn memory_allocation_metadata_flags(page_count: u64, coherent: bool, reclaimable: bool, candidate_queued: bool) -> u64:
-    var flags = page_count << MEMORY_ALLOCATION_PAGE_COUNT_SHIFT
-    if coherent:
-        flags = flags | MEMORY_ALLOCATION_FLAG_COHERENT
-    if reclaimable:
-        flags = flags | MEMORY_ALLOCATION_FLAG_RECLAIMABLE
-    if candidate_queued:
-        flags = flags | MEMORY_ALLOCATION_FLAG_CANDIDATE_QUEUED
-    flags
-
-fn memory_allocation_page_count_valid(page_count: u64) -> bool:
-    page_count > 0 and page_count <= MEMORY_ALLOCATION_MAX_PAGE_COUNT
-
-fn memory_allocation_page_count(allocation: MemoryAllocation) -> u64:
-    allocation.metadata_flags >> MEMORY_ALLOCATION_PAGE_COUNT_SHIFT
-
-fn memory_allocation_is_coherent(allocation: MemoryAllocation) -> bool:
-    (allocation.metadata_flags & MEMORY_ALLOCATION_FLAG_COHERENT) > 0
-
-fn memory_allocation_is_reclaimable(allocation: MemoryAllocation) -> bool:
-    (allocation.metadata_flags & MEMORY_ALLOCATION_FLAG_RECLAIMABLE) > 0
-
-fn memory_allocation_candidate_queued(allocation: MemoryAllocation) -> bool:
-    (allocation.metadata_flags & MEMORY_ALLOCATION_FLAG_CANDIDATE_QUEUED) > 0
-
 fn memory_allocation_from_intent(allocation_id: u64, byte_length: u64, page_count: u64, intent: SimpleMemoryIntent) -> MemoryAllocation:
     val tier = memory_tier_from_intent(intent)
     MemoryAllocation(
         allocation_id: allocation_id,
         byte_length: byte_length,
+        page_count: page_count,
         owner_id: 0,
+        owner: intent.owner,
         domain: memory_domain_from_intent(intent),
         tier: tier,
         state: memory_page_state_from_intent(intent),
@@ -306,10 +270,13 @@ fn memory_allocation_from_intent(allocation_id: u64, byte_length: u64, page_coun
         in_flight_count: 0,
         mapping_count: 0,
         dma_direction: if intent.externally_visible: MEMORY_DMA_DIRECTION_BIDIRECTIONAL else: MEMORY_DMA_DIRECTION_NONE,
+        coherent: not intent.externally_visible,
         access_epoch: 0,
         cooldown_epoch: 0,
-        swap_slot_id: 0,
-        metadata_flags: memory_allocation_metadata_flags(page_count, not intent.externally_visible, simple_memory_intent_movable(intent), false)
+        reclaimable: simple_memory_intent_movable(intent),
+        contiguous: false,
+        physical_base: 0,
+        swap_slot_id: 0
     )
 
 fn memory_leveling_stats_empty() -> MemoryLevelingStats:
@@ -332,16 +299,7 @@ fn memory_leveling_stats_empty() -> MemoryLevelingStats:
         cooldown_count: 0,
         swap_read_count: 0,
         swap_write_count: 0,
-        swap_error_count: 0,
-        cpu_hot_bytes: 0,
-        cpu_cold_bytes: 0,
-        gpu_local_bytes: 0,
-        gpu_coherent_bytes: 0,
-        nic_buffer_bytes: 0,
-        dma_pinned_bytes: 0,
-        pressure_level: "normal",
-        metadata_record_count: 0,
-        metadata_bytes: 0
+        swap_error_count: 0
     )
 
 struct SimpleMemoryIntent:

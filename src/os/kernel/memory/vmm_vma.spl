@@ -3,7 +3,7 @@
 # vmm_cow_clone, COW/anon/file fault handlers, file backing cache, pt_set_ro,
 # and vmm_copy_to_user.
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, phys_addr_value, virt_addr_value}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
 use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{VmArea, ProcessVmSpace}
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64}
@@ -14,10 +14,22 @@ use os.kernel.memory.vmm_core.{
     g_next_as_id,
     _phys_to_virt, _read_pte, _write_pte, _pte_is_present, _pte_phys_addr,
     _pml4_index, _pdpt_index, _pd_index, _pt_index,
-    vmm_unmap_page, vmm_read_pte, _vmm_invalidate_tlb
+    _vmm_invalidate_tlb
 }
-use os.kernel.memory.vmm_address_space.{vmm_map_page_in, vmm_cow_clone_pages, _cow_ref_leaf_pages}
-use os.kernel.memory.pmm.{pmm_alloc_page_raw, pmm_free_page_raw, pmm_unref_page}
+use os.kernel.memory.vmm_address_space.{
+    vmm_map_page_in, vmm_read_pte_in, vmm_unmap_page_in, vmm_replace_pte_in,
+    vmm_cow_clone_pages
+}
+use os.kernel.memory.pmm.{pmm_alloc_page_raw, pmm_free_page_raw, pmm_put_page}
+
+struct VmmCowCloneResult:
+    ok: bool
+    parent: ProcessVmSpace
+    child: ProcessVmSpace
+
+struct VmmMunmapResult:
+    code: i32
+    space: ProcessVmSpace
 
 # ============================================================================
 # VMA Internal Helpers
@@ -73,7 +85,7 @@ fn vma_find(space: ProcessVmSpace, vaddr: u64) -> VmArea?:
         i = i + 1
     nil
 
-fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
+fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> ProcessVmSpace:
     """Remove or split VMAs that intersect [vaddr, vaddr+len).
 
     Implements the POSIX munmap semantic:
@@ -82,23 +94,24 @@ fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
     - A VMA partially overlapping at the end is trimmed from the left.
     - A VMA split down the middle produces a tail fragment re-inserted
       at the end of the array (low-overhead; order is not guaranteed).
-    Returns 0. Never fails (non-existent range is silently ignored).
+    Returns the updated value. Never fails (a missing range is ignored).
     """
+    var updated = space
     val range_end = vaddr + len
     var i: i32 = 0
-    while (i as u64) < space.vma_count:
-        val area = space.areas[i]
+    while (i as u64) < updated.vma_count:
+        val area = updated.areas[i]
         val area_end = area.start + area.len
         if not _vma_overlaps(area, vaddr, range_end):
             i = i + 1
         else:
             # Remove this entry by swapping with the last live entry
-            val last_idx = (space.vma_count - 1) as i32
-            space.areas[i] = space.areas[last_idx]
-            space.vma_count = space.vma_count - 1
+            val last_idx = (updated.vma_count - 1) as i32
+            updated.areas[i] = updated.areas[last_idx]
+            updated.vma_count = updated.vma_count - 1
             # Pop the trailing slot
-            if space.areas.len() > (space.vma_count as i32):
-                space.areas.pop()
+            if updated.areas.len() > (updated.vma_count as i32):
+                updated.areas.pop()
 
             # Re-insert surviving fragments
             if area.start < vaddr:
@@ -111,8 +124,8 @@ fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
                     backing: area.backing,
                     backing_offset: area.backing_offset
                 )
-                space.areas.push(left)
-                space.vma_count = space.vma_count + 1
+                updated.areas.push(left)
+                updated.vma_count = updated.vma_count + 1
             if area_end > range_end:
                 # Right fragment: [range_end .. area_end)
                 val right_offset = range_end - area.start
@@ -124,27 +137,28 @@ fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
                     backing: area.backing,
                     backing_offset: area.backing_offset + right_offset
                 )
-                space.areas.push(right)
-                space.vma_count = space.vma_count + 1
+                updated.areas.push(right)
+                updated.vma_count = updated.vma_count + 1
             # Do NOT advance i — the slot now holds a different (swapped) entry
-    0
+    updated
 
 fn vmm_teardown_user_space(space: ProcessVmSpace):
     """Tear down all user-space VMAs in the given address space."""
+    var current = space
     var i: i32 = 0
-    while (i as u64) < space.vma_count:
-        val area = space.areas[i]
+    while (i as u64) < current.vma_count:
+        val area = current.areas[i]
         if area.start < VMM_KERNEL_SPACE_START:
-            val area_end = area.start + area.len
-            var page_addr = (area.start / PAGE_SIZE) * PAGE_SIZE
-            while page_addr < area_end:
-                vmm_unmap_page(VirtAddr(addr: page_addr))
-                page_addr = page_addr + PAGE_SIZE
-        i = i + 1
+            val unmapped = vmm_munmap_result(current, area.start, area.len)
+            if unmapped.code != 0:
+                return
+            current = unmapped.space
+        else:
+            i = i + 1
     # Reset the VMA list to empty.
-    while space.areas.len() > 0:
-        space.areas.pop()
-    space.vma_count = 0
+    while current.areas.len() > 0:
+        current.areas.pop()
+    current.vma_count = 0
 
 fn vma_split(space: ProcessVmSpace, vaddr: u64) -> i32:
     """Split whichever VMA contains `vaddr` at that address."""
@@ -247,35 +261,79 @@ fn vmm_mmap(
 
     chosen as i64
 
-fn vmm_munmap(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
+fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapResult:
     """Unmap [vaddr, vaddr+len) from `space`."""
     if len == 0:
-        return -22  # -EINVAL
+        return VmmMunmapResult(code: -22, space: space)  # -EINVAL
+    var updated = space
 
     val aligned_start = _align_down(vaddr, PAGE_SIZE)
     val aligned_len   = _align_up(len, PAGE_SIZE)
     val aligned_end   = aligned_start + aligned_len
 
-    # Remove VMAs first
-    vma_remove(space, aligned_start, aligned_len)
-
-    # Unmap any present page-table entries in the range
+    val as_handle = AddressSpace(phys_root: updated.pml4, id: updated.id)
+    var detached_vaddrs: [u64] = []
+    var detached_ptes: [u64] = []
     var pg = aligned_start
     while pg < aligned_end:
         val virt = VirtAddr(addr: pg)
-        vmm_unmap_page(virt)
+        val pte = vmm_read_pte_in(as_handle, virt)
+        if (pte & PTE_PRESENT) != 0:
+            if not vmm_unmap_page_in(as_handle, virt):
+                # Restore detached pages before returning; ownership has not
+                # been released yet, so rollback only remaps the old frames.
+                var ri: i32 = 0
+                while (ri as u64) < detached_ptes.len():
+                    val old_pte = detached_ptes[ri]
+                    if not vmm_replace_pte_in(
+                        as_handle,
+                        VirtAddr(addr: detached_vaddrs[ri]),
+                        0,
+                        old_pte
+                    ):
+                        return VmmMunmapResult(code: -5, space: updated)  # -EIO
+                    ri = ri + 1
+                return VmmMunmapResult(code: -14, space: updated)  # -EFAULT
+            detached_vaddrs.push(pg)
+            detached_ptes.push(pte)
         pg = pg + PAGE_SIZE
 
-    0
+    # PTE ownership is detached successfully; release each leaf exactly once.
+    var fi: i32 = 0
+    while (fi as u64) < detached_ptes.len():
+        val pa = detached_ptes[fi] & PTE_ADDR_MASK
+        if pa != 0:
+            pmm_put_page(pa)
+        fi = fi + 1
+
+    # Metadata changes are committed only after all PTE/frame ownership work.
+    updated = vma_remove(updated, aligned_start, aligned_len)
+    VmmMunmapResult(code: 0, space: updated)
+
+fn vmm_munmap(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
+    vmm_munmap_result(space, vaddr, len).code
+
+fn vmm_remove_vma_metadata(space: ProcessVmSpace, vaddr: u64, len: u64) -> ProcessVmSpace:
+    var updated = space
+    if len != 0:
+        updated = vma_remove(updated, _align_down(vaddr, PAGE_SIZE), _align_up(len, PAGE_SIZE))
+    updated
 
 # ============================================================================
 # Copy-on-Write: fork clone
 # ============================================================================
 
-fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
-    """Create a COW child address space from `parent_space`."""
+fn vmm_cow_clone_result(parent_space: ProcessVmSpace) -> VmmCowCloneResult:
+    """Create a COW child and return the parent's updated VMA metadata."""
     val child_pml4 = vmm_cow_clone_pages(parent_space.pml4)
+    if child_pml4 == 0:
+        return VmmCowCloneResult(
+            ok: false,
+            parent: parent_space,
+            child: ProcessVmSpace(pml4: 0, id: 0, vma_count: 0, areas: [])
+        )
 
+    var updated_parent = parent_space
     var child = ProcessVmSpace(
         pml4: child_pml4,
         id: g_next_as_id,
@@ -305,7 +363,7 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
         # Also mark parent VMA as COW so the parent faults on next write
         if (src.flags & 2) != 0:
             var parent_flags = src.flags | VMM_VMA_COW
-            parent_space.areas[i] = VmArea(
+            updated_parent.areas[i] = VmArea(
                 start: src.start,
                 len: src.len,
                 kind: src.kind,
@@ -316,9 +374,11 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
 
         i = i + 1
 
-    _cow_ref_leaf_pages(parent_space.pml4, 3)
+    VmmCowCloneResult(ok: true, parent: updated_parent, child: child)
 
-    child
+fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
+    """Compatibility wrapper returning the child or an invalid root on failure."""
+    vmm_cow_clone_result(parent_space).child
 
 # ============================================================================
 # COW page fault handler
@@ -338,7 +398,8 @@ fn vmm_handle_cow_fault(space: ProcessVmSpace, fault_vaddr: u64) -> i32:
 
         # Copy old page content via HHDM
         val page_base = _align_down(fault_vaddr, PAGE_SIZE)
-        val old_pte = vmm_read_pte(VirtAddr(addr: page_base))
+        val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+        val old_pte = vmm_read_pte_in(as_handle, VirtAddr(addr: page_base))
         val old_pa = old_pte & PTE_ADDR_MASK
         if old_pa != 0:
             val old_virt = _phys_to_virt(old_pa)
@@ -349,41 +410,25 @@ fn vmm_handle_cow_fault(space: ProcessVmSpace, fault_vaddr: u64) -> i32:
                 mmio_write64(new_virt + byte_idx, b)
                 byte_idx = byte_idx + 8
 
-        # Map the new page as RW+NX in the faulting address space.
-        val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
-        val map_flags = VmFlags(bits: 39)   # VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE
-        val mapped = vmm_map_page_in(
+        if (old_pte & PTE_PRESENT) == 0:
+            pmm_free_page_raw(new_pa)
+            return -14  # -EFAULT
+
+        # Preserve the entire old leaf PTE while changing only its frame and RW bit.
+        val replacement_pte = (new_pa & PTE_ADDR_MASK) | ((old_pte & ~PTE_ADDR_MASK) | PTE_WRITABLE)
+        val mapped = vmm_replace_pte_in(
             as_handle,
             VirtAddr(addr: page_base),
-            PhysAddr(addr: new_pa),
-            map_flags
+            old_pte,
+            replacement_pte
         )
         if not mapped:
             pmm_free_page_raw(new_pa)
             return -12  # -ENOMEM
 
-        # Update VMA flags: clear COW, ensure WRITE is set
-        var i: i32 = 0
-        while (i as u64) < space.vma_count:
-            val a = space.areas[i]
-            if (fault_vaddr >= a.start) and (fault_vaddr < (a.start + a.len)):
-                val new_flags = (a.flags & ~VMM_VMA_COW) | 2
-                space.areas[i] = VmArea(
-                    start: a.start,
-                    len: a.len,
-                    kind: a.kind,
-                    flags: new_flags,
-                    backing: a.backing,
-                    backing_offset: a.backing_offset
-                )
-                break
-            i = i + 1
-
         # Drop the reference on the old page (may free it if last holder)
         if old_pa != 0:
-            val remaining = pmm_unref_page(old_pa)
-            if remaining == 0:
-                pmm_free_page_raw(old_pa)
+            pmm_put_page(old_pa)
 
         return 0
 

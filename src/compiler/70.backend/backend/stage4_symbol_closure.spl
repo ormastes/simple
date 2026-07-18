@@ -37,47 +37,31 @@ fn stage4_split_whitespace(value: text) -> [text]:
 fn stage4_is_runtime_abi_symbol(name: text) -> bool:
     name.starts_with("rt_") or name.starts_with("spl_") or name.starts_with("__simple_") or name == "g_memtrack_enabled"
 
-fn stage4_is_coff_feature_symbol(name: text, object_format: text) -> bool:
-    (object_format == "coff-msvc" or object_format == "coff-mingw") and name == "@feat.00"
+fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
+    if macho_prefixes and name.starts_with("_"):
+        val unprefixed = name.substring(1)
+        if stage4_is_runtime_abi_symbol(unprefixed):
+            return unprefixed
+    name
 
-fn stage4_is_compiler_object_format(object_format: text) -> bool:
-    object_format == "elf" or object_format == "macho" or object_format == "coff-msvc" or object_format == "coff-mingw"
-
-fn stage4_provider_symbol(name: text, object_format: text, import_reference: bool) -> text:
+fn stage4_provider_symbol(name: text, object_format: text) -> text:
     var symbol = name
     if object_format == "macho" and symbol.starts_with("_"):
         symbol = symbol.substring(1)
     elif object_format == "coff-msvc" or object_format == "coff-mingw":
         var imported = false
-        if import_reference and symbol.starts_with("__imp_"):
+        if symbol.starts_with("__imp_"):
             imported = true
             symbol = symbol.substring(6)
-        if object_format == "coff-mingw" and not symbol.starts_with("__imp_") and symbol.starts_with("_"):
-            val unprefixed = symbol.substring(1)
-            val known_stdcall = unprefixed == "LoadLibraryA@4" or unprefixed == "GetProcAddress@8" or unprefixed == "FreeLibrary@4"
-            if stage4_is_runtime_abi_symbol(unprefixed) or (imported and known_stdcall):
-                symbol = unprefixed
+        if symbol.starts_with("_"):
+            symbol = symbol.substring(1)
         val decoration = symbol.last_index_of("@") ?? -1
         val known_stdcall_import = symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4"
         if imported and known_stdcall_import:
             symbol = symbol.substring(0, decoration)
     symbol
 
-# Named struct instead of a labeled tuple return: `-> (definitions: [text],
-# undefined: [text])` is unparseable syntax (labeled-tuple returns; see
-# doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md),
-# but a plain unlabeled `-> ([text], [text])` trips the seed's own
-# "anonymous multi-return tuple contains repeated field types" ambiguity
-# check (src/compiler_rust/type/src/checker_check.rs) unconditionally on
-# this function declaration, since both elements are `[text]`. A struct
-# return type is neither: it is not the labeled-tuple grammar form, and it
-# is not an anonymous `AstType::Tuple` at all, so the repeated-element-type
-# check (which only matches tuple return types) never fires.
-struct Stage4NmGlobalSymbols:
-    definitions: [text]
-    undefined: [text]
-
-fn stage4_exact_nm_global_symbols(nm_output: text) -> Stage4NmGlobalSymbols:
+fn stage4_exact_nm_global_symbols(nm_output: text) -> (definitions: [text], undefined: [text]):
     """Parse the exact two/three-field global-symbol form emitted by portable nm."""
     var definitions: [text] = []
     var undefined: Dict<text, bool> = {}
@@ -96,13 +80,11 @@ fn stage4_exact_nm_global_symbols(nm_output: text) -> Stage4NmGlobalSymbols:
             undefined[symbol] = true
         else:
             definitions = definitions.push(symbol)
-    Stage4NmGlobalSymbols(definitions: definitions, undefined: stage4_sorted_text(undefined.keys()))
+    (definitions, stage4_sorted_text(undefined.keys()))
 
 pub fn stage4_compiler_backfill_symbol_table_fingerprint(nm_output: text) -> Result<text, text>:
     """Return a deterministic fingerprint input for an exact raw global symbol table."""
-    val nm_symbols = stage4_exact_nm_global_symbols(nm_output)
-    val definitions = nm_symbols.definitions
-    val undefined = nm_symbols.undefined
+    val (definitions, undefined) = stage4_exact_nm_global_symbols(nm_output)
     var definition_counts: Dict<text, i64> = {}
     for symbol in definitions:
         definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
@@ -116,7 +98,7 @@ pub fn stage4_compiler_backfill_symbol_table_fingerprint(nm_output: text) -> Res
 
 pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, provider_labels: [text], provider_nms: [text], object_format: text) -> Result<(), text>:
     """Reject canonical global definitions shared by the compiler capsule and a provider."""
-    if not stage4_is_compiler_object_format(object_format):
+    if object_format != "elf" and object_format != "macho":
         return Err("Unsupported Stage4 compiler backfill provider object format '" + object_format + "'")
     if provider_labels.len() == 0 or provider_labels.len() != provider_nms.len():
         return Err("Stage4 compiler backfill provider labels and symbol scans must be non-empty and have equal length")
@@ -129,30 +111,22 @@ pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, pro
             return Err("Stage4 compiler backfill provider label '" + label + "' is repeated")
         labels_seen[label] = true
 
-    val capsule_raw_definitions = stage4_exact_nm_global_symbols(capsule_nm).definitions
+    val (capsule_raw_definitions, _) = stage4_exact_nm_global_symbols(capsule_nm)
     if capsule_raw_definitions.len() == 0:
         return Err("Stage4 compiler backfill capsule defines no global symbols")
     var capsule_definitions: Dict<text, bool> = {}
     for raw_symbol in capsule_raw_definitions:
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        capsule_definitions[stage4_provider_symbol(raw_symbol, object_format, false)] = true
-    if capsule_definitions.len() == 0:
-        return Err("Stage4 compiler backfill capsule defines no global symbols")
+        capsule_definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
 
     var provider_i = 0
     while provider_i < provider_labels.len():
         val label = provider_labels[provider_i]
-        val provider_raw_definitions = stage4_exact_nm_global_symbols(provider_nms[provider_i]).definitions
+        val (provider_raw_definitions, _) = stage4_exact_nm_global_symbols(provider_nms[provider_i])
         if provider_raw_definitions.len() == 0:
             return Err("Stage4 compiler backfill provider '" + label + "' defines no global symbols")
         var provider_definitions: Dict<text, bool> = {}
         for raw_symbol in provider_raw_definitions:
-            if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-                continue
-            provider_definitions[stage4_provider_symbol(raw_symbol, object_format, false)] = true
-        if provider_definitions.len() == 0:
-            return Err("Stage4 compiler backfill provider '" + label + "' defines no global symbols")
+            provider_definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
         for symbol in stage4_sorted_text(provider_definitions.keys()):
             if capsule_definitions.has(symbol):
                 return Err("Stage4 compiler backfill overlaps provider '" + label + "': " + symbol)
@@ -183,13 +157,9 @@ fn stage4_hosted_provider_archive_file(provider: text, target_os_name: text, msv
         return Ok("libsimple_stage4_" + provider + ".a")
     Err("Stage4 provider has no archive policy for target OS '" + target_os_name + "'")
 
-pub fn stage4_compiler_backfill_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+pub fn stage4_compiler_backfill_archive_file(target_os_name: text) -> Result<text, text>:
     """Return the dedicated compiler capsule name on supported producer hosts."""
-    if target_os_name == "windows":
-        return Ok(if msvc_linker: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a")
-    if msvc_linker:
-        return Err("Stage4 MSVC compiler backfill requires a Windows target")
-    if target_os_name == "linux" or target_os_name == "macos" or target_os_name == "freebsd":
+    if target_os_name == "linux" or target_os_name == "macos":
         return Ok("libsimple_compiler_backfill.a")
     Err("Stage4 compiler backfill has no capsule producer for target OS '" + target_os_name + "'")
 
@@ -221,10 +191,6 @@ pub fn stage4_time_provider_archive_file(target_os_name: text, msvc_linker: bool
     """Return the target/linker-specific time/progress archive name without selecting it."""
     stage4_hosted_provider_archive_file("time", target_os_name, msvc_linker)
 
-pub fn stage4_sqlite_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
-    """Return the target/linker-specific SQLite provider archive name."""
-    stage4_hosted_provider_archive_file("sqlite", target_os_name, msvc_linker)
-
 pub fn stage4_fork_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the POSIX fork-isolation archive name without selecting Windows stubs."""
     if target_os_name == "windows":
@@ -252,8 +218,6 @@ pub fn stage4_windows_c_object_uses_msvc_abi(target_os_name: text, target: text,
         return Err("Stage4 MinGW C compiler is incompatible with the MSVC linker policy")
     if target.contains("-") and target.ends_with("-pc-windows-msvc") and not msvc_driver:
         return Err("Stage4 MinGW C compiler is incompatible with explicit MSVC target '" + target + "'")
-    if target.contains("-") and target.ends_with("-pc-windows-gnu") and not mingw_driver:
-        return Err("Stage4 MSVC C compiler is incompatible with explicit MinGW target '" + target + "'")
     Ok(msvc_driver)
 
 fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
@@ -267,40 +231,30 @@ fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool
         return Ok("elf")
     Err("Stage4 provider has no object-format policy for target OS '" + target_os_name + "'")
 
-pub fn stage4_compiler_backfill_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+pub fn stage4_compiler_backfill_object_format(target_os_name: text) -> Result<text, text>:
     """Return the portable-nm contract for a supported compiler capsule."""
-    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
-
-pub fn stage4_compiler_backfill_manifest_scan(nm_output: text, object_format: text) -> Result<text, text>:
-    """Reduce a raw compiler archive scan to its exact public runtime owners."""
-    val manifest = match stage4_derive_compiler_backfill_manifest(nm_output, object_format):
-        case Ok(symbols): symbols
-        case Err(err): return Err(err)
-    var rows: [text] = []
-    for symbol in manifest:
-        rows = rows.push("00000000 T " + symbol)
-    Ok(rows.join("\n"))
+    if target_os_name == "linux":
+        return Ok("elf")
+    if target_os_name == "macos":
+        return Ok("macho")
+    Err("Stage4 compiler backfill has no object-format policy for target OS '" + target_os_name + "'")
 
 pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: text) -> Result<[text], text>:
     """Derive the exact compiler-capsule export manifest from a portable nm scan."""
-    if not stage4_is_compiler_object_format(object_format):
+    if object_format != "elf" and object_format != "macho":
         return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
 
     var definition_counts: Dict<text, i64> = {}
     var runtime_symbols: Dict<text, bool> = {}
-    val nm_symbols = stage4_exact_nm_global_symbols(nm_output)
-    val raw_definitions = nm_symbols.definitions
-    val raw_undefined = nm_symbols.undefined
+    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_symbols[symbol] = true
         if symbol.starts_with("rt_cranelift_"):
             definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_symbols[symbol] = true
 
@@ -317,7 +271,7 @@ pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: 
 
 pub fn stage4_compiler_backfill_localization_symbols(nm_output: text, object_format: text, manifest: [text]) -> Result<[text], text>:
     """Return raw closure-object definitions that must be localized."""
-    if not stage4_is_compiler_object_format(object_format):
+    if object_format != "elf" and object_format != "macho":
         return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
     if manifest.len() == 0:
         return Err("Stage4 compiler backfill manifest is empty")
@@ -330,17 +284,13 @@ pub fn stage4_compiler_backfill_localization_symbols(nm_output: text, object_for
             return Err("Stage4 compiler backfill manifest repeats export '" + symbol + "'")
         manifest_symbols[symbol] = true
 
-    val nm_symbols = stage4_exact_nm_global_symbols(nm_output)
-    val raw_definitions = nm_symbols.definitions
-    val raw_undefined = nm_symbols.undefined
+    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             return Err("Stage4 compiler backfill closure has forbidden runtime dependency '" + symbol + "'")
     for raw_symbol in raw_definitions:
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if manifest_symbols.has(symbol):
             definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
         else:
@@ -403,7 +353,7 @@ pub fn stage4_runtime_legacy_compat_localization_symbols(nm_output: text, object
     for raw_symbol in raw_definitions:
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
         if (definition_counts[symbol] ?? 0) != 1:
             return Err("Stage4 runtime legacy compatibility source repeats global definition '" + symbol + "'")
@@ -415,7 +365,7 @@ pub fn stage4_runtime_legacy_compat_localization_symbols(nm_output: text, object
 
     var runtime_undefined: Dict<text, bool> = {}
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_undefined[symbol] = true
     if runtime_undefined.len() != 1 or not runtime_undefined.has("rt_value_bool"):
@@ -436,7 +386,7 @@ pub fn stage4_validate_runtime_legacy_compat_symbol_contract(nm_output: text, ob
     for raw_symbol in raw_definitions:
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if not expected.has(symbol):
             return Err("Stage4 runtime legacy compatibility retained forbidden global definition '" + symbol + "'")
         definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
@@ -446,7 +396,7 @@ pub fn stage4_validate_runtime_legacy_compat_symbol_contract(nm_output: text, ob
 
     var runtime_undefined: Dict<text, bool> = {}
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_undefined[symbol] = true
     if runtime_undefined.len() != 1 or not runtime_undefined.has("rt_value_bool"):
@@ -468,11 +418,9 @@ pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format
     ]
     var counts: Dict<text, i64> = {}
     var raw_by_symbol: Dict<text, text> = {}
-    val raw_definitions = stage4_exact_nm_global_symbols(nm_output).definitions
+    val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         counts[symbol] = (counts[symbol] ?? 0) + 1
         raw_by_symbol[symbol] = raw_symbol
     for symbol in legacy:
@@ -496,11 +444,9 @@ pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, obje
         "rt_string_data", "rt_string_new", "rt_time_now_nanos", "rt_time_now_unix_micros"
     ]
     var definitions: Dict<text, bool> = {}
-    val raw_definitions = stage4_exact_nm_global_symbols(nm_output).definitions
+    val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        definitions[stage4_provider_symbol(raw_symbol, object_format, false)] = true
+        definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
     for symbol in legacy:
         if definitions.has(symbol):
             return Err("Stage4 runtime-native retained legacy provider definition '" + symbol + "'")
@@ -519,10 +465,6 @@ pub fn stage4_memtrack_provider_object_format(target_os_name: text, msvc_objects
 
 pub fn stage4_time_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a hosted time/progress provider."""
-    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
-
-pub fn stage4_sqlite_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
-    """Return the portable-nm contract for a hosted SQLite provider."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
 pub fn stage4_fork_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
@@ -547,8 +489,8 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         val raw_symbol = parts[parts.len() - 1]
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, is_undefined)
         if is_undefined:
             if undefined.has(symbol):
                 return Err("Stage4 dynamic-loader provider repeats undefined symbol '" + symbol + "'")
@@ -567,18 +509,14 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
     Ok(())
 
-fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text], required_runtime_dependencies: [text], allow_other_runtime_dependencies: bool = false, expected_external_dependencies: [text] = []) -> Result<(), text>:
+fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text], required_runtime_dependencies: [text], allow_other_runtime_dependencies: bool = false) -> Result<(), text>:
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 " + provider + " object format '" + object_format + "'")
     var definitions: Dict<text, bool> = {}
     var required: Dict<text, bool> = {}
     var dependencies: Dict<text, bool> = {}
-    var required_external: Dict<text, bool> = {}
-    var external_dependencies: Dict<text, bool> = {}
     for symbol in required_runtime_dependencies:
         required[symbol] = true
-    for symbol in expected_external_dependencies:
-        required_external[symbol] = true
     for line in nm_output.split("\n"):
         val parts = stage4_split_whitespace(line)
         if parts.len() < 2:
@@ -588,8 +526,8 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
         val raw_symbol = parts[parts.len() - 1]
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, is_undefined)
         if is_undefined:
             if symbol.starts_with("rt_") or symbol.starts_with("spl_") or symbol == "g_memtrack_enabled":
                 if not required.has(symbol):
@@ -599,12 +537,6 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
                 if dependencies.has(symbol):
                     return Err("Stage4 " + provider + " provider repeats runtime dependency '" + symbol + "'")
                 dependencies[symbol] = true
-            elif expected_external_dependencies.len() > 0:
-                if not required_external.has(symbol):
-                    return Err("Stage4 " + provider + " provider has unexpected external dependency '" + symbol + "'")
-                if external_dependencies.has(symbol):
-                    return Err("Stage4 " + provider + " provider repeats external dependency '" + symbol + "'")
-                external_dependencies[symbol] = true
         elif stage4_nm_has_address(parts, type_index):
             if definitions.has(symbol):
                 return Err("Stage4 " + provider + " provider repeats global definition '" + symbol + "'")
@@ -618,9 +550,6 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
     for symbol in required_runtime_dependencies:
         if not dependencies.has(symbol):
             return Err("Stage4 " + provider + " provider is missing required runtime dependency '" + symbol + "'")
-    for symbol in expected_external_dependencies:
-        if not external_dependencies.has(symbol):
-            return Err("Stage4 " + provider + " provider is missing required external dependency '" + symbol + "'")
     Ok(())
 
 pub fn stage4_validate_process_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
@@ -672,27 +601,6 @@ pub fn stage4_validate_time_provider_symbol_contract(nm_output: text, object_for
         "rt_timestamp_get_second", "rt_timestamp_get_year"
     ], clock_dependencies)
 
-pub fn stage4_validate_sqlite_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
-    """Validate the exact SQLite wrapper ABI and its audited external closure."""
-    var external = [
-        "sqlite3_bind_double", "sqlite3_bind_int64", "sqlite3_bind_null", "sqlite3_bind_text",
-        "sqlite3_changes", "sqlite3_close", "sqlite3_column_count", "sqlite3_column_double",
-        "sqlite3_column_int64", "sqlite3_column_name", "sqlite3_column_text", "sqlite3_column_type",
-        "sqlite3_errmsg", "sqlite3_exec", "sqlite3_finalize", "sqlite3_free",
-        "sqlite3_last_insert_rowid", "sqlite3_open", "sqlite3_prepare_v2", "sqlite3_reset", "sqlite3_step"
-    ]
-    if object_format == "coff-msvc":
-        external = external.push("fltused")
-    stage4_validate_runtime_provider_symbol_contract(nm_output, object_format, "sqlite", [
-        "rt_sqlite_begin", "rt_sqlite_bind_float", "rt_sqlite_bind_int", "rt_sqlite_bind_null",
-        "rt_sqlite_bind_text", "rt_sqlite_changes", "rt_sqlite_close", "rt_sqlite_column_count",
-        "rt_sqlite_column_float", "rt_sqlite_column_int", "rt_sqlite_column_name", "rt_sqlite_column_text",
-        "rt_sqlite_column_type", "rt_sqlite_commit", "rt_sqlite_error_message", "rt_sqlite_execute",
-        "rt_sqlite_execute_batch", "rt_sqlite_finalize", "rt_sqlite_last_insert_rowid", "rt_sqlite_open",
-        "rt_sqlite_open_memory", "rt_sqlite_prepare", "rt_sqlite_query", "rt_sqlite_query_done",
-        "rt_sqlite_query_next", "rt_sqlite_reset", "rt_sqlite_rollback"
-    ], ["rt_string_data", "rt_string_new"], false, external)
-
 pub fn stage4_validate_fork_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
     """Validate the exact fork-isolation ABI and its POSIX memtrack dependencies."""
     if object_format == "coff-msvc" or object_format == "coff-mingw":
@@ -725,7 +633,7 @@ fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
         i = i + 1
     true
 
-pub fn stage4_requested_from_nm_output_for_format(nm_output: text, object_format: text) -> [text]:
+pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) -> [text]:
     """Return sorted strong runtime ABI requests not defined by sibling objects."""
     var defined: Dict<text, bool> = {}
     var undefined: Dict<text, bool> = {}
@@ -735,11 +643,7 @@ pub fn stage4_requested_from_nm_output_for_format(nm_output: text, object_format
             continue
         val type_index = parts.len() - 2
         val type_code = parts[type_index]
-        val raw_symbol = parts[parts.len() - 1]
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        val is_undefined = type_code == "U"
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, is_undefined)
+        val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
         if not stage4_is_runtime_abi_symbol(symbol):
             continue
         if type_code == "U":
@@ -755,10 +659,7 @@ pub fn stage4_requested_from_nm_output_for_format(nm_output: text, object_format
             requested = requested.push(symbol)
     stage4_sorted_text(requested)
 
-pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) -> [text]:
-    stage4_requested_from_nm_output_for_format(nm_output, if macho_prefixes: "macho" else: "elf")
-
-fn stage4_global_definitions_from_nm_output_for_format(nm_output: text, object_format: text, owner: text) -> Result<[text], text>:
+fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: bool, owner: text) -> Result<[text], text>:
     var seen: Dict<text, bool> = {}
     var definitions: [text] = []
     for line in nm_output.split("\n"):
@@ -769,10 +670,7 @@ fn stage4_global_definitions_from_nm_output_for_format(nm_output: text, object_f
         val type_code = parts[type_index]
         if type_code == "U" or not stage4_nm_has_address(parts, type_index):
             continue
-        val raw_symbol = parts[parts.len() - 1]
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
         if seen.has(symbol):
             return Err("Stage4 archive '" + owner + "' repeats global definition '" + symbol + "'")
         seen[symbol] = true
@@ -830,18 +728,8 @@ pub fn stage4_forbidden_archive_sections(section_headers: text) -> [text]:
             found.push(section)
     found
 
-pub fn stage4_forbidden_coff_dll_sections(section_headers: text) -> [text]:
-    """Reject merged PE initializer and TLS sections that cannot run with /NOENTRY."""
-    var found = stage4_forbidden_archive_sections(section_headers)
-    for section in [".CRT", ".tls"]:
-        if section_headers.contains(section) and not found.contains(section):
-            found = found.push(section)
-    found
-
-pub fn stage4_resolve_requested_archive_owners_for_format(requested: [text], archive_labels: [text], archive_nm_outputs: [text], object_format: text) -> Result<([i64], [text]), text>:
+pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<([i64], [text]), text>:
     """Validate transitive runtime ownership and return selected archives plus owner rows."""
-    if not stage4_is_compiler_object_format(object_format):
-        return Err("Unsupported Stage4 owner-resolution object format '" + object_format + "'")
     if requested.len() == 0:
         return Err("Stage4 requested symbol closure is empty")
     if archive_labels.len() == 0 or archive_labels.len() != archive_nm_outputs.len():
@@ -857,7 +745,7 @@ pub fn stage4_resolve_requested_archive_owners_for_format(requested: [text], arc
         if labels_seen.has(label):
             return Err("Stage4 archive label '" + label + "' is repeated")
         labels_seen[label] = true
-        val definitions_result = stage4_global_definitions_from_nm_output_for_format(archive_nm_outputs[archive_i], object_format, label)
+        val definitions_result = stage4_global_definitions_from_nm_output(archive_nm_outputs[archive_i], macho_prefixes, label)
         val definitions = match definitions_result:
             case Ok(symbols): symbols
             case Err(err): return Err(err)
@@ -899,7 +787,7 @@ pub fn stage4_resolve_requested_archive_owners_for_format(requested: [text], arc
         owner_rows = owner_rows.push(symbol + "=" + archive_labels[owner_i])
         if not expanded_by_index.has(owner_i):
             expanded_by_index[owner_i] = true
-            val dependencies = stage4_requested_from_nm_output_for_format(archive_nm_outputs[owner_i], object_format)
+            val dependencies = stage4_requested_from_nm_output(archive_nm_outputs[owner_i], macho_prefixes)
             for dependency in dependencies:
                 if not queued.has(dependency):
                     queued[dependency] = true
@@ -914,9 +802,6 @@ pub fn stage4_resolve_requested_archive_owners_for_format(requested: [text], arc
         archive_i = archive_i + 1
     Ok((selected, stage4_sorted_text(owner_rows)))
 
-pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<([i64], [text]), text>:
-    stage4_resolve_requested_archive_owners_for_format(requested, archive_labels, archive_nm_outputs, if macho_prefixes: "macho" else: "elf")
-
 pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<[i64], text>:
     """Validate unique symbol ownership and return selected archives in declared order."""
     match stage4_resolve_requested_archive_owners(requested, archive_labels, archive_nm_outputs, macho_prefixes):
@@ -925,7 +810,7 @@ pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels
 
 pub fn stage4_projection_localization_symbols(nm_output: text, object_format: text, requested: [text]) -> Result<[text], text>:
     """Return raw globals to localize so a Stage4 capsule exports only its requested roots."""
-    if not stage4_is_compiler_object_format(object_format):
+    if object_format != "elf" and object_format != "macho":
         return Err("Unsupported Stage4 projection object format '" + object_format + "'")
     if requested.len() == 0:
         return Err("Stage4 projection requested symbol set is empty")
@@ -941,9 +826,7 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
     var localize: [text] = []
     val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
-            continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         counts[symbol] = (counts[symbol] ?? 0) + 1
         if (counts[symbol] ?? 0) != 1:
             return Err("Stage4 projection closure repeats global definition '" + symbol + "'")
@@ -953,7 +836,7 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
         if (counts[symbol] ?? 0) != 1:
             return Err("Stage4 projection root '" + symbol + "' must exist exactly once")
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if stage4_is_runtime_abi_symbol(symbol):
             return Err("Stage4 projection closure retains unresolved runtime symbol '" + symbol + "'")
     Ok(stage4_sorted_text(localize))
@@ -965,57 +848,6 @@ pub fn stage4_validate_projection_symbol_contract(nm_output: text, object_format
         case Err(err): return Err(err)
     if localize.len() != 0:
         return Err("Stage4 projection retained unexpected global definitions: " + localize.join(", "))
-    Ok(())
-
-pub fn stage4_coff_dll_exports_from_objdump(objdump_output: text) -> Result<[text], text>:
-    """Parse the named PE export table emitted by llvm-objdump -p."""
-    var in_names = false
-    var exports: [text] = []
-    var seen: Dict<text, bool> = {}
-    for line in objdump_output.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.contains("[Ordinal/Name Pointer] Table"):
-            in_names = true
-            continue
-        if not in_names or trimmed == "":
-            continue
-        if not trimmed.starts_with("["):
-            if exports.len() > 0:
-                break
-            continue
-        val close = trimmed.index_of("]") ?? -1
-        if close < 0:
-            continue
-        val symbol = trimmed.substring(close + 1).trim()
-        if symbol == "":
-            continue
-        if seen.has(symbol):
-            return Err("Stage4 MSVC projection repeats DLL export '" + symbol + "'")
-        seen[symbol] = true
-        exports = exports.push(symbol)
-    if not in_names or exports.len() == 0:
-        return Err("Stage4 MSVC projection DLL has no named export table")
-    Ok(stage4_sorted_text(exports))
-
-pub fn stage4_validate_coff_dll_export_contract(objdump_output: text, requested: [text]) -> Result<(), text>:
-    """Require the final MSVC DLL export ABI to equal the requested roots."""
-    if requested.len() == 0:
-        return Err("Stage4 MSVC projection requested symbol set is empty")
-    var expected: Dict<text, bool> = {}
-    for symbol in requested:
-        if not stage4_is_runtime_abi_symbol(symbol):
-            return Err("Stage4 MSVC projection root '" + symbol + "' is not a runtime ABI symbol")
-        if expected.has(symbol):
-            return Err("Stage4 MSVC projection root '" + symbol + "' is repeated")
-        expected[symbol] = true
-    val exports = match stage4_coff_dll_exports_from_objdump(objdump_output):
-        case Ok(symbols): symbols
-        case Err(err): return Err(err)
-    if exports.len() != requested.len():
-        return Err("Stage4 MSVC projection DLL exports differ from the requested ABI: " + exports.join(", "))
-    for symbol in exports:
-        if not expected.has(symbol):
-            return Err("Stage4 MSVC projection DLL retained unexpected export '" + symbol + "'")
     Ok(())
 
 fn stage4_canonical_fingerprint_rows(group: text, rows: [text]) -> Result<[text], text>:

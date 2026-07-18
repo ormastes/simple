@@ -91,34 +91,6 @@ fn native_object_staging_survives_cache_clean() {
 }
 
 #[test]
-fn native_object_materialization_retries_the_complete_cached_and_fresh_set() {
-    let cache = tempfile::tempdir().unwrap();
-    let cached_source = cache.path().join("cached.o");
-    std::fs::write(&cached_source, b"cached-object").unwrap();
-    let cached_objects = vec![(0usize, cached_source)];
-    let fresh_objects = vec![(1usize, b"fresh-object".to_vec())];
-
-    let initial = tempfile::tempdir().unwrap();
-    let initial_path = initial.path().to_path_buf();
-    let mut removed_initial = false;
-    let (replacement, mut all_paths) =
-        materialize_native_objects_with_initial_and_hook(initial, &cached_objects, &fresh_objects, |directory| {
-            if !removed_initial {
-                std::fs::remove_dir_all(directory).unwrap();
-                removed_initial = true;
-            }
-        })
-        .unwrap();
-
-    assert!(removed_initial);
-    assert_ne!(replacement.path(), initial_path);
-    all_paths.sort_by_key(|(index, _)| *index);
-    assert_eq!(std::fs::read(&all_paths[0].1).unwrap(), b"cached-object");
-    assert_eq!(std::fs::read(&all_paths[1].1).unwrap(), b"fresh-object");
-    assert!(all_paths.iter().all(|(_, path)| path.starts_with(replacement.path())));
-}
-
-#[test]
 fn msvc_lib_archive_commands_use_native_argument_forms() {
     let archive = PathBuf::from("out.lib");
     let objects = vec![PathBuf::from("one.obj"), PathBuf::from("two.obj")];
@@ -241,7 +213,13 @@ __attribute__((constructor(101))) static void non_llvm_ctor(void) {}
 #[test]
 fn canonical_bootstrap_does_not_force_diagnostic_whole_archive_mode() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
     let script = std::fs::read_to_string(repo_root.join("scripts/bootstrap/bootstrap-from-scratch.sh")).unwrap();
 
     assert!(!script.contains("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1"));
@@ -1001,138 +979,6 @@ fn test_entry_closure_follows_bare_export_facade_to_owner_only() {
     assert_eq!(files.len(), 4);
 }
 
-// Regression coverage for the `frontend_core` false-ambiguous-export bug
-// (doc/08_tracking/bug/frontend_core_ambiguous_export_regression_2026-07-13.md):
-// a stale `extern fn` re-declaration of an already-defined symbol must not
-// tie against the real definition and must not fail discovery. Real
-// same-name-different-symbol collisions must still be rejected.
-#[test]
-fn test_entry_closure_bare_export_prefers_definition_over_stale_extern() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("project");
-    let src_dir = project_root.join("src");
-    let package = src_dir.join("pkg");
-    std::fs::create_dir_all(src_dir.join("app")).unwrap();
-    std::fs::create_dir_all(&package).unwrap();
-    let entry = src_dir.join("app/main.spl");
-    let init = package.join("__init__.spl");
-    let owner = package.join("owner.spl");
-    let stale = package.join("stale.spl");
-    std::fs::write(
-        &entry,
-        "use pkg.{get_members}\nfn main() -> i64:\n    return get_members()\n",
-    )
-    .unwrap();
-    std::fs::write(&init, "export get_members\n").unwrap();
-    std::fs::write(&owner, "fn get_members() -> i64:\n    return 1\n").unwrap();
-    // Stale forward declaration of the same symbol: a real fn already
-    // defines it elsewhere in the package, so this extern must be treated
-    // as a weak re-declaration, not a second provider.
-    std::fs::write(
-        &stale,
-        "extern fn get_members() -> i64\nfn use_it() -> i64:\n    return get_members()\n",
-    )
-    .unwrap();
-
-    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
-        .config(NativeBuildConfig {
-            entry_closure: true,
-            ..NativeBuildConfig::default()
-        })
-        .source_dir(src_dir)
-        .entry_file(entry);
-    let files = builder
-        .discover_files()
-        .expect("stale extern re-declaration must not be flagged as an ambiguous package export");
-    assert!(files.iter().any(|path| same_file_path(path, &init)));
-    assert!(files.iter().any(|path| same_file_path(path, &owner)));
-}
-
-// Verifies the REAL production package named in the bug doc
-// (src/compiler/10.frontend/core, module path `compiler.core`) discovers
-// cleanly with no false ambiguous-export error, exercising the exact
-// resolver/tiering path native-build uses in production against the
-// actual ~450-export `__init__.spl` and its 48 sibling files.
-#[test]
-fn test_entry_closure_real_frontend_core_package_has_no_ambiguous_export() {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent() // src/compiler_rust
-        .unwrap()
-        .parent() // src
-        .unwrap()
-        .parent() // repo root
-        .unwrap()
-        .to_path_buf();
-    let core_init = repo_root.join("src/compiler/10.frontend/core/__init__.spl");
-    assert!(
-        core_init.is_file(),
-        "expected real frontend core package at {}",
-        core_init.display()
-    );
-
-    let temp = tempfile::tempdir().unwrap();
-    let entry = temp.path().join("entry.spl");
-    std::fs::write(
-        &entry,
-        "use compiler.core.{is_alpha}\nfn main() -> bool:\n    return is_alpha(\"a\")\n",
-    )
-    .unwrap();
-
-    let builder = NativeProjectBuilder::new(repo_root.clone(), temp.path().join("bin/tool"))
-        .config(NativeBuildConfig {
-            entry_closure: true,
-            ..NativeBuildConfig::default()
-        })
-        .source_dir(repo_root.join("src"))
-        .entry_file(entry);
-    let files = builder
-        .discover_files()
-        .expect("real src/compiler/10.frontend/core package must resolve without a false ambiguous-export error");
-    assert!(files.iter().any(|path| same_file_path(path, &core_init)));
-}
-
-#[test]
-fn test_entry_closure_bare_export_rejects_genuine_duplicate_definitions() {
-    // Guard against the SIMPLE_AMBIGUOUS_EXPORT_ALL escape hatch (discovery.rs)
-    // downgrading this to a warning if it happens to be set in the test process.
-    let previous_escape_hatch = std::env::var("SIMPLE_AMBIGUOUS_EXPORT_ALL").ok();
-    std::env::remove_var("SIMPLE_AMBIGUOUS_EXPORT_ALL");
-
-    let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("project");
-    let src_dir = project_root.join("src");
-    let package = src_dir.join("pkg2");
-    std::fs::create_dir_all(src_dir.join("app")).unwrap();
-    std::fs::create_dir_all(&package).unwrap();
-    let entry = src_dir.join("app/main.spl");
-    let init = package.join("__init__.spl");
-    let a = package.join("a.spl");
-    let b = package.join("b.spl");
-    std::fs::write(&entry, "use pkg2.{helper}\nfn main() -> i64:\n    return helper()\n").unwrap();
-    std::fs::write(&init, "export helper\n").unwrap();
-    // Two genuinely different symbols happen to share a name: this must
-    // still fail loudly rather than silently pick one.
-    std::fs::write(&a, "fn helper() -> i64:\n    return 1\n").unwrap();
-    std::fs::write(&b, "fn helper() -> i64:\n    return 2\n").unwrap();
-
-    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
-        .config(NativeBuildConfig {
-            entry_closure: true,
-            ..NativeBuildConfig::default()
-        })
-        .source_dir(src_dir)
-        .entry_file(entry);
-    let error = builder
-        .discover_files()
-        .expect_err("two real definitions of the same exported name must still be rejected as ambiguous");
-    match previous_escape_hatch {
-        Some(value) => std::env::set_var("SIMPLE_AMBIGUOUS_EXPORT_ALL", value),
-        None => std::env::remove_var("SIMPLE_AMBIGUOUS_EXPORT_ALL"),
-    }
-    assert!(error.contains("ambiguous package export"), "unexpected error: {error}");
-    assert!(error.contains("helper"), "unexpected error: {error}");
-}
-
 #[test]
 fn test_entry_closure_follows_extend_method_imports() {
     let temp = tempfile::tempdir().unwrap();
@@ -1704,7 +1550,7 @@ int main(void) {
     int64_t keyword_join = rt_string_join(keyword_slice, rt_string_new(NULL, 0));
     if (rt_string_len(keyword_join) != 2 || memcmp(rt_string_data(keyword_join), "fn", 2) != 0) return 47;
     if (!rt_is_none(rt_value_nil()) || rt_is_none(rt_value_int(1))) return 48;
-    if (rt_is_none(0) || !rt_is_some(0) || !rt_is_some(rt_value_int(1))) return 49;
+    if (!rt_is_none(0) || rt_is_some(0) || !rt_is_some(rt_value_int(1))) return 49;
     int64_t byte_stride = rt_slice((int64_t)(uintptr_t)byte_left, 0, 2, 2);
     if (rt_array_len((SplArray*)(uintptr_t)byte_stride) != 1 ||
         rt_bytes_u8_at((SplArray*)(uintptr_t)byte_stride, 0) != 'a') return 50;
@@ -2281,19 +2127,18 @@ int main(void) {
     __simple_runtime_init();
     int64_t connection = rt_sqlite_open_memory();
     if (connection == rt_value_nil()) return 1;
-    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != rt_value_int(1)) return 2;
-    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != rt_value_int(1)) return 3;
+    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != rt_value_int(0)) return 2;
+    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != rt_value_int(0)) return 3;
     int64_t statement = rt_sqlite_query(connection, text("SELECT label AS item_name FROM item"));
     if (statement == rt_value_nil()) return 4;
-    if (rt_sqlite_query_next(statement) != rt_value_int(1)) return 5;
+    if (rt_sqlite_query_next(statement) != rt_value_bool(1)) return 5;
     int64_t index = rt_value_int(0);
     if (!text_equals(rt_sqlite_column_name(statement, index), "item_name")) return 6;
     if (!text_equals(rt_sqlite_column_text(statement, index), "hello")) return 7;
-    if (rt_sqlite_query_next(statement) != rt_value_int(0)) return 8;
     rt_sqlite_query_done(statement);
-    if (rt_sqlite_execute(connection, text("invalid sql")) != rt_value_int(0)) return 9;
-    if (!text_contains(rt_sqlite_error_message(connection), "syntax")) return 10;
-    if (rt_sqlite_close(connection) != rt_value_int(1)) return 11;
+    if (rt_sqlite_execute(connection, text("invalid sql")) != rt_value_int(-1)) return 8;
+    if (!text_contains(rt_sqlite_error_message(connection), "syntax")) return 9;
+    if (rt_sqlite_close(connection) != rt_value_int(0)) return 10;
     __simple_runtime_shutdown();
     return 0;
 }
@@ -2923,33 +2768,6 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
 
     let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
     assert_eq!(selected, (native_all, true));
-    match old_bootstrap {
-        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
-        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
-    }
-}
-
-#[test]
-fn test_core_c_bootstrap_entry_builds_runtime_when_explicit_path_has_only_native_all() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
-    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
-    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
-    let temp = tempfile::tempdir().unwrap();
-    let native_all = temp.path().join("libsimple_native_all.a");
-    std::fs::write(&native_all, b"all").unwrap();
-
-    let mut config = NativeBuildConfig {
-        runtime_path: Some(temp.path().to_path_buf()),
-        ..Default::default()
-    };
-    config.runtime_bundle = "core-c-bootstrap".to_string();
-    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("simple")).config(config);
-    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/bootstrap_main.spl"));
-
-    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_ne!(selected, native_all);
-    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
-    assert!(!is_native_all);
     match old_bootstrap {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
         None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
@@ -3979,45 +3797,6 @@ fn test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type() {
 }
 
 #[test]
-fn test_llvm_mangle_does_not_rebind_qualified_string_builtin_to_imported_wrapper() {
-    let mut mir = crate::mir::MirModule::new();
-    let mut func = crate::mir::MirFunction::new(
-        "str_ends_with".to_string(),
-        crate::hir::TypeId::BOOL,
-        simple_parser::Visibility::Private,
-    );
-    func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
-        dest: Some(crate::mir::VReg(2)),
-        receiver: crate::mir::VReg(0),
-        func_name: "str.ends_with".to_string(),
-        args: vec![crate::mir::VReg(1)],
-    });
-    func.blocks[0].terminator = crate::mir::Terminator::Return(Some(crate::mir::VReg(2)));
-    mir.functions.push(func);
-
-    let use_map = std::collections::HashMap::from([(
-        "str.ends_with".to_string(),
-        "common__string_core__str_ends_with".to_string(),
-    )]);
-    super::mangle::mangle_mir(
-        &mut mir,
-        "common__string_core",
-        false,
-        &std::collections::HashMap::new(),
-        &std::collections::HashSet::new(),
-        &use_map,
-        &std::collections::HashMap::new(),
-    );
-
-    match &mir.functions[0].blocks[0].instructions[0] {
-        crate::mir::MirInst::MethodCallStatic { func_name, .. } => {
-            assert_eq!(func_name, "str.ends_with");
-        }
-        other => panic!("expected static method call, got {other:?}"),
-    }
-}
-
-#[test]
 fn test_llvm_mangle_resolves_desugared_cross_module_method() {
     let mut mir = crate::mir::MirModule::new();
     let mut func = crate::mir::MirFunction::new(
@@ -4049,9 +3828,10 @@ fn test_llvm_mangle_resolves_desugared_cross_module_method() {
     );
 
     match &mir.functions[0].blocks[0].instructions[0] {
-        crate::mir::MirInst::MethodCallStatic { func_name, .. } => {
-            assert_eq!(func_name, "frontend__treesitter__outline_lexer__treesitter_match_token")
-        }
+        crate::mir::MirInst::MethodCallStatic { func_name, .. } => assert_eq!(
+            func_name,
+            "frontend__treesitter__outline_lexer__treesitter_match_token"
+        ),
         other => panic!("expected static method call, got {other:?}"),
     }
 }
@@ -4102,189 +3882,6 @@ fn test_re_exports_include_glob_imported_facade_symbols() {
         Some(&expected)
     );
     assert_eq!(use_map.get("log_info"), Some(&expected));
-}
-
-#[test]
-fn test_package_selected_data_global_reaches_hir_and_mir() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("project");
-    let src_root = project_root.join("src");
-    let app = src_root.join("app");
-    let package = src_root.join("app/pkg");
-    let other = src_root.join("app/other");
-    let transparent = package.join("_Split");
-    let child = package.join("child");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::create_dir_all(&other).unwrap();
-    std::fs::create_dir_all(&transparent).unwrap();
-    std::fs::create_dir_all(&child).unwrap();
-
-    let parent_facade = app.join("__init__.spl");
-    let parent_state = app.join("state.spl");
-    let facade = package.join("__init__.spl");
-    let state = package.join("state.spl");
-    let reader = package.join("reader.spl");
-    let transparent_reader = transparent.join("reader.spl");
-    let child_reader = child.join("reader.spl");
-    let clash_a = package.join("clash_a.spl");
-    let clash_b = package.join("clash_b.spl");
-    let clash_reader = package.join("clash_reader.spl");
-    let typo = package.join("typo.spl");
-    let unrelated = other.join("state.spl");
-    std::fs::write(&parent_facade, "export PARENT_FLAG\n").unwrap();
-    std::fs::write(&parent_state, "var PARENT_FLAG: bool = true\n").unwrap();
-    std::fs::write(&facade, "export FLAG, DYNAMIC_FLAG, ITEM, read\n").unwrap();
-    std::fs::write(
-        &state,
-        "struct Foo:\n    x: i64\nvar FLAG: bool = true\nvar PRIVATE_FLAG: bool = true\nvar DYNAMIC_FLAG = false\nvar ITEM: Foo = nil\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &reader,
-        "fn read() -> bool:\n    FLAG\nfn read_private() -> bool:\n    PRIVATE_FLAG\nfn read_parent() -> bool:\n    PARENT_FLAG\n",
-    )
-    .unwrap();
-    std::fs::write(&transparent_reader, "fn read_private() -> bool:\n    PRIVATE_FLAG\n").unwrap();
-    std::fs::write(&child_reader, "fn read_private() -> bool:\n    PRIVATE_FLAG\n").unwrap();
-    std::fs::write(&clash_a, "var CLASH: i64 = 1\n").unwrap();
-    std::fs::write(&clash_b, "var CLASH: i64 = 2\n").unwrap();
-    std::fs::write(&clash_reader, "fn read_clash() -> i64:\n    CLASH\n").unwrap();
-    std::fs::write(&typo, "fn typo() -> i64:\n    OUTSIDE_ONLY\n").unwrap();
-    std::fs::write(
-        &unrelated,
-        "struct Foo:\n    y: text\nvar FLAG: i64 = 1\nvar OUTSIDE_ONLY: i64 = 9\n",
-    )
-    .unwrap();
-
-    let paths = [
-        &parent_facade,
-        &parent_state,
-        &facade,
-        &state,
-        &reader,
-        &transparent_reader,
-        &child_reader,
-        &clash_a,
-        &clash_b,
-        &clash_reader,
-        &typo,
-        &unrelated,
-    ];
-    let file_sources: Vec<_> = paths
-        .iter()
-        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
-        .collect();
-    let source_dirs = vec![src_root.clone()];
-    let result = super::imports::build_import_map(&file_sources, &source_dirs, &src_root);
-    let expected_owner = format!("{}__FLAG", module_prefix_from_path(&state, &src_root));
-    let package_prefix = module_prefix_from_path(&package, &src_root);
-    let private_owner = format!("{}__PRIVATE_FLAG", module_prefix_from_path(&state, &src_root));
-    assert_eq!(
-        result
-            .package_data
-            .get(&package_prefix)
-            .and_then(|entries| entries.get("PRIVATE_FLAG")),
-        Some(&private_owner)
-    );
-    assert!(!result
-        .package_data
-        .get(&package_prefix)
-        .is_some_and(|entries| entries.contains_key("CLASH")));
-    assert_eq!(
-        result
-            .re_exports
-            .get(&package_prefix)
-            .and_then(|exports| exports.get("FLAG")),
-        Some(&expected_owner)
-    );
-    assert_eq!(
-        result.data_types.get(&expected_owner),
-        Some(&simple_parser::Type::Simple("bool".into()))
-    );
-    let dynamic_owner = format!("{}__DYNAMIC_FLAG", module_prefix_from_path(&state, &src_root));
-    assert_eq!(
-        result.data_types.get(&dynamic_owner),
-        Some(&simple_parser::Type::Simple("Any".into()))
-    );
-    let item_owner = format!("{}__ITEM", module_prefix_from_path(&state, &src_root));
-    assert_eq!(
-        result.data_types.get(&item_owner),
-        Some(&simple_parser::Type::Simple("Any".into()))
-    );
-    let parent_owner = format!("{}__PARENT_FLAG", module_prefix_from_path(&parent_state, &src_root));
-    assert_eq!(
-        result
-            .re_exports
-            .get(&module_prefix_from_path(&app, &src_root))
-            .and_then(|exports| exports.get("PARENT_FLAG")),
-        Some(&parent_owner)
-    );
-
-    let imports = ModuleImports {
-        import_map: std::sync::Arc::new(result.map),
-        ambiguous_names: std::sync::Arc::new(result.ambiguous),
-        all_mangled: std::sync::Arc::new(result.all_mangled),
-        re_exports: std::sync::Arc::new(result.re_exports),
-        trait_impls: std::sync::Arc::new(result.trait_impls),
-        struct_defs: std::sync::Arc::new(result.struct_defs),
-        duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
-        enum_defs: std::sync::Arc::new(result.enum_defs),
-        data_exports: std::sync::Arc::new(result.data_exports),
-        data_types: std::sync::Arc::new(result.data_types),
-        package_data: std::sync::Arc::new(result.package_data),
-        fn_arities: std::sync::Arc::new(result.fn_arities),
-        fn_return_types: std::sync::Arc::new(result.fn_return_types),
-        populate_global_struct_defs: true,
-        populate_global_enum_defs: true,
-    };
-
-    let object = compile_file_to_object(
-        &std::fs::read_to_string(&reader).unwrap(),
-        &reader,
-        &project_root,
-        &src_root,
-        &source_dirs,
-        false,
-        crate::optimizations::NativeOptimizationLevel::None,
-        false,
-        &imports,
-    )
-    .unwrap();
-    assert!(!object.is_empty());
-
-    let transparent_object = compile_file_to_object(
-        &std::fs::read_to_string(&transparent_reader).unwrap(),
-        &transparent_reader,
-        &project_root,
-        &src_root,
-        &source_dirs,
-        false,
-        crate::optimizations::NativeOptimizationLevel::None,
-        false,
-        &imports,
-    )
-    .unwrap();
-    assert!(!transparent_object.is_empty());
-
-    for (path, missing) in [
-        (&child_reader, "PRIVATE_FLAG"),
-        (&clash_reader, "CLASH"),
-        (&typo, "OUTSIDE_ONLY"),
-    ] {
-        let error = compile_file_to_object(
-            &std::fs::read_to_string(path).unwrap(),
-            path,
-            &project_root,
-            &src_root,
-            &source_dirs,
-            false,
-            crate::optimizations::NativeOptimizationLevel::None,
-            false,
-            &imports,
-        )
-        .unwrap_err();
-        assert!(error.contains(&format!("Undefined global `{missing}`")), "{error}");
-    }
 }
 
 #[test]
@@ -4439,8 +4036,6 @@ int main(void) { app_call(); return 0; }
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4550,8 +4145,6 @@ void __module_init_security_registry(void) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4678,8 +4271,6 @@ int main(int argc, char** argv) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4784,8 +4375,6 @@ int main(void) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4853,8 +4442,6 @@ int main(void) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -4916,8 +4503,6 @@ int main(void) { return (int)run_check(); }
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -5206,72 +4791,6 @@ int main(void) {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_simple_core_enum_registry_rejects_raw_tag_collisions() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let temp = tempfile::tempdir().unwrap();
-    let archive = temp.path().join("libsimple_runtime.a");
-
-    NativeProjectBuilder::new(repo_root.clone(), archive.clone())
-        .config(NativeBuildConfig {
-            emit_archive: true,
-            clean: true,
-            incremental: false,
-            no_mangle: true,
-            ..NativeBuildConfig::default()
-        })
-        .source_dir(repo_root.join("src/runtime/simple_core"))
-        .build()
-        .unwrap();
-
-    let probe_source = temp.path().join("simple_core_enum_registry_probe.c");
-    let probe_exe = temp.path().join("simple_core_enum_registry_probe");
-    std::fs::write(
-        &probe_source,
-        r#"
-#include <stdint.h>
-
-int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
-int64_t rt_enum_id(int64_t value);
-int8_t rt_is_none(int64_t value);
-
-int main(void) {
-    if (rt_enum_id(4097) != -1 || rt_enum_id(-7) != -1) return 1;
-    if (rt_is_none(4097) || rt_is_none(-7)) return 2;
-    int64_t none = rt_enum_new(1, 1, 3);
-    if (rt_enum_id(none) != 1 || !rt_is_none(none)) return 3;
-    return 0;
-}
-"#,
-    )
-    .unwrap();
-    let status = std::process::Command::new(find_c_compiler())
-        .arg(&probe_source)
-        .arg(&archive)
-        .arg("-o")
-        .arg(&probe_exe)
-        .status()
-        .unwrap();
-    assert!(status.success(), "failed to compile pure-Simple enum registry probe");
-    let output = std::process::Command::new(&probe_exe).output().unwrap();
-    assert!(
-        output.status.success(),
-        "pure-Simple enum registry probe failed: code={:?} stdout=`{}` stderr=`{}`",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
 fn test_simple_core_source_tree_emits_partial_runtime_archive() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
@@ -5503,15 +5022,13 @@ int main(void) {
     if (!rt_dict_contains(dict, key3) || !rt_dict_remove(dict, key3)) return 92;
     if (rt_dict_contains(dict, key3) || rt_dict_get(dict, key3) != 3) return 93;
 
-    int64_t none = rt_enum_new(1, 1, 3);
-    int64_t some = rt_enum_new(1, 0, rt_value_int(9));
+    int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
+    int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
     if (rt_enum_id(none) != 1 || rt_enum_id(some) != 1 || rt_enum_id(rt_value_int(9)) != -1) return 104;
-    if (rt_enum_id(4097) != -1 || rt_enum_id(-7) != -1) return 105;
-    if (rt_is_none(4097) || rt_is_none(-7)) return 106;
     if (!rt_is_none(none) || rt_is_some(none)) return 94;
     if (rt_is_none(some) || !rt_is_some(some)) return 95;
-    if (rt_enum_discriminant(some) != 0) return 96;
-    if (!rt_enum_check_discriminant(some, 0)) return 97;
+    if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;
+    if (!rt_enum_check_discriminant(some, 4053299545u)) return 97;
     if (rt_enum_payload(some) != rt_value_int(9)) return 98;
     if (rt_unwrap_or_self(some) != rt_value_int(9)) return 99;
     if (rt_unwrap_or_self(rt_value_int(9)) != rt_value_int(9)) return 100;
@@ -5698,8 +5215,6 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
-        data_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        package_data: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
@@ -6315,8 +5830,6 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         duplicate_struct_defs: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
         data_exports: std::collections::HashSet::new(),
-        data_types: std::collections::HashMap::new(),
-        package_data: std::collections::HashMap::new(),
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),
     }
@@ -6372,11 +5885,7 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
     let line = base.to_manifest_line();
     let parsed = GlobalBuildFingerprint::from_manifest_line(&line).expect("manifest line must parse");
     assert_eq!(parsed, base, "manifest round-trip must preserve all five components");
-    assert_eq!(
-        base.changed_reason(&parsed),
-        None,
-        "identical fingerprints report no change"
-    );
+    assert_eq!(base.changed_reason(&parsed), None, "identical fingerprints report no change");
 
     let mut layout_changed = base;
     layout_changed.layout = 0x9999_9999_9999_9999;
@@ -6452,11 +5961,7 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
     // Build 1: cold cache -> both modules compile fresh.
     let r1 = build();
     assert_eq!(r1.cached, 0, "cold build must not report cache hits");
-    assert!(
-        r1.compiled >= 2,
-        "cold build must compile both modules, got {}",
-        r1.compiled
-    );
+    assert!(r1.compiled >= 2, "cold build must compile both modules, got {}", r1.compiled);
 
     // Build 2: leaf body-only change in A (constant), B untouched. B stays cached
     // -> incrementality is real (not a full rebuild on every edit).

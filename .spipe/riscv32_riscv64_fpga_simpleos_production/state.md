@@ -110,7 +110,7 @@ Do not invent a second RISC-V core, bootloader, or FPGA framework. Reuse the exi
 - Unchosen options were deleted rather than archived.
 
 ## Phase
-implementation-milestone-2-in-progress
+implementation-milestone-0-in-progress
 
 ## Log
 - dev: Created production-readiness lane and fixed existing smoke wrappers to expose both RV32/RV64 missing smoke artifacts.
@@ -201,86 +201,3 @@ implementation-milestone-2-in-progress
   CPU-bound with no output until a 120-second timeout. The three-cycle cap is
   reached. Recorded the repair and closure criteria in
   `doc/08_tracking/bug/pure_simple_full_cli_process_run_inherit_spipe_docgen_crash_2026-07-18.md`.
-- impl milestone 2 2026-07-18: Added synthesizable RV32/RV64 PMP priority,
-  access-gate, and CSR owners with explicit module exports. RV64 `CoreState64`
-  now owns `PmpEntries64`; all six Zicsr forms route legal M/S/PMP accesses,
-  SATP changes synchronize and globally flush the Sv39 MMU, and illegal CSR,
-  ECALL, and EBREAK paths enter precise delegated traps without register
-  writeback. The production request/response page walker and bus gating remain
-  active work; the RAM-backed translator is not being promoted as RTL proof.
-- review 2026-07-18: The bounded RV64 sidecar audit was merged. The primary
-  review corrected reserved funct3 decoding, legality-qualified writeback,
-  interrupted privilege in MPP, delegated supervisor CSR return state, writable
-  machine counters, and Sv48 rejection in the Sv39-only core.
-- verification blocker 2026-07-18: One bounded focused check of
-  `src/lib/hardware/rv64gc_rtl` with the freshly built pure-Simple CLI exited
-  139 before diagnostics. Log:
-  `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. No Rust seed or
-  repeated check was substituted.
-- impl milestone 2 walker 2026-07-18: Added the RV64 request/response Sv39
-  walker and upgraded the fixed TLB with ASID, global-map, and superpage state.
-  The walker checks canonical addresses, reserved/leaf PTE rules, SUM/MXR,
-  fault-on-clear A/D, superpage alignment, and S-effective PMP before issuing
-  each PTE read; PMP/bus failures map to the originating access-fault cause.
-  Focused production-owner and pure-Simple-to-VHDL/GHDL scenarios were added
-  but remain unexecuted because the one permitted pure-Simple check already
-  hit the recorded exit-139 blocker. Core fetch/data arbitration is next.
-- review 2026-07-18 walker: The read-only sidecar found a zero-latency response
-  loss and reserved-privilege Bare-mode fail-open. The primary fixed both,
-  made the aligned 8-byte PTE read contract explicit, replaced modulo with a
-  fixed mask, added backpressure/zero-latency/reserved-privilege cases, and
-  removed the weaker direct-RAM translator from production package exports.
-- impl milestone 2 memory frontend 2026-07-18: Added
-  `memory64_start/cycle`, the canonical RV64 translation-to-final-PMP physical
-  request owner for 2-byte instruction parcels and naturally aligned data.
-  Focused cases cover Bare M allow, Bare S deny, translated request ordering,
-  walker-allowed/final-PMP-denied suppression, and precise misaligned stores.
-  Core state/commit arbitration has not yet consumed this frontend.
-## 2026-07-18 RV64 clock-path integration
-
-- Added `core64_cycle` as the single production RV64 clock path with persistent
-  register state, two 16-bit fetch parcels, stalled data access, and precise
-  Sv39/PMP trap entry.
-- Replaced `soc_top_64_tick`'s manual PC increment with one-cycle-latched routing
-  to the existing ROM, DRAM, CLINT, PLIC, and UART owners.
-- Deleted the PC-only `core64_step`, `SocBus64`, and raw `core64_ports` bypasses.
-- Added focused executable scenarios for register commit, exactly-once stores,
-  no-bus PMP faults, and RV64 reset-ROM handoff.
-- High-capability review found and fixed three pre-commit blockers: M/A/C are no
-  longer falsely advertised, reserved encodings fail closed before memory, and
-  CLINT/PLIC pending signals now reach boundary-precise interrupt entry.
-- Connected the existing multi-cycle M unit to the production core stall/commit
-  phase, replaced placeholder high products and fragile unsigned division with
-  exact fixed-width algorithms, and enabled only the M `misa` bit.
-- Connected LR/SC and AMO.W/D through translated physical reservations and
-  protected read/conditional-write phases. Successful overlapping stores
-  invalidate reservations, SC failure emits no write, and the SoC rejects
-  atomic ROM/MMIO before target side effects. The reusable core leaves A clear;
-  the explicit single-master SoC profile enables the A `misa` bit.
-- Post-change sidecar review found and closed two A-profile blockers: generic
-  embeddings no longer advertise/execute A without the exclusive-bus contract,
-  and the MMIO PMA scenario now proves a populated UART RX FIFO is not consumed.
-- Checks remain unexecuted because the tracked pure-Simple full-CLI crash exits
-  139 before diagnostics. Supervisor interrupt contexts, MPRV data privilege,
-  and RV32 parity remain open.
-- Connected integer RV64C through a fail-closed decompressor and the existing
-  base decoder. Original instruction length now survives all clock phases;
-  sequential/link PCs, JALR alignment, EPC alignment, illegal-parcel trap
-  values, cross-page high-parcel faults, and semihost discrimination follow the
-  16-bit contract. Reusable/exclusive MISA profiles now advertise IMC/IMAC.
-- Replaced the disconnected approximate compressed spec with exact GNU
-  assembler/disassembler fixtures and protected clock-path scenarios. These
-  repository scenarios are intentionally recorded as unexecuted until the
-  pure-Simple CLI crash is repaired.
-- Post-fix sidecar review found and closed two RV64C/semihost blockers:
-  unsupported long prefixes now report zero instead of a partial nonzero
-  `mtval`, and unmatched semihost sequences no longer bypass ordinary
-  SYSTEM/CSR/return dispatch. The review then reported no remaining production
-  blocker; its requested CJ/CB/stack-access and IALIGN test gaps were added.
-- RV64 effective-privilege slice: added MPRV/MPP selection for loads, stores,
-  LR/SC, and AMO phases while keeping fetch/trap origin on current privilege.
-  MRET/SRET clear MPRV below M. A single supervisor-owned merge keeps
-  SIE/SPIE/SPP/SUM/MXR coherent through mstatus/sstatus CSR and trap paths;
-  SXL/UXL are fixed RV64, MPP=2 coerces to U, and direct-only mtvec/stvec writes
-  are aligned. Focused scenarios cover aliasing, WARL, PMP denial, every atomic
-  entry path, and xRET clearing, but remain unexecuted under the CLI blocker.

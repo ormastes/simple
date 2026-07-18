@@ -14,7 +14,7 @@ use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
-use super::imports::{build_suffix_index, build_use_map_from_ast, effective_package_prefix};
+use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::mangle_mir;
 use super::module_global_init::inject_freestanding_module_global_init;
 
@@ -185,15 +185,17 @@ impl NativeProjectBuilder {
     pub(crate) fn compile_entries_parallel(
         &self,
         entries: &[(usize, PathBuf, String)],
+        temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
-    ) -> Vec<Result<(usize, Vec<u8>), (PathBuf, String)>> {
+    ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let project_root = self.project_root.clone();
         let source_dirs = self.source_dirs.clone();
         let fallback_root = self.source_root.clone();
         let file_timeout = self.config.file_timeout;
         let stack_size = self.config.stack_size;
         let verbose = self.config.verbose;
+        let temp_dir = temp_dir.to_path_buf();
         let total = entries.len();
         let no_mangle = self.config.no_mangle;
         let opt_level = self.config.opt_level;
@@ -222,10 +224,12 @@ impl NativeProjectBuilder {
                     imports.clone(),
                 ) {
                     Ok(obj_code) => {
+                        let obj_path = temp_dir.join(format!("mod_{}.o", idx));
+                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if verbose && (progress_i + 1) % 50 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
-                        Ok((*idx, obj_code))
+                        Ok((*idx, obj_path))
                     }
                     Err(e) => {
                         let msg = format!("{}: {}", path.display(), e);
@@ -240,9 +244,10 @@ impl NativeProjectBuilder {
     pub(crate) fn compile_entries_sequential(
         &self,
         entries: &[(usize, PathBuf, String)],
+        temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
-    ) -> Vec<Result<(usize, Vec<u8>), (PathBuf, String)>> {
+    ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let total = entries.len();
         entries
             .iter()
@@ -266,10 +271,12 @@ impl NativeProjectBuilder {
                     imports.clone(),
                 ) {
                     Ok(obj_code) => {
+                        let obj_path = temp_dir.join(format!("mod_{}.o", idx));
+                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if self.config.verbose && (progress_i + 1) % 10 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
-                        Ok((*idx, obj_code))
+                        Ok((*idx, obj_path))
                     }
                     Err(e) => {
                         let msg = format!("{}: {}", path.display(), e);
@@ -336,23 +343,7 @@ pub(crate) fn compile_file_to_object(
     }
 
     // Build per-module use_map from AST `use` statements.
-    let mut use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
-    let package_prefix = effective_package_prefix(file_path, source_root);
-    if let Some(package_data) = imports.package_data.get(&package_prefix) {
-        for (name, owner) in package_data {
-            use_map.entry(name.clone()).or_insert_with(|| owner.clone());
-        }
-    }
-    if let Some(parent) = file_path.parent() {
-        for package in parent.ancestors().take_while(|path| path.starts_with(source_root)) {
-            let package_prefix = module_prefix_from_path(package, source_root);
-            if let Some(package_exports) = imports.re_exports.get(&package_prefix) {
-                for (name, owner) in package_exports {
-                    use_map.entry(name.clone()).or_insert_with(|| owner.clone());
-                }
-            }
-        }
-    }
+    let use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
 
     // Mono
     let ast = monomorphize_module(&ast);
@@ -420,13 +411,6 @@ pub(crate) fn compile_file_to_object(
     // reached via the global import map (no `use` import) get a real result
     // type instead of ANY (Pass 0.5c in module_pass.rs resolves them).
     lowerer.set_global_fn_return_types(std::sync::Arc::clone(&imports.fn_return_types));
-    let mut global_data_types = std::collections::HashMap::new();
-    for (name, owner) in &use_map {
-        if let Some(ty) = imports.data_types.get(owner) {
-            global_data_types.insert(name.clone(), ty.clone());
-        }
-    }
-    lowerer.set_global_data_types(std::sync::Arc::new(global_data_types));
     // W15-H: seed the lowerer with the project-wide enum table and
     // eagerly register every entry into `module.types` + `self.globals`
     // before `lower_module(&ast)` runs. Pass 0 of `module_pass.rs`

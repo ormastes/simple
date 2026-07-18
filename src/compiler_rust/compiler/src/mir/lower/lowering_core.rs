@@ -250,8 +250,6 @@ pub enum MirLowerError {
     AopWeavingFailed(String),
     #[error("Circular dependency detected in DI: {0}")]
     CircularDependency(String),
-    #[error("Undefined global `{0}`")]
-    UndefinedGlobal(String),
 }
 
 pub type MirLowerResult<T> = Result<T, MirLowerError>;

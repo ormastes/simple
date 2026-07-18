@@ -132,12 +132,3 @@ native-build failing to match a reference — the reference itself is broken.
 
 If this needs fixing, it should be re-filed against `src/compiler_rust` (seed JIT) rather than
 "native codegen."
-
-## Cross-target native-build hardening
-
-The shared cross-target Result fixture now repeats the pure-Simple native-build
-oracle: a non-first class array field is pushed and index-written through a
-parameter, an alias captured before mutation observes the same live handle, and
-the preceding scalar field stays intact. AArch64/RISC-V64 execute the oracle
-under flagless LLVM and explicit Cranelift; ARM32/RV32 LLVM and Windows ARM64
-LLVM/Cranelift require target objects from the same source.

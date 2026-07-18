@@ -81,7 +81,7 @@ fn hosted_c_arch_kind(arch: text) -> text:
     if arch == "riscv64" or arch == "riscv64gc" or arch == "rv64" or arch == "rv64gc":
         return "riscv64"
     val normalized = mir_target_context_normalize_arch(arch)
-    if normalized == "x86_64" or normalized == "aarch64" or normalized == "arm":
+    if normalized == "x86_64" or normalized == "aarch64":
         return normalized
     ""
 
@@ -89,14 +89,11 @@ fn hosted_c_target_os_matches(target: text, host_os_name: text) -> bool:
     if not target.contains("-"):
         return true
     if host_os_name == "linux":
-        val target_arch = hosted_c_arch_kind(target.split("-")[0])
-        if target_arch == "arm":
-            return target.ends_with("-linux-gnueabihf")
         return target.ends_with("-linux-gnu")
     if host_os_name == "macos" or host_os_name == "darwin":
         return target.ends_with("-apple-darwin")
     if host_os_name == "windows":
-        return target.ends_with("-pc-windows-msvc") or target.ends_with("-pc-windows-gnu")
+        return target.ends_with("-pc-windows-msvc")
     if host_os_name == "freebsd":
         return target.ends_with("-unknown-freebsd")
     false
@@ -115,8 +112,6 @@ pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: 
         return HostedCCompilerPlan(requires_cross: false, supported: true, command: "")
     if host_os_name == "linux" and target_arch == "aarch64":
         return HostedCCompilerPlan(requires_cross: true, supported: true, command: "aarch64-linux-gnu-gcc")
-    if host_os_name == "linux" and target_arch == "arm":
-        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "arm-linux-gnueabihf-gcc")
     if host_os_name == "linux" and target_arch == "riscv64":
         return HostedCCompilerPlan(requires_cross: true, supported: true, command: "riscv64-linux-gnu-gcc")
     HostedCCompilerPlan(requires_cross: true, supported: false, command: "")
@@ -285,8 +280,6 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     if include_stage4_legacy_compat:
         sources = sources.push("runtime_legacy_core")
         objects = objects.push("{object_prefix}runtime_legacy_core{ext}")
-        sources = sources.push("runtime_sqlite")
-        objects = objects.push("{object_prefix}runtime_sqlite{ext}")
     if include_dynload:
         sources = sources.push("runtime_dynload")
         objects = objects.push("{object_prefix}runtime_dynload{ext}")
@@ -313,10 +306,6 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # MSVC cl.exe flags (/Gy enables function-level linking for /OPT:REF)
             val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
             comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
-            if name == "runtime_sqlite":
-                # Keep the provider's undefined-symbol envelope deterministic.
-                comp_args.push("/GS-")
-                comp_args.push("/Oi-")
         else:
             # GCC/Clang flags (-fPIC only on Unix, not needed on Windows)
             # -ffunction-sections -fdata-sections: emit each function/data in its own
@@ -329,10 +318,6 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push("-ffunction-sections")
             comp_args.push("-fdata-sections")
             comp_args.push("-std=gnu11")
-            if name == "runtime_sqlite":
-                # Match the audited provider build: no compiler-added helpers.
-                comp_args.push("-fno-stack-protector")
-                comp_args.push("-fno-builtin")
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")
             # Explicit opt-in: the resulting binary requires an RVV-capable CPU.
@@ -343,9 +328,6 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(rt_dir)
             comp_args.push("-I")
             comp_args.push("{rt_dir}/platform")
-            if name == "runtime_sqlite" and host_os() == "freebsd":
-                comp_args.push("-I")
-                comp_args.push("/usr/local/include")
             comp_args.push("-o")
             comp_args.push(obj_path)
             comp_args.push(src_path)

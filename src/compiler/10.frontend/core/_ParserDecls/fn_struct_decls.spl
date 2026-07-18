@@ -52,6 +52,7 @@ use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_se
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
@@ -61,6 +62,7 @@ use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backin
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, par_struct_names}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 
@@ -81,37 +83,45 @@ fn parser_skip_tilde_if_present():
     if par_kind_get() == 123:
         parser_advance()
 
-fn parser_current_token_is_param_name() -> bool:
-    # Accept IDENT, SELF, UNDERSCORE, or any keyword as parameter name (e.g. cli, mcp, type)
-    val is_ident: bool = par_kind_get() == TOK_IDENT
-    val is_self: bool = par_kind_get() == TOK_KW_SELF
-    val is_under: bool = par_kind_get() == TOK_UNDERSCORE
-    val epn_kw_name: text = tok_kind_name(par_kind_get())
-    val is_kw: bool = keyword_lookup(epn_kw_name) == par_kind_get()
-    is_ident or is_self or is_under or is_kw
+fn parser_skip_mut_if_present() -> bool:
+    # Skip a leading `mut` modifier in a parameter declaration (`mut buf: [u8]`).
+    # `mut` lexes as a plain identifier (kind 6) — it is NOT reserved, so it CAN
+    # be used as a parameter name (`fn f(mut: i32)`). Consuming it on a bare
+    # text match would wrongly eat that parameter's name. Peek one token ahead
+    # (save/advance/check/restore, the idiom used by parser_stmts.spl's `me`
+    # disambiguation and parser_expr.spl's try_skip_ident_generic_args) and only
+    # treat `mut` as the modifier when the following token is itself a valid
+    # parameter-name token (identifier or `self`) — i.e. `mut buf`/`mut self`,
+    # not `mut:` or `mut)` where `mut` is the parameter name.
+    # Returns true when a `mut` modifier was actually consumed, so callers can
+    # thread the marker into PARAM_MUTS (native_freefn_mut_param_no_mutate):
+    # a free-function `mut` param must reach MIR lowering to bind by-reference
+    # instead of taking the Bug #167 defensive struct-value-copy.
+    if par_kind_get() == 6 and par_text_get() == "mut":
+        val (mut_snap_nums, mut_snap_txts) = lex_snapshot_save()
+        val (mut_tok_nums, mut_tok_text) = parser_tok_save()
+        parser_advance()
+        val next_is_param_name = par_kind_get() == 6 or par_kind_get() == 38
+        lex_snapshot_restore(mut_snap_nums, mut_snap_txts)
+        parser_tok_restore(mut_tok_nums, mut_tok_text)
+        if next_is_param_name:
+            parser_advance()
+            return true
+    false
 
 fn parser_expect_param_name():
-    if parser_current_token_is_param_name():
+    # Accept IDENT, SELF, UNDERSCORE, or any keyword as parameter name (e.g. cli, mcp, type)
+    val is_ident: bool = par_kind_get() == 6
+    val is_self: bool = par_kind_get() == 38
+    val is_under: bool = par_kind_get() == 169
+    val epn_kw_name: text = tok_kind_name(par_kind_get())
+    val is_kw: bool = keyword_lookup(epn_kw_name) == par_kind_get()
+    val is_valid: bool = is_ident or is_self or is_under or is_kw
+    if is_valid:
         parser_advance()
     else:
         parser_error("expected parameter name")
         parser_advance()
-
-fn parser_consume_param_name_and_mut() -> (text, bool):
-    # `mut` is contextual: `mut counts: T` marks counts mutable, while
-    # `mut: T`, `mut,`, and `mut)` use mut as the parameter name. Consume once
-    # and decide from the current token; lexer snapshots/backtracking can
-    # restore the token stream out of sync with the parser's current token.
-    if par_kind_get() == TOK_IDENT and par_text_get() == "mut":
-        parser_advance()
-        if parser_current_token_is_param_name():
-            val name = par_text_get()
-            parser_advance()
-            return (name, true)
-        return ("mut", false)
-    val name = par_text_get()
-    parser_expect_param_name()
-    (name, false)
 
 fn is_domain_block_kind(name: text) -> bool:
     name == "schema" or
@@ -346,7 +356,9 @@ fn parse_fn_decl(is_async: i64) -> i64:
         if par_kind_get() != 141:
             # First parameter (skip ~ keyword-only marker + optional `mut` modifier)
             parser_skip_tilde_if_present()
-            val (pname, p0_is_mut) = parser_consume_param_name_and_mut()
+            val p0_is_mut = parser_skip_mut_if_present()
+            val pname = par_text_get()
+            parser_expect_param_name()
             param_names.push(pname)
             param_muts.push(if p0_is_mut: 1 else: 0)
             var ptype = 0
@@ -368,7 +380,9 @@ fn parse_fn_decl(is_async: i64) -> i64:
                 if par_kind_get() == 141:
                     break
                 parser_skip_tilde_if_present()
-                val (pn, pn_is_mut) = parser_consume_param_name_and_mut()
+                val pn_is_mut = parser_skip_mut_if_present()
+                val pn = par_text_get()
+                parser_expect_param_name()
                 param_names.push(pn)
                 param_muts.push(if pn_is_mut: 1 else: 0)
                 var pt = 0
@@ -680,20 +694,6 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             continue
 
         # Handle methods in class/struct body
-        if par_kind_get() == TOK_KW_PUB:
-            parser_advance()
-            var public_method_id: i64 = -1
-            if par_kind_get() == TOK_KW_STATIC:
-                public_method_id = parse_class_body_method(struct_name, true, false)
-            elif par_kind_get() == TOK_KW_FN:
-                public_method_id = parse_class_body_method(struct_name, false, false)
-            elif par_kind_get() == TOK_KW_ME:
-                public_method_id = parse_class_body_method(struct_name, false, true)
-            if public_method_id >= 0:
-                decl_set_visibility_text(public_method_id, "public")
-                class_method_ids.push(public_method_id)
-                continue
-            parser_error("expected 'static fn', 'fn', or 'me' after 'pub' in class body")
         if par_kind_get() == 30:
             val sm_id = parse_class_body_method(struct_name, true, false)
             if sm_id >= 0:

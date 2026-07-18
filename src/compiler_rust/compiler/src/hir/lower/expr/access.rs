@@ -261,32 +261,6 @@ impl Lowerer {
                 })
             }
             Err(LowerError::CannotInferFieldType { struct_name, .. }) => {
-                // Builtin-typed receivers (String/Array/...) have no real
-                // struct declaration to search for a `len` field -- field-type
-                // inference for the bare-field spelling (`c.len`, no parens)
-                // then depends entirely on `resolve_global_field_info`'s
-                // name-matching heuristic over every struct discovered in this
-                // compilation unit's closure. Under `--entry-closure` with a
-                // trivial no-`use` entry, nothing is reachable so the heuristic
-                // has zero candidates and this whole branch hard-errors
-                // ("cannot infer field type: struct 'String' field 'len'"),
-                // even though the identical `.len()` method-call spelling on
-                // the very same receiver already resolves correctly and
-                // unconditionally via `lower_builtin_method_call`, which keys
-                // off the receiver's actual resolved HirType (HirType::String /
-                // HirType::Array), not on any reachable global struct defs.
-                // Whole-program (non-closure) builds mask this because some
-                // unrelated struct with a `len` field is almost always
-                // reachable -- but resolving through that heuristic there is
-                // ALSO wrong: it borrows that unrelated struct's field index,
-                // and a bare `c.len` on a real string reads the wrong byte
-                // offset (proven: a probe with a reachable `struct Foo: len:
-                // i64` field builds but returns a garbage value, not the real
-                // string length). Try the builtin dispatch first, before this
-                // heuristic, for both correctness and the entry-closure gap.
-                if let Some(builtin_expr) = self.lower_builtin_method_call(&recv_hir, field, &[], ctx)? {
-                    return Ok(builtin_expr);
-                }
                 if let Some(projected) = self.try_lower_result_projection(&recv_hir, field) {
                     return Ok(projected);
                 }

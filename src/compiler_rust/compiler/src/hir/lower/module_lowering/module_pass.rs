@@ -11,7 +11,7 @@ use crate::hir::types::{
     HirType, HirUiPolicy, HirUiPolicyItem, TypeId,
 };
 
-pub(crate) fn try_const_eval(expr: &Expr) -> Option<i64> {
+fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
         // RuntimeValue nil is the tagged sentinel 0x3. Recording it here keeps
@@ -1026,19 +1026,6 @@ impl Lowerer {
         }
     }
 
-    fn populate_global_data_types(&mut self) {
-        let Some(map) = self.global_data_types.clone() else {
-            return;
-        };
-        for (name, source_type) in map.iter() {
-            if self.globals.contains_key(name) {
-                continue;
-            }
-            let resolved = self.resolve_type(source_type).unwrap_or(TypeId::ANY);
-            self.globals.insert(name.clone(), resolved);
-        }
-    }
-
     /// M12 3b: record each free function's parameter default-value expressions
     /// so omitted trailing arguments can be filled at call sites (`lower_call`).
     /// Captured here (from the AST) because the HIR function *type* carries only
@@ -1159,10 +1146,8 @@ impl Lowerer {
             }
         }
 
-        // Pass 0.5c: seed package-selected data globals and upgrade imported
-        // return types that resolved to ANY before
+        // Pass 0.5c: upgrade imported return types that resolved to ANY before
         // their home module was loaded (now that all imports are registered).
-        self.populate_global_data_types();
         self.populate_global_fn_return_types();
 
         // First pass: collect type and function declarations (with full field resolution)

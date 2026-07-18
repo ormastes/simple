@@ -240,12 +240,8 @@ fn pmm_init(boot_info: BootOutputPort):
             _pmm_free_pages = _pmm_free_pages - 1
         low_page = low_page + 1
 
-    # Step 8: Pre-allocate refcount slab sized to physical memory
-    g_page_refcounts = []
-    var rc_idx: u64 = 0
-    while rc_idx < total_pages:
-        g_page_refcounts.push(0)
-        rc_idx = rc_idx + 1
+    # Step 8: Seed refcounts from the final allocation bitmap.
+    _pmm_initialize_refcounts()
 
     log_raw_println("[PMM] Refcount slab: {total_pages} entries ({total_pages * 2 / 1024}KB)")
     log_raw_println("[PMM] Initialization complete")
@@ -295,6 +291,7 @@ fn pmm_init_identity_range(total_memory: u64, kernel_start: u64, kernel_end: u64
     val reserved_pages = _align_up(bitmap_end, PAGE_SIZE) / PAGE_SIZE
     _bitmap_initialize_free_with_reserved_prefix(bitmap_addr, bitmap_bytes, reserved_pages)
     _pmm_set_state(bitmap_addr, total_pages, total_pages - reserved_pages, reserved_pages)
+    _pmm_initialize_refcounts()
 
     log_raw_println("[PMM] scalar init complete")
     true
@@ -319,6 +316,7 @@ fn _pmm_alloc_page_address() -> u64:
             _pmm_last_alloc_index = index + 1
             if _pmm_last_alloc_index >= _pmm_total_pages:
                 _pmm_last_alloc_index = 0
+            _pmm_set_refcount(index, 1)
             return index * PAGE_SIZE
 
         index = index + 1
@@ -338,6 +336,8 @@ fn pmm_alloc_page() -> PageFrame?:
 fn _pmm_free_page_index(index: u64):
     if index >= _pmm_total_pages:
         return
+    if (g_page_refcounts.len() as u64) > index:
+        g_page_refcounts[index as i32] = 0
     if _bitmap_test_addr(_pmm_bitmap_addr, index):
         _bitmap_clear_addr(_pmm_bitmap_addr, index)
         _pmm_free_pages = _pmm_free_pages + 1
@@ -378,6 +378,7 @@ fn pmm_alloc_pages(count: u64) -> PhysAddr?:
             var i: u64 = 0
             while i < count:
                 _bitmap_set_addr(_pmm_bitmap_addr, start + i)
+                _pmm_set_refcount(start + i, 1)
                 i = i + 1
             _pmm_free_pages = _pmm_free_pages - count
             return PhysAddr(addr: start * PAGE_SIZE)
@@ -430,6 +431,19 @@ fn pmm_free_memory() -> u64:
 
 var g_page_refcounts: [u16] = []
 
+fn _pmm_set_refcount(index: u64, count: u16):
+    while (g_page_refcounts.len() as u64) <= index:
+        g_page_refcounts.push(0)
+    g_page_refcounts[index as i32] = count
+
+fn _pmm_initialize_refcounts():
+    g_page_refcounts = []
+    var index: u64 = 0
+    while index < _pmm_total_pages:
+        val count: u16 = if _bitmap_test_addr(_pmm_bitmap_addr, index): 1 else 0
+        g_page_refcounts.push(count)
+        index = index + 1
+
 fn pmm_ref_page(pa: u64):
     """Increment reference count for the page containing physical address `pa`.
 
@@ -466,6 +480,14 @@ fn pmm_unref_page(pa: u64) -> u16:
     val next = cur - 1
     g_page_refcounts[pfn as i32] = next
     next
+
+fn pmm_put_page(pa: u64):
+    """Drop one owner or mapping and free the frame on the last drop."""
+    if pmm_get_refcount(pa) == 0:
+        return
+    val remaining = pmm_unref_page(pa)
+    if remaining == 0:
+        pmm_free_page_raw(pa)
 
 fn pmm_get_refcount(pa: u64) -> u16:
     """Read the current reference count for the page at physical address `pa`."""

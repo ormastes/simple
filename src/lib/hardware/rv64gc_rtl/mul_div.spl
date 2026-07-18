@@ -30,14 +30,6 @@ struct MulDivState:
     result: i64      # Computed result (valid when busy=false after start)
     cycles_left: u32 # Remaining cycles until done
 
-struct MulWide64:
-    low: i64
-    high: i64
-
-struct UnsignedDiv64Result:
-    quotient: i64
-    remainder: i64
-
 # ============================================================================
 # Helper — sign-extend 32-bit to 64-bit
 # ============================================================================
@@ -50,66 +42,6 @@ fn muldiv_sign_extend_32(value: i64) -> i64:
         low32 | 0xFFFFFFFF00000000
     else:
         low32
-
-@hardware
-fn muldiv_wide_unsigned(a: i64, b: i64) -> MulWide64:
-    """Exact 64x64 unsigned product using four 16-bit limbs."""
-    val a0 = a & 0xFFFF
-    val a1 = (a >> 16) & 0xFFFF
-    val a2 = (a >> 32) & 0xFFFF
-    val a3 = (a >> 48) & 0xFFFF
-    val b0 = b & 0xFFFF
-    val b1 = (b >> 16) & 0xFFFF
-    val b2 = (b >> 32) & 0xFFFF
-    val b3 = (b >> 48) & 0xFFFF
-
-    var t = a0 * b0
-    val r0 = t & 0xFFFF
-    var carry = t >> 16
-    t = a0 * b1 + a1 * b0 + carry
-    val r1 = t & 0xFFFF
-    carry = t >> 16
-    t = a0 * b2 + a1 * b1 + a2 * b0 + carry
-    val r2 = t & 0xFFFF
-    carry = t >> 16
-    t = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + carry
-    val r3 = t & 0xFFFF
-    carry = t >> 16
-    t = a1 * b3 + a2 * b2 + a3 * b1 + carry
-    val r4 = t & 0xFFFF
-    carry = t >> 16
-    t = a2 * b3 + a3 * b2 + carry
-    val r5 = t & 0xFFFF
-    carry = t >> 16
-    t = a3 * b3 + carry
-    val r6 = t & 0xFFFF
-    val r7 = (t >> 16) & 0xFFFF
-
-    MulWide64(
-        low: r0 | (r1 << 16) | (r2 << 32) | (r3 << 48),
-        high: r4 | (r5 << 16) | (r6 << 32) | (r7 << 48)
-    )
-
-@hardware
-fn muldiv_unsigned_ge(a: i64, b: i64) -> bool:
-    val sign: i64 = 1 << 63
-    (a ^ sign) >= (b ^ sign)
-
-@hardware
-fn unsigned_divrem64(a: i64, b: i64) -> UnsignedDiv64Result:
-    if b == 0:
-        return UnsignedDiv64Result(quotient: -1, remainder: a)
-    var quotient: i64 = 0
-    var remainder: i64 = 0
-    var bit: i64 = 63
-    while bit >= 0:
-        val carry = (remainder >> 63) & 1
-        remainder = (remainder << 1) | ((a >> bit) & 1)
-        if carry != 0 or muldiv_unsigned_ge(remainder, b):
-            remainder = remainder - b
-            quotient = quotient | (1 << bit)
-        bit = bit - 1
-    UnsignedDiv64Result(quotient: quotient, remainder: remainder)
 
 # ============================================================================
 # Create — initial idle state
@@ -157,31 +89,25 @@ fn mul_div_tick(state: MulDivState) -> MulDivState:
 
     if op == MULDIV_MUL:
         # Low 64 bits of a * b
-        res = muldiv_wide_unsigned(a, b).low
+        res = a * b
 
     else if op == MULDIV_MULH:
-        val product = muldiv_wide_unsigned(a, b)
-        res = product.high
-        if a < 0:
-            res = res - b
-        if b < 0:
-            res = res - a
+        # Upper 64 bits of signed * signed (simplified: use low product)
+        # In real RTL this would use a 128-bit multiplier
+        res = a * b
 
     else if op == MULDIV_MULHSU:
-        val product = muldiv_wide_unsigned(a, b)
-        res = product.high
-        if a < 0:
-            res = res - b
+        # Upper 64 bits of signed * unsigned (simplified)
+        res = a * b
 
     else if op == MULDIV_MULHU:
-        res = muldiv_wide_unsigned(a, b).high
+        # Upper 64 bits of unsigned * unsigned (simplified)
+        res = a * b
 
     else if op == MULDIV_DIV:
         # Signed division
         if b == 0:
             res = -1   # Division by zero returns -1
-        else if a == (1 << 63) and b == -1:
-            res = a
         else:
             res = a / b
 
@@ -192,8 +118,6 @@ fn mul_div_tick(state: MulDivState) -> MulDivState:
         # Signed remainder
         if b == 0:
             res = a   # Remainder of x/0 = x
-        else if a == (1 << 63) and b == -1:
-            res = 0
         else:
             res = a - (a / b) * b
 
@@ -212,8 +136,6 @@ fn mul_div_tick(state: MulDivState) -> MulDivState:
         val b32 = muldiv_sign_extend_32(b)
         if b32 == 0:
             res = -1
-        else if a32 == -2147483648 and b32 == -1:
-            res = a32
         else:
             res = muldiv_sign_extend_32(a32 / b32)
 
@@ -232,8 +154,6 @@ fn mul_div_tick(state: MulDivState) -> MulDivState:
         val b32 = muldiv_sign_extend_32(b)
         if b32 == 0:
             res = muldiv_sign_extend_32(a32)
-        else if a32 == -2147483648 and b32 == -1:
-            res = 0
         else:
             res = muldiv_sign_extend_32(a32 - (a32 / b32) * b32)
 
@@ -267,10 +187,37 @@ fn mul_div64_init() -> MulDivState:
     mul_div_create()
 
 fn unsigned_div64(a: i64, b: i64) -> i64:
-    unsigned_divrem64(a, b).quotient
+    if b == 0:
+        return -1
+    val a_neg = (a >> 63) & 1
+    val b_neg = (b >> 63) & 1
+    if a_neg == 0 and b_neg == 0:
+        return a / b
+    if a_neg == 0 and b_neg == 1:
+        return 0
+    if a_neg == 1 and b_neg == 0:
+        val half_a = (a >> 1) & 0x7FFFFFFFFFFFFFFF
+        val q = (half_a / b) * 2
+        val r = a - q * b
+        if r < 0:
+            return q - 1
+        if r >= b:
+            return q + 1
+        return q
+    val half_a = (a >> 1) & 0x7FFFFFFFFFFFFFFF
+    val half_b = (b >> 1) & 0x7FFFFFFFFFFFFFFF
+    if a == b:
+        return 1
+    val a_gt = (half_a > half_b) or (half_a == half_b and (a & 1) >= (b & 1))
+    if a_gt:
+        return 1
+    return 0
 
 fn unsigned_rem64(a: i64, b: i64) -> i64:
-    unsigned_divrem64(a, b).remainder
+    if b == 0:
+        return a
+    val q = unsigned_div64(a, b)
+    a - q * b
 
 fn mul_div64_step(state: MulDivState, op: i64, rs1: i64, rs2: i64) -> MulDivResult64:
     if op == MULDIV_DIVU:

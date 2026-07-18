@@ -19,14 +19,7 @@
 # - Lazy directory traversal
 # - Pattern matching with glob syntax
 
-use src.std.platform (is_windows, dir_sep, normalize_path, is_absolute_path as platform_is_absolute, join_path)
-use std.glob.{glob_match}
-use std.path.{basename as std_path_basename}
-use std.path.{extension as std_path_extension}
-use std.path.{parent_dir_option as std_path_parent_dir_option}
-use std.path.{split_path as std_path_split_path}
-use std.path.{stem as std_path_stem}
-use std.path.{with_extension as std_path_with_extension}
+use src.std.platform (is_windows, dir_sep, normalize_path as platform_normalize, is_absolute_path as platform_is_absolute, join_path)
 
 # ============================================================================
 # Path - Path Manipulation
@@ -89,7 +82,7 @@ class Path:
             Path(path:"/a/b/../c").normalize()  # "/a/c"
             Path(path:"C:/Users/Name").normalize()  # "C:\Users\Name" (Windows)
         """
-        val normalized = normalize_path(self.path)
+        val normalized = platform_normalize(self.path)
         Path(path: normalized)
 
     fn parent() -> Path?:
@@ -101,7 +94,7 @@ class Path:
         Example:
             Path(path:"/home/user").parent()  # Some("/home")
         """
-        val parent = std_path_parent_dir_option(self.path)
+        val parent = path_parent(self.path)
         match parent:
             Some(parent_path):
                 Some(Path(path: parent_path))
@@ -197,13 +190,13 @@ struct FileMetadata:
         print "Size: {metadata.size} bytes"
         print "Is file: {metadata.is_file}"
     """
-    size: i64           # File size in bytes
+    size: usize         # File size in bytes
     is_file: bool       # Is regular file
     is_dir: bool        # Is directory
     is_symlink: bool    # Is symbolic link
     readonly: bool      # Is read-only
-    modified: i64       # Last modified time (Unix timestamp)
-    created: i64        # Creation time (Unix timestamp)
+    modified: usize     # Last modified time (Unix timestamp)
+    created: usize      # Creation time (Unix timestamp)
 
 # ============================================================================
 # File - File Operations
@@ -611,36 +604,20 @@ fn list_dir(path: text) -> [text]?:
 # ============================================================================
 
 # Path operations
-# NOTE(stage4_stub_symbol_plan step 2): the remaining bare declarations have no
-# ABI-compatible runtime owner for this monolithic Path API. Parent, filename,
-# extension, stem, and components reuse the existing pure-Simple std.path owners.
+# NOTE(stage4_stub_symbol_plan step 2): no rt_-prefixed runtime symbols exist
+# for path manipulation anywhere in src/runtime/{runtime.h,runtime.c,
+# runtime_native.c} (grepped for rt_path_*) — left as bare externs, marked
+# unresolvable-here (would require new pure-Simple or new runtime
+# implementations, out of scope of the naming-mismatch fix).
 extern fn path_join(path: text, other: text) -> text
 extern fn path_normalize(path: text) -> text
-fn path_filename(path_value: text) -> text?:
-    val path = path_value.replace("\\", "/")
-    if path == "" or path.ends_with("/"):
-        return nil
-    val value = std_path_basename(path)
-    if value == "": nil else: value
-fn path_extension(path_value: text) -> text?:
-    val value = std_path_extension(path_filename(path_value) ?? "")
-    if value == "": nil else: value
-fn path_stem(path_value: text) -> text?:
-    val value = std_path_stem(path_value.replace("\\", "/"))
-    if value == "": nil else: value
-fn path_components(path_value: text) -> [text]:
-    val normalized = path_value.replace("\\", "/")
-    val parts = std_path_split_path(normalized)
-    if not normalized.starts_with("/"):
-        return parts
-    var rooted: [text] = []
-    rooted = rooted.push("/")
-    for part in parts:
-        rooted = rooted.push(part)
-    rooted
+extern fn path_parent(path: text) -> text?
+extern fn path_filename(path: text) -> text?
+extern fn path_extension(path: text) -> text?
+extern fn path_stem(path: text) -> text?
+extern fn path_components(path: text) -> [text]
 extern fn path_is_absolute(path: text) -> bool
-fn path_with_extension(path: text, ext: text) -> text:
-    std_path_with_extension(path, ext)
+extern fn path_with_extension(path: text, ext: text) -> text
 
 # File operations — renamed to the real rt_-prefixed runtime symbols
 # (src/runtime/runtime.h + runtime_native.c).
@@ -655,37 +632,10 @@ extern fn rt_file_move(old_path: text, new_path: text) -> bool
 extern fn rt_file_copy(src: text, dest: text) -> bool
 extern fn rt_file_size(path: text) -> usize?
 
-extern fn rt_stat_open(path: text) -> i64
-extern fn rt_file_stat_size(handle: i64) -> i64
-extern fn rt_file_stat_mtime(handle: i64) -> i64
-extern fn rt_file_stat_is_dir(handle: i64) -> bool
-extern fn rt_file_stat_is_file(handle: i64) -> bool
-extern fn rt_file_stat_is_symlink(handle: i64) -> bool
-extern fn rt_file_stat_readonly(handle: i64) -> bool
-extern fn rt_file_stat_created(handle: i64) -> i64
-extern fn rt_file_stat_free(handle: i64)
-
-fn file_metadata(path: text) -> FileMetadata?:
-    val handle = rt_stat_open(path)
-    if handle == 0:
-        return nil
-    val size = rt_file_stat_size(handle)
-    val modified = rt_file_stat_mtime(handle)
-    val is_dir = rt_file_stat_is_dir(handle)
-    val is_file = rt_file_stat_is_file(handle)
-    val is_symlink = rt_file_stat_is_symlink(handle)
-    val readonly = rt_file_stat_readonly(handle)
-    val created = rt_file_stat_created(handle)
-    rt_file_stat_free(handle)
-    FileMetadata(
-        size: size,
-        is_file: is_file,
-        is_dir: is_dir,
-        is_symlink: is_symlink,
-        readonly: readonly,
-        modified: modified,
-        created: created
-    )
+# NOTE: no rt_ symbol returns a full FileMetadata struct (size/is_file/
+# is_dir/is_symlink/readonly/modified/created) — only rt_file_stat/
+# rt_file_size (single scalars) exist. Left as bare extern, unresolvable-here.
+extern fn file_metadata(path: text) -> FileMetadata?
 
 # file_rename has no rt_file_rename runtime symbol; the real symbol is
 # rt_file_move (runtime_native.c:2546, same (src,dst)->bool contract) —
@@ -736,49 +686,10 @@ fn walk_dir(root: text) -> [DirEntry]:
         entries.push(DirEntry(path: path, name: name, is_file: not is_dir, is_dir: is_dir))
     entries
 
-# Glob pattern matching stays pure-Simple; no rt_glob_* runtime ABI exists.
-fn glob_walk_root(pattern: text) -> text:
-    var wildcard = pattern.len()
-    val star = pattern.index_of("*") ?? -1
-    val question = pattern.index_of("?") ?? -1
-    val bracket = pattern.index_of("[") ?? -1
-    if star >= 0 and star < wildcard:
-        wildcard = star
-    if question >= 0 and question < wildcard:
-        wildcard = question
-    if bracket >= 0 and bracket < wildcard:
-        wildcard = bracket
-    val prefix = pattern.substring(0, wildcard)
-    var slash = prefix.last_index_of("/") ?? -1
-    val backslash = prefix.last_index_of("\\") ?? -1
-    if backslash > slash:
-        slash = backslash
-    if slash < 0:
-        return "."
-    if slash == 0:
-        return prefix.substring(0, 1)
-    if slash == 2 and prefix.len() >= 3 and prefix[1:2] == ":":
-        return prefix.substring(0, 3)
-    prefix.substring(0, slash)
-
-fn glob_find(pattern: text) -> [text]:
-    val root = glob_walk_root(pattern)
-    val explicit_dot = pattern.starts_with("./") or pattern.starts_with(".\\")
-    var matches: [text] = []
-    for path in rt_dir_walk(root):
-        val candidate = glob_candidate_path(path, root, explicit_dot)
-        if glob_match(candidate, pattern):
-            matches.push(candidate)
-    matches
-
-fn glob_candidate_path(path: text, root: text, explicit_dot: bool) -> text:
-    var candidate = path
-    if root == "." and not explicit_dot and (path.starts_with("./") or path.starts_with(".\\")):
-        candidate = path.substring(2, path.len())
-    candidate.replace("\\", "/")
-
-fn glob_matches(pattern: text, path: text) -> bool:
-    glob_match(path, pattern)
+# Glob pattern matching
+# NOTE: no rt_glob_* runtime symbols exist anywhere — unresolvable-here.
+extern fn glob_find(pattern: text) -> [text]
+extern fn glob_matches(pattern: text, path: text) -> bool
 
 # ============================================================================
 # Exports

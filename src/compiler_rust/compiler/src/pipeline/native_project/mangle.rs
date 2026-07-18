@@ -697,32 +697,6 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
         || name.starts_with("sffi_")
         || name.starts_with("rc_box_")
         || name.starts_with("arc_box_")
-        || name.strip_prefix("str.").is_some_and(|method| {
-            matches!(
-                method,
-                "len"
-                    | "contains"
-                    | "starts_with"
-                    | "ends_with"
-                    | "concat"
-                    | "char_at"
-                    | "char_code_at"
-                    | "join"
-                    | "trim"
-                    | "trim_start"
-                    | "trim_end"
-                    | "split"
-                    | "replace"
-                    | "to_upper"
-                    | "upper"
-                    | "to_lower"
-                    | "lower"
-                    | "slice"
-                    | "substring"
-                    | "rfind"
-                    | "last_index_of"
-            )
-        })
         || (name.contains('.') && {
             let prefix = name.split('.').next().unwrap_or("");
             !prefix.is_empty()

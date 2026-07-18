@@ -72,12 +72,3 @@ with the compositor session instead of allocating per-frame.
 **Nested WmContentFrame compositing** remains stable; the heap pressure is 
 upstream in the first-frame initialization path, not in the embedding/nesting 
 machinery itself. See glass-render debugging notes under the rendering layer expert.
-
-**RENDER MILESTONE — offscreen reuse applied:** commit 77acb3e4b8b wires 
-`software_backend: sw` in the offscreen constructor, eliminating the per-frame 
-allocation storm and enabling stable 99.83% desktop framebuffer coverage 
-(3840×2160, 13 colors, zero heap allocations). The invariant holds: nested 
-child surfaces (windows, taskbar, embedded app frames) all render to embedded 
-offscreen targets and composite into the parent as before; the fix is purely 
-at the compositor session level (one persistent software rasterizer per session 
-vs per-frame allocation).

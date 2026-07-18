@@ -19,20 +19,8 @@ use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_a
 use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_i64}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use std.sffi.codegen.*
-use std.alloc.sffi.{rt_dict_values}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
-extern fn rt_dict_contains(dict: i64, key: i64) -> bool
-extern fn rt_value_int(value: i64) -> i64
-extern fn rt_value_as_int(value: i64) -> i64
-extern fn rt_value_as_float(value: i64) -> f64
-extern fn rt_value_as_bool(value: i64) -> bool
-
-fn cranelift_dict_contains_i64(dict: i64, key: i64) -> bool:
-    rt_dict_contains(dict, rt_value_int(key))
 
 fn cranelift_file_read_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path)
@@ -105,21 +93,20 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
     print "[cranelift-direct] module"
 
     val global_handles = declare_module_statics(cl_module, module)
-    if cranelift_dict_contains_i64(global_handles, STATICS_FAILED_KEY):
+    if global_handles.has(STATICS_FAILED_KEY):
         cranelift_free_module(cl_module)
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to declare module statics"))
 
     var func_handles: Dict<text, i64> = {}
-    val functions: [MirFunction] = rt_dict_values(module.functions)
-    for func in functions:
+    for func in module.functions.values():
         val emit_name = cl_function_emit_name(func.name)
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
         val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
         func_handles[func.name] = handle
 
-    for func in functions:
+    for func in module.functions.values():
         print "[cranelift-direct] compile {func.name}"
         val result = compile_function(cl_module, func, func_handles, global_handles)
         if not result:
@@ -163,22 +150,21 @@ impl Codegen for CraneliftCodegenAdapter:
                 "Failed to create Cranelift AOT module"))
 
         val global_handles = declare_module_statics(cl_module, module)
-        if cranelift_dict_contains_i64(global_handles, STATICS_FAILED_KEY):
+        if global_handles.has(STATICS_FAILED_KEY):
             cranelift_free_module(cl_module)
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to declare module statics"))
 
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
-        val functions: [MirFunction] = rt_dict_values(module.functions)
-        for func in functions:
+        for func in module.functions.values():
             val sig = build_signature(func.signature, func.name == "main")
             val emit_name = cl_function_emit_name(func.name)
             val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
             func_handles[func.name] = handle
 
         # Second pass: compile each function
-        for func in functions:
+        for func in module.functions.values():
             val result = compile_function(cl_module, func, func_handles, global_handles)
             if not result:
                 cranelift_free_module(cl_module)
@@ -284,8 +270,7 @@ val STATICS_FAILED_KEY: i64 = -1
 
 fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>:
     var handles: Dict<i64, i64> = {}
-    val statics: [MirStatic] = rt_dict_values(module.statics)
-    for static_ in statics:
+    for static_ in module.statics.values():
         if not cranelift_static_init_supported(static_):
             print "[cranelift] unsupported module static '{static_.name}' (non-scalar type or non-const init)"
             handles[STATICS_FAILED_KEY] = 1
@@ -335,6 +320,8 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
 
     # Allocate stack slots for all locals
     for local in func.locals:
+        if not local.?:
+            continue
         # 8-byte slot floor: Bool lowers to i64 in this backend (see
         # mir_type_to_cl), so a 1-byte Bool slot would be clobber-overflowed
         # by i64 stores. Widening is safe (stack waste only).
@@ -354,10 +341,12 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     # Store function params into their stack slots
     var param_idx = 0
     for local in func.locals:
+        if not local.?:
+            continue
         match local.kind:
             case Arg(index):
                 val param_val = cranelift_block_param(ctx, entry_block, index)
-                if cranelift_dict_contains_i64(slot_map, local.id.id):
+                if slot_map.has(local.id.id):
                     val addr = cranelift_stack_addr(ctx, slot_map[local.id.id], 0)
                     cranelift_store(ctx, param_val, addr, 0)
                 value_map[local.id.id] = param_val
@@ -371,9 +360,6 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         val cl_block = block_map[block.id.id]
 
         if i > 0:
-            # SSA handles are valid only in the block where they were emitted.
-            # Cross-block values flow through stack slots and phi edge stores.
-            value_map = {}
             cranelift_switch_to_block(ctx, cl_block)
 
         # Compile instructions. Keep a small adjacent-pattern window so
@@ -391,7 +377,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
                     val c = cl_translate_operand(ctx, cl_module, plan.addend, value_map, slot_map, func)
                     val result = translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_gemm_add", [a, b, c])
                     value_map[plan.dest.id] = result
-                    if cranelift_dict_contains_i64(slot_map, plan.dest.id):
+                    if slot_map.has(plan.dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[plan.dest.id], 0)
                         cranelift_store(ctx, result, addr, 0)
                     inst_index = inst_index + 2
@@ -409,23 +395,8 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         return false
 
     # Define function in module
-    #
-    # bug rt_string_data_cranelift_direct_wall_2026-07-18 (arg-binding facet):
-    # `cranelift_aot_define_function` is declared `(module: i64, ctx: i64) ->
-    # bool` (src/lib/nogc_sync_mut/sffi/codegen.spl +
-    # src/lib/nogc_sync_mut/ffi/codegen.spl) and forwards `rt_string_data`/
-    # `rt_string_len` placeholders `0, 0` for the extern's unused
-    # `name_ptr`/`name_len` params -- the Rust implementation
-    # (`rt_cranelift_aot_define_function`, codegen/cranelift_sffi.rs:1523)
-    # never reads them; it recovers the function's name from its own
-    # `FINISHED_FUNCS` state (keyed by `ctx`, captured back at
-    # `cranelift_begin_function`). This call site passed a 3rd, stale
-    # `emit_name` argument the 2-param wrapper never declared, so the
-    # interpreted "cranelift-direct" path died with "function expects 2
-    # argument(s), but more were provided" on every native-build (even the
-    # single-function `fn main(): print(42)` probe). Drop the redundant arg.
     val handle = func_handles[func.name]
-    val ok = cranelift_aot_define_function(cl_module, finished)
+    val ok = cranelift_aot_define_function(cl_module, emit_name, finished)
     ok
 
 # ============================================================================
@@ -434,7 +405,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
 
 fn store_local_result(ctx: i64, dest: LocalId, value: i64, slot_map: Dict<i64, i64>, func: MirFunction):
     val type_ = local_type(dest.id, func)
-    if cranelift_dict_contains_i64(slot_map, dest.id) and (not type_is_aggregate(type_) or type_is_runtime_handle(type_)):
+    if slot_map.has(dest.id) and (not type_is_aggregate(type_) or type_is_runtime_handle(type_)):
         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
         cranelift_store(ctx, value, addr, 0)
 
@@ -449,65 +420,25 @@ fn cl_translate_instruction(
     global_handles: Dict<i64, i64>,
     func: MirFunction
 ):
-    val inst_kind = inst.kind
-    # Native bootstrap can bind a multi-field enum arm from the enum header
-    # instead of its payload. Decode Const explicitly before source matching.
-    if rt_enum_discriminant(inst_kind) == 0x0b55abba:  # hash("Const")
-        val payload = rt_enum_payload(inst_kind)
-        val dest: LocalId = rt_tuple_get(payload, 0)
-        val value: MirConstValue = rt_tuple_get(payload, 1)
-        val type_: MirType = rt_tuple_get(payload, 2)
-        val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
-        value_map[dest.id] = cl_val
-        if cranelift_dict_contains_i64(slot_map, dest.id):
-            val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
-            cranelift_store(ctx, cl_val, addr, 0)
-        return
-
-    if rt_enum_discriminant(inst_kind) == 0x3d5f86a0:  # hash("BinOp")
-        val payload = rt_enum_payload(inst_kind)
-        val dest: LocalId = rt_tuple_get(payload, 0)
-        val op: MirBinOp = rt_tuple_get(payload, 1)
-        val left: MirOperand = rt_tuple_get(payload, 2)
-        val right: MirOperand = rt_tuple_get(payload, 3)
-        val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
-        val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-        val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
-        value_map[dest.id] = result
-        store_local_result(ctx, dest, result, slot_map, func)
-        return
-
-    if rt_enum_discriminant(inst_kind) == 0x311b931f:  # hash("Call")
-        val payload = rt_enum_payload(inst_kind)
-        val raw_dest = rt_tuple_get(payload, 0)
-        val func_op: MirOperand = rt_tuple_get(payload, 1)
-        val args: [MirOperand] = rt_tuple_get(payload, 2)
-        val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, func_handles, func)
-        if rt_enum_discriminant(raw_dest) == 0xf1987159:  # hash("Some")
-            val dest: LocalId = rt_enum_payload(raw_dest)
-            value_map[dest.id] = result
-            store_local_result(ctx, dest, result, slot_map, func)
-        return
-
-    match inst_kind:
+    match inst.kind:
         case Const(dest, value, type_):
             val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
             value_map[dest.id] = cl_val
-            if cranelift_dict_contains_i64(slot_map, dest.id):
+            if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, cl_val, addr, 0)
 
         case Copy(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val
-            if cranelift_dict_contains_i64(slot_map, dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, src_val, addr, 0)
 
         case Move(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val
-            if cranelift_dict_contains_i64(slot_map, dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, src_val, addr, 0)
 
@@ -516,7 +447,7 @@ fn cl_translate_instruction(
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
             val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
             value_map[dest.id] = result
-            if cranelift_dict_contains_i64(slot_map, dest.id):
+            if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, result, addr, 0)
 
@@ -535,7 +466,7 @@ fn cl_translate_instruction(
 
         case Alloc(dest, type_):
             # Alloc is handled by stack slot
-            if cranelift_dict_contains_i64(slot_map, dest.id):
+            if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 value_map[dest.id] = addr
 
@@ -552,7 +483,7 @@ fn cl_translate_instruction(
             cranelift_store(ctx, val_, addr, 0)
 
         case LoadGlobal(dest, symbol):
-            if not cranelift_dict_contains_i64(global_handles, symbol.id):
+            if not global_handles.has(symbol.id):
                 panic("Cranelift global load missing declaration: {symbol.id}")
             val addr = cranelift_data_addr_in_func(ctx, global_handles[symbol.id])
             if addr == 0:
@@ -562,7 +493,7 @@ fn cl_translate_instruction(
             store_local_result(ctx, dest, result, slot_map, func)
 
         case StoreGlobal(symbol, value):
-            if not cranelift_dict_contains_i64(global_handles, symbol.id):
+            if not global_handles.has(symbol.id):
                 panic("Cranelift global store missing declaration: {symbol.id}")
             val addr = cranelift_data_addr_in_func(ctx, global_handles[symbol.id])
             if addr == 0:
@@ -608,7 +539,7 @@ fn cl_translate_instruction(
                         val value = cl_translate_operand(ctx, cl_module, op, value_map, slot_map, func)
                         translate_runtime_import_call_i64(ctx, cl_module, "rt_array_push", [array, value])
                     value_map[dest.id] = array
-                    if cranelift_dict_contains_i64(slot_map, dest.id):
+                    if slot_map.has(dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         cranelift_store(ctx, array, addr, 0)
                 case Struct(_):
@@ -622,11 +553,11 @@ fn cl_translate_instruction(
                     val heap_tag = cranelift_iconst(ctx, CL_TYPE_I64, 1)
                     val tagged = cranelift_bor(ctx, base, heap_tag)
                     value_map[dest.id] = tagged
-                    if cranelift_dict_contains_i64(slot_map, dest.id):
+                    if slot_map.has(dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         cranelift_store(ctx, tagged, addr, 0)
                 case _:
-                    if cranelift_dict_contains_i64(slot_map, dest.id):
+                    if slot_map.has(dest.id):
                         val base = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         var offset = 0
                         for op in operands:
@@ -653,7 +584,7 @@ fn cl_translate_instruction(
             if dest.?:
                 val dest_id = dest.unwrap().id
                 value_map[dest_id] = result
-                if cranelift_dict_contains_i64(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     cranelift_store(ctx, result, addr, 0)
 
@@ -667,7 +598,7 @@ fn cl_translate_instruction(
             if dest.?:
                 val dest_id = dest.unwrap().id
                 value_map[dest_id] = result
-                if cranelift_dict_contains_i64(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val dest_addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     cranelift_store(ctx, result, dest_addr, 0)
 
@@ -685,11 +616,11 @@ fn cl_translate_instruction(
                 # first pair. No caller currently emits N-ary joins through
                 # this backend, so this is latent; guard it loudly rather
                 # than miscompiling silently if that ever changes.
-                if args.len() > 4 and not cranelift_dict_contains_i64(slot_map, dest.unwrap().id):
+                if args.len() > 4 and not slot_map.has(dest.unwrap().id):
                     eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
                     return
                 val dest_id = dest.unwrap().id
-                if cranelift_dict_contains_i64(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     val ty = mir_type_to_cl(local_type(dest_id, func))
                     value_map[dest_id] = cranelift_load(ctx, ty, addr, 0)
@@ -758,7 +689,7 @@ fn store_phi_incomings_for_edge(
                     case Intrinsic(dest, name, args):
                         if name == "__simple_ssa_phi" and dest.?:
                             val incoming = cranelift_phi_incoming_for_predecessor(pred.id, args)
-                            if incoming.? and cranelift_dict_contains_i64(slot_map, dest.unwrap().id):
+                            if incoming.? and slot_map.has(dest.unwrap().id):
                                 val val_ = cl_translate_operand(ctx, cl_module, incoming.unwrap(), value_map, slot_map, func)
                                 val addr = cranelift_stack_addr(ctx, slot_map[dest.unwrap().id], 0)
                                 cranelift_store(ctx, val_, addr, 0)
@@ -777,7 +708,7 @@ fn cl_translate_terminator(
 ):
     match term:
         case Goto(target):
-            if cranelift_dict_contains_i64(block_map, target.id):
+            if block_map.has(target.id):
                 store_phi_incomings_for_edge(ctx, cl_module, current_block, target, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[target.id])
 
@@ -844,10 +775,10 @@ fn cl_translate_terminator(
             if dest.?:
                 val dest_id = dest.unwrap().id
                 value_map[dest_id] = result
-                if cranelift_dict_contains_i64(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     cranelift_store(ctx, result, addr, 0)
-            if cranelift_dict_contains_i64(block_map, normal.id):
+            if block_map.has(normal.id):
                 store_phi_incomings_for_edge(ctx, cl_module, current_block, normal, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[normal.id])
 
@@ -863,25 +794,7 @@ fn cl_translate_operand(
     slot_map: Dict<i64, i64>,
     func: MirFunction
 ) -> i64:
-    val kind = operand.kind
-    val disc = rt_enum_discriminant(kind)
-    val placeholder = LocalId(id: -1)
-    if disc == rt_enum_discriminant(MirOperandKind.Copy(placeholder)) or disc == rt_enum_discriminant(MirOperandKind.Move(placeholder)):
-        val payload = rt_enum_payload(kind)
-        if payload <= 3:
-            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-        val local: LocalId = payload
-        if local.id < 0:
-            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-        return load_local(ctx, local.id, value_map, slot_map, func)
-    if disc == rt_enum_discriminant(MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())):
-        val payload = rt_enum_payload(kind)
-        if payload <= 3:
-            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-        val value: MirConstValue = rt_tuple_get(payload, 0)
-        val type_: MirType = rt_tuple_get(payload, 1)
-        return cl_translate_const_value(ctx, cl_module, value, type_)
-    match kind:
+    match operand.kind:
         case Copy(local):
             if not local.?:
                 return cranelift_iconst(ctx, CL_TYPE_I64, 0)
@@ -901,16 +814,22 @@ fn load_local(
     func: MirFunction
 ) -> i64:
     val local_ty = local_type(local_id, func)
-    # Slots are authoritative across blocks. value_map follows backend compile
-    # order, so an SSA value retained there may not dominate the current block.
-    if cranelift_dict_contains_i64(slot_map, local_id):
+    # Runtime handles may be assigned on multiple control-flow edges. Their
+    # slot contains the value selected at runtime; value_map reflects only the
+    # backend's block compilation order.
+    if type_is_runtime_handle(local_ty) and slot_map.has(local_id):
+        val handle_addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
+        return cranelift_load(ctx, CL_TYPE_PTR, handle_addr, 0)
+    # Prefer SSA value if available
+    if value_map.has(local_id):
+        return value_map[local_id]
+    # Fall back to loading from stack slot
+    if slot_map.has(local_id):
         val addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
         if type_is_aggregate(local_ty) and not type_is_runtime_handle(local_ty):
             return addr
         val ty = mir_type_to_cl(local_ty)
         return cranelift_load(ctx, ty, addr, 0)
-    if cranelift_dict_contains_i64(value_map, local_id):
-        return value_map[local_id]
     # Default: zero
     cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
@@ -919,16 +838,6 @@ fn load_local(
 # ============================================================================
 
 fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType) -> i64:
-    # Scalar enum payloads remain tagged RuntimeValues. Stage2 native mode can
-    # misbind their source patterns, so decode them before the fallback match.
-    val disc = rt_enum_discriminant(value)
-    val payload = rt_enum_payload(value)
-    if disc == rt_enum_discriminant(MirConstValue.Int(0)):
-        return cranelift_iconst(ctx, mir_type_to_cl(type_), rt_value_as_int(payload))
-    if disc == rt_enum_discriminant(MirConstValue.Float(0.0)):
-        return cranelift_fconst(ctx, mir_type_to_cl(type_), rt_value_as_float(payload))
-    if disc == rt_enum_discriminant(MirConstValue.Bool(false)):
-        return cranelift_iconst(ctx, CL_TYPE_I64, if rt_value_as_bool(payload): 1 else: 0)
     match value:
         case Int(v):
             cranelift_iconst(ctx, mir_type_to_cl(type_), v)
@@ -990,18 +899,24 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, le
             cranelift_ishl(ctx, a, b)
         case Shr:
             if left_is_unsigned: cranelift_ushr(ctx, a, b) else: cranelift_sshr(ctx, a, b)
+        # NOTE: the cranelift_icmp/cranelift_fcmp FFI wrappers already return
+        # i64 results (verified empirically: wrapping them in uextend.i64
+        # fails verification with "arg 0 with type i64 failed to satisfy type
+        # set" — uextend requires a narrower source). This matches the
+        # uniform-i64 Bool convention (see mir_type_to_cl) with no extra
+        # widening here.
         case Eq:
-            cranelift_uextend(ctx, CL_TYPE_I64, if is_float: cranelift_fcmp(ctx, CL_FCMP_EQ, a, b) else: cranelift_icmp(ctx, CL_CMP_EQ, a, b))
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_EQ, a, b) else: cranelift_icmp(ctx, CL_CMP_EQ, a, b)
         case Ne:
-            cranelift_uextend(ctx, CL_TYPE_I64, if is_float: cranelift_fcmp(ctx, CL_FCMP_NE, a, b) else: cranelift_icmp(ctx, CL_CMP_NE, a, b))
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_NE, a, b) else: cranelift_icmp(ctx, CL_CMP_NE, a, b)
         case Lt:
-            cranelift_uextend(ctx, CL_TYPE_I64, if is_float: cranelift_fcmp(ctx, CL_FCMP_LT, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULT, a, b) else: cranelift_icmp(ctx, CL_CMP_SLT, a, b))
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_LT, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULT, a, b) else: cranelift_icmp(ctx, CL_CMP_SLT, a, b)
         case Le:
-            cranelift_uextend(ctx, CL_TYPE_I64, if is_float: cranelift_fcmp(ctx, CL_FCMP_LE, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULE, a, b) else: cranelift_icmp(ctx, CL_CMP_SLE, a, b))
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_LE, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULE, a, b) else: cranelift_icmp(ctx, CL_CMP_SLE, a, b)
         case Gt:
-            cranelift_uextend(ctx, CL_TYPE_I64, if is_float: cranelift_fcmp(ctx, CL_FCMP_GT, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGT, a, b) else: cranelift_icmp(ctx, CL_CMP_SGT, a, b))
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_GT, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGT, a, b) else: cranelift_icmp(ctx, CL_CMP_SGT, a, b)
         case Ge:
-            cranelift_uextend(ctx, CL_TYPE_I64, if is_float: cranelift_fcmp(ctx, CL_FCMP_GE, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGE, a, b) else: cranelift_icmp(ctx, CL_CMP_SGE, a, b))
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_GE, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGE, a, b) else: cranelift_icmp(ctx, CL_CMP_SGE, a, b)
         case Offset:
             cranelift_iadd(ctx, a, b)
         case MatMul:
@@ -1137,28 +1052,6 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
 # Function Call Translation
 # ============================================================================
 
-fn cl_translate_named_call(
-    ctx: i64,
-    cl_module: i64,
-    name: text,
-    arg_vals: [i64],
-    func_handles: Dict<text, i64>
-) -> i64:
-    if cl_is_lowering_owned_runtime(name):
-        return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
-    if func_handles.has(name):
-        val func_ref = cranelift_import_function(ctx, func_handles[name])
-        return cranelift_call(ctx, func_ref, arg_vals)
-    val builtin_link_name = if name == "main": "__simple_main" elif name == "print": "rt_println" elif name == "get_args" or name == "get_cli_args" or name == "sys_get_args": "rt_get_args" else: name
-    val link_name = cl_external_runtime_name(builtin_link_name)
-    val sig = cranelift_new_signature(CL_CC_SYSTEM_V)
-    for arg in arg_vals:
-        cranelift_sig_add_param(sig, CL_TYPE_I64)
-    cranelift_sig_set_return(sig, CL_TYPE_I64)
-    val handle = cranelift_declare_function(cl_module, link_name, sig, CL_LINKAGE_IMPORT)
-    val func_ref = cranelift_import_function(ctx, handle)
-    cranelift_call(ctx, func_ref, arg_vals)
-
 fn cl_translate_call(
     ctx: i64,
     func_op: MirOperand,
@@ -1175,18 +1068,33 @@ fn cl_translate_call(
         arg_vals.push(cl_translate_operand(ctx, cl_module, arg, value_map, slot_map, func))
 
     # Determine callee
-    val func_kind = func_op.kind
-    if rt_enum_discriminant(func_kind) == 0x0b55abba:  # hash("Const")
-        val const_payload = rt_enum_payload(func_kind)
-        val raw_value = rt_tuple_get(const_payload, 0)
-        if rt_enum_discriminant(raw_value) == 0xd43c7eb8:  # hash("Str")
-            val name: text = rt_enum_payload(raw_value)
-            return cl_translate_named_call(ctx, cl_module, name, arg_vals, func_handles)
-    match func_kind:
+    match func_op.kind:
         case Const(value, type_):
             match value:
                 case Str(name):
-                    cl_translate_named_call(ctx, cl_module, name, arg_vals, func_handles)
+                    val method = method_leaf_name(name)
+                    if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:
+                        return arg_vals[0]
+                    # MIR currently represents compiler-generated collection
+                    # helpers and source calls with the same string operand.
+                    # Keep the lowering-owned primitives on the runtime ABI so
+                    # a coincidentally named local body cannot capture them.
+                    if cl_is_lowering_owned_runtime(name):
+                        return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
+                    # Named function call
+                    if func_handles.has(name):
+                        val handle = func_handles[name]
+                        val func_ref = cranelift_import_function(ctx, handle)
+                        cranelift_call(ctx, func_ref, arg_vals)
+                    else:
+                        # External function - declare as import
+                        val sig = cranelift_new_signature(CL_CC_SYSTEM_V)
+                        for arg in args:
+                            cranelift_sig_add_param(sig, CL_TYPE_I64)
+                        cranelift_sig_set_return(sig, CL_TYPE_I64)
+                        val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
+                        val func_ref = cranelift_import_function(ctx, handle)
+                        cranelift_call(ctx, func_ref, arg_vals)
                 case _:
                     cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Copy(local):
@@ -1211,13 +1119,6 @@ fn cl_translate_call(
 fn cl_is_lowering_owned_runtime(name: text) -> bool:
     name == "rt_array_len" or name == "rt_array_get" or name == "rt_array_get_text" or name == "rt_array_set" or name == "rt_array_set_text"
 
-fn cl_external_runtime_name(name: text) -> text:
-    if name == "rt_process_run": "rt_process_run_tuple"
-    elif name == "rt_process_run_bounded": "rt_process_run_bounded_tuple"
-    elif name == "rt_process_run_inherit": "rt_process_run_inherit_value"
-    elif name == "rt_process_run_timeout": "rt_process_run_timeout_tuple"
-    else: name
-
 fn cl_function_emit_name(name: text) -> text:
     if name == "main":
         return "__simple_main"
@@ -1239,8 +1140,20 @@ fn cl_function_emit_name(name: text) -> text:
         return "__simple_local_{name}"
     name
 
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn method_leaf_name(name: text) -> text:
+    val idx = name.rfind(".")
+    if idx < 0:
+        return name
+    name.substring(idx + 1)
+
 fn local_type(local_id: i64, func: MirFunction) -> MirType:
     for local in func.locals:
+        if not local.?:
+            continue
         if local.id.id == local_id:
             return local.type_
     MirType.i64()

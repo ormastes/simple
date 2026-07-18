@@ -10,7 +10,6 @@ use compiler.types.type_infer.*
 use compiler.types.dim_constraints_types.{DimError}
 use compiler.borrow.borrow_check.*
 use compiler.borrow.borrow_check.nll.{NLLError, nllerror_format_related}
-use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 
@@ -18,6 +17,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_hash_text(value: text) -> i64
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -104,7 +104,7 @@ pub fn _driver_canonical_source_path(path: text) -> text:
         joined
 
 fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
-    val raw = hm_hash_text(key) % bucket_count
+    val raw = rt_hash_text(key) % bucket_count
     if raw < 0:
         raw + bucket_count
     else:
@@ -204,12 +204,13 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     for raw in lines:
         val line = raw.trim()
         var quote_count = 0
-        var quote_tail = line
-        var quote_pos = quote_tail.index_of("\"\"\"") ?? -1
-        while quote_pos >= 0:
-            quote_count = quote_count + 1
-            quote_tail = quote_tail.substring(quote_pos + 3)
-            quote_pos = quote_tail.index_of("\"\"\"") ?? -1
+        var scan_pos = 0
+        while scan_pos + 3 <= line.len():
+            if line.substring(scan_pos, scan_pos + 3) == "\"\"\"":
+                quote_count = quote_count + 1
+                scan_pos = scan_pos + 3
+            else:
+                scan_pos = scan_pos + 1
         val was_in_doc = in_doc
         if quote_count % 2 == 1:
             in_doc = not in_doc

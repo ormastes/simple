@@ -11,14 +11,10 @@
 ##   bin/simple test test/unit/os/kernel/loader/stack_builder_spec.spl
 
 use std.spec
-use std.io_runtime.{file_read}
 use os.kernel.loader.stack_builder.{
     AuxEntry,
     DEFAULT_USER_STACK_SIZE,
     MAX_USER_STACK_SIZE,
-    arm64_stage_initial_stack_values,
-    arm64_staged_initial_sp,
-    arm64_staged_initial_stack_bytes,
     build_initial_stack,
     compute_stack_size
 }
@@ -32,14 +28,6 @@ fn _read_u64_le(bytes: [u8], off: i64) -> u64:
         v = (v << 8) | (bytes[off + i] as u64)
         i = i - 1
     v
-
-fn _append_u64_le(bytes: [u8], value: u64) -> [u8]:
-    var out = bytes
-    var shift: u64 = 0
-    while shift < 64:
-        out.push(((value >> shift) & 0xff) as u8)
-        shift = shift + 8
-    out
 
 describe "kernel.loader.stack_builder.compute_stack_size":
     """Image-size-to-stack-size scaling."""
@@ -111,133 +99,3 @@ describe "kernel.loader.stack_builder.build_initial_stack":
                 found = true
             off = off + 8
         expect(found).to_be_true()
-
-describe "kernel.loader.stack_builder ARM64 staged startup boundary":
-    it "01 serializes the exact two-argument frame and absolute pointers":
-        val entry: u64 = 0x201000
-        expect(arm64_stage_initial_stack_values(
-            STACK_TOP, 2, "/usr/bin/simple", "/hello.spl", entry
-        )).to_equal(1)
-
-        val sp = arm64_staged_initial_sp()
-        val bytes = arm64_staged_initial_stack_bytes()
-        expect(sp).to_equal(STACK_TOP - 112)
-        expect(bytes.len()).to_equal(112)
-
-        var expected: [u8] = []
-        expected = _append_u64_le(expected, 2)
-        expected = _append_u64_le(expected, sp + 85)
-        expected = _append_u64_le(expected, sp + 101)
-        expected = _append_u64_le(expected, 0)
-        expected = _append_u64_le(expected, 0)
-        expected = _append_u64_le(expected, 9)
-        expected = _append_u64_le(expected, entry)
-        expected = _append_u64_le(expected, 0)
-        expected = _append_u64_le(expected, 0)
-        var pad: i64 = 0
-        while pad < 13:
-            expected.push(0)
-            pad = pad + 1
-        # "/usr/bin/simple\0"
-        expected.push(47)
-        expected.push(117)
-        expected.push(115)
-        expected.push(114)
-        expected.push(47)
-        expected.push(98)
-        expected.push(105)
-        expected.push(110)
-        expected.push(47)
-        expected.push(115)
-        expected.push(105)
-        expected.push(109)
-        expected.push(112)
-        expected.push(108)
-        expected.push(101)
-        expected.push(0)
-        # "/hello.spl\0"
-        expected.push(47)
-        expected.push(104)
-        expected.push(101)
-        expected.push(108)
-        expected.push(108)
-        expected.push(111)
-        expected.push(46)
-        expected.push(115)
-        expected.push(112)
-        expected.push(108)
-        expected.push(0)
-
-        expect(bytes).to_equal(expected)
-
-    it "02 places AT_ENTRY immediately before the terminating AT_NULL pair":
-        val entry: u64 = 0x123456789abcdef0
-        expect(arm64_stage_initial_stack_values(
-            STACK_TOP, 2, "/usr/bin/simple", "/hello.spl", entry
-        )).to_equal(1)
-        val bytes = arm64_staged_initial_stack_bytes()
-        expect(_read_u64_le(bytes, 32)).to_equal(0)
-        expect(_read_u64_le(bytes, 40)).to_equal(9)
-        expect(_read_u64_le(bytes, 48)).to_equal(entry)
-        expect(_read_u64_le(bytes, 56)).to_equal(0)
-        expect(_read_u64_le(bytes, 64)).to_equal(0)
-
-    it "03 accepts the mounted ELF one-argument launch without stale argv slots":
-        val entry: u64 = 0x201000
-        expect(arm64_stage_initial_stack_values(
-            STACK_TOP, 1, "/FSEXEC.ELF", "", entry
-        )).to_equal(1)
-        val sp = arm64_staged_initial_sp()
-        val bytes = arm64_staged_initial_stack_bytes()
-        expect(sp).to_equal(STACK_TOP - 80)
-        expect(bytes.len()).to_equal(80)
-        expect(_read_u64_le(bytes, 0)).to_equal(1)
-        expect(_read_u64_le(bytes, 8)).to_equal(sp + 68)
-        expect(_read_u64_le(bytes, 16)).to_equal(0)
-        expect(_read_u64_le(bytes, 24)).to_equal(0)
-        expect(_read_u64_le(bytes, 32)).to_equal(9)
-        expect(_read_u64_le(bytes, 40)).to_equal(entry)
-        expect(_read_u64_le(bytes, 48)).to_equal(0)
-        expect(_read_u64_le(bytes, 56)).to_equal(0)
-
-    it "04 fails closed for an unsupported argv count":
-        expect(arm64_stage_initial_stack_values(
-            STACK_TOP, 0, "", "", 0x201000
-        )).to_equal(-22)
-        expect(arm64_staged_initial_sp()).to_equal(0)
-        expect(arm64_staged_initial_stack_bytes().len()).to_equal(0)
-
-describe "ARM64 filesystem-exec initial-stack static wiring":
-    it "05 stages raw-safe argv through scalar stack-builder accessors":
-        val builder = file_read("src/os/kernel/loader/stack_builder.spl")
-        val image = file_read("src/os/kernel/loader/process_image.spl")
-        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
-
-        expect(builder).to_contain("rt_arm_text_array_len_u32(argv)")
-        expect(builder).to_contain("rt_arm_text_array_get(argv, 0u64)")
-        expect(builder).to_contain("rt_arm_text_array_get(argv, 1u64)")
-        expect(image).to_contain("arm64_stage_initial_stack(stack_top, effective_argv, elf_entry)")
-        expect(image).to_contain("arm64_staged_initial_sp()")
-        expect(image).to_contain("arm64_staged_initial_stack_bytes()")
-        expect(image.contains("rt_arm_array_empty_exact")).to_equal(false)
-        expect(runtime).to_contain("RuntimeValue rt_arm_text_array_len_u32")
-        expect(runtime).to_contain("RuntimeValue rt_arm_text_array_get")
-
-    it "06 maps the staged stack before the ARM direct-load branch returns":
-        val scheduler = file_read("src/os/kernel/scheduler/scheduler_types.spl")
-
-        expect(scheduler).to_contain("_stack_byte_len(initial_stack_bytes) == 0")
-        expect(scheduler).to_contain("arm64 direct-load invalid stack frame")
-        expect(scheduler).to_contain("map_stack(space, stack_top, stack_size, initial_stack_bytes)")
-        expect(scheduler).to_contain("arm64 direct-load stack map failed")
-
-    it "07 copies ARM stack bytes through the raw-safe physical-memory bridge":
-        val mapper = file_read("src/os/kernel/loader/segment_mapper.spl")
-        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
-
-        expect(mapper).to_contain("rt_arm_array_copy_bytes_to_phys")
-        expect(mapper).to_contain("rt_arm_array_copy_bytes_to_phys(dst_phys, src, src_offset, len) == len")
-        expect(mapper).to_contain("if not _copy_stack_page")
-        expect(mapper).to_contain("return Err(\"copy initial stack bytes failed\")")
-        expect(runtime).to_contain("RuntimeValue rt_arm_array_copy_bytes_to_phys")
-        expect(runtime).to_contain("arm64_array_byte_at_raw_index(src_val, src_offset + i)")

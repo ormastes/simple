@@ -1,9 +1,6 @@
 use std.spec.*
 use std.memory_leveling.{
     MEMORY_DMA_DIRECTION_TO_DEVICE,
-    MEMORY_ALLOCATION_MAX_PAGE_COUNT,
-    MEMORY_LEVELING_ALLOCATION_METADATA_BYTES,
-    memory_tier_cpu_hot,
     simple_memory_iso_cpu_cold,
     simple_memory_device_gpu,
     simple_memory_placement_config_from_intent,
@@ -24,10 +21,6 @@ describe "SimpleOS memory leveling manager":
         expect(config.physical_capacity_bytes).to_equal(256 * 1024 * 1024)
         expect(config.cpu_low_watermark_bytes).to_equal(32 * 1024 * 1024)
         expect(config.cpu_high_watermark_bytes).to_equal(64 * 1024 * 1024)
-        expect(config.nic_low_watermark_bytes).to_equal(config.nic_capacity_bytes / 8)
-        expect(config.nic_high_watermark_bytes).to_equal(config.nic_capacity_bytes / 4)
-        expect(config.dma_low_watermark_bytes).to_equal(config.dma_capacity_bytes / 8)
-        expect(config.dma_high_watermark_bytes).to_equal(config.dma_capacity_bytes / 4)
         expect(simpleos_memory_leveling_config_validate(config)).to_equal("ok")
 
     it "keeps language placement and SimpleOS capacity configs independent":
@@ -51,52 +44,6 @@ describe "SimpleOS memory leveling manager":
 
         expect(simpleos_memory_leveling_config_validate(config)).to_equal("invalid-watermark")
         expect(placement.preferred_tier.name).to_equal("cpu_cold")
-
-        config = simpleos_memory_leveling_config_default()
-        config.nic_low_watermark_bytes = config.nic_high_watermark_bytes + 1
-        expect(simpleos_memory_leveling_config_validate(config)).to_equal("invalid-watermark")
-
-    it "raises effective pressure when enabled pools cross free-byte watermarks":
-        var config = simpleos_memory_leveling_config_default()
-        config.physical_capacity_bytes = 16384
-        config.cpu_capacity_bytes = 16384
-        config.cpu_reserved_bytes = 0
-        config.cpu_low_watermark_bytes = 2048
-        config.cpu_high_watermark_bytes = 8192
-        config.gpu_reserved_bytes = 0
-        config.nic_reserved_bytes = 0
-        config.dma_reserved_bytes = 0
-        val manager = memory_leveling_manager_new(config)
-        val intent = simple_memory_iso_cpu_cold()
-        val placement = simple_memory_placement_config_from_intent(intent)
-        val policy = memory_leveling_policy_from_intent(intent)
-
-        expect(manager.request(placement, policy, 9000, 3, 1).ok).to_equal(true)
-        expect(manager.apply_pressure("normal").level).to_equal("elevated")
-        expect(manager.request(placement, policy, 6000, 2, 2).ok).to_equal(true)
-        expect(manager.apply_pressure("normal").level).to_equal("critical")
-
-    it "preserves the source tier on rollback and rejects swap overcommit":
-        var config = simpleos_memory_leveling_config_default()
-        config.swap_capacity_bytes = 4096
-        config.swap_low_watermark_bytes = 1024
-        config.swap_high_watermark_bytes = 2048
-        val manager = memory_leveling_manager_new(config)
-        val intent = simple_memory_iso_cpu_cold()
-        var placement = simple_memory_placement_config_from_intent(intent)
-        placement.preferred_tier = memory_tier_cpu_hot()
-        val policy = memory_leveling_policy_from_intent(intent)
-        val hot = manager.request(placement, policy, 2048, 1, 1)
-
-        expect(manager.prepare_swap(hot.allocation_id, 1).ok).to_equal(true)
-        expect(manager.rollback_swap(hot.allocation_id, 1).ok).to_equal(true)
-        expect(manager.get(hot.allocation_id).unwrap().tier.name).to_equal("cpu_hot")
-
-        val first = manager.request(placement, policy, 4096, 1, 2)
-        expect(manager.prepare_swap(first.allocation_id, 2).ok).to_equal(true)
-        expect(manager.commit_swap(first.allocation_id, 2, 1).ok).to_equal(true)
-        val second = manager.request(placement, policy, 1, 1, 3)
-        expect(manager.prepare_swap(second.allocation_id, 3).reason).to_equal("swap-capacity")
 
     it "rejects restore when resident capacity was consumed while swapped":
         var config = simpleos_memory_leveling_config_default()
@@ -159,47 +106,6 @@ describe "SimpleOS memory leveling manager":
         expect(report.inspected).to_equal(64)
         expect(report.selected).to_equal(64)
         expect(report.candidate_ids.len()).to_equal(64)
-        val stats = manager.snapshot()
-        expect(stats.pressure_level).to_equal("critical")
-        expect(stats.cpu_cold_bytes).to_equal(80 * 4096)
-        expect(stats.metadata_record_count).to_equal(80)
-        expect(stats.metadata_bytes).to_equal(80u64 * MEMORY_LEVELING_ALLOCATION_METADATA_BYTES)
-
-    it "retains one compact candidate record per allocation":
-        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
-        val intent = simple_memory_iso_cpu_cold()
-        val allocation = manager.request(simple_memory_placement_config_from_intent(intent), memory_leveling_policy_from_intent(intent), 9000, 3, 33)
-        expect(manager.pin(allocation.allocation_id, 33).ok).to_equal(true)
-        expect(manager.unpin(allocation.allocation_id, 33).ok).to_equal(true)
-        expect(manager.snapshot().candidate_count).to_equal(1)
-        val report = manager.apply_pressure("critical")
-        expect(report.inspected).to_equal(1)
-        expect(report.selected).to_equal(1)
-        expect(MEMORY_LEVELING_ALLOCATION_METADATA_BYTES).to_equal(120)
-
-    it "requeues failed selections and rejects packed page-count overflow":
-        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
-        val intent = simple_memory_iso_cpu_cold()
-        val placement = simple_memory_placement_config_from_intent(intent)
-        val policy = memory_leveling_policy_from_intent(intent)
-        val allocation = manager.request(placement, policy, 4096, 1, 35)
-        expect(manager.apply_pressure("critical").selected).to_equal(1)
-        expect(manager.requeue_candidate(allocation.allocation_id)).to_equal(true)
-        expect(manager.apply_pressure("critical").selected).to_equal(1)
-        expect(manager.request(placement, policy, 4096, MEMORY_ALLOCATION_MAX_PAGE_COUNT + 1, 36).reason).to_equal("invalid-request")
-
-    it "retains a pressure candidate until its cooldown expires":
-        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
-        val intent = simple_memory_iso_cpu_cold()
-        val allocation = manager.request(simple_memory_placement_config_from_intent(intent), memory_leveling_policy_from_intent(intent), 4096, 1, 34)
-        expect(manager.touch(allocation.allocation_id, 34).ok).to_equal(true)
-        val cooling = manager.apply_pressure("critical")
-        expect(cooling.inspected).to_equal(1)
-        expect(cooling.selected).to_equal(0)
-        expect(cooling.skipped).to_equal(1)
-        val cooled = manager.apply_pressure("critical")
-        expect(cooled.inspected).to_equal(1)
-        expect(cooled.selected).to_equal(1)
 
     it "preserves CPU and device reservations in shared physical capacity":
         var config = simpleos_memory_leveling_config_default()

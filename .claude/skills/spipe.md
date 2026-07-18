@@ -1326,19 +1326,3 @@ there for the next investigation. Never gate a probe whose output an
 evidence/gate script asserts on. See
 `doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
 caveats".
-
-## Verifying render/offscreen fixes
-
-A field-wiring fix — a ctor that starts naming an already-declared struct
-field (e.g. `software_backend: sw` in `Engine2D.create_offscreen()`) so a
-downstream fast path becomes reachable — needs a spec that asserts BOTH the
-wiring and the behavior, not just that the file compiles: (1) the field
-itself is set (`Some`/not-nil) right off the ctor, as a direct regression
-guard if the named arg is ever dropped again, and (2) the fast path is
-actually TAKEN (its "did I apply" return value, e.g. a `bool`) with a
-pixel-correctness check against the known blend math — a spec that only
-checks "returns without crashing" would stay green even if the fast path
-silently fell back to the slow/leaky path. See
-`test/02_integration/rendering/engine2d_embedded_surface_spec.spl` (the
-`software_backend` / `draw_software_offscreen_opacity_consume` scenario) for
-a worked example of this two-assertion shape.

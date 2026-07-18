@@ -163,28 +163,6 @@ fn native_build_mode_from_args(args: [text], i: i64) -> text:
     else:
         native_build_mode_from_args(args, i + 1)
 
-# S80: `--threads N` was parsed by native_build_flag_needs_value (so the arg
-# scanner knows to skip its value token) but never read into a value anywhere
-# in this file -- the Stage4 in-process branch below called
-# aot_native_project_with_backend_fixed without ever setting
-# SIMPLE_NATIVE_BUILD_THREADS, so driver_native_build_threads()
-# (driver_aot_output.spl) always saw "" and fell back to auto-detected CPU
-# count. The production bootstrap-from-scratch.sh wrapper happens to also
-# export SIMPLE_NATIVE_BUILD_THREADS itself, masking this for that one
-# caller, but any direct `simple native-build --entry ... --threads N`
-# invocation (e.g. this lane's A/B probe, or a developer running the command
-# by hand) silently dropped the requested value. Mirrors the existing
-# native_threads parse in src/app/io/_CliCompile/compile_targets.spl:667-685.
-fn native_build_threads_from_args(args: [text], i: i64) -> i64:
-    if i >= args.len():
-        0
-    elif args[i] == "--threads" and i + 1 < args.len():
-        args[i + 1].to_i64() ?? 0
-    elif args[i].starts_with("--threads="):
-        args[i].substring(10).to_i64() ?? 0
-    else:
-        native_build_threads_from_args(args, i + 1)
-
 # #138/#19: the authorized Stage4 explicit entry and the single-file positional
 # shape (no --source dirs -- i.e. `bm native-build foo.spl -o out`) compile
 # THROUGH THE PURE-SIMPLE IN-PROCESS PIPELINE instead of the Rust
@@ -214,23 +192,10 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
         val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS")
         env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
-        # S80: forward the requested --threads value so the AOT codegen
-        # phase's ParallelBuildConfig (driver_aot_output.spl:driver_native_build_threads,
-        # read from this same env var) sees it instead of silently falling
-        # back to auto-detected CPU count. See native_build_threads_from_args
-        # above for why this was previously discarded.
-        val requested_threads = native_build_threads_from_args(args, 0)
-        val old_native_threads = env_get("SIMPLE_NATIVE_BUILD_THREADS")
-        if env_get("SIMPLE_COMPILER_TRACE") == "1":
-            print "[S80-THREADS] requested_threads={requested_threads} old_env={old_native_threads}"
-        if requested_threads > 0:
-            env_set("SIMPLE_NATIVE_BUILD_THREADS", "{requested_threads}")
         val stage4_result = aot_native_project_with_backend_fixed(
             "", "", "", "", "", 0,
             explicit_entry, stage4_output, stage4_backend, true, true, 3
         )
-        if requested_threads > 0:
-            env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
         env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
         if compile_result_is_success(stage4_result):
             return 0

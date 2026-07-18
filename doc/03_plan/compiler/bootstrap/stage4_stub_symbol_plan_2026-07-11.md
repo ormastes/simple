@@ -434,28 +434,3 @@ Side findings: (1) `rt_dir_create(text,bool)` returns corrupted result under Cra
 correct under interpret — pre-existing JIT FFI marshalling bug for (text,bool) extern args
 (follow-up bug candidate). (2) Several rt_ symbols exist in runtime.c/runtime_native.c but are
 missing from runtime.h declarations (rt_file_read_bytes/write_bytes/move, rt_dir_delete/walk/list).
-
-## Follow-up status (2026-07-18): walk/glob/lexical-path stubs reduced
-
-`walk_dir`, `glob_find`, `glob_matches`, `path_parent`, `path_filename`,
-`path_extension`, `path_stem`, `path_components`, and `path_with_extension` now
-stay in pure Simple.
-They reuse the existing `rt_dir_walk`, shared `std.glob` matcher, and `std.path`
-lexical helpers; no new runtime ABI was added. The core-C `rt_dir_walk` owner now returns the canonical `rt_array_*` /
-`rt_string_*` representation consumed by native Simple iteration instead of the
-legacy `spl_array_*` representation. `file_metadata` now constructs the public
-metadata record in pure Simple over one opaque runtime stat handle. The handle
-adds only platform-owned symlink, readonly, and creation-time scalar getters;
-no live unresolvable entries remain in this stub family. The three dead path
-declarations remain separate cleanup.
-
-Focused evidence: both fs/glob profile twins pass incremental source checking; a
-pure Stage2 LLVM matcher probe and a core-C-bootstrap `Glob.matches()` /
-`matches_path()` facade probe compile and run successfully. The C runtime focus
-contract and source parity spec now assert canonical directory-walk array access.
-A focused source/behavior spec now defines Unix/Windows-form and empty-path
-`Path.stem`, parent, filename, extension, components, and
-extension-replacement coverage;
-the metadata contract covers missing/file/directory behavior and the platform
-implementation branches. Staged native execution and the full Stage4 gate
-remain pending.

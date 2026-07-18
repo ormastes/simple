@@ -10,9 +10,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
 
-extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+extern fn rt_enum_payload(value: StmtKind) -> Expr
+extern fn rt_enum_discriminant(value: StmtKind) -> i64
 
 fn hir_stmt_kind_disc(k: StmtKind) -> i64:
     rt_enum_discriminant(k)
@@ -34,33 +33,42 @@ impl HirLowering:
     # lowering then falls back to its pre-existing untyped i64 default,
     # same as today -- this is additive, never a regression).
     me try_register_local_struct_type(sym: SymbolId, init_expr: Expr):
-        val init_kind = init_expr.kind
-        if rt_enum_discriminant(init_kind) != 0x311b931f:  # hash("Call")
-            return
-        val payload = rt_enum_payload(init_kind)
-        val callee: Expr = rt_tuple_get(payload, 0)
-        val call_args: [CallArg] = rt_tuple_get(payload, 1)
-        match callee.kind:
-            case ExprKind.Ident(callee_name):
-                if self.struct_field_types_by_name.has(callee_name):
-                    self.local_struct_types[sym.id] = callee_name
-                    # Struct field type ANNOTATIONS are unreliable here
-                    # (`arr: [i64]` parses to TypeKind.Infer on this path).
-                    # Learn each field's shape from positional construction
-                    # arguments, matching MIR aggregate construction.
-                    if self.struct_field_order_by_name.has(callee_name):
-                        val field_order = self.struct_field_order_by_name[callee_name]
-                        var known_fields = self.struct_field_types_by_name[callee_name]
-                        var arg_i = 0
-                        while arg_i < call_args.len() and arg_i < field_order.len():
-                            val field_name_at_i = field_order[arg_i]
-                            match call_args[arg_i].value.kind:
-                                case ExprKind.ArrayLit(_):
-                                    val elem_i64 = HirType(kind: HirTypeKind.Int(64, true), span: call_args[arg_i].span)
-                                    known_fields[field_name_at_i] = HirType(kind: HirTypeKind.Array(elem_i64, nil), span: call_args[arg_i].span)
-                                case _: ()
-                            arg_i = arg_i + 1
-                        self.struct_field_types_by_name[callee_name] = known_fields
+        match init_expr.kind:
+            case ExprKind.Call(callee, call_args):
+                match callee.kind:
+                    case ExprKind.Ident(callee_name):
+                        if self.struct_field_types_by_name.has(callee_name):
+                            self.local_struct_types[sym.id] = callee_name
+                            # Struct field type ANNOTATIONS are unreliable here
+                            # (`arr: [i64]` parses to TypeKind.Infer on this
+                            # path, both parser- and HIR-level -- a documented
+                            # pre-existing limitation, see bug #156's
+                            # method_calls_literals.spl comment). CallArg's
+                            # has_name/name are ALSO unreliable (observed false
+                            # /empty for every arg regardless of source syntax)
+                            # -- MIR's own lower_struct_construct has the same
+                            # gap and falls back to POSITIONAL order against
+                            # the struct's declared field order, so mirror that
+                            # here: learn each field's shape from the
+                            # CONSTRUCTION SITE argument at its position. An
+                            # ArrayLit argument means the field is array-typed.
+                            # All instances of a struct share layout, so
+                            # recording this once (first construction site
+                            # seen) is globally valid for the struct name.
+                            if self.struct_field_order_by_name.has(callee_name):
+                                val field_order = self.struct_field_order_by_name[callee_name]
+                                var known_fields = self.struct_field_types_by_name[callee_name]
+                                var arg_i = 0
+                                while arg_i < call_args.len() and arg_i < field_order.len():
+                                    val field_name_at_i = field_order[arg_i]
+                                    match call_args[arg_i].value.kind:
+                                        case ExprKind.ArrayLit(_):
+                                            val elem_i64 = HirType(kind: HirTypeKind.Int(64, true), span: call_args[arg_i].span)
+                                            known_fields[field_name_at_i] = HirType(kind: HirTypeKind.Array(elem_i64, nil), span: call_args[arg_i].span)
+                                        case _: ()
+                                    arg_i = arg_i + 1
+                                self.struct_field_types_by_name[callee_name] = known_fields
+                    case _: ()
             case _: ()
 
     # Tuple analogue of try_register_local_struct_type (see local_tuple_types
@@ -138,16 +146,30 @@ impl HirLowering:
         val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
         val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
-            val v_payload = rt_enum_payload(stmt_kind_value)
-            val v_name: text = rt_tuple_get(v_payload, 0)
+            val v_name: text = match stmt_kind_value:
+                case StmtKind.Val(vname, _, _):
+                    vname
+                case _:
+                    ""
             if v_name.len() > 1 and v_name[0:1] == "(":
-                val v_init: Expr = rt_tuple_get(v_payload, 2)
+                val v_init = match stmt_kind_value:
+                    case StmtKind.Val(_, _, vinit):
+                        vinit
+                    case _:
+                        sk_dummy
                 return self.lower_hir_tuple_destructure_val(v_name, v_init, s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
-            val vr_payload = rt_enum_payload(stmt_kind_value)
-            val vr_name: text = rt_tuple_get(vr_payload, 0)
+            val vr_name = match stmt_kind_value:
+                case StmtKind.Var(vrname, _, _):
+                    vrname
+                case _:
+                    ""
             if vr_name.len() > 1 and vr_name[0:1] == "(":
-                val vr_init: Expr? = rt_tuple_get(vr_payload, 2)
+                val vr_init = match stmt_kind_value:
+                    case StmtKind.Var(_, _, vrinit):
+                        vrinit
+                    case _:
+                        nil
                 val vr_init_expr = vr_init ?? sk_dummy
                 return self.lower_hir_tuple_destructure_var(vr_name, vr_init_expr, s.span)
         [self.lower_hir_stmt(s)]
@@ -263,17 +285,16 @@ impl HirLowering:
         val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, false, false, nil)
         stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
         var td_elem_types: [HirType] = []
-        # Keep this concrete: seed-native `if val` can bind nil even when the
-        # optional branch is entered, then `.id` traps below.
-        var td_base_sym = SymbolId(id: -1)
+        var td_base_sym: SymbolId? = nil
         match hir_init.kind:
             case HirExprKind.Var(td_sym):
-                td_base_sym = td_sym
+                td_base_sym = Some(td_sym)
             case HirExprKind.NamedVar(td_sym2, _):
-                td_base_sym = td_sym2
+                td_base_sym = Some(td_sym2)
             case _: ()
-        if td_base_sym.id >= 0 and self.local_tuple_types.has(td_base_sym.id):
-            td_elem_types = self.local_tuple_types[td_base_sym.id]
+        if val td_bs = td_base_sym:
+            if self.local_tuple_types.has(td_bs.id):
+                td_elem_types = self.local_tuple_types[td_bs.id]
         # Call init: `val (a, b, c) = f(...)` where f's declared return type
         # is a tuple. Without this, every destructured element's Let has a
         # nil type, so downstream consumers default the locals to i64 --
@@ -326,10 +347,21 @@ impl HirLowering:
         val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
         val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
-            val v_payload = rt_enum_payload(stmt_kind_value)
-            val v_name: text = rt_tuple_get(v_payload, 0)
-            val v_type: Type? = rt_tuple_get(v_payload, 1)
-            val v_init: Expr = rt_tuple_get(v_payload, 2)
+            val v_name: text = match stmt_kind_value:
+                case StmtKind.Val(vname, _, _):
+                    vname
+                case _:
+                    ""
+            val v_type: Type? = match stmt_kind_value:
+                case StmtKind.Val(_, vtype, _):
+                    vtype
+                case _:
+                    nil
+            val v_init: Expr = match stmt_kind_value:
+                case StmtKind.Val(_, _, vinit):
+                    vinit
+                case _:
+                    sk_dummy
             val v_hir_type = if v_type.?:
                 Some(self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span)))
             else:
@@ -340,10 +372,21 @@ impl HirLowering:
             self.try_register_local_tuple_type(v_symbol, v_init)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
-            val vr_payload = rt_enum_payload(stmt_kind_value)
-            val vr_name: text = rt_tuple_get(vr_payload, 0)
-            val vr_type: Type? = rt_tuple_get(vr_payload, 1)
-            val vr_init: Expr? = rt_tuple_get(vr_payload, 2)
+            val vr_name = match stmt_kind_value:
+                case StmtKind.Var(vrname, _, _):
+                    vrname
+                case _:
+                    ""
+            val vr_type = match stmt_kind_value:
+                case StmtKind.Var(_, vrtype, _):
+                    vrtype
+                case _:
+                    nil
+            val vr_init: Expr? = match stmt_kind_value:
+                case StmtKind.Var(_, _, vrinit):
+                    vrinit
+                case _:
+                    nil
             val vr_hir_type = if vr_type.?:
                 Some(self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span)))
             else:
@@ -353,26 +396,37 @@ impl HirLowering:
             else:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
-            # Expr? is flat-nullable on this native path, not an Option enum.
-            # Avoid both `if val`'s nil binding and Option.unwrap's enum-payload
-            # extraction; read the already-present raw Expr slot directly.
-            if vr_init.?:
-                val vr_init_present: Expr = rt_tuple_get(vr_payload, 2)
+            if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
-            val rt_val: Expr? = rt_enum_payload(stmt_kind_value)
+            val rt_val: Expr? = match stmt_kind_value:
+                case StmtKind.Return(rvalue):
+                    rvalue
+                case _:
+                    nil
             val rt_hir = if rt_val.?:
                 Some(self.lower_hir_expr(rt_val ?? sk_dummy))
             else:
                 nil
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), type_: nil, span: s.span)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
-            val as_payload = rt_enum_payload(stmt_kind_value)
-            val as_target: Expr = rt_tuple_get(as_payload, 0)
-            val as_op: AssignOp? = rt_tuple_get(as_payload, 1)
-            val as_value: Expr = rt_tuple_get(as_payload, 2)
+            val as_target: Expr = match stmt_kind_value:
+                case StmtKind.Assign(atarget, _, _):
+                    atarget
+                case _:
+                    sk_dummy
+            val as_op: AssignOp? = match stmt_kind_value:
+                case StmtKind.Assign(_, aop, _):
+                    aop
+                case _:
+                    nil
+            val as_value: Expr = match stmt_kind_value:
+                case StmtKind.Assign(_, _, avalue):
+                    avalue
+                case _:
+                    sk_dummy
             val as_hir_op = self.lower_hir_assign_op_opt(as_op)
             return HirStmt(kind: HirStmtKind.Assign(self.lower_hir_expr(as_target), as_hir_op, self.lower_hir_expr(as_value)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Expr(sk_dummy)):

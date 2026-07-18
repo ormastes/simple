@@ -126,89 +126,6 @@ _start:
     .asciz  "[BOOT] ARM64 vectors ok\r\n"
 
 /* ===================================================================
- * Blocking EL0 entry trampoline.
- *
- * AAPCS64 requires x19-x30 to survive this call. The 128-byte frame also
- * retains the kernel translation state needed when syscall 0 returns through
- * arm64_user_exit_resume. Caller-saved x0-x18 are intentionally not retained.
- *
- * x0 = user TTBR0 root, x1 = user entry, x2 = user SP,
- * x3 = user MAIR_EL1, x4 = user TCR_EL1.
- * =================================================================== */
-
-    .globl arm64_enter_user_virtual
-    .type arm64_enter_user_virtual, @function
-arm64_enter_user_virtual:
-    sub     sp, sp, #128
-    stp     x19, x20, [sp, #0]
-    stp     x21, x22, [sp, #16]
-    stp     x23, x24, [sp, #32]
-    stp     x25, x26, [sp, #48]
-    stp     x27, x28, [sp, #64]
-    stp     x29, x30, [sp, #80]
-    mrs     x9, ttbr0_el1
-    mrs     x10, sctlr_el1
-    stp     x9, x10, [sp, #96]
-    mrs     x9, tcr_el1
-    mrs     x10, mair_el1
-    stp     x9, x10, [sp, #112]
-
-    ldr     x9, [sp, #104]         /* saved SCTLR_EL1 */
-    bic     x9, x9, #1             /* disable translation before TCR changes */
-    dsb     sy
-    msr     sctlr_el1, x9
-    isb
-    msr     mair_el1, x3
-    msr     tcr_el1, x4
-    msr     ttbr0_el1, x0
-    dsb     sy
-    tlbi    vmalle1
-    dsb     sy
-    isb
-    ldr     x9, [sp, #104]         /* retain the kernel's non-M control bits */
-    orr     x9, x9, #1
-    msr     sctlr_el1, x9
-    isb
-    msr     sp_el0, x2
-    msr     elr_el1, x1
-    msr     spsr_el1, xzr
-    isb
-    eret
-
-    .size arm64_enter_user_virtual, . - arm64_enter_user_virtual
-
-    .globl arm64_user_exit_resume
-    .type arm64_user_exit_resume, @function
-arm64_user_exit_resume:
-    /* x0 is the raw user exit code returned by rt_arm64_handle_user_svc. */
-    ldp     x9, x10, [sp, #96]     /* old TTBR0_EL1, SCTLR_EL1 */
-    ldp     x11, x12, [sp, #112]   /* old TCR_EL1, MAIR_EL1 */
-    mrs     x13, sctlr_el1
-    bic     x13, x13, #1           /* disable user translation before restore */
-    dsb     sy
-    msr     sctlr_el1, x13
-    isb
-    msr     ttbr0_el1, x9
-    msr     tcr_el1, x11
-    msr     mair_el1, x12
-    dsb     sy
-    tlbi    vmalle1
-    dsb     sy
-    isb
-    msr     sctlr_el1, x10         /* restore the saved kernel state exactly */
-    isb
-    ldp     x19, x20, [sp, #0]
-    ldp     x21, x22, [sp, #16]
-    ldp     x23, x24, [sp, #32]
-    ldp     x25, x26, [sp, #48]
-    ldp     x27, x28, [sp, #64]
-    ldp     x29, x30, [sp, #80]
-    add     sp, sp, #128
-    ret
-
-    .size arm64_user_exit_resume, . - arm64_user_exit_resume
-
-/* ===================================================================
  * Exception Vector Table — 16 entries, 128 bytes each, 2KB aligned
  *
  * On any exception, prints "FAULT @ <ELR_EL1>" to PL011 serial
@@ -507,8 +424,6 @@ _lower_el_aarch64_sync_handler:
     mov     x1, x0                 /* syscall arg0 */
     mov     x0, x8                 /* syscall id */
     bl      rt_arm64_handle_user_svc
-    ldr     x9, [sp, #64]          /* saved user x8 / syscall id */
-    cbz     x9, .Llower_el_user_exit
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
 
     mrs     x9, elr_el1
@@ -534,12 +449,6 @@ _lower_el_aarch64_sync_handler:
     ldr     x30,       [sp, #240]
     add     sp, sp, #272
     eret
-
-.Llower_el_user_exit:
-    /* Exit never returns to EL0. Discard the exception frame and resume the
-     * blocking kernel call through its AAPCS/system-register frame. */
-    add     sp, sp, #272
-    b       arm64_user_exit_resume
 
 /* ===================================================================
  * Fault handler — prints "FAULT @ 0x<ELR_EL1>" to PL011 then halts

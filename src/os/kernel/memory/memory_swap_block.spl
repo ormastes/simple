@@ -23,6 +23,7 @@ class MemorySwapBlockStore:
     reads: u64
     releases: u64
     errors: u64
+    fail_releases_for_test: u64
 
 fn _memory_swap_block_failure(reason: text) -> MemorySwapResult:
     MemorySwapResult(ok: false, reason: reason, slot_id: 0, allocation_id: 0, page_index: 0, bytes: [])
@@ -41,10 +42,14 @@ fn memory_swap_block_store_new(enabled: bool, device: BlockDevice, base_lba: u64
         writes: 0,
         reads: 0,
         releases: 0,
-        errors: 0
+        errors: 0,
+        fail_releases_for_test: 0
     )
 
 impl MemorySwapBlockStore:
+
+    me fail_next_release_for_test():
+        me.fail_releases_for_test = me.fail_releases_for_test + 1
 
     me _find_free_slot() -> i64:
         var i: i64 = 0
@@ -143,6 +148,10 @@ impl MemorySwapBlockStore:
         MemorySwapResult(ok: true, reason: "ok", slot_id: slot_id, allocation_id: allocation_id, page_index: page_index, bytes: bytes)
 
     me release(slot_id: u64, allocation_id: u64) -> MemorySwapResult:
+        if me.fail_releases_for_test > 0:
+            me.fail_releases_for_test = me.fail_releases_for_test - 1
+            me.errors = me.errors + 1
+            return _memory_swap_block_failure("swap-io")
         if slot_id == 0 or slot_id > (me.slots.len() as u64):
             me.errors = me.errors + 1
             return _memory_swap_block_failure("missing-slot")

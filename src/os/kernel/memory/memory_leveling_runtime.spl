@@ -2,6 +2,7 @@
 
 use std.memory_leveling.{simple_memory_mut_cpu_cold, simple_memory_placement_config_from_intent, memory_leveling_policy_from_intent, MemoryLevelingStats, MEMORY_DMA_DIRECTION_BIDIRECTIONAL, memory_domain, memory_tier_dma_pinned}
 use os.kernel.memory.memory_leveling_manager.{MemoryLevelingManager, MemoryRuntimeMapping, SimpleOsMemoryLevelingConfig, MemoryPressureReport, memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.vmm.{vmm_active_root}
 
 struct MemoryLevelingRuntimeResult:
     ok: bool
@@ -29,8 +30,8 @@ fn memory_leveling_runtime_manager() -> MemoryLevelingManager:
 fn memory_leveling_runtime_replace_manager(manager: MemoryLevelingManager):
     _memory_leveling_runtime_manager = Some(manager)
 
-fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
-    if virt_addr == 0 or (virt_addr % 4096) != 0 or byte_length == 0 or owner_id == 0:
+fn memory_leveling_runtime_register_cpu_range_in(virt_addr: u64, byte_length: u64, owner_id: u64, address_space_root: u64) -> MemoryLevelingRuntimeResult:
+    if virt_addr == 0 or (virt_addr % 4096) != 0 or byte_length == 0 or owner_id == 0 or address_space_root == 0 or address_space_root == 1:
         return MemoryLevelingRuntimeResult(ok: false, reason: "invalid-request", allocation_ids: [])
     val manager = memory_leveling_runtime_manager()
     val intent = simple_memory_mut_cpu_cold()
@@ -46,7 +47,11 @@ fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, 
         if not requested.ok:
             var rollback_index: i64 = 0
             while rollback_index < allocation_ids.len():
-                manager.release(allocation_ids[rollback_index], owner_id)
+                val released = manager.release(allocation_ids[rollback_index], owner_id)
+                if released.ok:
+                    manager.runtime_mapping_remove(allocation_ids[rollback_index])
+                else:
+                    _ = manager.fail(allocation_ids[rollback_index], owner_id, "registration-rollback-failed")
                 rollback_index = rollback_index + 1
             _memory_leveling_runtime_manager = Some(manager)
             return MemoryLevelingRuntimeResult(ok: false, reason: requested.reason, allocation_ids: [])
@@ -54,6 +59,7 @@ fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, 
         val mapping = MemoryRuntimeMapping(
             allocation_id: requested.allocation_id,
             owner_id: owner_id,
+            address_space_root: address_space_root,
             virt_addr: virt_addr + page_index * 4096,
             page_index: page_index,
             byte_length: page_bytes
@@ -63,13 +69,19 @@ fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, 
     _memory_leveling_runtime_manager = Some(manager)
     MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: allocation_ids)
 
+fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
+    memory_leveling_runtime_register_cpu_range_in(virt_addr, byte_length, owner_id, vmm_active_root())
+
 fn memory_leveling_runtime_mapping(allocation_id: u64) -> MemoryRuntimeMapping?:
     val manager = memory_leveling_runtime_manager()
     manager.runtime_mapping(allocation_id)
 
 fn memory_leveling_runtime_mapping_at(virt_addr: u64) -> MemoryRuntimeMapping?:
+    memory_leveling_runtime_mapping_at_in(virt_addr, vmm_active_root())
+
+fn memory_leveling_runtime_mapping_at_in(virt_addr: u64, address_space_root: u64) -> MemoryRuntimeMapping?:
     val manager = memory_leveling_runtime_manager()
-    manager.runtime_mapping_at(virt_addr)
+    manager.runtime_mapping_at_in(virt_addr, address_space_root)
 
 fn memory_leveling_runtime_forget_mapping(allocation_id: u64):
     val manager = memory_leveling_runtime_manager()
@@ -99,7 +111,7 @@ fn memory_leveling_runtime_register_dma(allocation_id: u64, owner_id: u64, virt_
     if not registered.ok:
         return MemoryLevelingRuntimeResult(ok: false, reason: registered.reason, allocation_ids: [])
     val registered_id = registered.allocation_id
-    val mapping = MemoryRuntimeMapping(allocation_id: registered_id, owner_id: owner_id, virt_addr: virt_addr, page_index: 0, byte_length: byte_length)
+    val mapping = MemoryRuntimeMapping(allocation_id: registered_id, owner_id: owner_id, address_space_root: vmm_active_root(), virt_addr: virt_addr, page_index: 0, byte_length: byte_length)
     manager.runtime_mapping_add(mapping)
     MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: [registered_id])
 
@@ -150,14 +162,14 @@ fn memory_leveling_runtime_dma_sync_for_cpu(allocation_id: u64, owner_id: u64) -
         return MemoryLevelingRuntimeResult(ok: false, reason: unmapped.reason, allocation_ids: [])
     MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: [allocation_id])
 
-fn memory_leveling_runtime_release_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
+fn memory_leveling_runtime_release_range_in(virt_addr: u64, byte_length: u64, owner_id: u64, address_space_root: u64) -> MemoryLevelingRuntimeResult:
     val end_addr = virt_addr + ((byte_length + 4095) / 4096) * 4096
     val manager = memory_leveling_runtime_manager()
     var released_ids: [u64] = []
     var i: i64 = 0
     while i < manager.runtime_mappings.len():
         val mapping = manager.runtime_mappings[i]
-        if mapping.virt_addr >= virt_addr and mapping.virt_addr < end_addr:
+        if mapping.address_space_root == address_space_root and mapping.virt_addr >= virt_addr and mapping.virt_addr < end_addr:
             if mapping.owner_id != owner_id:
                 _memory_leveling_runtime_manager = Some(manager)
                 return MemoryLevelingRuntimeResult(ok: false, reason: "not-owner", allocation_ids: released_ids)
@@ -171,6 +183,9 @@ fn memory_leveling_runtime_release_range(virt_addr: u64, byte_length: u64, owner
             i = i + 1
     _memory_leveling_runtime_manager = Some(manager)
     MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: released_ids)
+
+fn memory_leveling_runtime_release_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
+    memory_leveling_runtime_release_range_in(virt_addr, byte_length, owner_id, vmm_active_root())
 
 fn memory_leveling_runtime_apply_pressure(level: text) -> MemoryPressureReport:
     val manager = memory_leveling_runtime_manager()

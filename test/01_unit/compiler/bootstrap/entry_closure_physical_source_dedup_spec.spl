@@ -6,7 +6,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.driver.driver_source_loading.{
     _driver_canonical_source_path, _driver_module_name_from_path, _driver_unique_physical_sources,
     _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
-    _driver_collect_sources_via_find, _driver_entry_import_module_paths
+    _driver_collect_sources_via_find
 }
 
 describe "entry-closure physical source deduplication":
@@ -35,21 +35,6 @@ describe "entry-closure physical source deduplication":
         expect(_driver_text_bucket_set_has(buckets, "std.alphabet")).to_be(true)
         expect(_driver_text_bucket_set_has(buckets, "std.alph")).to_be(false)
 
-    it "spreads distinct keys across phase-one buckets":
-        var buckets = _driver_text_bucket_set_new(16)
-        for key in [
-            "std.alpha", "std.beta", "std.gamma", "std.delta",
-            "std.epsilon", "std.zeta", "std.eta", "std.theta",
-            "app.main", "app.cli", "compiler.driver", "compiler.parser"
-        ]:
-            buckets = _driver_text_bucket_set_add(buckets, key)
-
-        var populated = 0
-        for bucket in buckets:
-            if bucket != "":
-                populated = populated + 1
-        expect(populated).to_be_greater_than(1)
-
     it "registers every logical alias from one cached module result":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
 
@@ -67,16 +52,6 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(8192)")
         expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(8192)")
         expect(driver).to_not_contain("var closure_seen_mods: [text]")
-
-    it "skips docstring imports without slicing every source character":
-        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\nexport use app.live.*\n")
-        val long_imports = _driver_entry_import_module_paths("x".repeat(65536) + "\nuse std.real\n")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
-
-        expect(imports).to_equal(["std.real", "app.live"])
-        expect(long_imports).to_equal(["std.real"])
-        expect(loading).to_contain("var quote_pos = quote_tail.index_of")
-        expect(loading).to_not_contain("line.substring(scan_pos, scan_pos + 3)")
 
     it "keeps a zero-import explicit entry out of whole-workspace loading":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""

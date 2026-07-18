@@ -15,9 +15,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **94 logical cases / 128 recorded checks** because strict-dual cases
+  defines **93 logical cases / 127 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **96 logical cases / 131 recorded checks**; execution is opt-in because
+  to **95 logical cases / 130 recorded checks**; execution is opt-in because
   those two reproductions remain known-red. Execution of the expanded matrix
   is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -221,9 +221,7 @@ the shared binary — deploys require explicit user go-ahead).
   identity calls. One strict LLVM/Cranelift fixture covers all six collisions,
   `Err(text).unwrap_err()`, and single receiver evaluation in Linux's full gate
   plus the selected macOS, Windows, and FreeBSD gates. First staged execution
-  is pending. The shared cross-target fixture also routes a custom non-Option
-  `unwrap` through its declared receiver on AArch64/RISC-V64 execution and
-  ARM32/RV32/Windows ARM64 object gates.
+  is pending.
 - The Engine2D host-runtime queue symbol bug now has one incremental
   gate that builds the existing no-GPU probe with the host-GPU bundle under
   flagless LLVM or explicit Cranelift, compares native output byte-for-byte
@@ -246,22 +244,12 @@ the shared binary — deploys require explicit user go-ahead).
   falling into Mach-O flags, and direct strict linking reuses the established
   base-system `/usr/lib` CRT directory. Its full Stage4 QEMU execution remains
   pending.
-  The executed Stage4 unresolved preview's bare `path_parent`, `path_filename`,
-  `path_extension`, `path_stem`, `path_components`, and `path_with_extension`
-  are also removed in both filesystem profiles by reusing `std.path`; no new C
-  provider was added. `file_metadata` now uses one opaque runtime stat handle,
-  constructs the record in pure Simple, and releases the handle; no live
-  unresolvable entry remains in that stub family.
-  Windows COFF projection is now source-implemented for both linker families:
-  MinGW keeps the exact static capsule, while MSVC links the selected owners
-  once into an exact-export DLL/import library and hash-verifies the Stage4 and
-  SQLite DLL neighbors beside the final executable. The Windows LLVM/Cranelift
-  full-CLI matrix now schedules nonempty artifact receipts. The remaining
-  Linux recovery profile now completes phase-one loading in 6.325 seconds for
-  1,763 sources with the pure-Simple bucket hash; `std.alloc.sffi` is also owned
-  in the pure library tree instead of the Rust-seed mirror. The next blocker is
-  phase-two parse retention exceeding the 4 GiB safety cap, followed by first
-  full execution evidence and any concrete missing owner reported by the
-  complete compiler request closure, not the retired seed enum/mcall
-  diagnoses. See
+  The executed Stage4 unresolved preview's bare `path_filename`,
+  `path_extension`, and `path_stem` are also removed in both filesystem
+  profiles by reusing `std.path`; no new C provider was added. Three live path
+  helpers plus `file_metadata` remain in that stub family.
+  Windows COFF projection and DLL staging remain a separate source-open lane.
+  The remaining blocker is execution evidence plus any concrete missing owner
+  reported by the complete compiler request closure, not the retired seed
+  enum/mcall diagnoses. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

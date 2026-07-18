@@ -17,7 +17,6 @@ Date: 2026-07-18
 | `rv32_mmu_audit` | canonical VHDL compiler boundary | Existing RV32 generated source has 13 real combinational `@hardware` helpers; canonical CLI/API and backend limits identified; RV64 still lacks an equivalent | accepted; Milestone 1 starts from this RV32 slice and does not claim a CPU |
 | `rv64_mmu_audit` | SPipe/manual structure | Existing app/hardware feature lane, five-step visible flow, folded negative matrices, typed captures, and explicit failing helpers identified | accepted; helper names and spec path frozen by primary |
 | `linux_fpga_audit` | smallest false-green removal | Keep bundle contract names but make CPU/testbench/formal execution fail with `GENERATED_RTL_NOT_IMPLEMENTED`; mark sidecars non-ready | accepted and implemented in Milestone 0 |
-| `rv64_mmu_audit` | supervisor interrupt ownership and priority | Canonical `mie`/`mip`/`mideleg`, masked S aliases, independent PLIC M/S contexts, and strict software/external `SEIP` OR semantics | accepted; primary implemented and owns final review |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

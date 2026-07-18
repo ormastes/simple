@@ -913,23 +913,6 @@ impl Lowerer {
                 "concat" | "slice" | "replace" => Some(TypeId::STRING),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
-                // `.to_int()`/`.to_i64()` parse the string to a raw i64 (0 on
-                // failure -- see interpreter_method/string.rs `"to_int" |
-                // "to_i64" | ... => Value::Int(...)` and the native runtime's
-                // `rt_string_to_int`). This table forgetting them is the SAME
-                // class of gap as the `"length"`/`"bytes"` entries above:
-                // `.to_int()` fell through to the generic dynamic-dispatch
-                // fallback (`lower_method_call`'s `DispatchMode::Dynamic`
-                // path), which does not actually invoke `rt_string_to_int` --
-                // it resolves to an identity pass-through of the receiver, so
-                // the STRING's own heap/data pointer (still typed `I64` from
-                // `lookup_method_return_type`'s suffix search) flows out
-                // unboxed and gets misdecoded downstream (tiny-float garbage
-                // for literal strings, ASLR-varying huge-int garbage for
-                // heap-allocated strings such as `.split()` elements) instead
-                // of the parsed integer (bug
-                // interp_to_int_split_result_nil_coalesce_garbage_2026-07-17.md).
-                "to_int" | "to_i64" => Some(TypeId::I64),
                 // `.bytes()` returns UTF-8 bytes as an array of ints (see
                 // interpreter_method/string.rs `"bytes" => Vec<Value::Int>`,
                 // and the native runtime's `rt_string_bytes`, which pushes
@@ -951,25 +934,6 @@ impl Lowerer {
                     self.module
                         .types
                         .register(HirType::Array { element: TypeId::I64, size: None }),
-                ),
-                // `.split(sep)` returns an array of String elements (see
-                // interpreter_method/string.rs `"split" => Vec<Value::text>`
-                // and the native runtime's `rt_string_split`). Same class of
-                // gap as `"bytes"` above: without this entry the call fell
-                // through to generic dynamic dispatch typed `TypeId::ANY`, so
-                // each element's static type was erased to `Any` instead of
-                // `String` -- any subsequent method call on an indexed
-                // element (e.g. `parts[1].to_int()`) then ALSO missed the
-                // is_string table (receiver typed `Any`, not `String`) and
-                // fell through to the same broken generic dynamic-dispatch
-                // fallback, which resolves `to_int` to an identity
-                // pass-through of the element's own heap pointer instead of
-                // calling `rt_string_to_int` (bug
-                // interp_to_int_split_result_nil_coalesce_garbage_2026-07-17.md).
-                "split" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
                 ),
                 _ => None,
             };

@@ -60,8 +60,8 @@ static int64_t text(const char* value) {
 }
 
 static int walk_contains(SplArray* paths, const char* expected) {
-    for (int64_t i = 0; i < rt_array_len(paths); i++) {
-        const char* actual = (const char*)rt_string_data(rt_array_get(paths, i));
+    for (int64_t i = 0; i < spl_array_len(paths); i++) {
+        const char* actual = spl_as_str(spl_array_get(paths, i));
         if (actual && strcmp(actual, expected) == 0) return 1;
     }
     return 0;
@@ -113,7 +113,7 @@ int main(void) {
     assert(symlink(walk_regular, walk_file_link) == 0);
     assert(symlink(walk_root, walk_cycle) == 0);
     SplArray* walked = rt_dir_walk(walk_root);
-    assert(rt_array_len(walked) == 4);
+    assert(spl_array_len(walked) == 4);
     assert(walk_contains(walked, walk_regular));
     assert(walk_contains(walked, walk_child));
     assert(walk_contains(walked, walk_file_link));
@@ -252,16 +252,6 @@ int main(void) {
     assert(rt_tuple_set(tuple, 8, rt_value_int(88)));
     assert(rt_tuple_get(tuple, 8) == rt_value_int(88));
     assert(rt_is_none(rt_value_nil()));
-    assert(!rt_is_none(0));
-    assert(rt_is_some(0));
-    int64_t option_none = rt_enum_new(1, 1, rt_value_nil());
-    int64_t option_some_zero = rt_enum_new(1, 0, 0);
-    int64_t other_none_ordinal = rt_enum_new(7, 1, rt_value_nil());
-    assert(rt_is_none(option_none));
-    assert(!rt_is_some(option_none));
-    assert(!rt_is_none(option_some_zero));
-    assert(rt_is_some(option_some_zero));
-    assert(!rt_is_none(other_none_ordinal));
     assert(!rt_is_some(rt_value_nil()));
     assert(rt_math_pow(2.0, 3.0) == 8.0);
     uint64_t mmio = 0;

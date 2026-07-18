@@ -1,54 +1,9 @@
 use std.spec
-use os.kernel.arch.riscv64.trap_model.{RV64_CAUSE_INTERRUPT_BIT, RV64_CAUSE_S_TIMER_INTERRUPT, RV64_CAUSE_ECALL_FROM_U, RV64_SSTATUS_SPIE, RV64_SSTATUS_SPP, RV64_CONTEXT_BYTES, RV64_KERNEL_RETURN_COOKIE, Rv64TrapKind, rv64_initial_kernel_sstatus, rv64_initial_user_sstatus, rv64_prepare_kernel_exit_context, create_rv64_user_context, create_rv64_kernel_context, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
+use os.kernel.arch.riscv64.trap_model.{RV64_CAUSE_INTERRUPT_BIT, RV64_CAUSE_S_TIMER_INTERRUPT, RV64_CAUSE_ECALL_FROM_U, RV64_SSTATUS_SPIE, RV64_SSTATUS_SPP, Rv64TrapKind, rv64_initial_kernel_sstatus, rv64_initial_user_sstatus, create_rv64_user_context, create_rv64_kernel_context, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
 use os.kernel.arch.arch_context.{Riscv64Context}
 use os.kernel.types.syscall_types.{SyscallResult}
 
 describe "rv64 trap model":
-    it "prepares a validated kernel continuation with the user exit code":
-        expect(RV64_CONTEXT_BYTES).to_equal(272)
-        var saved = create_rv64_kernel_context(0x80201000, 0x80402000, 0)
-        saved.ra = 0x80203000
-        saved.s0 = 0xA5A5
-        saved.scause = RV64_KERNEL_RETURN_COOKIE
-
-        val result = rv64_prepare_kernel_exit_context(saved, 37)
-        expect(result.is_ok()).to_equal(true)
-        val resumed = result.unwrap()
-        expect(resumed.a0).to_equal(37)
-        expect(resumed.scause).to_equal(0)
-        expect(resumed.sstatus & RV64_SSTATUS_SPP).to_equal(RV64_SSTATUS_SPP)
-        expect(resumed.sepc).to_equal(saved.sepc)
-        expect(resumed.sp).to_equal(saved.sp)
-        expect(resumed.ra).to_equal(saved.ra)
-        expect(resumed.s0).to_equal(saved.s0)
-
-    it "rejects malformed kernel continuations":
-        var wrong_cookie = create_rv64_kernel_context(0x80201000, 0x80402000, 0)
-        val wrong_cookie_result = rv64_prepare_kernel_exit_context(wrong_cookie, 1)
-        val wrong_cookie_error = wrong_cookie_result.err()
-        expect(wrong_cookie_error.unwrap()).to_contain("cookie")
-
-        var missing_sepc = wrong_cookie
-        missing_sepc.scause = RV64_KERNEL_RETURN_COOKIE
-        missing_sepc.sepc = 0
-        val missing_sepc_result = rv64_prepare_kernel_exit_context(missing_sepc, 1)
-        val missing_sepc_error = missing_sepc_result.err()
-        expect(missing_sepc_error.unwrap()).to_contain("sepc")
-
-        var missing_sp = wrong_cookie
-        missing_sp.scause = RV64_KERNEL_RETURN_COOKIE
-        missing_sp.sp = 0
-        val missing_sp_result = rv64_prepare_kernel_exit_context(missing_sp, 1)
-        val missing_sp_error = missing_sp_result.err()
-        expect(missing_sp_error.unwrap()).to_contain("sp")
-
-        var user_privilege = wrong_cookie
-        user_privilege.scause = RV64_KERNEL_RETURN_COOKIE
-        user_privilege.sstatus = user_privilege.sstatus & ~RV64_SSTATUS_SPP
-        val user_privilege_result = rv64_prepare_kernel_exit_context(user_privilege, 1)
-        val user_privilege_error = user_privilege_result.err()
-        expect(user_privilege_error.unwrap()).to_contain("privilege")
-
     it "builds kernel contexts that return to supervisor mode":
         val ctx = create_rv64_kernel_context(0x80200000, 0x80400000, 7)
         expect(rv64_initial_kernel_sstatus() & RV64_SSTATUS_SPIE).to_equal(RV64_SSTATUS_SPIE)

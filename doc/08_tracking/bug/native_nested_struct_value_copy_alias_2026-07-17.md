@@ -33,10 +33,5 @@ to remain isolated while the same outer struct's embedded class remains
 shared. Linux runs the full parity board; macOS and Windows select the case in
 their hosted matrix, and FreeBSD selects it under both LLVM and Cranelift.
 
-The shared cross-target Result fixture repeats the same local-copy,
-plain-parameter, and embedded-class oracle. AArch64 and RISC-V64 execute it
-under flagless LLVM and explicit Cranelift; ARM32/RV32 LLVM and Windows ARM64
-LLVM/Cranelift require target objects from that source.
-
 Execution remains pending under the current no-runtime/no-compiler-command
 restriction.

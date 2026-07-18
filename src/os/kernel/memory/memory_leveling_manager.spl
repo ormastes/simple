@@ -12,12 +12,6 @@ use std.memory_leveling.{
     MEMORY_DOMAIN_GPU,
     MEMORY_DOMAIN_NIC,
     MEMORY_DOMAIN_DMA,
-    MEMORY_TIER_CPU_HOT,
-    MEMORY_TIER_CPU_COLD,
-    MEMORY_TIER_GPU_LOCAL,
-    MEMORY_TIER_GPU_COHERENT,
-    MEMORY_TIER_NIC_BUFFER,
-    MEMORY_TIER_DMA_PINNED,
     MEMORY_PAGE_STATE_CPU_OWNED,
     MEMORY_PAGE_STATE_SYNCING_FOR_DEVICE,
     MEMORY_PAGE_STATE_DEVICE_OWNED,
@@ -25,20 +19,12 @@ use std.memory_leveling.{
     MEMORY_PAGE_STATE_MIGRATING,
     MEMORY_PAGE_STATE_SWAPPED,
     MEMORY_PAGE_STATE_RELEASED,
-    MEMORY_PAGE_STATE_FAILED,
     MEMORY_DMA_DIRECTION_NONE,
-    MEMORY_LEVELING_ALLOCATION_METADATA_BYTES,
     memory_tier_cpu_cold,
     memory_tier_dma_pinned,
     memory_tier_swap_backed,
     memory_page_state,
     memory_allocation_from_intent,
-    memory_allocation_metadata_flags,
-    memory_allocation_page_count,
-    memory_allocation_page_count_valid,
-    memory_allocation_is_coherent,
-    memory_allocation_is_reclaimable,
-    memory_allocation_candidate_queued,
     memory_leveling_stats_empty
 }
 
@@ -52,23 +38,19 @@ struct SimpleOsMemoryLevelingConfig:
     cpu_high_watermark_bytes: u64
     gpu_capacity_bytes: u64
     gpu_reserved_bytes: u64
-    gpu_low_watermark_bytes: u64
-    gpu_high_watermark_bytes: u64
     nic_capacity_bytes: u64
     nic_reserved_bytes: u64
-    nic_low_watermark_bytes: u64
-    nic_high_watermark_bytes: u64
     dma_capacity_bytes: u64
     dma_reserved_bytes: u64
-    dma_low_watermark_bytes: u64
-    dma_high_watermark_bytes: u64
     swap_capacity_bytes: u64
-    swap_low_watermark_bytes: u64
-    swap_high_watermark_bytes: u64
     pressure_batch_limit: u64
     cooldown_epochs: u64
     swap_enabled: bool
     device_safety_enabled: bool
+
+struct MemoryLevelingCandidate:
+    allocation_id: u64
+    generation: u64
 
 struct MemoryLevelingOperation:
     ok: bool
@@ -79,7 +61,6 @@ struct MemoryLevelingOperation:
 struct MemoryRuntimeMapping:
     allocation_id: u64
     owner_id: u64
-    address_space_root: u64
     virt_addr: u64
     page_index: u64
     byte_length: u64
@@ -94,7 +75,8 @@ struct MemoryPressureReport:
 class MemoryLevelingManager:
     config: SimpleOsMemoryLevelingConfig
     allocations: [MemoryAllocation]
-    candidates: [u64]
+    generations: [u64]
+    candidates: [MemoryLevelingCandidate]
     stats: MemoryLevelingStats
     next_allocation_id: u64
     epoch: u64
@@ -110,19 +92,11 @@ fn simpleos_memory_leveling_config_default() -> SimpleOsMemoryLevelingConfig:
         cpu_high_watermark_bytes: 256 * 1024 * 1024,
         gpu_capacity_bytes: 0,
         gpu_reserved_bytes: 0,
-        gpu_low_watermark_bytes: 0,
-        gpu_high_watermark_bytes: 0,
         nic_capacity_bytes: 64 * 1024 * 1024,
         nic_reserved_bytes: 4 * 1024 * 1024,
-        nic_low_watermark_bytes: 8 * 1024 * 1024,
-        nic_high_watermark_bytes: 16 * 1024 * 1024,
         dma_capacity_bytes: 64 * 1024 * 1024,
         dma_reserved_bytes: 4 * 1024 * 1024,
-        dma_low_watermark_bytes: 8 * 1024 * 1024,
-        dma_high_watermark_bytes: 16 * 1024 * 1024,
         swap_capacity_bytes: 2 * 1024 * 1024 * 1024,
-        swap_low_watermark_bytes: 256 * 1024 * 1024,
-        swap_high_watermark_bytes: 512 * 1024 * 1024,
         pressure_batch_limit: MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES,
         cooldown_epochs: 2,
         swap_enabled: true,
@@ -140,12 +114,8 @@ fn simpleos_memory_leveling_config_for_physical_capacity(capacity_bytes: u64) ->
     config.cpu_high_watermark_bytes = capacity_bytes / 4
     config.nic_capacity_bytes = if config.nic_capacity_bytes < capacity_bytes / 4: config.nic_capacity_bytes else: capacity_bytes / 4
     config.nic_reserved_bytes = config.nic_capacity_bytes / 16
-    config.nic_low_watermark_bytes = config.nic_capacity_bytes / 8
-    config.nic_high_watermark_bytes = config.nic_capacity_bytes / 4
     config.dma_capacity_bytes = if config.dma_capacity_bytes < capacity_bytes / 4: config.dma_capacity_bytes else: capacity_bytes / 4
     config.dma_reserved_bytes = config.dma_capacity_bytes / 16
-    config.dma_low_watermark_bytes = config.dma_capacity_bytes / 8
-    config.dma_high_watermark_bytes = config.dma_capacity_bytes / 4
     config
 
 fn simpleos_memory_leveling_config_validate(config: SimpleOsMemoryLevelingConfig) -> text:
@@ -158,14 +128,6 @@ fn simpleos_memory_leveling_config_validate(config: SimpleOsMemoryLevelingConfig
         return "invalid-reservation"
     if config.cpu_low_watermark_bytes > config.cpu_high_watermark_bytes or config.cpu_high_watermark_bytes > config.cpu_capacity_bytes:
         return "invalid-watermark"
-    if config.gpu_low_watermark_bytes > config.gpu_high_watermark_bytes or config.gpu_high_watermark_bytes > config.gpu_capacity_bytes:
-        return "invalid-watermark"
-    if config.nic_low_watermark_bytes > config.nic_high_watermark_bytes or config.nic_high_watermark_bytes > config.nic_capacity_bytes:
-        return "invalid-watermark"
-    if config.dma_low_watermark_bytes > config.dma_high_watermark_bytes or config.dma_high_watermark_bytes > config.dma_capacity_bytes:
-        return "invalid-watermark"
-    if config.swap_low_watermark_bytes > config.swap_high_watermark_bytes or config.swap_high_watermark_bytes > config.swap_capacity_bytes:
-        return "invalid-watermark"
     if config.swap_enabled and config.swap_capacity_bytes == 0:
         return "invalid-swap-capacity"
     "ok"
@@ -174,6 +136,7 @@ fn memory_leveling_manager_new(config: SimpleOsMemoryLevelingConfig) -> MemoryLe
     MemoryLevelingManager(
         config: config,
         allocations: [],
+        generations: [],
         candidates: [],
         stats: memory_leveling_stats_empty(),
         next_allocation_id: 1,
@@ -192,9 +155,9 @@ impl MemoryLevelingManager:
                 return Some(mapping)
         nil
 
-    me runtime_mapping_at_in(virt_addr: u64, address_space_root: u64) -> MemoryRuntimeMapping?:
+    me runtime_mapping_at(virt_addr: u64) -> MemoryRuntimeMapping?:
         for mapping in me.runtime_mappings:
-            if mapping.address_space_root == address_space_root and mapping.virt_addr == virt_addr:
+            if mapping.virt_addr == virt_addr:
                 return Some(mapping)
         nil
 
@@ -212,7 +175,9 @@ fn _memory_leveling_updated(source: MemoryAllocation, tier: MemoryTier, state: M
     MemoryAllocation(
         allocation_id: source.allocation_id,
         byte_length: source.byte_length,
+        page_count: source.page_count,
         owner_id: source.owner_id,
+        owner: source.owner,
         domain: source.domain,
         tier: tier,
         state: state,
@@ -220,10 +185,13 @@ fn _memory_leveling_updated(source: MemoryAllocation, tier: MemoryTier, state: M
         in_flight_count: in_flight_count,
         mapping_count: mapping_count,
         dma_direction: dma_direction,
+        coherent: coherent,
         access_epoch: access_epoch,
         cooldown_epoch: cooldown_epoch,
-        swap_slot_id: swap_slot_id,
-        metadata_flags: memory_allocation_metadata_flags(memory_allocation_page_count(source), coherent, reclaimable, memory_allocation_candidate_queued(source))
+        reclaimable: reclaimable,
+        contiguous: source.contiguous,
+        physical_base: source.physical_base,
+        swap_slot_id: swap_slot_id
     )
 
 fn _memory_leveling_batch_limit(config: SimpleOsMemoryLevelingConfig) -> u64:
@@ -232,30 +200,6 @@ fn _memory_leveling_batch_limit(config: SimpleOsMemoryLevelingConfig) -> u64:
     if config.pressure_batch_limit > MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES:
         return MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES
     config.pressure_batch_limit
-
-fn _memory_leveling_pool_pressure(used_bytes: u64, capacity_bytes: u64, low_watermark_bytes: u64, high_watermark_bytes: u64) -> text:
-    if capacity_bytes == 0:
-        return "normal"
-    val free_bytes = if used_bytes < capacity_bytes: capacity_bytes - used_bytes else: 0
-    if free_bytes <= low_watermark_bytes:
-        return "critical"
-    if free_bytes < high_watermark_bytes:
-        return "elevated"
-    "normal"
-
-fn _memory_leveling_pressure_rank(level: text) -> u64:
-    if level == "emergency":
-        return 3
-    if level == "critical":
-        return 2
-    if level == "elevated":
-        return 1
-    0
-
-fn _memory_leveling_higher_pressure(requested: text, observed: text) -> text:
-    if _memory_leveling_pressure_rank(requested) > _memory_leveling_pressure_rank(observed):
-        return requested
-    observed
 
 fn placement_tier_for_cpu(allocation: MemoryAllocation) -> MemoryTier:
     # Swap candidates are cold CPU allocations; hot refault promotion is a
@@ -294,15 +238,6 @@ impl MemoryLevelingManager:
         if domain_name == MEMORY_DOMAIN_DMA:
             return me.config.dma_capacity_bytes
         0
-
-    me _watermark_pressure_level() -> text:
-        var level = _memory_leveling_pool_pressure(me.stats.cpu_bytes, me.config.cpu_capacity_bytes, me.config.cpu_low_watermark_bytes, me.config.cpu_high_watermark_bytes)
-        level = _memory_leveling_higher_pressure(_memory_leveling_pool_pressure(me.stats.gpu_bytes, me.config.gpu_capacity_bytes, me.config.gpu_low_watermark_bytes, me.config.gpu_high_watermark_bytes), level)
-        level = _memory_leveling_higher_pressure(_memory_leveling_pool_pressure(me.stats.nic_bytes, me.config.nic_capacity_bytes, me.config.nic_low_watermark_bytes, me.config.nic_high_watermark_bytes), level)
-        level = _memory_leveling_higher_pressure(_memory_leveling_pool_pressure(me.stats.dma_bytes, me.config.dma_capacity_bytes, me.config.dma_low_watermark_bytes, me.config.dma_high_watermark_bytes), level)
-        if me.config.swap_enabled:
-            level = _memory_leveling_higher_pressure(_memory_leveling_pool_pressure(me.stats.swap_bytes, me.config.swap_capacity_bytes, me.config.swap_low_watermark_bytes, me.config.swap_high_watermark_bytes), level)
-        level
 
     me _resident_bytes() -> u64:
         me.stats.cpu_bytes + me.stats.gpu_bytes + me.stats.nic_bytes + me.stats.dma_bytes
@@ -353,60 +288,20 @@ impl MemoryLevelingManager:
         elif domain_name == MEMORY_DOMAIN_DMA and me.stats.dma_bytes >= byte_length:
             me.stats.dma_bytes = me.stats.dma_bytes - byte_length
 
-    me _add_tier_bytes(tier_name: text, byte_length: u64):
-        if tier_name == MEMORY_TIER_CPU_HOT:
-            me.stats.cpu_hot_bytes = me.stats.cpu_hot_bytes + byte_length
-        elif tier_name == MEMORY_TIER_CPU_COLD:
-            me.stats.cpu_cold_bytes = me.stats.cpu_cold_bytes + byte_length
-        elif tier_name == MEMORY_TIER_GPU_LOCAL:
-            me.stats.gpu_local_bytes = me.stats.gpu_local_bytes + byte_length
-        elif tier_name == MEMORY_TIER_GPU_COHERENT:
-            me.stats.gpu_coherent_bytes = me.stats.gpu_coherent_bytes + byte_length
-        elif tier_name == MEMORY_TIER_NIC_BUFFER:
-            me.stats.nic_buffer_bytes = me.stats.nic_buffer_bytes + byte_length
-        elif tier_name == MEMORY_TIER_DMA_PINNED:
-            me.stats.dma_pinned_bytes = me.stats.dma_pinned_bytes + byte_length
-
-    me _subtract_tier_bytes(tier_name: text, byte_length: u64):
-        if tier_name == MEMORY_TIER_CPU_HOT and me.stats.cpu_hot_bytes >= byte_length:
-            me.stats.cpu_hot_bytes = me.stats.cpu_hot_bytes - byte_length
-        elif tier_name == MEMORY_TIER_CPU_COLD and me.stats.cpu_cold_bytes >= byte_length:
-            me.stats.cpu_cold_bytes = me.stats.cpu_cold_bytes - byte_length
-        elif tier_name == MEMORY_TIER_GPU_LOCAL and me.stats.gpu_local_bytes >= byte_length:
-            me.stats.gpu_local_bytes = me.stats.gpu_local_bytes - byte_length
-        elif tier_name == MEMORY_TIER_GPU_COHERENT and me.stats.gpu_coherent_bytes >= byte_length:
-            me.stats.gpu_coherent_bytes = me.stats.gpu_coherent_bytes - byte_length
-        elif tier_name == MEMORY_TIER_NIC_BUFFER and me.stats.nic_buffer_bytes >= byte_length:
-            me.stats.nic_buffer_bytes = me.stats.nic_buffer_bytes - byte_length
-        elif tier_name == MEMORY_TIER_DMA_PINNED and me.stats.dma_pinned_bytes >= byte_length:
-            me.stats.dma_pinned_bytes = me.stats.dma_pinned_bytes - byte_length
-
-    me _record_metadata_allocation():
-        me.stats.metadata_record_count = me.stats.metadata_record_count + 1
-        me.stats.metadata_bytes = me.stats.metadata_bytes + MEMORY_LEVELING_ALLOCATION_METADATA_BYTES
-
     me _enqueue(index: i64):
-        var allocation = me.allocations[index]
-        if allocation.domain.name != MEMORY_DOMAIN_CPU or not memory_allocation_is_reclaimable(allocation) or memory_allocation_candidate_queued(allocation):
+        val allocation = me.allocations[index]
+        if allocation.domain.name != MEMORY_DOMAIN_CPU or not allocation.reclaimable:
             return
-        allocation.metadata_flags = memory_allocation_metadata_flags(memory_allocation_page_count(allocation), memory_allocation_is_coherent(allocation), true, true)
-        me.allocations[index] = allocation
-        me.candidates.push(allocation.allocation_id)
+        me.generations[index] = me.generations[index] + 1
+        me.candidates.push(MemoryLevelingCandidate(allocation_id: allocation.allocation_id, generation: me.generations[index]))
         me.stats.candidate_count = me.stats.candidate_count + 1
-
-    me requeue_candidate(allocation_id: u64) -> bool:
-        val index = me._find(allocation_id)
-        if index < 0:
-            return false
-        me._enqueue(index)
-        memory_allocation_candidate_queued(me.allocations[index])
 
     me request(placement: SimpleMemoryPlacementConfig, policy: MemoryLevelingPolicy, byte_length: u64, page_count: u64, owner_id: u64) -> MemoryLevelingOperation:
         val config_reason = simpleos_memory_leveling_config_validate(me.config)
         if config_reason != "ok":
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, config_reason, 0, "failed")
-        if byte_length == 0 or not memory_allocation_page_count_valid(page_count) or owner_id == 0:
+        if byte_length == 0 or page_count == 0 or owner_id == 0:
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, "invalid-request", 0, "failed")
         val domain_name = placement.intent.placement
@@ -420,13 +315,12 @@ impl MemoryLevelingManager:
         var allocation = memory_allocation_from_intent(allocation_id, byte_length, page_count, placement.intent)
         allocation.owner_id = owner_id
         allocation.tier = placement.preferred_tier
-        allocation.metadata_flags = memory_allocation_metadata_flags(page_count, memory_allocation_is_coherent(allocation), placement.movable and policy.movable and policy.swap_allowed and allocation.state.name == MEMORY_PAGE_STATE_CPU_OWNED, false)
+        allocation.reclaimable = placement.movable and policy.movable and policy.swap_allowed and allocation.state.name == MEMORY_PAGE_STATE_CPU_OWNED
         me.allocations.push(allocation)
+        me.generations.push(0)
         me.stats.allocation_count = me.stats.allocation_count + 1
         me.stats.byte_count = me.stats.byte_count + byte_length
         me._add_domain_bytes(allocation.domain.name, byte_length)
-        me._add_tier_bytes(allocation.tier.name, byte_length)
-        me._record_metadata_allocation()
         val index = me.allocations.len() - 1
         me._enqueue(index)
         _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
@@ -436,8 +330,7 @@ impl MemoryLevelingManager:
         if config_reason != "ok":
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, config_reason, allocation_id, "failed")
-        val has_physical_layout = contiguous and physical_base > 0
-        if owner_id == 0 or byte_length == 0 or not memory_allocation_page_count_valid(page_count) or not has_physical_layout or (allocation_id != 0 and me._find(allocation_id) >= 0):
+        if owner_id == 0 or byte_length == 0 or page_count == 0 or (allocation_id != 0 and me._find(allocation_id) >= 0):
             return _memory_leveling_operation(false, "invalid-request", allocation_id, "failed")
         val admission = me._admission_reason(domain.name, byte_length)
         if admission != "ok":
@@ -452,7 +345,9 @@ impl MemoryLevelingManager:
         val allocation = MemoryAllocation(
             allocation_id: resolved_allocation_id,
             byte_length: byte_length,
+            page_count: page_count,
             owner_id: owner_id,
+            owner: "simpleos-device",
             domain: domain,
             tier: tier,
             state: cpu_owned,
@@ -460,20 +355,22 @@ impl MemoryLevelingManager:
             in_flight_count: 0,
             mapping_count: 0,
             dma_direction: dma_direction,
+            coherent: coherent,
             access_epoch: me.epoch,
             cooldown_epoch: 0,
-            swap_slot_id: 0,
-            metadata_flags: memory_allocation_metadata_flags(page_count, coherent, false, false)
+            reclaimable: false,
+            contiguous: contiguous,
+            physical_base: physical_base,
+            swap_slot_id: 0
         )
         me.allocations.push(allocation)
+        me.generations.push(0)
         if resolved_allocation_id >= me.next_allocation_id:
             me.next_allocation_id = resolved_allocation_id + 1
         me.stats.allocation_count = me.stats.allocation_count + 1
         me.stats.byte_count = me.stats.byte_count + byte_length
         me.stats.pin_count = me.stats.pin_count + pin_count
         me._add_domain_bytes(domain.name, byte_length)
-        me._add_tier_bytes(tier.name, byte_length)
-        me._record_metadata_allocation()
         _memory_leveling_operation(true, "ok", resolved_allocation_id, cpu_owned.name)
 
     me get(allocation_id: u64) -> MemoryAllocation?:
@@ -491,7 +388,7 @@ impl MemoryLevelingManager:
             return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
         if allocation.state.name == MEMORY_PAGE_STATE_RELEASED or allocation.state.name == MEMORY_PAGE_STATE_SWAPPED:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count + 1, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count + 1, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, allocation.coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.pin_count = me.stats.pin_count + 1
         _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
 
@@ -505,7 +402,7 @@ impl MemoryLevelingManager:
         if allocation.pin_count == 0:
             return _memory_leveling_operation(false, "pin-underflow", allocation_id, allocation.state.name)
         val reclaimable = allocation.pin_count == 1 and allocation.mapping_count == 0 and allocation.in_flight_count == 0 and allocation.state.name == MEMORY_PAGE_STATE_CPU_OWNED
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count - 1, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, reclaimable, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count - 1, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, allocation.coherent, allocation.access_epoch, allocation.cooldown_epoch, reclaimable, allocation.swap_slot_id)
         me.stats.pin_count = me.stats.pin_count - 1
         if reclaimable:
             me._enqueue(index)
@@ -536,7 +433,7 @@ impl MemoryLevelingManager:
         if allocation.state.name != MEMORY_PAGE_STATE_SYNCING_FOR_DEVICE or allocation.mapping_count == 0:
             return _memory_leveling_operation(false, "sync-required", allocation_id, allocation.state.name)
         val owned = memory_page_state(MEMORY_PAGE_STATE_DEVICE_OWNED, true, false)
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, owned, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, owned, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, allocation.coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.transition_count = me.stats.transition_count + 1
         _memory_leveling_operation(true, "ok", allocation_id, owned.name)
 
@@ -547,7 +444,7 @@ impl MemoryLevelingManager:
         val allocation = me.allocations[index]
         if allocation.owner_id != owner_id or allocation.state.name != MEMORY_PAGE_STATE_DEVICE_OWNED:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count, allocation.in_flight_count + 1, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count, allocation.in_flight_count + 1, allocation.mapping_count, allocation.dma_direction, allocation.coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.in_flight_count = me.stats.in_flight_count + 1
         _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
 
@@ -558,7 +455,7 @@ impl MemoryLevelingManager:
         val allocation = me.allocations[index]
         if allocation.owner_id != owner_id or allocation.in_flight_count == 0:
             return _memory_leveling_operation(false, "in-flight-underflow", allocation_id, allocation.state.name)
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count, allocation.in_flight_count - 1, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count, allocation.in_flight_count - 1, allocation.mapping_count, allocation.dma_direction, allocation.coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.in_flight_count = me.stats.in_flight_count - 1
         _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
 
@@ -572,7 +469,7 @@ impl MemoryLevelingManager:
         if allocation.in_flight_count > 0:
             return _memory_leveling_operation(false, "in-flight", allocation_id, allocation.state.name)
         val syncing = memory_page_state(MEMORY_PAGE_STATE_SYNCING_FOR_CPU, true, false)
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, syncing, allocation.pin_count, 0, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, syncing, allocation.pin_count, 0, allocation.mapping_count, allocation.dma_direction, allocation.coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.transition_count = me.stats.transition_count + 1
         _memory_leveling_operation(true, "ok", allocation_id, syncing.name)
 
@@ -593,25 +490,17 @@ impl MemoryLevelingManager:
             me._enqueue(index)
         _memory_leveling_operation(true, "ok", allocation_id, cpu_owned.name)
 
-    me can_release(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
+    me release(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
         val index = me._find(allocation_id)
         if index < 0:
             return _memory_leveling_operation(false, "not-found", allocation_id, "failed")
         val allocation = me.allocations[index]
         if allocation.owner_id != owner_id:
             return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
-        if allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name == MEMORY_PAGE_STATE_DEVICE_OWNED or allocation.state.name == MEMORY_PAGE_STATE_MIGRATING or allocation.state.name == MEMORY_PAGE_STATE_FAILED:
+        if allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name == MEMORY_PAGE_STATE_DEVICE_OWNED or allocation.state.name == MEMORY_PAGE_STATE_MIGRATING:
             return _memory_leveling_operation(false, "protected", allocation_id, allocation.state.name)
         if allocation.state.name == MEMORY_PAGE_STATE_RELEASED:
             return _memory_leveling_operation(false, "released", allocation_id, allocation.state.name)
-        _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
-
-    me release(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
-        val releasable = me.can_release(allocation_id, owner_id)
-        if not releasable.ok:
-            return releasable
-        val index = me._find(allocation_id)
-        val allocation = me.allocations[index]
         val released = memory_page_state(MEMORY_PAGE_STATE_RELEASED, false, false)
         me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, released, 0, 0, 0, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, false, 0)
         me.stats.allocation_count = me.stats.allocation_count - 1
@@ -621,28 +510,8 @@ impl MemoryLevelingManager:
                 me.stats.swap_bytes = me.stats.swap_bytes - allocation.byte_length
         else:
             me._subtract_domain_bytes(allocation.domain.name, allocation.byte_length)
-            me._subtract_tier_bytes(allocation.tier.name, allocation.byte_length)
         me.stats.transition_count = me.stats.transition_count + 1
         _memory_leveling_operation(true, "ok", allocation_id, released.name)
-
-    me fail(allocation_id: u64, owner_id: u64, reason: text) -> MemoryLevelingOperation:
-        val index = me._find(allocation_id)
-        if index < 0:
-            return _memory_leveling_operation(false, "not-found", allocation_id, MEMORY_PAGE_STATE_FAILED)
-        val allocation = me.allocations[index]
-        if allocation.owner_id != owner_id:
-            return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
-        if allocation.state.name == MEMORY_PAGE_STATE_RELEASED:
-            return _memory_leveling_operation(false, "released", allocation_id, allocation.state.name)
-        if allocation.state.name == MEMORY_PAGE_STATE_FAILED:
-            return _memory_leveling_operation(false, "already-failed", allocation_id, allocation.state.name)
-        val failed = memory_page_state(MEMORY_PAGE_STATE_FAILED, false, false)
-        # Keep accounting, mappings, frames, and swap slots owned until an
-        # operator-level recovery path can prove which resources are safe.
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, failed, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
-        me.stats.failure_count = me.stats.failure_count + 1
-        me.stats.transition_count = me.stats.transition_count + 1
-        _memory_leveling_operation(false, reason, allocation_id, failed.name)
 
     me prepare_swap(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
         val index = me._find(allocation_id)
@@ -653,12 +522,8 @@ impl MemoryLevelingManager:
             return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
         if not me.config.swap_enabled:
             return _memory_leveling_operation(false, "swap-disabled", allocation_id, allocation.state.name)
-        if not memory_allocation_is_reclaimable(allocation) or allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name != MEMORY_PAGE_STATE_CPU_OWNED:
+        if not allocation.reclaimable or allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name != MEMORY_PAGE_STATE_CPU_OWNED:
             return _memory_leveling_operation(false, "protected", allocation_id, allocation.state.name)
-        if allocation.byte_length > me.config.swap_capacity_bytes or me.stats.swap_bytes > me.config.swap_capacity_bytes - allocation.byte_length:
-            me.stats.failure_count = me.stats.failure_count + 1
-            me.stats.swap_error_count = me.stats.swap_error_count + 1
-            return _memory_leveling_operation(false, "swap-capacity", allocation_id, allocation.state.name)
         val migrating = memory_page_state(MEMORY_PAGE_STATE_MIGRATING, false, false)
         me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, migrating, 0, 0, 0, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, false, 0)
         me.stats.transition_count = me.stats.transition_count + 1
@@ -671,14 +536,9 @@ impl MemoryLevelingManager:
         val allocation = me.allocations[index]
         if allocation.owner_id != owner_id or allocation.state.name != MEMORY_PAGE_STATE_MIGRATING or slot_id == 0:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
-        if allocation.byte_length > me.config.swap_capacity_bytes or me.stats.swap_bytes > me.config.swap_capacity_bytes - allocation.byte_length:
-            me.stats.failure_count = me.stats.failure_count + 1
-            me.stats.swap_error_count = me.stats.swap_error_count + 1
-            return _memory_leveling_operation(false, "swap-capacity", allocation_id, allocation.state.name)
         val swapped = memory_page_state(MEMORY_PAGE_STATE_SWAPPED, false, false)
         me.allocations[index] = _memory_leveling_updated(allocation, memory_tier_swap_backed(), swapped, 0, 0, 0, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, false, slot_id)
         me._subtract_domain_bytes(allocation.domain.name, allocation.byte_length)
-        me._subtract_tier_bytes(allocation.tier.name, allocation.byte_length)
         me.stats.swap_bytes = me.stats.swap_bytes + allocation.byte_length
         me.stats.swap_write_count = me.stats.swap_write_count + 1
         me.stats.transition_count = me.stats.transition_count + 1
@@ -692,7 +552,7 @@ impl MemoryLevelingManager:
         if allocation.owner_id != owner_id or allocation.state.name != MEMORY_PAGE_STATE_MIGRATING or allocation.swap_slot_id != 0:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
         val cpu_owned = memory_page_state(MEMORY_PAGE_STATE_CPU_OWNED, false, true)
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, cpu_owned, 0, 0, 0, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, true, 0)
+        me.allocations[index] = _memory_leveling_updated(allocation, placement_tier_for_cpu(allocation), cpu_owned, 0, 0, 0, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, true, 0)
         me.stats.transition_count = me.stats.transition_count + 1
         me._enqueue(index)
         _memory_leveling_operation(true, "ok", allocation_id, cpu_owned.name)
@@ -726,7 +586,6 @@ impl MemoryLevelingManager:
         if me.stats.swap_bytes >= allocation.byte_length:
             me.stats.swap_bytes = me.stats.swap_bytes - allocation.byte_length
         me._add_domain_bytes(allocation.domain.name, allocation.byte_length)
-        me._add_tier_bytes(placement_tier_for_cpu(allocation).name, allocation.byte_length)
         me.stats.swap_read_count = me.stats.swap_read_count + 1
         me.stats.refault_count = me.stats.refault_count + 1
         me.stats.transition_count = me.stats.transition_count + 1
@@ -754,49 +613,42 @@ impl MemoryLevelingManager:
             return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
         me.epoch = me.epoch + 1
         val cooldown = me.epoch + me.config.cooldown_epochs
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, memory_allocation_is_coherent(allocation), me.epoch, cooldown, memory_allocation_is_reclaimable(allocation), allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, allocation.state, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count, allocation.dma_direction, allocation.coherent, me.epoch, cooldown, allocation.reclaimable, allocation.swap_slot_id)
         me.stats.refault_count = me.stats.refault_count + 1
         _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
 
     me apply_pressure(level: text) -> MemoryPressureReport:
-        val effective_level = _memory_leveling_higher_pressure(level, me._watermark_pressure_level())
-        me.pressure_level = effective_level
-        me.stats.pressure_level = effective_level
+        me.pressure_level = level
         me.epoch = me.epoch + 1
         val limit = _memory_leveling_batch_limit(me.config)
         var inspected: u64 = 0
         var selected: u64 = 0
         var skipped: u64 = 0
         var selected_ids: [u64] = []
-        var remaining: [u64] = []
         var queue_index: i64 = 0
         while queue_index < me.candidates.len() and inspected < limit:
             val candidate = me.candidates[queue_index]
             inspected = inspected + 1
-            val index = me._find(candidate)
-            if index < 0:
+            val index = me._find(candidate.allocation_id)
+            if index < 0 or candidate.generation != me.generations[index]:
                 skipped = skipped + 1
             else:
-                var allocation = me.allocations[index]
-                if allocation.cooldown_epoch > me.epoch:
+                val allocation = me.allocations[index]
+                if not me.config.swap_enabled or not allocation.reclaimable or allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name != MEMORY_PAGE_STATE_CPU_OWNED or allocation.cooldown_epoch > me.epoch:
                     skipped = skipped + 1
-                    me.stats.cooldown_count = me.stats.cooldown_count + 1
-                    remaining.push(candidate)
+                    if allocation.cooldown_epoch > me.epoch:
+                        me.stats.cooldown_count = me.stats.cooldown_count + 1
                 else:
-                    allocation.metadata_flags = memory_allocation_metadata_flags(memory_allocation_page_count(allocation), memory_allocation_is_coherent(allocation), memory_allocation_is_reclaimable(allocation), false)
-                    me.allocations[index] = allocation
-                    if not me.config.swap_enabled or not memory_allocation_is_reclaimable(allocation) or allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name != MEMORY_PAGE_STATE_CPU_OWNED:
-                        skipped = skipped + 1
-                    else:
-                        selected_ids.push(allocation.allocation_id)
-                        selected = selected + 1
+                    selected_ids.push(allocation.allocation_id)
+                    selected = selected + 1
             queue_index = queue_index + 1
+        var remaining: [MemoryLevelingCandidate] = []
         while queue_index < me.candidates.len():
             remaining.push(me.candidates[queue_index])
             queue_index = queue_index + 1
         me.candidates = remaining
         me.stats.skipped_count = me.stats.skipped_count + skipped
-        MemoryPressureReport(level: effective_level, inspected: inspected, selected: selected, skipped: skipped, candidate_ids: selected_ids)
+        MemoryPressureReport(level: level, inspected: inspected, selected: selected, skipped: skipped, candidate_ids: selected_ids)
 
     me snapshot() -> MemoryLevelingStats:
         me.stats

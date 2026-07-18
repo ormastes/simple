@@ -3,32 +3,21 @@
 //! Wrapper functions for RuntimeValue string operations.
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::value::Value;
+use crate::value::{SharedText, Value};
 use simple_runtime::value::RuntimeValue;
+use std::cell::RefCell;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{rt_string_new, rt_string_concat, rt_string_len, rt_string_eq};
 use simple_runtime::value::{rt_string_data};
 
-/// Resolve an interpreted `text` argument to the tagged `RuntimeValue` string
-/// the native runtime functions expect.
-///
-/// Most `text` locals reaching these `EXTERN_DISPATCH` handlers have already
-/// been boxed into a `RuntimeValue` (represented here as `Value::Int(raw_bits)`)
-/// by an earlier `rt_string_new` round-trip. A raw string *literal* passed
-/// directly at an extern call site (e.g. `cranelift_new_aot_module("bootstrap_main", ...)`
-/// in `cranelift_codegen_adapter.spl`), however, still arrives as a plain
-/// `Value::Str` that was never boxed. Box it on the fly so both shapes work.
 fn resolve_runtime_string(val: &Value) -> Result<RuntimeValue, CompileError> {
     match val {
         Value::Str(s) => {
             let bytes = s.as_bytes();
             Ok(rt_string_new(bytes.as_ptr(), bytes.len() as u64))
         }
-        other => {
-            let raw = other.as_int()?;
-            Ok(RuntimeValue::from_raw(raw as u64))
-        }
+        other => Ok(RuntimeValue::from_raw(other.as_int()? as u64)),
     }
 }
 // String builder SFFI functions are re-exported at the crate root (see lib.rs).
@@ -36,6 +25,12 @@ use simple_runtime::{
     rt_string_builder_finish, rt_string_builder_free, rt_string_builder_len, rt_string_builder_new,
     rt_string_builder_push,
 };
+
+thread_local! {
+    // ponytail: one retained pointer matches current single-text-pointer SFFI
+    // calls; use per-call owned argument storage if an extern needs two.
+    static BORROWED_STRING_DATA: RefCell<Option<SharedText>> = const { RefCell::new(None) };
+}
 
 // ============================================================================
 // String Creation
@@ -70,7 +65,6 @@ pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )
     })?)?;
-
     let b = resolve_runtime_string(args.get(1).ok_or_else(|| {
         CompileError::semantic_with_context(
             "rt_string_concat expects 2 arguments".to_string(),
@@ -84,43 +78,37 @@ pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get string length
 pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let string = resolve_runtime_string(args.first().ok_or_else(|| {
-        CompileError::semantic_with_context(
+    match args.first() {
+        Some(Value::Str(text)) => Ok(Value::Int(text.len() as i64)),
+        Some(value) => {
+            let string = RuntimeValue::from_raw(value.as_int()? as u64);
+            Ok(Value::Int(rt_string_len(string)))
+        }
+        None => Err(CompileError::semantic_with_context(
             "rt_string_len expects 1 argument".to_string(),
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        )
-    })?)?;
-
-    let len = rt_string_len(string);
-    Ok(Value::Int(len))
+        )),
+    }
 }
 
-/// Return the raw pointer to a `text` value's UTF-8 bytes as a plain i64.
-///
-/// Mirrors the runtime's native `rt_string_data` (`RuntimeFuncSpec::new("rt_string_data",
-/// &[I64], &[I64])`, see `codegen/runtime_sffi.rs`) used by the compiled/native
-/// path. Without this hand-written `EXTERN_DISPATCH` entry, interpreted calls to
-/// `extern fn rt_string_data(s: text) -> i64` fell through to
-/// `interpreter_extern::dynamic_sffi`'s dlopen-based fallback -- the same
-/// landmine class as `rt_string_bytes` (see
-/// `seed_flat_registry_len_i64_2026-07-17`): that fallback's `value_to_i64`
-/// marshals a `Value::Str` argument as a raw *leaked CString pointer*, not a
-/// tagged `RuntimeValue`, so the real native `rt_string_data` decodes garbage
-/// tag bits from an address that was never a `RuntimeValue` to begin with.
-/// This wall blocked every fresh-seed native-build through the pure-Simple
-/// cranelift-direct path (`cranelift_new_aot_module` in
-/// `cranelift_codegen_adapter.spl`), since `rt_string_data(name)` is the first
-/// call any AOT module creation makes for its literal module name.
+/// Return a pointer retained until the next string-data call on this thread.
 pub fn rt_string_data_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let string = resolve_runtime_string(args.first().ok_or_else(|| {
-        CompileError::semantic_with_context(
+    match args.first() {
+        Some(Value::Str(text)) => {
+            let retained = text.clone();
+            let ptr = retained.as_ptr() as i64;
+            BORROWED_STRING_DATA.with(|slot| *slot.borrow_mut() = Some(retained));
+            Ok(Value::Int(ptr))
+        }
+        Some(value) => {
+            let string = RuntimeValue::from_raw(value.as_int()? as u64);
+            Ok(Value::Int(rt_string_data(string) as i64))
+        }
+        None => Err(CompileError::semantic_with_context(
             "rt_string_data expects 1 argument".to_string(),
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        )
-    })?)?;
-
-    let ptr = rt_string_data(string);
-    Ok(Value::Int(ptr as i64))
+        )),
+    }
 }
 
 /// Return the UTF-8 bytes of a `text` value as a real interpreter
@@ -162,7 +150,6 @@ pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )
     })?)?;
-
     let b = resolve_runtime_string(args.get(1).ok_or_else(|| {
         CompileError::semantic_with_context(
             "rt_string_eq expects 2 arguments".to_string(),
@@ -274,4 +261,22 @@ pub fn rt_string_builder_free_fn(args: &[Value]) -> Result<Value, CompileError> 
 
     unsafe { rt_string_builder_free(handle) };
     Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_pointer_and_length_accept_temporary_interpreter_text() {
+        let ptr = match rt_string_data_fn(&[Value::text("mcp".to_string())]).unwrap() {
+            Value::Int(ptr) => ptr,
+            other => panic!("expected pointer integer, got {other:?}"),
+        };
+        assert_eq!(
+            rt_string_len_fn(&[Value::text("mcp".to_string())]).unwrap(),
+            Value::Int(3)
+        );
+        assert_eq!(unsafe { std::slice::from_raw_parts(ptr as *const u8, 3) }, b"mcp");
+    }
 }

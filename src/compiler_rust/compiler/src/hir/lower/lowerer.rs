@@ -82,9 +82,6 @@ pub struct Lowerer {
     /// their call results become ANY and field access on them fails. Resolved
     /// into `method_return_types` in Pass 0.5c (additive: upgrade-only).
     pub(super) global_fn_return_types: Option<std::sync::Arc<HashMap<String, Type>>>,
-    /// Package-selected project data globals available to this compilation
-    /// unit even when the source relies on sibling/package visibility.
-    pub(super) global_data_types: Option<std::sync::Arc<HashMap<String, Type>>>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -156,7 +153,6 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
-            global_data_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
@@ -201,7 +197,6 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
-            global_data_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
@@ -269,7 +264,6 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
-            global_data_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
@@ -316,10 +310,6 @@ impl Lowerer {
     /// Set the whole-program free-function return-type map (see field doc).
     pub fn set_global_fn_return_types(&mut self, defs: std::sync::Arc<HashMap<String, Type>>) {
         self.global_fn_return_types = Some(defs);
-    }
-
-    pub fn set_global_data_types(&mut self, defs: std::sync::Arc<HashMap<String, Type>>) {
-        self.global_data_types = Some(defs);
     }
 
     pub fn set_duplicate_global_struct_defs(&mut self, defs: DuplicateGlobalStructDefs) {

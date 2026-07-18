@@ -21,5 +21,4 @@ mod validation;
 
 // Re-export the main entry point
 pub use module_pass::*;
-pub(crate) use module_pass::try_const_eval;
 pub use nested_def_hoist::module_with_hoisted_defs;

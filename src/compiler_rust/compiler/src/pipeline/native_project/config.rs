@@ -240,7 +240,7 @@ impl NativeProjectBuilder {
             "libsimple_runtime.a"
         };
 
-        if is_bootstrap_main_entry(&self.entry_file) && self.runtime_bundle_requests_removed_hosted() {
+        if is_bootstrap_main_entry(&self.entry_file) {
             if let Some(ref rp) = self.config.runtime_path {
                 let native_all = rp.join(native_all_name);
                 if native_all.exists() {
@@ -288,17 +288,20 @@ impl NativeProjectBuilder {
             return Ok(Some((provider, false)));
         }
 
+        let mut saw_core_c_runtime_path_archive = false;
         let mut push_runtime_candidates = |dir: &Path| {
             let runtime_deps = dir.join("deps").join(runtime_name);
             let runtime = dir.join(runtime_name);
             match lane {
                 NativeRuntimeLane::CoreCBootstrap => {
                     if runtime_deps.exists() {
+                        saw_core_c_runtime_path_archive = true;
                         if runtime_archive_has_bootstrap_cli_symbols(&runtime_deps) {
                             candidates.push((runtime_deps, false));
                         }
                     }
                     if runtime.exists() {
+                        saw_core_c_runtime_path_archive = true;
                         if runtime_archive_has_bootstrap_cli_symbols(&runtime) {
                             candidates.push((runtime, false));
                         }
@@ -344,7 +347,10 @@ impl NativeProjectBuilder {
             }
         }
 
-        if lane == NativeRuntimeLane::CoreCBootstrap && candidates.is_empty() {
+        if lane == NativeRuntimeLane::CoreCBootstrap
+            && candidates.is_empty()
+            && (self.config.runtime_path.is_none() || saw_core_c_runtime_path_archive)
+        {
             if let Some(runtime) = build_core_c_runtime_library(&temp_dir.join("core_c_runtime")) {
                 candidates.push((runtime, false));
             }
@@ -370,10 +376,6 @@ impl NativeProjectBuilder {
                 "native-build requested `simple-core` for `{}` but no simple-core runtime archive was found. Provide SIMPLE_SIMPLE_CORE_PATH/SIMPLE_CORE_RUNTIME_PATH or use `--runtime-bundle core-c-bootstrap` while the pure-Simple lane is still being ported.",
                 entry
             ));
-        }
-
-        if lane == NativeRuntimeLane::CoreCBootstrap {
-            return Err("native-build could not build or find the required core-C bootstrap runtime archive".to_string());
         }
 
         Ok(None)

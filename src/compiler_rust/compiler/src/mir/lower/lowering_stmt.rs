@@ -3,7 +3,7 @@
 //! This module contains methods for lowering HIR statements to MIR instructions,
 //! including control flow (if, while, loop, break, continue) and assignments.
 
-use super::lowering_core::{ArrayAppendPtrs, LoopContext, MirLowerError, MirLowerResult, MirLowerer};
+use super::lowering_core::{ArrayAppendPtrs, LoopContext, MirLowerResult, MirLowerer};
 use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
@@ -642,9 +642,6 @@ impl<'a> MirLowerer<'a> {
                     // Global variable assignment: use GlobalStore directly
                     HirExprKind::Global(name) => {
                         let global_name = name.clone();
-                        if !self.is_known_global_name(&global_name) {
-                            return Err(MirLowerError::UndefinedGlobal(global_name));
-                        }
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::GlobalStore {

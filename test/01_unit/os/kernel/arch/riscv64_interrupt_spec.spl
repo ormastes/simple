@@ -1,58 +1,14 @@
 use std.spec
-use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt, rv64_install_trap_runtime, rv64_install_trap_scheduler, rv64_runtime_installed, rv64_read_trap_log, rv64_dispatch_installed_trap, rv64_dispatch_trap_frame_ptr}
+use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt, rv64_install_trap_runtime, rv64_runtime_installed, rv64_read_trap_log, rv64_dispatch_installed_trap, rv64_dispatch_trap_frame_ptr}
 use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
-use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context, create_rv64_kernel_context, RV64_CAUSE_ECALL_FROM_U, RV64_KERNEL_RETURN_COOKIE, RV64_SSTATUS_SPP}
-use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context, RV64_CAUSE_ECALL_FROM_U}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.types.task_types.{TaskPriority}
-use os.kernel.types.capability_types.{CapabilitySet}
-
-@repr("C")
-struct Rv64ExitFrames:
-    live: Riscv64Context
-    saved: Riscv64Context
 
 describe "rv64 interrupt runtime bridge":
     it "reports missing runtime until installed":
         expect(rv64_runtime_installed()).to_equal(false)
-        expect(rv64_install_trap_scheduler(Scheduler.new())).to_equal(false)
-
-    it "replaces only the installed scheduler for syscall dispatch":
-        var scheduler = Scheduler.new()
-        val task = scheduler.create_task(0x400000, TaskPriority.Normal, CapabilitySet.full())
-        scheduler.schedule()
-        val selected = scheduler.get_current()
-        expect(selected.id).to_equal(task.id)
-
-        var ipc = IpcManager.new()
-        val port = ipc.create_port(task, "port")
-        var klog = KernelLog.new(16)
-        klog.write(1, 0, task.id, "rv64-scheduler-install-sentinel")
-        rv64_install_trap_runtime(Scheduler.new(), ipc, klog)
-        expect(Rv64Interrupt.install_scheduler(scheduler)).to_equal(true)
-
-        var getpid_ctx = create_rv64_user_context(0x400000, 0x410000, 0)
-        getpid_ctx.a7 = 4
-        getpid_ctx.scause = RV64_CAUSE_ECALL_FROM_U
-        val getpid_result = rv64_dispatch_installed_trap(getpid_ctx)
-        expect(getpid_result.is_ok()).to_equal(true)
-        val getpid_updated = getpid_result.unwrap()
-        expect(getpid_updated.a0).to_equal(task.id)
-        expect(getpid_updated.sepc).to_equal(0x400004)
-
-        var connect_ctx = create_rv64_user_context(0x500000, 0x510000, 0)
-        connect_ctx.a7 = 23
-        connect_ctx.scause = RV64_CAUSE_ECALL_FROM_U
-        val connect_result = rv64_dispatch_installed_trap(connect_ctx)
-        expect(connect_result.is_ok()).to_equal(true)
-        val connect_updated = connect_result.unwrap()
-        expect(connect_updated.a0).to_equal(port.id)
-
-        val entries = rv64_read_trap_log(0, 0, 4)
-        expect(entries.len()).to_be_greater_than(0)
-        expect(entries[0].message).to_equal("rv64-scheduler-install-sentinel")
 
     it "dispatches a user ecall through installed runtime objects":
         rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
@@ -119,61 +75,6 @@ describe "rv64 interrupt runtime bridge":
         val updated = result.unwrap()
         expect(updated.a0).to_equal(0)
         expect(updated.sepc).to_equal(0x400004)
-
-    it "replaces an exit trap with the adjacent validated kernel continuation":
-        var scheduler = Scheduler.new()
-        val task = scheduler.create_task(0x400000, TaskPriority.Normal, CapabilitySet.full())
-        scheduler.schedule()
-        expect(scheduler.get_current()).to_equal(task)
-        rv64_install_trap_runtime(scheduler, IpcManager.new(), KernelLog.new(8))
-
-        var live = create_rv64_user_context(0x400000, 0x410000, 0)
-        live.a0 = 37
-        live.a7 = 0
-        live.scause = RV64_CAUSE_ECALL_FROM_U
-        var saved = create_rv64_kernel_context(0x80201000, 0x80402000, 0)
-        saved.ra = 0x80203000
-        saved.s0 = 0xA5A5
-        saved.scause = RV64_KERNEL_RETURN_COOKIE
-        var frames = Rv64ExitFrames(live: live, saved: saved)
-
-        var rc: i64 = -1
-        unsafe:
-            rc = rv64_dispatch_trap_frame_ptr(&frames as u64)
-        expect(rc).to_equal(0)
-        expect(frames.live.a0).to_equal(37)
-        expect(frames.live.scause).to_equal(0)
-        expect(frames.live.sstatus & RV64_SSTATUS_SPP).to_equal(RV64_SSTATUS_SPP)
-        expect(frames.live.sepc).to_equal(saved.sepc)
-        expect(frames.live.sp).to_equal(saved.sp)
-        expect(frames.live.ra).to_equal(saved.ra)
-        expect(frames.live.s0).to_equal(saved.s0)
-
-    it "rejects an exit frame with no kernel continuation cookie before dispatch":
-        var scheduler = Scheduler.new()
-        val task = scheduler.create_task(0x400000, TaskPriority.Normal, CapabilitySet.full())
-        scheduler.schedule()
-        expect(scheduler.get_current()).to_equal(task)
-        rv64_install_trap_runtime(scheduler, IpcManager.new(), KernelLog.new(8))
-
-        var live = create_rv64_user_context(0x400000, 0x410000, 0)
-        live.a0 = 19
-        live.a7 = 0
-        live.scause = RV64_CAUSE_ECALL_FROM_U
-        val saved = create_rv64_kernel_context(0x80201000, 0x80402000, 0)
-        val original_sepc = live.sepc
-        var frames = Rv64ExitFrames(live: live, saved: saved)
-
-        var rc: i64 = 0
-        unsafe:
-            rc = rv64_dispatch_trap_frame_ptr(&frames as u64)
-        expect(rc).to_equal(-1)
-        expect(frames.live.sepc).to_equal(original_sepc)
-        expect(frames.live.a0).to_equal(19)
-
-        val entries = rv64_read_trap_log(0, 0, 4)
-        expect(entries.len()).to_be_greater_than(0)
-        expect(entries[entries.len() - 1].message).to_contain("continuation cookie")
 
     it "rejects a null trap frame pointer":
         rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))

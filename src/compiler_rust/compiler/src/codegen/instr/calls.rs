@@ -2799,28 +2799,20 @@ pub fn compile_call<M: Module>(
         .unwrap_or(func_name);
     if matches!(variant_name, "Ok" | "Err" | "Some" | "None") {
         if let Some(d) = dest {
-            let is_option = matches!(variant_name, "Some" | "None");
-            let disc = if variant_name == "Some" {
-                0
-            } else if variant_name == "None" {
-                1
-            } else {
+            // Use hashed discriminants consistently with pattern matching
+            let disc = {
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 let mut hasher = DefaultHasher::new();
                 variant_name.hash(&mut hasher);
                 (hasher.finish() & 0xFFFFFFFF) as i64
             };
-            let enum_id_val = builder.ins().iconst(types::I32, if is_option { 1 } else { 0 });
+            let enum_id_val = builder.ins().iconst(types::I32, 0);
             let disc_val = builder.ins().iconst(types::I32, disc);
             let payload_val = if !args.is_empty() {
                 // Tag scalar payloads (Ok/Err/Some) to match the multi-arg /
                 // extraction convention; heap payloads pass through. Task #117.
-                if is_option {
-                    get_vreg_or_default(ctx, builder, &args[0])
-                } else {
-                    runtime_payload_value(ctx, builder, args[0])
-                }
+                runtime_payload_value(ctx, builder, args[0])
             } else {
                 // Empty payload uses tagged nil (3), not raw 0
                 builder.ins().iconst(types::I64, 3)

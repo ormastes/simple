@@ -42,26 +42,9 @@ Pressure work is bounded by the kernel configuration and has a hard maximum of
 64 candidates per call. Stats are maintained by lifecycle events and do not scan
 PMM or the allocation registry when queried.
 
-Every CPU, GPU, NIC, DMA, and swap pool has independently configurable low/high
-free-byte watermarks. Crossing the high watermark raises effective pressure to
-elevated; reaching the low watermark raises it to critical. Caller-requested
-critical or emergency pressure is never lowered. Telemetry reports concrete tier and domain bytes, current pressure,
-candidate/protection/swap counters, and retained metadata. The allocation
-registry uses fourteen native value slots (112 bytes), including a packed page
-count/coherence/reclaim/queued-state word. One directly stored deduplicated `u64` allocation id
-adds at most eight bytes, so
-`memory_leveling_metadata_bytes_per_allocation=120` is the conservative retained
-budget; physical DMA layouts remain in their canonical mapping owner.
-Page counts above the packed 61-bit maximum are rejected at registry admission.
-
 Swap commits only after bytes and checksum are stored. Restore validates content,
 commits the CPU mapping, and then releases the slot. Failure leaves the original
-owner and tier intact or marks an unrecoverable rollback explicitly failed.
-Manager prepare and commit both reject a swap that would exceed configured swap
-capacity, so direct callers cannot overcommit the backing store.
-Failed pressure handoffs are not lost: missing coordinator/mapping and failed
-swap-out paths requeue an allocation that remains reclaimable. Requeue is
-idempotent with transactional rollback.
+owner intact or marks an unrecoverable rollback explicitly failed.
 
 Process mappings carry both the page-table root and address-space identity.
 Swap prepare, unmap, rollback, restore, and `munmap` operate on that explicit
@@ -109,13 +92,8 @@ remain unavailable until a hardware owner and evidence command are recorded.
 bin/simple test test/02_integration/os/memory_leveling_pressure_swap_spec.spl --mode=native
 bin/simple test test/01_unit/os/services/vfs/vfs_boot_memory_swap_range_spec.spl --mode=native
 bin/simple test test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl --mode=native
-build/native_probe/stage2-boxed-pair/simple native-build --backend cranelift --runtime-bundle core-c-bootstrap --source src/lib --source src/os --entry-closure --cache-dir build/native_probe/memory-leveling-direct-cache --entry test/system/os/memory_leveling_contract_direct_probe.spl -o build/native_probe/memory-leveling-contract-direct-probe
 sh scripts/check/check-simpleos-memory-leveling-qemu.shs
 ```
-
-The QEMU checker preserves its focused native cache by default. Set
-`MEMORY_LEVELING_QEMU_CLEAN_CACHE=1` only when intentionally invalidating that
-cache; normal fix/verify cycles should remain incremental.
 
 The process isolation scenario creates two real sparse page-table roots, maps
 the same virtual address to distinct frames, swaps exactly one mapping, proves

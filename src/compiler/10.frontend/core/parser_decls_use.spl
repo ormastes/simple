@@ -446,31 +446,39 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     decl_set_param_defaults(mid, param_defaults)
     return mid
 
-fn parse_impl_target_name() -> text:
-    if par_kind_get() == TOK_LBRACKET:
-        return "Array"
-    if par_kind_get() == TOK_LPAREN:
-        return "Tuple"
-    par_text_get()
-
-fn parse_impl_where_clause():
+fn skip_impl_where_clause():
     if par_kind_get() != TOK_KW_WHERE:
         return
     parser_advance()
-    for i in 0..100:
-        if par_kind_get() != TOK_IDENT:
-            break
+
+    var generic_depth: i64 = 0
+    var needs_constraint_colon = true
+    for i in 0..1000:
+        val kind = par_kind_get()
+        if kind == TOK_EOF:
+            parser_error("unterminated where clause in impl header")
+            return
+        if kind == TOK_LT or kind == TOK_LT_GENERIC:
+            generic_depth = generic_depth + 1
+        elif kind == TOK_GT:
+            generic_depth = generic_depth - 1
+        elif kind == TOK_SHR:
+            generic_depth = generic_depth - 2
+        elif generic_depth == 0 and kind == TOK_COMMA:
+            needs_constraint_colon = true
+        elif generic_depth == 0 and kind == TOK_COLON:
+            if not needs_constraint_colon:
+                return
+            needs_constraint_colon = false
         parser_advance()
-        parser_expect(TOK_COLON)
-        parser_parse_type()
-        if par_kind_get() != TOK_COMMA:
-            break
-        parser_advance()
+
+    parser_error("where clause in impl header is too long")
+
 fn parse_impl_decl() -> i64:
-    # impl<T> Trait<T> for StructName<U> where T: Bound:
+    # impl StructName:  |  impl TraitName for StructName:
     parser_advance()
     val type_params = parse_type_params()
-    var target_name = parse_impl_target_name()
+    var target_name = par_text_get()
     parser_parse_type()
     var trait_name = ""
     if par_kind_get() == TOK_KW_FOR:
@@ -481,12 +489,12 @@ fn parse_impl_decl() -> i64:
         # the native build path instead of failing "unresolved method call".
         trait_name = target_name
         parser_advance()
-        target_name = parse_impl_target_name()
+        target_name = par_text_get()
         parser_parse_type()
-    parse_impl_where_clause()
+    skip_impl_where_clause()
     parser_expect(TOK_COLON)
     parser_skip_newlines()
-    parser_expect(TOK_INDENT)
+    parser_expect(181)
 
     var method_ids: [i64] = []
 

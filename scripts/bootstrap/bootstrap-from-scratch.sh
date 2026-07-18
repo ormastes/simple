@@ -36,7 +36,7 @@ Options:
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
                      SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
   --full-cli         Relink the full CLI after the staged pure-Simple build
-                     (supported on native Linux, macOS, FreeBSD, and Windows hosts).
+                     (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
@@ -185,9 +185,9 @@ host_os=$(uname -s 2>/dev/null || echo unknown)
 
 if [ "${full_cli}" -eq 1 ]; then
   case "${host_os}" in
-    Linux|Darwin|FreeBSD|MINGW*|MSYS*|CYGWIN*|Windows*) ;;
+    Linux|Darwin) ;;
     *)
-      echo "error: Stage 4 full-CLI capsule preparation requires native Linux, macOS, FreeBSD, or Windows" >&2
+      echo "error: Stage 4 full-CLI capsule preparation requires native Linux or macOS" >&2
       exit 1
       ;;
   esac
@@ -829,18 +829,11 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
   echo "stage3 sha256: ${hash3}"
   if [ "${hash2}" != "${hash3}" ]; then
     echo "warning: stage2 and stage3 hashes differ (expected when runtime is embedded)"
-    if [ "${stage2_capability_ok:-0}" -eq 1 ]; then
-      echo "  Using capability-verified Stage 2 with embedded runtime for stage 4"
-      stage_for_build="${stage2}"
-    else
-      echo "  No capability-verified compiler is available for stage 4"
-      stage_for_build=""
-      stage4_is_seed=1
-    fi
+    echo "  Using verified Stage 3 for stage 4"
   else
     echo "Bootstrap verification passed."
-    stage_for_build="${stage3}"
   fi
+  stage_for_build="${stage3}"
 else
   if [ "${stage2_capability_ok:-0}" -eq 1 ] && [ -x "${stage2}" ]; then
     echo "Stage 3 unavailable — using capability-verified Stage 2 for stage 4"
@@ -877,6 +870,7 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 prepare_native_cache stage4
+rm -f "${full_dir}/simple${exe_suffix}"
 run_logged stage4-native-build bootstrap_native_build_main \
   "${stage_for_build}" "${full_dir}/simple${exe_suffix}"
 

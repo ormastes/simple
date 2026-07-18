@@ -21,6 +21,7 @@ fn variant_disc(name: &str) -> i64 {
 /// Create a Result/Option enum using rt_enum_new for consistent representation.
 /// This ensures rt_enum_discriminant and rt_enum_payload work correctly.
 ///
+/// Discriminants use hashed variant names (matching pattern.rs).
 fn create_enum_value<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -76,11 +77,11 @@ pub(crate) fn compile_option_some<M: Module>(
     dest: VReg,
     value: VReg,
 ) {
-    create_enum_value(ctx, builder, dest, 1, 0, Some(value));
+    create_enum_value(ctx, builder, dest, 1, variant_disc("Some"), Some(value));
 }
 
 pub(crate) fn compile_option_none<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder, dest: VReg) {
-    create_enum_value(ctx, builder, dest, 1, 1, None);
+    create_enum_value(ctx, builder, dest, 1, variant_disc("None"), None);
 }
 
 pub(crate) fn compile_result_ok<M: Module>(

@@ -149,20 +149,11 @@ fn expr_i64_list_split(raw: text) -> [i64]:
             result.push(expr_parse_i64(part))
     result
 
-fn expr_native_arena_enabled() -> bool:
-    (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-
-fn expr_env_mirror_enabled() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not expr_native_arena_enabled()
-
 fn expr_count_env() -> i64:
-    if not expr_env_mirror_enabled():
-        return expr_tag.len()
     expr_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
 
 fn expr_count_set(value: i64):
-    if expr_env_mirror_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
+    rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
 
 fn expr_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_EXPR_" + int_to_str(idx) + "_" + field
@@ -171,37 +162,32 @@ fn expr_key(idx: i64, field: text) -> text:
 # bootstrap mode — it accumulates ~10 environ entries per expr node and libc
 # setenv/getenv linear-scan environ => O(N^2). The expr_* module-var arrays
 # (written unconditionally by expr_alloc + constructors) are the real store in
-# compiled stage4. Native arena mode must never mix process-global env indices
-# with zero-based arrays. See bug ast_env_var_quadratic_parse_2026-06-13.
+# compiled stage4; expr_get_* readers are env-first/array-fallback, so skipping
+# the env write makes them fall back to the (correct) arrays. See bug
+# ast_env_var_quadratic_parse_2026-06-13.
 fn expr_i64_set(idx: i64, field: text, value: i64):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), int_to_str(value))
 
 fn expr_i64_get(idx: i64, field: text) -> i64:
-    if not expr_env_mirror_enabled():
-        return 0
     expr_parse_i64(rt_env_get(expr_key(idx, field)) ?? "")
 
 fn expr_text_set(idx: i64, field: text, value: text):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), value)
 
 fn expr_text_get(idx: i64, field: text) -> text:
-    if not expr_env_mirror_enabled():
-        return ""
     rt_env_get(expr_key(idx, field)) ?? ""
 
 fn expr_list_set(idx: i64, field: text, values: [i64]):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), expr_i64_list_join(values))
 
 fn expr_list_get(idx: i64, field: text) -> [i64]:
-    if not expr_env_mirror_enabled():
-        return []
     expr_i64_list_split(rt_env_get(expr_key(idx, field)) ?? "")
 
 fn expr_text_list_set(idx: i64, field: text, values: [text]):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), values.join("\n"))
 
 fn expr_call_args_set(idx: i64, call_args: [i64], arg_names: [text]):
@@ -211,8 +197,6 @@ fn expr_call_args_set(idx: i64, call_args: [i64], arg_names: [text]):
     expr_text_list_set(idx, "ARG_NAMES", arg_names)
 
 fn expr_count() -> i64:
-    if not expr_env_mirror_enabled():
-        return expr_tag.len()
     val env_count = expr_count_env()
     if env_count > 0:
         return env_count
@@ -309,7 +293,7 @@ fn expr_reset():
 
 # Allocate a new expression node, returns its index
 fn expr_alloc(tag: i64, span_id: i64) -> i64:
-    val idx = if expr_env_mirror_enabled(): expr_count_env() else: expr_tag.len()
+    val idx = expr_count_env()
     expr_count_set(idx + 1)
     expr_tag.push(tag)
     expr_span.push(span_id)

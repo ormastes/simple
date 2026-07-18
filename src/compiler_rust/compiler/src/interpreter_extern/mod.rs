@@ -211,7 +211,6 @@ fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::text(String::new()))
 }
 
-
 /// Build the dispatch table mapping extern function names to their implementations.
 /// Only includes "simple" functions that take `&[Value]` and return `Result<Value, CompileError>`.
 /// Complex functions (needing env, functions, classes, etc.) remain in the match fallback.
@@ -585,7 +584,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_byte_array_new", sffi_array::rt_byte_array_new_fn);
     insert_simple!("rt_byte_array_new_len", sffi_array::rt_byte_array_new_fn);
     insert_simple!("rt_byte_char", conversion::rt_byte_char_fn);
-    insert_simple!("rt_tuple_get", conversion::rt_tuple_get_fn);
     insert_simple!("rt_bytes_alloc", file_io::rt_bytes_alloc);
     insert_simple!("rt_bytes_from_raw", file_io::rt_bytes_from_raw);
     insert_simple!("rt_u32s_from_raw", file_io::rt_u32s_from_raw);
@@ -748,10 +746,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_cranelift_define_function", cranelift::rt_cranelift_define_function);
     insert_simple!("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object);
-    insert_simple!(
-        "rt_cranelift_emit_object_raw",
-        cranelift::rt_cranelift_emit_object_raw
-    );
+    insert_simple!("rt_cranelift_emit_object_raw", cranelift::rt_cranelift_emit_object_raw);
     insert_simple!("rt_cranelift_end_function", cranelift::rt_cranelift_end_function);
     insert_simple!("rt_cranelift_fadd", cranelift::rt_cranelift_fadd);
     insert_simple!("rt_cranelift_fcmp", cranelift::rt_cranelift_fcmp);
@@ -1202,12 +1197,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_size", file_io::rt_file_size);
     insert_simple!("rt_file_stat", file_io::rt_file_stat);
     insert_simple!("rt_file_stat_free", file_io::rt_file_stat_free);
-    insert_simple!("rt_file_stat_created", file_io::rt_file_stat_created);
     insert_simple!("rt_file_stat_is_dir", file_io::rt_file_stat_is_dir);
     insert_simple!("rt_file_stat_is_file", file_io::rt_file_stat_is_file);
-    insert_simple!("rt_file_stat_is_symlink", file_io::rt_file_stat_is_symlink);
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
-    insert_simple!("rt_file_stat_readonly", file_io::rt_file_stat_readonly);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
@@ -2528,7 +2520,10 @@ mod tests {
             &enums,
             &impl_methods,
         );
-        assert!(rt_result.is_ok(), "rt_get_args() should resolve under interpretation: {rt_result:?}");
+        assert!(
+            rt_result.is_ok(),
+            "rt_get_args() should resolve under interpretation: {rt_result:?}"
+        );
     }
 
     #[test]
@@ -2574,7 +2569,10 @@ mod tests {
     /// `Value::Array` of the correct byte values (not just "doesn't crash").
     #[test]
     fn rt_string_bytes_dispatches_through_native_handler_seed_flat_registry_len_i64_2026_07_17() {
-        assert!(EXTERN_DISPATCH.contains_key("rt_string_bytes"), "missing rt_string_bytes");
+        assert!(
+            EXTERN_DISPATCH.contains_key("rt_string_bytes"),
+            "missing rt_string_bytes"
+        );
 
         let handler = EXTERN_DISPATCH.get("rt_string_bytes").expect("registered handler");
         let mut env = Env::new();
@@ -2595,7 +2593,11 @@ mod tests {
 
         assert_eq!(
             result,
-            Value::array(vec![Value::Int(b'a' as i64), Value::Int(b'b' as i64), Value::Int(b'c' as i64)]),
+            Value::array(vec![
+                Value::Int(b'a' as i64),
+                Value::Int(b'b' as i64),
+                Value::Int(b'c' as i64)
+            ]),
             "rt_string_bytes(\"abc\") must be a real Value::Array([97, 98, 99]), not an opaque handle"
         );
     }
@@ -2609,35 +2611,29 @@ mod tests {
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
 
-        let result = handler(&[Value::Int(42)], &mut env, &mut functions, &mut classes, &enums, &impl_methods);
-        assert!(result.is_err(), "rt_string_bytes should reject a non-text argument, not silently misbehave");
+        let result = handler(
+            &[Value::Int(42)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        );
+        assert!(
+            result.is_err(),
+            "rt_string_bytes should reject a non-text argument, not silently misbehave"
+        );
     }
 
-    /// Regression test for the `rt_string_data` `EXTERN_DISPATCH` gap that
-    /// blocked every fresh-seed native-build through the pure-Simple
-    /// cranelift-direct path (`cranelift_new_aot_module` calls
-    /// `rt_string_data(name)` on its literal module name before anything
-    /// else). Before this fix, `rt_string_data` had no dispatch entry and
-    /// fell through to `interpreter_extern::dynamic_sffi`'s dlopen-based
-    /// fallback, whose `value_to_i64` marshals a `Value::Str` argument as a
-    /// raw leaked-`CString` pointer instead of a tagged `RuntimeValue` --
-    /// same landmine class as `rt_string_bytes`
-    /// (`seed_flat_registry_len_i64_2026-07-17`). This asserts the dispatch
-    /// table has a native handler and that the returned pointer really does
-    /// point at the string's UTF-8 bytes.
     #[test]
-    fn rt_string_data_dispatches_through_native_handler_rt_string_data_extern_dispatch_gap_2026_07_18() {
-        assert!(EXTERN_DISPATCH.contains_key("rt_string_data"), "missing rt_string_data");
-
+    fn temporary_text_pointer_externs_are_registered_and_dispatch() {
         let handler = EXTERN_DISPATCH.get("rt_string_data").expect("registered handler");
+        assert!(EXTERN_DISPATCH.contains_key("rt_string_len"));
         let mut env = Env::new();
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
-
-        // Plain, never-boxed string literal -- the exact shape
-        // `cranelift_new_aot_module("bootstrap_main", ...)` passes.
         let result = handler(
             &[Value::text("abc")],
             &mut env,
@@ -2646,15 +2642,12 @@ mod tests {
             &enums,
             &impl_methods,
         )
-        .expect("rt_string_data should not error on a plain text argument");
-
+        .expect("rt_string_data should accept interpreter text");
         let ptr = match result {
-            Value::Int(p) => p,
-            other => panic!("rt_string_data must return Value::Int(ptr), got {other:?}"),
+            Value::Int(ptr) => ptr,
+            other => panic!("rt_string_data must return a pointer, got {other:?}"),
         };
-        assert_ne!(ptr, 0, "rt_string_data(\"abc\") must return a non-null pointer");
-        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, 3) };
-        assert_eq!(bytes, b"abc", "rt_string_data(\"abc\") must point at the real UTF-8 bytes, not garbage");
+        assert_eq!(unsafe { std::slice::from_raw_parts(ptr as *const u8, 3) }, b"abc");
     }
 
     #[test]
@@ -2665,8 +2658,6 @@ mod tests {
         let mut classes = HashMap::new();
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
-
-        let result = handler(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods);
-        assert!(result.is_err(), "rt_string_data should reject a missing argument, not silently misbehave");
+        assert!(handler(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).is_err());
     }
 }

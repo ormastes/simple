@@ -253,43 +253,41 @@ impl HirLowering:
         val host_gpu_lane = self.try_lower_host_gpu_lane_expr(e)
         if val lowered_host_gpu_lane = host_gpu_lane:
             return lowered_host_gpu_lane
-        val call_disc = hir_expr_kind_disc(ExprKind.Call(e, []))
-        if hir_expr_kind_disc(expr_kind_value) == call_disc:
-            match expr_kind_value:
-                case ExprKind.Call(callee, args):
-                    val call_callee_t: Expr = callee
-                    val call_args_t: [CallArg] = args
-                    # `i32(x)` / `f64(x)`: fixed-width primitive type name used as
-                    # a callee is a numeric CAST (see primitive_cast_type_kind).
-                    # Lower it as HirExprKind.Cast -- the callee name would
-                    # otherwise fail symbol lookup and become HirExprKind.Error.
-                    match call_callee_t.kind:
-                        case ExprKind.Ident(callee_ident):
-                            val callee_ident_t: text = callee_ident
-                            if call_args_t.len() == 1 and not call_args_t[0].has_name:
-                                val prim_kind = primitive_cast_type_kind(callee_ident_t)
-                                if prim_kind.?:
-                                    val cast_arg_t: CallArg = call_args_t[0]
-                                    val cast_target = HirType(kind: prim_kind.unwrap(), span: e.span)
-                                    return HirExpr(
-                                        kind: HirExprKind.Cast(self.lower_hir_expr(cast_arg_t.value), cast_target),
-                                        type_: cast_target,
-                                        span: e.span
-                                    )
-                        case _:
-                            pass
-                    var hir_args: [HirCallArg] = []
-                    for arg in call_args_t:
-                        val arg_t: CallArg = arg
-                        hir_args = hir_args.push(HirCallArg(
-                            has_name: arg_t.has_name,
-                            name: arg_t.name,
-                            value: self.lower_hir_expr(arg_t.value),
-                            span: arg_t.span
-                        ))
-                    return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, []), type_: nil, span: e.span)
-                case _:
-                    pass
+        match expr_kind_value:
+            case ExprKind.Call(callee, args):
+                val call_callee_t: Expr = callee
+                val call_args_t: [CallArg] = args
+                # `i32(x)` / `f64(x)`: fixed-width primitive type name used as
+                # a callee is a numeric CAST (see primitive_cast_type_kind).
+                # Lower it as HirExprKind.Cast -- the callee name would
+                # otherwise fail symbol lookup and become HirExprKind.Error.
+                match call_callee_t.kind:
+                    case ExprKind.Ident(callee_ident):
+                        val callee_ident_t: text = callee_ident
+                        if call_args_t.len() == 1 and not call_args_t[0].has_name:
+                            val prim_kind = primitive_cast_type_kind(callee_ident_t)
+                            if prim_kind.?:
+                                val cast_arg_t: CallArg = call_args_t[0]
+                                val cast_target = HirType(kind: prim_kind.unwrap(), span: e.span)
+                                return HirExpr(
+                                    kind: HirExprKind.Cast(self.lower_hir_expr(cast_arg_t.value), cast_target),
+                                    type_: cast_target,
+                                    span: e.span
+                                )
+                    case _:
+                        pass
+                var hir_args: [HirCallArg] = []
+                for arg in call_args_t:
+                    val arg_t: CallArg = arg
+                    hir_args = hir_args.push(HirCallArg(
+                        has_name: arg_t.has_name,
+                        name: arg_t.name,
+                        value: self.lower_hir_expr(arg_t.value),
+                        span: arg_t.span
+                    ))
+                return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, []), type_: nil, span: e.span)
+            case _:
+                pass
         if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_expr:kind")
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
@@ -304,22 +302,6 @@ impl HirLowering:
         # (rt_enum_discriminant = DefaultHasher(variant name) truncated to u32)
         # and keep them OUT of the big match.
         val kind_disc_v: i64 = hir_expr_kind_disc(expr_kind_value)
-        val ident_disc = hir_expr_kind_disc(ExprKind.Ident(""))
-        if kind_disc_v == ident_disc:
-            # Ident can also be misrouted by the seed's large variant match
-            # (observed `right` consumed as a Cast target in `zip(right)`).
-            match expr_kind_value:
-                case ExprKind.Ident(ident_name):
-                    val ident_name_t: text = ident_name
-                    val found_symbol = self.symbols.lookup_or_invalid(ident_name_t)
-                    val ident_kind = if found_symbol.id >= 0:
-                        val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
-                        HirExprKind.NamedVar(found_symbol, display_name)
-                    else:
-                        self.lower_unresolved_ident(ident_name_t, e.span)
-                    return HirExpr(kind: ident_kind, type_: nil, span: e.span)
-                case _:
-                    pass
         if kind_disc_v == 21232742:  # hash("Field")
             match expr_kind_value:
                 case ExprKind.Field(base, field):
@@ -508,13 +490,54 @@ impl HirLowering:
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                # Avoid seed-native `if val` binding a raw nil SymbolId from a
-                # failed lookup. This API always returns a concrete sentinel.
-                val found_symbol = self.symbols.lookup_or_invalid(ident_name_t)
-                if found_symbol.id >= 0:
-                    # Preserve any current qualified rename in the emitted HIR.
-                    val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
-                    HirExprKind.NamedVar(found_symbol, display_name)
+                val symbol = self.symbols.lookup(ident_name_t)
+                if val found_symbol = symbol:
+                    # NOTE: `if val found_symbol = symbol:` is not sufficient
+                    # here -- same class of bug fixed in 413d121a011 for MIR
+                    # `if val ... .type_:` sites: the seed interpreter's
+                    # `if val` presence check can still enter this true
+                    # branch with `found_symbol` bound to nil when the
+                    # lookup actually failed. Downstream consumers of
+                    # HirExprKind.NamedVar (e.g. MIR lowering's `symbol.id`
+                    # access) assume `symbol` is never nil, so a redundant
+                    # explicit nil re-check here avoids constructing a
+                    # NamedVar with a nil symbol and crashing later with
+                    # "undefined field 'id': cannot access field on value
+                    # of type 'nil'".
+                    if found_symbol == nil:
+                        self.lower_unresolved_ident(ident_name_t, e.span)
+                    else:
+                        # Under a --entry-closure bootstrap build, a
+                        # cross-module imported (or same-module,
+                        # non-entry-module) function's stored symbol name may
+                        # have been rewritten to a qualified `module.function`
+                        # form (qualify_imported_function_symbol /
+                        # bootstrap_decl_idx's rename_symbol call, both in
+                        # this file's `impl HirLowering` block) so it stays
+                        # distinct from a same-named function in a DIFFERENT
+                        # module -- the flat MIR accumulator
+                        # (bootstrap_lower_extra_hir_module_to_mir,
+                        # bootstrap_globals.spl) keys/emits every closure
+                        # helper module's functions the same qualified way.
+                        # Bake the CURRENT stored name into this NamedVar's
+                        # payload text HERE (same HIR-lowering pass as the
+                        # rename, so the mutation is still visible) rather
+                        # than deferring to a fresh `self.symbols` lookup at
+                        # MIR-lowering time: a symbol-table rename applied
+                        # during HIR lowering does not survive the trip
+                        # through the bootstrap entry-HIR-module global into
+                        # that later, separate pass (the interpreter's known
+                        # "mutating a class held inside a value-type struct
+                        # across a pass boundary" landmine) even though it IS
+                        # visible to a same-pass lookup like this one (bug
+                        # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe
+                        # B). A name that was never rewritten (the common
+                        # case: normal compiles, single-entry bootstrap
+                        # builds, and the entry closure module's own
+                        # same-module calls) round-trips to `ident_name_t`
+                        # unchanged, so this is a no-op there.
+                        val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                        HirExprKind.NamedVar(found_symbol, display_name)
                 else:
                     self.lower_unresolved_ident(ident_name_t, e.span)
 

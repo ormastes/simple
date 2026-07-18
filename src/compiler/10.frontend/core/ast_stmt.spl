@@ -99,20 +99,11 @@ fn stmt_i64_list_split(raw: text) -> [i64]:
             result.push(stmt_parse_i64(part))
     result
 
-fn stmt_native_arena_enabled() -> bool:
-    (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-
-fn stmt_env_mirror_enabled() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not stmt_native_arena_enabled()
-
 fn stmt_count_env() -> i64:
-    if not stmt_env_mirror_enabled():
-        return stmt_tag.len()
     stmt_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "")
 
 fn stmt_count_set(value: i64):
-    if stmt_env_mirror_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
+    rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
 
 fn stmt_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_STMT_" + int_to_str(idx) + "_" + field
@@ -122,24 +113,22 @@ fn stmt_key(idx: i64, field: text) -> text:
 # mirror is O(N^2) in statement count. The parallel module-var arrays (stmt_tag,
 # stmt_expr, ...) are written unconditionally by the constructors and are the real
 # store in compiled stage4; the env mirror is only needed in the interpreter
-# bootstrap, where module-var arrays do not persist. Native arena mode must never
-# mix process-global env indices with zero-based arrays. See bug
-# ast_env_var_quadratic_parse_2026-06-13.
+# bootstrap (SIMPLE_BOOTSTRAP=1), where module-var arrays do not persist. Readers
+# are env-first/array-fallback, so skipping the env write here makes them fall
+# back to the (correct) arrays. See bug ast_env_var_quadratic_parse_2026-06-13.
 fn stmt_i64_set(idx: i64, field: text, value: i64):
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(stmt_key(idx, field), int_to_str(value))
 
 fn stmt_text_set(idx: i64, field: text, value: text):
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(stmt_key(idx, field), value)
 
 fn stmt_list_set(idx: i64, field: text, values: [i64]):
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
 
 fn stmt_count() -> i64:
-    if not stmt_env_mirror_enabled():
-        return stmt_tag.len()
     val env_count = stmt_count_env()
     if env_count > 0:
         return env_count
@@ -181,7 +170,7 @@ fn stmt_reset():
     stmt_count_set(0)
 
 fn stmt_alloc(tag: i64, span_id: i64) -> i64:
-    val idx = if stmt_env_mirror_enabled(): stmt_count_env() else: stmt_tag.len()
+    val idx = stmt_count_env()
     stmt_count_set(idx + 1)
     stmt_tag.push(tag)
     stmt_span.push(span_id)
@@ -228,7 +217,7 @@ fn stmt_if_val_decl(name: text, init_expr: i64, span_id: i64) -> i64:
     idx
 
 fn stmt_is_if_val_decl(idx: i64) -> bool:
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         return (rt_env_get(stmt_key(idx, "IF_VAL")) ?? "") == "1"
     idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
 
@@ -459,14 +448,13 @@ fn stmt_get_gpu_block(idx: i64) -> [i64]:
 # ===== Statement Accessors =====
 
 fn stmt_get_tag(idx: i64) -> i64:
-    if stmt_env_mirror_enabled():
-        val direct = rt_env_get(stmt_key(idx, "TAG")) ?? ""
-        if direct != "":
-            val parsed = stmt_parse_i64(direct)
-            val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
-            if trace_stmt_tags != "" and (idx < 8 or parsed <= 0):
-                print "[stmt_get_tag] idx={idx} env={direct} parsed={parsed}"
-            return parsed
+    val direct = rt_env_get(stmt_key(idx, "TAG")) ?? ""
+    if direct != "":
+        val parsed = stmt_parse_i64(direct)
+        val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
+        if trace_stmt_tags != "" and (idx < 8 or parsed <= 0):
+            print "[stmt_get_tag] idx={idx} env={direct} parsed={parsed}"
+        return parsed
     # Bounds guard: a stale stmt index (captured before an interleaved
     # ast_reset/stmt_reset cleared the shared arena) can exceed the live arena
     # length (stage-4 "index is 48 but length is 13" class). Return -1 so tag
@@ -482,38 +470,33 @@ fn stmt_get_tag(idx: i64) -> i64:
     fallback
 
 fn stmt_get_span(idx: i64) -> i64:
-    if stmt_env_mirror_enabled():
-        val direct = rt_env_get(stmt_key(idx, "SPAN")) ?? ""
-        if direct != "":
-            return stmt_parse_i64(direct)
+    val direct = rt_env_get(stmt_key(idx, "SPAN")) ?? ""
+    if direct != "":
+        return stmt_parse_i64(direct)
     stmt_span[idx]
 
 fn stmt_get_expr(idx: i64) -> i64:
-    if stmt_env_mirror_enabled():
-        val direct = rt_env_get(stmt_key(idx, "EXPR")) ?? ""
-        if direct != "":
-            return stmt_parse_i64(direct)
+    val direct = rt_env_get(stmt_key(idx, "EXPR")) ?? ""
+    if direct != "":
+        return stmt_parse_i64(direct)
     stmt_expr[idx]
 
 fn stmt_get_name(idx: i64) -> text:
-    if stmt_env_mirror_enabled():
-        val direct = rt_env_get(stmt_key(idx, "NAME")) ?? ""
-        if direct != "":
-            return direct
+    val direct = rt_env_get(stmt_key(idx, "NAME")) ?? ""
+    if direct != "":
+        return direct
     stmt_name[idx]
 
 fn stmt_get_type(idx: i64) -> i64:
-    if stmt_env_mirror_enabled():
-        val direct = rt_env_get(stmt_key(idx, "TYPE")) ?? ""
-        if direct != "":
-            return stmt_parse_i64(direct)
+    val direct = rt_env_get(stmt_key(idx, "TYPE")) ?? ""
+    if direct != "":
+        return stmt_parse_i64(direct)
     stmt_type_tag[idx]
 
 fn stmt_get_body(idx: i64) -> [i64]:
-    if stmt_env_mirror_enabled():
-        val direct = rt_env_get(stmt_key(idx, "BODY")) ?? ""
-        if direct != "":
-            return stmt_i64_list_split(direct)
+    val direct = rt_env_get(stmt_key(idx, "BODY")) ?? ""
+    if direct != "":
+        return stmt_i64_list_split(direct)
     stmt_body[idx]
 
 export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
@@ -523,7 +506,6 @@ export STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIN
 export STMT_LAZY_VAL_DECL, STMT_ASM_ASSERT, STMT_GPU_LAUNCH
 export stmt_tag, stmt_span, stmt_expr, stmt_name, stmt_type_tag, stmt_body, stmt_count
 export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
-export stmt_native_arena_enabled, stmt_env_mirror_enabled
 export stmt_count_env, stmt_count_set, stmt_key
 export stmt_i64_set, stmt_text_set, stmt_list_set
 export stmt_reset, stmt_alloc

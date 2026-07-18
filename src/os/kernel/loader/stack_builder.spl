@@ -47,24 +47,8 @@ val DEFAULT_USER_STACK_SIZE: u64 = 0x800000
 val MAX_USER_STACK_SIZE: u64 = 0x8000000
 val USER_PAGE_SIZE: u64 = 0x1000
 val AUX_RANDOM_BYTES: u64 = 0x10
-val ARM64_STAGED_STACK_MAX_BYTES: u64 = 0x1000
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
-
-@cfg(arm64)
-extern fn rt_arm_text_array_len_u32(argv: [text]) -> u32
-
-@cfg(arm64)
-extern fn rt_arm_text_array_get(argv: [text], idx: u64) -> text
-
-# The freestanding ARM64 ABI cannot reliably return StackBuildResult across a
-# module boundary. Keep the staged scalar/byte fields in this owner instead.
-var g_arm64_staged_initial_sp: u64 = 0
-var g_arm64_staged_initial_stack_bytes: [u8] = []
-
-fn _reset_arm64_staged_initial_stack():
-    g_arm64_staged_initial_sp = 0
-    g_arm64_staged_initial_stack_bytes = []
 
 struct AuxEntry:
     """Single auxiliary vector entry (type, value) written to the stack."""
@@ -142,75 +126,6 @@ fn _zero_bytes(n: u64) -> [u8]:
         out.push(0 as u8)
         i = i + 1
     out
-
-fn arm64_stage_initial_stack_values(
-    stack_top: u64,
-    argc: u64,
-    argv0: text,
-    argv1: text,
-    entry: u64
-) -> i64:
-    """Stage a bounded ARM64 SysV frame without aggregate aux/result values."""
-    _reset_arm64_staged_initial_stack()
-    if argc < 1 or argc > 2:
-        return -22
-
-    val argv0_raw = rt_text_to_bytes(argv0)
-    val argv1_raw = rt_text_to_bytes(argv1)
-    val argv0_size = (argv0_raw.len() as u64) + 1
-    val argv1_size = if argc == 2: (argv1_raw.len() as u64) + 1 else: 0u64
-    if argv0_size > ARM64_STAGED_STACK_MAX_BYTES or argv1_size > ARM64_STAGED_STACK_MAX_BYTES:
-        return -7
-
-    # argc + argv pointers + argv NULL + envp NULL + AT_ENTRY pair + AT_NULL pair.
-    val fixed_size = (1 + argc + 1 + 1 + 4) * 8
-    val unaligned_size = fixed_size + argv0_size + argv1_size
-    if unaligned_size > ARM64_STAGED_STACK_MAX_BYTES:
-        return -7
-    val total_size = (unaligned_size + 15) & 0xfffffffffffffff0
-    if stack_top < total_size:
-        return -22
-    val pad_size = total_size - unaligned_size
-    val sp = stack_top - total_size
-    val argv0_addr = sp + fixed_size + pad_size
-    val argv1_addr = argv0_addr + argv0_size
-
-    var bytes: [u8] = []
-    bytes = _push_u64_le(bytes, argc)
-    bytes = _push_u64_le(bytes, argv0_addr)
-    if argc == 2:
-        bytes = _push_u64_le(bytes, argv1_addr)
-    bytes = _push_u64_le(bytes, 0)  # argv terminator
-    bytes = _push_u64_le(bytes, 0)  # empty envp terminator
-    bytes = _push_u64_le(bytes, AT_ENTRY)
-    bytes = _push_u64_le(bytes, entry)
-    bytes = _push_u64_le(bytes, AT_NULL)
-    bytes = _push_u64_le(bytes, 0)
-    bytes = _push_bytes(bytes, _zero_bytes(pad_size))
-    bytes = _push_cstr(bytes, argv0)
-    if argc == 2:
-        bytes = _push_cstr(bytes, argv1)
-
-    g_arm64_staged_initial_sp = sp
-    g_arm64_staged_initial_stack_bytes = bytes
-    1
-
-@cfg(arm64)
-fn arm64_stage_initial_stack(stack_top: u64, argv: [text], entry: u64) -> i64:
-    """Read one or two raw-safe argv entries and stage their startup frame."""
-    _reset_arm64_staged_initial_stack()
-    val argc = rt_arm_text_array_len_u32(argv).to_u64()
-    if argc < 1 or argc > 2:
-        return -22
-    val argv0 = rt_arm_text_array_get(argv, 0u64)
-    val argv1 = if argc == 2: rt_arm_text_array_get(argv, 1u64) else: ""
-    arm64_stage_initial_stack_values(stack_top, argc, argv0, argv1, entry)
-
-fn arm64_staged_initial_sp() -> u64:
-    g_arm64_staged_initial_sp
-
-fn arm64_staged_initial_stack_bytes() -> [u8]:
-    g_arm64_staged_initial_stack_bytes
 
 fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEntry]) -> StackBuildResult:
     """Construct the initial SysV user-mode stack frame.

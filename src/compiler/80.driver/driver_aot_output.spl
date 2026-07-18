@@ -24,12 +24,11 @@ use compiler.driver.driver.{CompilerDriver}
 use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
-use compiler.mir.mir_data.{MirModule, MirFunction}
+use compiler.mir.mir_data.{MirModule}
 use compiler.frontend.parser_types.{Module}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 use compiler.driver.driver_source_loading.{_driver_entry_import_dirname}
-use std.alloc.sffi.{rt_dict_keys, rt_dict_values}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -137,8 +136,7 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Modu
     # HIR had bodies, so an empty MIR is a real lowering bug and must stay
     # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
     var only_extern_functions = true
-    val parsed_function_names: [text] = rt_dict_keys(parsed.functions)
-    for fn_name in parsed_function_names:
+    for fn_name in parsed.functions.keys():
         val parsed_fn = parsed.functions[fn_name]
         if not parsed_fn.is_extern:
             only_extern_functions = false
@@ -299,7 +297,7 @@ impl CompilerDriver:
         var object_files: [text] = []
 
         val low_memory = ctx.options.low_memory
-        val module_names: [text] = rt_dict_keys(ctx.mir_modules)
+        val module_names = ctx.mir_modules.keys()
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
@@ -322,7 +320,7 @@ impl CompilerDriver:
         for name in module_names:
             # Import/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
-            if driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
+            if driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules.get(name)):
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
@@ -499,8 +497,7 @@ impl CompilerDriver:
         driver_log_debug(log, "AOT C: generating C++20 to {output}")
 
         var all_c_source = ""
-        val c_module_names: [text] = rt_dict_keys(ctx.mir_modules)
-        for name in c_module_names:
+        for name in ctx.mir_modules.keys():
             driver_log_trace(log, "translating module: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
@@ -530,8 +527,7 @@ impl CompilerDriver:
 
         var module_files: [(text, text)] = []
 
-        val c_directory_module_names: [text] = rt_dict_keys(ctx.mir_modules)
-        for name in c_directory_module_names:
+        for name in ctx.mir_modules.keys():
             driver_log_trace(log, "translating module: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
@@ -581,7 +577,7 @@ impl CompilerDriver:
         driver_log_debug(log, "AOT CUDA: generating PTX to {output}")
 
         var all_ptx = ""
-        val keys: [text] = rt_dict_keys(ctx.mir_modules)
+        val keys = ctx.mir_modules.keys()
         for name in keys:
             driver_log_trace(log, "translating module to PTX: {name}")
             val mir_module = ctx.mir_modules[name]
@@ -607,7 +603,7 @@ impl CompilerDriver:
         driver_log_debug(log, "AOT OpenCL: generating OpenCL C to {output}")
 
         var all_source = ""
-        val keys: [text] = rt_dict_keys(ctx.mir_modules)
+        val keys = ctx.mir_modules.keys()
         for name in keys:
             driver_log_trace(log, "translating module to OpenCL C: {name}")
             val mir_module = ctx.mir_modules[name]
@@ -633,7 +629,7 @@ impl CompilerDriver:
         driver_log_debug(log, "AOT VHDL: generating VHDL to {output}")
 
         var all_vhdl = ""
-        val keys: [text] = rt_dict_keys(ctx.mir_modules)
+        val keys = ctx.mir_modules.keys()
         for name in keys:
             driver_log_trace(log, "translating module to VHDL: {name}")
             val mir_module = ctx.mir_modules[name]
@@ -664,7 +660,7 @@ impl CompilerDriver:
         driver_log_debug(log, "AOT WASM: generating WAT to {output}")
 
         var all_wat = ""
-        val keys: [text] = rt_dict_keys(ctx.mir_modules)
+        val keys = ctx.mir_modules.keys()
         for name in keys:
             driver_log_trace(log, "translating module to WAT: {name}")
             val mir_module = ctx.mir_modules[name]
@@ -739,8 +735,7 @@ impl CompilerDriver:
 
         var all_object_bytes: [u8] = []
 
-        val smf_module_names: [text] = rt_dict_keys(ctx.mir_modules)
-        for name in smf_module_names:
+        for name in ctx.mir_modules.keys():
             driver_log_trace(log, "compiling module for SMF: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend(backend_name, mir_module, is_release, driver_opt_level)
@@ -861,11 +856,9 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
 
 fn collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
     var payload: [u8] = []
-    val module_names: [text] = rt_dict_keys(modules)
-    for module_name in module_names:
+    for module_name in modules.keys():
         val module = modules[module_name]
-        val functions: [MirFunction] = rt_dict_values(module.functions)
-        for fn_ in functions:
+        for fn_ in module.functions.values():
             if fn_.has_driver_manifest_attr:
                 payload = payload.concat(encode_driver_manifest_record(fn_.name, fn_.driver_manifest_attr))
     payload

@@ -1,6 +1,4 @@
 use std.spec
-use std.io_runtime.{file_read}
-use os.kernel.arch.riscv64.trap_model.{RV64_CONTEXT_BYTES, RV64_KERNEL_RETURN_COOKIE}
 use os.kernel.arch.riscv64.trap_frame.{
     RV64_TRAP_FRAME_SLOT_BYTES,
     RV64_TRAP_FRAME_FIELD_COUNT,
@@ -22,8 +20,6 @@ describe "rv64 trap frame layout":
     it "reports the full saved frame size":
         expect(RV64_TRAP_FRAME_FIELD_COUNT).to_equal(34)
         expect(RV64_TRAP_FRAME_SIZE_BYTES).to_equal(272)
-        expect(RV64_CONTEXT_BYTES).to_equal(RV64_TRAP_FRAME_SIZE_BYTES)
-        expect(RV64_KERNEL_RETURN_COOKIE).to_equal(0x525636344B524554)
 
     it "keeps key register offsets stable":
         expect(RV64_TRAP_RA_OFFSET).to_equal(0)
@@ -42,36 +38,3 @@ describe "rv64 trap frame layout":
         while i < offsets.len():
             expect(offsets[i]).to_equal(offsets[i - 1] + RV64_TRAP_FRAME_SLOT_BYTES)
             i = i + 1
-
-    it "saves one adjacent kernel continuation in the naked user-entry ABI":
-        val source = file_read("src/os/kernel/arch/riscv64/trap_vector.spl")
-        val sections = source.split("fn _rv64_enter_user")
-        expect(sections.len()).to_equal(2)
-        val entry = sections[1]
-        expect(entry).to_contain("addi    sp, sp, -272")
-        expect(entry).to_contain("addi    t0, sp, 272")
-        expect(entry).to_contain("sd      t0, 8(sp)")
-        expect(entry).to_contain("la      t0, .Lrv64_enter_user_return")
-        expect(entry).to_contain("sd      t0, 248(sp)")
-        expect(entry).to_contain("li      t0, 0x120")
-        expect(entry).to_contain("sd      t0, 256(sp)")
-        expect(entry).to_contain("li      t0, 0x525636344B524554")
-        expect(entry).to_contain("sd      t0, 264(sp)")
-        expect(entry).to_contain(".Lrv64_enter_user_return:")
-        expect(entry).to_contain("ret")
-        expect(entry.contains("jump_buf")).to_equal(false)
-
-    it "routes scheduled RV64 entry through SATP switch and restore":
-        val entry = file_read("src/os/kernel/arch/riscv64/user_entry.spl")
-        val bridge = file_read("src/os/kernel/arch/user_entry_bridge.spl")
-        expect(entry).to_contain("sched.schedule()")
-        expect(entry).to_contain("val selected = sched.get_current()")
-        expect(entry).to_contain("selected != task.id")
-        expect(entry).to_contain("Rv64Interrupt.install_scheduler(sched)")
-        expect(entry).to_contain("create_rv64_user_context(portable.rip, portable.rsp, 0)")
-        expect(entry).to_contain("val kernel_satp = csrr_satp()")
-        expect(entry).to_contain("vmm_switch_address_space(task.address_space)")
-        expect(entry).to_contain("_rv64_enter_user(&rv_context as u64)")
-        expect(entry).to_contain("csrw_satp(kernel_satp)")
-        expect(entry).to_contain("sfence_vma()")
-        expect(bridge).to_contain("dispatch_rv64_enter_user(pid_hint, scheduler)")

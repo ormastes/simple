@@ -116,20 +116,6 @@ instruction and ALU addresses. Searches found no production calls to
 `lsu64_access()` returns the virtual address unchanged for both Bare and
 non-Bare SATP modes. `core64_step()` only increments PC by four.
 
-Implementation note (2026-07-18): this paragraph records the initial audit.
-The production APIs are now `sv39_walker64_start/cycle`,
-`memory64_start/cycle`, and `core64_cycle`; the weaker direct-RAM function was
-renamed `mmu64_translate_ram_test_adapter`, and the identity LSU, raw core-port,
-and PC-only step paths were removed. The clocked SoC now routes ROM, DRAM,
-CLINT, PLIC, and UART requests. M execution and machine interrupt sampling are
-now connected. LR/SC and AMO.W/D use translated physical reservations and the
-single-master protected bus. Integer RV64C now expands through the same legal
-32-bit decode/commit path while preserving 2-byte PC/link/fault semantics;
-MPRV/MPP now selects the effective privilege of loads, stores, LR/SC, and AMOs
-without affecting fetch. The production CSR/trap path keeps the supervisor
-status alias coherent with `mstatus`. Complete supervisor interrupt contexts
-and RV32 parity remain open.
-
 The walker uses the 32-bit-addressed `RamState`, while the RV64 SoC uses
 `Ram64State`; the types cannot form a real RV64 page-table bus without an owner
 boundary change.
@@ -247,15 +233,3 @@ models, VHDL backend, manifests, and board wrappers. It removes the parallel
 empty/string-emitted CPU path and integrates one architecture capability at a
 time through the real compiler. An external core such as VexRiscv can remain a
 differential oracle, but cannot satisfy the final “Simple-generated CPU” row.
-
-## 2026-07-18 Attached-Board Evidence
-
-Read-only host enumeration now proves a live Xilinx FT4232H interface
-(`0403:6011`) with product `ML_Carrier_Card` and serial
-`XFL1OSWWFM2B`.  Interfaces 01, 02, and 03 enumerate as `/dev/ttyUSB1`,
-`/dev/ttyUSB2`, and `/dev/ttyUSB3`; interface 00 is the non-TTY JTAG lane.
-The current host exposes `openocd` but no `vivado`, `vitis`, or `xsct` on
-`PATH`.  AMD's KV260 platform documentation also names its board-side hardware
-as the ML carrier card, so KV260 remains the best-supported board identity, but
-the programming gate must still record an authoritative device/JTAG scan
-before treating that inference as final hardware identity.

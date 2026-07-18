@@ -199,33 +199,6 @@ pub fn bytes_to_u32_le_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result as i64))
 }
 
-/// Get element `index` from a tuple (or array), returning the element `Value`.
-///
-/// Callable from Simple as: `rt_tuple_get(tuple, index)`. The `.spl` extern
-/// declares i64 params/return (SFFI handle convention), but the interpreter
-/// passes the real `Value::Tuple` and returns the element `Value` directly.
-/// This is registered on the native codegen side (codegen/instr/pattern.rs,
-/// common_backend.rs, methods.rs) but was missing here, so every `native-build`
-/// failed with "unknown extern function: rt_tuple_get" — native-build interprets
-/// the compiler, whose HIR lowering (20.hir/hir_lowering/statements.spl) calls it.
-pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let items: &[Value] = match args.first() {
-        Some(Value::Tuple(arr)) => arr,
-        Some(Value::LabeledTuple { values, .. }) => values,
-        Some(Value::Array(arr)) => arr.as_ref(),
-        Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        _ => return Ok(Value::Nil),
-    };
-    let idx = match args.get(1) {
-        Some(Value::Int(i)) => *i,
-        _ => return Ok(Value::Nil),
-    };
-    if idx < 0 || idx as usize >= items.len() {
-        return Ok(Value::Nil);
-    }
-    Ok(items[idx as usize].clone())
-}
-
 /// Assemble a [u8] array into a u32 (big-endian).
 ///
 /// Callable from Simple as: `bytes_to_u32_be(bytes)`
@@ -445,32 +418,5 @@ mod tests {
             Value::Array(rows) => assert_eq!(rows.len(), 16),
             other => panic!("expected array, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_rt_tuple_get_returns_element_by_index() {
-        let tup = Value::Tuple(vec![Value::Int(10), Value::text("hi"), Value::Int(30)]);
-        // in-range indices return the element Value
-        assert_eq!(
-            rt_tuple_get_fn(&[tup.clone(), Value::Int(0)]).unwrap(),
-            Value::Int(10)
-        );
-        assert_eq!(
-            rt_tuple_get_fn(&[tup.clone(), Value::Int(2)]).unwrap(),
-            Value::Int(30)
-        );
-        // out-of-range / negative / non-tuple receiver return Nil, never panic
-        assert_eq!(rt_tuple_get_fn(&[tup.clone(), Value::Int(9)]).unwrap(), Value::Nil);
-        assert_eq!(rt_tuple_get_fn(&[tup, Value::Int(-1)]).unwrap(), Value::Nil);
-        assert_eq!(
-            rt_tuple_get_fn(&[Value::Int(1), Value::Int(0)]).unwrap(),
-            Value::Nil
-        );
-        // LabeledTuple is accessed positionally too
-        let lt = Value::LabeledTuple {
-            labels: vec!["a".to_string(), "b".to_string()],
-            values: vec![Value::Int(1), Value::Int(2)],
-        };
-        assert_eq!(rt_tuple_get_fn(&[lt, Value::Int(1)]).unwrap(), Value::Int(2));
     }
 }

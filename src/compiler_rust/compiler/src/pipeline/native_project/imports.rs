@@ -43,13 +43,6 @@ pub(crate) struct ImportMapResult {
     /// get incorrectly routed through the function-import fast path and
     /// `GlobalLoad` returns the symbol's address instead of its value.
     pub data_exports: std::collections::HashSet<String>,
-    /// Mangled data symbol -> declared/inferred source type. The native
-    /// per-file lowerer uses this after package-owner selection so sibling
-    /// globals are known before MIR's strict undefined-global check.
-    pub data_types: std::collections::HashMap<String, simple_parser::Type>,
-    /// Effective package -> (bare data name -> exact mangled owner).
-    /// `_`-prefixed directories are transparent; ambiguous owners are omitted.
-    pub package_data: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Mangled function name → declared parameter count. Used by the codegen
     /// backend to strip the spurious nil receiver that HIR→MIR lowering adds
     /// to module-qualified free function calls (`mod.func(args)` → MIR args
@@ -240,9 +233,6 @@ pub(crate) fn build_import_map(
     let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
     let mut duplicate_enum_defs: HashSet<String> = HashSet::new();
     let mut data_exports: HashSet<String> = HashSet::new();
-    let mut data_types: HashMap<String, simple_parser::Type> = HashMap::new();
-    let mut package_data_owners: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<String>> =
-        std::collections::BTreeMap::new();
     let mut fn_arities: HashMap<String, usize> = HashMap::new();
     let mut trait_impls: HashMap<String, Vec<String>> = HashMap::new();
     // Bare function name -> declared return type. This includes primitive
@@ -258,7 +248,6 @@ pub(crate) fn build_import_map(
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
-        let package_prefix = effective_package_prefix(path, &per_file_root);
         let filtered_source =
             crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
         let mut parser = simple_parser::Parser::new(&filtered_source);
@@ -342,56 +331,22 @@ pub(crate) fn build_import_map(
                     simple_parser::ast::Node::Let(l) => {
                         if let Some(name) = extract_let_name(&l.pattern) {
                             let mangled = format!("{}__{}", prefix, name);
-                            raw_to_mangled.entry(name.clone()).or_default().push(mangled.clone());
-                            package_data_owners
-                                .entry((package_prefix.clone(), name))
-                                .or_default()
-                                .insert(mangled.clone());
+                            raw_to_mangled.entry(name).or_default().push(mangled.clone());
                             // Module-level `var`/`val` (via `let`) is data, not a function.
-                            data_exports.insert(mangled.clone());
-                            data_types.insert(
-                                mangled,
-                                l.ty.clone()
-                                    .or_else(|| extract_let_type(&l.pattern))
-                                    .unwrap_or_else(any_data_type),
-                            );
+                            data_exports.insert(mangled);
                         }
                     }
                     simple_parser::ast::Node::Const(c) => {
                         let mangled = format!("{}__{}", prefix, c.name);
                         raw_to_mangled.entry(c.name.clone()).or_default().push(mangled.clone());
-                        package_data_owners
-                            .entry((package_prefix.clone(), c.name.clone()))
-                            .or_default()
-                            .insert(mangled.clone());
                         // Module-level `const`/`val` is data, not a function.
-                        data_exports.insert(mangled.clone());
-                        data_types.insert(
-                            mangled,
-                            c.ty.clone().unwrap_or_else(|| {
-                                if crate::hir::try_const_eval(&c.value).is_some() {
-                                    simple_parser::Type::Simple("i64".to_string())
-                                } else if matches!(
-                                    &c.value,
-                                    simple_parser::ast::Expr::String(_) | simple_parser::ast::Expr::FString { .. }
-                                ) {
-                                    simple_parser::Type::Simple("text".to_string())
-                                } else {
-                                    any_data_type()
-                                }
-                            }),
-                        );
+                        data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Static(s) => {
                         let mangled = format!("{}__{}", prefix, s.name);
                         raw_to_mangled.entry(s.name.clone()).or_default().push(mangled.clone());
-                        package_data_owners
-                            .entry((package_prefix.clone(), s.name.clone()))
-                            .or_default()
-                            .insert(mangled.clone());
                         // Module-level `static` is data, not a function.
-                        data_exports.insert(mangled.clone());
-                        data_types.insert(mangled, s.ty.clone().unwrap_or_else(any_data_type));
+                        data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Struct(s) => {
                         // Register the bare struct type name so cross-module imports
@@ -765,11 +720,6 @@ pub(crate) fn build_import_map(
     // nested wrappers, so discovery order cannot invent an owner.
     let mut ambiguous_type_owners = duplicate_enum_defs;
     ambiguous_type_owners.extend(duplicate_struct_defs.keys().cloned());
-    for ty in data_types.values_mut() {
-        if type_mentions_ambiguous_owner(ty, &ambiguous_type_owners) {
-            *ty = any_data_type();
-        }
-    }
     for variants in enum_defs.values_mut() {
         for (_, payload) in variants {
             if let Some(fields) = payload {
@@ -784,16 +734,6 @@ pub(crate) fn build_import_map(
 
     // Drop ambiguous (empty-name sentinel) entries before returning.
     fn_return_types.retain(|_, ty| !matches!(ty, simple_parser::Type::Simple(s) if s.is_empty()));
-    let mut package_data: HashMap<String, HashMap<String, String>> = HashMap::new();
-    for ((package, name), owners) in package_data_owners {
-        if owners.len() == 1 {
-            package_data
-                .entry(package)
-                .or_default()
-                .insert(name, owners.into_iter().next().unwrap());
-        }
-    }
-
     ImportMapResult {
         map,
         ambiguous,
@@ -804,26 +744,9 @@ pub(crate) fn build_import_map(
         duplicate_struct_defs,
         enum_defs,
         data_exports,
-        data_types,
-        package_data,
         fn_arities,
         fn_return_types,
     }
-}
-
-/// Package visibility treats `_`-prefixed directories as transparent.
-pub(crate) fn effective_package_prefix(file_path: &Path, source_root: &Path) -> String {
-    let mut effective = source_root.to_path_buf();
-    let parent = file_path.parent().unwrap_or(source_root);
-    let relative = parent.strip_prefix(source_root).unwrap_or(parent);
-    for component in relative.components() {
-        if let std::path::Component::Normal(part) = component {
-            if !part.to_string_lossy().starts_with('_') {
-                effective.push(part);
-            }
-        }
-    }
-    module_prefix_from_path(&effective, source_root)
 }
 
 fn type_mentions_ambiguous_owner(ty: &simple_parser::Type, ambiguous: &std::collections::HashSet<String>) -> bool {
@@ -1139,15 +1062,4 @@ fn extract_let_name(pattern: &simple_parser::Pattern) -> Option<String> {
         simple_parser::Pattern::Typed { pattern: inner, .. } => extract_let_name(inner),
         _ => None,
     }
-}
-
-fn extract_let_type(pattern: &simple_parser::Pattern) -> Option<simple_parser::Type> {
-    match pattern {
-        simple_parser::Pattern::Typed { ty, .. } => Some(ty.clone()),
-        _ => None,
-    }
-}
-
-fn any_data_type() -> simple_parser::Type {
-    simple_parser::Type::Simple("Any".to_string())
 }
