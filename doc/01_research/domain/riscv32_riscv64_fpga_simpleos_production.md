@@ -225,3 +225,21 @@ M-mode bypass, locked permission enforcement, S/U no-match denial, 34-bit RV32
 and 56-bit RV64 physical-address domains, and S-effective PMP checks for page
 table walks.  Source:
 [RISC-V Machine-Level ISA 1.13](https://docs.riscv.org/reference/isa/v20260120/priv/machine.html#machine-level-isa).
+
+## 2026-07-18 A-Extension Normative Recheck
+
+The ratified A-extension text requires LR.W to sign-extend its loaded word and
+create a reservation set containing the accessed bytes; SC succeeds only while
+that reservation remains valid, writes zero on success and nonzero on failure,
+always passes store permission checks before retirement, and performs no memory
+write on failure. AMO.W similarly computes modulo 32 bits and sign-extends the
+old word into `rd`. Source:
+[RISC-V A extension 2.1](https://docs.riscv.org/reference/isa/unpriv/a-st-ext.html).
+
+The privileged specification classifies LR faults as load faults and SC/AMO
+faults as store/AMO faults. PMP requires read permission for LR and write
+permission for SC/AMO. Atomicity PMAs may independently reject LR/SC or some/all
+AMOs for a physical region, so the current single-master SoC permits tagged
+atomics only in DRAM and rejects ROM/MMIO before invoking a target. Sources:
+[RISC-V Machine-Level ISA 1.13](https://docs.riscv.org/reference/isa/priv/machine.html),
+[RISC-V Supervisor-Level ISA 1.13](https://docs.riscv.org/reference/isa/priv/supervisor.html).

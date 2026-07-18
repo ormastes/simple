@@ -9,8 +9,7 @@
 # request completes, so page walks, fetches, and data accesses share one path.
 #
 # Dependencies:
-#   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init
-#     (priv_mode field and core64_init fn added by rv64gc core parallel agent)
+#   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init_single_master
 #   - std.hardware.soc_rtl.clint: ClintState, clint_create, clint_tick
 #     (mtime i64 field added by clint upgrade parallel agent)
 #   - std.hardware.soc_rtl.ram64: Ram64State, ram64_init
@@ -21,7 +20,7 @@
 # ============================================================================
 
 # -- Core
-use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_cycle}
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init_single_master, core64_cycle}
 use std.hardware.rv64gc_rtl.csr.csr64_update_mip
 
 # -- Peripherals
@@ -72,7 +71,7 @@ fn soc_top_64_init(dram_size: i64) -> SocTop64State:
     - clint initialized with mtime = 0, mtimecmp = max"""
     val regions = wb64_qemu_virt_regions()
     SocTop64State(
-        core:  core64_init(SOC64_RESET_VECTOR),
+        core:  core64_init_single_master(SOC64_RESET_VECTOR),
         ram:   ram64_init(dram_size),
         clint: clint_create(),
         plic:  plic_create(),
@@ -143,7 +142,12 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
 
         if not decoded.err:
             val pid = decoded.peripheral_id
-            if pid == WB64_PID_BOOTROM:
+            # This SoC has one coherent memory agent and only DRAM is atomic.
+            # Reject atomic MMIO/ROM before invoking any side-effecting target.
+            if core_result.bus_atomic and pid != WB64_PID_DRAM:
+                out.response_error = true
+
+            else if pid == WB64_PID_BOOTROM:
                 if core_result.bus_write:
                     out.response_error = true
                 else:

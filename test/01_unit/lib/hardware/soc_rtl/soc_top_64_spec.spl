@@ -30,7 +30,8 @@ updates + interrupt routing) requires compiled mode.
 
 use std.spipe.*
 use std.hardware.soc_rtl.*
-use std.hardware.rv64gc_rtl.core.core64_init
+use std.hardware.rv64gc_rtl.core.{core64_init, core64_init_single_master, CORE64_ATOMIC_LOAD}
+use std.hardware.rv64gc_rtl.memory_access.memory64_start_lr
 use std.hardware.rv64gc_rtl.regfile.regfile64_write
 
 val SOC64_TEST_DRAM_SIZE: i64 = 0x1000
@@ -194,6 +195,24 @@ describe "SocTop64 Tick":
         expect(soc.core.pc).to_equal(WB64_DRAM_BASE)
         soc = soc_top_64_tick(soc)
         expect(soc.core.pc).to_equal(WB64_DRAM_BASE + 4)
+
+    it "AC-3: atomic MMIO is rejected before a peripheral read side effect":
+        var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        soc.core = core64_init_single_master(WB64_UART_BASE)
+        soc.core.pipeline_phase = CORE64_ATOMIC_LOAD
+        soc.core.instruction = 0x1000B1AF  # LR.D x3,(x1)
+        soc.core.memory = memory64_start_lr(soc.core.mmu, soc.core.pmp,
+            WB64_UART_BASE, 8, 3, false, false)
+        soc.uart = uart_rx_push(soc.uart, 0x41)
+
+        soc = soc_top_64_tick(soc)
+        expect(soc.response_error).to_be(true)
+        expect(soc.uart.rx_count).to_equal(1)
+        expect(soc.uart.rx_fifo_0).to_equal(0x41)
+        soc = soc_top_64_tick(soc)
+        expect(soc.uart.rx_count).to_equal(1)
+        expect(soc.core.csr_m.mcause).to_equal(5)
+        expect(soc.core.csr_m.mtval).to_equal(WB64_UART_BASE)
 
 
 # ============================================================================

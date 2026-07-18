@@ -1,10 +1,10 @@
 # ============================================================================
-# RV64GC RTL Core — Single-Cycle Datapath (64-bit)
+# RV64GC RTL Core — Clocked Protected Datapath (64-bit)
 # ============================================================================
 #
-# Adapts RV32I core pattern for 64-bit RV64GC.  Top-level module that wires
-# the decoder, ALU, register file, LSU, mul/div, and atomics into a
-# single-cycle pipeline.
+# Adapts the RV32I core pattern for the clocked RV64 path. Fetch, protected
+# memory, mul/div, and atomic phases stall until their architectural result is
+# ready to commit.
 #
 # Architecture:
 #   - core64_combinational()  — all combinational datapath logic
@@ -29,8 +29,12 @@ use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_start, mul_div_tick}
 use std.hardware.rv64gc_rtl.pkg.{MULDIV_MUL, MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU}
 use std.hardware.rv64gc_rtl.pkg.{MULDIV_DIV, MULDIV_DIVU, MULDIV_REM, MULDIV_REMU}
 use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULW, MULDIV_DIVW, MULDIV_DIVUW, MULDIV_REMW, MULDIV_REMUW}
-use std.hardware.rv64gc_rtl.atomics.AtomicsState
+use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, atomics_invalidate}
+use std.hardware.rv64gc_rtl.atomics.{atomics_sign_extend_32, amo_compute, amo_compute_word}
+use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR}
+use std.hardware.rv64gc_rtl.pkg.{AMO_AND, AMO_OR, AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
+use std.hardware.rv64gc_rtl.csr.misa_rv64imasu
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
 use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
@@ -39,7 +43,9 @@ use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_me
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
 use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
 use std.hardware.rv64gc_rtl.memory_access.MemoryAccessState64
-use std.hardware.rv64gc_rtl.memory_access.{memory64_start, memory64_cycle}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start, memory64_start_atomic_read}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start_lr, memory64_start_atomic_store}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start_conditional_store, memory64_cycle}
 use std.hardware.rv64gc_rtl.pmp.PmpEntries64
 use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_entries_reset, pmp64_csr_read, pmp64_csr_write}
 use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
@@ -48,6 +54,8 @@ val CORE64_FETCH_LOW: u32 = 0
 val CORE64_FETCH_HIGH: u32 = 1
 val CORE64_DATA_ACCESS: u32 = 2
 val CORE64_MULDIV: u32 = 3
+val CORE64_ATOMIC_LOAD: u32 = 4
+val CORE64_ATOMIC_STORE: u32 = 5
 
 # ============================================================================
 # Core sequential state (clocked registers)
@@ -64,6 +72,8 @@ struct CoreState64:
     semi_trigger: bool  # One-cycle pulse when semihosting completes
     mul_div: MulDivState  # M extension state
     atomics: AtomicsState # A extension state
+    atomic_old: i64       # Architectural AMO read value held through its store
+    atomic_bus_exclusive: bool  # Embedding guarantees no competing memory agent
     priv_mode: i64      # Current privilege mode: M=3, S=1, U=0
     csr_m: CsrFile64    # M-mode CSR file
     csr_s: CsrSMode64   # S-mode CSR file
@@ -93,6 +103,7 @@ struct Core64CycleResult:
     bus_write: bool
     bus_wdata: i64
     bus_is_pte: bool
+    bus_atomic: bool
 
 # ============================================================================
 # Combinational result bundle
@@ -179,6 +190,22 @@ fn eval_branch_64(funct3: u32, rs1_data: i64, rs2_data: i64) -> bool:
     false
 
 @hardware
+fn core64_amo_funct5(instruction: u32) -> u32:
+    (instruction >> 27) & 0x1F
+
+@hardware
+fn core64_amo_legal(instruction: u32, dec: DecodeResult64) -> bool:
+    if dec.funct3 != 2 and dec.funct3 != 3:
+        return false
+    val funct5 = core64_amo_funct5(instruction)
+    if funct5 == AMO_LR:
+        return dec.rs2 == 0
+    (funct5 == AMO_SC or funct5 == AMO_SWAP or funct5 == AMO_ADD or
+     funct5 == AMO_XOR or funct5 == AMO_AND or funct5 == AMO_OR or
+     funct5 == AMO_MIN or funct5 == AMO_MAX or funct5 == AMO_MINU or
+     funct5 == AMO_MAXU)
+
+@hardware
 fn core64_instruction_legal(instruction: u32, dec: DecodeResult64) -> bool:
     """Fail closed for every encoding the current integer datapath accepts."""
     val op = dec.opcode
@@ -237,9 +264,9 @@ fn core64_instruction_legal(instruction: u32, dec: DecodeResult64) -> bool:
             return true
         return instruction == 0x00000073 or instruction == 0x00100073
 
-    # A is recognized so the extension gate below can raise a precise illegal
-    # instruction until its reservation/bus path is connected.
-    op == OP_AMO
+    if op == OP_AMO:
+        return core64_amo_legal(instruction, dec)
+    false
 
 @hardware
 fn core64_privileged_instruction_legal(state: CoreState64,
@@ -551,6 +578,8 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
         semi_trigger: new_semi_trigger,
         mul_div: new_mul_div,
         atomics: new_atomics,
+        atomic_old: state.atomic_old,
+        atomic_bus_exclusive: state.atomic_bus_exclusive,
         priv_mode: new_priv_mode,
         csr_m: new_csr_m,
         csr_s: new_csr_s,
@@ -588,7 +617,9 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
         semi_suppress: false,
         semi_trigger: false,
         mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
-        atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
+        atomics: atomics_create(),
+        atomic_old: 0,
+        atomic_bus_exclusive: false,
         priv_mode: 3,
         csr_m: csr64_create(0),
         csr_s: csr_s64_create(),
@@ -619,7 +650,9 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         semi_suppress: false,
         semi_trigger: false,
         mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
-        atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
+        atomics: atomics_create(),
+        atomic_old: 0,
+        atomic_bus_exclusive: false,
         priv_mode: 3,
         csr_m: csr64_create(0),
         csr_s: csr_s64_create(),
@@ -635,6 +668,13 @@ fn core64_init(reset_vec: i64) -> CoreState64:
 # ============================================================================
 # Clocked protected-memory core path
 # ============================================================================
+
+fn core64_init_single_master(reset_vec: i64) -> CoreState64:
+    """Enable A only when the embedding owns the memory bus exclusively."""
+    var out = core64_init(reset_vec)
+    out.atomic_bus_exclusive = true
+    out.csr_m.misa = misa_rv64imasu()
+    out
 
 @hardware
 fn core64_sum_enabled(state: CoreState64) -> bool:
@@ -654,6 +694,18 @@ fn core64_data_size(funct3: u32) -> u32:
     if width == 2:
         return 4
     8
+
+@hardware
+fn core64_atomic_size(dec: DecodeResult64) -> u32:
+    if dec.funct3 == 2:
+        return 4
+    8
+
+@hardware
+fn core64_atomic_read_value(dec: DecodeResult64, value: i64) -> i64:
+    if dec.funct3 == 2:
+        return atomics_sign_extend_32(value)
+    value
 
 @hardware
 fn core64_muldiv_op(dec: DecodeResult64) -> i64:
@@ -690,6 +742,8 @@ fn core64_raise_exception(state: CoreState64, cause: i64, tval: i64) -> CoreStat
     out.priv_mode = trap.target_mode
     out.csr_m = trap.csr
     out.csr_s = trap.csr_s
+    out.atomics = atomics_create()
+    out.atomic_old = 0
     out.semi_phase = 0
     out.semi_suppress = false
     core64_restart_fetch(out)
@@ -745,10 +799,12 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
     var bus_write = false
     var bus_wdata: i64 = 0
     var bus_is_pte = false
+    var bus_atomic = false
 
     if state.halt:
         return Core64CycleResult(state: state, bus_valid: false, bus_addr: 0,
-            bus_size: 1, bus_write: false, bus_wdata: 0, bus_is_pte: false)
+            bus_size: 1, bus_write: false, bus_wdata: 0, bus_is_pte: false,
+            bus_atomic: false)
 
     out.semi_trigger = false
 
@@ -763,7 +819,8 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
                 comb.a0_val, comb.a1_val)
             out = core64_finish_instruction(out)
         return Core64CycleResult(state: out, bus_valid: false, bus_addr: 0,
-            bus_size: 1, bus_write: false, bus_wdata: 0, bus_is_pte: false)
+            bus_size: 1, bus_write: false, bus_wdata: 0, bus_is_pte: false,
+            bus_atomic: false)
 
     val mem = memory64_cycle(state.memory, state.mmu, state.pmp, request_ready,
         response_valid, response_error, response_data)
@@ -775,10 +832,50 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
     bus_write = mem.bus_write
     bus_wdata = mem.bus_wdata
     bus_is_pte = mem.bus_is_pte
+    bus_atomic = mem.bus_atomic
 
     if mem.done:
         if mem.fault:
             out = core64_raise_exception(out, mem.fault_cause, mem.fault_tval)
+
+        else if state.pipeline_phase == CORE64_ATOMIC_LOAD:
+            var comb = core64_combinational(out, state.instruction, 0, out.rf)
+            val funct5 = core64_amo_funct5(state.instruction)
+            val old_value = core64_atomic_read_value(comb.dec, mem.read_data)
+            if funct5 == AMO_LR:
+                out.atomics = atomics_lr(out.atomics, mem.state.paddr,
+                    core64_atomic_size(comb.dec))
+                comb.rd_data = old_value
+                comb.rd_write = true
+                out = core64_update(out, state.instruction, comb,
+                    comb.a0_val, comb.a1_val)
+                out = core64_finish_instruction(out)
+            else:
+                val amo = if comb.dec.funct3 == 2:
+                    amo_compute_word(funct5, mem.read_data, comb.rs2_data)
+                else:
+                    amo_compute(funct5, mem.read_data, comb.rs2_data)
+                out.atomic_old = amo.old_value
+                out.pipeline_phase = CORE64_ATOMIC_STORE
+                out.memory = memory64_start_atomic_store(out.mmu, out.pmp,
+                    state.memory.vaddr, core64_atomic_size(comb.dec),
+                    out.priv_mode as u32, core64_sum_enabled(out),
+                    core64_mxr_enabled(out), amo.new_value)
+
+        else if state.pipeline_phase == CORE64_ATOMIC_STORE:
+            var comb = core64_combinational(out, state.instruction, 0, out.rf)
+            val funct5 = core64_amo_funct5(state.instruction)
+            if funct5 == AMO_SC:
+                comb.rd_data = if mem.state.conditional_failed: 1 else: 0
+            else:
+                comb.rd_data = state.atomic_old
+                out.atomics = atomics_invalidate(out.atomics, mem.state.paddr,
+                    core64_atomic_size(comb.dec))
+            comb.rd_write = true
+            out.atomic_old = 0
+            out = core64_update(out, state.instruction, comb,
+                comb.a0_val, comb.a1_val)
+            out = core64_finish_instruction(out)
 
         else if state.pipeline_phase == CORE64_FETCH_LOW:
             val parcel = (mem.read_data & 0xFFFF) as u32
@@ -796,11 +893,35 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
             out.instruction = insn
             val comb = core64_combinational(out, insn, 0, out.rf)
             val legal = (core64_instruction_legal(insn, comb.dec) and
-                core64_privileged_instruction_legal(out, comb.dec))
+                core64_privileged_instruction_legal(out, comb.dec) and
+                (not comb.dec.is_amo or out.atomic_bus_exclusive))
             if not legal:
                 out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, insn as i64)
             else if comb.dec.is_amo:
-                out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, insn as i64)
+                val funct5 = core64_amo_funct5(insn)
+                val size = core64_atomic_size(comb.dec)
+                if funct5 == AMO_SC:
+                    val reservation = out.atomics
+                    out.atomics = atomics_create()
+                    out.pipeline_phase = CORE64_ATOMIC_STORE
+                    out.memory = memory64_start_conditional_store(out.mmu,
+                        out.pmp, comb.rs1_data, size, out.priv_mode as u32,
+                        core64_sum_enabled(out), core64_mxr_enabled(out),
+                        comb.rs2_data, reservation.reservation_valid,
+                        reservation.reservation_paddr,
+                        reservation.reservation_size)
+                else:
+                    out.pipeline_phase = CORE64_ATOMIC_LOAD
+                    if funct5 == AMO_LR:
+                        out.memory = memory64_start_lr(out.mmu, out.pmp,
+                            comb.rs1_data, size,
+                            out.priv_mode as u32, core64_sum_enabled(out),
+                            core64_mxr_enabled(out))
+                    else:
+                        out.memory = memory64_start_atomic_read(out.mmu,
+                            out.pmp, comb.rs1_data, size,
+                            out.priv_mode as u32, core64_sum_enabled(out),
+                            core64_mxr_enabled(out))
             else if comb.dec.is_muldiv:
                 out.pipeline_phase = CORE64_MULDIV
                 out.mul_div = mul_div_start(core64_muldiv_op(comb.dec),
@@ -819,10 +940,13 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
         else:
             val comb = core64_combinational(out, state.instruction,
                 mem.read_data, out.rf)
+            if comb.dec.mem_write:
+                out.atomics = atomics_invalidate(out.atomics, mem.state.paddr,
+                    core64_data_size(comb.dec.funct3))
             out = core64_update(out, state.instruction, comb,
                 comb.a0_val, comb.a1_val)
             out = core64_finish_instruction(out)
 
     Core64CycleResult(state: out, bus_valid: bus_valid, bus_addr: bus_addr,
         bus_size: bus_size, bus_write: bus_write, bus_wdata: bus_wdata,
-        bus_is_pte: bus_is_pte)
+        bus_is_pte: bus_is_pte, bus_atomic: bus_atomic)

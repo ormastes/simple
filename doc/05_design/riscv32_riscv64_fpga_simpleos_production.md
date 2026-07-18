@@ -150,7 +150,11 @@ bus response and routes accepted physical requests exactly once.
 The clock path validates encodings before starting data access, samples
 CLINT/PLIC pending state into `mip`, and takes enabled interrupts only after an
 instruction commits. `misa` grows only when the corresponding execution path is
-connected: M is now multi-cycle and architectural, while A and C remain clear.
+connected. M is multi-cycle; A uses translated physical reservations and
+interrupt-free read/conditional-write phases. Only DRAM accepts atomic-tagged
+requests, so ROM/MMIO rejection occurs before target side effects. The reusable
+core profile leaves A clear; only `core64_init_single_master()` enables it for
+this exclusive-bus SoC. C remains clear.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

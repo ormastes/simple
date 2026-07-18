@@ -252,6 +252,14 @@ implementation-milestone-2-in-progress
 - Connected the existing multi-cycle M unit to the production core stall/commit
   phase, replaced placeholder high products and fragile unsigned division with
   exact fixed-width algorithms, and enabled only the M `misa` bit.
+- Connected LR/SC and AMO.W/D through translated physical reservations and
+  protected read/conditional-write phases. Successful overlapping stores
+  invalidate reservations, SC failure emits no write, and the SoC rejects
+  atomic ROM/MMIO before target side effects. The reusable core leaves A clear;
+  the explicit single-master SoC profile enables the A `misa` bit.
+- Post-change sidecar review found and closed two A-profile blockers: generic
+  embeddings no longer advertise/execute A without the exclusive-bus contract,
+  and the MMIO PMA scenario now proves a populated UART RX FIFO is not consumed.
 - Checks remain unexecuted because the tracked pure-Simple full-CLI crash exits
-  139 before diagnostics. C, A, supervisor interrupt contexts, and RV32 parity
+  139 before diagnostics. C, supervisor interrupt contexts, and RV32 parity
   remain open.

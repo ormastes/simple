@@ -122,8 +122,9 @@ The production APIs are now `sv39_walker64_start/cycle`,
 renamed `mmu64_translate_ram_test_adapter`, and the identity LSU, raw core-port,
 and PC-only step paths were removed. The clocked SoC now routes ROM, DRAM,
 CLINT, PLIC, and UART requests. M execution and machine interrupt sampling are
-now connected; C/A execution and complete supervisor interrupt contexts remain
-open.
+now connected. LR/SC and AMO.W/D use translated physical reservations and the
+single-master protected bus; C execution and complete supervisor interrupt
+contexts remain open.
 
 The walker uses the 32-bit-addressed `RamState`, while the RV64 SoC uses
 `Ram64State`; the types cannot form a real RV64 page-table bus without an owner

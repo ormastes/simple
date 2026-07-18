@@ -1,5 +1,7 @@
 use std.spipe.*
-use std.hardware.rv64gc_rtl.core.{core64_init, core64_cycle, CORE64_FETCH_LOW, CORE64_DATA_ACCESS, CORE64_MULDIV}
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_init_single_master, core64_cycle}
+use std.hardware.rv64gc_rtl.core.{CORE64_FETCH_LOW, CORE64_DATA_ACCESS, CORE64_MULDIV}
+use std.hardware.rv64gc_rtl.core.{CORE64_ATOMIC_LOAD, CORE64_ATOMIC_STORE}
 use std.hardware.rv64gc_rtl.regfile.{regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.memory_access.memory64_start
 use std.hardware.rv64gc_rtl.mmu_sv39.ACCESS_FETCH_64
@@ -7,6 +9,8 @@ use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.trap.cause_mti
 use std.hardware.rv64gc_rtl.mul_div.{mul_div_start, mul_div_tick}
 use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU, MULDIV_DIVU, MULDIV_REMU}
+use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_ADD, AMO_MIN, AMO_MAXU}
+use std.hardware.rv64gc_rtl.atomics.{atomics_create, atomics_lr, atomics_invalidate, amo_compute_word}
 
 fn completed_muldiv(op: i64, a: i64, b: i64) -> i64:
     var state = mul_div_start(op, a, b)
@@ -14,12 +18,29 @@ fn completed_muldiv(op: i64, a: i64, b: i64) -> i64:
         state = mul_div_tick(state)
     state.result
 
+fn amo_instruction(funct5: u32, rs2: u32, rs1: u32,
+                   funct3: u32, rd: u32) -> u32:
+    (funct5 << 27) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) |
+        (rd << 7) | 0x2F
+
+fn enter_instruction(state: CoreState64, instruction: u32) -> CoreState64:
+    val low = core64_cycle(state, true, true, false,
+        (instruction & 0xFFFF) as i64)
+    core64_cycle(low.state, true, true, false,
+        ((instruction >> 16) & 0xFFFF) as i64).state
+
 describe "RV64 clocked protected-memory core":
     it "advertises only extensions connected to this clock path":
-        val misa = core64_init(0x8000_0000).csr_m.misa
-        val unsupported: i64 = (1 << 2) | 1
+        val reusable_misa = core64_init(0x8000_0000).csr_m.misa
+        expect(reusable_misa & 1).to_equal(0)
+        val misa = core64_init_single_master(0x8000_0000).csr_m.misa
+        val unsupported: i64 = 1 << 2
         expect(misa & unsupported).to_equal(0)
         expect(misa & (1 << 12)).to_equal(1 << 12)
+        expect(misa & 1).to_equal(1)
+        val generic_lr = enter_instruction(core64_init(0x8000_0000),
+            amo_instruction(AMO_LR, 0, 1, 3, 3))
+        expect(generic_lr.csr_m.mcause).to_equal(2)
 
     it "computes exact high multiply and unsigned divide edge cases":
         expect(completed_muldiv(MULDIV_MULH, -1, -1)).to_equal(0)
@@ -28,6 +49,13 @@ describe "RV64 clocked protected-memory core":
         expect(completed_muldiv(MULDIV_DIVU, -1, 2)).to_equal(0x7FFF_FFFF_FFFF_FFFF)
         expect(completed_muldiv(MULDIV_DIVU, -1, 0x8000000000000001)).to_equal(1)
         expect(completed_muldiv(MULDIV_REMU, -1, 0x8000000000000001)).to_equal(0x7FFF_FFFF_FFFF_FFFE)
+
+    it "applies signed and unsigned AMO.W comparisons at word width":
+        val signed_min = amo_compute_word(AMO_MIN, 0x8000_0000, 1)
+        expect(signed_min.old_value).to_equal(-2147483648)
+        expect(signed_min.new_value).to_equal(0x8000_0000)
+        val unsigned_max = amo_compute_word(AMO_MAXU, 0x8000_0000, 1)
+        expect(unsigned_max.new_value).to_equal(0x8000_0000)
 
     it "commits ADDI only after both instruction parcels return":
         val reset_pc: i64 = 0x8000_0000
@@ -59,6 +87,85 @@ describe "RV64 clocked protected-memory core":
             i = i + 1
         expect(cycle.state.pc).to_equal(reset_pc + 4)
         expect(regfile64_read(cycle.state.rf, 3, 0).rs1_data).to_equal(42)
+
+    it "reserves a physical LR.D address and commits one successful SC.D write":
+        val reset_pc: i64 = 0x8000_0000
+        val data_addr: i64 = 0x8000_0100
+        var state = core64_init_single_master(reset_pc)
+        state.rf = regfile64_write(state.rf, 1, data_addr, true)
+        state.rf = regfile64_write(state.rf, 2, 0x5566_7788, true)
+
+        state = enter_instruction(state, amo_instruction(AMO_LR, 0, 1, 3, 3))
+        expect(state.pipeline_phase).to_equal(CORE64_ATOMIC_LOAD)
+        val load = core64_cycle(state, true, true, false, 0x1122_3344)
+        expect(load.bus_valid).to_be(true)
+        expect(load.bus_write).to_be(false)
+        expect(load.bus_atomic).to_be(true)
+        expect(load.state.atomics.reservation_valid).to_be(true)
+        expect(load.state.atomics.reservation_paddr).to_equal(data_addr)
+        expect(load.state.atomics.reservation_size).to_equal(8)
+        expect(regfile64_read(load.state.rf, 3, 0).rs1_data).to_equal(0x1122_3344)
+
+        state = enter_instruction(load.state, amo_instruction(AMO_SC, 2, 1, 3, 4))
+        expect(state.pipeline_phase).to_equal(CORE64_ATOMIC_STORE)
+        val store = core64_cycle(state, true, true, false, 0)
+        expect(store.bus_valid).to_be(true)
+        expect(store.bus_write).to_be(true)
+        expect(store.bus_atomic).to_be(true)
+        expect(store.bus_addr).to_equal(data_addr)
+        expect(store.bus_wdata).to_equal(0x5566_7788)
+        expect(store.state.atomics.reservation_valid).to_be(false)
+        expect(regfile64_read(store.state.rf, 4, 0).rs1_data).to_equal(0)
+
+    it "fails SC.D without a reservation and suppresses the physical write":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init_single_master(reset_pc)
+        state.rf = regfile64_write(state.rf, 1, 0x8000_0100, true)
+        state.rf = regfile64_write(state.rf, 2, 9, true)
+        state = enter_instruction(state, amo_instruction(AMO_SC, 2, 1, 3, 4))
+        val failed = core64_cycle(state, false, false, false, 0)
+        expect(failed.bus_valid).to_be(false)
+        expect(regfile64_read(failed.state.rf, 4, 0).rs1_data).to_equal(1)
+
+    it "invalidates a reservation on an overlapping successful store range":
+        val reserved = atomics_lr(atomics_create(), 0x8000_0100, 8)
+        val invalidated = atomics_invalidate(reserved, 0x8000_0104, 4)
+        expect(invalidated.reservation_valid).to_be(false)
+
+    it "executes AMOADD.W as an ordered read then write with signed rd data":
+        val reset_pc: i64 = 0x8000_0000
+        val data_addr: i64 = 0x8000_0100
+        var state = core64_init_single_master(reset_pc)
+        state.rf = regfile64_write(state.rf, 1, data_addr, true)
+        state.rf = regfile64_write(state.rf, 2, 2, true)
+        state = enter_instruction(state, amo_instruction(AMO_ADD, 2, 1, 2, 5))
+        val stalled = core64_cycle(state, false, false, false, 0)
+        expect(stalled.bus_valid).to_be(true)
+        expect(stalled.bus_addr).to_equal(data_addr)
+        expect(stalled.bus_atomic).to_be(true)
+        val read = core64_cycle(stalled.state, true, true, false, 0xFFFF_FFFF)
+        expect(read.bus_valid).to_be(true)
+        expect(read.bus_write).to_be(false)
+        expect(read.bus_atomic).to_be(true)
+        expect(read.state.pipeline_phase).to_equal(CORE64_ATOMIC_STORE)
+        val write = core64_cycle(read.state, true, true, false, 0)
+        expect(write.bus_valid).to_be(true)
+        expect(write.bus_write).to_be(true)
+        expect(write.bus_atomic).to_be(true)
+        expect(write.bus_size).to_equal(4)
+        expect(write.bus_wdata).to_equal(1)
+        expect(regfile64_read(write.state.rf, 5, 0).rs1_data).to_equal(-1)
+
+    it "traps malformed and reserved AMOs before issuing a data request":
+        val reset_pc: i64 = 0x8000_0000
+        val malformed = amo_instruction(AMO_LR, 2, 1, 3, 3)
+        val trapped = enter_instruction(core64_init_single_master(reset_pc), malformed)
+        expect(trapped.csr_m.mcause).to_equal(2)
+        expect(trapped.pipeline_phase).to_equal(CORE64_FETCH_LOW)
+        val reserved = amo_instruction(0x1F, 2, 1, 3, 3)
+        val trapped_reserved = enter_instruction(core64_init_single_master(reset_pc), reserved)
+        expect(trapped_reserved.csr_m.mcause).to_equal(2)
+        expect(trapped_reserved.pipeline_phase).to_equal(CORE64_FETCH_LOW)
 
     it "routes a store through the shared data transaction before commit":
         val reset_pc: i64 = 0x8000_0000
