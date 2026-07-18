@@ -6,8 +6,10 @@
 
 use super::super::common::*;
 use super::helpers::*;
-use crate::hir::BinOp;
+use crate::hir::{self, BinOp};
+use crate::mir::lower::lower_to_mir;
 use crate::mir::{CallTarget, MirInst};
+use simple_parser::Parser;
 
 // =============================================================================
 // Coverage-enabled compound boolean (lowering_expr.rs line 82)
@@ -383,6 +385,44 @@ fn global_variable_load() {
     if let Ok(mir) = result {
         assert!(has_inst(&mir, |i| matches!(i, MirInst::GlobalLoad { .. })));
     }
+}
+
+#[test]
+fn undefined_global_is_rejected_before_codegen() {
+    let mut parser = Parser::new("fn test() -> i64:\n    val present = 1\n    return present\n");
+    let ast = parser.parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+    let test_fn = hir_module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "test")
+        .unwrap();
+    let hir::HirStmt::Return(Some(expr)) = &mut test_fn.body[1] else {
+        panic!("expected return");
+    };
+    expr.kind = hir::HirExprKind::Global("missing_name".to_string());
+
+    let error = lower_to_mir(&hir_module).unwrap_err();
+    assert!(error.to_string().contains("Undefined global `missing_name`"), "{error}");
+}
+
+#[test]
+fn undefined_global_store_is_rejected_before_codegen() {
+    let mut parser = Parser::new("fn test():\n    var present = 0\n    present = 1\n");
+    let ast = parser.parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+    let test_fn = hir_module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "test")
+        .unwrap();
+    let hir::HirStmt::Assign { target, .. } = &mut test_fn.body[1] else {
+        panic!("expected assignment");
+    };
+    target.kind = hir::HirExprKind::Global("missing_name".to_string());
+
+    let error = lower_to_mir(&hir_module).unwrap_err();
+    assert!(error.to_string().contains("Undefined global `missing_name`"), "{error}");
 }
 
 // =============================================================================

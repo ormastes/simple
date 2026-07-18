@@ -3797,6 +3797,45 @@ fn test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type() {
 }
 
 #[test]
+fn test_llvm_mangle_does_not_rebind_qualified_string_builtin_to_imported_wrapper() {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "str_ends_with".to_string(),
+        crate::hir::TypeId::BOOL,
+        simple_parser::Visibility::Private,
+    );
+    func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
+        dest: Some(crate::mir::VReg(2)),
+        receiver: crate::mir::VReg(0),
+        func_name: "str.ends_with".to_string(),
+        args: vec![crate::mir::VReg(1)],
+    });
+    func.blocks[0].terminator = crate::mir::Terminator::Return(Some(crate::mir::VReg(2)));
+    mir.functions.push(func);
+
+    let use_map = std::collections::HashMap::from([(
+        "str.ends_with".to_string(),
+        "common__string_core__str_ends_with".to_string(),
+    )]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "common__string_core",
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &use_map,
+        &std::collections::HashMap::new(),
+    );
+
+    match &mir.functions[0].blocks[0].instructions[0] {
+        crate::mir::MirInst::MethodCallStatic { func_name, .. } => {
+            assert_eq!(func_name, "str.ends_with");
+        }
+        other => panic!("expected static method call, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_llvm_mangle_resolves_desugared_cross_module_method() {
     let mut mir = crate::mir::MirModule::new();
     let mut func = crate::mir::MirFunction::new(

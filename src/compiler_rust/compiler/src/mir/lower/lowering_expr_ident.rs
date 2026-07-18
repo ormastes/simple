@@ -5,6 +5,13 @@ use crate::hir::TypeId;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
+    pub(super) fn is_known_global_name(&self, name: &str) -> bool {
+        self.global_types.contains_key(name)
+            || self.function_value_globals.contains(name)
+            || self.available_functions.contains(name)
+            || self.extern_fn_name_set.contains(name)
+    }
+
     pub(super) fn lower_local_expr(&mut self, idx: usize, expr_ty: TypeId) -> MirLowerResult<VReg> {
         let is_tagged_local = self.tagged_locals.contains(&idx);
         let result = self.with_func(|func, current_block| {
@@ -57,6 +64,10 @@ impl<'a> MirLowerer<'a> {
             }
             // Dot-separated name that's not a known enum — static method reference
             // (e.g. Point.origin). Fall through to GlobalLoad below.
+        }
+
+        if !self.is_known_global_name(&name) {
+            return Err(MirLowerError::UndefinedGlobal(name));
         }
 
         // Regular global variable - load via GlobalLoad instruction
