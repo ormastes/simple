@@ -3301,8 +3301,9 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
 }
 
 #define ARM64_UAS_REGION_BASE 0x48000000ULL
-#define ARM64_UAS_REGION_SIZE 0x00200000ULL
+#define ARM64_UAS_REGION_SIZE 0x00800000ULL
 #define ARM64_UAS_TABLE_BYTES 0x00100000ULL
+#define ARM64_UAS_IMAGE_BYTES (ARM64_UAS_REGION_SIZE - ARM64_UAS_TABLE_BYTES - 4096ULL)
 #define ARM64_UAS_MAX_SPACES 16U
 #define ARM64_PTE_VALID (1ULL << 0)
 #define ARM64_PTE_TABLE (1ULL << 1)
@@ -3778,6 +3779,32 @@ RuntimeValue rt_arm_elf64_pt_load_align(RuntimeValue bytes, RuntimeValue idx_val
     return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 48ULL);
 }
 
+static int arm64_elf64_load_bounds(RuntimeValue bytes, uint64_t *min_out, uint64_t *end_out)
+{
+    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes);
+    uint64_t file_len = arm64_elf_len(bytes);
+    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t end_vaddr = 0;
+    if (count == 0) return 0;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t file_off = arm64_elf_u64(bytes, ph + 8ULL);
+        uint64_t vaddr = arm64_elf_u64(bytes, ph + 16ULL);
+        uint64_t filesz = arm64_elf_u64(bytes, ph + 32ULL);
+        uint64_t memsz = arm64_elf_u64(bytes, ph + 40ULL);
+        if (filesz > memsz || file_off > file_len || filesz > file_len - file_off) return 0;
+        if (memsz > UINT64_MAX - vaddr) return 0;
+        if (vaddr < min_vaddr) min_vaddr = vaddr;
+        if (vaddr + memsz > end_vaddr) end_vaddr = vaddr + memsz;
+    }
+    min_vaddr &= ~4095ULL;
+    if (end_vaddr < min_vaddr || end_vaddr - min_vaddr > ARM64_UAS_IMAGE_BYTES) return 0;
+    *min_out = min_vaddr;
+    *end_out = end_vaddr;
+    return 1;
+}
+
 RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
 {
     uint64_t dst_phys = (uint64_t)dst_phys_val;
@@ -3785,16 +3812,9 @@ RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue dst_phys_val, RuntimeVal
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
-    for (uint32_t idx = 0; idx < count; idx++) {
-        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
-        if (ph == UINT64_MAX) return 0;
-        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-    }
-    min_vaddr &= ~4095ULL;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
 
     for (uint32_t idx = 0; idx < count; idx++) {
         uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
@@ -3826,16 +3846,9 @@ RuntimeValue rt_arm64_user_as_map_elf64(RuntimeValue root_val, RuntimeValue dst_
     if (!root || !dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
-    for (uint32_t idx = 0; idx < count; idx++) {
-        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
-        if (ph == UINT64_MAX) return 0;
-        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-    }
-    min_vaddr &= ~4095ULL;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
 
     uint32_t mapped = 0;
     for (uint32_t idx = 0; idx < count; idx++) {
@@ -3866,18 +3879,10 @@ RuntimeValue rt_arm_elf64_direct_entry(RuntimeValue dst_phys_val, RuntimeValue b
     bytes_val = arm64_exec_image_or(bytes_val);
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
-    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
-    for (uint32_t idx = 0; idx < count; idx++) {
-        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
-        if (ph == UINT64_MAX) return 0;
-        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-    }
-    min_vaddr &= ~4095ULL;
-    if (entry < min_vaddr) return 0;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
+    if (entry < min_vaddr || entry >= end_vaddr) return 0;
     uint64_t direct = dst_phys + (entry - min_vaddr);
     arm64_last_elf_virtual_entry = entry;
     arm64_last_elf_direct_entry = direct;
@@ -3892,9 +3897,9 @@ RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, Runti
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
     uint64_t entry_ph = UINT64_MAX;
     for (uint32_t idx = 0; idx < count; idx++) {
         uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
@@ -3903,13 +3908,11 @@ RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, Runti
         uint64_t filesz = arm64_elf_u64(bytes_val, ph + 32ULL);
         uint64_t memsz = arm64_elf_u64(bytes_val, ph + 40ULL);
         if (filesz > memsz) return 0;
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-        if (entry >= vaddr && entry < vaddr + filesz) entry_ph = ph;
+        if (entry >= vaddr && entry - vaddr < filesz) entry_ph = ph;
     }
     if (entry_ph == UINT64_MAX) return 0;
 
-    min_vaddr &= ~4095ULL;
-    if (entry < min_vaddr) return 0;
+    if (entry < min_vaddr || entry >= end_vaddr) return 0;
 
     uint64_t file_off = arm64_elf_u64(bytes_val, entry_ph + 8ULL);
     uint64_t vaddr = arm64_elf_u64(bytes_val, entry_ph + 16ULL);
@@ -3969,11 +3972,13 @@ RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue byte
     uint64_t dst_phys = (uint64_t)dst_phys_val;
     RuntimeArray *bytes = (RuntimeArray *)(IS_HEAP(bytes_val) ? DECODE_PTR(bytes_val) : (void *)(uintptr_t)(uint64_t)bytes_val);
     if (!dst_phys || !bytes || bytes->hdr.type != HEAP_ARRAY || bytes->len > bytes->cap) return 0;
+    if (bytes->len > ARM64_UAS_IMAGE_BYTES || bytes->len > UINT64_MAX - 4095ULL) return 0;
+    uint64_t padded = (bytes->len + 4095ULL) & ~4095ULL;
+    if (padded > ARM64_UAS_IMAGE_BYTES) return 0;
     volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_phys;
     for (uint64_t i = 0; i < bytes->len; i++) {
         dst[i] = (uint8_t)arm64_array_byte_at_raw_index(bytes_val, i);
     }
-    uint64_t padded = (bytes->len + 4095ULL) & ~4095ULL;
     for (uint64_t i = bytes->len; i < padded; i++) {
         dst[i] = 0;
     }

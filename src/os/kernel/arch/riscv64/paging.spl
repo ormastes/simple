@@ -65,6 +65,7 @@ val SATP_MODE_SHIFT: u64 = 60
 
 # Identity map range: first 1GB for initial kernel
 val IDENTITY_MAP_END: u64 = 0x40000000      # 1GB
+val RV64_SUPERVISOR_MMIO_VPN2_SLOT: u64 = 0 # 0x00000000..0x3FFFFFFF
 val RV64_KERNEL_VPN2_SLOT: u64 = 2          # 0x80000000..0xBFFFFFFF
 
 # ============================================================================
@@ -390,6 +391,12 @@ fn vmm_create_address_space() -> u64:
     if kernel_root == 0:
         return 0
 
+    val supervisor_mmio_entry = _read_pte(kernel_root, RV64_SUPERVISOR_MMIO_VPN2_SLOT)
+    if not _pte_is_valid(supervisor_mmio_entry) or not _pte_is_leaf(supervisor_mmio_entry):
+        return 0
+    if (supervisor_mmio_entry & PTE_U) != 0:
+        return 0
+
     val kernel_ram_entry = _read_pte(kernel_root, RV64_KERNEL_VPN2_SLOT)
     if not _pte_is_valid(kernel_ram_entry) or not _pte_is_leaf(kernel_ram_entry):
         return 0
@@ -400,9 +407,9 @@ fn vmm_create_address_space() -> u64:
     if new_root_phys == 0:
         return 0
 
-    # The kernel, trap vector, and active kernel stack are identity-mapped in
-    # VPN[2] slot 2. RV64 userspace links in slot 4, so this leaf cannot collide
-    # with user ELF mappings.
+    # Trap handling under a user SATP still needs supervisor-only UART/PLIC in
+    # slot 0 and kernel RAM in slot 2. Userspace links in slot 4.
+    _write_pte(new_root_phys, RV64_SUPERVISOR_MMIO_VPN2_SLOT, supervisor_mmio_entry)
     _write_pte(new_root_phys, RV64_KERNEL_VPN2_SLOT, kernel_ram_entry)
 
     # Copy kernel-space entries (upper half: indices 256..511)
