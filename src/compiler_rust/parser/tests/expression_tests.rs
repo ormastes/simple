@@ -207,6 +207,7 @@ fn test_map_tuple_placeholder_inside_fstring_interpolation() {
 fn nested_string_literals_remain_fstring_expressions() {
     for source in [
         r#""j={xs.join("-")}""#,
+        r#""std::tuple<{types.join(", ")}>""#,
         r#""struct_{member_ids.map("{_}").join("_")}""#,
     ] {
         let module = parse(source).expect("nested string interpolation should parse");

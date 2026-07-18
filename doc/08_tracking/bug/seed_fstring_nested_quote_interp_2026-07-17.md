@@ -43,3 +43,10 @@ line numbers, which cost real time — diagnostics gap worth fixing alongside.
 ## Status (2026-07-18)
 
 FIXED+PUSHED at 310bcdf1131 (strings.rs lexer fix) + 7a27c446582 (.spl hoists revert). Regression tests: 25/25 + 19/19 + 4/4 passed.
+
+Self-host follow-up (2026-07-18): a Stage-2 binary linked against a stale
+`libsimple_native_all.a` reproduced the old comma-in-interpolation parse error
+even though the freshly rebuilt seed accepted it. Rebuilding that companion
+archive cleared the parser failure. The existing expression test now includes
+the exact `types.join(", ")` form so future parser-bearing artifacts cover the
+observed syntax, not only single-character separators.
