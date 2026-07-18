@@ -162,3 +162,19 @@ grub-mkstandalone's multiboot payload #UD-crashes at video-mode negotiation unde
 is loaded. Candidate hardening: embed `all_video`/`gfxterm` modules + `set gfxpayload=text`, or boot
 the multiboot kernel via a direct UEFI stub instead of GRUB. (A naive `terminal_output console` +
 `gfxpayload=text` grub.cfg tweak did NOT help — reverted.)
+
+## OVMF GRUB #UD — CONFIRMED ENVIRONMENTAL (blocks all OVMF verification, not just load)
+
+Update: ~24 OVMF boot attempts across load levels (from ~30 down to ~10-12) ALL #UD-crash in GRUB
+(`error: no suitable video mode found` -> `#UD @ RIP 0x101E`), BEFORE the kernel runs. A no-NVMe
+OVMF boot ALSO crashes now (kernel never boots) — so it is NOT NVMe-related and NOT purely
+load-related. The two early boots that reached the kernel (one with-NVMe -> NVMe fault, one no-NVMe
+-> 99.83%) were hours earlier in a different box state. GRUB's std-vga GOP video-mode negotiation
+under OVMF now fails reproducibly in this environment (heavy sustained multi-session QEMU/build load,
+earlyoom active, swap exhausted). This BLOCKS runtime verification of the NVMe BAR-high fix under
+OVMF; it does not reflect on the fix (which is -kernel-verified and correct-by-analysis).
+
+Hardening (separate task): embed all_video/gfxterm/efi_gop/efi_uga in grub-mkstandalone modules; or
+boot the multiboot kernel via a direct UEFI multiboot stub instead of GRUB; or run OVMF boots on an
+unloaded host. Re-verify the NVMe fix under OVMF via scratchpad/ovmf_retry_loop.sh when a clean OVMF
+boot is achievable.
