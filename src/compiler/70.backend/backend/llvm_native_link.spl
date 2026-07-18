@@ -18,7 +18,7 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
@@ -212,6 +212,9 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
     match stage4_validate_compiler_backfill_symbol_envelope(localized_nm_out, object_format):
         case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
         case Ok(()): ()
+    val localized_symbol_fingerprint = match stage4_compiler_backfill_symbol_table_fingerprint(localized_nm_out):
+        case Ok(fingerprint): fingerprint
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
 
     val section_flag = if section_reader.lower().contains("readelf"): "-S" else: "-h"
     val (section_out, section_err, section_code) = process_run(section_reader, [section_flag, localized_object])
@@ -242,6 +245,11 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
     match stage4_validate_compiler_backfill_symbol_envelope(scans[0], object_format):
         case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
         case Ok(()): ()
+    val final_symbol_fingerprint = match stage4_compiler_backfill_symbol_table_fingerprint(scans[0]):
+        case Ok(fingerprint): fingerprint
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+    if final_symbol_fingerprint != localized_symbol_fingerprint:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill archive changed the localized symbol table")
     if not llvm_stage4_cleanup_compiler_backfill_capsule(stage_dir, capsule_path, false):
         return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill temporary cleanup failed")
     Ok(capsule_path)
@@ -825,6 +833,47 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 fork provider failed: " + err)
+        val candidate_labels = ["compiler_backfill", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp", "runtime_fork"]
+        val candidate_paths = [compiler_backfill_capsule, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive, fork_provider_archive]
+        val candidate_scans = match llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths):
+            case Ok(scans): scans
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 combined candidate inventory failed: " + err)
+        val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os):
+            case Ok(format): format
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+        match stage4_validate_compiler_backfill_provider_disjoint(candidate_scans[0], candidate_labels[1:], candidate_scans[1:], compiler_backfill_object_format):
+            case Ok(()): ()
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
         cleanup_runtime_objects(runtime_objects)
         file_delete(entry_obj_path)
         file_delete(dynload_provider_archive)
