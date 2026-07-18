@@ -47,6 +47,8 @@ stale PASS artifact.
 > Reuse the pure test runner or `src/app/test/font_evidence_runner.spl`; do not
 > create another result wrapper.
 
+> **Test runner operational caveats.** Section/directory test runs must be SEQUENTIAL (parallel database access corrupts state); only the final `Results:` summary line is authoritative (intermediate diagnostics mislead); single-file targets use the Rust-embedded runner (reliable), directory targets use the Pure-Simple daemon (known fresh-seed hang). See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats" for F1–F4 facts and remedies.
+
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**

@@ -176,11 +176,6 @@ val path = 'C:\Users\name'          # Backslashes are literal
 
 # r"..." prefix also works
 val pattern = r"no\escape"
-
-# Triple-quoted strings are raw and may span lines
-val template = """Hello, {name}
-This keeps braces literal."""
-val raw_template = r"""C:\temp\{name}"""
 ```
 
 ### Typed String Literals
@@ -647,6 +642,8 @@ val r = div_rem(10, 3)
 print r.quotient
 print r.remainder
 ```
+
+**⚠️ WARNING: Labeled-tuple return syntax is currently unparseable.** Both seed and self-hosted compilers reject `-> (label: type, ...)` syntax. See `doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md` for details. Use the anonymous tuple form below + destructure with typed bindings as the current workaround.
 
 Anonymous tuple returns remain valid when the fields are not ambiguous:
 

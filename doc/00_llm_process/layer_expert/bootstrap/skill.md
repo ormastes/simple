@@ -127,6 +127,14 @@ in `me` methods, field assignments without explicit `self.` prefix silently
 no-op, while the lint recommends the implicit form. This is a semantic error 
 that needs investigation.
 
+**Canonical redeploy path:** `scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift` 
+(LLVM feature absent in cargo seed; Cranelift is the canonical JIT target for self-hosted stage3).
+See `doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md` for blocker tracking.
+
+**f-string interpolation contract (fix 2026-07-17):** unescaped `"` inside `{...}` 
+toggles nested string literal; unmatched `{` containment via newline guard for non-triple f-strings 
+(parser/src/lexer/strings.rs, regression ca58e1f reverted).
+
 ## Update Rule
 
 After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill

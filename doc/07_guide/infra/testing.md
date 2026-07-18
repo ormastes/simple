@@ -759,6 +759,18 @@ contract is not test evidence.
 | 2 | Environment failure |
 | 3 | Invalid config |
 
+### Runner Operational Caveats (2026-07-18)
+
+Four critical operational facts for reliable test execution:
+
+1. **Stale/corrupt manifest** (F1): `Test discovery found 0 test files ... but N exist on disk` + `Warning: Could not load test database` → remedy is `--refresh-manifest`. The runner correctly fail-closes this as a failed result. See `doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md`.
+
+2. **Test-DB lock contention** (F2): Refreshing the manifest while another `simple test` runs corrupts/locks the shared test database. Section runs (`simple test path/to/dir`) must be **SEQUENTIAL**, never parallel. Cross-file parallel runs risk database corruption; use a serial test wrapper or run single specs.
+
+3. **Verification discipline** (F3): Only the final `Results: N total, ...` line is authoritative. Compile diagnostics may quote runner source containing "passed"/"failed" tokens — grepping those greenwashes a failed run. Always consume the bottom-line result summary, not intermediate diagnostic output.
+
+4. **Single-file vs directory paths** (F4): Single-file targets (`simple test path/to/spec.spl`) run via the Rust-embedded runner (fail-closed, verified); directory targets (`simple test path/to/dir`) enter `src/app/test_runner_new` (daemon route, known hang under fresh seed). For automated test workflows, prefer single-spec targets or use the self-hosted binary (`bin/release/<triple>/simple`) after bootstrap.
+
 ---
 
 ## UI System Testing
