@@ -704,3 +704,68 @@ fn test_match_exists_check_subject_stays_bool_not_unwrapped() {
         func.body
     );
 }
+
+/// B10 fix: `while val v = x.?:` previously dropped `let_pattern` entirely in
+/// `Node::While` (not just the ExistsCheck-unwrap -- the WHOLE pattern
+/// binding was silently discarded and the raw condition lowered as a bare
+/// bool), so `v` was never added to `ctx.locals` and any body reference to
+/// it failed HIR lowering. Fixed by desugaring to
+/// `Loop { subject-store; If(pattern-match) { bindings + body } else { break } }`,
+/// mirroring the if-val mechanism including the one-layer ExistsCheck unwrap.
+#[test]
+fn test_while_val_exists_check_binds_unwrapped_option_value() {
+    let source = "fn present(x: i64?) -> i64:\n    while val v = x.?:\n        return v\n    return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::Loop { body: loop_body, .. } = &func.body[0] else {
+        panic!("expected while-val desugared to a Loop: {:?}", func.body)
+    };
+
+    let HirStmt::Let {
+        local_index: subject_idx,
+        ty: subject_ty,
+        ..
+    } = &loop_body[0]
+    else {
+        panic!("expected subject store as first loop-body statement: {:?}", loop_body)
+    };
+    assert_ne!(
+        *subject_ty,
+        TypeId::BOOL,
+        "while-val subject kept the ExistsCheck's bool type instead of unwrapping to the Option's own type: {:?}",
+        loop_body
+    );
+
+    let HirStmt::If {
+        then_block,
+        else_block,
+        ..
+    } = &loop_body[1]
+    else {
+        panic!(
+            "expected lowered while-val pattern-match If as second loop-body statement: {:?}",
+            loop_body
+        )
+    };
+    let binds_v_to_subject = then_block.iter().any(|stmt| {
+        matches!(
+            stmt,
+            HirStmt::Let {
+                value: Some(HirExpr {
+                    kind: HirExprKind::Local(idx),
+                    ..
+                }),
+                ..
+            } if idx == subject_idx
+        )
+    });
+    assert!(
+        binds_v_to_subject,
+        "`v` binding did not copy the unwrapped subject (local {subject_idx}): {then_block:?}"
+    );
+    assert!(
+        matches!(else_block.as_deref(), Some([HirStmt::Break])),
+        "while-val's non-matching path must `break` the desugared Loop: {else_block:?}"
+    );
+}
