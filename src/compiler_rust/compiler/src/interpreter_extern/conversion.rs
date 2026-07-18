@@ -446,4 +446,31 @@ mod tests {
             other => panic!("expected array, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_rt_tuple_get_returns_element_by_index() {
+        let tup = Value::Tuple(vec![Value::Int(10), Value::text("hi"), Value::Int(30)]);
+        // in-range indices return the element Value
+        assert_eq!(
+            rt_tuple_get_fn(&[tup.clone(), Value::Int(0)]).unwrap(),
+            Value::Int(10)
+        );
+        assert_eq!(
+            rt_tuple_get_fn(&[tup.clone(), Value::Int(2)]).unwrap(),
+            Value::Int(30)
+        );
+        // out-of-range / negative / non-tuple receiver return Nil, never panic
+        assert_eq!(rt_tuple_get_fn(&[tup.clone(), Value::Int(9)]).unwrap(), Value::Nil);
+        assert_eq!(rt_tuple_get_fn(&[tup, Value::Int(-1)]).unwrap(), Value::Nil);
+        assert_eq!(
+            rt_tuple_get_fn(&[Value::Int(1), Value::Int(0)]).unwrap(),
+            Value::Nil
+        );
+        // LabeledTuple is accessed positionally too
+        let lt = Value::LabeledTuple {
+            labels: vec!["a".to_string(), "b".to_string()],
+            values: vec![Value::Int(1), Value::Int(2)],
+        };
+        assert_eq!(rt_tuple_get_fn(&[lt, Value::Int(1)]).unwrap(), Value::Int(2));
+    }
 }
