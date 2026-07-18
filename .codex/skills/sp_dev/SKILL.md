@@ -60,6 +60,13 @@ or disabled stub-fallback guard is not equivalent evidence. Treat this as
 post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates.
 
+For Windows Stage 4, require the runtime-set receipts as well as the executable:
+the MSVC projection DLL and, when selected, `sqlite3.dll` must be nonempty beside
+the final binary. Preserve the LLVM-default and explicit-Cranelift matrix. Do not
+accept an import library alone as runtime proof or overwrite a differing
+preexisting neighbor; require the transaction/hash contract and exact DLL
+export validation.
+
 If a stale deployed pure-Simple test runner crashes during repair, temporary
 Rust-runner evidence may use only the explicit `SIMPLE_TEST_RUNNER_RUST=1`
 seed opt-in. Bound it with the canonical resource cap, `timeout -k`, and

@@ -68,8 +68,8 @@ source fixes from executable proof.
 | 15 | Seed cache-key source fix and focused regression implemented; fresh executable cache proof pending. |
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; the empirically resolved strict LLVM+Cranelift dispatch case is scheduled on Linux, macOS arm64/x64, Windows x64, and FreeBSD x86_64. First staged non-Linux execution is pending. |
-| 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, target-explicit dynamic-loader archive/symbol policy, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, canonical link-profile fingerprint input, cross-platform candidate-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, exact requested-root projection and strict final-link routing, fail-fast rejection of Stage4 emit-object bypass, native-host-only compiler-capsule admission, deterministic exact-ABI production staging for dynload, font, memtrack, time/progress, POSIX fork isolation, and process/editor transport, plus localized runtime-native dependency ownership and transitive requested-owner resolution are source-implemented. The fork provider requires the exact three memtrack dependencies on Linux/macOS/FreeBSD; Windows fork stubs are rejected as non-providers. Hosted Windows candidate validation now case-normalizes relative `.a`/`.lib` paths while Unix remains case-sensitive. Windows provider object ABI is now derived from the once-resolved C driver, kept separate from linker/archive flavor and path semantics, with contradictory or unknown Stage4 toolchains rejected. Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64 dynamic-loader compile/archive/scan proof is source-scheduled; first execution is pending. It checks independent rebuild determinism, exact one-member composition, forbidden sections, and measured ELF/Mach-O/COFF-MSVC/COFF-MinGW symbols through the existing pure-Simple validators. All current hosted formats are source-scheduled but pending first execution; none remains unscheduled. Remaining duplicate-free core/CLI owners, production hash/cache wiring, cross-target compiler capsules, and strict execution remain. The existing strict LLVM/Cranelift `dynload_tagged_text` proof is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64, with backend XFAIL forbidden; first staged execution is pending. |
+| 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data. The strict LLVM+Cranelift init/mutation case runs in Linux's full parity gate and is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64; first staged execution is pending. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, target-explicit dynamic-loader archive/symbol policy, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, canonical link-profile fingerprint input, cross-platform candidate-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, exact requested-root projection and strict final-link routing, fail-fast rejection of Stage4 emit-object bypass, native-host-only compiler-capsule admission, deterministic exact-ABI production staging for dynload, font, memtrack, time/progress, POSIX fork isolation, and process/editor transport, plus localized runtime-native dependency ownership and transitive requested-owner resolution are source-implemented. The fork provider requires the exact three memtrack dependencies on Linux/macOS/FreeBSD; Windows fork stubs are rejected as non-providers. Hosted Windows candidate validation now case-normalizes relative `.a`/`.lib` paths while Unix remains case-sensitive. Windows provider object ABI is now derived from the once-resolved C driver, kept separate from linker/archive flavor and path semantics, with contradictory or unknown Stage4 toolchains rejected. MSVC selected owners now project through a per-executable exact-export DLL/import library, with hash-verified Stage4 and SQLite neighbors; MinGW retains the exact static-capsule path. Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64 dynamic-loader compile/archive/scan proof is source-scheduled; first execution is pending. It checks independent rebuild determinism, exact one-member composition, forbidden sections, and measured ELF/Mach-O/COFF-MSVC/COFF-MinGW symbols through the existing pure-Simple validators. All current hosted formats are source-scheduled but pending first execution; none remains unscheduled. Remaining duplicate-free core/CLI owners, production hash/cache wiring, cross-target compiler capsules, and strict execution remain. The existing strict LLVM/Cranelift `dynload_tagged_text` proof is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64, with backend XFAIL forbidden; first staged execution is pending. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Rust-seed inline-continuation fix and focused chained-inline regression are verified (`simple-parser` control-flow test: 19 passed); real inspector execution remains pending behind the unrelated pure-Simple `rt_cli_arg_count` bootstrap failure. |
 
@@ -230,7 +230,15 @@ path now stages, inventories, and exact-ABI validates the dedicated font archive
 with vendored STB exports held translation-unit-local and the dedicated
 memtrack archive with its 15-global ABI. It also compiles and stages the
 dedicated 14-export time/progress archive with target-specific core clock
-dependencies; execution proof remains pending. GPU, window,
+dependencies. The strict owner path also has a separate exact 27-export SQLite
+provider with audited runtime/external dependencies and conditional `sqlite3`
+link input; its C result encoding now matches the public Simple/interpreter
+integer `1`/`0` ABI. Windows SQLite neighbor staging is source-implemented with
+SHA-256 equality checks; hosted execution and native artifact receipts remain
+pending. Non-vcpkg override/PATH builds still need explicit import-library/DLL
+pair validation; see
+`doc/08_tracking/bug/stage4_windows_sqlite_import_dll_pairing_2026-07-18.md`.
+GPU, window,
 remaining HTTP helper/server, thread, SMF/CUDA, and other CLI owners remain. The remaining
 core-C split has 31 runtime/runtime-native overlaps plus the thread-sleep weak
 fallback and cannot use raw aggregate linking. Raw
@@ -250,22 +258,28 @@ closure, validates the exact raw and localized envelopes for every hosted
 object-format contract, and admits only those exact names for direct or
 transitive ownership.
 Exact selected-archive projection/linking is now source-implemented for native
-Linux/macOS/FreeBSD: selected one-member archives are partial-linked cycle-safely, all
-non-root globals are localized, the deterministic capsule is rescanned, and
-strict final linking disables duplicate forgiveness and cc fallback. Execution
-and complete requested-owner evidence remain pending. Strict execution therefore
-requires successful direct-linker and CRT discovery; it does not silently
-change semantics through the compiler-driver fallback.
+Linux/macOS/FreeBSD/Windows. Unix and MinGW selected archives are partial-linked
+cycle-safely, all non-root globals are localized, and the deterministic capsule
+is rescanned. MSVC instead links each output's selected archives once into a
+per-executable `<stem>_stage4_<fingerprint>.dll`, validates its named export table
+against the exact requested runtime ABI, and feeds the generated import library to the strict
+final link. Both paths disable duplicate forgiveness and compiler-driver
+fallback. Execution and complete requested-owner evidence remain pending.
 
 Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
 `lib*.a`: explicit linker flavor wins, then canonical `PLATFORM_ABI` preserves
-the public `--msvc`/`--mingw` selection. Static source coverage is present;
-native Windows artifact receipts remain pending.
+the public `--msvc`/`--mingw` selection. Static source coverage is present. The
+Windows LLVM/Cranelift full-CLI matrix now requires the final executable,
+Stage4 projection DLL, and `sqlite3.dll`; the first native artifact receipts
+remain pending.
 
 Strict Stage4 now bypasses raw `native_all` and treats the Cargo backfill as a
 read-only input. Pure-Simple derives its manifest without a hardcoded count,
 uses the portable `objcopy` resolver, and builds a transaction-owned localized
-Linux/FreeBSD ELF or macOS Mach-O one-member capsule. Final inventory checks exact
+Linux/FreeBSD ELF or macOS Mach-O one-member capsule. MSVC stages the raw
+compiler `.lib` only inside the same transaction, reduces its inventory to the
+derived exact manifest for owner resolution, and validates the final DLL export
+table instead of attempting a GNU relocatable link. Final inventory checks exact
 localized-object/archive global symbol-table equality and canonical disjointness
 from every staged exact C provider and the localized runtime-native dependency
 owner. The process provider uses one exact platform-specific ABI archive while

@@ -268,6 +268,15 @@ Windows stage outputs are executable paths (`stage2/<triple>/simple.exe` and
 override automatic ABI selection. Normal Windows bootstrap uses the same
 dynload-only default and explicit full-build policy.
 
+A Windows `--full-cli` Stage4 result is a runtime set, not executable-only
+evidence. MSVC projects selected exact owners through a per-executable
+`<stem>_stage4_<fingerprint>.dll` and its import library; MinGW keeps the exact
+static capsule. When
+the SQLite provider is selected, `sqlite3.dll` is staged
+beside the final executable. Bootstrap/CI must require nonempty neighbor files,
+and staging must reuse only byte-identical existing files rather than overwrite
+a differing DLL.
+
 On Windows, stripped native links normalize volatile PE metadata after the
 hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
 optional-header `CheckSum` fields so repeated stripped native-build and

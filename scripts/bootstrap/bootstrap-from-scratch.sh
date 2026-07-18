@@ -187,7 +187,7 @@ if [ "${full_cli}" -eq 1 ]; then
   case "${host_os}" in
     Linux|Darwin|FreeBSD|MINGW*|MSYS*|CYGWIN*|Windows*) ;;
     *)
-      echo "error: Stage 4 full-CLI capsule preparation requires a supported native host" >&2
+      echo "error: Stage 4 full-CLI capsule preparation requires native Linux, macOS, FreeBSD, or Windows" >&2
       exit 1
       ;;
   esac
@@ -870,7 +870,6 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 prepare_native_cache stage4
-rm -f "${full_dir}/simple${exe_suffix}"
 run_logged stage4-native-build bootstrap_native_build_main \
   "${stage_for_build}" "${full_dir}/simple${exe_suffix}"
 

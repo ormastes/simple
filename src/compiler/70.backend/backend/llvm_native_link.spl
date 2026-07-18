@@ -17,13 +17,14 @@ use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_s
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_sqlite_provider_archive_file, stage4_sqlite_provider_object_format, stage4_validate_sqlite_provider_symbol_contract, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output_for_format, stage4_resolve_requested_archive_owners_for_format, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_shared, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_compiler_backfill_manifest_scan, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_validate_coff_dll_export_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_sqlite_provider_archive_file, stage4_sqlite_provider_object_format, stage4_validate_sqlite_provider_symbol_contract, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_forbidden_coff_dll_sections, stage4_requested_from_nm_output_for_format, stage4_resolve_requested_archive_owners_for_format, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_write, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_size, file_write, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.path.{basename, join2, parent_dir, stem}
 
 fn llvm_link_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
@@ -82,17 +83,258 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         i = i + 1
     Ok(scans)
 
-fn llvm_stage4_projection_failure(stage_dir: text, message: text) -> Result<(text, text), text>:
+fn llvm_stage4_combined_candidate_inventory(labels: [text], paths: [text], object_format: text, msvc_linker: bool) -> Result<[text], text>:
+    if not msvc_linker:
+        return llvm_stage4_candidate_archive_inventory(labels, paths)
+    if labels.len() < 2 or labels.len() != paths.len() or labels[0] != "compiler_backfill":
+        return Err("Stage4 MSVC candidate inventory requires compiler backfill followed by providers")
+    val compiler_path = paths[0]
+    if not file_exists(compiler_path) or file_size(compiler_path) <= 0:
+        return Err("Stage4 MSVC compiler backfill archive is missing or empty")
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("Stage4 MSVC compiler backfill scan requires llvm-nm or nm")
+    val (compiler_out, compiler_err, compiler_code) = process_run(nm, ["-g", "-p", compiler_path])
+    if compiler_code != 0 or compiler_out.trim() == "":
+        return Err("Stage4 MSVC compiler backfill scan failed: " + compiler_err.trim())
+    val compiler_scan = match stage4_compiler_backfill_manifest_scan(compiler_out, object_format):
+        case Ok(scan): scan
+        case Err(err): return Err(err)
+    val provider_scans = match llvm_stage4_candidate_archive_inventory(labels[1:], paths[1:]):
+        case Ok(scans): scans
+        case Err(err): return Err(err)
+    var scans = [compiler_scan]
+    for scan in provider_scans:
+        scans = scans.push(scan)
+    Ok(scans)
+
+fn llvm_stage4_projection_failure(stage_dir: text, message: text) -> Result<(text, text, text, text), text>:
     if not dir_remove_all(stage_dir):
         return Err(message + "; Stage4 projection cleanup also failed")
     Err(message)
 
-fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_paths: [text], selected_indices: [i64], requested_symbols: [text], target_os_name: text, hosted_cc: text, msvc_objects: bool, msvc_linker: bool, pid: i64, output_path: text) -> Result<(text, text), text>:
+fn llvm_stage4_find_windows_dll(file_name: text, override_key: text) -> text:
+    val override_path = env_get(override_key) ?? ""
+    if override_path != "" and file_exists(override_path) and file_size(override_path) > 0:
+        return override_path
+    val vcpkg_root = env_get("VCPKG_INSTALLATION_ROOT") ?? ""
+    if vcpkg_root != "":
+        val vcpkg_path = join2(join2(join2(vcpkg_root, "installed"), "x64-windows/bin"), file_name)
+        if file_exists(vcpkg_path) and file_size(vcpkg_path) > 0:
+            return vcpkg_path
+    val path_value = env_get("PATH") ?? ""
+    for raw_dir in path_value.split(";"):
+        val dir = raw_dir.trim().replace("\"", "")
+        if dir == "":
+            continue
+        val candidate = join2(dir, file_name)
+        if file_exists(candidate) and file_size(candidate) > 0:
+            return candidate
+    ""
+
+fn llvm_stage4_file_sha256(path: text) -> text:
+    val (sha_out, _, sha_code) = process_run("sha256sum", [path])
+    if sha_code == 0:
+        for token in sha_out.replace("\r", "").replace("\n", " ").split(" "):
+            if token.len() == 64:
+                return token.lower()
+    val (shasum_out, _, shasum_code) = process_run("shasum", ["-a", "256", path])
+    if shasum_code == 0:
+        for token in shasum_out.replace("\r", "").replace("\n", " ").split(" "):
+            if token.len() == 64:
+                return token.lower()
+    val (freebsd_out, _, freebsd_code) = process_run("sha256", ["-q", path])
+    if freebsd_code == 0:
+        for token in freebsd_out.replace("\r", "").replace("\n", " ").split(" "):
+            if token.len() == 64:
+                return token.lower()
+    val (openssl_out, _, openssl_code) = process_run("openssl", ["dgst", "-sha256", path])
+    if openssl_code == 0:
+        for token in openssl_out.replace("\r", "").replace("\n", " ").split(" "):
+            if token.len() == 64:
+                return token.lower()
+    val (cert_out, _, cert_code) = process_run("certutil", ["-hashfile", path, "SHA256"])
+    if cert_code == 0:
+        for token in cert_out.replace("\r", "").replace("\n", " ").split(" "):
+            if token.len() == 64:
+                return token.lower()
+    ""
+
+fn llvm_stage4_promote_artifact(source: text, destination: text) -> bool:
+    if host_os() != "windows":
+        val (unix_move_out, unix_move_err, code) = process_run("mv", ["-f", source, destination])
+        return code == 0
+    val quoted_source = source.replace("'", "''")
+    val quoted_destination = destination.replace("'", "''")
+    val command = "Move-Item -LiteralPath '" + quoted_source + "' -Destination '" + quoted_destination + "' -ErrorAction Stop"
+    val (windows_move_out, windows_move_err, code) = process_run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command])
+    code == 0
+
+struct Stage4Replacement:
+    destination: text
+    backup: text
+    changed: bool
+
+fn llvm_stage4_recover_replacement(destination: text) -> bool:
+    val backup = destination + ".stage4.backup"
+    if not file_exists(backup):
+        return true
+    if file_exists(destination):
+        return remove_file_if_exists(backup)
+    llvm_stage4_promote_artifact(backup, destination)
+
+fn llvm_stage4_rollback_replacement(receipt: Stage4Replacement) -> bool:
+    if not receipt.changed:
+        return true
+    if not remove_file_if_exists(receipt.destination):
+        return false
+    if receipt.backup != "":
+        return llvm_stage4_promote_artifact(receipt.backup, receipt.destination)
+    true
+
+fn llvm_stage4_replace_verified_artifact(source: text, destination: text) -> Result<Stage4Replacement, text>:
+    if not llvm_stage4_recover_replacement(destination):
+        return Err("Stage4 artifact backup recovery failed: '" + destination + "'")
+    val source_hash = llvm_stage4_file_sha256(source)
+    if source_hash == "":
+        return Err("Stage4 artifact source hash failed: '" + source + "'")
+    if file_exists(destination) and file_size(destination) > 0 and llvm_stage4_file_sha256(destination) == source_hash:
+        return Ok(Stage4Replacement(destination: destination, backup: "", changed: false))
+    val temporary = destination + ".stage4.tmp"
+    val backup = destination + ".stage4.backup"
+    if not remove_file_if_exists(temporary) or not remove_file_if_exists(backup):
+        return Err("Stage4 artifact stale transaction cleanup failed: '" + destination + "'")
+    if not file_copy(source, temporary):
+        if not remove_file_if_exists(temporary):
+            return Err("Stage4 artifact temporary copy failed and cleanup failed: '" + temporary + "'")
+        return Err("Stage4 artifact temporary copy failed: '" + temporary + "'")
+    if file_size(temporary) <= 0 or llvm_stage4_file_sha256(temporary) != source_hash:
+        if not remove_file_if_exists(temporary):
+            return Err("Stage4 artifact temporary verification failed and cleanup failed: '" + temporary + "'")
+        return Err("Stage4 artifact temporary verification failed: '" + temporary + "'")
+    var backup_path = ""
+    if file_exists(destination):
+        if not llvm_stage4_promote_artifact(destination, backup):
+            if not remove_file_if_exists(temporary):
+                return Err("Stage4 artifact backup promotion failed and temporary cleanup failed: '" + destination + "'")
+            return Err("Stage4 artifact backup promotion failed: '" + destination + "'")
+        backup_path = backup
+    if not llvm_stage4_promote_artifact(temporary, destination):
+        var recovery_ok = remove_file_if_exists(temporary)
+        if backup_path != "":
+            if not llvm_stage4_promote_artifact(backup_path, destination):
+                recovery_ok = false
+        if not recovery_ok:
+            return Err("Stage4 artifact atomic promotion failed and recovery failed: '" + destination + "'")
+        return Err("Stage4 artifact atomic promotion failed: '" + destination + "'")
+    if file_size(destination) <= 0 or llvm_stage4_file_sha256(destination) != source_hash:
+        val receipt = Stage4Replacement(destination: destination, backup: backup_path, changed: true)
+        if not llvm_stage4_rollback_replacement(receipt):
+            return Err("Stage4 artifact promotion verification failed and rollback failed: '" + destination + "'")
+        return Err("Stage4 artifact promotion verification failed: '" + destination + "'")
+    Ok(Stage4Replacement(destination: destination, backup: backup_path, changed: true))
+
+fn llvm_stage4_copy_verified_neighbor(source: text, destination: text) -> Result<bool, text>:
+    if source == "" or not file_exists(source) or file_size(source) <= 0:
+        return Err("Stage4 Windows neighbor source is missing or empty: '" + source + "'")
+    val source_hash = llvm_stage4_file_sha256(source)
+    if source_hash == "":
+        return Err("Stage4 Windows neighbor source hash failed: '" + source + "'")
+    if file_exists(destination):
+        if file_size(destination) > 0 and llvm_stage4_file_sha256(destination) == source_hash:
+            return Ok(false)
+        return Err("Stage4 Windows neighbor differs from the staged artifact: '" + destination + "'")
+    val temporary = destination + ".stage4.tmp"
+    if not remove_file_if_exists(temporary):
+        return Err("Stage4 Windows neighbor stale temporary cleanup failed: '" + temporary + "'")
+    if not file_copy(source, temporary):
+        remove_file_if_exists(temporary)
+        return Err("Stage4 Windows neighbor temporary copy failed: '" + temporary + "'")
+    if file_size(temporary) <= 0 or llvm_stage4_file_sha256(temporary) != source_hash:
+        remove_file_if_exists(temporary)
+        return Err("Stage4 Windows neighbor temporary verification failed: '" + temporary + "'")
+    if file_exists(destination):
+        val identical = file_size(destination) > 0 and llvm_stage4_file_sha256(destination) == source_hash
+        remove_file_if_exists(temporary)
+        if identical:
+            return Ok(false)
+        return Err("Stage4 Windows neighbor appeared with different content: '" + destination + "'")
+    if not llvm_stage4_promote_artifact(temporary, destination):
+        remove_file_if_exists(temporary)
+        if file_exists(destination) and file_size(destination) > 0 and llvm_stage4_file_sha256(destination) == source_hash:
+            return Ok(false)
+        return Err("Stage4 Windows neighbor atomic promotion failed: '" + destination + "'")
+    if file_size(destination) <= 0 or llvm_stage4_file_sha256(destination) != source_hash:
+        remove_file_if_exists(destination)
+        return Err("Stage4 Windows neighbor promotion verification failed: '" + destination + "'")
+    Ok(true)
+
+fn llvm_stage4_projection_fingerprint(selected_paths: [text], requested_symbols: [text], stage_dir: text) -> Result<text, text>:
+    val manifest_path = stage_dir + "/projection.fingerprint"
+    var manifest = ""
+    for path in selected_paths:
+        val hash = llvm_stage4_file_sha256(path)
+        if hash == "":
+            return Err("Stage4 MSVC projection input hash failed: '" + path + "'")
+        manifest = manifest + "archive\t" + hash + "\n"
+    for symbol in requested_symbols:
+        manifest = manifest + "root\t" + symbol + "\n"
+    if not file_write(manifest_path, manifest):
+        return Err("Stage4 MSVC projection fingerprint write failed")
+    val fingerprint = llvm_stage4_file_sha256(manifest_path)
+    if not remove_file_if_exists(manifest_path):
+        return Err("Stage4 MSVC projection fingerprint cleanup failed")
+    if fingerprint.len() != 64:
+        return Err("Stage4 MSVC projection fingerprint hash failed")
+    Ok(fingerprint.substring(0, 16))
+
+fn llvm_stage4_project_selected_archives_msvc(selected_paths: [text], requested_symbols: [text], stage_dir: text, projection_name: text, link_libraries: [text], link_library_paths: [text], sqlite_dll_source: text) -> Result<(text, text, text, text), text>:
+    val section_reader = find_objdump_portable()
+    if section_reader == "":
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 MSVC projection requires llvm-objdump")
+    val dll_path = stage_dir + "/" + projection_name + ".dll"
+    val import_lib = stage_dir + "/" + projection_name + ".lib"
+    var extra_flags = ["/NOENTRY", "/INCREMENTAL:NO", "/Brepro", "/IMPLIB:" + import_lib]
+    for symbol in requested_symbols:
+        val export_name = if symbol == "g_memtrack_enabled": symbol + ",DATA" else: symbol
+        extra_flags = extra_flags.push("/EXPORT:" + export_name)
+        extra_flags = extra_flags.push("/INCLUDE:" + symbol)
+    val config = NativeLinkConfig(
+        libraries: link_libraries,
+        library_paths: link_library_paths,
+        runtime_path: "none",
+        pie: false,
+        debug: false,
+        verbose: false,
+        allow_duplicate_definitions: false,
+        allow_cc_fallback: false,
+        extra_flags: extra_flags
+    )
+    match link_to_shared(selected_paths, dll_path, config):
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, "Stage4 MSVC projection link failed: " + err)
+        case Ok(_): ()
+    if not file_exists(dll_path) or file_size(dll_path) <= 0 or not file_exists(import_lib) or file_size(import_lib) <= 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 MSVC projection did not produce a nonempty DLL and import library")
+    val (exports_out, exports_err, exports_code) = process_run(section_reader, ["-p", dll_path])
+    if exports_code != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 MSVC projection export scan failed: " + exports_err.trim())
+    match stage4_validate_coff_dll_export_contract(exports_out, requested_symbols):
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+        case Ok(()): ()
+    val (sections_out, sections_err, sections_code) = process_run(section_reader, ["-h", dll_path])
+    if sections_code != 0 or sections_err.trim() != "" or sections_out.trim() == "":
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 MSVC projection section scan was not clean: " + sections_err.trim())
+    val forbidden_sections = stage4_forbidden_coff_dll_sections(sections_out)
+    if forbidden_sections.len() != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 MSVC projection retained constructor/destructor sections: " + forbidden_sections.join(", "))
+    Ok((import_lib, stage_dir, dll_path, sqlite_dll_source))
+
+fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_paths: [text], selected_indices: [i64], requested_symbols: [text], target_os_name: text, hosted_cc: text, msvc_objects: bool, msvc_linker: bool, link_libraries: [text], link_library_paths: [text], pid: i64, output_path: text) -> Result<(text, text, text, text), text>:
     """Partial-link selected exact archives and export only the original requested roots."""
-    if target_os_name == "windows" and (msvc_objects or msvc_linker):
-        return Err("Stage4 selected-archive projection requires the MSVC DLL/import-library path")
+    if target_os_name == "windows" and msvc_objects != msvc_linker:
+        return Err("Stage4 selected-archive projection Windows object and linker ABIs disagree")
     if target_os_name != "linux" and target_os_name != "macos" and target_os_name != "freebsd" and target_os_name != "windows":
-        return Err("Stage4 selected-archive projection requires native Linux, macOS, FreeBSD, or MinGW Windows")
+        return Err("Stage4 selected-archive projection requires native Linux, macOS, FreeBSD, or Windows")
     match stage4_validate_candidate_archive_inputs_for_platform(candidate_labels, candidate_paths, target_os_name == "windows"):
         case Err(err): return Err(err)
         case Ok(()): ()
@@ -104,36 +346,49 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
         return Err("Stage4 selected-archive projection requires a hosted C compiler")
 
     var selected_paths: [text] = []
+    var selected_sqlite = false
     var previous_index = -1
     for index in selected_indices:
         if index < 0 or index >= candidate_paths.len():
             return Err("Stage4 selected-archive projection index is out of bounds")
         if index <= previous_index:
             return Err("Stage4 selected-archive projection indices must be unique and in candidate order")
-        if target_os_name == "windows" and candidate_labels[index] == "runtime_sqlite":
-            return Err("Stage4 MinGW SQLite projection requires sqlite3.dll neighbor staging")
+        if candidate_labels[index] == "runtime_sqlite":
+            selected_sqlite = true
         previous_index = index
         selected_paths = selected_paths.push(candidate_paths[index])
+
+    var sqlite_dll_source = ""
+    if target_os_name == "windows" and selected_sqlite:
+        sqlite_dll_source = llvm_stage4_find_windows_dll("sqlite3.dll", "SIMPLE_SQLITE3_DLL")
+        if sqlite_dll_source == "":
+            return Err("Stage4 Windows SQLite projection requires a nonempty sqlite3.dll")
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_selected_projection_{pid}_{output_path.hash()}"
+    if dir_exists(stage_dir):
+        if not dir_remove_all(stage_dir):
+            return Err("Stage4 selected-archive projection stale transaction cleanup failed")
+    if not dir_create_all(stage_dir):
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive projection directory creation failed")
+    if target_os_name == "windows" and msvc_linker:
+        val fingerprint = match llvm_stage4_projection_fingerprint(selected_paths, requested_symbols, stage_dir):
+            case Ok(value): value
+            case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+        val projection_name = stem(output_path.replace("\\", "/")) + "_stage4_" + fingerprint
+        return llvm_stage4_project_selected_archives_msvc(selected_paths, requested_symbols, stage_dir, projection_name, link_libraries, link_library_paths, sqlite_dll_source)
 
     val nm = find_nm_portable()
     val objcopy = find_objcopy_portable()
     val section_reader = find_objdump_portable()
     val archiver = find_archive_portable()
     if nm == "" or objcopy == "" or section_reader == "" or archiver == "":
-        return Err("Stage4 selected-archive projection requires nm, objcopy, section-reader, and archive tools")
-    val object_format = match stage4_compiler_backfill_object_format(target_os_name, msvc_objects):
-        case Ok(format): format
-        case Err(err): return Err(err)
-    val stage_dir = "{_get_temp_dir()}/simple_stage4_selected_projection_{pid}_{output_path.hash()}"
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive projection requires nm, objcopy, section-reader, and archive tools")
     val closure_object = stage_dir + "/stage4_selected_closure.o"
     val localized_object = stage_dir + "/stage4_selected_local.o"
     val localize_path = stage_dir + "/stage4_selected_localize.syms"
     val capsule_path = stage_dir + "/libsimple_stage4_selected.a"
-    if dir_exists(stage_dir):
-        if not dir_remove_all(stage_dir):
-            return Err("Stage4 selected-archive projection stale transaction cleanup failed")
-    if not dir_create_all(stage_dir):
-        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive projection directory creation failed")
 
     var closure_args: [text] = ["-nostdlib", "-Wl,-r"]
     if target_os_name == "linux" or target_os_name == "freebsd" or target_os_name == "windows":
@@ -220,7 +475,7 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
     for path in [closure_object, localized_object, localize_path]:
         if not remove_file_if_exists(path):
             return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive temporary cleanup failed")
-    Ok((capsule_path, stage_dir))
+    Ok((capsule_path, stage_dir, "", sqlite_dll_source))
 
 fn llvm_stage4_cleanup_compiler_backfill_capsule(stage_dir: text, output_path: text, remove_output: bool) -> bool:
     var clean = true
@@ -248,8 +503,8 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
         return Err("Stage4 compiler backfill capsule requires SIMPLE_RUNTIME_PATH")
     if output_path.trim() == "":
         return Err("Stage4 compiler backfill capsule requires a final output path")
-    if target_os_name == "windows" and (msvc_objects or msvc_linker):
-        return Err("Stage4 compiler backfill capsule requires the MSVC DLL/import-library path")
+    if target_os_name == "windows" and msvc_objects != msvc_linker:
+        return Err("Stage4 compiler backfill Windows object and linker ABIs disagree")
     val archive_file = match stage4_compiler_backfill_archive_file(target_os_name, msvc_linker):
         case Ok(file): file
         case Err(err): return Err(err)
@@ -259,20 +514,9 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
     val raw_archive = runtime_path + "/" + archive_file
     if not file_exists(raw_archive):
         return Err("Stage4 compiler backfill source archive is missing at '" + raw_archive + "'")
-    if hosted_cc.trim() == "":
-        return Err("Stage4 compiler backfill closure requires a hosted C compiler")
     val nm = find_nm_portable()
     if nm == "":
         return Err("Stage4 compiler backfill closure requires llvm-nm or nm")
-    val objcopy = find_objcopy_portable()
-    if objcopy == "":
-        return Err("Stage4 compiler backfill closure requires llvm-objcopy or objcopy")
-    val section_reader = find_objdump_portable()
-    if section_reader == "":
-        return Err("Stage4 compiler backfill closure requires llvm-objdump, readelf, or objdump")
-    val archiver = find_archive_portable()
-    if archiver == "":
-        return Err("Stage4 compiler backfill closure requires llvm-ar or ar")
 
     val (raw_nm_out, raw_nm_err, raw_nm_code) = process_run(nm, ["-g", "-p", raw_archive])
     if raw_nm_code != 0:
@@ -293,6 +537,29 @@ fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_nam
         return Err("Stage4 compiler backfill stale transaction cleanup failed: '" + stage_dir + "'")
     if not dir_create_all(stage_dir):
         return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill staging directory creation failed")
+
+    # MSVC cannot use the GNU-style relocatable/localization path. Keep the raw
+    # archive only inside the Stage4 transaction; the exact manifest scan below
+    # prevents helper symbols from participating in owner resolution.
+    if target_os_name == "windows" and msvc_linker:
+        if not file_copy(raw_archive, capsule_path):
+            return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 MSVC compiler backfill archive staging failed")
+        val raw_hash = llvm_stage4_file_sha256(raw_archive)
+        if file_size(capsule_path) <= 0 or raw_hash == "" or llvm_stage4_file_sha256(capsule_path) != raw_hash:
+            return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 MSVC compiler backfill archive staging verification failed")
+        return Ok(capsule_path)
+
+    if hosted_cc.trim() == "":
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill closure requires a hosted C compiler")
+    val objcopy = find_objcopy_portable()
+    if objcopy == "":
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill closure requires llvm-objcopy or objcopy")
+    val section_reader = find_objdump_portable()
+    if section_reader == "":
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill closure requires llvm-objdump, readelf, or objdump")
+    val archiver = find_archive_portable()
+    if archiver == "":
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill closure requires llvm-ar or ar")
 
     var closure_args: [text] = ["-nostdlib", "-Wl,-r"]
     if target_os_name == "linux" or target_os_name == "freebsd" or target_os_name == "windows":
@@ -1008,6 +1275,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     val stage4_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
     if stage4_requested and (stage4_entry != "src/app/cli/main.spl" or stage4_entry_closure != "1"):
         return Err("Stage4 strict profile requires --entry src/app/cli/main.spl with entry closure")
+    if stage4_requested and not llvm_stage4_recover_replacement(output):
+        return Err("Stage4 final executable backup recovery failed: '" + output + "'")
 
     if is_simpleos_x86_64_link(user_objects, output):
         if stage4_requested:
@@ -1126,6 +1395,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     var stage4_requested_symbols: [text] = []
     var stage4_projection_capsule = ""
     var stage4_projection_dir = ""
+    var stage4_projection_dll_source = ""
+    var stage4_sqlite_dll_source = ""
     var stage4_system_libraries: [text] = []
     var stage4_system_library_paths: [text] = []
     if stage4_requested:
@@ -1275,7 +1546,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         if fork_provider_archive != "":
             candidate_labels = candidate_labels.push("runtime_fork")
             candidate_paths = candidate_paths.push(fork_provider_archive)
-        val candidate_scans = match llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths):
+        val candidate_scans = match llvm_stage4_combined_candidate_inventory(candidate_labels, candidate_paths, stage4_object_format, stage4_msvc_linker):
             case Ok(scans): scans
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -1337,7 +1608,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                     stage4_system_library_paths = ["/usr/local/lib"]
         if trace:
             print "[LLVM-LINK] Stage4 selected archives: {selected_archive_indices.len()}, owners: {owner_rows.len()}"
-        val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, stage4_msvc_objects, stage4_msvc_linker, pid, output):
+        val (projected_capsule, projected_dir, projected_dll_source, sqlite_dll_source) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, stage4_msvc_objects, stage4_msvc_linker, stage4_system_libraries, stage4_system_library_paths, pid, output):
             case Ok(value): value
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -1357,6 +1628,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 selected-archive projection failed: " + err)
         stage4_projection_capsule = projected_capsule
         stage4_projection_dir = projected_dir
+        stage4_projection_dll_source = projected_dll_source
+        stage4_sqlite_dll_source = sqlite_dll_source
         cleanup_runtime_objects(runtime_objects)
         var candidate_cleanup_ok = true
         for path in candidate_paths:
@@ -1368,8 +1641,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             if not remove_file_if_exists(bootstrap_support_obj):
                 candidate_cleanup_ok = false
         if not candidate_cleanup_ok:
-            dir_remove_all(stage4_projection_dir)
-            file_delete(entry_obj_path)
+            var rollback_ok = dir_remove_all(stage4_projection_dir)
+            if not remove_file_if_exists(entry_obj_path):
+                rollback_ok = false
+            if not rollback_ok:
+                return Err("Stage4 selected-archive candidate cleanup failed; projection rollback also failed")
             return Err("Stage4 selected-archive candidate cleanup failed")
 
     # Step 3: Combine all objects and link
@@ -1414,7 +1690,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if trace:
         print "[LLVM-LINK] calling link_to_native..."
 
-    val link_result = link_to_native(all_objects, output, link_config)
+    val final_link_output = if stage4_requested: join2(stage4_projection_dir, basename(output.replace("\\", "/"))) else: output
+    val link_result = link_to_native(all_objects, final_link_output, link_config)
     if trace:
         print "[LLVM-LINK] link_to_native returned"
 
@@ -1428,22 +1705,93 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             stage4_cleanup_ok = false
     else:
         file_delete(entry_obj_path)
-    if stage4_projection_dir != "":
-        if not dir_remove_all(stage4_projection_dir):
-            stage4_cleanup_ok = false
-
     match link_result:
         case Ok(path):
             if not stage4_cleanup_ok:
-                if not remove_file_if_exists(path):
+                var rollback_ok = remove_file_if_exists(path)
+                if stage4_projection_dir != "":
+                    if not dir_remove_all(stage4_projection_dir):
+                        rollback_ok = false
+                if not rollback_ok:
                     return Err("Stage4 selected-archive projection cleanup failed after linking; output cleanup also failed")
                 return Err("Stage4 selected-archive projection cleanup failed after linking")
+            if not stage4_requested:
+                if verbose:
+                    print "[llvm-link] Native executable: {path}"
+                return Ok(path)
+            var stage4_dll_destination = ""
+            var sqlite_dll_destination = ""
+            var stage4_dll_created = false
+            var sqlite_dll_created = false
+            val output_dir = parent_dir(output.replace("\\", "/"))
+            if stage4_projection_dll_source != "":
+                stage4_dll_destination = join2(output_dir, basename(stage4_projection_dll_source))
+                match llvm_stage4_copy_verified_neighbor(stage4_projection_dll_source, stage4_dll_destination):
+                    case Ok(created): stage4_dll_created = created
+                    case Err(err):
+                        if not dir_remove_all(stage4_projection_dir):
+                            return Err(err + "; Stage4 transaction cleanup also failed")
+                        return Err(err)
+            if stage4_sqlite_dll_source != "":
+                sqlite_dll_destination = join2(output_dir, "sqlite3.dll")
+                match llvm_stage4_copy_verified_neighbor(stage4_sqlite_dll_source, sqlite_dll_destination):
+                    case Ok(created): sqlite_dll_created = created
+                    case Err(err):
+                        var rollback_ok = true
+                        if stage4_dll_created:
+                            if not remove_file_if_exists(stage4_dll_destination):
+                                rollback_ok = false
+                        if not dir_remove_all(stage4_projection_dir):
+                            rollback_ok = false
+                        if not rollback_ok:
+                            return Err(err + "; Stage4 transaction rollback also failed")
+                        return Err(err)
+            val output_receipt = match llvm_stage4_replace_verified_artifact(path, output):
+                case Ok(receipt): receipt
+                case Err(err):
+                    var rollback_ok = true
+                    if sqlite_dll_created:
+                        if not remove_file_if_exists(sqlite_dll_destination):
+                            rollback_ok = false
+                    if stage4_dll_created:
+                        if not remove_file_if_exists(stage4_dll_destination):
+                            rollback_ok = false
+                    if not dir_remove_all(stage4_projection_dir):
+                        rollback_ok = false
+                    if not rollback_ok:
+                        return Err(err + "; Stage4 transaction rollback also failed")
+                    return Err(err)
+            if stage4_projection_dir != "" and not dir_remove_all(stage4_projection_dir):
+                var rollback_ok = llvm_stage4_rollback_replacement(output_receipt)
+                if sqlite_dll_created:
+                    if not remove_file_if_exists(sqlite_dll_destination):
+                        rollback_ok = false
+                if stage4_dll_created:
+                    if not remove_file_if_exists(stage4_dll_destination):
+                        rollback_ok = false
+                if not rollback_ok:
+                    return Err("Stage4 selected-archive projection cleanup failed after linking; transaction rollback also failed")
+                return Err("Stage4 selected-archive projection cleanup failed after linking")
+            if output_receipt.backup != "" and not remove_file_if_exists(output_receipt.backup):
+                var rollback_ok = llvm_stage4_rollback_replacement(output_receipt)
+                if sqlite_dll_created:
+                    if not remove_file_if_exists(sqlite_dll_destination):
+                        rollback_ok = false
+                if stage4_dll_created:
+                    if not remove_file_if_exists(stage4_dll_destination):
+                        rollback_ok = false
+                if not rollback_ok:
+                    return Err("Stage4 final executable backup cleanup failed; transaction rollback also failed")
+                return Err("Stage4 final executable backup cleanup failed")
             if verbose:
-                print "[llvm-link] Native executable: {path}"
-            Ok(path)
+                print "[llvm-link] Native executable: {output}"
+            Ok(output)
         case Err(e):
             if stage4_requested:
-                if not remove_file_if_exists(output):
+                if not remove_file_if_exists(final_link_output):
+                    stage4_cleanup_ok = false
+            if stage4_projection_dir != "":
+                if not dir_remove_all(stage4_projection_dir):
                     stage4_cleanup_ok = false
             if not stage4_cleanup_ok:
                 return Err("Linking failed: {e}; Stage4 strict cleanup also failed")
