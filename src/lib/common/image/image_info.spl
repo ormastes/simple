@@ -256,7 +256,7 @@ fn _jpeg_xl_width_from_ratio(height: i64, ratio: i64) -> i64:
         return height * 2
     0
 
-fn _jpeg_xl_read_u32_choice(data: text, start: i64, length: i64, bit_pos: i64, c0: i64, c1: i64, c2: i64, c3: i64, u0: i64, u1: i64, u2: i64, u3: i64) -> (value: i64, next_bit: i64):
+fn _jpeg_xl_read_u32_choice(data: text, start: i64, length: i64, bit_pos: i64, c0: i64, c1: i64, c2: i64, c3: i64, u0: i64, u1: i64, u2: i64, u3: i64) -> (i64, i64):
     val choice = _jpeg_xl_read_bits(data, start, length, bit_pos, 2)
     var value = c0
     var bit_count = u0
@@ -271,7 +271,7 @@ fn _jpeg_xl_read_u32_choice(data: text, start: i64, length: i64, bit_pos: i64, c
         bit_count = u3
     if bit_count > 0:
         value = value + _jpeg_xl_read_bits(data, start, length, bit_pos + 2, bit_count)
-    (value: value, next_bit: bit_pos + 2 + bit_count)
+    (value, bit_pos + 2 + bit_count)
 
 fn _jpeg_xl_codestream_info_at(data: text, start: i64, length: i64) -> ImageInfo:
     if length < 2 or start < 0 or start + length > data.len():
@@ -307,11 +307,11 @@ fn _jpeg_xl_codestream_info_at(data: text, start: i64, length: i64) -> ImageInfo
         width = width_header.value + 1
     ImageInfo(format: "jpegxl", width: width, height: height, supported: true, reason: "jpegxl-large-codestream-metadata")
 
-fn _jpeg_xl_codestream_size_header_next_bit(data: text, start: i64, length: i64) -> (supported: bool, next_bit: i64):
+fn _jpeg_xl_codestream_size_header_next_bit(data: text, start: i64, length: i64) -> (bool, i64):
     if length < 4 or start < 0 or start + length > data.len():
-        return (supported: false, next_bit: 0)
+        return (false, 0)
     if _byte_at(data, start) != 255 or _byte_at(data, start + 1) != 10:
-        return (supported: false, next_bit: 0)
+        return (false, 0)
     val bits_start = start + 2
     val bits_length = length - 2
     val small = _jpeg_xl_read_bit(data, bits_start, bits_length, 0)
@@ -319,19 +319,19 @@ fn _jpeg_xl_codestream_size_header_next_bit(data: text, start: i64, length: i64)
         val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, 6, 3)
         if ratio == 0:
             if bits_length * 8 < 14:
-                return (supported: false, next_bit: 0)
-            return (supported: true, next_bit: 14)
-        return (supported: true, next_bit: 9)
+                return (false, 0)
+            return (true, 14)
+        return (true, 9)
     val height_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, 1, 0, 0, 0, 0, 9, 13, 18, 30)
-    if bits_length * 8 < height_header.next_bit + 3:
-        return (supported: false, next_bit: 0)
-    val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, height_header.next_bit, 3)
+    if bits_length * 8 < height_header.1 + 3:
+        return (false, 0)
+    val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, height_header.1, 3)
     if ratio == 0:
-        val width_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, height_header.next_bit + 3, 0, 0, 0, 0, 9, 13, 18, 30)
-        if bits_length * 8 < width_header.next_bit:
-            return (supported: false, next_bit: 0)
-        return (supported: true, next_bit: width_header.next_bit)
-    (supported: true, next_bit: height_header.next_bit + 3)
+        val width_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, height_header.1 + 3, 0, 0, 0, 0, 9, 13, 18, 30)
+        if bits_length * 8 < width_header.1:
+            return (false, 0)
+        return (true, width_header.1)
+    (true, height_header.1 + 3)
 
 fn _profile_result(format: text, kind: text, length: i64, offset: i64, reason: text) -> ImageColorProfileInfo:
     ImageColorProfileInfo(
