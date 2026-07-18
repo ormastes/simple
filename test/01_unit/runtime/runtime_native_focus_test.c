@@ -60,8 +60,8 @@ static int64_t text(const char* value) {
 }
 
 static int walk_contains(SplArray* paths, const char* expected) {
-    for (int64_t i = 0; i < spl_array_len(paths); i++) {
-        const char* actual = spl_as_str(spl_array_get(paths, i));
+    for (int64_t i = 0; i < rt_array_len(paths); i++) {
+        const char* actual = (const char*)rt_string_data(rt_array_get(paths, i));
         if (actual && strcmp(actual, expected) == 0) return 1;
     }
     return 0;
@@ -113,7 +113,7 @@ int main(void) {
     assert(symlink(walk_regular, walk_file_link) == 0);
     assert(symlink(walk_root, walk_cycle) == 0);
     SplArray* walked = rt_dir_walk(walk_root);
-    assert(spl_array_len(walked) == 4);
+    assert(rt_array_len(walked) == 4);
     assert(walk_contains(walked, walk_regular));
     assert(walk_contains(walked, walk_child));
     assert(walk_contains(walked, walk_file_link));

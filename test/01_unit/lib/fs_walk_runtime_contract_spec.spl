@@ -1,3 +1,6 @@
+use std.glob.{glob_match}
+use std.fs.{Glob, glob_candidate_path}
+
 extern fn rt_file_read_text(path: text) -> text
 
 describe "filesystem walk runtime contract":
@@ -9,3 +12,37 @@ describe "filesystem walk runtime contract":
             expect(source).to_contain("extern fn rt_dir_walk(root: text) -> [text]")
             expect(source).to_contain("entries.push(DirEntry(")
             expect(source.contains("extern fn walk_dir")).to_equal(false)
+
+    it "keeps filesystem globbing in pure Simple":
+        val sync_source = rt_file_read_text("src/lib/nogc_sync_mut/fs.spl") ?? ""
+        val async_source = rt_file_read_text("src/lib/nogc_async_mut/fs.spl") ?? ""
+
+        for source in [sync_source, async_source]:
+            expect(source).to_contain("rt_dir_walk(root)")
+            expect(source).to_contain("glob_match(path, pattern)")
+            expect(source).to_contain("normalize_path(self.path)")
+            expect(source).to_contain("candidate.replace(\"\\\\\", \"/\")")
+            expect(source.contains("platform_normalize")).to_equal(false)
+            expect(source.contains("extern fn glob_find")).to_equal(false)
+            expect(source.contains("extern fn glob_matches")).to_equal(false)
+
+    it "distinguishes component wildcards from recursive globstars":
+        expect(glob_match("src/main.spl", "src/*.spl")).to_equal(true)
+        expect(glob_match("src\\main.spl", "src/*.spl")).to_equal(true)
+        expect(glob_match("src/lib/main.spl", "src/*.spl")).to_equal(false)
+        expect(glob_match("src/main.spl", "src/**/main.spl")).to_equal(true)
+        expect(glob_match("src/lib/main.spl", "src/**/main.spl")).to_equal(true)
+        expect(glob_match("a/b", "a?b")).to_equal(false)
+        expect(glob_match("a\\b", "a?b")).to_equal(false)
+        expect(glob_match("a/x/b", "a**b")).to_equal(true)
+        expect(glob_match("ab", "a**/b")).to_equal(false)
+
+    it "walks from the literal prefix":
+        val matches = Glob.new("test/fixtures/duplication/clean_pair/*.spl").matches()
+        expect(matches.len()).to_equal(2)
+        expect(matches).to_contain("test/fixtures/duplication/clean_pair/a.spl")
+
+    it "normalizes synthetic current-directory prefixes without scanning the repository":
+        expect(glob_candidate_path("./probe_case4.spl", ".", false)).to_equal("probe_case4.spl")
+        expect(glob_candidate_path(".\\probe_case4.spl", ".", false)).to_equal("probe_case4.spl")
+        expect(glob_candidate_path("./probe_case4.spl", ".", true)).to_equal("./probe_case4.spl")

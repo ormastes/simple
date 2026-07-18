@@ -13,19 +13,38 @@ fn _glob_at(s: text, si: i64, p: text, pi: i64) -> bool:
     val pc = p[pi:pi + 1]
 
     if pc == "*":
-        # Star: try matching 0..N characters from current position
+        val is_globstar = pi + 1 < p.len() and p[pi + 1:pi + 2] == "*"
+        if is_globstar:
+            # `**/` may match zero directories; otherwise `**` may consume
+            # any characters, including path separators.
+            val after = pi + 2
+            val starts_component = pi == 0 or _glob_is_sep(p[pi - 1:pi])
+            if starts_component and after < p.len() and _glob_is_sep(p[after:after + 1]):
+                if _glob_at(s: s, si: si, p: p, pi: after + 1):
+                    return true
+            for i in si..s.len() + 1:
+                if _glob_at(s: s, si: i, p: p, pi: after):
+                    return true
+            return false
+        # A single star stays within one path component.
         for i in si..s.len() + 1:
             if _glob_at(s: s, si: i, p: p, pi: pi + 1):
                 return true
+            if i < s.len() and _glob_is_sep(s[i:i + 1]):
+                return false
         return false
 
     if si >= s.len():
         return false
 
     if pc == "?":
+        if _glob_is_sep(s[si:si + 1]):
+            return false
         return _glob_at(s: s, si: si + 1, p: p, pi: pi + 1)
 
     if pc == "[":
+        if _glob_is_sep(s[si:si + 1]):
+            return false
         # Character class: find first closing ]
         var close = -1
         for ci in (pi + 1)..p.len():
@@ -38,10 +57,13 @@ fn _glob_at(s: text, si: i64, p: text, pi: i64) -> bool:
         return false
 
     # Literal match
-    if s[si:si + 1] == pc:
+    if s[si:si + 1] == pc or (_glob_is_sep(s[si:si + 1]) and _glob_is_sep(pc)):
         return _glob_at(s: s, si: si + 1, p: p, pi: pi + 1)
 
     false
+
+fn _glob_is_sep(ch: text) -> bool:
+    ch == "/" or ch == "\\"
 
 fn _char_in_class(ch: text, class_str: text) -> bool:
     # Match character against class: abc, a-z, !abc

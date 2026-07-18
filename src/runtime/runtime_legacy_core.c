@@ -67,39 +67,43 @@ const char* spl_as_str(SplValue v) {
 
 #if defined(_WIN32)
 static void core_dir_walk_impl(const char* path, SplArray* result) {
+    size_t path_len = strlen(path);
+    const char* separator = path_len > 0 && (path[path_len - 1] == '\\' || path[path_len - 1] == '/') ? "" : "\\";
     char pattern[4096];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    snprintf(pattern, sizeof(pattern), "%s%s*", path, separator);
     WIN32_FIND_DATAA entry;
     HANDLE handle = FindFirstFileA(pattern, &entry);
     if (handle == INVALID_HANDLE_VALUE) return;
     do {
         if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
         char full[4096];
-        snprintf(full, sizeof(full), "%s\\%s", path, entry.cFileName);
+        snprintf(full, sizeof(full), "%s%s%s", path, separator, entry.cFileName);
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
             !(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
             core_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push(result, rt_string_new((const uint8_t*)full, strlen(full)));
         }
     } while (FindNextFileA(handle, &entry));
     FindClose(handle);
 }
 #else
 static void core_dir_walk_impl(const char* path, SplArray* result) {
+    size_t path_len = strlen(path);
+    const char* separator = path_len > 0 && path[path_len - 1] == '/' ? "" : "/";
     DIR* dir = opendir(path);
     if (!dir) return;
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
         char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+        snprintf(full, sizeof(full), "%s%s%s", path, separator, entry->d_name);
         struct stat metadata;
         if (lstat(full, &metadata) != 0) continue;
         if (S_ISDIR(metadata.st_mode)) {
             core_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push(result, rt_string_new((const uint8_t*)full, strlen(full)));
         }
     }
     closedir(dir);
@@ -107,7 +111,7 @@ static void core_dir_walk_impl(const char* path, SplArray* result) {
 #endif
 
 SplArray* rt_dir_walk(const char* path) {
-    SplArray* result = spl_array_new();
+    SplArray* result = rt_array_new(4);
     if (path) core_dir_walk_impl(path, result);
     return result;
 }

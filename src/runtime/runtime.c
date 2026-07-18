@@ -1569,8 +1569,10 @@ void rt_prefetch_wait(void) { spl_prefetch_wait(); }
 
 #ifdef _WIN32
 static void rt_dir_walk_impl(const char* path, SplArray* result) {
+    size_t path_len = strlen(path);
+    const char* separator = path_len > 0 && (path[path_len - 1] == '\\' || path[path_len - 1] == '/') ? "" : "\\";
     char pattern[4096];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    snprintf(pattern, sizeof(pattern), "%s%s*", path, separator);
 
     WIN32_FIND_DATAA find_data;
     HANDLE hFind = FindFirstFileA(pattern, &find_data);
@@ -1580,7 +1582,7 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
         if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0) continue;
 
         char full[4096];
-        snprintf(full, sizeof(full), "%s\\%s", path, find_data.cFileName);
+        snprintf(full, sizeof(full), "%s%s%s", path, separator, find_data.cFileName);
 
         if ((find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
             !(find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
@@ -1594,6 +1596,8 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
 }
 #else
 static void rt_dir_walk_impl(const char* path, SplArray* result) {
+    size_t path_len = strlen(path);
+    const char* separator = path_len > 0 && path[path_len - 1] == '/' ? "" : "/";
     DIR* dir = opendir(path);
     if (!dir) return;
 
@@ -1602,7 +1606,7 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
 
         char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", path, ent->d_name);
+        snprintf(full, sizeof(full), "%s%s%s", path, separator, ent->d_name);
 
         struct stat st;
         if (lstat(full, &st) != 0) continue;

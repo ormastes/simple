@@ -19,7 +19,8 @@
 # - Lazy directory traversal
 # - Pattern matching with glob syntax
 
-use src.std.platform (is_windows, dir_sep, normalize_path as platform_normalize, is_absolute_path as platform_is_absolute, join_path)
+use src.std.platform (is_windows, dir_sep, normalize_path, is_absolute_path as platform_is_absolute, join_path)
+use std.glob.{glob_match}
 
 # ============================================================================
 # Path - Path Manipulation
@@ -82,7 +83,7 @@ class Path:
             Path(path:"/a/b/../c").normalize()  # "/a/c"
             Path(path:"C:/Users/Name").normalize()  # "C:\Users\Name" (Windows)
         """
-        val normalized = platform_normalize(self.path)
+        val normalized = normalize_path(self.path)
         Path(path: normalized)
 
     fn parent() -> Path?:
@@ -686,10 +687,49 @@ fn walk_dir(root: text) -> [DirEntry]:
         entries.push(DirEntry(path: path, name: name, is_file: not is_dir, is_dir: is_dir))
     entries
 
-# Glob pattern matching
-# NOTE: no rt_glob_* runtime symbols exist anywhere — unresolvable-here.
-extern fn glob_find(pattern: text) -> [text]
-extern fn glob_matches(pattern: text, path: text) -> bool
+# Glob pattern matching stays pure-Simple; no rt_glob_* runtime ABI exists.
+fn glob_walk_root(pattern: text) -> text:
+    var wildcard = pattern.len()
+    val star = pattern.index_of("*") ?? -1
+    val question = pattern.index_of("?") ?? -1
+    val bracket = pattern.index_of("[") ?? -1
+    if star >= 0 and star < wildcard:
+        wildcard = star
+    if question >= 0 and question < wildcard:
+        wildcard = question
+    if bracket >= 0 and bracket < wildcard:
+        wildcard = bracket
+    val prefix = pattern.substring(0, wildcard)
+    var slash = prefix.last_index_of("/") ?? -1
+    val backslash = prefix.last_index_of("\\") ?? -1
+    if backslash > slash:
+        slash = backslash
+    if slash < 0:
+        return "."
+    if slash == 0:
+        return prefix.substring(0, 1)
+    if slash == 2 and prefix.len() >= 3 and prefix[1:2] == ":":
+        return prefix.substring(0, 3)
+    prefix.substring(0, slash)
+
+fn glob_find(pattern: text) -> [text]:
+    val root = glob_walk_root(pattern)
+    val explicit_dot = pattern.starts_with("./") or pattern.starts_with(".\\")
+    var matches: [text] = []
+    for path in rt_dir_walk(root):
+        val candidate = glob_candidate_path(path, root, explicit_dot)
+        if glob_match(candidate, pattern):
+            matches.push(candidate)
+    matches
+
+fn glob_candidate_path(path: text, root: text, explicit_dot: bool) -> text:
+    var candidate = path
+    if root == "." and not explicit_dot and (path.starts_with("./") or path.starts_with(".\\")):
+        candidate = path.substring(2, path.len())
+    candidate.replace("\\", "/")
+
+fn glob_matches(pattern: text, path: text) -> bool:
+    glob_match(path, pattern)
 
 # ============================================================================
 # Exports
