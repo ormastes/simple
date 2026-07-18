@@ -483,6 +483,23 @@ pub(crate) fn evaluate_expr(
         // "Present" means: not nil, and (for Option/Result) Some/Ok, and (for
         // collections/strings) non-empty. See
         // doc/07_guide/quick_reference/syntax_quick_reference.md "Existence Check (`.?`)".
+        //
+        // This intentionally returns the *value* (or `Value::Nil`), not a
+        // bool: `.? ??`, `.?` chaining, and `if val v = expr.?:` all rely on
+        // getting the real unwrapped value back (see
+        // test/03_system/feature/usage/exists_check_value_return_spec.spl).
+        // `is_present` is computed correctly here (Option/Result presence
+        // comes from `try_unwrap_option_or_result`'s Some/Ok-vs-None/Err
+        // check, not from the payload's truthiness -- a bare `Int`/`Bool`/
+        // `Float` payload always falls through to the `_ => true` arm below
+        // regardless of its value). The "0 is falsy" landmine
+        // (doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+        // is NOT here: it is in callers that take this correct "value or
+        // Value::Nil" result and run it back through generic
+        // `Value::truthy()` (which treats `Int(0)`/`Bool(false)`/`""` as
+        // falsy) instead of a simple "is it `Value::Nil`" presence check.
+        // See `is_condition_present` in `interpreter_control.rs` for the fix
+        // at those call sites.
         Expr::ExistsCheck(inner) => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             // First unwrap any Option/Result layer (Some/Ok -> payload, None/Err/Nil -> absent).

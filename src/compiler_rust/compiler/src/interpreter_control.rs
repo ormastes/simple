@@ -160,6 +160,30 @@ pub(crate) fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind 
     }
 }
 
+/// Is `val` (the already-evaluated result of a boolean-context condition
+/// expression) "true" for branch-taking purposes? For an `Expr::ExistsCheck`
+/// (`.?`) condition, presence was already fully decided inside
+/// `Expr::ExistsCheck`'s own evaluation (`interpreter/expr.rs`) — it returns
+/// the unwrapped value when present, `Value::Nil` when absent. Re-running
+/// that returned value through generic `Value::truthy()` would silently
+/// re-decide presence a second time, this time based on the *payload's*
+/// truthiness instead of the presence `.?` already established — and
+/// disagree for any falsy-but-present payload (`Some(0)`, `Some(false)`,
+/// `Some("")`, `Ok(0)`, …), which is the "0 is falsy" `.?` landmine
+/// (doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md):
+/// `if opt.?:` on `Some(0)` silently took the `else` branch. The fix is
+/// purely at this consumption boundary: when `condition_expr` is
+/// `Expr::ExistsCheck`, "true" means "not `Value::Nil`" (trust `.?`'s own
+/// presence decision), not generic truthiness. For any other condition
+/// expression, ordinary `Value::truthy()` is unchanged and correct.
+pub(crate) fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
+
 #[cfg(test)]
 mod optional_let_binding_tests {
     use super::*;
@@ -218,7 +242,11 @@ pub(super) fn exec_if(
             cond_val
         };
 
-        let decision_result = cond_val.truthy();
+        // `is_condition_present` (not plain `.truthy()`): see its doc comment
+        // -- an `.?` (`Expr::ExistsCheck`) condition's presence was already
+        // decided inside `.?`'s own evaluation, and must not be re-decided
+        // from the returned payload's truthiness (the "0 is falsy" landmine).
+        let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for if statement
         record_decision_coverage_sffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
@@ -255,7 +283,7 @@ pub(super) fn exec_if(
             } else {
                 elif_val
             };
-            let elif_decision = elif_val.truthy();
+            let elif_decision = is_condition_present(cond, &elif_val);
 
             // COVERAGE: Record decision for elif statement
             let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
@@ -384,7 +412,7 @@ pub(super) fn exec_while(
                     // and re-run this iteration with the slow path semantics.
                     // This should be very rare; fall through to a full condition eval.
                     let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
-                    let decision_result = cond_val.truthy();
+                    let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
                     record_decision_coverage_sffi(
                         "<source>",
                         while_stmt.span.line,
@@ -455,7 +483,7 @@ pub(super) fn exec_while(
             cond_val
         };
 
-        let decision_result = cond_val.truthy();
+        let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for while condition on each iteration
         record_decision_coverage_sffi(
@@ -4682,7 +4710,8 @@ pub(crate) fn exec_match_core(
                 for (name, value) in &bindings {
                     guard_env.insert(name.clone(), value.clone());
                 }
-                if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
+                let guard_val = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
+                if !is_condition_present(guard, &guard_val) {
                     continue;
                 }
             }
@@ -4742,7 +4771,6 @@ pub(crate) fn exec_if_core(
 ) -> Result<(Control, Value), CompileError> {
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
-        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
         // `if val IDENT = expr:` is an optional-binding — try `optional_let_binding`
         // first (bug #188a). `pattern_matches` alone always matches a bare
         // identifier pattern, even against nil/None, so relying on it directly
@@ -4750,6 +4778,7 @@ pub(crate) fn exec_if_core(
         // `exec_if_core` sibling of the fix already landed in `exec_if` — `if val`
         // reaches THIS function instead whenever the `if` is the last statement
         // of a function/block body (implicit-return / value position).
+        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
         match optional_let_binding(pattern, &value) {
             LetBind::Bind(name, inner) => {
                 env.insert(name, inner);
@@ -4787,7 +4816,11 @@ pub(crate) fn exec_if_core(
             cond_val
         };
 
-        if cond_val.truthy() {
+        // `is_condition_present` (not plain `.truthy()`): see its doc
+        // comment in this file -- an `.?` condition's presence was already
+        // decided inside `.?`'s own evaluation and must not be re-decided
+        // from the payload's truthiness (the "0 is falsy" landmine).
+        if is_condition_present(&if_stmt.condition, &cond_val) {
             let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
             return match flow {
                 Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
@@ -4830,7 +4863,7 @@ pub(crate) fn exec_if_core(
             } else {
                 elif_val
             };
-            if elif_val.truthy() {
+            if is_condition_present(cond, &elif_val) {
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
                     Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
@@ -4918,6 +4951,128 @@ mod exec_if_core_tests {
         .expect("exec_if_core");
         assert!(matches!(flow, Control::Next));
         assert_eq!(value.as_int().expect("int"), 42);
+    }
+
+    /// Regression test for `if val v = expr.?:` (the documented idiom in
+    /// `doc/07_guide/quick_reference/syntax_quick_reference.md`, "Existence
+    /// Check (`.?`)"). This must bind `v` to the *unwrapped* value of `expr`
+    /// (here `42`). `Expr::ExistsCheck`'s evaluation (`interpreter/expr.rs`)
+    /// already returns "the value if present, `Value::Nil` if absent" (not a
+    /// bool), so plain `optional_let_binding` on that result binds correctly
+    /// with no special-casing needed here -- this guards that continuing to
+    /// be true.
+    #[test]
+    fn exec_if_core_if_val_with_exists_check_binds_unwrapped_value() {
+        let if_stmt = parse_trailing_if("fn probe():\n    if val v = x.?:\n        v\n    else:\n        99\n");
+        let mut env = Env::new();
+        env.insert("x".to_string(), Value::Int(42));
+        let (flow, value) = exec_if_core(
+            &if_stmt,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_if_core");
+        assert!(matches!(flow, Control::Next));
+        assert_eq!(value.as_int().expect("int (not a bool!)"), 42);
+    }
+
+    /// Companion regression test: `if val v = expr.?:` must still SKIP for
+    /// an empty (bare, non-Option) string, matching `.?`'s own
+    /// non-empty-means-present rule
+    /// (`test/03_system/feature/usage/exists_check_value_return_spec.spl`'s
+    /// "skips binding for empty string"). `Expr::ExistsCheck` itself already
+    /// applies the emptiness check and returns `Value::Nil` for `""`, which
+    /// `optional_let_binding` correctly treats as `LetBind::Skip` -- this
+    /// guards that a future change doesn't collapse `.?`'s emptiness check
+    /// (e.g. by having it return the bare payload's truthiness instead of a
+    /// presence-aware `Value::Nil`).
+    #[test]
+    fn exec_if_core_if_val_with_exists_check_skips_empty_string() {
+        let if_stmt = parse_trailing_if("fn probe():\n    if val v = x.?:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
+        let mut env = Env::new();
+        env.insert("x".to_string(), Value::text(""));
+        let (flow, value) = exec_if_core(
+            &if_stmt,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_if_core");
+        assert!(matches!(flow, Control::Next));
+        assert_eq!(value.to_display_string(), "SKIPPED");
+    }
+
+    /// Regression test for the "0 is falsy" `.?` landmine
+    /// (doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md):
+    /// `if opt.?:` on `Some(0)` must take the `then` branch. `Expr::ExistsCheck`
+    /// (interpreter/expr.rs) correctly evaluates `Some(0)` as present and
+    /// returns the unwrapped payload `Value::Int(0)` (not `Value::Nil`) --
+    /// that part was never wrong. The bug was in the CALLER
+    /// (`exec_if_core`'s plain-condition branch): it used to run that
+    /// returned value through generic `Value::truthy()`, which is `false`
+    /// for `0`, silently re-deciding "absent" from the payload's own
+    /// truthiness and discarding `.?`'s already-correct presence decision.
+    /// The fix is `is_condition_present` (this file): for an `.?`
+    /// (`Expr::ExistsCheck`) condition, "true" means "not `Value::Nil`",
+    /// not generic truthiness.
+    #[test]
+    fn exec_if_core_takes_then_branch_for_some_zero_via_exists_check() {
+        use crate::value::enum_names;
+
+        let if_stmt = parse_trailing_if("fn probe():\n    if x.?:\n        \"present\"\n    else:\n        \"absent\"\n");
+        let mut env = Env::new();
+        env.insert(
+            "x".to_string(),
+            Value::Enum {
+                enum_name: enum_names::OPTION.to_string(),
+                variant: enum_names::SOME.to_string(),
+                payload: Some(Box::new(Value::Int(0))),
+            },
+        );
+        let (flow, value) = exec_if_core(
+            &if_stmt,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_if_core");
+        assert!(matches!(flow, Control::Next));
+        assert_eq!(value.to_display_string(), "present");
+    }
+
+    /// Companion case: `None` via `.?` must still take the `else` branch.
+    #[test]
+    fn exec_if_core_takes_else_branch_for_none_via_exists_check() {
+        use crate::value::enum_names;
+
+        let if_stmt = parse_trailing_if("fn probe():\n    if x.?:\n        \"present\"\n    else:\n        \"absent\"\n");
+        let mut env = Env::new();
+        env.insert(
+            "x".to_string(),
+            Value::Enum {
+                enum_name: enum_names::OPTION.to_string(),
+                variant: enum_names::NONE.to_string(),
+                payload: None,
+            },
+        );
+        let (flow, value) = exec_if_core(
+            &if_stmt,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_if_core");
+        assert!(matches!(flow, Control::Next));
+        assert_eq!(value.to_display_string(), "absent");
     }
 }
 

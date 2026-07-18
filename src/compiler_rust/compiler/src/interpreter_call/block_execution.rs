@@ -1,6 +1,6 @@
 // Block closure execution helpers for interpreter_call module
 
-use super::super::interpreter_control::{optional_let_binding, LetBind};
+use super::super::interpreter_control::{is_condition_present, optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
@@ -373,6 +373,12 @@ pub(super) fn exec_block_closure_into(
                 // straight to `else` (mirror of the fix noted in `exec_if`).
                 let mut handled = false;
                 if let Some(pattern) = &if_stmt.let_pattern {
+                    // `if val IDENT = expr:` is an optional-binding: only take the branch
+                    // when the value is present, binding IDENT to the *unwrapped* value.
+                    // Running a bare identifier pattern through `pattern_matches` always
+                    // matches (even nil/None) and binds the Option wrapper itself — see
+                    // `optional_let_binding`'s doc comment and bug #188a. Defer structural
+                    // patterns (Some(x), enums, tuples, …) to `pattern_matches`.
                     let value = evaluate_expr(
                         &if_stmt.condition,
                         &mut local_env,
@@ -381,12 +387,6 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
-                    // `if val IDENT = expr:` is an optional-binding: only take the branch
-                    // when the value is present, binding IDENT to the *unwrapped* value.
-                    // Running a bare identifier pattern through `pattern_matches` always
-                    // matches (even nil/None) and binds the Option wrapper itself — see
-                    // `optional_let_binding`'s doc comment and bug #188a. Defer structural
-                    // patterns (Some(x), enums, tuples, …) to `pattern_matches`.
                     match optional_let_binding(pattern, &value) {
                         LetBind::Bind(name, inner) => {
                             local_env.insert(name, inner);
@@ -419,16 +419,19 @@ pub(super) fn exec_block_closure_into(
                             }
                         }
                     }
-                } else if evaluate_expr(
-                    &if_stmt.condition,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?
-                .truthy()
-                {
+                } else if {
+                    let cond_val = evaluate_expr(
+                        &if_stmt.condition,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    // `is_condition_present` (not plain `.truthy()`): see its
+                    // doc comment in `interpreter_control.rs`.
+                    is_condition_present(&if_stmt.condition, &cond_val)
+                } {
                     last_value = exec_block_closure_mut(
                         &if_stmt.then_block.statements,
                         &mut local_env,
@@ -477,8 +480,10 @@ pub(super) fn exec_block_closure_into(
                                     }
                                 }
                             }
-                        } else if evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?.truthy()
-                        {
+                        } else if {
+                            let elif_val = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
+                            is_condition_present(cond, &elif_val)
+                        } {
                             last_value = exec_block_closure_mut(
                                 &block.statements,
                                 &mut local_env,
@@ -561,8 +566,8 @@ pub(super) fn exec_block_closure_into(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy()
-                            {
+                            let guard_val = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
+                            if !is_condition_present(guard, &guard_val) {
                                 continue;
                             }
                         }
@@ -894,7 +899,7 @@ pub(super) fn exec_block_closure_into(
                     enums,
                     impl_methods,
                 )?;
-                if !cond.truthy() {
+                if !is_condition_present(&while_stmt.condition, &cond) {
                     break;
                 }
                 match exec_block_closure_mut(
@@ -1062,10 +1067,10 @@ fn exec_block_closure_mut(
                 // the `else` block (previously they were silently skipped).
                 let mut handled = false;
                 if let Some(pattern) = &if_stmt.let_pattern {
-                    let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     // See the `optional_let_binding` fix in the sibling `exec_block_closure_into`
                     // above (bug #188a) — `pattern_matches` alone always matches a bare
                     // identifier pattern, even against nil/None, so it must be tried first.
+                    let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     match optional_let_binding(pattern, &value) {
                         LetBind::Bind(name, inner) => {
                             local_env.insert(name, inner);
@@ -1098,9 +1103,12 @@ fn exec_block_closure_mut(
                             }
                         }
                     }
-                } else if evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?
-                    .truthy()
-                {
+                } else if {
+                    let cond_val = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                    // `is_condition_present` (not plain `.truthy()`): see its
+                    // doc comment in `interpreter_control.rs`.
+                    is_condition_present(&if_stmt.condition, &cond_val)
+                } {
                     last_value = exec_block_closure_mut(
                         &if_stmt.then_block.statements,
                         local_env,
@@ -1149,7 +1157,10 @@ fn exec_block_closure_mut(
                                     }
                                 }
                             }
-                        } else if evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?.truthy() {
+                        } else if {
+                            let elif_val = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
+                            is_condition_present(cond, &elif_val)
+                        } {
                             last_value = exec_block_closure_mut(
                                 &block.statements,
                                 local_env,
@@ -1218,8 +1229,8 @@ fn exec_block_closure_mut(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy()
-                            {
+                            let guard_val = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
+                            if !is_condition_present(guard, &guard_val) {
                                 continue;
                             }
                         }
@@ -1493,7 +1504,7 @@ fn exec_block_closure_mut(
                     enums,
                     impl_methods,
                 )?;
-                if !cond.truthy() {
+                if !is_condition_present(&while_stmt.condition, &cond) {
                     break;
                 }
                 match exec_block_closure_mut(

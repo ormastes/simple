@@ -9,7 +9,7 @@ use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pa
 use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
-use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
+use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with, is_condition_present};
 use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
@@ -314,7 +314,11 @@ pub(crate) fn exec_node(
             let should_return = match &guard_stmt.condition {
                 Some(cond_expr) => {
                     let cond = evaluate_expr(cond_expr, env, functions, classes, enums, impl_methods)?;
-                    cond.truthy()
+                    // `is_condition_present` (not plain `.truthy()`): see its
+                    // doc comment in `interpreter_control.rs` -- an `.?`
+                    // condition's presence must not be re-decided from the
+                    // payload's truthiness (the "0 is falsy" landmine).
+                    is_condition_present(cond_expr, &cond)
                 }
                 None => true, // `? else -> result` always matches
             };
