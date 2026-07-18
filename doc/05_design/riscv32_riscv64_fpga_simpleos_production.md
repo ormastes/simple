@@ -164,6 +164,14 @@ illegal compressed instructions report the original parcel. Compressed EBREAK
 cannot participate in the 32-bit semihost sequence. The reusable profile is
 RV64IMC+S/U and the exclusive-bus SoC profile is RV64IMAC+S/U.
 
+For explicit data accesses, `core64_effective_data_privilege` selects MPP only
+when the current mode is M and MPRV is set. Fetch and trap entry always use the
+current mode. The selected privilege, SUM, and MXR are latched in the memory
+transaction and reused by both AMO phases. The S-mode CSR owner owns the
+SIE/SPIE/SPP/SUM/MXR alias; machine CSR reads/writes and trap transitions merge
+that view into `mstatus`. SXL/UXL are fixed RV64 fields, MPP=2 coerces to U, and
+the current direct-only trap owner clears unsupported vector modes.
+
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,
 then performs RV64 PMP before bus issue. Fault cause/address and RVFI trap fields

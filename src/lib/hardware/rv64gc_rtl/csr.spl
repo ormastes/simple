@@ -41,6 +41,16 @@ val CSR_ADDR_MHARTID: u32   = 0xF14
 val MSTATUS_MIE_MASK: i64   = 0x00000008   # bit 3
 val MSTATUS_MPIE_MASK: i64  = 0x00000080   # bit 7
 val MSTATUS_MPP_MASK: i64   = 0x00001800   # bits [12:11]
+val MSTATUS_MPRV_MASK: i64  = 0x00020000   # bit 17
+val MSTATUS_SUM_MASK: i64   = 0x00040000   # bit 18
+val MSTATUS_MXR_MASK: i64   = 0x00080000   # bit 19
+
+# SIE/SPIE/SPP/SUM/MXR are the sstatus view stored by the S-mode owner.
+val MSTATUS_SSTATUS_MASK: i64 = 0x000C0122
+val MSTATUS_WRITABLE_MASK: i64 = (MSTATUS_MIE_MASK | MSTATUS_MPIE_MASK |
+    MSTATUS_MPP_MASK | MSTATUS_MPRV_MASK | MSTATUS_SSTATUS_MASK)
+# SXL=2 and UXL=2: supervisor and user execution are fixed at 64 bits.
+val MSTATUS_XLEN_FIXED: i64 = (2 << 34) | (2 << 32)
 
 val MSTATUS_MIE_BIT: i64    = 3
 val MSTATUS_MPIE_BIT: i64   = 7
@@ -147,7 +157,7 @@ fn csr64_create(hartid: i64) -> CsrFile64:
     """Create initial CSR state for a given hart.
     A remains clear until the embedding SoC guarantees an exclusive atomic bus."""
     CsrFile64(
-        mstatus: 0,
+        mstatus: MSTATUS_XLEN_FIXED,
         misa: misa_rv64imcsu(),
         mie: 0,
         mtvec: 0,
@@ -210,12 +220,17 @@ fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
     """Write a value to a CSR by address. Read-only and unknown addresses are ignored."""
     var out = csr
     if addr == CSR_ADDR_MSTATUS:
-        val writable_mask = MSTATUS_MIE_MASK | MSTATUS_MPIE_MASK | MSTATUS_MPP_MASK
-        out.mstatus = value & writable_mask
+        var normalized = value & MSTATUS_WRITABLE_MASK
+        val mpp = (normalized & MSTATUS_MPP_MASK) >> MSTATUS_MPP_LO_BIT
+        if mpp == 2:
+            # Privilege encoding 2 is reserved; this implementation chooses U.
+            normalized = normalized & (MSTATUS_MPP_MASK ^ -1)
+        out.mstatus = normalized | MSTATUS_XLEN_FIXED
     else if addr == CSR_ADDR_MIE:
         out.mie = value
     else if addr == CSR_ADDR_MTVEC:
-        out.mtvec = value
+        # The current trap owner implements Direct mode only.
+        out.mtvec = value & -4
     else if addr == CSR_ADDR_MSCRATCH:
         out.mscratch = value
     else if addr == CSR_ADDR_MEPC:
@@ -310,6 +325,9 @@ export CSR_ADDR_MSCRATCH, CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL
 export CSR_ADDR_MIP, CSR_ADDR_MCYCLE, CSR_ADDR_MINSTRET, CSR_ADDR_MHARTID
 export CSR_ADDR_MEDELEG, CSR_ADDR_MIDELEG
 export MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP_MASK
+export MSTATUS_MPRV_MASK, MSTATUS_SUM_MASK, MSTATUS_MXR_MASK
+export MSTATUS_SSTATUS_MASK, MSTATUS_WRITABLE_MASK
+export MSTATUS_XLEN_FIXED
 export MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT, MPP_M_MODE
 export MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK
 export FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC

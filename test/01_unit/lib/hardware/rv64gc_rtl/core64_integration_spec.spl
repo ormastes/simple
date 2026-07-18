@@ -41,6 +41,7 @@ use std.spipe.*
 use std.hardware.rv64gc_rtl.core.{CoreState64, CoreCombResult64, core64_init, core64_update}
 use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode64}
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_init, csr64_write}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_XLEN_FIXED}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s_init, csr_s64_write}
 use std.hardware.rv64gc_rtl.mmu_sv39.mmu64_tlb_insert
 use std.hardware.rv64gc_rtl.mul_div.{MulDivState, MulDivResult64, mul_div64_init, mul_div64_step}
@@ -85,9 +86,9 @@ describe "Core64 Initialization":
         val state = core64_init(0x1000)
         expect(state.priv_mode).to_equal(3)
 
-    it "AC-1: core64_init zeroes all CSRs":
+    it "AC-1: core64_init sets only fixed XLEN status fields":
         val state = core64_init(0x1000)
-        expect(state.csr_m.mstatus).to_equal(0)
+        expect(state.csr_m.mstatus).to_equal(MSTATUS_XLEN_FIXED)
         expect(state.csr_s.sstatus).to_equal(0)
 
 
@@ -186,7 +187,8 @@ describe "Trap64 S-mode Delegation":
 describe "Core64 SYSTEM trap returns":
     it "AC-1: core64_update applies MRET to PC, privilege, and mstatus":
         var state = core64_init(0x1000)
-        val csr_m0 = csr64_write(state.csr_m, 0x300, 0x880)
+        val csr_m0 = csr64_write(state.csr_m, 0x300,
+            0x880 | MSTATUS_MPRV_MASK)
         state.csr_m = csr64_write(csr_m0, 0x341, 0x8000_2000)
         val comb = _system_comb(0x30200073, state.pc)
         val next = core64_update(state, 0x30200073, comb, 0, 0)
@@ -195,10 +197,13 @@ describe "Core64 SYSTEM trap returns":
         expect(next.priv_mode).to_equal(1)
         expect(next.csr_m.mstatus & 0x8).to_equal(0x8)
         expect(next.csr_m.mstatus & 0x1800).to_equal(0)
+        expect(next.csr_m.mstatus & MSTATUS_MPRV_MASK).to_equal(0)
 
     it "AC-1: core64_update applies SRET to PC, privilege, and sstatus":
         var state = core64_init(0x1000)
         state.priv_mode = 1
+        state.csr_m = csr64_write(state.csr_m, 0x300,
+            MSTATUS_MPRV_MASK)
         val csr_s0 = csr_s64_write(state.csr_s, 0x100, 0x120)
         state.csr_s = csr_s64_write(csr_s0, 0x141, 0x8000_3000)
         val comb = _system_comb(0x10200073, state.pc)
@@ -208,6 +213,7 @@ describe "Core64 SYSTEM trap returns":
         expect(next.priv_mode).to_equal(1)
         expect(next.csr_s.sstatus & 0x2).to_equal(0x2)
         expect(next.csr_s.sstatus & 0x100).to_equal(0)
+        expect(next.csr_m.mstatus & MSTATUS_MPRV_MASK).to_equal(0)
 
     it "AC-1: core64_update treats SFENCE.VMA as non-halting fence":
         var state = core64_init(0x1000)
@@ -291,4 +297,3 @@ describe "MulDiv64 Unsigned Division":
         while state.busy:
             state = mul_div_tick(state)
         expect(state.result).to_equal(0)
-

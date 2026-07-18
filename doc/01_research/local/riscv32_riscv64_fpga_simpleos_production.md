@@ -125,8 +125,10 @@ CLINT, PLIC, and UART requests. M execution and machine interrupt sampling are
 now connected. LR/SC and AMO.W/D use translated physical reservations and the
 single-master protected bus. Integer RV64C now expands through the same legal
 32-bit decode/commit path while preserving 2-byte PC/link/fault semantics;
-complete supervisor interrupt contexts, MPRV data privilege, and RV32 parity
-remain open.
+MPRV/MPP now selects the effective privilege of loads, stores, LR/SC, and AMOs
+without affecting fetch. The production CSR/trap path keeps the supervisor
+status alias coherent with `mstatus`. Complete supervisor interrupt contexts
+and RV32 parity remain open.
 
 The walker uses the 32-bit-addressed `RamState`, while the RV64 SoC uses
 `Ram64State`; the types cannot form a real RV64 page-table bus without an owner

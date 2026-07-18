@@ -14,9 +14,11 @@
 
 use std.hardware.rv64gc_rtl.csr.{CsrFile64}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP_MASK}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_XLEN_FIXED}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv64gc_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create}
+use std.hardware.rv64gc_rtl.csr_s.csr_s64_merge_mstatus
 use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SPP_MASK_64, SSTATUS_SPP_BIT_64}
 use std.hardware.rv64gc_rtl.csr_s.{csr_s64_is_exception_delegated, csr_s64_is_interrupt_delegated}
 
@@ -178,6 +180,8 @@ fn trap64_exit_mret(csr: CsrFile64) -> TrapExitResult64:
     # MIE <- MPIE, MPIE <- 1, MPP <- U-mode
     new_mstatus = new_mstatus | (old_mpie << MSTATUS_MIE_BIT)
     new_mstatus = new_mstatus | MSTATUS_MPIE_MASK
+    if mpp != 3:
+        new_mstatus = new_mstatus & (MSTATUS_MPRV_MASK ^ -1)
 
     var new_csr = csr
     new_csr.mstatus = new_mstatus
@@ -237,11 +241,18 @@ fn trap64_enter(ts: TrapState64, cause: i64, tval: i64, pc: i64, priv_mode: i64,
         new_csr_s.sstatus = new_sstatus
 
         val trap_pc = csr_s.stvec & 0xFFFFFFFFFFFFFFFC
-        TrapEnterResult64(csr: csr_m, csr_s: new_csr_s, trap_pc: trap_pc, target_mode: 1)
+        var new_csr_m = csr_m
+        new_csr_m.mstatus = csr_s64_merge_mstatus(new_csr_m.mstatus,
+            new_csr_s.sstatus)
+        TrapEnterResult64(csr: new_csr_m, csr_s: new_csr_s,
+            trap_pc: trap_pc, target_mode: 1)
     else:
         # Route to M-mode via existing logic
         val machine = trap64_enter_m_only_from_priv(csr_m, pc, cause, tval, priv_mode)
-        TrapEnterResult64(csr: machine.csr, csr_s: csr_s,
+        var new_csr_m = machine.csr
+        new_csr_m.mstatus = csr_s64_merge_mstatus(new_csr_m.mstatus,
+            csr_s.sstatus)
+        TrapEnterResult64(csr: new_csr_m, csr_s: csr_s,
             trap_pc: machine.trap_pc, target_mode: machine.target_mode)
 
 # ============================================================================
@@ -278,7 +289,9 @@ fn trap64_sret(csr_s: CsrSMode64) -> TrapExitResult64:
     val new_csr_s = trap64_sret_csr(csr_s)
 
     # Return a TrapExitResult64; csr field is unused for S-mode but we embed a zeroed M CSR
-    val dummy_csr_m = CsrFile64(mstatus: 0, misa: 0, mie: 0, mtvec: 0, mscratch: 0, mepc: 0, mcause: 0, mtval: 0, mip: 0, medeleg: 0, mideleg: 0, mcycle: 0, minstret: 0, mhartid: 0)
+    val dummy_csr_m = CsrFile64(mstatus: MSTATUS_XLEN_FIXED, misa: 0, mie: 0,
+        mtvec: 0, mscratch: 0, mepc: 0, mcause: 0, mtval: 0, mip: 0,
+        medeleg: 0, mideleg: 0, mcycle: 0, minstret: 0, mhartid: 0)
     TrapExitResult64(csr: dummy_csr_m, return_pc: csr_s.sepc, target_mode: spp)
 
 export TrapState64, TrapEnterResult64, TrapExitResult64, InterruptCheckResult64

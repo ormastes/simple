@@ -95,6 +95,11 @@ existing RV64 base decoder, but original 2/4-byte length and fault parcel remain
 clocked core state so PC, link, trap, and semihost behavior cannot be inferred
 from the expanded instruction.
 
+Within the RV64 capsule, the S-CSR module owns the restricted status fields and
+exports one merge operation to the machine CSR/trap/core owners. Effective data
+privilege is derived once at the core-to-memory boundary; the MMU/PMP layers
+consume the latched value and never inspect current privilege independently.
+
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real
 compiled call sites reveal a smaller common interface.

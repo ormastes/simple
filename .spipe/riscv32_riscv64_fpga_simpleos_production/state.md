@@ -277,3 +277,10 @@ implementation-milestone-2-in-progress
   `mtval`, and unmatched semihost sequences no longer bypass ordinary
   SYSTEM/CSR/return dispatch. The review then reported no remaining production
   blocker; its requested CJ/CB/stack-access and IALIGN test gaps were added.
+- RV64 effective-privilege slice: added MPRV/MPP selection for loads, stores,
+  LR/SC, and AMO phases while keeping fetch/trap origin on current privilege.
+  MRET/SRET clear MPRV below M. A single supervisor-owned merge keeps
+  SIE/SPIE/SPP/SUM/MXR coherent through mstatus/sstatus CSR and trap paths;
+  SXL/UXL are fixed RV64, MPP=2 coerces to U, and direct-only mtvec/stvec writes
+  are aligned. Focused scenarios cover aliasing, WARL, PMP denial, every atomic
+  entry path, and xRET clearing, but remain unexecuted under the CLI blocker.

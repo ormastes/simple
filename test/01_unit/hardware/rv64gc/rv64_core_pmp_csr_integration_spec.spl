@@ -3,7 +3,11 @@ use std.hardware.rv64gc_rtl.core.{CoreState64, core64_combinational, core64_init
 use std.hardware.rv64gc_rtl.regfile.{RegFile64, regfile64_create, regfile64_write}
 use std.hardware.rv64gc_rtl.mmu_sv39.mmu64_tlb_insert
 use std.hardware.rv64gc_rtl.csr.csr64_write
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_MPP_MASK, MSTATUS_XLEN_FIXED}
 use std.hardware.rv64gc_rtl.csr_s.csr_s64_write
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+use std.hardware.rv64gc_rtl.csr_s.SSTATUS_UXL_FIXED_64
+use std.hardware.rv64gc_rtl.trap.trap64_mret
 
 fn csr_instruction(addr: u32, rs1: u32, funct3: u32, rd: u32) -> u32:
     (addr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
@@ -136,6 +140,54 @@ describe "RV64 core PMP and privileged CSR integration":
         expect(csr_m.mepc).to_equal(0x8000_0002)
         expect(csr_s.sepc).to_equal(0x8000_0002)
 
+    it "keeps mstatus and sstatus alias fields coherent through core CSR access":
+        var state = core64_init(0x4700)
+        val supervisor_bits = SSTATUS_SIE_MASK_64 | SSTATUS_SUM_MASK_64 |
+            SSTATUS_MXR_MASK_64
+        val machine_bits = MSTATUS_MPRV_MASK | (1 << 11)
+        var rf = regfile64_create()
+        rf = regfile64_write(rf, 1, machine_bits | supervisor_bits, true)
+        val write_mstatus = csr_instruction(0x300, 1, 1, 2)
+        state = apply_csr(state, rf, write_mstatus)
+        expect(state.csr_s.sstatus & supervisor_bits).to_equal(supervisor_bits)
+        expect(state.csr_m.mstatus & supervisor_bits).to_equal(supervisor_bits)
+        expect(state.csr_m.mstatus & machine_bits).to_equal(machine_bits)
+
+        val read_sstatus = csr_instruction(0x100, 0, 2, 3)
+        val read_comb = core64_combinational(state, read_sstatus, 0,
+            regfile64_create())
+        expect(read_comb.rd_data & supervisor_bits).to_equal(supervisor_bits)
+        expect(read_comb.rd_data & SSTATUS_UXL_FIXED_64).to_equal(
+            SSTATUS_UXL_FIXED_64)
+
+        val clear_sstatus = csr_instruction(0x100, 0, 1, 0)
+        state = apply_csr(state, regfile64_create(), clear_sstatus)
+        expect(state.csr_s.sstatus & supervisor_bits).to_equal(0)
+        expect(state.csr_m.mstatus & supervisor_bits).to_equal(0)
+        expect(state.csr_m.mstatus & machine_bits).to_equal(machine_bits)
+
+    it "normalizes reserved MPP and clears MPRV when MRET lowers privilege":
+        val state = core64_init(0x4780)
+        expect(state.csr_m.mstatus & MSTATUS_XLEN_FIXED).to_equal(
+            MSTATUS_XLEN_FIXED)
+        val reserved = csr64_write(state.csr_m, 0x300,
+            MSTATUS_MPRV_MASK | (2 << 11))
+        expect(reserved.mstatus & MSTATUS_MPP_MASK).to_equal(0)
+
+        var supervisor = csr64_write(state.csr_m, 0x300,
+            MSTATUS_MPRV_MASK | (1 << 11))
+        supervisor = csr64_write(supervisor, 0x341, 0x8000_0100)
+        val exit = trap64_mret(supervisor)
+        expect(exit.target_mode).to_equal(1)
+        expect(exit.csr.mstatus & MSTATUS_MPRV_MASK).to_equal(0)
+
+    it "coerces unsupported trap-vector modes to aligned Direct mode":
+        val state = core64_init(0x47C0)
+        val csr_m = csr64_write(state.csr_m, 0x305, 0x8000_0103)
+        val csr_s = csr_s64_write(state.csr_s, 0x105, 0x8000_0203)
+        expect(csr_m.mtvec).to_equal(0x8000_0100)
+        expect(csr_s.stvec).to_equal(0x8000_0200)
+
     it "returns delegated illegal CSR traps with updated supervisor state":
         var state = core64_init(0x4802)
         state.priv_mode = 1
@@ -149,3 +201,5 @@ describe "RV64 core PMP and privileged CSR integration":
         expect(next.csr_s.sepc).to_equal(0x4802)
         expect(next.csr_s.scause).to_equal(2)
         expect(next.csr_s.stval).to_equal(insn as i64)
+        expect(next.csr_m.mstatus & SSTATUS_SIE_MASK_64).to_equal(
+            next.csr_s.sstatus & SSTATUS_SIE_MASK_64)

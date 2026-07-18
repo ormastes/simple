@@ -14,7 +14,8 @@ sidecars, VHDL interfaces, SoC scaffolding, formal files, and future acceptance
 metadata. The bundled CPU VHDL remains placeholder text with constant RVFI and
 is not an executable compiler-generated CPU. In Simple source, the RV64 clock
 path now connects Sv39, PMP, M, single-master A, and integer C; RV32 parity and
-compiler-to-VHDL evidence remain open. No generated-RTL or KV260 Linux
+MPRV-protected data privilege and status aliasing are also connected. RV32
+parity and compiler-to-VHDL evidence remain open. No generated-RTL or KV260 Linux
 login/`ls` transcript exists.
 
 Accordingly, current bundles report:
@@ -134,8 +135,8 @@ Linux acceptance: the old permissive `lsu64_access()` and PC-only
 register file, two-parcel instruction fetch, data stalls, Sv39/PMP faults, and
 commit; `soc_top_64_tick()` routes its single outstanding physical request to
 the RV64 reset ROM, DRAM, CLINT, PLIC, or UART with a one-cycle response latch.
-Supervisor interrupt contexts, MPRV data privilege, and RV32 parity remain
-incomplete. The multi-cycle M unit is clocked into commit with exact high
+Supervisor interrupt contexts and RV32 parity remain incomplete. The
+multi-cycle M unit is clocked into commit with exact high
 multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
 LR/SC and AMO.W/D now reserve translated physical byte ranges and retire through
 the same protected, single-outstanding bus. Atomic-tagged ROM/MMIO requests fail

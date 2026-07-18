@@ -261,3 +261,19 @@ guards the three-instruction semihosting marker by original length. Exact
 decompression fixtures were independently assembled/disassembled with the GNU
 RISC-V toolchain; repository execution remains pending the tracked pure-Simple
 CLI repair.
+
+## 2026-07-18 MPRV and Status Normative Recheck
+
+`mstatus.MPRV` changes the effective privilege of explicit memory accesses in
+M-mode to `MPP`; it does not change instruction fetch or trap-origin privilege.
+When the effective privilege is S or U, normal address translation and PMP
+rules apply. Returning below M clears MPRV. `sstatus` is a restricted view of
+`mstatus`, not independent storage, and fixed RV64 S/U execution reports
+`SXL=UXL=2`. Source:
+[RISC-V Machine-Level ISA 1.13](https://docs.riscv.org/reference/isa/priv/machine.html).
+
+The current core therefore merges SIE/SPIE/SPP/SUM/MXR bidirectionally at CSR
+and trap boundaries, WARL-coerces reserved MPP and unsupported vector modes,
+and latches effective privilege plus SUM/MXR across atomic phases. Focused
+repository scenarios remain unexecuted under the tracked pure-Simple CLI
+crash.

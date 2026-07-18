@@ -37,7 +37,9 @@ use std.hardware.rv64gc_rtl.pkg.{AMO_AND, AMO_OR, AMO_MIN, AMO_MAX, AMO_MINU, AM
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
 use std.hardware.rv64gc_rtl.csr.misa_rv64imacsu
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_MPP_MASK, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
+use std.hardware.rv64gc_rtl.csr_s.csr_s64_merge_mstatus
 use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
 use std.hardware.rv64gc_rtl.trap.{InterruptCheckResult64, trap64_enter, trap64_state_init}
 use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_mei, cause_msi, cause_mti}
@@ -346,23 +348,36 @@ fn core64_csr_access(state: CoreState64, addr: u32, source: i64, funct3: u32) ->
             csr_m: state.csr_m, csr_s: state.csr_s, mmu: state.mmu, pmp: new_pmp)
 
     if core64_machine_csr_known(addr):
-        val old_value = csr64_read(state.csr_m, addr)
+        var old_value = csr64_read(state.csr_m, addr)
         var new_csr_m = state.csr_m
+        var new_csr_s = state.csr_s
+        if addr == 0x300:
+            old_value = csr_s64_merge_mstatus(old_value, state.csr_s.sstatus)
         if write_requested:
-            new_csr_m = csr64_write(state.csr_m, addr, core64_csr_next_value(old_value, source, funct3))
+            new_csr_m = csr64_write(state.csr_m, addr,
+                core64_csr_next_value(old_value, source, funct3))
+            if addr == 0x300:
+                new_csr_s = csr_s64_write(state.csr_s, 0x100,
+                    new_csr_m.mstatus)
+                new_csr_m.mstatus = csr_s64_merge_mstatus(new_csr_m.mstatus,
+                    new_csr_s.sstatus)
         return CoreCsrAccess64(valid: true, old_value: old_value,
-            csr_m: new_csr_m, csr_s: state.csr_s, mmu: state.mmu, pmp: state.pmp)
+            csr_m: new_csr_m, csr_s: new_csr_s, mmu: state.mmu, pmp: state.pmp)
 
     if core64_supervisor_csr_known(addr):
         val old_value = csr_s64_read(state.csr_s, addr)
+        var new_csr_m = state.csr_m
         var new_csr_s = state.csr_s
         var new_mmu = state.mmu
         if write_requested:
             new_csr_s = csr_s64_write(state.csr_s, addr, core64_csr_next_value(old_value, source, funct3))
+            if addr == 0x100:
+                new_csr_m.mstatus = csr_s64_merge_mstatus(
+                    new_csr_m.mstatus, new_csr_s.sstatus)
             if addr == 0x180 and new_csr_s.satp != state.csr_s.satp:
                 new_mmu = mmu64_set_satp(mmu64_flush(state.mmu), new_csr_s.satp)
         return CoreCsrAccess64(valid: true, old_value: old_value,
-            csr_m: state.csr_m, csr_s: new_csr_s, mmu: new_mmu, pmp: state.pmp)
+            csr_m: new_csr_m, csr_s: new_csr_s, mmu: new_mmu, pmp: state.pmp)
 
     core64_invalid_csr_access(state)
 
@@ -534,6 +549,9 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_pc = result.return_pc
             new_priv_mode = result.target_mode
             new_csr_s = trap64_sret_csr(state.csr_s)
+            if new_priv_mode < 3:
+                new_csr_m.mstatus = new_csr_m.mstatus &
+                    (MSTATUS_MPRV_MASK ^ -1)
             new_semi_phase = 0
             new_semi_suppress = false
 
@@ -588,6 +606,9 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_pc = comb.pc_next
 
         new_rf = regfile64_write(state.rf, comb.dec.rd, comb.rd_data, comb.rd_write)
+
+    new_csr_m.mstatus = csr_s64_merge_mstatus(new_csr_m.mstatus,
+        new_csr_s.sstatus)
 
     CoreState64(
         pc: new_pc,
@@ -701,6 +722,18 @@ fn core64_init_single_master(reset_vec: i64) -> CoreState64:
     out
 
 @hardware
+fn core64_effective_data_privilege(state: CoreState64) -> u32:
+    """Apply MPRV/MPP to loads, stores, and atomics, never instruction fetch."""
+    if (state.priv_mode == 3 and
+        (state.csr_m.mstatus & MSTATUS_MPRV_MASK) != 0):
+        val mpp = (state.csr_m.mstatus & MSTATUS_MPP_MASK) >>
+            MSTATUS_MPP_LO_BIT
+        if mpp == 0 or mpp == 1 or mpp == 3:
+            return mpp as u32
+        return 0
+    state.priv_mode as u32
+
+@hardware
 fn core64_sum_enabled(state: CoreState64) -> bool:
     (state.csr_s.sstatus & SSTATUS_SUM_MASK_64) != 0
 
@@ -766,6 +799,8 @@ fn core64_raise_exception(state: CoreState64, cause: i64, tval: i64) -> CoreStat
     out.priv_mode = trap.target_mode
     out.csr_m = trap.csr
     out.csr_s = trap.csr_s
+    out.csr_m.mstatus = csr_s64_merge_mstatus(out.csr_m.mstatus,
+        out.csr_s.sstatus)
     out.atomics = atomics_create()
     out.atomic_old = 0
     out.semi_phase = 0
@@ -818,6 +853,7 @@ fn core64_begin_instruction(state: CoreState64, instruction: u32,
     out.instruction_bytes = instruction_bytes
     val comb = core64_combinational_length(out, instruction, 0, out.rf,
         instruction_bytes)
+    val data_privilege = core64_effective_data_privilege(out)
     val legal = (core64_instruction_legal(instruction, comb.dec) and
         core64_privileged_instruction_legal(out, comb.dec) and
         (not comb.dec.is_amo or out.atomic_bus_exclusive))
@@ -832,7 +868,7 @@ fn core64_begin_instruction(state: CoreState64, instruction: u32,
             out.atomics = atomics_create()
             out.pipeline_phase = CORE64_ATOMIC_STORE
             out.memory = memory64_start_conditional_store(out.mmu,
-                out.pmp, comb.rs1_data, size, out.priv_mode as u32,
+                out.pmp, comb.rs1_data, size, data_privilege,
                 core64_sum_enabled(out), core64_mxr_enabled(out),
                 comb.rs2_data, reservation.reservation_valid,
                 reservation.reservation_paddr, reservation.reservation_size)
@@ -840,11 +876,11 @@ fn core64_begin_instruction(state: CoreState64, instruction: u32,
             out.pipeline_phase = CORE64_ATOMIC_LOAD
             if funct5 == AMO_LR:
                 out.memory = memory64_start_lr(out.mmu, out.pmp,
-                    comb.rs1_data, size, out.priv_mode as u32,
+                    comb.rs1_data, size, data_privilege,
                     core64_sum_enabled(out), core64_mxr_enabled(out))
             else:
                 out.memory = memory64_start_atomic_read(out.mmu, out.pmp,
-                    comb.rs1_data, size, out.priv_mode as u32,
+                    comb.rs1_data, size, data_privilege,
                     core64_sum_enabled(out), core64_mxr_enabled(out))
         return out
 
@@ -859,7 +895,7 @@ fn core64_begin_instruction(state: CoreState64, instruction: u32,
         out.pipeline_phase = CORE64_DATA_ACCESS
         out.memory = memory64_start(out.mmu, out.pmp, comb.dmem_addr,
             access_type, core64_data_size(comb.dec.funct3),
-            out.priv_mode as u32, core64_sum_enabled(out),
+            data_privilege, core64_sum_enabled(out),
             core64_mxr_enabled(out), comb.dmem_wdata)
         return out
 
@@ -943,8 +979,8 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
                 out.pipeline_phase = CORE64_ATOMIC_STORE
                 out.memory = memory64_start_atomic_store(out.mmu, out.pmp,
                     state.memory.vaddr, core64_atomic_size(comb.dec),
-                    out.priv_mode as u32, core64_sum_enabled(out),
-                    core64_mxr_enabled(out), amo.new_value)
+                    state.memory.privilege, state.memory.sum,
+                    state.memory.mxr, amo.new_value)
 
         else if state.pipeline_phase == CORE64_ATOMIC_STORE:
             var comb = core64_combinational_length(out, state.instruction, 0,
