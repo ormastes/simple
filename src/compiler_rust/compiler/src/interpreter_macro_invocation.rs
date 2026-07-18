@@ -10,11 +10,28 @@
 
 use std::collections::HashMap;
 
-use simple_parser::ast::{MacroArg, MacroDef};
+use simple_parser::ast::{Expr, MacroArg, MacroDef};
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, ClassDef, Enums, ImplMethods};
 use crate::value::{Env, Value};
+
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to the `assert!(expr)` macro's condition argument.
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
 
 /// Built-in macro evaluation for println, print, vec, assert, etc.
 ///
@@ -76,7 +93,7 @@ pub fn eval_builtin_macro(
         "assert" => {
             if let Some(MacroArg::Expr(e)) = macro_args.first() {
                 let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
-                if !val.truthy() {
+                if !is_condition_present(e, &val) {
                     // E3004 - Assertion Failed
                     let ctx = ErrorContext::new()
                         .with_code(codes::ASSERTION_FAILED)
@@ -143,5 +160,40 @@ pub fn eval_builtin_macro(
             }
         }
         _ => None,
+    }
+}
+
+// Lane C10 regression coverage: the `assert!(expr)` macro's condition
+// argument must trust `.?`'s own presence decision instead of re-testing
+// the unwrapped payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        // `assert!(opt.?)` on `Some(0)` must pass (opt is present).
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
     }
 }

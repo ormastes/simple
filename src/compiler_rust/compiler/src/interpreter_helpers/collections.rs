@@ -23,6 +23,23 @@ pub(crate) fn eval_array_map(
     Ok(Value::array(results))
 }
 
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to lambda-predicate bodies (filter/find/any/all/dict-filter).
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
+
 /// Setup environment with single parameter binding for a lambda
 fn bind_lambda_param(captured: &Env, params: &[String], value: &Value) -> Env {
     let mut env = captured.clone();
@@ -88,7 +105,8 @@ pub(crate) fn eval_array_filter(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
+                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                if is_condition_present(body, &pred_val) {
                     results.push(item.clone());
                 }
             }
@@ -197,7 +215,8 @@ pub(crate) fn eval_array_find(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
+                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                if is_condition_present(body, &pred_val) {
                     return Ok(item.clone());
                 }
             }
@@ -243,7 +262,8 @@ pub(crate) fn eval_array_any(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
+                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                if is_condition_present(body, &pred_val) {
                     return Ok(Value::Bool(true));
                 }
             }
@@ -289,7 +309,8 @@ pub(crate) fn eval_array_all(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                if !evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
+                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                if !is_condition_present(body, &pred_val) {
                     return Ok(Value::Bool(false));
                 }
             }
@@ -356,7 +377,8 @@ pub(crate) fn eval_dict_filter(
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), v.clone());
             }
-            if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+            if is_condition_present(body, &pred_val) {
                 new_map.insert(k.clone(), v.clone());
             }
         }
@@ -450,4 +472,40 @@ pub(crate) fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &m
         }
     }
     true
+}
+
+// Lane C10 regression coverage: filter/find/any/all/dict-filter lambda
+// predicates must trust `.?`'s own presence decision instead of re-testing
+// the unwrapped payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        // A filter/find/any/all predicate lambda body of literally `|x| x.?`
+        // on a `Some(0)` item must keep the item (present), not drop it.
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
 }

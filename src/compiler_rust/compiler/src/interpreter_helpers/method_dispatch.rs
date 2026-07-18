@@ -13,6 +13,23 @@ use super::super::{
 };
 use crate::interpreter::interpreter_call::{exec_function_with_values, exec_function_with_values_and_self};
 
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to lambda-predicate bodies (filter/any/all dispatch).
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn call_method_on_value(
     recv_val: Value,
@@ -283,7 +300,7 @@ pub(crate) fn call_method_on_value(
                                 local_env.insert(param.clone(), item.clone());
                             }
                             let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
-                            if val.truthy() {
+                            if is_condition_present(body, &val) {
                                 result.push(item.clone());
                             }
                         }
@@ -411,7 +428,7 @@ pub(crate) fn call_method_on_value(
                                 local_env.insert(param.clone(), item.clone());
                             }
                             let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
-                            if val.truthy() {
+                            if is_condition_present(body, &val) {
                                 return Ok(Value::Bool(true));
                             }
                         }
@@ -452,7 +469,7 @@ pub(crate) fn call_method_on_value(
                                 local_env.insert(param.clone(), item.clone());
                             }
                             let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
-                            if !val.truthy() {
+                            if !is_condition_present(body, &val) {
                                 return Ok(Value::Bool(false));
                             }
                         }
@@ -987,4 +1004,38 @@ pub(crate) fn try_method_missing(
         enums,
         impl_methods,
     )
+}
+
+// Lane C10 regression coverage: the filter/any/all dispatch paths' lambda
+// predicates must trust `.?`'s own presence decision instead of re-testing
+// the unwrapped payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
 }

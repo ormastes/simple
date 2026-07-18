@@ -377,6 +377,24 @@ pub(crate) fn exec_block_value(
 /// without evaluating FString interpolations.  `{expr}` and `{expr:spec}` parts are
 /// reconstructed as literal text so that strings like `"encodes {a:1} as bytes"` are
 /// preserved verbatim instead of crashing with "variable `a` not found".
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to the standalone `assert_true`/`assert_false` BDD builtins,
+/// whose sole argument expression may itself be `expr.?`.
+fn is_condition_present(condition_expr: Option<&Expr>, val: &Value) -> bool {
+    if matches!(condition_expr, Some(Expr::ExistsCheck(_))) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
+
 fn extract_desc_str(args: &[Argument], default: &str) -> String {
     use simple_parser::ast::{Expr, FStringPart};
     let Some(arg) = args.first() else {
@@ -1435,7 +1453,7 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
-            if !val.truthy() {
+            if !is_condition_present(args.first().map(|a| &a.value), &val) {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!("assert_true failed: got {}", val.to_display_string()));
@@ -1445,7 +1463,7 @@ pub(super) fn eval_bdd_builtin(
         }
         "assert_false" => {
             let val = eval_arg(args, 0, Value::Bool(true), env, functions, classes, enums, impl_methods)?;
-            if val.truthy() {
+            if is_condition_present(args.first().map(|a| &a.value), &val) {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!("assert_false failed: got {}", val.to_display_string()));
@@ -1755,4 +1773,44 @@ pub fn get_ignored_tests() -> Vec<String> {
 /// Get individual test results: (describe_path, test_name, passed, skipped)
 pub fn get_test_results() -> Vec<(String, String, bool, bool)> {
     BDD_TEST_RESULTS.with(|cell| cell.borrow().clone())
+}
+
+// Lane C10 regression coverage: the standalone `assert_true`/`assert_false`
+// BDD builtins must trust `.?`'s own presence decision instead of
+// re-testing the unwrapped payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        // `assert_true(opt.?)` on `Some(0)` must pass (opt is present).
+        let cond = exists_check_cond();
+        assert!(is_condition_present(Some(&cond), &Value::Int(0)));
+        assert!(is_condition_present(Some(&cond), &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        // `assert_false(opt.?)` on `None` must pass (opt is absent).
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(Some(&cond), &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check_or_missing_arg() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(Some(&cond), &Value::Int(0)));
+        assert!(is_condition_present(Some(&cond), &Value::Int(1)));
+        // Defensive: no argument expression at all also falls back to
+        // generic truthy() rather than panicking.
+        assert!(!is_condition_present(None, &Value::Int(0)));
+        assert!(is_condition_present(None, &Value::Int(1)));
+    }
 }

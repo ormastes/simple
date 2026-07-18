@@ -8,8 +8,25 @@ use super::super::{
 };
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
-use simple_parser::ast::{Argument, ClassDef, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::collections::HashMap;
+
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to lambda-predicate bodies (take_while/skip_while/count/partition).
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
 
 fn array_ndim(arr: &[Value]) -> i64 {
     if arr.is_empty() {
@@ -345,7 +362,7 @@ pub fn handle_array_methods(
                         local_env.insert(param.clone(), item.clone());
                     }
                     let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    if !pred.truthy() {
+                    if !is_condition_present(&body, &pred) {
                         break;
                     }
                     result.push(item.clone());
@@ -370,7 +387,7 @@ pub fn handle_array_methods(
                             local_env.insert(param.clone(), item.clone());
                         }
                         let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                        if !pred.truthy() {
+                        if !is_condition_present(&body, &pred) {
                             dropping = false;
                             result.push(item.clone());
                         }
@@ -430,7 +447,7 @@ pub fn handle_array_methods(
                         local_env.insert(param.clone(), item.clone());
                     }
                     let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    if pred.truthy() {
+                    if is_condition_present(&body, &pred) {
                         count += 1;
                     }
                 }
@@ -455,7 +472,7 @@ pub fn handle_array_methods(
                         local_env.insert(param.clone(), item.clone());
                     }
                     let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    if pred.truthy() {
+                    if is_condition_present(&body, &pred) {
                         pass.push(item.clone());
                     } else {
                         fail.push(item.clone());
@@ -1096,4 +1113,38 @@ pub fn handle_dict_methods(
         }
     };
     Ok(Some(result))
+}
+
+// Lane C10 regression coverage: take_while/skip_while/count/partition lambda
+// predicates must trust `.?`'s own presence decision instead of re-testing
+// the unwrapped payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
 }

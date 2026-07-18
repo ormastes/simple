@@ -10,6 +10,23 @@ use super::super::{evaluate_expr, exec_block, exec_function, Control, Enums, Imp
 use super::collections::iter_to_vec;
 use super::patterns::bind_pattern;
 
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to comprehension `if` filter conditions.
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
+
 pub(crate) fn normalize_index(idx: i64, len: i64) -> i64 {
     if idx < 0 {
         (len + idx).max(0)
@@ -103,7 +120,7 @@ pub(crate) fn comprehension_iterate(
         // Check condition if present
         if let Some(cond) = condition {
             let cond_val = evaluate_expr(cond, &mut inner_env, functions, classes, enums, impl_methods)?;
-            if !cond_val.truthy() {
+            if !is_condition_present(cond, &cond_val) {
                 continue;
             }
         }
@@ -282,4 +299,39 @@ pub(crate) fn spawn_future_with_expr(
         )
         .map_err(|e| format!("{:?}", e))
     })
+}
+
+// Lane C10 regression coverage: comprehension `if` filter conditions must
+// trust `.?`'s own presence decision instead of re-testing the unwrapped
+// payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        // `[x for x in opts if x.?]` must keep a `Some(0)` item.
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
 }

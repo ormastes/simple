@@ -9,11 +9,28 @@ use std::sync::Arc;
 use crate::error::CompileError;
 use crate::value::{enum_names, Env, OptionVariant, ResultVariant, Value};
 use simple_common::actor::Message;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
 // Import from interpreter module (this file is included via #[path] from collections.rs)
 use super::super::super::{eval_arg, evaluate_expr, exec_block, Control, Enums, ImplMethods};
+
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to `Option.filter`'s lambda-predicate body.
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
 
 /// Convert a Message to a Value
 pub(crate) fn message_to_value(msg: Message) -> Value {
@@ -251,7 +268,7 @@ pub(crate) fn eval_option_filter(
                     ctx.enums,
                     ctx.impl_methods,
                 )?;
-                if result.truthy() {
+                if is_condition_present(&body, &result) {
                     return Ok(Value::some(val.as_ref().clone()));
                 }
             }
@@ -367,4 +384,39 @@ pub(crate) fn eval_result_or_else(
         }
     }
     Ok(Value::err(Value::Nil))
+}
+
+// Lane C10 regression coverage: `Option.filter`'s lambda predicate must
+// trust `.?`'s own presence decision instead of re-testing the unwrapped
+// payload's truthiness. See
+// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        // `some_opt.filter(|x| x.?)` on a `Some(0)` payload must keep it.
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
 }

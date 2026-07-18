@@ -244,6 +244,23 @@ fn is_pointer_type(val: &Value) -> bool {
     )
 }
 
+/// Trust `.?`'s own presence decision instead of re-testing the payload's
+/// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
+/// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
+/// back through generic `Value::truthy()` re-decides presence a second time,
+/// this time from the *payload's* truthiness, and wrongly rejects
+/// `Some(0)`/`Some(false)`/etc. Mirrors N2's `is_condition_present`
+/// (interpreter_control.rs, if/elif/while/match-guard sites; see
+/// doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+/// applied here to `and`/`or`/`not` boolean-operator operands.
+fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
+    if matches!(condition_expr, Expr::ExistsCheck(_)) {
+        !matches!(val, Value::Nil)
+    } else {
+        val.truthy()
+    }
+}
+
 pub(super) fn eval_op_expr(
     expr: &Expr,
     env: &mut Env,
@@ -266,7 +283,7 @@ pub(super) fn eval_op_expr(
             match op {
                 BinOp::AndSuspend => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    let left_result = left_val.truthy();
+                    let left_result = is_condition_present(left, &left_val);
 
                     // COVERAGE: Record left condition of &&~
                     record_condition_coverage("<source>", 0, 0, 0, left_result);
@@ -280,7 +297,7 @@ pub(super) fn eval_op_expr(
                     // Left is truthy, await right and return logical AND
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                     let awaited_right = await_value(right_val)?;
-                    let right_result = awaited_right.truthy();
+                    let right_result = is_condition_present(right, &awaited_right);
 
                     // COVERAGE: Record right condition of &&~
                     record_condition_coverage("<source>", 0, 0, 1, right_result);
@@ -289,7 +306,7 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::OrSuspend => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    let left_result = left_val.truthy();
+                    let left_result = is_condition_present(left, &left_val);
 
                     // COVERAGE: Record left condition of ||~
                     record_condition_coverage("<source>", 0, 1, 0, left_result);
@@ -303,7 +320,7 @@ pub(super) fn eval_op_expr(
                     // Left is falsy, await right and return its truthiness
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                     let awaited_right = await_value(right_val)?;
-                    let right_result = awaited_right.truthy();
+                    let right_result = is_condition_present(right, &awaited_right);
 
                     // COVERAGE: Record right condition of ||~
                     record_condition_coverage("<source>", 0, 1, 1, right_result);
@@ -312,19 +329,19 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::And => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    if !left_val.truthy() {
+                    if !is_condition_present(left, &left_val) {
                         return Ok(Some(Value::Bool(false)));
                     }
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-                    return Ok(Some(Value::Bool(right_val.truthy())));
+                    return Ok(Some(Value::Bool(is_condition_present(right, &right_val))));
                 }
                 BinOp::Or => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    if left_val.truthy() {
+                    if is_condition_present(left, &left_val) {
                         return Ok(Some(Value::Bool(true)));
                     }
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-                    return Ok(Some(Value::Bool(right_val.truthy())));
+                    return Ok(Some(Value::Bool(is_condition_present(right, &right_val))));
                 }
                 BinOp::ShiftRight | BinOp::Compose => {
                     // Compose operator: f >> g → \__c0: g(f(__c0))
@@ -1497,7 +1514,7 @@ pub(super) fn eval_op_expr(
                         Value::Int(int_value.wrapping_neg())
                     }
                 }
-                UnaryOp::Not => Value::Bool(!val.truthy()),
+                UnaryOp::Not => Value::Bool(!is_condition_present(operand, &val)),
                 UnaryOp::BitNot => Value::Int(!val.as_int()?),
                 UnaryOp::Ref => Value::Borrow(BorrowValue::new(val)),
                 UnaryOp::RefMut => Value::BorrowMut(BorrowMutValue::new(val)),
@@ -2041,5 +2058,44 @@ mod tests {
     fn fast_int_binop_declines_non_integer_special_forms() {
         assert!(matches!(fast_int_binop(&BinOp::In, 1, 2), Ok(None)));
         assert!(matches!(fast_int_binop(&BinOp::NotIn, 1, 2), Ok(None)));
+    }
+}
+
+// Lane C10 regression coverage: `and`/`or`/`not` must trust `.?`'s own
+// presence decision instead of re-testing the unwrapped payload's
+// truthiness. See doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+// ("Known follow-up") and N2's `is_condition_present` (interpreter_control.rs).
+#[cfg(test)]
+mod is_condition_present_tests {
+    use super::*;
+
+    fn exists_check_cond() -> Expr {
+        Expr::ExistsCheck(Box::new(Expr::Identifier("x".to_string())))
+    }
+
+    #[test]
+    fn trusts_exists_check_presence_for_falsy_payload() {
+        // Some(0)/Some(false) -- `.?` already decided "present"; must not
+        // be re-tested via generic truthy() on the falsy payload. (Note:
+        // Some("") is a different case -- ExistsCheck's own empty-string
+        // rule already collapses it to Nil before this helper ever sees
+        // it; see interpreter/expr.rs's ExistsCheck arm.)
+        let cond = exists_check_cond();
+        assert!(is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Bool(false)));
+    }
+
+    #[test]
+    fn trusts_exists_check_absence_for_nil() {
+        let cond = exists_check_cond();
+        assert!(!is_condition_present(&cond, &Value::Nil));
+    }
+
+    #[test]
+    fn falls_back_to_generic_truthy_for_non_exists_check() {
+        // A plain (non-`.?`) operand keeps ordinary truthiness semantics.
+        let cond = Expr::Integer(0);
+        assert!(!is_condition_present(&cond, &Value::Int(0)));
+        assert!(is_condition_present(&cond, &Value::Int(1)));
     }
 }
