@@ -58,7 +58,7 @@ source fixes from executable proof.
 | 4 | Enum text-payload source fix landed; strict default-LLVM + explicit-Cranelift callback/match/field-assignment proof added, execution pending. |
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
-| 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with flagless default-LLVM and explicit-Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V64 QEMU and flagless-LLVM ARM32/RV32 correctness object gates. Execution is pending. |
+| 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with flagless default-LLVM and explicit-Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V64 QEMU, flagless-LLVM ARM32/RV32 objects, and Windows ARM64 LLVM/Cranelift objects. Execution is pending. |
 | 8 | Open/partial; typed local/direct-call Option `?` support, resolved/unresolved-method provenance, and additive `rt_enum_id` surfaces are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method native-authoritative checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target objects without the retired diagnostic. Execution is pending and genuinely unknown late dispatch remains unguessed. The flat payload-3 collision and uniform tagged Option ABI remain open; flat text unwrap is implemented but unexecuted. |
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
@@ -123,9 +123,10 @@ trait codegen paths convert that sentinel to `compileerror_target_unsupported`.
 First staged execution of the rejection and QEMU checks is pending.
 
 Windows x86_64 LLVM CI now also uses its freshly staged pure-Simple compiler
-to emit an `aarch64-pc-windows-msvc` COFF object with the default backend and
-requires `IMAGE_FILE_MACHINE_ARM64`. The legacy Windows ARM64 job that only
-inspected the repository's Linux binary has been removed.
+to emit `aarch64-pc-windows-msvc` COFF objects with flagless default LLVM and
+explicit Cranelift, requires `IMAGE_FILE_MACHINE_ARM64`, and compiles the shared
+Result/numeric fixture under both backends. The legacy Windows ARM64 job that
+only inspected the repository's Linux binary has been removed.
 
 Cranelift AOT source now sends the exact requested target triple from the
 pure-Simple target-context owner through a new ABI entrypoint; the legacy
