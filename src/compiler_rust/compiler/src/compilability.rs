@@ -410,12 +410,27 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::CollectionLiteral);
         }
 
+        // Dict literals lower to MIR Call sequences (rt_dict_new + rt_index_set)
+        // and stay on the native path, same as Array/Tuple above. Forcing a
+        // hybrid-interpreter fallback here (as a leftover from before the
+        // Array/Tuple fix) routes the *caller's* call to any Dict-returning
+        // function through InterpCall. InterpCall's return handling only
+        // special-cases scalar/f64/rt_-or-spl_-prefixed externs and the
+        // tuple/text `boxed_result` allowlist (see `return_type_keeps_boxed`
+        // in this file and `compile_interp_call` in codegen/instr/core.rs);
+        // a plain user function returning a generic/composite type like Dict
+        // falls through to "keep boxed", leaving the interpreter's boxed
+        // RuntimeValue wrapper in the destination vreg instead of the native
+        // tagged Dict handle. Downstream native Dict method calls then read
+        // the wrong representation, corrupting len()/contains_key()/indexing
+        // (see doc/08_tracking/bug/s59_cranelift_dict_return_abi_root_cause_2026-07-17.md).
+        // Keep walking nested expressions for unsupported constructs, but do
+        // not force hybrid fallback just because a helper constructs a dict.
         Expr::Dict(entries) => {
             for (key, value) in entries {
                 analyze_expr(key, reasons);
                 analyze_expr(value, reasons);
             }
-            add_reason(reasons, FallbackReason::CollectionLiteral);
         }
 
         // Range needs collection runtime
@@ -869,6 +884,36 @@ mod tests {
         assert!(
             status.is_compilable(),
             "array literal helper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    // Regression test for the seed cranelift Dict-return ABI miscompile
+    // (doc/08_tracking/bug/s59_cranelift_dict_return_abi_root_cause_2026-07-17.md,
+    // doc/08_tracking/bug/seed_native_cranelift_dict_return_abi_2026-07-17.md).
+    //
+    // Before the fix, `Expr::Dict` unconditionally added
+    // `FallbackReason::CollectionLiteral`, marking any function containing a
+    // Dict literal as non-compilable — even though Dict literals lower to
+    // ordinary MIR `Call` sequences (rt_dict_new + rt_index_set) and compile
+    // natively just like Array/Tuple literals (which were already exempted
+    // from this same fallback reason in the same match statement). That
+    // misclassification forced every *caller* of a Dict-returning function
+    // through `InterpCall`, whose return-value handling only special-cases
+    // scalar/f64/rt_-or-spl_-prefixed externs plus the tuple/text
+    // `boxed_result` allowlist — leaving the interpreter bridge's boxed
+    // RuntimeValue wrapper (instead of the native tagged Dict handle) in the
+    // destination vreg, which corrupted downstream `Dict.len()` /
+    // `contains_key()` / indexing.
+    #[test]
+    fn test_function_with_dict_compilable() {
+        let results = parse_and_analyze(
+            "fn make_dict() -> Dict<text, i64>:\n    var d: Dict<text, i64> = {}\n    d[\"a\"] = 11\n    d\n",
+        );
+        let status = results.get("make_dict").unwrap();
+        assert!(
+            status.is_compilable(),
+            "dict literal helper should compile natively (same as array/tuple), got {:?}",
             status.reasons()
         );
     }

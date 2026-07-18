@@ -194,4 +194,72 @@ mod tests {
         non_compilable.insert("complex_fn".to_string());
         assert!(needs_hybrid_support(&func, &non_compilable));
     }
+
+    /// Regression test for the seed cranelift Dict-return ABI miscompile
+    /// (doc/08_tracking/bug/s59_cranelift_dict_return_abi_root_cause_2026-07-17.md).
+    ///
+    /// Reproduces the actual mechanism end to end at the boundary between
+    /// `compilability::analyze_module` (real AST-driven classification) and
+    /// this module's `transform_function` (the MIR rewrite that turned the
+    /// bug into a corrupted runtime value): before the fix, a Dict-returning
+    /// function was classified non-compilable purely for containing a Dict
+    /// literal, which caused any caller's `Call` to it to be rewritten into
+    /// `InterpCall`. `InterpCall`'s return handling (codegen/instr/core.rs
+    /// `compile_interp_call`) only special-cases scalar/f64/rt_-or-spl_
+    /// externs plus the tuple/text `boxed_result` allowlist, so a plain user
+    /// function's boxed interpreter RuntimeValue leaked into the native
+    /// vreg instead of the native tagged Dict handle — corrupting
+    /// `len()`/`contains_key()`/indexing downstream. This test parses the
+    /// real two-function repro, runs the real `analyze_module` classifier,
+    /// and asserts the caller's call to the Dict-returning callee survives
+    /// `transform_function` as a plain `Call`, not `InterpCall`.
+    #[test]
+    fn dict_returning_function_call_stays_native_not_interp_call() {
+        use crate::compilability::analyze_module;
+        use simple_parser::Parser;
+
+        let source = "fn ret_built() -> Dict<text, i64>:\n    \
+                       var d: Dict<text, i64> = {}\n    \
+                       d[\"a\"] = 11\n    \
+                       d\n\n\
+                       fn main() -> i64:\n    \
+                       val d = ret_built()\n    \
+                       0\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse repro source");
+        let statuses = analyze_module(&module.items);
+
+        let ret_built_status = statuses
+            .get("ret_built")
+            .expect("ret_built should be analyzed");
+        assert!(
+            ret_built_status.is_compilable(),
+            "ret_built (Dict-returning, Dict-literal body) must be classified compilable \
+             (same as an equivalent Array/Tuple-returning helper); got reasons {:?}",
+            ret_built_status.reasons()
+        );
+
+        let non_compilable: HashSet<String> = statuses
+            .iter()
+            .filter(|(_, status)| !status.is_compilable())
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert!(
+            !non_compilable.contains("ret_built"),
+            "ret_built must not be in the non_compilable set fed to apply_hybrid_transform"
+        );
+
+        // Mirror the real MIR shape (a caller with a `Call` to the
+        // Dict-returning callee) and run it through the actual hybrid
+        // transform used by the compile pipeline.
+        let mut caller = make_test_function("main", vec![make_call(0, "ret_built")]);
+        transform_function(&mut caller, &non_compilable, &HashSet::new());
+
+        assert!(
+            matches!(caller.blocks[0].instructions[0], MirInst::Call { .. }),
+            "caller's call to a Dict-returning function must stay a native Call, \
+             not be rewritten to InterpCall: {:?}",
+            caller.blocks[0].instructions[0]
+        );
+    }
 }
