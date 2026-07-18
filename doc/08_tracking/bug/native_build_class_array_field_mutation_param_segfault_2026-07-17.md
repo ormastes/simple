@@ -1,8 +1,8 @@
 # native-build SIGSEGV: class-in-array field mutation through a function param
 
-- **Status:** OPEN — filed, not fixed (found incidentally while verifying
-  `struct_param_mutation_semantics_2026-07-03.md`'s class-reference-semantics
-  fix; confirmed pre-existing and unrelated to that fix)
+- **Status:** FIXED — the later named-array type bridge fix preserves class
+  element identity across parameters; LLVM and Cranelift verification passed
+  on 2026-07-18.
 - **Discovered:** 2026-07-17, lane s19
 - **Area:** native-build MIR/codegen — array-of-class parameter + indexed
   element field write
@@ -57,7 +57,7 @@ mutating correctly. Not yet root-caused; likely in the MIR lowering for
 array parameter's element storage interacts with the class reference-binding
 introduced by the sibling fix above.
 
-## Next step
+## Historical next step
 
 Not fixed in lane s19 (out of scope: a different codegen path from the
 function-parameter mutation-drop bug this lane targeted). Needs its own
@@ -73,14 +73,12 @@ The exact two-element/static-constructor shape is checked in at
 Run it through both native backends with:
 
 ```sh
-NATIVE_OPEN_BUG_REPROS=1 \
 NATIVE_PARITY_CASES=class_array_param_field_mutation \
 sh scripts/check/check-native-seed-parity.shs
 ```
 
-It is intentionally excluded from the default green parity gate while this
-issue is OPEN; it is a strict repro, not an expected-failure waiver. Remove
-the opt-in guard only after both backend legs print exactly `1` and exit 0.
+It is now part of the default strict dual-backend parity gate. Both backend
+legs print exactly `1` and exit 0.
 
 ## Current-source audit (2026-07-17)
 
@@ -91,9 +89,9 @@ which is the shared provenance path required by the subsequent field write.
 `mir_lowering_new_spec.spl` now pins that path, the critical mutation shape,
 and its strict harness registration.
 
-This is source hardening, not runtime closure. The strict dual-backend fixture
-remains opt-in until LLVM and Cranelift both print `1` and exit zero; only then
-should it join the Linux, macOS, Windows, and FreeBSD selected green gates.
+This source hardening now has runtime closure. The strict dual-backend fixture
+is part of the default gate after LLVM and Cranelift both printed `1` and
+exited zero.
 
 ## Root-cause narrowing (2026-07-17, lane S53 — #138 self-host census)
 
@@ -148,6 +146,7 @@ localized MIR-lowering patch.
 MIR-dump inspection of this crash is not available through the plain
 native-build path; use a JIT/interpreter path or capture worker stderr.
 
-Not fixed in lane S53 (deep codegen box-model change, high regression risk on
-the self-host build; out of a single census lane's safe scope). Analysis above
-supersedes the "likely Index + FieldSet lowering" guess in the Impact section.
+The later s54d named-array bridge fix supplied the missing element identity;
+no additional box-model change was required. Incremental verification with
+the pure Stage2 compiler on 2026-07-18 built and ran the durable fixture with
+both `--backend llvm` and `--backend cranelift`; each printed `1` and exited 0.
