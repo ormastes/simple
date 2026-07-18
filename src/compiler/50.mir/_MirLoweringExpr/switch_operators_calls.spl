@@ -1212,11 +1212,10 @@ impl MirLowering:
         use of undefined value).
 
         Option: presence is tested via rt_is_some, mirroring `.unwrap()`'s
-        mechanics in method_calls_literals.spl. On absence, propagate None
-        upward by returning the SAME reserved nil sentinel (bit pattern 3)
-        that a bare `nil` tail expression in an Optional-returning function
-        already emits (see NilLit in expr_dispatch.spl) -- an early
-        `terminate_return` instead of `.unwrap()`'s panic.
+        mechanics in method_calls_literals.spl. On absence, promote the raw
+        nil local to the canonical enum-id-1 None handle before the early
+        `terminate_return`; otherwise this branch bypasses the enclosing
+        function's normal typed-return promotion.
 
         Payload extraction must handle BOTH physical Option representations
         this codebase has: the flat-nullable ABI (`val x: i64? = 3`), whose
@@ -1234,11 +1233,9 @@ impl MirLowering:
         a flat raw payload (even one that aliases the heap-tag bits) is
         never registered, so this correctly routes flat payloads through
         raw-passthrough and boxed Some(v) through rt_enum_payload. This
-        inherits, unchanged, the same already-accepted flat-ABI trade-off
-        every other flat Option operation has (is_some/unwrap/unwrap_or/??/
-        .? -- see NilLit's comment): a literal flat payload of exactly `3`
-        is indistinguishable from None. That is a pre-existing ABI
-        limitation, not a new gap introduced by this lowering."""
+        retains migration handling for an unpromoted flat value, while typed
+        producers and boundaries use ensure_option_handle so payload `3` is
+        unambiguous."""
         if val base_type = self.enum_match_expr_type(base):
             match base_type.kind:
                 case HirTypeKind.Optional(inner):
@@ -1348,16 +1345,21 @@ impl MirLowering:
                     b_flat_some.terminate_goto(payload_merge_block)
                     self.builder = b_flat_some
 
-                    # Absent (either lane): propagate None upward via the
-                    # SAME reserved nil sentinel a bare `nil` tail expression
-                    # already emits.
+                    # Absent (either lane): propagate the same canonical
+                    # enum-id-1 None handle used by every other typed Optional
+                    # return. Returning the raw nil sentinel here bypassed the
+                    # function-return promotion because this is an early MIR
+                    # terminator.
                     var b_none = self.builder
                     b_none.switch_to_block(none_block)
                     val nil_result = b_none.new_temp(MirType.i64())
                     b_none.emit_const(nil_result, MirConstValue.Int(3), MirType.i64())
                     self.nil_locals[nil_result.id] = true
-                    b_none.terminate_return(Some(mir_operand_copy(nil_result)))
                     self.builder = b_none
+                    val none_handle = self.ensure_option_handle(nil_result, base_type)
+                    var b_none2 = self.builder
+                    b_none2.terminate_return(Some(mir_operand_copy(none_handle)))
+                    self.builder = b_none2
 
                     var b_pm = self.builder
                     b_pm.switch_to_block(payload_merge_block)
@@ -2538,9 +2540,15 @@ impl MirLowering:
 
         var arg_operands: [MirOperand] = []
         var call_param_types: [HirType] = []
-        if is_direct:
+        # A Var/NamedVar callee keeps its resolved symbol even when it names a
+        # local function value and therefore is not a direct call. Recover the
+        # declared parameter types from that symbol too, so `f(3)` can promote
+        # raw payload 3 to the canonical Option handle before the callee sees
+        # it. The callee expression type remains a fallback for symbol-less
+        # function values.
+        if mir_expr_symbol_id_value(direct_symbol) >= 0:
             call_param_types = self.resolved_call_hir_param_types(direct_symbol)
-        elif callee.has_type_:
+        if call_param_types.len() == 0 and callee.has_type_:
             match callee.type_.kind:
                 case HirTypeKind.Function(params, _, _):
                     call_param_types = params

@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** typed local/direct-call support implemented and execution-verified on native-build `--entry`; method-call support also implemented and verified for a method call whose RECEIVER has a statically recoverable declared type (a typed local/parameter) — chained calls and receivers with no recoverable static type still fall through to the Result decoder unrecognized; uniform tagged Option ABI (payload-3 collision) remains open
+**Status:** typed local/direct/method-call `?` support is source-implemented; the enum-id-1 Option migration now covers typed boundaries, true function-valued calls, and early `?` absence. The strict LLVM/Cranelift ABI matrix remains opt-in pending current-source execution; the separate `.?` consumer and legacy Cranelift generic-call shortcut remain follow-ups.
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -156,15 +156,20 @@ native-authoritative cases under flagless LLVM and explicit Cranelift. ARM32
 default LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target
 objects and reject the retired fail-closed diagnostic. Static portability
 coverage pins backend selection and the target-object contract. Execution is
-pending; the payload-3 collision and uniform tagged Option ABI remain open.
+pending. The payload-3 producer collision is source-fixed by the enum-id-1
+migration, but the full strict-dual ABI matrix remains opt-in until executed.
 
 The exact open ABI matrix is preserved in
 `test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl`. It covers
-raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`, and
-raw/explicit `Some(0)` controls. Set `NATIVE_OPEN_BUG_REPROS=1` on the native
-parity harness to run it under default LLVM and explicit Cranelift; expected
-output is `3377777700`. It remains opt-in and red until all typed boundaries
-share the uniform tagged representation.
+raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`,
+raw/explicit `Some(0)` controls, annotated locals/aliases, true function-valued
+calls, parameters, returns, fields, `if`/`match` merges, and present/absent `?`
+propagation. Set `NATIVE_OPEN_BUG_REPROS=1` on the native parity harness to run
+it under default LLVM and explicit Cranelift; expected output is
+`337777770033377703377737773777377737771`; the final `1` is the direct
+`rt_enum_id(through_try(nil))` representation oracle, which distinguishes the
+canonical None handle from legacy raw nil (`-1`). It remains opt-in until both backends
+pass the current-source incremental run.
 
 ## Regression re-fixed: resolved method-call Option try silently wrong again — root-caused + fixed + execution-verified (2026-07-18, P4 lane)
 
@@ -271,8 +276,8 @@ in scope for this pass (the fresh self-hosted `bin/simple run` currently
 errors out unrelated to this bug — a lint diagnostic on explicit `self.`
 usage in a different, pre-existing native-build regression — and the stale
 seed's own `run` prints no output for this fixture either; neither was
-usable as a clean oracle here). The uniform tagged Option ABI (payload-3
-collision) remains the one genuinely open item.
+usable as a clean oracle here). The uniform tagged Option ABI was subsequently
+source-migrated; its current-source strict-dual execution remains pending.
 
 **Scope note:** this fix is entirely in the *type-gating* layer
 (`enum_match_expr_type`) that decides whether `lower_try_expr`'s Optional
@@ -286,5 +291,113 @@ them reachable). The regression fixed here is that a resolved method call's
 Option return type was silently un-recognized so the base fell through to the
 *unconditional Result decoder* instead — a wrong-decoder selection, not a
 wrong offset inside the right decoder. The one place an actual payload-slot
-ambiguity remains is the documented, separate, and still-open uniform tagged
-Option ABI item (raw payload `3` colliding with the None sentinel) above.
+ambiguity was the documented uniform tagged Option ABI item above; the later
+enum-id-1 migration removes that producer collision in source, pending its
+strict-dual execution gate.
+
+## Round-10 landing regression, fixed before re-land (2026-07-18, P4 lane)
+
+Commit `affc31afd7d` above was dropped from the round-10 landing batch: the
+coordinator's landing matrix hit
+`error: semantic: method 'has' not found on type 'nil' (receiver value:
+nil)` building `struct_field` (a struct with fields but NO methods —
+`Point(x: 30, y: 41); return p.x + p.y`, the exact `native-smoke-matrix.shs`
+case #6, rc 71) — i.e. every struct program, not just Option/method-call
+ones, failed to native-build.
+
+**Root cause:** the `struct_method_syms` fallback added in `affc31afd7d`
+called `self.struct_method_syms.has(method_key)` unguarded. `struct_method_syms`
+is declared as a plain (non-optional) `Dict<text, SymbolId>` field on
+`MirLowering` (`mir_lowering_types.spl:105`) and is initialized to `{}` in the
+constructors this lane inspected (`module_lowering.spl:82,425`) — but on the
+coordinator's landing-matrix run it was still nil at the point
+`enum_match_expr_type` ran for a struct with no methods, and calling `.has()`
+on that nil field is a hard build-time error, not a graceful "key not found."
+This lane's own local verification matrix (stale-seed `native-build --entry`
+re-run of the full 19-case `native-smoke-matrix.shs`, including
+`struct_field`) did **not** reproduce the crash — `struct_method_syms` came
+back non-nil in every local run — so the exact nil-triggering condition
+differs between this lane's environment and the landing pipeline's; the
+matrix was too narrow regardless (it happened to never probe this field's
+nil-ness directly) and is now widened per the fix below.
+
+**Fix:** guard the same line with an explicit `!= nil` check, matching the
+idiom already used everywhere else in this function (e.g. `if callee_type !=
+nil:` in the `Call` arm) — `if self.struct_method_syms != nil and
+self.struct_method_syms.has(method_key):`. When nil, the fallback is skipped
+gracefully (same as the pre-`affc31afd7d` behavior for this shape) instead of
+crashing. `option_variant_order_source_spec.spl`'s pinned-source assertion was
+updated to match the new guarded line so it can't regress unguarded again.
+
+**Verification (stale deployed seed
+`/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`,
+`native-build --entry ... --clean`, `env -u SIMPLE_BOOTSTRAP
+SIMPLE_NO_STUB_FALLBACK=1` unless noted):**
+- Full `native-smoke-matrix.shs` (all 19 cases, `SIMPLE_BINARY=<stale seed>`):
+  19/19 PASS, including `struct_field` -> rc 71 (own struct-with-no-methods
+  case added to this lane's local checks too: `Point(x,y); return p.x+p.y`
+  native-builds and exits 71).
+- Original regression target still fixed: `native_option_try_unresolved_method_loud.spl`
+  -> `6`.
+- No regression on the rest of this lane's matrix: `annotated_loud`->5,
+  `direct_loud`->4, Result `?` cross-check->`8boom`, `match Src(v:9).get():
+  case Ok(x)`->9, `match source.label(): case Ok(s)` (Var receiver,
+  `Result<text,_>`)->`hi`, `match Src(v:11).maybe()`->`none` (pre-existing,
+  unrelated, unchanged).
+- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl`: 4
+  examples, 0 failures.
+
+**Honesty note on the guard's effectiveness (not just its safety):** every
+verification above proves the guard is *safe* (no new crash, no behavior
+change on any reachable path in this lane's environment) — it does NOT prove
+the guard *fires*, because this lane could not reproduce
+`struct_method_syms` actually being nil. Traced the field's only constructor,
+`MirLowering.new_for_target` (`module_lowering.spl:60`), which
+unconditionally sets `struct_method_syms: {}` (never nil) — every
+`MirLowering` instance this lane's build creates, including the lambda-lift
+child context (`lw = MirLowering.new_for_target(...)` at
+`switch_operators_calls.spl:2230`, which then copies the parent's dict at
+line 2240), starts non-nil. `!= nil` was chosen over the coordinator's
+suggested `.?` because `.?` is this codebase's documented Option-unwrap
+check (used on `Symbol?`/`HirType?` elsewhere in this same file), while
+`struct_method_syms` is declared as a plain non-optional `Dict<text,
+SymbolId>` — `!= nil` is the same idiom this exact function already uses
+successfully for its other nil-checks (e.g. `if callee_type != nil:`) and is
+a plain value comparison that does not depend on the field's static
+optionality, so it should still correctly detect a genuinely-nil runtime
+value if the interpreter's dynamic-typing leniency ever puts one there (a
+documented interpreter-landmine class in this repo — see
+`reference_interpreter_dict_and_value_quirks` — even though this lane could
+not manufacture that exact condition from the constructor it could find).
+**This guard has not been confirmed to fire in the specific case the
+coordinator's landing matrix hit; only that it cannot make anything worse.
+Please re-run the round-10 landing matrix against this new commit to confirm
+`struct_field` (and the rest of the batch) actually passes there before
+counting this closed** — if it still fails, the nil source is a construction
+path this lane did not find, and the next lane should grep for other
+`MirLowering(...)` struct-literal constructions or copy sites beyond
+`new_for_target` and the one copy at line 2240.
+
+Committed as a new SHA (see VCS log) for round-11 re-landing.
+
+## Uniform ABI boundary follow-up (2026-07-18)
+
+The expanded fixture exposed that its claimed function-value coverage was not
+actually indirect: `through_function_value(f, value)` first promoted `value`
+at that function's direct typed boundary, so the later `f(value)` never tested
+a raw payload crossing a local function value. `lower_call` also discarded the
+retained callee symbol's parameter types after classifying a local callee as
+non-direct, so a real `f(3)` passed raw `3` and the callee mistook it for nil.
+Parameter-type recovery now uses the retained symbol for direct and local
+function-value calls, with the expression type as fallback.
+
+The Optional `?` none block also emitted an early raw-sentinel return, bypassing
+the normal function-return promotion. It now passes that nil local through
+`ensure_option_handle` before terminating. The fixture uses genuine `f(3)` /
+`f(nil)` calls and adds present/absent `?` propagation; the source contract
+pins both lowering paths and the exact expanded output. A direct `rt_enum_id`
+check makes the absent-`?` row representation-sensitive instead of relying on
+`unwrap_or`, which intentionally accepts both canonical and migration nil. The matrix stays opt-in
+until focused LLVM and Cranelift executions pass. A separate `.?` payload
+consumer defect and the Cranelift adapter's legacy generic
+`unwrap`/`unwrap_err`/`unwrap_or` identity shortcut are not claimed fixed here.
