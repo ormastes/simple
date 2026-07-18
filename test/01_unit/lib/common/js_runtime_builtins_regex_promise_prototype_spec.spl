@@ -1,0 +1,52 @@
+use std.spec.*
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+
+# Repro for doc/08_tracking/bug/js_engine_missing_builtins_regex_promise_prototype_2026-07-11.md
+# 1. String.prototype.replace with a regex literal was a no-op.
+# 2. typeof Promise reported "undefined" even though Promise is a working pseudo-global.
+# 3. typeof on present prototype methods ([].forEach, ''.replace) reported "undefined".
+
+fn _runtime_eval_text(source: text) -> text:
+    val runtime = JsRuntime.new(Logger.new("builtins-gap", LogLevel.Error))
+    val result = runtime.eval(source)
+    match result:
+        Ok(value):
+            match value:
+                JsValue.String(v): v
+                JsValue.Number(v):
+                    var s = "{v}"
+                    if s.ends_with(".0"):
+                        return s.substring(0, s.len() - 2)
+                    s
+                JsValue.Boolean(v): if v: "true" else: "false"
+                JsValue.Undefined: "undefined"
+                _: "object"
+        Err(err): "error"
+
+describe "JS engine builtin gaps: regex replace, Promise typeof, prototype introspection":
+    it "performs regex substitution for String.prototype.replace with a regex literal":
+        expect(_runtime_eval_text("'abc'.replace(/b/, 'X')")).to_equal("aXc")
+
+    it "replaces only the first match without the g flag":
+        expect(_runtime_eval_text("'abcabc'.replace(/b/, 'X')")).to_equal("aXcabc")
+
+    it "supports character classes and quantifiers in the regex literal":
+        expect(_runtime_eval_text("'a1 b22'.replace(/[0-9]+/, 'N')")).to_equal("aN b22")
+        expect(_runtime_eval_text("'hello world'.replace(/o/, '0')")).to_equal("hell0 world")
+
+    it "reports typeof Promise as function":
+        expect(_runtime_eval_text("typeof Promise")).to_equal("function")
+
+    it "reports typeof on present Array.prototype methods as function":
+        expect(_runtime_eval_text("typeof [].forEach")).to_equal("function")
+        expect(_runtime_eval_text("typeof [].map")).to_equal("function")
+
+    it "reports typeof on present String.prototype methods as function":
+        expect(_runtime_eval_text("typeof ''.replace")).to_equal("function")
+        expect(_runtime_eval_text("typeof ''.split")).to_equal("function")
+
+    it "still runs the working reference scripts from the bug report":
+        expect(_runtime_eval_text("1 + 2")).to_equal("3")
+        expect(_runtime_eval_text("[1,2,3].map(function(n){return n*2;}).join(',')")).to_equal("2,4,6")

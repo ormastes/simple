@@ -161,6 +161,24 @@ impl JsInterpreter:
                 return Ok(JsValue.Undefined)
             JsExpression.ArrayPattern(elements):
                 return Ok(JsValue.Undefined)
+            JsExpression.RegexLiteral(pattern, flags):
+                return Ok(self._create_regex_value(pattern, flags))
+
+    # Regex literal /pattern/flags — materialized as a plain object carrying
+    # source/flags/global/ignoreCase/multiline plus an internal marker so
+    # callers (e.g. String.prototype.replace) can detect "this argument is a
+    # regex" without a dedicated JsValue variant (which would ripple through
+    # every exhaustive match on JsValue across the interpreter).
+    me _create_regex_value(pattern: text, flags: text) -> JsValue:
+        val obj_id = self.create_object()
+        self.set_object_property(obj_id, "__simple_is_regexp", JsValue.Boolean(v: true))
+        self.set_object_property(obj_id, "source", JsValue.String(v: pattern))
+        self.set_object_property(obj_id, "flags", JsValue.String(v: flags))
+        self.set_object_property(obj_id, "global", JsValue.Boolean(v: flags.contains("g")))
+        self.set_object_property(obj_id, "ignoreCase", JsValue.Boolean(v: flags.contains("i")))
+        self.set_object_property(obj_id, "multiline", JsValue.Boolean(v: flags.contains("m")))
+        self.set_object_property(obj_id, "lastIndex", JsValue.Number(v: 0.0))
+        JsValue.Object(id: obj_id)
 
     # new operator: new Foo(args)
     me eval_new(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
@@ -373,11 +391,27 @@ impl JsInterpreter:
                             val clear_immediate_fn = JsValue.Function(id: self._register_native("clearImmediate", NATIVE_CLEAR_IMMEDIATE))
                             self.define_global_value("clearImmediate", clear_immediate_fn)
                             return Ok(JsValue.String(v: typeof_value(clear_immediate_fn)))
-                        return Ok(JsValue.String(v: "undefined"))
+                        if name == "Promise":
+                            # Promise is a constructor (callable), but this
+                            # interpreter represents it internally as a plain
+                            # Object carrying resolve/reject/prototype (see
+                            # _promise_global_object) rather than a JsValue.Function,
+                            # so typeof needs an explicit override here to match
+                            # real JS: `typeof Promise === "function"`.
+                            return Ok(JsValue.String(v: "function"))
+                        # Fall through to eval_expression: it is the single source of
+                        # truth for pseudo-globals (window, document, Promise, Buffer,
+                        # process, require, setTimeout, clearTimeout, ...). Duplicating
+                        # that name list here previously drifted out of sync and caused
+                        # `typeof Promise` etc. to wrongly report "undefined" even
+                        # though the identifier resolves fine outside of `typeof`.
+                        val resolved = self.eval_expression(operand, env)?
+                        return Ok(JsValue.String(v: typeof_value(resolved)))
                     val lookup = self.env_stack.get_var(env, name)
                     if val Some(v) = lookup:
                         return Ok(JsValue.String(v: typeof_value(v)))
-                    return Ok(JsValue.String(v: "undefined"))
+                    val resolved_local = self.eval_expression(operand, env)?
+                    return Ok(JsValue.String(v: typeof_value(resolved_local)))
                 _:
                     val v = self.eval_expression(operand, env)?
                     return Ok(JsValue.String(v: typeof_value(v)))
