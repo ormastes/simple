@@ -2,8 +2,9 @@
 
 **Date:** 2026-07-18
 **Lane:** S68
-**Status:** OPEN — documented as a follow-up, NOT fixed here (out of scope for the
-Dict-literal fix landed alongside this doc; risky, needs its own verification).
+**Status:** Dict return case FIXED (S78, 2026-07-18) — see "Fix (S78)" below.
+Object/Enum(Option) composite values nested inside a Dict (or returned
+directly) are still NOT fixed; see that section's "Still open" note.
 **Severity:** P2 (silent wrong result), seed `--native --backend=cranelift` path only.
 
 ## Context
@@ -205,6 +206,85 @@ then calls methods on the result.
 **Recommendation:** Implement the `rt_value_as_handle` fix before any major
 bootstrap with dict-using functions on the native cranelift path. Track as
 a critical pre-release blocker.
+
+## Fix (S78) — 2026-07-18
+
+**Root cause was NOT where the S71 audit sketch guessed.** The audit's "Fix
+Mechanism Sketch" proposed adding a new `rt_value_as_handle` extraction step to
+`compile_interp_call` (`codegen/instr/core.rs`) or `value_ops.rs`, reasoning
+that the interpreter's boxed `RuntimeValue` needed a pointer/tag extraction to
+become the native tagged handle. Tracing the actual data flow end to end
+disproved this:
+
+1. `compile_interp_call` (`codegen/instr/core.rs:758-839`) already does the
+   right thing for a plain (non-`rt_`/`spl_`) function whose destination vreg
+   has no scalar type entry — a Dict-returning function matches this exactly
+   — it falls to the final `else { result }` branch and keeps the value
+   **boxed** as-is. No codegen change was needed or made.
+2. `rt_interp_call` (`runtime/src/value/sffi/interpreter_bridge.rs`) already
+   returns a proper `simple_runtime::RuntimeValue` — the *same* NaN-boxed
+   type used everywhere in compiled code (confirmed: `rt_dict_new`/
+   `rt_dict_len`/etc. all take/return `RuntimeValue` directly — there is only
+   one runtime value representation, not two).
+3. The actual defect: `interp_call_handler`
+   (`compiler/src/interpreter_sffi.rs`) converts the interpreter's own
+   `Value` enum to a `RuntimeValue` via
+   `crate::runtime_bridge::value_to_runtime`
+   (`compiler/src/runtime_bridge.rs`). That function's `match` had **no arm
+   for `Value::Dict`/`Value::FrozenDict`** — every Dict result fell through
+   to the wildcard `_ => RuntimeValue::NIL`, silently discarding the entire
+   dict before it ever reached `compile_interp_call`. `rt_dict_len(NIL)`
+   returns `-1` via its `as_typed_ptr!` fallback (`runtime/src/value/dict.rs`),
+   matching the originally reported symptom exactly.
+
+**Fix:** added a `Value::Dict(map) | Value::FrozenDict(map) => ...` arm to
+`value_to_runtime` (`compiler/src/runtime_bridge.rs`) that marshals the dict
+through `rt_dict_new`/`rt_dict_set` (keys via `rt_string_new`, values
+recursively through `value_to_runtime`), mirroring the existing
+`values_to_runtime_array`/`values_to_runtime_tuple` pattern. Added the
+symmetric `HeapObjectType::Dict` decode arm to `runtime_to_value` (fixes the
+mirror gap for Dict arguments passed *into* an `InterpCall`'d function). **No
+new `rt_` extern was added** — `rt_dict_new`/`rt_dict_set`/`rt_dict_entries`
+already existed and were reused.
+
+**Identity is NOT preserved — this is a deep copy, not a pointer/tag
+extraction.** The interpreter's `Value::Dict` is `Arc<HashMap<String,
+Value>>`; the native `RuntimeDict` (`runtime/src/value/dict.rs`) is a
+separate heap allocation with a different memory layout. There is no shared
+underlying object to extract a handle from. This is correct for a *return
+value*: the interpreter-side dict returned by a freshly-called function has
+no other alias, so a deep copy loses no shared-mutation semantics. It mirrors
+exactly how `Value::Tuple`/`Value::Array` were already handled before this
+fix (`values_to_runtime_tuple`/`values_to_runtime_array`).
+
+**Still open:** `value_to_runtime` still has no arm for `Value::Object`
+(class/struct instances — would need a class-id registry lookup that does
+not currently exist as a simple callable path) or `Value::Enum` (covers
+`Option`). Both still fall to `_ => RuntimeValue::NIL`. This means
+`process_async()`'s `Dict<text, AsyncStateMachine>` (bootstrap-critical,
+`driver_pipeline.spl:257`) is **only partially fixed**: the outer Dict now
+marshals correctly, but if any *value* inside it is an `Object`/`Enum`
+instance, that value still collapses to NIL. `Dict<text, i64>` /
+`Dict<text, text>` / `Dict<text, [T]>` (scalars, strings, arrays, nested
+dicts) round-trip correctly; `Dict<text, SomeClass>` does not yet.
+
+**Verification:**
+- New unit tests in `compiler/src/runtime_bridge.rs` (`value_to_runtime_dict_*`,
+  `dict_runtime_to_value_roundtrip`, `frozen_dict_also_marshals_to_native_dict`)
+  and `compiler/src/mir/hybrid.rs`
+  (`dict_returning_function_with_try_operator_still_routes_through_interp_call`).
+- `cargo test -p simple-compiler --lib` targeted families (runtime_bridge,
+  mir::hybrid, compilability, codegen) all green except pre-existing,
+  unrelated failures verified via file-swap A/B against pristine HEAD
+  (identical failing-test-name sets before/after, byte-for-byte, for the
+  `codegen` family: 143/143).
+- End-to-end: seed release binary rebuilt incrementally; a repro `.spl`
+  (Dict-returning function using `.?` inside to force
+  `FallbackReason::TryOperator`, called from a native `main`) via
+  `native-build --backend cranelift` (`SIMPLE_NATIVE_BUILD_RUST=1` to use the
+  Rust seed handler directly). Before the fix: `main` returns/exits with the
+  corrupted `len()` (`-1`, truncated to exit code `255`). After the fix:
+  `main` exits `2` (correct `len()` for a 2-entry dict).
 
 ## Related
 

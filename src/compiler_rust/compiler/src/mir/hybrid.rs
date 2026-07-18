@@ -262,4 +262,80 @@ mod tests {
             caller.blocks[0].instructions[0]
         );
     }
+
+    /// Regression test for the S68/S71 "composite-return InterpCall" gap
+    /// (doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md).
+    ///
+    /// Unlike `dict_returning_function_call_stays_native_not_interp_call`
+    /// above (which shows a *Dict-literal* alone no longer forces
+    /// `InterpCall`), this reproduces the residual gap: a Dict-returning
+    /// function that uses the Try operator (`?`) — the trigger the S71 audit
+    /// found in *all 24* Dict-returning pure-Simple compiler functions — is
+    /// still, correctly, classified non-compilable, so the caller's `Call`
+    /// IS rewritten to `InterpCall`. That's expected and unavoidable without
+    /// widening the classifier (out of scope here). What must never regress
+    /// silently is the value crossing that `InterpCall` boundary: this test
+    /// locks in that the routing precondition (Dict-returning function with
+    /// TryOperator forced through InterpCall) still holds, so the
+    /// `value_to_runtime` fix in `runtime_bridge.rs` (which is what actually
+    /// keeps the boxed result correct — see its `value_to_runtime_dict_*`
+    /// tests) stays load-bearing rather than dead code.
+    #[test]
+    fn dict_returning_function_with_try_operator_still_routes_through_interp_call() {
+        use crate::compilability::analyze_module;
+        use simple_parser::Parser;
+
+        let source = "fn ret_via_try() -> Dict<text, i64>:\n    \
+                       var d: Dict<text, i64> = {}\n    \
+                       val x = maybe_int()?\n    \
+                       d[\"a\"] = x\n    \
+                       d\n\n\
+                       fn main() -> i64:\n    \
+                       val d = ret_via_try()\n    \
+                       0\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse repro source");
+        let statuses = analyze_module(&module.items);
+
+        let status = statuses
+            .get("ret_via_try")
+            .expect("ret_via_try should be analyzed");
+        assert!(
+            !status.is_compilable(),
+            "ret_via_try (Dict-returning, TryOperator body) must still require the \
+             interpreter — this is the audited S71 gap precondition, not a regression"
+        );
+
+        let non_compilable: HashSet<String> = statuses
+            .iter()
+            .filter(|(_, status)| !status.is_compilable())
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert!(non_compilable.contains("ret_via_try"));
+
+        let mut caller = make_test_function("main", vec![make_call(0, "ret_via_try")]);
+        // `boxed_return_functions` does not (yet) cover Dict — mirrors the
+        // real driver-computed set for this case.
+        transform_function(&mut caller, &non_compilable, &HashSet::new());
+
+        assert!(
+            matches!(caller.blocks[0].instructions[0], MirInst::InterpCall { .. }),
+            "caller's call to a TryOperator-bodied Dict-returning function must be \
+             rewritten to InterpCall: {:?}",
+            caller.blocks[0].instructions[0]
+        );
+        if let MirInst::InterpCall {
+            func_name,
+            boxed_result,
+            ..
+        } = &caller.blocks[0].instructions[0]
+        {
+            assert_eq!(func_name, "ret_via_try");
+            // Correctness no longer depends on this flag: `compile_interp_call`
+            // already leaves non-scalar destinations boxed by default, and
+            // `value_to_runtime` (runtime_bridge.rs) now marshals `Value::Dict`
+            // to a real native RuntimeDict instead of collapsing to NIL.
+            assert!(!boxed_result);
+        }
+    }
 }

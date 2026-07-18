@@ -79,6 +79,33 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         // across the interpreter bridge (see compile_interp_call).
         Value::Tuple(data) => values_to_runtime_tuple(data.iter()),
         Value::LabeledTuple { values, .. } => values_to_runtime_array(values.iter()),
+        // A Dict must marshal to a real native `RuntimeDict` heap object (not
+        // NIL) so a composite (Dict/Map) return value that is forced through
+        // the interpreter bridge (`InterpCall` — e.g. via a TryOperator or
+        // PatternMatch fallback reason unrelated to the value's own type)
+        // round-trips correctly to native `Dict.len()` / `Dict.contains_key()`
+        // / indexing on the caller side.
+        //
+        // Root cause of the S68/S71 "composite-return InterpCall" gap: this
+        // match had NO arm for `Value::Dict`/`Value::FrozenDict`, so it fell
+        // through to the wildcard `_ => RuntimeValue::NIL` below, silently
+        // discarding the entire dict. `compile_interp_call` in
+        // codegen/instr/core.rs already keeps composite results boxed
+        // correctly (no codegen change needed) — the corruption happened
+        // upstream, here, before the boxed RuntimeValue was ever handed back
+        // to compiled code. `rt_dict_len(NIL)` returns -1, matching the
+        // originally reported symptom exactly.
+        //
+        // The interpreter's `Value::Dict` (`Arc<HashMap<String, Value>>`) and
+        // the native `RuntimeDict` are separate heap allocations with
+        // different memory layouts — there is no shared underlying object to
+        // extract a pointer/tag from, so identity cannot be preserved across
+        // this boundary. This is necessarily a copy (mirrors the existing
+        // `values_to_runtime_array`/`values_to_runtime_tuple` marshaling
+        // above), which is correct for a *return value*: the interpreter-side
+        // dict is a fresh, uniquely-owned object with no other alias, so a
+        // deep copy loses no shared-mutation semantics.
+        Value::Dict(map) | Value::FrozenDict(map) => values_to_runtime_dict(map.iter()),
         _ => RuntimeValue::NIL,
     }
 }
@@ -95,6 +122,27 @@ fn values_to_runtime_tuple<'a>(items: impl IntoIterator<Item = &'a Value>) -> Ru
         }
     }
     tuple
+}
+
+/// Marshal an interpreter dict (`String` keys, arbitrary `Value` values) into
+/// a native heap `RuntimeDict` via `rt_dict_new`/`rt_dict_set`, recursively
+/// converting nested values through `value_to_runtime`. Dict keys are always
+/// `String` on the interpreter side (`Value::Dict(Arc<HashMap<String, Value>>)`),
+/// so each key is marshaled through `rt_string_new` to match the native
+/// runtime's `RuntimeValue` key convention used by `rt_dict_get`/`rt_dict_set`.
+fn values_to_runtime_dict<'a>(entries: impl IntoIterator<Item = (&'a String, &'a Value)>) -> RuntimeValue {
+    let dict = simple_runtime::value::rt_dict_new(0);
+    if dict == RuntimeValue::NIL {
+        return RuntimeValue::NIL;
+    }
+    for (key, value) in entries {
+        let key_rv = simple_runtime::value::rt_string_new(key.as_ptr(), key.len() as u64);
+        let value_rv = value_to_runtime(value);
+        if !simple_runtime::value::rt_dict_set(dict, key_rv, value_rv) {
+            return RuntimeValue::NIL;
+        }
+    }
+    dict
 }
 
 fn values_to_runtime_array<'a>(items: impl IntoIterator<Item = &'a Value>) -> RuntimeValue {
@@ -185,6 +233,32 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
 
                         Value::Tuple(elements)
                     }
+                    HeapObjectType::Dict => {
+                        // Decode dict via rt_dict_entries (array of (key, value)
+                        // tuples), the symmetric counterpart to
+                        // `values_to_runtime_dict` above. Keys are expected to be
+                        // strings (the interpreter's `Value::Dict` convention);
+                        // a non-string native key falls back to its debug form
+                        // rather than silently dropping the entry.
+                        use simple_runtime::value::rt_dict_entries;
+
+                        let entries = rt_dict_entries(rv);
+                        let len = rt_array_len(entries) as usize;
+                        let mut map = std::collections::HashMap::with_capacity(len);
+
+                        for i in 0..len {
+                            let pair = rt_array_get(entries, i as i64);
+                            let key_rv = rt_tuple_get(pair, 0);
+                            let value_rv = rt_tuple_get(pair, 1);
+                            let key = match runtime_to_value(key_rv) {
+                                Value::Str(s) => (*s).clone(),
+                                other => format!("{:?}", other),
+                            };
+                            map.insert(key, runtime_to_value(value_rv));
+                        }
+
+                        Value::Dict(std::sync::Arc::new(map))
+                    }
                     _ => {
                         // Other heap types not yet supported
                         Value::Nil
@@ -256,5 +330,106 @@ mod tests {
         let value = Value::text("é🙂".to_string());
         let runtime = value_to_runtime(&value);
         assert_eq!(runtime_to_value(runtime), value);
+    }
+
+    // ========================================================================
+    // S78: composite-return InterpCall gap (S68/S71 follow-up) regression tests
+    //
+    // Root cause: `value_to_runtime` had no arm for `Value::Dict`/`FrozenDict`,
+    // so any Dict-returning function routed through the interpreter bridge
+    // (`rt_interp_call` -> `interp_call_handler` -> `value_to_runtime`) had its
+    // result silently collapsed to `RuntimeValue::NIL`. Downstream native
+    // `Dict.len()` on NIL returns -1 (see `rt_dict_len`'s `as_typed_ptr!`
+    // fallback), matching the originally reported symptom exactly.
+    // ========================================================================
+
+    #[test]
+    fn value_to_runtime_dict_is_a_real_native_dict_not_nil() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), Value::Int(1));
+        map.insert("b".to_string(), Value::Int(2));
+        let value = Value::dict(map);
+
+        let runtime = value_to_runtime(&value);
+
+        // Before the fix this was RuntimeValue::NIL and rt_dict_len returned -1.
+        assert_ne!(runtime, RuntimeValue::NIL, "Dict must not collapse to NIL");
+        assert_eq!(simple_runtime::value::rt_dict_len(runtime), 2);
+    }
+
+    #[test]
+    fn value_to_runtime_dict_values_are_readable_by_key() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("name".to_string(), Value::text("simple"));
+        map.insert("count".to_string(), Value::Int(42));
+        let value = Value::dict(map);
+
+        let runtime = value_to_runtime(&value);
+
+        let key = "count";
+        let key_rv = simple_runtime::value::rt_string_new(key.as_ptr(), key.len() as u64);
+        assert!(simple_runtime::value::rt_dict_contains(runtime, key_rv));
+        assert_eq!(simple_runtime::value::rt_dict_get(runtime, key_rv).as_int(), 42);
+    }
+
+    #[test]
+    fn value_to_runtime_dict_with_nested_composite_values_round_trips() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "items".to_string(),
+            Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        );
+        let value = Value::dict(map);
+
+        let runtime = value_to_runtime(&value);
+        assert_eq!(simple_runtime::value::rt_dict_len(runtime), 1);
+
+        let key = "items";
+        let key_rv = simple_runtime::value::rt_string_new(key.as_ptr(), key.len() as u64);
+        let nested = simple_runtime::value::rt_dict_get(runtime, key_rv);
+        assert_eq!(simple_runtime::value::rt_array_len(nested), 3);
+    }
+
+    #[test]
+    fn dict_runtime_to_value_roundtrip() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("x".to_string(), Value::Int(10));
+        map.insert("y".to_string(), Value::text("hello"));
+        let value = Value::dict(map);
+
+        let runtime = value_to_runtime(&value);
+        let back = runtime_to_value(runtime);
+
+        match (&value, &back) {
+            (Value::Dict(a), Value::Dict(b)) => {
+                assert_eq!(a.len(), b.len());
+                for (k, v) in a.iter() {
+                    assert_eq!(b.get(k), Some(v));
+                }
+            }
+            other => panic!("expected Dict round-trip, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn frozen_dict_also_marshals_to_native_dict() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut map = HashMap::new();
+        map.insert("k".to_string(), Value::Bool(true));
+        let value = Value::FrozenDict(Arc::new(map));
+
+        let runtime = value_to_runtime(&value);
+        assert_ne!(runtime, RuntimeValue::NIL);
+        assert_eq!(simple_runtime::value::rt_dict_len(runtime), 1);
     }
 }
