@@ -184,11 +184,13 @@ True long-tail (novel signatures): ~18 specs, mostly 1-occurrence edge cases
 
 **Full table:** `/tmp/claude-1000/-home-ormastes-dev-pub-simple/3a5335e6-6c02-459b-9ac1-fa39d352df7e/scratchpad/feature_longtail_table.md`
 
-### Top 3 New Signatures — Preliminary Classification (UNVERIFIED)
+### Top 3 New Signatures — Classification & Action (VERIFIED 2026-07-18)
 
-1. **`function 'compute_object_fit' not found`** (object_fit_wpt_spec.spl) → **Missing feature** — CSS layout function imported from `std.gc_async_mut.gpu.browser_engine.paint` but not implemented; spec expects HTML `object-fit` property CSS layout calculations
-2. **`method 'bits' not found on enum (TargetArch::AVR)`** (architecture_spec.spl) → **Spec-drift** — Spec calls `avr.bits()` on TargetArch enum variant but method is not defined in std.common.target; spec expects architecture query API
-3. **`method 'create_sampler' not found on WebGPUResourceTable`** (webgpu_facade_spec.spl) → **Missing feature** — WebGPU binding incomplete; spec calls `resources.create_sampler(...)` but method stub not implemented
+1. **`function 'compute_object_fit' not found`** (object_fit_wpt_spec.spl) → **MISSING-FEATURE** — CSS layout function; spec expects `compute_object_fit(natural_w, natural_h, box_w, box_h, mode: "fill"|"contain"|"cover"|"none", position) -> {dest_width, dest_height}`. Math for each mode is substantial (aspect ratio preservation, centering); function does not exist in `src/lib/gc_async_mut/gpu/browser_engine/paint.spl`. Out of scope (>50 lines, non-trivial CSS layout logic).
+
+2. **`method 'bits' not found on enum (TargetArch::AVR)`** (architecture_spec.spl) → **IMPLEMENTED** — Added `bits()` method to `TargetArch` impl block at `src/lib/common/target.spl:25-36`. Returns 8/16/32/64 per variant. Verified: probe output `AVR bits: 8, X86 bits: 32, ARM bits: 32, X86_64 bits: 64` matches spec expectations.
+
+3. **`method 'create_sampler' not found on WebGPUResourceTable`** (webgpu_facade_spec.spl) → **MISSING-FEATURE** — WebGPU resource facade incomplete. Spec expects `create_sampler(label, clamp_s, clamp_t, min_filter, mag_filter) -> GPUSamplerHandle` and `create_sampler_with_descriptor(...)` plus `create_texture(label, w, h, mip, format, usage) -> GPUTextureHandle`, `create_bind_group_layout(label, entries) -> GPUBindGroupLayoutHandle`, `create_bind_group(label, layout_id, entries) -> GPUBindGroupHandle`. Current `WebGPUResourceTable` only has `create_buffer()`. All methods follow pattern (insert to table, increment ID, return handle) but multi-method completion is out of scope (>100 lines total, needs GPU resource lifecycle management).
 
 ---
 
