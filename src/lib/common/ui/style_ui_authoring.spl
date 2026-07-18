@@ -1,0 +1,157 @@
+# Typed style{} and ui{} authoring surfaces.
+#
+# This module provides the pure Simple contract layer used by raw style{}/ui{}
+# domain blocks: typed tokens, component rules, widget style bindings, and CSS
+# output that can be consumed by the existing SimpleTheme CSS token pipeline.
+
+use common.ui.simple_theme.{SimpleTheme}
+
+class UiStyleToken:
+    name: text
+    token_type: text
+    value: text
+
+class UiComponentRule:
+    component: text
+    style_ref: text
+    margin: text
+    line_height: text
+    display: text
+    flex_direction: text
+    grid_template_columns: text
+    gap: text
+
+class UiStyleSurface:
+    name: text
+    tokens: [UiStyleToken]
+    rules: [UiComponentRule]
+
+class UiWidgetBinding:
+    widget_id: text
+    widget_kind: text
+    style_ref: text
+    classes: text
+
+class UiSurface:
+    name: text
+    widgets: [UiWidgetBinding]
+
+fn ui_style_token(name: text, token_type: text, value: text) -> UiStyleToken:
+    UiStyleToken(name: name, token_type: token_type, value: value)
+
+fn ui_color_token(name: text, value: text) -> UiStyleToken:
+    ui_style_token(name, "color", value)
+
+fn ui_length_token(name: text, value: text) -> UiStyleToken:
+    ui_style_token(name, "length", value)
+
+fn ui_text_token(name: text, value: text) -> UiStyleToken:
+    ui_style_token(name, "text", value)
+
+fn ui_component_rule(component: text, style_ref: text) -> UiComponentRule:
+    UiComponentRule(
+        component: component,
+        style_ref: style_ref,
+        margin: "",
+        line_height: "",
+        display: "",
+        flex_direction: "",
+        grid_template_columns: "",
+        gap: ""
+    )
+
+fn ui_component_layout_rule(
+    component: text,
+    style_ref: text,
+    margin: text,
+    line_height: text,
+    display: text,
+    flex_direction: text,
+    grid_template_columns: text,
+    gap: text
+) -> UiComponentRule:
+    UiComponentRule(
+        component: component,
+        style_ref: style_ref,
+        margin: margin,
+        line_height: line_height,
+        display: display,
+        flex_direction: flex_direction,
+        grid_template_columns: grid_template_columns,
+        gap: gap
+    )
+
+fn ui_style_surface(name: text) -> UiStyleSurface:
+    UiStyleSurface(name: name, tokens: [], rules: [])
+
+fn ui_style_add_token(surface: UiStyleSurface, token: UiStyleToken) -> UiStyleSurface:
+    UiStyleSurface(name: surface.name, tokens: surface.tokens.push(token), rules: surface.rules)
+
+fn ui_style_add_rule(surface: UiStyleSurface, rule: UiComponentRule) -> UiStyleSurface:
+    UiStyleSurface(name: surface.name, tokens: surface.tokens, rules: surface.rules.push(rule))
+
+fn ui_style_token_value(surface: UiStyleSurface, name: text) -> text:
+    val wanted = _ui_token_css_name(name)
+    for token in surface.tokens:
+        if _ui_token_css_name(token.name) == wanted:
+            return token.value
+    ""
+
+fn ui_style_has_ref(surface: UiStyleSurface, style_ref: text) -> bool:
+    for rule in surface.rules:
+        if rule.style_ref == style_ref:
+            return true
+    false
+
+fn ui_style_to_css(surface: UiStyleSurface) -> text:
+    var css = ":root {\n"
+    for token in surface.tokens:
+        css = "{css}  {_ui_token_css_name(token.name)}: {token.value};\n"
+    css = "{css}}\n"
+    for rule in surface.rules:
+        css = "{css}.{rule.style_ref}, [data-ui-style=\"{rule.style_ref}\"] {\n"
+        css = _append_css_prop(css, "margin", rule.margin)
+        css = _append_css_prop(css, "line-height", rule.line_height)
+        css = _append_css_prop(css, "display", rule.display)
+        css = _append_css_prop(css, "flex-direction", rule.flex_direction)
+        css = _append_css_prop(css, "grid-template-columns", rule.grid_template_columns)
+        css = _append_css_prop(css, "gap", rule.gap)
+        css = "{css}}\n"
+    css
+
+fn ui_style_to_theme(surface: UiStyleSurface) -> SimpleTheme:
+    SimpleTheme.from_css(surface.name, ui_style_to_css(surface))
+
+fn ui_surface(name: text) -> UiSurface:
+    UiSurface(name: name, widgets: [])
+
+fn ui_widget_binding(widget_id: text, widget_kind: text, style_ref: text) -> UiWidgetBinding:
+    UiWidgetBinding(widget_id: widget_id, widget_kind: widget_kind, style_ref: style_ref, classes: style_ref)
+
+fn ui_widget_binding_with_classes(widget_id: text, widget_kind: text, style_ref: text, classes: text) -> UiWidgetBinding:
+    UiWidgetBinding(widget_id: widget_id, widget_kind: widget_kind, style_ref: style_ref, classes: classes)
+
+fn ui_surface_add_widget(surface: UiSurface, binding: UiWidgetBinding) -> UiSurface:
+    UiSurface(name: surface.name, widgets: surface.widgets.push(binding))
+
+fn ui_surface_binding_valid(surface: UiStyleSurface, binding: UiWidgetBinding) -> bool:
+    ui_style_has_ref(surface, binding.style_ref)
+
+fn ui_surface_all_bindings_valid(styles: UiStyleSurface, ui: UiSurface) -> bool:
+    for binding in ui.widgets:
+        if not ui_surface_binding_valid(styles, binding):
+            return false
+    true
+
+fn ui_surface_to_dom_attrs(binding: UiWidgetBinding) -> text:
+    "id=\"{binding.widget_id}\" data-widget-kind=\"{binding.widget_kind}\" data-ui-style=\"{binding.style_ref}\" class=\"{binding.classes}\""
+
+fn _ui_token_css_name(name: text) -> text:
+    if name.starts_with("--"):
+        return name
+    "--{name}"
+
+fn _append_css_prop(css: text, prop: text, value: text) -> text:
+    if value == "":
+        return css
+    "{css}  {prop}: {value};\n"

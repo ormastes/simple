@@ -1,0 +1,123 @@
+# IPC Syscall Handlers — split from syscall.spl.
+# Contains _handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port,
+# _handle_ipc_connect.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.task_types.{BlockReason}
+use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+
+# ============================================================================
+# IPC Syscall Handlers
+# ============================================================================
+
+struct IpcSyscallState:
+    result: SyscallResult
+    scheduler: Scheduler
+    ipc: IpcManager
+
+fn _handle_ipc_send_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> IpcSyscallState:
+    """Send an IPC message.
+
+    Args:
+      arg0: destination port ID
+      arg1: method ID
+      arg2: flags
+      arg3: payload pointer (userspace)
+      arg4: payload length
+    """
+    var sched = scheduler
+    var ipc_mgr = ipc
+    val current = sched.get_current()
+
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: args.arg0,
+        method: args.arg1.to_u32(),
+        flags: args.arg2.to_u32(),
+        payload_len: args.arg4.to_u32(),
+        cap_count: 0
+    )
+
+    val result = ipc_mgr.send(msg)
+
+    # If send succeeded and there was a waiter, unblock it
+    if result == 0:
+        val waiter = ipc_mgr.get_first_waiter(args.arg0)
+        if waiter != nil:
+            val waiter_id = waiter
+            sched.unblock_task_on_cpu(waiter_id, 0u32)
+
+    IpcSyscallState(result: SyscallResult(value: result), scheduler: sched, ipc: ipc_mgr)
+
+fn _handle_ipc_send(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    _handle_ipc_send_state(args, scheduler, ipc).result
+
+fn _handle_ipc_recv_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> IpcSyscallState:
+    """Receive an IPC message.
+
+    Args:
+      arg0: port ID to receive from
+      arg1: timeout in milliseconds (0 = non-blocking, -1 = infinite)
+    """
+    var sched = scheduler
+    var ipc_mgr = ipc
+    val port = IpcPort(id: args.arg0, owner: 0)
+    val timeout = args.arg1.to_i64()
+
+    val msg = ipc_mgr.recv(port, timeout)
+
+    if msg != nil:
+        # Message received successfully
+        return IpcSyscallState(result: SyscallResult(value: 0), scheduler: sched, ipc: ipc_mgr)
+
+    # No message available
+    if timeout == 0:
+        # Non-blocking — return "would block"
+        return IpcSyscallState(result: SyscallResult(value: -11), scheduler: sched, ipc: ipc_mgr)    # EAGAIN
+
+    # Blocking recv — block the caller and add to waiter list
+    val current = sched.get_current()
+    ipc_mgr.add_waiter(port, current)
+    sched.block_task(current, BlockReason.IpcRecv(port: args.arg0))
+    IpcSyscallState(result: SyscallResult(value: 0), scheduler: sched, ipc: ipc_mgr)
+
+fn _handle_ipc_recv(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    _handle_ipc_recv_state(args, scheduler, ipc).result
+
+fn _handle_ipc_create_port_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> IpcSyscallState:
+    """Create a new IPC port.
+
+    Args:
+      arg0: pointer to name string (userspace)
+      arg1: name length
+    """
+    var ipc_mgr = ipc
+    val current = scheduler.get_current()
+
+    # In a real kernel, we would copy the name from userspace.
+    # For now, use a placeholder name based on port ID.
+    val port = ipc_mgr.create_port(current, "port")
+    IpcSyscallState(result: SyscallResult(value: port.id.to_i64()), scheduler: scheduler, ipc: ipc_mgr)
+
+fn _handle_ipc_create_port(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    _handle_ipc_create_port_state(args, scheduler, ipc).result
+
+fn _handle_ipc_connect_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> IpcSyscallState:
+    """Connect to an existing IPC port by name.
+
+    Args:
+      arg0: pointer to name string (userspace)
+      arg1: name length
+    """
+    # In a real kernel, we would copy the name from userspace.
+    var ipc_mgr = ipc
+    val port = ipc_mgr.connect("port")
+    if port != nil:
+        val p = port
+        return IpcSyscallState(result: SyscallResult(value: p.id.to_i64()), scheduler: scheduler, ipc: ipc_mgr)
+    IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
+
+fn _handle_ipc_connect(args: SyscallArgs, ipc: IpcManager) -> SyscallResult:
+    _handle_ipc_connect_state(args, Scheduler.new_bootstrap(), ipc).result

@@ -1,0 +1,1558 @@
+# Parser — Statement Module
+#
+# Statement parsing: parse_block, parse_statement, control flow statements,
+# type inference support, and expression-level control flow.
+# Extracted from parser.spl.
+
+use compiler.core.tokens.{tok_kind_name, keyword_lookup}
+use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
+use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
+use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN, TOK_KW_LOOP}
+use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
+use compiler.core.tokens.{TOK_KW_RETURN, TOK_KW_BREAK, TOK_KW_CONTINUE}
+use compiler.core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
+use compiler.core.tokens.{TOK_NEQ}
+use compiler.core.tokens.{TOK_KW_PASS, TOK_KW_PASS_TODO, TOK_KW_PASS_DO_NOTHING, TOK_KW_PASS_DN, TOK_KW_IS}
+use compiler.core.tokens.{TOK_KW_AS}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
+use compiler.core.tokens.{TOK_ASSIGN}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE, TOK_FAT_ARROW}
+use compiler.core.tokens.{TOK_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.tokens.{TOK_UNDERSCORE}
+use compiler.core.tokens.{TOK_SEMICOLON}
+use compiler.core.tokens.{TOK_KW_LAZY}
+use compiler.core.tokens.{TOK_KW_DEFER, TOK_KW_ERRDEFER}
+use compiler.core.tokens.{TOK_LABEL}
+use compiler.core.tokens.{TOK_KW_STATIC_FOR, TOK_KW_COMPTIME}
+use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
+use compiler.core.tokens.{TOK_BACKSLASH}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
+use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
+use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
+use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
+use compiler.core.ast.{expr_int_lit, expr_float_lit}
+use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
+use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
+use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
+use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
+use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
+use compiler.core.ast.{stmt_match_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop, STMT_LABELED_LOOP}
+use compiler.core.ast.{STMT_STATIC_FOR, stmt_static_for_stmt}
+use compiler.core.ast.{STMT_COMPTIME, stmt_comptime_block, decl_set_comptime}
+use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
+use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt, stmt_defer_block_stmt, stmt_errdefer_block_stmt}
+use compiler.core.ast.{decl_extern_fn}
+use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
+use compiler.core.ast.{arm_new, arm_new_with_binding, arm_new_with_binding_and_rationale}
+use compiler.core.ast.{elif_new}
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
+use compiler.core.types.{TYPE_ARRAY_ANY}
+use compiler.core.types.{TYPE_NIL}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+use compiler.core.types.{TYPE_NAMED_BASE}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
+use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
+use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+use compiler.core.parser.{rt_is_debug_mode_enabled}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# Import expression parsing
+use compiler.frontend.core.parser_expr.{parse_expr, parse_or, parse_postfix_on, parse_binary_from}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
+use compiler.core.ast.{expr_assign, expr_compound_assign}
+extern fn rt_env_get(key: text) -> text
+
+fn parser_stmt_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn parser_stmt_trace_line_enabled() -> bool:
+    parser_stmt_trace_enabled() and par_line_get() >= 60
+
+fn parse_optional_rationale_args() -> text:
+    var msg = ""
+    if par_kind_get() == 140:
+        parser_advance()
+        if par_kind_get() == 3:
+            msg = par_text_get()
+            parser_advance()
+            if par_kind_get() == 160:
+                parser_advance()
+                if par_kind_get() == 3:
+                    val hint = par_text_get()
+                    parser_advance()
+                    if hint != "":
+                        if msg != "":
+                            msg = msg + " | " + hint
+                        else:
+                            msg = hint
+        parser_expect(141)
+    msg
+
+fn extract_wildcard_rationale(pattern_idx: i64) -> text:
+    if pattern_idx < 0:
+        return ""
+    if expr_get_tag(pattern_idx) != EXPR_CALL:
+        return ""
+    val callee_idx = expr_get_left(pattern_idx)
+    if callee_idx < 0:
+        return ""
+    if expr_get_tag(callee_idx) != EXPR_IDENT:
+        return ""
+    if expr_get_str(callee_idx) != "_":
+        return ""
+    val args = expr_get_args(pattern_idx)
+    if args.len() == 0:
+        return ""
+    val first_arg = args[0]
+    if first_arg < 0:
+        return ""
+    if expr_get_tag(first_arg) != EXPR_STRING_LIT:
+        return ""
+    expr_get_str(first_arg)
+
+fn normalize_wildcard_pattern(pattern_idx: i64) -> i64:
+    val rationale = extract_wildcard_rationale(pattern_idx)
+    if rationale == "":
+        return pattern_idx
+    expr_ident("_", 0)
+
+# ===== Type Inference Support =====
+
+fn infer_expr_type_from_parse(expr_id: i64) -> i64:
+    # Simple type inference based on expression kind
+    # Returns TYPE_VOID (0) if type cannot be inferred
+    if expr_id < 0:
+        return 0
+    val tag = expr_get_tag(expr_id)
+
+    # Literal types
+    if tag == EXPR_INT_LIT:
+        return TYPE_I64
+    if tag == EXPR_FLOAT_LIT:
+        return TYPE_F64
+    if tag == EXPR_STRING_LIT:
+        return TYPE_TEXT
+    if tag == EXPR_BOOL_LIT:
+        return TYPE_BOOL
+    if tag == EXPR_NIL_LIT:
+        return TYPE_NIL
+    if tag == EXPR_ARRAY_LIT:
+        return TYPE_ARRAY_ANY
+
+    # Binary operations - infer from operator
+    if tag == EXPR_BINARY:
+        val op = expr_get_str(expr_id)
+        if op == "+" or op == "-" or op == "*" or op == "/":
+            # Could be i64 or f64, default to i64
+            return TYPE_I64
+        if (op == "==" or op == "!=" or op == "<" or op == ">" or
+            op == "<=" or op == ">=" or op == "and" or op == "or"):
+            return TYPE_BOOL
+        return 0
+
+    # Unary operations
+    if tag == EXPR_UNARY:
+        val op = expr_get_str(expr_id)
+        if op == "not":
+            return TYPE_BOOL
+        if op == "-":
+            return TYPE_I64
+        return 0
+
+    # Function calls - cannot infer without function signature
+    if tag == EXPR_CALL:
+        return 0
+
+    # Default: cannot infer
+    0
+
+# ===== Block and Statement Parsing =====
+
+fn parse_block() -> [i64]:
+    var stmts: [i64] = []
+    parser_skip_newlines()
+    var kind = par_kind_get()
+    if kind == 181:
+        # Multi-line indented block
+        parser_advance()
+        for i in 0..100000:
+            parser_skip_newlines()
+            kind = par_kind_get()
+            if kind == 182:
+                parser_advance()
+                break
+            if kind == 190:
+                break
+            if parser_stmt_trace_line_enabled():
+                val trace_kind = kind
+                val trace_text = par_text_get()
+                eprint("[parser-block] stmt:start i={i} kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
+            val s = parse_statement()
+            stmts.push(s)
+            parser_skip_newlines_and_semicolons()
+        return stmts
+    # Single-line body (no indent): parse one statement
+    val s = parse_statement()
+    stmts.push(s)
+    stmts
+
+# Inline consumer for `use` inside function bodies.
+# Avoids circular dependency: parser_decls_use.spl already imports parse_block from here,
+# so we cannot import parse_use_decl back. Instead, consume the use-path and import list
+# tokens and return a no-op pass statement so the rest of the function body parses cleanly.
+fn parse_use_stmt_inline() -> i64:
+    # Consume 'use' keyword (kind 27)
+    parser_advance()
+    # Skip optional 'lazy' modifier (kind 194)
+    if par_kind_get() == 194:
+        parser_advance()
+    # Consume dotted path: ident(.ident)*
+    for _ui in 0..200:
+        val uk = par_kind_get()
+        val is_ident_seg: bool = uk == 6
+        val is_dot_seg: bool = uk == 164
+        val is_star_seg: bool = uk == 62
+        val is_seg: bool = is_ident_seg or is_dot_seg or is_star_seg
+        if not is_seg:
+            break
+        parser_advance()
+    # Consume optional brace import list: .{name, name, ...} or {name, ...}
+    if par_kind_get() == 142:
+        parser_advance()
+        for _ul in 0..10000:
+            val ulk = par_kind_get()
+            if ulk == 143 or ulk == 190:
+                break
+            parser_advance()
+        if par_kind_get() == 143:
+            parser_advance()
+    # Consume optional paren import list: .(name, name) or (name, ...)
+    if par_kind_get() == 140:
+        parser_advance()
+        for _up in 0..10000:
+            val upk = par_kind_get()
+            if upk == 141 or upk == 190:
+                break
+            parser_advance()
+        if par_kind_get() == 141:
+            parser_advance()
+    stmt_expr_stmt(expr_pass(0), 0)
+
+# extern fn declaration inside a function body: register the signature
+# globally (same as a top-level extern) and emit a no-op statement.
+# Inlined here (like parse_use_stmt_inline) to avoid a circular dep with
+# the decl-parsing modules, which import parse_block from this file.
+fn parse_extern_fn_stmt_inline() -> i64:
+    parser_advance()  # consume 'extern'
+    parser_expect(20)
+    val ef_name = par_text_get()
+    parser_expect(6)
+    parser_expect(140)
+    var ef_pnames: [text] = []
+    var ef_ptypes: [i64] = []
+    for _ei in 0..100:
+        if par_kind_get() == 141 or par_kind_get() == 190:
+            break
+        val ef_pn = par_text_get()
+        parser_advance()  # param name (ident or keyword)
+        var ef_pt = 0
+        if par_kind_get() == 161:
+            parser_advance()
+            ef_pt = parser_parse_type()
+        ef_pnames.push(ef_pn)
+        ef_ptypes.push(ef_pt)
+        if par_kind_get() == 160:
+            parser_advance()
+    parser_expect(141)
+    var ef_ret = TYPE_VOID
+    if par_kind_get() == 167:
+        parser_advance()
+        ef_ret = parser_parse_type()
+    val ef_tparams: [text] = []
+    decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0)
+    stmt_expr_stmt(expr_pass(0), 0)
+
+fn parse_statement() -> i64:
+    var kind = par_kind_get()
+    if kind == 21:
+        return parse_val_decl_stmt()
+
+    if kind == 194:
+        parser_advance()
+        return parse_lazy_val_decl_stmt()
+
+    if kind == 22:
+        return parse_var_decl_stmt()
+
+    # use statement inside function body: consume tokens, return pass (no-op)
+    # Avoids circular dep with parser_decls_use.spl (which imports parse_block from here).
+    if kind == 27:
+        return parse_use_stmt_inline()
+
+    # extern fn declaration inside a function body
+    if kind == 25:
+        return parse_extern_fn_stmt_inline()
+
+    if kind == 49:
+        parser_advance()
+        val is_nl = par_kind_get() == 180
+        val is_ded = par_kind_get() == 182
+        val no_value = is_nl or is_ded
+        if no_value:
+            return stmt_return_stmt(-1, 0)
+        val ret_val = parse_expr()
+        return stmt_return_stmt(ret_val, 0)
+
+    if kind == 40:
+        return parse_if_stmt()
+
+    # Labeled loop: 'label: for/while
+    if kind == 192:
+        val loop_label = par_text_get()
+        parser_advance()
+        # Expect colon after label
+        parser_expect(161)
+        # Then parse the loop and wrap in labeled_loop stmt
+        kind = par_kind_get()
+        if kind == 45:
+            val for_s = parse_for_stmt()
+            return stmt_labeled_loop(loop_label, for_s, 0)
+        if kind == 46:
+            val while_s = parse_while_stmt()
+            return stmt_labeled_loop(loop_label, while_s, 0)
+        # Fallthrough: ignore label if not followed by loop
+        return parse_statement()
+
+    if kind == 45:
+        return parse_for_stmt()
+
+    if kind == 201:
+        return parse_static_for_stmt()
+
+    if kind == 202:
+        parser_advance()
+        kind = par_kind_get()
+        if kind == 161:
+            parser_advance()
+            val ct_body = parse_block()
+            return stmt_comptime_block(ct_body, 0)
+        # comptime fn inside a block: parse the fn as expression statement
+        val ct_expr = parse_expr()
+        return stmt_expr_stmt(ct_expr, 0)
+
+    if kind == 46:
+        return parse_while_stmt()
+
+    # Statement-form `loop:` -- desugar to `while true:` so downstream
+    # (HIR/MIR/native) lowering treats it as a genuine loop instead of a
+    # one-shot block. (Bug #163: native --entry ran `loop:` zero times
+    # because the old expression-position parse produced a plain
+    # expr_block with no loop semantics at all.) Loop-as-EXPRESSION
+    # (e.g. `val x = loop: ... break v`) is untouched -- still handled
+    # by the primary_expr.spl fallback -- since that path carries
+    # break-with-value semantics that are out of scope here.
+    if kind == TOK_KW_LOOP:
+        return parse_loop_stmt()
+
+    if kind == 43:
+        # G33: `match` may be an identifier (var match = true; match = false).
+        # After consuming `match`, a token that cannot start an expression
+        # means identifier usage. Tradeoff: scrutinees starting with -, (
+        # still route to match-stmt (their kinds can start expressions).
+        parser_advance()
+        kind = par_kind_get()
+        if g33_kw_ident_follow(kind):
+            var mleft = parse_postfix_on(expr_ident("match", 0))
+            mleft = parse_binary_from(mleft)
+            kind = par_kind_get()
+            if kind == 100 or kind == 106:
+                parser_advance()
+                return stmt_expr_stmt(expr_assign(mleft, parse_expr(), 0), 0)
+            kind = par_kind_get()
+            if kind == 101:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(60, mleft, parse_expr(), 0), 0)
+            kind = par_kind_get()
+            if kind == 102:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(61, mleft, parse_expr(), 0), 0)
+            kind = par_kind_get()
+            if kind == 103:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(62, mleft, parse_expr(), 0), 0)
+            kind = par_kind_get()
+            if kind == 104:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(63, mleft, parse_expr(), 0), 0)
+            return stmt_expr_stmt(mleft, 0)
+        return parse_match_stmt_tail()
+
+    if kind == 47:
+        parser_advance()
+        # Check for labeled break: break 'label
+        if par_kind_get() == 192:
+            val lbl = par_text_get()
+            parser_advance()
+            return stmt_break_labeled(lbl, 0)
+        return stmt_break_stmt(0)
+
+    if kind == 48:
+        parser_advance()
+        # Check for labeled continue: continue 'label
+        if par_kind_get() == 192:
+            val lbl = par_text_get()
+            parser_advance()
+            return stmt_continue_labeled(lbl, 0)
+        return stmt_continue_stmt(0)
+
+    if kind == 206:
+        parser_advance()
+        return parse_receive_stmt()
+
+    if kind == 204:
+        parser_advance()
+        return parse_bind_stmt()
+
+    if kind == 186:
+        parser_advance()
+        # Block form: `defer:` followed by an indented body (bug #172).
+        # `defer:` has no expression before the colon, so seeing TOK_COLON
+        # (161) immediately after the `defer` keyword unambiguously selects
+        # the block form -- the single-line form always starts an expression.
+        if par_kind_get() == 161:
+            parser_advance()  # consume ':'
+            val defer_body = parse_block()
+            return stmt_defer_block_stmt(defer_body, 0)
+        val deferred = parse_expr()
+        return stmt_defer_stmt(deferred, 0)
+
+    if kind == 187:
+        parser_advance()
+        # Block form: `errdefer:` (see `defer:` above for the disambiguation).
+        if par_kind_get() == 161:
+            parser_advance()  # consume ':'
+            val errdefer_body = parse_block()
+            return stmt_errdefer_block_stmt(errdefer_body, 0)
+        val err_deferred = parse_expr()
+        return stmt_errdefer_stmt(err_deferred, 0)
+
+    if kind == 52:
+        parser_advance()
+        val msg = parse_optional_rationale_args()
+        if msg == "":
+            return stmt_expr_stmt(expr_pass(0), 0)
+        return stmt_expr_stmt(expr_pass_with_msg(msg, 0), 0)
+
+    if kind == 183:
+        parser_advance()
+        val msg = parse_optional_rationale_args()
+        if msg == "":
+            parser_warn("REQC001: pass_todo requires a comment string: pass_todo(\"what remains\", \"hint or issue\")")
+        if rt_is_debug_mode_enabled() and msg != "":
+            print "[debug:pass] {msg}"
+        return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
+
+    if kind == 184:
+        parser_advance()
+        val msg = parse_optional_rationale_args()
+        if msg == "":
+            parser_warn("REQC001: pass_do_nothing requires a comment string: pass_do_nothing(\"reason\")")
+        if rt_is_debug_mode_enabled() and msg != "":
+            print "[debug:pass] {msg}"
+        return stmt_expr_stmt(expr_pass_do_nothing(msg, 0), 0)
+
+    if kind == 185:
+        parser_advance()
+        val msg = parse_optional_rationale_args()
+        if msg == "":
+            parser_warn("REQC001: pass_dn requires a comment string: pass_dn(\"reason\")")
+        if rt_is_debug_mode_enabled() and msg != "":
+            print "[debug:pass] {msg}"
+        return stmt_expr_stmt(expr_pass_dn(msg, 0), 0)
+
+    if kind == TOK_IDENT:
+        val ident_text = par_text_get()
+        if ident_text == "todo":
+            parser_advance()
+            val msg = parse_optional_rationale_args()
+            if msg == "":
+                parser_warn("REQC003: todo requires two strings: todo(\"what remains\", \"hint or issue\")")
+            return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
+
+        if ident_text == "gpu_launch":
+            return parse_gpu_launch_stmt()
+
+        if ident_text == "print":
+            parser_warn_print_if_needed()
+            parser_advance()
+            val is_nl = par_kind_get() == 180
+            val is_ded = par_kind_get() == 182
+            val is_eof = par_kind_get() == 190
+            val no_arg = is_nl or is_ded
+            val no_arg2 = no_arg or is_eof
+            if no_arg2:
+                val callee0 = expr_ident("print", 0)
+                var args0: [i64] = []
+                val call0 = expr_call(callee0, args0, 0)
+                return stmt_expr_stmt(call0, 0)
+            val print_arg = parse_expr()
+            val callee1 = expr_ident("print", 0)
+            var args1: [i64] = []
+            args1.push(print_arg)
+            val call1 = expr_call(callee1, args1, 0)
+            return stmt_expr_stmt(call1, 0)
+
+        if ident_text == "assert":
+            parser_advance()
+            val assert_cond = parse_expr()
+            if par_kind_get() == 160:
+                parser_advance()
+                val _assert_msg = parse_expr()
+            return stmt_expr_stmt(assert_cond, 0)
+
+    # `me NAME(...) [-> T]: body` in statement position (a class's methods
+    # written at fn-body indent, e.g. semantics/resolve.spl) — same desugar
+    # as the named nested fn below: `val NAME = fn(...): body`.
+    # Only when an identifier follows: `me` is also the self-alias in
+    # expressions (`me.backend.move_cursor(...)` in office/editor code),
+    # which must fall through to the expression path — backtrack then.
+    if kind == 34:
+        val (me_snap_nums, me_snap_txts) = lex_snapshot_save()
+        val (me_tok_nums, me_tok_text) = parser_tok_save()
+        parser_advance()  # consume me
+        if par_kind_get() == TOK_IDENT:
+            val me_stmt_name = par_text_get()
+            parser_advance()
+            val me_stmt_lambda = parse_fn_lambda_after_kw()
+            return stmt_val_decl(me_stmt_name, 0, me_stmt_lambda, 0)
+        lex_snapshot_restore(me_snap_nums, me_snap_txts)
+        parser_tok_restore(me_tok_nums, me_tok_text)
+
+    # G_named_nested_fn: `fn NAME(...): body` as a STATEMENT — a named nested
+    # fn declared inside another fn's body (only anonymous `fn(...): ...`
+    # lambdas parsed here before this fix). Distinguished from the anonymous
+    # lambda-as-expression-statement form by the token right after `fn`: an
+    # identifier (name) here vs. `(` there (handled by parse_fn_lambda_after_kw
+    # via parse_expr's primary-expr fallback below).
+    # Desugars to `val NAME = fn(...): body` (a local binding of the lambda).
+    # Seed-semantics note (verified with bin/simple run on the Rust seed):
+    # named nested fns work when called normally (interpreter resolves by
+    # name; JIT/HIR lowering falls back to the interpreter for this shape),
+    # but self-recursive calls fail seed-wide ("function X not found" — the
+    # seed never pre-binds the name before evaluating the body). This
+    # desugar matches that: it supports the non-recursive case only.
+    if kind == TOK_KW_FN:
+        parser_advance()  # consume fn
+        kind = par_kind_get()
+        if kind == TOK_IDENT:
+            val nested_fn_name = par_text_get()
+            parser_advance()  # consume name
+            val nested_lambda = parse_fn_lambda_after_kw()
+            return stmt_val_decl(nested_fn_name, 0, nested_lambda, 0)
+        # fn(...): ... with no name — anonymous lambda expression statement.
+        val anon_lambda = parse_fn_lambda_after_kw()
+        return stmt_expr_stmt(anon_lambda, 0)
+
+    # Expression statement (including assignment and walrus)
+    # Note: Walrus operator handled inline during expression parsing
+    # G31: tuple assignment (a, b) = expr is handled naturally:
+    #   G29 makes (a, b) a tuple expr; parse_assignment sees = and builds expr_assign.
+    if parser_stmt_trace_line_enabled():
+        val trace_kind = kind
+        val trace_text = par_text_get()
+        eprint("[parser-block] expr-branch:start kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
+    val expression = parse_expr()
+    kind = par_kind_get()
+    if kind == TOK_IDENT:
+        val lane_name = par_text_get()
+        if lane_name == "gpu" or lane_name == "host":
+            parser_advance()
+            kind = par_kind_get()
+            if kind == TOK_BACKSLASH:
+                parser_advance()
+            parser_expect(TOK_COLON)
+            val lane_body = parse_block()
+            val lane_block_expr = expr_block(lane_body, -1, 0)
+            var lane_lambda_body: [i64] = []
+            lane_lambda_body.push(lane_block_expr)
+            var lane_params: [i64] = []
+            val lane_lambda = expr_lambda(lane_params, lane_lambda_body, 0)
+            var lane_args: [i64] = []
+            lane_args.push(expression)
+            lane_args.push(lane_lambda)
+            return stmt_expr_stmt(expr_call(expr_ident(lane_name, 0), lane_args, 0), 0)
+    stmt_expr_stmt(expression, 0)
+
+# ===== Val/Var Declaration Statements =====
+
+fn parse_val_decl_stmt() -> i64:
+    parser_advance()
+
+    # Tuple destructuring: val (a, b, c) = expr
+    if par_kind_get() == 140:
+        return parse_tuple_destructure_val()
+
+    # G23: discard binding `val _ = expr` (`_` is kind 169, not Ident)
+    # G26: accept keyword tokens as binding names (e.g. val after = ...)
+    var name = par_text_get()
+    if par_kind_get() == 169:
+        name = "_"
+        parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        # Plain identifier: keep the text already captured above and just
+        # consume the token. Falling into the generic "keyword name" branch
+        # below is wrong here: tok_kind_name(TOK_IDENT) == "Ident", and
+        # keyword_lookup("Ident") falls through to its own not-a-real-keyword
+        # fallback, which is TOK_IDENT itself (see keyword_lookup's contract,
+        # locked in by test_core.spl's `keyword_lookup("xyz") == TOK_IDENT`
+        # case) -- so the round-trip check below is trivially true for EVERY
+        # plain identifier, silently replacing the real captured name (e.g.
+        # "inst") with the literal string "Ident".
+        parser_expect(6)
+    else:
+        val vd_kw_name = tok_kind_name(par_kind_get())
+        val vd_is_kw = keyword_lookup(vd_kw_name) == par_kind_get()
+        if vd_is_kw:
+            name = vd_kw_name
+            parser_advance()
+        else:
+            parser_expect(6)
+
+    # Optional type annotation: val x: i64 = ...
+    var type_tag = 0
+    if par_kind_get() == 161:
+        parser_advance()
+        type_tag = parser_parse_type()
+
+    parser_expect(100)
+    val init = parse_expr()
+
+    # Type inference: if no explicit type, try to infer from initializer
+    if type_tag == 0:
+        type_tag = infer_expr_type_from_parse(init)
+
+    stmt_val_decl(name, type_tag, init, 0)
+
+fn parse_lazy_val_decl_stmt() -> i64:
+    parser_advance()
+    val name = par_text_get()
+    parser_expect(6)
+
+    var type_tag = 0
+    if par_kind_get() == 161:
+        parser_advance()
+        type_tag = parser_parse_type()
+
+    parser_expect(100)
+    val init = parse_expr()
+
+    if type_tag == 0:
+        type_tag = infer_expr_type_from_parse(init)
+
+    stmt_lazy_val_decl(name, type_tag, init, 0)
+
+fn parse_var_decl_stmt() -> i64:
+    parser_advance()
+
+    # Tuple destructuring: var (a, b, c) = expr
+    if par_kind_get() == 140:
+        return parse_tuple_destructure_var()
+
+    # G23: discard binding `var _ = expr` (`_` is kind 169, not Ident)
+    # G26: accept keyword tokens as binding names (e.g. var after = ...)
+    var name = par_text_get()
+    if par_kind_get() == 169:
+        name = "_"
+        parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        # See the matching comment in parse_val_decl_stmt: this avoids the
+        # keyword_lookup(tok_kind_name(TOK_IDENT)) == TOK_IDENT false
+        # positive that silently renamed every plain-identifier binding to
+        # the literal string "Ident".
+        parser_expect(6)
+    else:
+        val vr_kw_name = tok_kind_name(par_kind_get())
+        val vr_is_kw = keyword_lookup(vr_kw_name) == par_kind_get()
+        if vr_is_kw:
+            name = vr_kw_name
+            parser_advance()
+        else:
+            parser_expect(6)
+
+    var type_tag = 0
+    var has_type_annotation = false
+    var type_looks_named = false
+    if par_kind_get() == 161:
+        parser_advance()
+        # Peek the raw type-position token before parser_parse_type() resolves
+        # it: a plain identifier that parser_parse_type_impl's named-type
+        # lookup (named_type_find) fails to resolve decays SILENTLY to
+        # TYPE_VOID (no parser_error of its own -- see parser.spl's ident
+        # branch, which always returns from within itself). That happens for
+        # any struct/class/enum declared in ANOTHER module: a single-file
+        # parse (e.g. `simple check` on one file, or a struct referenced
+        # before its own declaration in the same file) has no cross-module
+        # type registry yet. Capture the raw name/kind now so a var-decl with
+        # no initializer can still tell "unresolved PascalCase named type"
+        # (safe to nil-default, matches this codebase's struct/class naming
+        # convention -- Engine2D, TlsCertificateChain, HttpResponseData, ...)
+        # apart from a genuinely unsupported category (text, Dict, Option,
+        # ...), which always resolves to a *non-void* type tag of its own.
+        val type_start_kind = par_kind_get()
+        val type_start_text = par_text_get()
+        type_looks_named = type_start_kind == TOK_IDENT and type_start_text.len() > 0 and type_start_text[0:1] >= "A" and type_start_text[0:1] <= "Z"
+        type_tag = parser_parse_type()
+        has_type_annotation = true
+
+    # Type inference for var declarations handled after initialization
+
+    # G-varnoinit: `var name: Type` with no initializer (assigned later, e.g.
+    # in if/elif/else arms). The seed grammar accepts this declare-then-assign
+    # form; this parser used to unconditionally require `=` here, hard-erroring
+    # with "expected =, got Newline" on any such declaration (blocked the
+    # hosted-WM entry closure at draw_ir_adv.spl:586 and several stdlib
+    # files). Only trigger on an actual statement-end token so a genuinely
+    # malformed `=`-less declaration followed by garbage still falls through
+    # to the ordinary parser_expect(100) error below.
+    val at_stmt_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
+    if has_type_annotation and at_stmt_end:
+        return stmt_var_decl(name, type_tag, var_no_init_default_expr(type_tag, type_looks_named), 0)
+
+    parser_expect(100)
+    val init = parse_expr()
+    stmt_var_decl(name, type_tag, init, 0)
+
+# Synthesizes the default-value initializer for a `var name: Type` declared
+# with no `=`. Chosen to match seed runtime semantics (oracle probes,
+# 2026-07-17): scalar primitives zero-init (seed's `var x: i64` read before
+# any assignment observably reads back 0); named struct/class types nil-init
+# (seed's `var t: SomeStruct` reads as a nil receiver until assigned, and
+# accessing a field before assignment already fails loud at runtime via the
+# existing nil-receiver check -- not a new failure mode, just deferred to
+# first use). Every other category (text, Option, Result, Dict, arrays,
+# tuples, fn types, unions/intersections/refinements, bare struct/any/void)
+# has no safe, well-defined zero value to replicate: the seed's own
+# read-before-assign behavior for those is undefined garbage (e.g. `var s:
+# text` read before assignment observably returned a corrupt length under
+# the seed), so guessing one here would turn a loud gap into a silently
+# wrong answer. Those are rejected with a located parser error instead.
+fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
+    if type_tag == TYPE_BOOL:
+        return expr_bool_lit(0, 0)
+    val is_plain_int = type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16 or type_tag == TYPE_U32
+    val is_wide_int = type_tag == TYPE_U64 or type_tag == TYPE_I8 or type_tag == TYPE_I16 or type_tag == TYPE_I32
+    if is_plain_int or is_wide_int:
+        return expr_int_lit(0, 0)
+    if type_tag == TYPE_F64:
+        return expr_float_lit("0.0", 0)
+    if type_tag >= TYPE_NAMED_BASE:
+        return expr_nil_lit(0)
+    if type_tag == TYPE_VOID and type_looks_named:
+        return expr_nil_lit(0)
+    parser_error("var without initializer not yet supported for this declared type; only bool/i64/f64/fixed-width-int scalars and named struct/class types support declare-without-initializer -- add an explicit initializer")
+    expr_nil_lit(0)
+
+# ===== Control Flow Statements =====
+
+fn parse_if_stmt() -> i64:
+    parser_advance()
+
+    # G19: if val NAME = EXPR: body  (pattern-binding / nil-check form)
+    # Also handles: if var NAME = EXPR: body
+    # Also handles: if val Ctor(NAME, ...) = EXPR: body  (constructor-pattern
+    # binding, e.g. `if val Some(x) = opt:`). The binding pattern is parsed
+    # with the same `parse_expr()` used by `match` arm patterns, so a
+    # constructor pattern here parses identically to `match EXPR: Ctor(...):`.
+    if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
+        parser_advance()  # consume val/var
+        # Parse the binding pattern below assignment precedence (parse_or):
+        # `x` stays an ident and `Some(v)` a call, and the `=` that follows
+        # is left for the explicit expect below instead of being swallowed
+        # as an assignment expression.
+        val pattern_idx = parse_or()
+        if expr_get_tag(pattern_idx) != EXPR_CALL and expr_get_tag(pattern_idx) != EXPR_IDENT:
+            parser_error("expected identifier or constructor pattern after if val/var")
+        parser_expect(100)  # consume =
+        val init_expr = parse_expr()
+        parser_expect(161)  # consume :
+        val then_body = parse_block()
+
+        # Handle elif/else after the binding if-body
+        parser_skip_newlines()
+        var else_body: [i64] = []
+        if par_kind_get() == 42:
+            val nested_if = parse_if_stmt()
+            else_body.push(nested_if)
+        elif par_kind_get() == 41:
+            parser_advance()  # consume else
+            if par_kind_get() == 40:  # G47: `else if` -> nested if as else chain
+                else_body.push(parse_if_stmt())
+            else:
+                parser_expect(161)
+                else_body = parse_block()
+
+        if expr_get_tag(pattern_idx) == EXPR_CALL:
+            # Constructor-pattern binding: desugar to the equivalent match
+            # statement, reusing the exact arm-construction machinery that
+            # `match EXPR: Ctor(...): then_body  _: else_body` uses, so
+            # matching/binding semantics stay identical to `match`.
+            val rationale = extract_wildcard_rationale(pattern_idx)
+            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+            var arm_indices: [i64] = []
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_body, "", rationale))
+            val wildcard_pattern = expr_ident("_", 0)
+            # match arms produced by parse_block always have >=1 stmt; keep
+            # that invariant when there is no else branch.
+            var wildcard_body = else_body
+            if wildcard_body.len() == 0:
+                wildcard_body.push(stmt_expr_stmt(expr_unit(0), 0))
+            arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
+            return stmt_match_stmt(init_expr, arm_indices, 0)
+
+        # Plain identifier binding.
+        # Mark the synthetic binding so the interpreter unwraps Option only.
+        val bind_name = expr_get_str(pattern_idx)
+        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
+        val name_expr = expr_ident(bind_name, 0)
+        val nil_expr = expr_nil_lit(0)
+        val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
+        val elif_idx = elif_new(cond_expr, then_body, else_body)
+        val if_stmt = stmt_if_stmt(cond_expr, then_body, elif_idx, 0)
+        var block_stmts: [i64] = []
+        block_stmts.push(bind_stmt)
+        block_stmts.push(if_stmt)
+        return stmt_block_stmt(block_stmts, 0)
+
+    val cond = parse_expr()
+    parser_expect(161)
+    val then_body = parse_block()
+
+    # Handle elif/else
+    parser_skip_newlines()
+    var else_body: [i64] = []
+
+    if par_kind_get() == 42:
+        # Elif is parsed as nested if in else
+        val nested_if = parse_if_stmt()
+        else_body.push(nested_if)
+    elif par_kind_get() == 41:
+        parser_advance()  # consume else
+        # G47: `else if` (C-style elif, 1001 sites in src/lib): an `if` after
+        # `else` starts a nested if that becomes this if's else chain.
+        if par_kind_get() == 40:
+            else_body.push(parse_if_stmt())
+        else:
+            parser_expect(161)
+            else_body = parse_block()
+
+    # Store elif chain using elif arena
+    val elif_idx = elif_new(cond, then_body, else_body)
+    stmt_if_stmt(cond, then_body, elif_idx, 0)
+
+fn parse_for_stmt() -> i64:
+    parser_advance()
+    var iter_name = ""
+    if par_kind_get() == 140:
+        # Tuple destructuring: for (a, b) in list:
+        # G40: any keyword or _ accepted as tuple-binding name via G26 round-trip.
+        parser_advance()  # consume (
+        var names: [text] = []
+        # G26/G40 round-trip bug (see parse_tuple_destructure_val above):
+        # tok_kind_name(TOK_IDENT) == "Ident" and keyword_lookup("Ident") ==
+        # TOK_IDENT (the not-a-keyword fallback), so the keyword round-trip
+        # check below is trivially true for EVERY plain identifier -- without
+        # this explicit TOK_IDENT branch first, every `for (k, v) in ...`
+        # name silently became the literal string "Ident" and the loop
+        # body's real `k`/`v` were never bound ("unresolved name: k"/"v").
+        if par_kind_get() == 169:
+            names.push("_")
+            parser_advance()
+        elif par_kind_get() == TOK_IDENT:
+            names.push(par_text_get())
+            parser_expect(6)
+        else:
+            val ft0_kn = tok_kind_name(par_kind_get())
+            if keyword_lookup(ft0_kn) == par_kind_get():
+                names.push(ft0_kn)
+                parser_advance()
+            else:
+                names.push(par_text_get())
+                parser_expect(6)
+        while par_kind_get() == 160:
+            parser_advance()  # consume ,
+            if par_kind_get() == 169:
+                names.push("_")
+                parser_advance()
+            elif par_kind_get() == TOK_IDENT:
+                names.push(par_text_get())
+                parser_expect(6)
+            else:
+                val ftN_kn = tok_kind_name(par_kind_get())
+                if keyword_lookup(ftN_kn) == par_kind_get():
+                    names.push(ftN_kn)
+                    parser_advance()
+                else:
+                    names.push(par_text_get())
+                    parser_expect(6)
+        parser_expect(141)
+        # Encode tuple pattern as "(a,b,c)" in iter_name
+        var joined = "("
+        var ni = 0
+        while ni < names.len():
+            if ni > 0:
+                joined = joined + ","
+            joined = joined + names[ni]
+            ni = ni + 1
+        joined = joined + ")"
+        iter_name = joined
+    elif par_kind_get() == 169:
+        # Wildcard binding: for _ in xs:
+        iter_name = "_"
+        parser_advance()
+    else:
+        iter_name = par_text_get()
+        parser_expect(6)
+    parser_expect(50)
+    val iterable = parse_expr()
+    parser_expect(161)
+    val body = parse_block()
+    stmt_for_stmt(iter_name, iterable, body, 0)
+
+fn parse_static_for_stmt() -> i64:
+    parser_advance()
+    val iter_name = par_text_get()
+    parser_expect(6)
+    parser_expect(50)
+    val iterable = parse_expr()
+    parser_expect(161)
+    val body = parse_block()
+    stmt_static_for_stmt(iter_name, iterable, body, 0)
+
+fn parse_while_stmt() -> i64:
+    parser_advance()
+
+    # G19: while val NAME = EXPR: body  (re-bind each iteration, break on nil)
+    if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
+        parser_advance()  # consume val/var
+        val bind_name = par_text_get()
+        parser_expect(6)  # consume IDENT
+        parser_expect(100)  # consume =
+        val init_expr = parse_expr()
+        parser_expect(161)  # consume :
+        val body = parse_block()
+
+        # Mark the synthetic binding so the interpreter unwraps Option only.
+        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
+        val name_expr = expr_ident(bind_name, 0)
+        val nil_expr2 = expr_nil_lit(0)
+        # == is kind 80; break if NAME == nil
+        val nil_cond_eq = expr_binary(80, name_expr, nil_expr2, 0)
+        var break_body: [i64] = []
+        val break_s = stmt_break_stmt(0)
+        break_body.push(break_s)
+        val nil_check_if_idx = elif_new(nil_cond_eq, break_body, [])
+        val nil_check_stmt = stmt_if_stmt(nil_cond_eq, break_body, nil_check_if_idx, 0)
+        var loop_body: [i64] = []
+        loop_body.push(bind_stmt)
+        loop_body.push(nil_check_stmt)
+        for i in 0..body.len():
+            loop_body.push(body[i])
+        val true_expr = expr_ident("true", 0)
+        return stmt_while_stmt(true_expr, loop_body, 0)
+
+    val cond = parse_expr()
+    parser_expect(161)
+    val body = parse_block()
+    stmt_while_stmt(cond, body, 0)
+
+# Statement-form `loop: <body>` -- desugar to the exact AST shape that
+# `while true: <body>` produces (see the `true_expr` desugar above), so
+# every downstream layer (type-check, HIR, MIR, native codegen) treats it
+# as a genuine loop rather than a plain one-shot block.
+fn parse_loop_stmt() -> i64:
+    parser_advance()  # consume 'loop'
+    parser_expect(161)  # consume ':'
+    val body = parse_block()
+    # Use the real EXPR_BOOL_LIT node (same as what parsing a literal
+    # `true` token in expression position produces) rather than
+    # expr_ident("true", ...), which HIR lowering treats as an unresolved
+    # identifier and rejects.
+    val true_expr = expr_bool_lit(1, 0)
+    stmt_while_stmt(true_expr, body, 0)
+
+# G33: kinds that cannot START an expression — a statement keyword followed
+# by one of these is being used as an identifier, not a keyword.
+fn g33_kw_ident_follow(kind: i64) -> bool:
+    if kind >= 100 and kind <= 106:
+        return true
+    if kind == 141 or kind == 160 or kind == 161 or kind == 164 or kind == 168:
+        return true
+    if kind == 180 or kind == 181 or kind == 182:
+        return true
+    if kind == 55 or kind == 56:
+        return true
+    if kind >= 60 and kind <= 67:
+        return true
+    if kind >= 80 and kind <= 85:
+        return true
+    if kind >= 120 and kind <= 122:
+        return true
+    false
+
+fn parse_match_stmt() -> i64:
+    parser_advance()
+    return parse_match_stmt_tail()
+
+# Shared arm-parsing core for both `match` in STATEMENT position
+# (parse_match_stmt_tail -> stmt_match_stmt, a side-effecting match with no
+# value) and `match` in EXPRESSION position (parse_match_expr_tail ->
+# expr_match_expr, a value-producing match, e.g. `val r = match n: ...`).
+# Returns (scrutinee_expr_id, arm_indices) so each caller only differs in
+# which AST constructor it wraps the result in.
+fn parse_match_arms_common() -> (i64, [i64]):
+    val scrutinee = parse_expr()
+    parser_expect(161)
+    parser_skip_newlines()
+    parser_expect(181)
+
+    var arm_indices: [i64] = []
+    var kind = par_kind_get()
+    for i in 0..1000:
+        parser_skip_newlines()
+        kind = par_kind_get()
+        if kind == 182:
+            parser_advance()
+            break
+        if kind == 190:
+            break
+
+        if kind == 44:
+            parser_advance()
+
+            # Support multi-pattern: case X | Y | Z:
+            # Parse first pattern
+            var patterns: [i64] = []
+            patterns.push(parse_expr())
+
+            # Check for pipe separator and collect additional patterns
+            # Support multi-line patterns by skipping newlines/indents before pipes
+            for skip_idx in 0..100:
+                kind = par_kind_get()
+                val is_nl = kind == 180
+                val is_indent = kind == 181
+                val should_skip = is_nl or is_indent
+                if not should_skip:
+                    break
+                parser_advance()
+
+            kind = par_kind_get()
+            while kind == 121:
+                parser_advance()
+                # Skip newlines/indents after pipe
+                for skip_idx in 0..100:
+                    kind = par_kind_get()
+                    val is_nl = kind == 180
+                    val is_indent = kind == 181
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+                patterns.push(parse_expr())
+                kind = par_kind_get()
+                # Skip newlines/indents after pattern
+                for skip_idx in 0..100:
+                    kind = par_kind_get()
+                    val is_nl = kind == 180
+                    val is_indent = kind == 181
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+                kind = par_kind_get()
+
+            # Check for guard clause: case X if guard_expr:
+            var guard_expr_idx: i64 = -1
+            if par_kind_get() == 40:
+                parser_advance()
+                guard_expr_idx = parse_expr()
+
+            # Check for pattern binding: case X as binding_name:
+            var pattern_binding = ""
+            if par_kind_get() == TOK_KW_AS:
+                parser_advance()
+                pattern_binding = par_text_get()
+                parser_expect(6)
+
+            # Expect colon after all patterns
+            parser_expect(161)
+            val arm_body = parse_block()
+
+            # Create an arm for each pattern (they share the same body and guard)
+            for i in 0..patterns.len():
+                val pattern_idx = patterns[i]
+                val rationale = extract_wildcard_rationale(pattern_idx)
+                val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
+                arm_indices.push(arm_idx)
+        else:
+            # Caseless arm: pattern directly followed by ':' (no 'case' keyword required)
+            # e.g. `Enum.Variant:`, `Ok(v):`, `_:`, `0:`
+            var patterns: [i64] = []
+            patterns.push(parse_expr())
+
+            # Check for guard clause: pattern if guard_expr:
+            var guard_expr_idx: i64 = -1
+            if par_kind_get() == 40:
+                parser_advance()
+                guard_expr_idx = parse_expr()
+
+            # Check for pattern binding: pattern as binding_name:
+            var pattern_binding = ""
+            if par_kind_get() == TOK_KW_AS:
+                parser_advance()
+                pattern_binding = par_text_get()
+                parser_expect(6)
+
+            # G28: accept `=>` as either a single-expression separator or the
+            # established block-arm spelling used by UI/web renderers.
+            var arm_body: [i64] = []
+            if par_kind_get() == TOK_FAT_ARROW:
+                parser_advance()
+                if par_kind_get() == TOK_NEWLINE:
+                    arm_body = parse_block()
+                else:
+                    val arrow_expr = parse_expr()
+                    arm_body.push(arrow_expr)
+            else:
+                # Expect colon after pattern
+                parser_expect(161)
+                arm_body = parse_block()
+
+            # Create arm
+            for i in 0..patterns.len():
+                val pattern_idx = patterns[i]
+                val rationale = extract_wildcard_rationale(pattern_idx)
+                val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
+                arm_indices.push(arm_idx)
+
+    (scrutinee, arm_indices)
+
+fn parse_match_stmt_tail() -> i64:
+    val parsed = parse_match_arms_common()
+    stmt_match_stmt(parsed[0], parsed[1], 0)
+
+# `match` used as a VALUE (expression position), e.g. `val r = match n:
+# case 1: 10 case _: 99`. Bug: expression-position `match` used to call
+# parse_match_stmt_tail() and return its STATEMENT id directly as if it were
+# an expr id -- stmt-arena and expr-arena indices overlap, so the caller
+# (parse_primary_expr, expecting an expr id) silently read whatever unrelated
+# EXPR happened to occupy that numeric slot (a wrong-arena type confusion),
+# producing a garbage constant with no branches at all instead of the real
+# match value. Building a genuine expr_match_expr node here (mirroring the
+# stmt path exactly, just wrapped in the expr constructor) fixes this at the
+# source instead of downstream.
+fn parse_match_expr_tail() -> i64:
+    val parsed = parse_match_arms_common()
+    expr_match_expr(parsed[0], parsed[1], 0)
+
+fn parse_receive_stmt() -> i64:
+    # Already consumed 'receive' keyword
+    parser_expect(161)
+    parser_skip_newlines()
+    parser_expect(181)
+
+    var arm_indices: [i64] = []
+    var timeout_expr: i64 = -1
+    var timeout_body_idx: i64 = -1
+
+    var kind = par_kind_get()
+    for i in 0..1000:
+        parser_skip_newlines()
+        kind = par_kind_get()
+        if kind == 182:
+            parser_advance()
+            break
+        if kind == 190:
+            break
+
+        if kind == 207:
+            # after TIMEOUT: body -- timeout arm
+            parser_advance()
+            timeout_expr = parse_expr()
+            parser_expect(161)
+            val after_body = parse_block()
+            val after_body_stmt_idx = stmt_block_stmt(after_body, 0)
+            timeout_body_idx = after_body_stmt_idx
+        elif kind == 44:
+            parser_advance()
+            var patterns: [i64] = []
+            patterns.push(parse_expr())
+            for skip_idx in 0..100:
+                kind = par_kind_get()
+                val is_nl = kind == 180
+                val is_indent = kind == 181
+                val should_skip = is_nl or is_indent
+                if not should_skip:
+                    break
+                parser_advance()
+            kind = par_kind_get()
+            while kind == 121:
+                parser_advance()
+                for skip_idx in 0..100:
+                    kind = par_kind_get()
+                    val is_nl = kind == 180
+                    val is_indent = kind == 181
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+                kind = par_kind_get()
+                patterns.push(parse_expr())
+            var guard_expr_idx: i64 = -1
+            if par_kind_get() == 40:
+                parser_advance()
+                guard_expr_idx = parse_expr()
+            parser_expect(161)
+            val arm_body = parse_block()
+            for j in 0..patterns.len():
+                val pattern_idx = patterns[j]
+                val rationale = extract_wildcard_rationale(pattern_idx)
+                val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, "", rationale)
+                arm_indices.push(arm_idx)
+        else:
+            parser_error("expected 'case' or 'after' in receive block")
+            parser_advance()
+
+    stmt_receive_stmt(arm_indices, timeout_expr, timeout_body_idx, 0)
+
+fn parse_bind_stmt() -> i64:
+    # Already consumed 'bind' keyword
+    val var_name = par_text_get()
+    parser_expect(6)
+    parser_expect(100)
+    val rhs = parse_expr()
+    stmt_bind_stmt(var_name, rhs, 0)
+
+# ===== Expression-Level Control Flow (for module-level statements) =====
+
+fn parse_if_expr() -> i64:
+    parser_advance()
+
+    # G_ifval_expr: `if val/var NAME = EXPR: body [elif/else]` in EXPRESSION
+    # position (e.g. `val r = if val Some(x) = o: a else: b`). Mirrors
+    # parse_if_stmt's G19 desugar (statement position, fixed 2026-07-02) but
+    # expression-flavored: both branches must be *values*, not statement
+    # blocks executed for effect. Plain-ident binding desugars to a block
+    # value (bind + if-expr on `!= nil`); a constructor pattern desugars to
+    # an expr-level match (expr_match_expr, evaluated by eval_match_expr)
+    # instead of a match statement, reusing the same arm-construction
+    # machinery as the statement form so matching semantics stay identical.
+    if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
+        parser_advance()  # consume val/var
+        # Parse the binding pattern below assignment precedence (parse_or),
+        # same as parse_if_stmt: `x` stays an ident and `Some(v)` a call.
+        val pattern_idx = parse_or()
+        if expr_get_tag(pattern_idx) != EXPR_CALL and expr_get_tag(pattern_idx) != EXPR_IDENT:
+            parser_error("expected identifier or constructor pattern after if val/var")
+        parser_expect(100)  # consume =
+        val init_expr = parse_expr()
+        parser_expect(161)  # consume :
+        val then_body = parse_block()
+        val then_expr = expr_block(then_body, -1, 0)
+
+        parser_skip_newlines()
+        var else_expr: i64 = expr_unit(0)
+        if par_kind_get() == 42:
+            else_expr = parse_if_expr()
+        elif par_kind_get() == 41:
+            parser_advance()  # consume else
+            if par_kind_get() == 161:
+                parser_advance()
+                val else_body = parse_block()
+                else_expr = expr_block(else_body, -1, 0)
+            elif par_kind_get() == 40:
+                else_expr = parse_if_expr()
+            else:
+                else_expr = parse_expr()
+
+        if expr_get_tag(pattern_idx) == EXPR_CALL:
+            # Constructor-pattern binding: desugar to an expr-level match.
+            val rationale = extract_wildcard_rationale(pattern_idx)
+            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+            var arm_indices: [i64] = []
+            var then_arm_body: [i64] = []
+            then_arm_body.push(stmt_expr_stmt(then_expr, 0))
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_arm_body, "", rationale))
+            val wildcard_pattern = expr_ident("_", 0)
+            var wildcard_body: [i64] = []
+            wildcard_body.push(stmt_expr_stmt(else_expr, 0))
+            arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
+            return expr_match_expr(init_expr, arm_indices, 0)
+
+        # Plain identifier binding.
+        # Mark the synthetic binding so the interpreter unwraps Option only.
+        val bind_name = expr_get_str(pattern_idx)
+        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
+        val name_expr = expr_ident(bind_name, 0)
+        val nil_expr = expr_nil_lit(0)
+        val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
+        val if_val_expr = expr_if_expr(cond_expr, then_expr, else_expr, 0)
+        var block_stmts: [i64] = []
+        block_stmts.push(bind_stmt)
+        block_stmts.push(stmt_expr_stmt(if_val_expr, 0))
+        return expr_block(block_stmts, -1, 0)
+
+    val cond = parse_expr()
+    # G42: ternary expression form `if cond then X else Y`.
+    # `then` is not a keyword — it arrives as Ident (kind 6). In the block
+    # form the token after the cond is always `:` (161), never an Ident, so
+    # an Ident here can only be `then`. We detect on kind alone: par_text_get
+    # returns "" for this token under the interpreter (offset-based retrieval),
+    # so a text == "then" check would silently never fire there.
+    # `else` is keyword kind 41 (same as block form); parse_expr for the cond
+    # stops at `then` (Ident, not an operator) and the then-branch stops at
+    # `else` (kw 41). Bridge else/elif fidelity is tracked under M12.
+    # Brace-form if expression: `if cond { X } else { Y }` (Rust-style braces).
+    if par_kind_get() == 142:
+        parser_advance()
+        val br_then = parse_expr()
+        parser_expect(143)
+        var br_else: i64 = expr_unit(0)
+        if par_kind_get() == 41:
+            parser_advance()
+            if par_kind_get() == 40:
+                br_else = parse_if_expr()
+            elif par_kind_get() == 142:
+                parser_advance()
+                br_else = parse_expr()
+                parser_expect(143)
+            else:
+                br_else = parse_expr()
+        return expr_if_expr(cond, br_then, br_else, 0)
+    if par_kind_get() == 6:
+        parser_advance()
+        # G45: optional `:` after `then` (`then: X` variant)
+        if par_kind_get() == 161:
+            parser_advance()
+        val tern_then = parse_expr()
+        var tern_else: i64 = expr_unit(0)
+        if par_kind_get() == 41:
+            parser_advance()
+            # G45: colon-ternary `... else: X` — more common (154 sites) than
+            # the plain `... else X` form (54). Consume the optional `:`.
+            if par_kind_get() == 161:
+                parser_advance()
+            tern_else = parse_expr()
+        return expr_if_expr(cond, tern_then, tern_else, 0)
+    parser_expect(161)
+    val then_body = parse_block()
+    val then_expr = expr_block(then_body, -1, 0)
+    parser_skip_newlines()
+    var else_expr: i64 = expr_unit(0)
+    if par_kind_get() == 42:
+        else_expr = parse_if_expr()
+    elif par_kind_get() == 41:
+        parser_advance()  # consume else
+        # G48: colon-form inline ternary `if C: T else E` (~29 sites in src/lib):
+        # the else branch is an inline expression, not a block. Distinguish from
+        # the block `else:` (161) and the `else if` chain (40).
+        if par_kind_get() == 161:
+            parser_advance()
+            val else_body = parse_block()
+            else_expr = expr_block(else_body, -1, 0)
+        elif par_kind_get() == 40:
+            else_expr = parse_if_expr()
+        else:
+            else_expr = parse_expr()
+    expr_if_expr(cond, then_expr, else_expr, 0)
+
+fn parse_for_expr() -> i64:
+    parser_advance()
+    val iter_name = par_text_get()
+    parser_expect(6)
+    parser_expect(50)
+    val iterable = parse_expr()
+    parser_expect(161)
+    val body = parse_block()
+    expr_for_expr(iter_name, iterable, body, 0)
+
+fn parse_while_expr() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(161)
+    val body = parse_block()
+    expr_while_expr(cond, body, 0)
+
+# ===== Tuple Destructuring =====
+# val (a, b, c) = expr  →  val "(a,b,c)" = expr
+# var (a, b, c) = expr  →  var "(a,b,c)" = expr
+# The evaluator detects the "(" prefix and destructures at runtime
+
+fn parse_tuple_destructure_val() -> i64:
+    # Already consumed 'val', current token is '('
+    # Encode as: val "(a,b,c)" = expr
+    # The evaluator detects the "(" prefix and destructures
+    parser_advance()  # consume (
+    var joined = "("
+    # G30: accept _ (kind 169); G26: plain Ident MUST be captured via
+    # par_text_get() before the keyword round-trip check below -- that check
+    # (tok_kind_name(TOK_IDENT) == "Ident", keyword_lookup("Ident") ==
+    # TOK_IDENT since "Ident" is not a real keyword) is trivially true for
+    # EVERY plain identifier, so without this explicit TOK_IDENT branch first
+    # every destructured name silently became the literal string "Ident"
+    # (same class of bug already fixed for single-name `val` in
+    # parse_val_decl_stmt above -- that fix never propagated to the
+    # parenthesized tuple form). G40: accept any keyword via G26 round-trip.
+    if par_kind_get() == 169:
+        joined = joined + "_"
+        parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        # Plain identifier: capture real text. tok_kind_name(TOK_IDENT)=="Ident"
+        # and keyword_lookup("Ident")==TOK_IDENT, so the keyword round-trip below
+        # is trivially true for every ident and would append the literal "Ident"
+        # (same bug fixed in parse_val_decl_stmt's single-name path).
+        joined = joined + par_text_get()
+        parser_expect(6)
+    else:
+        val tdv0_kn = tok_kind_name(par_kind_get())
+        if keyword_lookup(tdv0_kn) == par_kind_get():
+            joined = joined + tdv0_kn
+            parser_advance()
+        else:
+            joined = joined + par_text_get()
+            parser_expect(6)
+    while par_kind_get() == 160:
+        parser_advance()  # consume ,
+        if par_kind_get() == 169:
+            joined = joined + ",_"
+            parser_advance()
+        elif par_kind_get() == TOK_IDENT:
+            joined = joined + "," + par_text_get()
+            parser_expect(6)
+        else:
+            val tdvN_kn = tok_kind_name(par_kind_get())
+            if keyword_lookup(tdvN_kn) == par_kind_get():
+                joined = joined + "," + tdvN_kn
+                parser_advance()
+            else:
+                joined = joined + "," + par_text_get()
+                parser_expect(6)
+    parser_expect(141)
+    joined = joined + ")"
+    parser_expect(100)
+    val init = parse_expr()
+    stmt_val_decl(joined, 0, init, 0)
+
+fn parse_tuple_destructure_var() -> i64:
+    # Already consumed 'var', current token is '('
+    # Encode as: var "(a,b,c)" = expr
+    # The evaluator detects the "(" prefix and destructures
+    parser_advance()  # consume (
+    var joined = "("
+    # G30: accept _ (kind 169); G40: accept any keyword via G26 round-trip
+    if par_kind_get() == 169:
+        joined = joined + "_"
+        parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        joined = joined + par_text_get()
+        parser_expect(6)
+    else:
+        val tdvr0_kn = tok_kind_name(par_kind_get())
+        if keyword_lookup(tdvr0_kn) == par_kind_get():
+            joined = joined + tdvr0_kn
+            parser_advance()
+        else:
+            joined = joined + par_text_get()
+            parser_expect(6)
+    while par_kind_get() == 160:
+        parser_advance()  # consume ,
+        if par_kind_get() == 169:
+            joined = joined + ",_"
+            parser_advance()
+        elif par_kind_get() == TOK_IDENT:
+            joined = joined + "," + par_text_get()
+            parser_expect(6)
+        else:
+            val tdvrN_kn = tok_kind_name(par_kind_get())
+            if keyword_lookup(tdvrN_kn) == par_kind_get():
+                joined = joined + "," + tdvrN_kn
+                parser_advance()
+            else:
+                joined = joined + "," + par_text_get()
+                parser_expect(6)
+    parser_expect(141)
+    joined = joined + ")"
+    parser_expect(100)
+    val init = parse_expr()
+    stmt_var_decl(joined, 0, init, 0)
+
+# ===== GPU Launch Statement =====
+
+fn parse_gpu_launch_stmt() -> i64:
+    """Parse gpu_launch(grid: (...), block: (...)): body
+
+    Syntax:
+        gpu_launch(grid: (256,), block: (256,)):
+            vector_add(a, b, out, n)
+
+        gpu_launch(grid: (16, 16), block: (32, 32)):
+            matrix_mul(a, b, out, n)
+    """
+    parser_advance()  # consume 'gpu_launch'
+    parser_expect(140)
+
+    var grid_exprs: [i64] = []
+    var block_exprs: [i64] = []
+
+    # Parse named arguments: grid: (...), block: (...)
+    for arg_i in 0..2:
+        if arg_i > 0:
+            if par_kind_get() == 160:
+                parser_advance()
+
+        val arg_name = par_text_get()
+        parser_expect(6)
+        parser_expect(161)
+
+        # Parse tuple: (expr, expr, ...)
+        parser_expect(140)
+        var dims: [i64] = []
+        for dim_i in 0..3:
+            if dim_i > 0:
+                if par_kind_get() == 160:
+                    parser_advance()
+                    # Check for trailing comma before )
+                    if par_kind_get() == 141:
+                        break
+                else:
+                    break
+            dims.push(parse_expr())
+        parser_expect(141)
+
+        if arg_name == "grid":
+            grid_exprs = dims
+        elif arg_name == "block":
+            block_exprs = dims
+
+    parser_expect(141)
+    parser_expect(161)
+
+    val body = parse_block()
+    stmt_gpu_launch(grid_exprs, block_exprs, body, 0)
+
+# ===== Exports =====
+export parse_block, parse_statement
+export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
+export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
+export parse_receive_stmt, parse_bind_stmt
+export parse_if_expr, parse_for_expr, parse_while_expr

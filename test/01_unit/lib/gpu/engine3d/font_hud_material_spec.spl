@@ -1,0 +1,80 @@
+use std.spipe.*
+use std.common.binary_io.{f32_to_bits}
+use std.gpu.engine3d.font_hud_material.{font_hud_vertices, font_world_vertices, font_world_vulkan_depth, font_hud_metal_vertices}
+use std.gpu.engine3d.vulkan_font_adapter.{vulkan_font_atlas_upload_required}
+use std.gpu.engine3d.font_vulkan_spirv.{font_vulkan_fragment_spirv}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn _u32_le(bytes: [u8], offset: i64) -> u32:
+    bytes[offset].to_u32() | (bytes[offset + 1].to_u32() << 8u32) |
+        (bytes[offset + 2].to_u32() << 16u32) | (bytes[offset + 3].to_u32() << 24u32)
+
+fn _hud_batch(quad: FontRenderQuad) -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 4, atlas_height: 2,
+        atlas_pixels: [0u32; 8], quads: [quad], atlas_generation: 1, dirty_rects: [])
+
+describe "Engine3D Vulkan font atlas identity":
+    it "pins the fragment shader that discards zero-coverage depth fragments":
+        val fragment = font_vulkan_fragment_spirv()
+        expect fragment.len() to_equal 1180
+        expect sha256_u8_hex(fragment) to_equal "f4d2dd66dc65502c94a9c90bae1cb4681fa3b55d2fd8ea34605960fde9312ab4"
+
+    it "reuploads when owner or dependency generation changes":
+        val batch = FontRenderBatch(program_version: 1, font_identity: "face-a", face_generation: 3,
+            valid: true, atlas_width: 2, atlas_height: 4,
+            atlas_pixels: [0u32; 8], quads: [], atlas_generation: 7, dirty_rects: [])
+        val owner = batch.atlas_owner_identity()
+        val other = FontRenderBatch(program_version: 1, font_identity: "face-b", face_generation: 3,
+            valid: true, atlas_width: 2, atlas_height: 4,
+            atlas_pixels: [0u32; 8], quads: [], atlas_generation: 7, dirty_rects: [])
+        expect vulkan_font_atlas_upload_required(owner, 7, batch) to_equal false
+        expect vulkan_font_atlas_upload_required(owner, 6, batch) to_equal true
+        expect vulkan_font_atlas_upload_required(other.atlas_owner_identity(), 7, batch) to_equal true
+        expect vulkan_font_atlas_upload_required("", -1, batch) to_equal true
+
+describe "Engine3D Metal font HUD material":
+    it "shares one canonical vertex stream across native backends":
+        val quad = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 2, height: 1, atlas_x: 1, atlas_y: 0, color: 0x80402010u32)
+        expect font_hud_vertices(_hud_batch(quad), 0, 0, 4, 2) to_equal font_hud_metal_vertices(_hud_batch(quad), 0, 0, 4, 2)
+
+    it "expands one validated quad to six little-endian 20-byte vertices":
+        val quad = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 2, height: 1, atlas_x: 1, atlas_y: 0, color: 0x80402010u32)
+        val bytes = font_hud_metal_vertices(_hud_batch(quad), 0, 0, 4, 2)
+        expect bytes.len() to_equal 120
+        expect _u32_le(bytes, 0) to_equal f32_to_bits(-1.0f32)
+        expect _u32_le(bytes, 4) to_equal f32_to_bits(1.0f32)
+        expect _u32_le(bytes, 8) to_equal f32_to_bits(0.25f32)
+        expect _u32_le(bytes, 12) to_equal f32_to_bits(0.0f32)
+        expect _u32_le(bytes, 16) to_equal 0x80402010u32
+        expect _u32_le(bytes, 100) to_equal f32_to_bits(0.0f32)
+        expect _u32_le(bytes, 104) to_equal f32_to_bits(0.0f32)
+        expect _u32_le(bytes, 108) to_equal f32_to_bits(0.75f32)
+        expect _u32_le(bytes, 112) to_equal f32_to_bits(0.5f32)
+
+    it "carries clip depth in the separate 24-byte world vertex contract":
+        val quad = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 2, height: 1, atlas_x: 1, atlas_y: 0, color: 0x80402010u32)
+        val bytes = font_world_vertices(_hud_batch(quad), 0, 0, 4, 2, 0.25f32)
+        expect bytes.len() to_equal 144
+        expect _u32_le(bytes, 8) to_equal f32_to_bits(0.25f32)
+        expect _u32_le(bytes, 12) to_equal f32_to_bits(0.25f32)
+        expect _u32_le(bytes, 20) to_equal 0x80402010u32
+
+    it "maps OpenGL clip depth to Vulkan device depth":
+        expect font_world_vulkan_depth(-1.0f32) to_equal 0.0f32
+        expect font_world_vulkan_depth(0.0f32) to_equal 0.5f32
+        expect font_world_vulkan_depth(1.0f32) to_equal 1.0f32
+
+    it "fails closed before emitting a partial vertex stream":
+        val bad_atlas = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 2, height: 1, atlas_x: 3, atlas_y: 0, color: 0xFFFFFFFFu32)
+        expect font_hud_metal_vertices(_hud_batch(bad_atlas), 0, 0, 4, 2).len() to_equal 0
+        val bad_destination = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 2147483647, dst_y: 0,
+            width: 2, height: 1, atlas_x: 0, atlas_y: 0, color: 0xFFFFFFFFu32)
+        expect font_hud_metal_vertices(_hud_batch(bad_destination), 1, 0, 4, 2).len() to_equal 0
+        val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: false, atlas_width: 4, atlas_height: 2,
+            atlas_pixels: [0u32; 8], quads: [bad_atlas], atlas_generation: 1, dirty_rects: [])
+        expect font_hud_metal_vertices(invalid, 0, 0, 4, 2).len() to_equal 0

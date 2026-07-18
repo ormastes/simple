@@ -1,0 +1,84 @@
+# Explicit allocation `new` keyword spec
+#
+# Tests for `new` expression parsing (EXPR_NEW)
+# Three forms:
+#   new expr           — default allocator (alloc_kind=0)
+#   new() expr         — type pool (alloc_kind=1)
+#   new(alloc) expr    — explicit allocator (alloc_kind=2)
+#
+# Phase 1: parser + interpreter passthrough (allocation is a no-op stub)
+#
+# NOTE: This test requires a binary rebuilt from the modified source files
+# (tokens.spl, ast_expr.spl, parser_primary.spl, eval.spl) that include
+# TOK_KW_NEW=211 and EXPR_NEW=50 support.
+
+# Helper struct for testing
+struct Point:
+    x: i64
+    y: i64
+
+fn make_point(x: i64, y: i64) -> Point:
+    Point(x: x, y: y)
+
+fn add(a: i64, b: i64) -> i64:
+    a + b
+
+# Verify `new` parses as an expression and evaluates to inner value
+val p1 = new Point(x: 3, y: 4)
+val p2 = new make_point(5, 6)
+val sum1 = new add(10, 20)
+
+# Verify `new()` pool form parses
+val p3 = new() Point(x: 7, y: 8)
+val p4 = new() make_point(9, 10)
+
+# Verify `new(alloc)` explicit allocator form parses
+# Use a simple integer as placeholder allocator (stub ignores it)
+val fake_alloc = 42
+val p5 = new(fake_alloc) Point(x: 11, y: 12)
+val p6 = new(fake_alloc) make_point(13, 14)
+val sum2 = new(fake_alloc) add(1, 2)
+
+describe "new keyword parsing":
+    context "new expr (default allocator)":
+        it "parses new before constructor call":
+            val p = new Point(x: 1, y: 2)
+            expect(p.x).to_equal(1)
+            expect(p.y).to_equal(2)
+
+        it "parses new before function call":
+            val result = new add(3, 4)
+            expect(result).to_equal(7)
+
+        it "parses new before factory function":
+            val p = new make_point(5, 6)
+            expect(p.x).to_equal(5)
+
+    context "new() expr (type pool)":
+        it "parses new() before constructor":
+            val p = new() Point(x: 10, y: 20)
+            expect(p.x).to_equal(10)
+
+        it "parses new() before function call":
+            val result = new() add(100, 200)
+            expect(result).to_equal(300)
+
+    context "new(allocator) expr (explicit allocator)":
+        it "parses new(alloc) before constructor":
+            val alloc = 99
+            val p = new(alloc) Point(x: 30, y: 40)
+            expect(p.x).to_equal(30)
+
+        it "parses new(alloc) before function call":
+            val alloc = 99
+            val result = new(alloc) add(50, 60)
+            expect(result).to_equal(110)
+
+    context "new in various expression positions":
+        it "new result assigned to val":
+            val x = new add(1, 1)
+            expect(x).to_equal(2)
+
+        it "new result used in arithmetic":
+            val x = new add(2, 3) + 10
+            expect(x).to_equal(15)

@@ -1,0 +1,1920 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os, is_macos}
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_write, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+
+fn llvm_link_trace_enabled() -> bool:
+    (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
+    if objects.len() == 0:
+        return Err("Stage4 final object closure is empty")
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("Stage4 final object symbol scan requires llvm-nm or nm")
+    var args: [text] = ["-g"]
+    for object in objects:
+        args = args.push(object)
+    val (nm_out, nm_err, nm_code) = process_run(nm, args)
+    if nm_code != 0:
+        return Err("Stage4 final object symbol scan failed: {nm_err}")
+    val requested = stage4_requested_from_nm_output(nm_out, is_macos())
+    if requested.len() == 0:
+        return Err("Stage4 final runtime symbol request closure is empty")
+    Ok(requested)
+
+pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) -> Result<[text], text>:
+    match stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == "windows"):
+        case Err(err): return Err(err)
+        case Ok(()): ()
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("Stage4 candidate archive scan requires llvm-nm or nm")
+    val section_reader = find_objdump_portable()
+    if section_reader == "":
+        return Err("Stage4 candidate archive scan requires llvm-objdump, readelf, or objdump")
+    var scans: [text] = []
+    var i = 0
+    while i < paths.len():
+        val label = labels[i]
+        val path = paths[i]
+        if not file_exists(path):
+            return Err("Stage4 candidate archive '" + label + "' is missing at '" + path + "'")
+        val section_flag = if section_reader.lower().contains("readelf"): "-S" else: "-h"
+        val (section_out, section_err, section_code) = process_run(section_reader, [section_flag, path])
+        if section_code != 0:
+            return Err("Stage4 candidate archive '" + label + "' section scan failed at '" + path + "': " + section_err)
+        if section_err.trim() != "":
+            return Err("Stage4 candidate archive '" + label + "' section scan reported diagnostics despite exit 0 at '" + path + "': " + section_err.trim())
+        if section_out.trim() == "":
+            return Err("Stage4 candidate archive '" + label + "' section scan was empty at '" + path + "'")
+        val forbidden_sections = stage4_forbidden_archive_sections(section_out)
+        if forbidden_sections.len() > 0:
+            return Err("Stage4 candidate archive '" + label + "' retained constructor/destructor sections at '" + path + "': " + forbidden_sections.join(", "))
+        val (nm_out, nm_err, nm_code) = process_run(nm, ["-g", path])
+        if nm_code != 0:
+            return Err("Stage4 candidate archive '" + label + "' scan failed at '" + path + "': " + nm_err)
+        if nm_out.trim() == "":
+            return Err("Stage4 candidate archive '" + label + "' scan was empty at '" + path + "'")
+        scans = scans.push(nm_out)
+        i = i + 1
+    Ok(scans)
+
+fn llvm_stage4_projection_failure(stage_dir: text, message: text) -> Result<(text, text), text>:
+    if not dir_remove_all(stage_dir):
+        return Err(message + "; Stage4 projection cleanup also failed")
+    Err(message)
+
+fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_paths: [text], selected_indices: [i64], requested_symbols: [text], target_os_name: text, hosted_cc: text, pid: i64, output_path: text) -> Result<(text, text), text>:
+    """Partial-link selected exact archives and export only the original requested roots."""
+    if target_os_name != "linux" and target_os_name != "macos":
+        return Err("Stage4 selected-archive projection requires native Linux or macOS")
+    match stage4_validate_candidate_archive_inputs_for_platform(candidate_labels, candidate_paths, false):
+        case Err(err): return Err(err)
+        case Ok(()): ()
+    if selected_indices.len() == 0:
+        return Err("Stage4 selected-archive projection requires at least one owner")
+    if requested_symbols.len() == 0:
+        return Err("Stage4 selected-archive projection requires at least one requested root")
+    if hosted_cc.trim() == "":
+        return Err("Stage4 selected-archive projection requires a hosted C compiler")
+
+    var selected_paths: [text] = []
+    var previous_index = -1
+    for index in selected_indices:
+        if index < 0 or index >= candidate_paths.len():
+            return Err("Stage4 selected-archive projection index is out of bounds")
+        if index <= previous_index:
+            return Err("Stage4 selected-archive projection indices must be unique and in candidate order")
+        previous_index = index
+        selected_paths = selected_paths.push(candidate_paths[index])
+
+    val nm = find_nm_portable()
+    val objcopy = find_objcopy_portable()
+    val section_reader = find_objdump_portable()
+    val archiver = find_archive_portable()
+    if nm == "" or objcopy == "" or section_reader == "" or archiver == "":
+        return Err("Stage4 selected-archive projection requires nm, objcopy, section-reader, and archive tools")
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_selected_projection_{pid}_{output_path.hash()}"
+    val closure_object = stage_dir + "/stage4_selected_closure.o"
+    val localized_object = stage_dir + "/stage4_selected_local.o"
+    val localize_path = stage_dir + "/stage4_selected_localize.syms"
+    val capsule_path = stage_dir + "/libsimple_stage4_selected.a"
+    if dir_exists(stage_dir):
+        if not dir_remove_all(stage_dir):
+            return Err("Stage4 selected-archive projection stale transaction cleanup failed")
+    if not dir_create_all(stage_dir):
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive projection directory creation failed")
+
+    var closure_args: [text] = ["-nostdlib", "-Wl,-r"]
+    if target_os_name == "linux":
+        closure_args = closure_args.push("-no-pie")
+        closure_args = closure_args.push("-Wl,--gc-sections")
+        for symbol in requested_symbols:
+            closure_args = closure_args.push("-Wl,--undefined={symbol}")
+        closure_args = closure_args.push("-Wl,--start-group")
+        for path in selected_paths:
+            closure_args = closure_args.push(path)
+        closure_args = closure_args.push("-Wl,--end-group")
+    else:
+        for symbol in requested_symbols:
+            closure_args = closure_args.push("-Wl,-u,_{symbol}")
+        for path in selected_paths:
+            closure_args = closure_args.push("-Wl,-force_load," + path)
+    closure_args = closure_args.push("-o")
+    closure_args = closure_args.push(closure_object)
+    val (_, closure_err, closure_code) = process_run(hosted_cc, closure_args)
+    if closure_code != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive closure link failed: " + closure_err.trim())
+
+    val (closure_nm_out, closure_nm_err, closure_nm_code) = process_run(nm, ["-g", "-p", closure_object])
+    if closure_nm_code != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive closure scan failed: " + closure_nm_err.trim())
+    val localize_symbols = match stage4_projection_localization_symbols(closure_nm_out, object_format, requested_symbols):
+        case Ok(symbols): symbols
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+    var localize_text = localize_symbols.join("\n")
+    if localize_text != "":
+        localize_text = localize_text + "\n"
+    if not file_write(localize_path, localize_text):
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive localization-list write failed")
+    val objcopy_args = [
+        "--localize-symbols=" + localize_path,
+        "--remove-section=.init_array", "--remove-section=.init_array.*",
+        "--remove-section=.ctors", "--remove-section=.ctors.*",
+        "--remove-section=.fini_array", "--remove-section=.fini_array.*",
+        "--remove-section=.dtors", "--remove-section=.dtors.*",
+        "--remove-section=__mod_init_func", "--remove-section=__mod_term_func",
+        "--remove-section=__DATA,__mod_init_func", "--remove-section=__DATA,__mod_term_func",
+        closure_object, localized_object
+    ]
+    val (_, objcopy_err, objcopy_code) = process_run(objcopy, objcopy_args)
+    if objcopy_code != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive localization failed: " + objcopy_err.trim())
+    val (localized_nm_out, localized_nm_err, localized_nm_code) = process_run(nm, ["-g", "-p", localized_object])
+    if localized_nm_code != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive localized scan failed: " + localized_nm_err.trim())
+    match stage4_validate_projection_symbol_contract(localized_nm_out, object_format, requested_symbols):
+        case Ok(()): ()
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+    val localized_fingerprint = match stage4_compiler_backfill_symbol_table_fingerprint(localized_nm_out):
+        case Ok(fingerprint): fingerprint
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+    val section_flag = if section_reader.lower().contains("readelf"): "-S" else: "-h"
+    val (section_out, section_err, section_code) = process_run(section_reader, [section_flag, localized_object])
+    if section_code != 0 or section_err.trim() != "" or section_out.trim() == "":
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive section scan was not clean: " + section_err.trim())
+    val forbidden_sections = stage4_forbidden_archive_sections(section_out)
+    if forbidden_sections.len() != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive projection retained constructor/destructor sections: " + forbidden_sections.join(", "))
+
+    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", capsule_path, localized_object])
+    if archive_code != 0:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive capsule creation failed: " + archive_err.trim())
+    val (members_out, members_err, members_code) = process_run(archiver, ["t", capsule_path])
+    if members_code != 0 or members_out.replace("\r", "").trim() != "stage4_selected_local.o":
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive capsule must contain exactly 'stage4_selected_local.o': " + members_err.trim())
+    val scans = match llvm_stage4_candidate_archive_inventory(["stage4_selected"], [capsule_path]):
+        case Ok(outputs): outputs
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+    match stage4_validate_projection_symbol_contract(scans[0], object_format, requested_symbols):
+        case Ok(()): ()
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+    val capsule_fingerprint = match stage4_compiler_backfill_symbol_table_fingerprint(scans[0]):
+        case Ok(fingerprint): fingerprint
+        case Err(err): return llvm_stage4_projection_failure(stage_dir, err)
+    if capsule_fingerprint != localized_fingerprint:
+        return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive capsule changed the localized symbol table")
+    for path in [closure_object, localized_object, localize_path]:
+        if not remove_file_if_exists(path):
+            return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive temporary cleanup failed")
+    Ok((capsule_path, stage_dir))
+
+fn llvm_stage4_cleanup_compiler_backfill_capsule(stage_dir: text, output_path: text, remove_output: bool) -> bool:
+    var clean = true
+    for path in [
+        stage_dir + "/compiler_backfill_closure.o",
+        stage_dir + "/compiler_backfill_local.o",
+        stage_dir + "/compiler_backfill_localize.syms"
+    ]:
+        if not remove_file_if_exists(path):
+            clean = false
+    if remove_output:
+        if not remove_file_if_exists(output_path):
+            clean = false
+        if not dir_remove_all(stage_dir):
+            clean = false
+    clean
+
+fn llvm_stage4_compiler_backfill_failure(stage_dir: text, output_path: text, message: text) -> Result<text, text>:
+    if not llvm_stage4_cleanup_compiler_backfill_capsule(stage_dir, output_path, true):
+        return Err(message + "; compiler backfill cleanup also failed")
+    Err(message)
+
+fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_name: text, hosted_cc: text, pid: i64, output_path: text) -> Result<text, text>:
+    if runtime_path.trim() == "":
+        return Err("Stage4 compiler backfill capsule requires SIMPLE_RUNTIME_PATH")
+    if output_path.trim() == "":
+        return Err("Stage4 compiler backfill capsule requires a final output path")
+    val archive_file = match stage4_compiler_backfill_archive_file(target_os_name):
+        case Ok(file): file
+        case Err(err): return Err(err)
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val raw_archive = runtime_path + "/" + archive_file
+    if not file_exists(raw_archive):
+        return Err("Stage4 compiler backfill source archive is missing at '" + raw_archive + "'")
+    if hosted_cc.trim() == "":
+        return Err("Stage4 compiler backfill closure requires a hosted C compiler")
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("Stage4 compiler backfill closure requires llvm-nm or nm")
+    val objcopy = find_objcopy_portable()
+    if objcopy == "":
+        return Err("Stage4 compiler backfill closure requires llvm-objcopy or objcopy")
+    val section_reader = find_objdump_portable()
+    if section_reader == "":
+        return Err("Stage4 compiler backfill closure requires llvm-objdump, readelf, or objdump")
+    val archiver = find_archive_portable()
+    if archiver == "":
+        return Err("Stage4 compiler backfill closure requires llvm-ar or ar")
+
+    val (raw_nm_out, raw_nm_err, raw_nm_code) = process_run(nm, ["-g", "-p", raw_archive])
+    if raw_nm_code != 0:
+        return Err("Stage4 compiler backfill source symbol scan failed: " + raw_nm_err.trim())
+    val manifest = match stage4_derive_compiler_backfill_manifest(raw_nm_out, object_format):
+        case Ok(symbols): symbols
+        case Err(err): return Err(err)
+
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_compiler_backfill_{pid}_{output_path.hash()}"
+    val closure_object = stage_dir + "/compiler_backfill_closure.o"
+    val localized_object = stage_dir + "/compiler_backfill_local.o"
+    val localize_path = stage_dir + "/compiler_backfill_localize.syms"
+    val capsule_path = stage_dir + "/" + archive_file
+    if raw_archive == capsule_path:
+        return Err("Stage4 compiler backfill input and output archives must differ")
+    dir_remove_all(stage_dir)
+    if dir_exists(stage_dir):
+        return Err("Stage4 compiler backfill stale transaction cleanup failed: '" + stage_dir + "'")
+    if not dir_create_all(stage_dir):
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill staging directory creation failed")
+
+    var closure_args: [text] = ["-nostdlib", "-Wl,-r"]
+    if target_os_name == "linux":
+        closure_args = closure_args.push("-no-pie")
+        closure_args = closure_args.push("-Wl,--gc-sections")
+        for symbol in manifest:
+            closure_args = closure_args.push("-Wl,--undefined={symbol}")
+    else:
+        for symbol in manifest:
+            closure_args = closure_args.push("-Wl,-u,_{symbol}")
+    closure_args = closure_args.push("-o")
+    closure_args = closure_args.push(closure_object)
+    closure_args = closure_args.push(raw_archive)
+    val (_, closure_err, closure_code) = process_run(hosted_cc, closure_args)
+    if closure_code != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill closure link failed: " + closure_err.trim())
+
+    val (closure_nm_out, closure_nm_err, closure_nm_code) = process_run(nm, ["-g", "-p", closure_object])
+    if closure_nm_code != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill closure symbol scan failed: " + closure_nm_err.trim())
+    val localize_symbols = match stage4_compiler_backfill_localization_symbols(closure_nm_out, object_format, manifest):
+        case Ok(symbols): symbols
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+    var localize_text = localize_symbols.join("\n")
+    if localize_text != "":
+        localize_text = localize_text + "\n"
+    if not file_write(localize_path, localize_text):
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill localization-list write failed")
+
+    val objcopy_args = [
+        "--localize-symbols=" + localize_path,
+        "--remove-section=.init_array",
+        "--remove-section=.init_array.*",
+        "--remove-section=.ctors",
+        "--remove-section=.ctors.*",
+        "--remove-section=.fini_array",
+        "--remove-section=.fini_array.*",
+        "--remove-section=.dtors",
+        "--remove-section=.dtors.*",
+        "--remove-section=__mod_init_func",
+        "--remove-section=__mod_term_func",
+        "--remove-section=__DATA,__mod_init_func",
+        "--remove-section=__DATA,__mod_term_func",
+        closure_object,
+        localized_object
+    ]
+    val (_, objcopy_err, objcopy_code) = process_run(objcopy, objcopy_args)
+    if objcopy_code != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill localization failed: " + objcopy_err.trim())
+
+    val (localized_nm_out, localized_nm_err, localized_nm_code) = process_run(nm, ["-g", "-p", localized_object])
+    if localized_nm_code != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 localized compiler backfill symbol scan failed: " + localized_nm_err.trim())
+    val localized_extra = match stage4_compiler_backfill_localization_symbols(localized_nm_out, object_format, manifest):
+        case Ok(symbols): symbols
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+    if localized_extra.len() != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill retained unexpected global definitions: " + localized_extra.join(", "))
+    match stage4_validate_compiler_backfill_symbol_envelope(localized_nm_out, object_format):
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+        case Ok(()): ()
+    val localized_symbol_fingerprint = match stage4_compiler_backfill_symbol_table_fingerprint(localized_nm_out):
+        case Ok(fingerprint): fingerprint
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+
+    val section_flag = if section_reader.lower().contains("readelf"): "-S" else: "-h"
+    val (section_out, section_err, section_code) = process_run(section_reader, [section_flag, localized_object])
+    if section_code != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 localized compiler backfill section scan failed: " + section_err.trim())
+    if section_err.trim() != "" or section_out.trim() == "":
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 localized compiler backfill section scan was not clean")
+    val forbidden_sections = stage4_forbidden_archive_sections(section_out)
+    if forbidden_sections.len() != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill retained constructor/destructor sections: " + forbidden_sections.join(", "))
+
+    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", capsule_path, localized_object])
+    if archive_code != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill archive creation failed: " + archive_err.trim())
+    val (members_out, members_err, members_code) = process_run(archiver, ["t", capsule_path])
+    val members = members_out.replace("\r", "").trim()
+    if members_code != 0 or members != "compiler_backfill_local.o":
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill archive must contain exactly 'compiler_backfill_local.o': " + members_err.trim())
+
+    val scans = match llvm_stage4_candidate_archive_inventory(["compiler_backfill"], [capsule_path]):
+        case Ok(outputs): outputs
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+    val final_extra = match stage4_compiler_backfill_localization_symbols(scans[0], object_format, manifest):
+        case Ok(symbols): symbols
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+    if final_extra.len() != 0:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill archive retained unexpected global definitions: " + final_extra.join(", "))
+    match stage4_validate_compiler_backfill_symbol_envelope(scans[0], object_format):
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+        case Ok(()): ()
+    val final_symbol_fingerprint = match stage4_compiler_backfill_symbol_table_fingerprint(scans[0]):
+        case Ok(fingerprint): fingerprint
+        case Err(err): return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, err)
+    if final_symbol_fingerprint != localized_symbol_fingerprint:
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill archive changed the localized symbol table")
+    if not llvm_stage4_cleanup_compiler_backfill_capsule(stage_dir, capsule_path, false):
+        return llvm_stage4_compiler_backfill_failure(stage_dir, capsule_path, "Stage4 compiler backfill temporary cleanup failed")
+    Ok(capsule_path)
+
+fn llvm_stage4_build_single_object_provider_archive(runtime_objects: [text], object_stem: text, provider: text, archive_file: text, object_ext: text, windows_paths: bool, pid: i64) -> Result<text, text>:
+    var provider_objects: [text] = []
+    for object in runtime_objects:
+        if stage4_runtime_provider_object_matches(object, object_stem, object_ext, windows_paths):
+            provider_objects = provider_objects.push(object)
+    if provider_objects.len() != 1:
+        return Err("Stage4 " + provider + " provider requires exactly one fresh " + object_stem + object_ext + " object")
+    val archiver = find_archive_portable()
+    if archiver == "":
+        return Err("Stage4 " + provider + " provider requires llvm-ar or ar")
+
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_{provider}_{pid}"
+    dir_remove_all(stage_dir)
+    if not dir_create_all(stage_dir):
+        return Err("Stage4 " + provider + " provider staging directory creation failed")
+    val expected_member = object_stem + object_ext
+    val staged_object = stage_dir + "/" + expected_member
+    if not file_copy(provider_objects[0], staged_object):
+        dir_remove_all(stage_dir)
+        return Err("Stage4 " + provider + " provider canonical object staging failed")
+
+    val archive_path = _get_temp_dir() + "/simple_stage4_{pid}_" + archive_file
+    if file_exists(archive_path):
+        file_delete(archive_path)
+    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", archive_path, staged_object])
+    if archive_code != 0:
+        dir_remove_all(stage_dir)
+        file_delete(archive_path)
+        return Err("Stage4 " + provider + " provider archive creation failed: " + archive_err.trim())
+
+    val (members_out, members_err, members_code) = process_run(archiver, ["t", archive_path])
+    val members = members_out.replace("\r", "").trim()
+    if members_code != 0 or members != expected_member:
+        dir_remove_all(stage_dir)
+        file_delete(archive_path)
+        return Err("Stage4 " + provider + " provider archive must contain exactly '" + expected_member + "': " + members_err.trim())
+    if not dir_remove_all(stage_dir):
+        file_delete(archive_path)
+        return Err("Stage4 " + provider + " provider staging cleanup failed")
+
+    Ok(archive_path)
+
+fn llvm_stage4_build_runtime_native_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    """Localize legacy dynload exports and stage the runtime-native core owner."""
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val windows_paths = target_os_name == "windows"
+    val archive_file = match stage4_runtime_native_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_runtime_native_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    var matches: [text] = []
+    for object in runtime_objects:
+        if stage4_runtime_provider_object_matches(object, "runtime_native", object_ext, windows_paths):
+            matches = matches.push(object)
+    if matches.len() != 1:
+        return Err("Stage4 runtime-native core requires exactly one fresh runtime_native" + object_ext + " object")
+
+    val archiver = find_archive_portable()
+    val objcopy = find_objcopy_portable()
+    val nm = find_nm_portable()
+    if archiver == "" or objcopy == "" or nm == "":
+        return Err("Stage4 runtime-native core requires archive, objcopy, and nm tools")
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_runtime_native_{pid}"
+    if dir_exists(stage_dir):
+        if not dir_remove_all(stage_dir):
+            return Err("Stage4 runtime-native stale staging cleanup failed")
+    if not dir_create_all(stage_dir):
+        return Err("Stage4 runtime-native staging directory creation failed")
+    val raw_object = stage_dir + "/runtime_native_raw" + object_ext
+    val localized_object = stage_dir + "/runtime_native" + object_ext
+    val localize_path = stage_dir + "/runtime_native_localize.syms"
+    if not file_copy(matches[0], raw_object):
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime-native canonical object staging failed")
+    val (raw_nm_out, raw_nm_err, raw_nm_code) = process_run(nm, ["-g", "-p", raw_object])
+    if raw_nm_code != 0:
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime-native source scan failed: " + raw_nm_err.trim())
+    val localize_symbols = match stage4_runtime_native_localization_symbols(raw_nm_out, object_format):
+        case Ok(symbols): symbols
+        case Err(err):
+            dir_remove_all(stage_dir)
+            return Err(err)
+    if not file_write(localize_path, localize_symbols.join("\n") + "\n"):
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime-native localization-list write failed")
+    val (_, objcopy_err, objcopy_code) = process_run(objcopy, ["--localize-symbols=" + localize_path, raw_object, localized_object])
+    if objcopy_code != 0:
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime-native localization failed: " + objcopy_err.trim())
+    val (localized_nm_out, localized_nm_err, localized_nm_code) = process_run(nm, ["-g", "-p", localized_object])
+    if localized_nm_code != 0:
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime-native localized scan failed: " + localized_nm_err.trim())
+    match stage4_validate_runtime_native_core_symbol_contract(localized_nm_out, object_format):
+        case Ok(()): ()
+        case Err(err):
+            dir_remove_all(stage_dir)
+            return Err(err)
+
+    val archive_path = _get_temp_dir() + "/simple_stage4_{pid}_" + archive_file
+    if file_exists(archive_path):
+        if not file_delete(archive_path):
+            dir_remove_all(stage_dir)
+            return Err("Stage4 runtime-native stale archive cleanup failed")
+    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", archive_path, localized_object])
+    if archive_code != 0:
+        dir_remove_all(stage_dir)
+        file_delete(archive_path)
+        return Err("Stage4 runtime-native archive creation failed: " + archive_err.trim())
+    val (members_out, members_err, members_code) = process_run(archiver, ["t", archive_path])
+    val members = members_out.replace("\r", "").trim()
+    if members_code != 0 or members != "runtime_native" + object_ext:
+        dir_remove_all(stage_dir)
+        file_delete(archive_path)
+        return Err("Stage4 runtime-native archive must contain exactly 'runtime_native" + object_ext + "': " + members_err.trim())
+    if not dir_remove_all(stage_dir):
+        file_delete(archive_path)
+        return Err("Stage4 runtime-native staging cleanup failed")
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_native"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    if scans.len() != 1 or scans[0].trim() == "":
+        file_delete(archive_path)
+        return Err("Stage4 runtime-native archive inventory is empty")
+    Ok(archive_path)
+
+fn llvm_stage4_build_runtime_legacy_compat_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    """Localize the broad legacy object to the exact 18-symbol compatibility ABI."""
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val windows_paths = target_os_name == "windows"
+    val archive_file = match stage4_runtime_legacy_compat_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_runtime_legacy_compat_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    var matches: [text] = []
+    for object in runtime_objects:
+        if stage4_runtime_provider_object_matches(object, "runtime_legacy_core", object_ext, windows_paths):
+            matches = matches.push(object)
+    if matches.len() != 1:
+        return Err("Stage4 runtime legacy compatibility requires exactly one fresh runtime_legacy_core" + object_ext + " object")
+
+    val archiver = find_archive_portable()
+    val objcopy = find_objcopy_portable()
+    val nm = find_nm_portable()
+    if archiver == "" or objcopy == "" or nm == "":
+        return Err("Stage4 runtime legacy compatibility requires archive, objcopy, and nm tools")
+    val stage_dir = "{_get_temp_dir()}/simple_stage4_runtime_legacy_compat_{pid}"
+    if dir_exists(stage_dir):
+        if not dir_remove_all(stage_dir):
+            return Err("Stage4 runtime legacy compatibility stale staging cleanup failed")
+    if not dir_create_all(stage_dir):
+        return Err("Stage4 runtime legacy compatibility staging directory creation failed")
+    val raw_object = stage_dir + "/runtime_legacy_core_raw" + object_ext
+    val localized_object = stage_dir + "/runtime_legacy_compat" + object_ext
+    val localize_path = stage_dir + "/runtime_legacy_compat_localize.syms"
+    if not file_copy(matches[0], raw_object):
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime legacy compatibility canonical object staging failed")
+    val (raw_nm_out, raw_nm_err, raw_nm_code) = process_run(nm, ["-g", "-p", raw_object])
+    if raw_nm_code != 0:
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime legacy compatibility source scan failed: " + raw_nm_err.trim())
+    val localize_symbols = match stage4_runtime_legacy_compat_localization_symbols(raw_nm_out, object_format):
+        case Ok(symbols): symbols
+        case Err(err):
+            dir_remove_all(stage_dir)
+            return Err(err)
+    if not file_write(localize_path, localize_symbols.join("\n") + "\n"):
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime legacy compatibility localization-list write failed")
+    val (_, objcopy_err, objcopy_code) = process_run(objcopy, ["--localize-symbols=" + localize_path, raw_object, localized_object])
+    if objcopy_code != 0:
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime legacy compatibility localization failed: " + objcopy_err.trim())
+    val (localized_nm_out, localized_nm_err, localized_nm_code) = process_run(nm, ["-g", "-p", localized_object])
+    if localized_nm_code != 0:
+        dir_remove_all(stage_dir)
+        return Err("Stage4 runtime legacy compatibility localized scan failed: " + localized_nm_err.trim())
+    match stage4_validate_runtime_legacy_compat_symbol_contract(localized_nm_out, object_format):
+        case Ok(()): ()
+        case Err(err):
+            dir_remove_all(stage_dir)
+            return Err(err)
+
+    val archive_path = _get_temp_dir() + "/simple_stage4_{pid}_" + archive_file
+    if file_exists(archive_path):
+        if not file_delete(archive_path):
+            dir_remove_all(stage_dir)
+            return Err("Stage4 runtime legacy compatibility stale archive cleanup failed")
+    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", archive_path, localized_object])
+    if archive_code != 0:
+        dir_remove_all(stage_dir)
+        file_delete(archive_path)
+        return Err("Stage4 runtime legacy compatibility archive creation failed: " + archive_err.trim())
+    val (members_out, members_err, members_code) = process_run(archiver, ["t", archive_path])
+    val members = members_out.replace("\r", "").trim()
+    if members_code != 0 or members != "runtime_legacy_compat" + object_ext:
+        dir_remove_all(stage_dir)
+        file_delete(archive_path)
+        return Err("Stage4 runtime legacy compatibility archive must contain exactly 'runtime_legacy_compat" + object_ext + "': " + members_err.trim())
+    if not dir_remove_all(stage_dir):
+        file_delete(archive_path)
+        return Err("Stage4 runtime legacy compatibility staging cleanup failed")
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_legacy_compat"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    if scans.len() != 1 or scans[0].trim() == "":
+        file_delete(archive_path)
+        return Err("Stage4 runtime legacy compatibility archive inventory is empty")
+    match stage4_validate_runtime_legacy_compat_symbol_contract(scans[0], object_format):
+        case Ok(()): Ok(archive_path)
+        case Err(err):
+            file_delete(archive_path)
+            Err(err)
+
+fn llvm_stage4_build_process_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_process_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_process_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_process", "process", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_process"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_process_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+fn llvm_stage4_build_dynload_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_dynload_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_dynload_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_dynload", "dynamic-loader", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_dynload"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_dynload_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+fn llvm_stage4_build_font_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_font_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_font_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_font", "font", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_font"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_font_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+fn llvm_stage4_build_memtrack_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_memtrack_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_memtrack_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_memtrack", "memtrack", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_memtrack"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_memtrack_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+fn llvm_stage4_build_time_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_time_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_time_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_timestamp", "time", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_timestamp"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_time_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+fn llvm_stage4_build_fork_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_fork_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val object_format = match stage4_fork_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_fork", "fork", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_fork"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    match stage4_validate_fork_provider_symbol_contract(scans[0], object_format):
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+        case Ok(()): ()
+    Ok(archive_path)
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct NativeLinkOptions:
+    """Options for LLVM native linking."""
+    debug: bool
+    verbose: bool
+    pie: bool
+    bare_metal: bool
+    opt_level: i64
+
+impl NativeLinkOptions:
+    static fn default() -> NativeLinkOptions:
+        NativeLinkOptions(
+            debug: false,
+            verbose: false,
+            pie: true,
+            bare_metal: false,
+            opt_level: 3
+        )
+
+fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name: text) -> bool:
+    """Whether host-compiled C runtime and entry objects match an explicit target."""
+    if target == "" or target == "host" or target == "native":
+        return true
+
+    val target_arch_text = if target.contains("-"): target.split("-")[0] else: target
+    val target_arch = mir_target_context_normalize_arch(target_arch_text)
+    val host_arch_normalized = mir_target_context_normalize_arch(host_arch_name)
+    val hosted_riscv64_arch = target_arch_text == "riscv64" or target_arch_text == "riscv64gc" or target_arch_text == "rv64" or target_arch_text == "rv64gc"
+    val is_x86_64 = target_arch == "x86_64" and host_arch_normalized == "x86_64"
+    val is_aarch64 = target_arch == "aarch64" and host_arch_normalized == "aarch64"
+    val is_riscv64 = hosted_riscv64_arch and host_arch_normalized == "riscv64"
+    if not is_x86_64 and not is_aarch64 and not is_riscv64:
+        return false
+
+    # Architecture-only x86-64/AArch64 targets inherit the host OS. The
+    # current explicit RISC-V target contract is Linux-only.
+    if not target.contains("-"):
+        return not is_riscv64 or host_os_name == "linux"
+
+    val canonical_suffix = match host_os_name:
+        case "linux": "-unknown-linux-gnu"
+        case "macos" | "darwin": "-apple-darwin"
+        case "windows": "-pc-windows-msvc"
+        case "freebsd": if is_riscv64: "" else: "-unknown-freebsd"
+        case _: ""
+    if canonical_suffix == "":
+        return false
+    target.substring(target_arch_text.len()) == canonical_suffix
+
+# ============================================================================
+# C-Based Entry Point Compiler (no llc needed)
+# ============================================================================
+
+fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
+    """Compile entry point as C source (no llc needed)."""
+    val cc = if compiler != "": compiler else: find_c_compiler()
+    if cc == "":
+        return Err("No C compiler found")
+    val tmp_dir = _get_temp_dir()
+    val ext = _obj_ext()
+    # Deterministic entry-shim basename for reproducible builds: the C compiler
+    # embeds the source basename (STT_FILE) into the object, so a PID in the
+    # filename would leak into the binary and break bootstrap determinism. Keep
+    # the PID in the directory (concurrency-safe) and use a fixed basename.
+    val entry_dir = "{tmp_dir}/simple_entry_{pid}"
+    dir_create_all(entry_dir)
+    val entry_c = "{entry_dir}/simple_entry.c"
+    val entry_o = "{entry_dir}/simple_entry{ext}"
+    var c_source = "extern void spl_init_args(int argc, char** argv);\n"
+    c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    c_source = c_source + "extern long long __simple_main(void);\n"
+    c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
+    c_source = c_source + "int main(int argc, char** argv) {\n"
+    c_source = c_source + "    spl_init_args(argc, argv);\n"
+    c_source = c_source + "    __simple_runtime_init();\n"
+    c_source = c_source + "    long long result = __simple_main();\n"
+    c_source = c_source + "    __simple_runtime_shutdown();\n"
+    c_source = c_source + "    return (int)result;\n"
+    c_source = c_source + "}\n"
+    file_write(entry_c, c_source)
+
+    val use_msvc = _is_msvc_cc(cc)
+    var comp_args: [text] = []
+    if use_msvc:
+        var msvc_opt = "/Ox"
+        if opt_level <= 0:
+            msvc_opt = "/Od"
+        elif opt_level == 1:
+            msvc_opt = "/O1"
+        elif opt_level == 2:
+            msvc_opt = "/O2"
+        comp_args = ["/c", msvc_opt, "/Gy", "/Fo{entry_o}", entry_c]
+    else:
+        comp_args = ["-c"]
+        if not _is_windows():
+            comp_args.push("-fPIC")
+        var cc_opt = "-O3"
+        if opt_level <= 0:
+            cc_opt = "-O0"
+        elif opt_level == 1:
+            cc_opt = "-Oz"
+        elif opt_level == 2:
+            cc_opt = "-O2"
+        comp_args.push(cc_opt)
+        comp_args.push("-ffunction-sections")
+        comp_args.push("-fdata-sections")
+        comp_args.push("-o")
+        comp_args.push(entry_o)
+        comp_args.push(entry_c)
+
+    val (ep_out, ep_err, ep_code) = process_run(cc, comp_args)
+    file_delete(entry_c)
+    if ep_code != 0:
+        return Err("Entry point compilation failed: {ep_out}{ep_err}")
+    Ok(entry_o)
+
+pub fn bootstrap_native_all_support_source() -> text:
+    """C ABI support needed when bootstrap links libsimple_native_all.a.
+
+    The Rust native_all archive owns compiler/runtime SFFI symbols, but it does
+    not export the small C entry ABI that Simple-generated hosted programs
+    expect. Keep this object bootstrap-only so normal C runtime linking remains
+    the owner for these symbols.
+    """
+    var c_source = "#include <stdint.h>\n"
+    c_source = c_source + "static int simple_bootstrap_argc = 0;\n"
+    c_source = c_source + "static char** simple_bootstrap_argv = 0;\n"
+    c_source = c_source + "void spl_init_args(int argc, char** argv) {\n"
+    c_source = c_source + "    simple_bootstrap_argc = argc;\n"
+    c_source = c_source + "    simple_bootstrap_argv = argv;\n"
+    c_source = c_source + "}\n"
+    c_source = c_source + "int64_t spl_arg_count(void) {\n"
+    c_source = c_source + "    return (int64_t)simple_bootstrap_argc;\n"
+    c_source = c_source + "}\n"
+    c_source = c_source + "const char* spl_get_arg(int64_t idx) {\n"
+    c_source = c_source + "    if (idx < 0 || idx >= simple_bootstrap_argc) return \"\";\n"
+    c_source = c_source + "    return simple_bootstrap_argv && simple_bootstrap_argv[idx] ? simple_bootstrap_argv[idx] : \"\";\n"
+    c_source = c_source + "}\n"
+    c_source = c_source + "void __simple_runtime_init(void) {}\n"
+    c_source = c_source + "void __simple_runtime_shutdown(void) {}\n"
+    c_source = c_source + "int64_t rt_strlen(const char* s) {\n"
+    c_source = c_source + "    if (!s) return 0;\n"
+    c_source = c_source + "    const char* p = s;\n"
+    c_source = c_source + "    while (*p) p++;\n"
+    c_source = c_source + "    return (int64_t)(p - s);\n"
+    c_source = c_source + "}\n"
+    c_source
+
+fn compile_bootstrap_native_all_support_c(pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
+    """Compile the bootstrap native_all C ABI support object."""
+    val cc = if compiler != "": compiler else: find_c_compiler()
+    if cc == "":
+        return Err("No C compiler found")
+    val tmp_dir = _get_temp_dir()
+    val ext = _obj_ext()
+    val support_dir = "{tmp_dir}/simple_bootstrap_native_all_{pid}"
+    dir_create_all(support_dir)
+    val support_c = "{support_dir}/simple_bootstrap_native_all_support.c"
+    val support_o = "{support_dir}/simple_bootstrap_native_all_support{ext}"
+    file_write(support_c, bootstrap_native_all_support_source())
+
+    val use_msvc = _is_msvc_cc(cc)
+    var comp_args: [text] = []
+    if use_msvc:
+        var msvc_opt = "/Ox"
+        if opt_level <= 0:
+            msvc_opt = "/Od"
+        elif opt_level == 1:
+            msvc_opt = "/O1"
+        elif opt_level == 2:
+            msvc_opt = "/O2"
+        comp_args = ["/c", msvc_opt, "/Gy", "/Fo{support_o}", support_c]
+    else:
+        comp_args = ["-c"]
+        if not _is_windows():
+            comp_args.push("-fPIC")
+        var cc_opt = "-O3"
+        if opt_level <= 0:
+            cc_opt = "-O0"
+        elif opt_level == 1:
+            cc_opt = "-Oz"
+        elif opt_level == 2:
+            cc_opt = "-O2"
+        comp_args.push(cc_opt)
+        comp_args.push("-ffunction-sections")
+        comp_args.push("-fdata-sections")
+        comp_args.push("-o")
+        comp_args.push(support_o)
+        comp_args.push(support_c)
+
+    val (out, err, code) = process_run(cc, comp_args)
+    file_delete(support_c)
+    if code != 0:
+        return Err("Bootstrap native_all support compilation failed: {out}{err}")
+    Ok(support_o)
+
+# ============================================================================
+# Main Orchestrator
+# ============================================================================
+
+fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+    """Link LLVM-compiled user objects with C runtime into a native executable.
+
+    Pipeline:
+    1. Compile C runtime (runtime.c, runtime_native.c, etc.) to .o files
+    2. Generate and compile entry point IR to .o (via llc, or C fallback)
+    3. Combine all objects and link with system linker
+
+    Returns Ok(output_path) on success, Err(message) on failure.
+    """
+    val trace = llvm_link_trace_enabled()
+    if trace:
+        print "[LLVM-LINK] enter link_llvm_native"
+    val verbose = options.verbose
+    if trace:
+        print "[LLVM-LINK] verbose={verbose}"
+    val pid = getpid()
+    if trace:
+        print "[LLVM-LINK] pid={pid}"
+
+    val stage4_requested = (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+    val stage4_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val stage4_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+    if stage4_requested and (stage4_entry != "src/app/cli/main.spl" or stage4_entry_closure != "1"):
+        return Err("Stage4 strict profile requires --entry src/app/cli/main.spl with entry closure")
+
+    if is_simpleos_x86_64_link(user_objects, output):
+        if stage4_requested:
+            return Err("Stage4 strict profile does not support SimpleOS link routes")
+        return link_simpleos_x86_64(user_objects, output, verbose, options.opt_level)
+
+    if is_simpleos_arm64_link(output):
+        if stage4_requested:
+            return Err("Stage4 strict profile does not support SimpleOS link routes")
+        return link_simpleos_arm64(user_objects, output, verbose, options.opt_level)
+
+    if is_simpleos_riscv64_link(user_objects, output):
+        if stage4_requested:
+            return Err("Stage4 strict profile does not support SimpleOS link routes")
+        return link_simpleos_riscv64(user_objects, output, verbose)
+
+    if is_simpleos_riscv32_link(user_objects, output):
+        if stage4_requested:
+            return Err("Stage4 strict profile does not support SimpleOS link routes")
+        return link_simpleos_riscv32(user_objects, output, verbose)
+
+    val hosted_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val hosted_os = host_os()
+    val hosted_arch = host_arch()
+    val hosted_plan = hosted_c_compiler_plan(hosted_target, hosted_os, hosted_arch)
+    if not hosted_plan.supported:
+        return Err("host C runtime/entry compilation unsupported: target '{hosted_target}' on host '{hosted_arch}-{hosted_os}'")
+    if not hosted_native_link_arch_supported(hosted_os, hosted_arch):
+        return Err(hosted_native_link_unsupported_arch_error(hosted_os, hosted_arch))
+    if stage4_requested and hosted_plan.requires_cross:
+        return Err("Stage4 strict profile requires a native host target; cross-target compiler capsules are unavailable")
+    val hosted_cc = find_c_compiler()
+    if hosted_cc == "":
+        return Err("No C compiler found. Install clang or gcc.")
+
+    var stage4_msvc_linker = false
+    var stage4_msvc_objects = false
+    if stage4_requested:
+        stage4_msvc_linker = hosted_os == "windows" and not _is_mingw()
+        match stage4_windows_c_object_uses_msvc_abi(hosted_os, hosted_target, hosted_cc, stage4_msvc_linker):
+            case Ok(msvc): stage4_msvc_objects = msvc
+            case Err(err): return Err(err)
+
+    # Outside strict Stage4, link the Rust native_all archive whenever
+    # SIMPLE_RUNTIME_PATH points at one. The normal path needs it for
+    # modules calling seed-owned externs (e.g. bootstrap_main's
+    # rt_native_build), which the C runtime objects do not define; without it
+    # the link dies with "undefined symbol: rt_native_build" (#146/#79).
+    var bootstrap_native_all = ""
+    val runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    if not stage4_requested and runtime_path != "" and not hosted_plan.requires_cross:
+        val native_all_name = if hosted_os == "windows": "simple_native_all.lib" else: "libsimple_native_all.a"
+        val native_all = runtime_path + "/" + native_all_name
+        if file_exists(native_all):
+            bootstrap_native_all = native_all
+
+    # Step 1: Always compile the FRESH C runtime to object files, even when the
+    # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
+    # pulls archive members only for still-undefined symbols, so native_all just
+    # backfills seed-owned externs (rt_native_build) while the fresh C runtime
+    # keeps owning rt_interp_cstr/rt_strcat/rt_text_eq_any/
+    # __simple_intrinsic_bounds_check/etc. The old SIMPLE_BOOTSTRAP=1 branch
+    # REPLACED the C runtime with the archive's bundled (and stale) runtime
+    # snapshot, so any runtime symbol added after the archive was built (e.g.
+    # rt_text_eq_any from #148) linked as "undefined symbol" and broke the
+    # stage2 redeploy compile of bootstrap_main. Never replace.
+    val native_all_replaces_c_runtime = false
+    if trace:
+        print "[LLVM-LINK] step 1: compile_runtime_objects..."
+    val runtime_objects = if native_all_replaces_c_runtime:
+        []
+    else:
+        # native_all already owns spl_dl* in Rust; otherwise the pure hosted
+        # runtime supplies the C owner for both LLVM and Cranelift.
+        val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested)
+        if trace:
+            print "[LLVM-LINK] compile_runtime_objects returned"
+        match rt_result:
+            case Ok(paths):
+                paths
+            case Err(err):
+                return Err("Runtime compilation failed: {err}")
+    if trace:
+        print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
+
+    val bootstrap_support_result = if native_all_replaces_c_runtime:
+        compile_bootstrap_native_all_support_c(pid, verbose, options.opt_level, hosted_cc)
+    else:
+        Ok("")
+    val bootstrap_support_obj = match bootstrap_support_result:
+        case Ok(path):
+            path
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            return Err(err)
+
+    # Step 2: Generate and compile entry point
+    if trace:
+        print "[LLVM-LINK] step 2: compile entry point..."
+    val c_result = compile_entry_point_c(pid, verbose, options.opt_level, hosted_cc)
+    if trace:
+        print "[LLVM-LINK] entry point compiled"
+    val entry_obj_path = match c_result:
+        case Ok(path):
+            path
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            if bootstrap_support_obj != "":
+                file_delete(bootstrap_support_obj)
+            return Err("Entry point compilation failed: {err}")
+
+    var stage4_requested_symbols: [text] = []
+    var stage4_projection_capsule = ""
+    var stage4_projection_dir = ""
+    if stage4_requested:
+        if bootstrap_native_all != "":
+            cleanup_runtime_objects(runtime_objects)
+            file_delete(entry_obj_path)
+            if bootstrap_support_obj != "":
+                file_delete(bootstrap_support_obj)
+            return Err("Stage4 strict profile rejects libsimple_native_all.a")
+        var final_simple_objects: [text] = []
+        for object in user_objects:
+            final_simple_objects = final_simple_objects.push(object)
+        final_simple_objects = final_simple_objects.push(entry_obj_path)
+        match llvm_stage4_final_requested_symbols(final_simple_objects):
+            case Ok(symbols):
+                stage4_requested_symbols = symbols
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return Err(err)
+        if trace:
+            print "[LLVM-LINK] Stage4 requested runtime symbols: {stage4_requested_symbols.len()}"
+        val compiler_backfill_capsule = match llvm_stage4_build_compiler_backfill_capsule(runtime_path, hosted_os, hosted_cc, pid, output):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return Err("Stage4 compiler backfill capsule failed: " + err)
+        val compiler_backfill_stage_dir = "{_get_temp_dir()}/simple_stage4_compiler_backfill_{pid}_{output.hash()}"
+        val runtime_native_archive = match llvm_stage4_build_runtime_native_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 runtime-native core failed: " + err)
+        val process_provider_archive = match llvm_stage4_build_process_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 process provider failed: " + err)
+        val dynload_provider_archive = match llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(process_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 dynamic-loader provider failed: " + err)
+        val font_provider_archive = match llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 font provider failed: " + err)
+        val memtrack_provider_archive = match llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 memtrack provider failed: " + err)
+        val time_provider_archive = match llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 time provider failed: " + err)
+        var fork_provider_archive = ""
+        if hosted_os != "windows":
+            match llvm_stage4_build_fork_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+                case Ok(path): fork_provider_archive = path
+                case Err(err):
+                    cleanup_runtime_objects(runtime_objects)
+                    file_delete(entry_obj_path)
+                    file_delete(runtime_native_archive)
+                    file_delete(process_provider_archive)
+                    file_delete(dynload_provider_archive)
+                    file_delete(font_provider_archive)
+                    file_delete(memtrack_provider_archive)
+                    file_delete(time_provider_archive)
+                    if bootstrap_support_obj != "":
+                        file_delete(bootstrap_support_obj)
+                    return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 fork provider failed: " + err)
+        val runtime_legacy_compat_archive = match llvm_stage4_build_runtime_legacy_compat_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 runtime legacy compatibility failed: " + err)
+        var candidate_labels = ["compiler_backfill", "runtime_native", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
+        var candidate_paths = [compiler_backfill_capsule, runtime_native_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
+        if fork_provider_archive != "":
+            candidate_labels = candidate_labels.push("runtime_fork")
+            candidate_paths = candidate_paths.push(fork_provider_archive)
+        val candidate_scans = match llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths):
+            case Ok(scans): scans
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(runtime_legacy_compat_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 combined candidate inventory failed: " + err)
+        val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os):
+            case Ok(format): format
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(runtime_legacy_compat_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+        match stage4_validate_compiler_backfill_provider_disjoint(candidate_scans[0], candidate_labels[1:], candidate_scans[1:], compiler_backfill_object_format):
+            case Ok(()): ()
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(runtime_legacy_compat_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+        val (selected_archive_indices, owner_rows) = match stage4_resolve_requested_archive_owners(stage4_requested_symbols, candidate_labels, candidate_scans, hosted_os == "macos"):
+            case Ok(resolution): resolution
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(runtime_legacy_compat_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 requested-owner resolution failed: " + err)
+        if trace:
+            print "[LLVM-LINK] Stage4 selected archives: {selected_archive_indices.len()}, owners: {owner_rows.len()}"
+        val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, pid, output):
+            case Ok(value): value
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                file_delete(runtime_native_archive)
+                file_delete(runtime_legacy_compat_archive)
+                file_delete(process_provider_archive)
+                file_delete(dynload_provider_archive)
+                file_delete(font_provider_archive)
+                file_delete(memtrack_provider_archive)
+                file_delete(time_provider_archive)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 selected-archive projection failed: " + err)
+        stage4_projection_capsule = projected_capsule
+        stage4_projection_dir = projected_dir
+        cleanup_runtime_objects(runtime_objects)
+        var candidate_cleanup_ok = true
+        for path in candidate_paths:
+            if not remove_file_if_exists(path):
+                candidate_cleanup_ok = false
+        if not dir_remove_all(compiler_backfill_stage_dir):
+            candidate_cleanup_ok = false
+        if bootstrap_support_obj != "":
+            if not remove_file_if_exists(bootstrap_support_obj):
+                candidate_cleanup_ok = false
+        if not candidate_cleanup_ok:
+            dir_remove_all(stage4_projection_dir)
+            file_delete(entry_obj_path)
+            return Err("Stage4 selected-archive candidate cleanup failed")
+
+    # Step 3: Combine all objects and link
+    if trace:
+        print "[LLVM-LINK] step 3: combining objects..."
+    var all_objects: [text] = []
+    var user_object_i = 0
+    while user_object_i < user_objects.len():
+        val user_object: text = user_objects[user_object_i]
+        all_objects = all_objects.push(user_object)
+        user_object_i = user_object_i + 1
+    if stage4_requested:
+        all_objects = all_objects.push(entry_obj_path)
+        all_objects = all_objects.push(stage4_projection_capsule)
+    else:
+        var runtime_object_i = 0
+        while runtime_object_i < runtime_objects.len():
+            val runtime_object: text = runtime_objects[runtime_object_i]
+            all_objects = all_objects.push(runtime_object)
+            runtime_object_i = runtime_object_i + 1
+        if bootstrap_support_obj != "":
+            all_objects = all_objects.push(bootstrap_support_obj)
+        if bootstrap_native_all != "":
+            all_objects = all_objects.push(bootstrap_native_all)
+        all_objects = all_objects.push(entry_obj_path)
+    if trace:
+        print "[LLVM-LINK] total objects: {all_objects.len()}"
+
+    if trace:
+        print "[LLVM-LINK] creating NativeLinkConfig..."
+    var link_config = NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "none",
+        pie: options.pie,
+        debug: options.debug,
+        verbose: options.verbose,
+        allow_duplicate_definitions: not stage4_requested,
+        allow_cc_fallback: not stage4_requested,
+        extra_flags: []
+    )
+    if trace:
+        print "[LLVM-LINK] calling link_to_native..."
+
+    val link_result = link_to_native(all_objects, output, link_config)
+    if trace:
+        print "[LLVM-LINK] link_to_native returned"
+
+    # Cleanup temp files
+    cleanup_runtime_objects(runtime_objects)
+    if bootstrap_support_obj != "":
+        file_delete(bootstrap_support_obj)
+    var stage4_cleanup_ok = true
+    if stage4_requested:
+        if not remove_file_if_exists(entry_obj_path):
+            stage4_cleanup_ok = false
+    else:
+        file_delete(entry_obj_path)
+    if stage4_projection_dir != "":
+        if not dir_remove_all(stage4_projection_dir):
+            stage4_cleanup_ok = false
+
+    match link_result:
+        case Ok(path):
+            if not stage4_cleanup_ok:
+                if not remove_file_if_exists(path):
+                    return Err("Stage4 selected-archive projection cleanup failed after linking; output cleanup also failed")
+                return Err("Stage4 selected-archive projection cleanup failed after linking")
+            if verbose:
+                print "[llvm-link] Native executable: {path}"
+            Ok(path)
+        case Err(e):
+            if stage4_requested:
+                if not remove_file_if_exists(output):
+                    stage4_cleanup_ok = false
+            if not stage4_cleanup_ok:
+                return Err("Linking failed: {e}; Stage4 strict cleanup also failed")
+            Err("Linking failed: {e}")
+
+fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if is_simpleos_riscv64_target(target):
+        return true
+    if output.contains("simpleos_riscv64"):
+        return true
+    for obj in user_objects:
+        if obj.contains("simpleos_riscv64"):
+            return true
+    false
+
+fn is_simpleos_riscv64_target(target: text) -> bool:
+    target == "riscv64gc-simpleos" or target == "riscv64gc-unknown-simpleos" or target == "riscv64gc-unknown-simpleos-elf" or target == "riscv64gc-unknown-none" or target == "riscv64gc-unknown-none-elf" or target == "riscv64-simpleos" or target == "riscv64-unknown-simpleos" or target == "riscv64-unknown-simpleos-elf" or target == "riscv64-unknown-none" or target == "riscv64-unknown-none-elf"
+
+fn is_simpleos_arm64_link(output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    is_simpleos_arm64_target(target) or output.contains("simpleos_arm64")
+
+fn is_simpleos_arm64_target(target: text) -> bool:
+    target == "aarch64-simpleos" or target == "aarch64-unknown-simpleos" or target == "aarch64-unknown-simpleos-elf" or target == "aarch64-unknown-none" or target == "aarch64-unknown-none-elf"
+
+fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if is_simpleos_x86_64_target(target):
+        return true
+    if output.contains("simpleos_wm_simple_web_check") or output.contains("simpleos_x86_64"):
+        return true
+    false
+
+fn is_simpleos_x86_64_target(target: text) -> bool:
+    target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf" or target == "x86_64-unknown-none" or target == "x86_64-unknown-none-elf"
+
+fn simpleos_x86_64_sysroot() -> text:
+    val configured = env_get("SIMPLE_SYSROOT") ?? ""
+    if configured != "":
+        return configured
+    val legacy = env_get("SIMPLEOS_SYSROOT") ?? ""
+    if legacy != "":
+        return legacy
+    "build/os/sysroot"
+
+fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
+    val configured_crt0 = env_get("SIMPLE_CRT0_PATH") ?? ""
+    val configured_libc = env_get("SIMPLE_LIBC_PATH") ?? ""
+    val configured_runtime = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+    val target_runtime = "build/os/simple-core-simpleos/libsimple_runtime.a"
+    val runtime = if configured_runtime != "":
+        configured_runtime
+    elif file_exists(target_runtime):
+        target_runtime
+    else:
+        "{sysroot}/lib/libsimple_runtime.a"
+    val inputs: [text] = [
+        if configured_crt0 != "": configured_crt0 else: "{sysroot}/lib/crt0.o",
+        runtime,
+        if configured_libc != "": configured_libc else: "{sysroot}/lib/libsimpleos_c.a"
+    ]
+    inputs
+
+fn is_simpleos_riscv32_link(user_objects: [text], output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    is_simpleos_riscv32_link_for_target(target, user_objects, output)
+
+fn is_simpleos_riscv32_link_for_target(target: text, user_objects: [text], output: text) -> bool:
+    if is_simpleos_riscv32_target(target):
+        return true
+    if target != "":
+        return false
+    if output.contains("riscv32") or output.contains("rv32"):
+        return true
+    for obj in user_objects:
+        if obj.contains("riscv32") or obj.contains("rv32"):
+            return true
+    false
+
+fn is_simpleos_riscv32_target(target: text) -> bool:
+    target == "riscv32imac-simpleos" or target == "riscv32imac-unknown-simpleos" or target == "riscv32imac-unknown-simpleos-elf" or target == "riscv32imac-unknown-none" or target == "riscv32imac-unknown-none-elf" or target == "riscv32-unknown-none" or target == "riscv32-unknown-none-elf"
+
+fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    var opt = "-O2"
+    if opt_level <= 0:
+        opt = "-O0"
+    elif opt_level == 1:
+        opt = "-Os"
+    val (_out, err, code) = process_run("cc", [
+        "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
+        "-ffunction-sections", "-fdata-sections", opt,
+        "-I", "examples/09_embedded/simple_os/arch/x86_64/boot",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS x86_64 C compile failed for {src}: {err}")
+    Ok(obj)
+
+fn compile_simpleos_arm64(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    var opt = "-O2"
+    if opt_level <= 0:
+        opt = "-O0"
+    elif opt_level == 1:
+        opt = "-Os"
+    val (_out, err, code) = process_run("clang", [
+        "-target", "aarch64-unknown-none-elf", "-c", "-ffreestanding", "-nostdlib",
+        "-fno-pie", "-ffunction-sections", "-fdata-sections", opt,
+        "-I", "examples/09_embedded/simple_os/arch/arm64/boot",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS ARM64 boot compile failed for {src}: {err}")
+    Ok(obj)
+
+fn simpleos_spl_start_symbol(user_objects: [text]) -> text:
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            if symbol.name.ends_with("__spl_start"):
+                return symbol.name
+    ""
+
+fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
+    """Collect defined `__module_init` / `__module_init_<prefix>` symbols
+    across the user's compiled objects, sorted + deduped by name.
+
+    Mirrors the naming convention `module_init_symbol()` computes on the Rust
+    seed (src/compiler_rust/compiler/src/codegen/common_backend.rs, restored
+    by commit 4aab3c435b7) and the discovery step of the seed linker's
+    `generate_init_caller` (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:786-812),
+    which sorts+dedups by symbol name rather than tracking a real dependency
+    graph -- there is no cross-module init ORDER guarantee beyond that, on
+    either backend. `extract_symbols_nm` already filters out undefined (U/u)
+    and weak (W/w/V/v) symbols, so only concretely DEFINED init functions are
+    collected here.
+
+    As of this writing the pure-Simple MIR-lowering path
+    (`src/compiler/50.mir/_MirLowering/module_lowering.spl`'s `lower_const`/
+    `lower_static`) never emits a `__module_init_*` function body for a
+    non-literal module-level `val`/`var` initializer, so this will return an
+    empty list for every native-build today. See
+    doc/08_tracking/bug/baremetal_entry_closure_class_instantiation_fault_2026-07-06.md."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            if symbol.name == "__module_init" or symbol.name.starts_with("__module_init_"):
+                if not seen.has(symbol.name):
+                    seen[symbol.name] = true
+                    names.push(symbol.name)
+    names.sort()
+    names
+
+fn simpleos_module_init_caller_source(init_names: [text]) -> text:
+    """Generate the freestanding C source defining `__simple_call_module_inits`,
+    which calls every discovered `__module_init_*` function.
+
+    Always emits a concrete (non-weak) definition, even with zero names, so
+    the `.weak __simple_call_module_inits` reference in
+    examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s and the
+    `extern void __simple_call_module_inits(void) __attribute__((weak));`
+    guard in baremetal_stubs.c resolve to a real function instead of staying
+    permanently unresolved-weak (today both always skip the call). Each
+    callee is itself declared `weak` inside this generated translation unit
+    so a partial object set still links. Mirrors the non-clang-cl branch of
+    generate_init_caller (linker.rs:844-855)."""
+    var code = "// Auto-generated: calls all __module_init_* functions\n"
+    for name in init_names:
+        code = code + "extern void __attribute__((weak)) {name}(void);\n"
+    code = code + "void __simple_call_module_inits(void) {\n"
+    for name in init_names:
+        code = code + "    if ({name}) {name}();\n"
+    code = code + "}\n"
+    code
+
+fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val pid = getpid()
+    val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
+    val stubs_o = "build/os/simpleos_arm64_baremetal_stubs_{pid}.o"
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/crt0.S", crt_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c", stubs_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "examples/09_embedded/simple_os/arch/arm64/linker.ld"
+    var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-o", output, crt_o, stubs_o]
+    val spl_start = simpleos_spl_start_symbol(user_objects)
+    if spl_start != "":
+        args.push("--defsym=spl_start={spl_start}")
+    for obj in user_objects:
+        args.push(obj)
+    val (_out, err, code) = process_run("ld.lld", args)
+    file_delete(crt_o)
+    file_delete(stubs_o)
+    if code != 0:
+        return Err("SimpleOS ARM64 freestanding link failed: {err}")
+    if verbose:
+        print "[llvm-link] SimpleOS ARM64 freestanding executable: {output}"
+    Ok(output)
+
+fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
+    val (_out, err, code) = process_run("cc", [
+        "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS x86_64 asm compile failed for {src}: {err}")
+    Ok(obj)
+
+fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
+        val sysroot = simpleos_x86_64_sysroot()
+        val support = simpleos_x86_64_user_link_inputs(sysroot)
+        for path in support:
+            if not file_exists(path):
+                return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+        val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+        val linker_script = if configured_script != "": configured_script else: "{sysroot}/share/simpleos/simpleos.ld"
+        if not file_exists(linker_script):
+            return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+
+        val entry_result = compile_entry_point_c(getpid(), verbose, opt_level)
+        val entry_object = match entry_result:
+            case Ok(path): path
+            case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
+
+        val support0 = support[0]
+        var user_args: [text] = [
+            "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
+            "-o", output, support0, entry_object
+        ]
+        for obj in user_objects:
+            user_args.push(obj)
+        user_args.push("--start-group")
+        user_args.push(support[1])
+        user_args.push(support[2])
+        user_args.push("--end-group")
+        val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
+        val (_user_out, user_err, user_code) = process_run(linker, user_args)
+        file_delete(entry_object)
+        if user_code != 0:
+            return Err("SimpleOS x86_64 user executable link failed: {user_err}")
+        if verbose:
+            print "[llvm-link] SimpleOS x86_64 user executable: {output}"
+        return Ok(output)
+
+    # Legacy `*-unknown-none[-elf]` and filename-selected kernel builds keep
+    # their boot CRT/stub path. The canonical `*-simpleos` target above is a
+    # filesystem-launched user process and must use the installed sysroot.
+    val pid = getpid()
+    val crt_o = "build/os/simpleos_x86_64_crt0_{pid}.o"
+    val stubs_o = "build/os/simpleos_x86_64_baremetal_stubs_{pid}.o"
+    val type_o = "build/os/simpleos_x86_64_type_stubs_{pid}.o"
+    val auto_o = "build/os/simpleos_x86_64_auto_stubs_{pid}.o"
+    val init_c = "build/os/simpleos_x86_64_module_init_{pid}.c"
+    val init_o = "build/os/simpleos_x86_64_module_init_{pid}.o"
+
+    match compile_simpleos_x86_64_asm("examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s", crt_o):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c", stubs_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/type_stubs.c", type_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c", auto_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    # crt0.s (`.weak __simple_call_module_inits`) and baremetal_stubs.c
+    # (`extern void __simple_call_module_inits(void) __attribute__((weak));`)
+    # both only ever reference this symbol as unresolved-weak, so it is
+    # always skipped. Emit a concrete definition that aggregates every
+    # discovered `__module_init_*` from the user's objects (see
+    # simpleos_module_init_symbols / simpleos_module_init_caller_source
+    # above) so the aggregation mechanism exists on the pure-Simple path the
+    # same way it does on the Rust seed's generate_init_caller.
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    file_write(init_c, simpleos_module_init_caller_source(module_init_names))
+    match compile_simpleos_x86_64_c(init_c, init_o, opt_level):
+        case Err(e):
+            file_delete(init_c)
+            return Err(e)
+        case Ok(_): pass
+    file_delete(init_c)
+
+    val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if linker_script_env != "":
+        linker_script_env
+    else:
+        "examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+
+    var args: [text] = [
+        "-T", linker_script,
+        "-nostdlib", "--gc-sections", "-o", output,
+        crt_o, stubs_o, type_o, auto_o, init_o
+    ]
+    for obj in user_objects:
+        args.push(obj)
+    val (_link_out, link_err, link_code) = process_run("ld.lld", args)
+    file_delete(crt_o)
+    file_delete(stubs_o)
+    file_delete(type_o)
+    file_delete(auto_o)
+    file_delete(init_o)
+    if link_code != 0:
+        return Err("SimpleOS x86_64 freestanding link failed: {link_err}")
+    if verbose:
+        print "[llvm-link] SimpleOS x86_64 freestanding executable: {output}"
+    Ok(output)
+
+pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Result<text, text>:
+    link_simpleos_x86_64(user_objects, output, false, 2)
+
+fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    var is_smoke_entry = false
+    val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
+    val uses_freestanding_runtime = is_display_smoke or output.contains("simpleos_riscv64_host_gpu_probe")
+    # TODO(rv64-real-exit-facade): remove legacy stub-source generation once
+    # every remaining smoke target uses the architecture-owned QEMU exit path.
+    # Tracked in doc/08_tracking/bug/rv64_host_gpu_real_runtime_exit_facade_2026-07-12.md.
+    for obj in user_objects:
+        if obj.contains("smoke_entry"):
+            is_smoke_entry = true
+    val entry_s = "build/os/simpleos_riscv64_entry.S"
+    val entry_o = "build/os/simpleos_riscv64_entry.o"
+    val stub_c = "build/os/simpleos_riscv64_link_stubs.c"
+    val stub_o = "build/os/simpleos_riscv64_link_stubs.o"
+    val init_c = "build/os/simpleos_riscv64_module_init.c"
+    val init_o = "build/os/simpleos_riscv64_module_init.o"
+    val entry_symbol = if is_smoke_entry: "spl_start" else: "boot_main"
+    var entry_src = ".section .text.entry,\"ax\",@progbits\n"
+    entry_src = entry_src + ".globl __simple_riscv_entry\n"
+    entry_src = entry_src + "__simple_riscv_entry:\n"
+    entry_src = entry_src + "  mv s0, a0\n"
+    entry_src = entry_src + "  mv s1, a1\n"
+    entry_src = entry_src + "  la sp, _stack_top\n"
+    entry_src = entry_src + "  la t0, _sbss\n"
+    entry_src = entry_src + "  la t1, _ebss\n"
+    entry_src = entry_src + "1:\n"
+    entry_src = entry_src + "  bgeu t0, t1, 2f\n"
+    entry_src = entry_src + "  sd zero, 0(t0)\n"
+    entry_src = entry_src + "  addi t0, t0, 8\n"
+    entry_src = entry_src + "  j 1b\n"
+    entry_src = entry_src + "2:\n"
+    entry_src = entry_src + "  mv a0, s0\n"
+    entry_src = entry_src + "  mv a1, s1\n"
+    entry_src = entry_src + "  call " + entry_symbol + "\n"
+    entry_src = entry_src + "3:\n"
+    entry_src = entry_src + "  wfi\n"
+    entry_src = entry_src + "  j 3b\n"
+    file_write(entry_s, entry_src)
+    val (entry_out, entry_err, entry_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+        "-o", entry_o, entry_s
+    ])
+    if entry_code != 0:
+        return Err("SimpleOS RISC-V entry compilation failed: {entry_out}{entry_err}")
+
+    var stub_src = "#include <stdint.h>\n"
+    stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
+    stub_src = stub_src + "#define SIFIVE_TEST ((volatile uint32_t*)0x100000UL)\n"
+    stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_ram_base(void){return 0x80000000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_ram_size(void){return 128ULL*1024ULL*1024ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_reserved_end(void){return 0x80200000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_start(void){return 0x80400000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_size(void){return 16ULL*1024ULL*1024ULL;}\n"
+    stub_src = stub_src + "int rt_riscv_noalloc_pmm_init(uint64_t a,uint64_t b,uint64_t c,uint64_t d){(void)a;(void)b;(void)c;(void)d;return 1;}\n"
+    # `__simple_call_module_inits` used to be defined here as an always-empty
+    # `{}` body. `src/os/kernel/arch/riscv64/boot.spl` declares it
+    # `extern fn __simple_call_module_inits()` and CALLS it unconditionally
+    # (not weakly) -- so the symbol must resolve for every riscv64 link, in
+    # both the `stub_o` and `uses_freestanding_runtime` branches below. It is
+    # now emitted unconditionally as its own object (init_c/init_o, see
+    # simpleos_module_init_symbols / simpleos_module_init_caller_source
+    # above) so both branches keep linking AND the aggregator actually
+    # collects any `__module_init_*` the user's objects define, instead of
+    # hard-coding an empty body regardless of what those objects contain.
+    stub_src = stub_src + "void serial_println(uint64_t msg){const char*s=(const char*)(uintptr_t)msg;if(!s)return;while(*s)rt_riscv_uart_put((uint64_t)*s++);rt_riscv_uart_put(13);rt_riscv_uart_put(10);}\n"
+    stub_src = stub_src + "void log_raw_println(uint64_t msg){serial_println(msg);}\n"
+    stub_src = stub_src + "void rt_riscv_wfi_forever(void){for(;;){__asm__ volatile(\"wfi\");}}\n"
+    stub_src = stub_src + "void rt_qemu_exit_success(void){SIFIVE_TEST[0]=0x5555U;for(;;){}}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_nvfs_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_cli_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_cli_load(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_gui_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_native_gui_process_render(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t riscv64_hardening_boot_canary_marker(void){return 0;}\n"
+    stub_src = stub_src + "uint64_t sandbox_boot_apply_embedded_riscv64(void){return 0;}\n"
+    file_write(stub_c, stub_src)
+    if not uses_freestanding_runtime:
+        val (stub_out, stub_err, stub_code) = process_run("riscv64-unknown-elf-gcc", [
+            "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+            "-o", stub_o, stub_c
+        ])
+        if stub_code != 0:
+            return Err("SimpleOS RISC-V stub compilation failed: {stub_out}{stub_err}")
+
+    val runtime_o = "build/os/simpleos_riscv64_freestanding_runtime.o"
+    if uses_freestanding_runtime:
+        val (runtime_out, runtime_err, runtime_code) = process_run("riscv64-unknown-elf-gcc", [
+            "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
+            "-DSIMPLE_BOOT_MINIMAL=1", "-DSIMPLE_RUNTIME_NO_ENTRY=1", "-DSIMPLE_RUNTIME_NO_WEAK_HEAP=1",
+            "-o", runtime_o, "src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+        ])
+        if runtime_code != 0:
+            return Err("SimpleOS RISC-V runtime compilation failed: {runtime_out}{runtime_err}")
+
+    # Always compiled (both stub_o and freestanding_runtime branches link
+    # this in) because boot.spl's `__simple_call_module_inits()` call is an
+    # unconditional (non-weak) extern reference. `-mcmodel=medany` matches
+    # the Rust seed's generate_init_caller (linker.rs:882-891): the
+    # `if (__module_init_x) __module_init_x();` null-check pattern
+    # materializes each callee's ADDRESS as a value (not just a PC-relative
+    # call), which overflows medlow's +-2GB-from-zero window once this
+    # freestanding kernel is linked high (0x80200000+, see linker_script).
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    file_write(init_c, simpleos_module_init_caller_source(module_init_names))
+    val (init_out, init_err, init_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
+        "-o", init_o, init_c
+    ])
+    file_delete(init_c)
+    if init_code != 0:
+        return Err("SimpleOS RISC-V module-init caller compilation failed: {init_out}{init_err}")
+
+    val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "src/os/kernel/arch/riscv64/linker.ld"
+    var args: [text] = [
+        "-m", "elf64lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", linker_script,
+        "--entry=__simple_riscv_entry"
+    ]
+    val spl_start = simpleos_spl_start_symbol(user_objects)
+    if spl_start != "":
+        args.push("--defsym=spl_start={spl_start}")
+    if not is_smoke_entry and not uses_freestanding_runtime:
+        args = args.push("--defsym=unknown_0=rt_riscv_uart_put")
+        args = args.push("--defsym=unknown_1=_uart_put")
+        args = args.push("--defsym=unknown_2=rt_riscv_qemu_reserved_end")
+        args = args.push("--defsym=unknown_3=rt_riscv_qemu_ram_base")
+        args = args.push("--defsym=unknown_4=rt_riscv_qemu_heap_size")
+        args = args.push("--defsym=unknown_5=rt_riscv_uart_put")
+        args = args.push("--defsym=unknown_6=_boot_banner")
+        args = args.push("--defsym=unknown_7=rt_riscv_qemu_ram_size")
+        args = args.push("--defsym=unknown_8=_boot_banner")
+        args = args.push("--defsym=unknown_9=log_raw_println")
+        args = args.push("--defsym=unknown_10=_uart_put")
+        args = args.push("--defsym=unknown_11=rt_riscv_noalloc_pmm_init")
+        args = args.push("--defsym=unknown_12=_uart_put")
+    args = args.push(entry_o)
+    for obj in user_objects:
+        args = args.push(obj)
+    if uses_freestanding_runtime:
+        args = args.push(runtime_o)
+    else:
+        args = args.push(stub_o)
+    args = args.push(init_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS RISC-V link: ld.lld {joined_args}"
+    val (stdout, stderr, code) = process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
+    Ok(output)
+
+fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    val stub_c = "build/os/simpleos_riscv32_link_stubs.c"
+    val stub_o = "build/os/simpleos_riscv32_link_stubs.o"
+    var stub_src = "#include <stdint.h>\n"
+    stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
+    stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
+    file_write(stub_c, stub_src)
+    val (stub_out, stub_err, stub_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
+        "-o", stub_o, stub_c
+    ])
+    if stub_code != 0:
+        return Err("SimpleOS RV32 stub compilation failed: {stub_out}{stub_err}")
+
+    val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if linker_script_env != "":
+        linker_script_env
+    else:
+        "src/os/kernel/arch/riscv32/linker.ld"
+    var args: [text] = [
+        "-m", "elf32lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", linker_script
+    ]
+    for obj in user_objects:
+        args = args.push(obj)
+    args = args.push(stub_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS RV32 link: ld.lld {joined_args}"
+    val (stdout, stderr, code) = process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RV32 link failed: {stdout}{stderr}")
+    Ok(output)
+
+# ============================================================================
+# Exports
+# ============================================================================

@@ -1,0 +1,601 @@
+# Style Block Parser — keyframes, CSS rule parsing, shorthand expansion, var resolution
+#
+# Extracted from style_block.spl. Contains:
+#   - @keyframes registry and parsing
+#   - <style> block extraction from HTML
+#   - CSS rule parsing (flatten, parse_declarations, collect_css_vars, resolve_css_vars)
+#   - Shorthand property expansion (flex, border, background, margin/padding, font)
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{has_var_reference, parse_var_function}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{Keyframe, CSSValue, CSSDeclaration}
+use std.gc_async_mut.gpu.browser_engine.style_block.{
+    CssRule, CssDecl,
+    sb_find, sb_split_char, sb_split_selector_list, sb_split_ws, sb_skip_ws_comments,
+    find_matching_brace, sb_parse_int}
+
+# =========================================================================
+# @keyframes registry
+# =========================================================================
+
+pub class KeyframeEntry:
+    name: text
+    frames: [Keyframe]
+
+pub class KeyframeRegistry:
+    entries: [KeyframeEntry]
+
+    static fn new() -> KeyframeRegistry:
+        val empty: [KeyframeEntry] = []
+        KeyframeRegistry(entries: empty)
+
+    me add(name: text, frames: [Keyframe]):
+        self.entries.push(KeyframeEntry(name: name, frames: frames))
+
+pub fn extract_keyframes(css: text) -> KeyframeRegistry:
+    val registry = KeyframeRegistry.new()
+    val lower = css.lower()
+    var pos = 0
+    while pos < css.len():
+        val kf_pos = sb_find(lower, "@keyframes", pos)
+        if kf_pos >= 999999999:
+            break
+        val after_kw = kf_pos + 10
+        val open = sb_find(css, "{", after_kw)
+        if open >= 999999999:
+            break
+        val name_raw = css.slice(after_kw, open)
+        val anim_name = name_raw.trim()
+        val close = find_matching_brace(css, open)
+        if close >= 999999999:
+            break
+        val body = css.slice(open + 1, close)
+        val frames = _parse_keyframe_body(body)
+        registry.add(anim_name, frames)
+        pos = close + 1
+    registry
+
+fn _parse_keyframe_body(body: text) -> [Keyframe]:
+    var frames: [Keyframe] = []
+    var pos = 0
+    while pos < body.len():
+        val open = sb_find(body, "{", pos)
+        if open >= 999999999:
+            break
+        val offset_text = body.slice(pos, open).trim()
+        val close = find_matching_brace(body, open)
+        if close >= 999999999:
+            break
+        val decl_text = body.slice(open + 1, close).trim()
+        val raw_decls = parse_declarations(decl_text)
+        var css_decls: [CSSDeclaration] = []
+        var di = 0
+        while di < raw_decls.len():
+            val d = raw_decls[di]
+            di = di + 1
+            css_decls.push(CSSDeclaration(property: d.property, value: CSSValue.Keyword(v: d.value), important: false))
+        val offsets = sb_split_selector_list(offset_text)
+        var oi = 0
+        while oi < offsets.len():
+            val off_raw = offsets[oi]
+            oi = oi + 1
+            val off = off_raw.trim()
+            val offset_val = _parse_keyframe_offset(off)
+            frames.push(Keyframe.create(offset_val, css_decls))
+        pos = close + 1
+    frames
+
+fn _parse_keyframe_offset(off: text) -> f64:
+    if off == "from":
+        return 0.0
+    if off == "to":
+        return 1.0
+    if off.ends_with("%"):
+        val num_text = off.slice(0, off.len() - 1).trim()
+        val pct = num_text.to_f64()
+        return pct / 100.0
+    0.0
+
+fn flatten_supports_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val sup_pos = sb_find(lower, "@supports", pos)
+        if sup_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, sup_pos)
+        val after_kw = sup_pos + 9
+        val open = sb_find(css_text, "{", after_kw)
+        if open >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        val condition = css_text.slice(after_kw, open).trim()
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        if eval_supports_query(condition):
+            val inner = css_text.slice(open + 1, close).trim()
+            if inner.len() > 0:
+                out = out + "\n" + inner + "\n"
+        pos = close + 1
+    out
+
+# =========================================================================
+# Extract <style> blocks from HTML
+# =========================================================================
+
+pub fn extract_style_blocks(html: text) -> [text]:
+    var blocks: [text] = []
+    var pos = 0
+    val lower = html.lower()
+    while pos < lower.len():
+        val style_open = sb_find(lower, "<style", pos)
+        if style_open >= 999999999:
+            break
+        val gt = sb_find(html, ">", style_open)
+        if gt >= 999999999:
+            break
+        val content_start = gt + 1
+        val style_close = sb_find(lower, "</style", content_start)
+        if style_close >= 999999999:
+            break
+        val block = html.slice(content_start, style_close)
+        blocks.push(block)
+        pos = style_close + 8
+    blocks
+
+# =========================================================================
+# Parse CSS text into rules
+# =========================================================================
+
+fn strip_keyframe_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val kf_pos = sb_find(lower, "@keyframes", pos)
+        if kf_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, kf_pos)
+        val open = sb_find(css_text, "{", kf_pos + 10)
+        if open >= 999999999:
+            out = out + css_text.slice(kf_pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(kf_pos, css_text.len())
+            break
+        pos = close + 1
+    out
+
+pub fn parse_css_rules(css_text: text) -> [CssRule]:
+    var rules: [CssRule] = []
+    var pos = 0
+    val after_supports = flatten_supports_blocks(css_text)
+    val after_keyframes = strip_keyframe_blocks(after_supports)
+    val normalized_css = flatten_simple_nested_rules(flatten_layer_blocks(after_keyframes))
+    val len = normalized_css.len()
+
+    while pos < len:
+        pos = sb_skip_ws_comments(normalized_css, pos)
+        if pos >= len:
+            break
+        val brace_open = sb_find(normalized_css, "{", pos)
+        if brace_open >= 999999999:
+            break
+        val selector_raw = normalized_css.slice(pos, brace_open)
+        val selector_text = selector_raw.trim()
+        if selector_text.len() == 0:
+            pos = brace_open + 1
+            continue
+        val brace_close = sb_find(normalized_css, "}", brace_open + 1)
+        if brace_close >= 999999999:
+            break
+        val decl_raw = normalized_css.slice(brace_open + 1, brace_close)
+        val decl_text = decl_raw.trim()
+        val declarations = parse_declarations(decl_text)
+        val selectors = sb_split_selector_list(selector_text)
+        var sel_idx = 0
+        while sel_idx < selectors.len():
+            val sel = selectors[sel_idx]
+            sel_idx = sel_idx + 1
+            val trimmed = sel.trim()
+            if trimmed.len() > 0:
+                rules.push(CssRule(selector: trimmed, declarations: declarations))
+        pos = brace_close + 1
+
+    rules
+
+fn flatten_layer_blocks(css_text: text) -> text:
+    """Expose simple @layer wrapper contents to the existing flat rule parser."""
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val layer_pos = sb_find(lower, "@layer", pos)
+        if layer_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, layer_pos)
+        val open = sb_find(css_text, "{", layer_pos)
+        if open >= 999999999:
+            out = out + css_text.slice(layer_pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(layer_pos, css_text.len())
+            break
+        val inner = css_text.slice(open + 1, close).trim()
+        if inner.len() > 0:
+            out = out + "\n" + inner + "\n"
+        pos = close + 1
+    out
+
+fn flatten_simple_nested_rules(css_text: text) -> text:
+    """Expose bounded parent-referencing CSS nesting to the flat rule parser."""
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val open = sb_find(css_text, "{", pos)
+        if open >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val selector = css_text.slice(pos, open).trim()
+        val body = css_text.slice(open + 1, close)
+        if selector.len() > 0 and not selector.starts_with("@") and body.contains("&"):
+            out = out + flatten_one_nested_rule(selector, body)
+        else:
+            out = out + css_text.slice(pos, close + 1)
+        pos = close + 1
+    out
+
+fn flatten_one_nested_rule(selector: text, body: text) -> text:
+    var direct_body = ""
+    var nested_rules = ""
+    var pos = 0
+    while pos < body.len():
+        val open = sb_find(body, "{", pos)
+        if open >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_start = last_nested_selector_start(body, pos, open)
+        val close = find_matching_brace(body, open)
+        if close >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_selector = body.slice(nested_start, open).trim()
+        val nested_body = body.slice(open + 1, close).trim()
+        val combined = combine_nested_selector(selector, nested_selector)
+        direct_body = direct_body + body.slice(pos, nested_start)
+        if combined.len() > 0 and nested_body.len() > 0:
+            nested_rules = nested_rules + "\n" + combined + " " + 123.chr() + " " + nested_body + " " + 125.chr() + "\n"
+        pos = close + 1
+    val direct = direct_body.trim()
+    var out = ""
+    if direct.len() > 0:
+        out = selector + " " + 123.chr() + " " + direct + " " + 125.chr() + "\n"
+    out + nested_rules
+
+fn last_nested_selector_start(body: text, start: i32, nested_open: i32) -> i32:
+    var pos = nested_open - 1
+    while pos >= start:
+        val ch = body.char_at(pos)
+        if ch == ";" or ch == "}":
+            return pos + 1
+        pos = pos - 1
+    start
+
+fn combine_nested_selector(parent: text, nested_selector: text) -> text:
+    val nested = nested_selector.trim()
+    if nested.len() == 0 or nested.starts_with("@") or not nested.contains("&"):
+        return ""
+    nested.replace("&", parent.trim()).trim()
+
+pub fn parse_declarations(text_val: text) -> [CssDecl]:
+    var decls: [CssDecl] = []
+    val parts = sb_split_char(text_val, ";")
+    var pt_idx = 0
+    while pt_idx < parts.len():
+        val part = parts[pt_idx]
+        pt_idx = pt_idx + 1
+        val trimmed = part.trim()
+        if trimmed.len() == 0:
+            continue
+        val colon = sb_find(trimmed, ":", 0)
+        if colon <= 0 or colon >= 999999999:
+            continue
+        val prop_raw = trimmed.slice(0, colon)
+        val prop = prop_raw.trim()
+        val value_raw = trimmed.slice(colon + 1, trimmed.len())
+        val value = value_raw.trim()
+        if prop.len() > 0 and value.len() > 0:
+            val expanded = expand_shorthand(prop, value)
+            var ex_idx = 0
+            while ex_idx < expanded.len():
+                val e = expanded[ex_idx]
+                ex_idx = ex_idx + 1
+                decls.push(e)
+    decls
+
+pub fn collect_css_vars(rules: [CssRule]) -> [CssDecl]:
+    var vars: [CssDecl] = []
+    var ri = 0
+    while ri < rules.len():
+        val rule = rules[ri]
+        ri = ri + 1
+        if rule.selector == ":root" or rule.selector == "html":
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                di = di + 1
+                if decl.property.starts_with("--"):
+                    vars.push(decl)
+    vars
+
+fn _find_var_call_end(value: text, var_start: i64) -> i64:
+    var depth = 0
+    var pos = var_start
+    while pos < value.len():
+        val ch = value.char_at(pos)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    999999999
+
+fn _lookup_css_var(name: text, vars: [CssDecl]) -> text:
+    var vi = 0
+    while vi < vars.len():
+        val v = vars[vi]
+        vi = vi + 1
+        if v.property == name:
+            return v.value
+    ""
+
+fn resolve_css_vars_in_value(value: text, vars: [CssDecl]) -> text:
+    var resolved = value
+    var depth_guard = 0
+    while has_var_reference(resolved) and depth_guard < 32:
+        depth_guard = depth_guard + 1
+        val parsed = parse_var_function(resolved)
+        val var_name = parsed.first
+        val fallback = parsed.second
+        if var_name.len() == 0:
+            break
+        val looked_up = _lookup_css_var(var_name, vars)
+        var replacement = ""
+        if looked_up.len() > 0:
+            replacement = looked_up
+        elif fallback.len() > 0:
+            replacement = fallback
+        else:
+            break
+        val var_start = sb_find(resolved, "var(", 0)
+        if var_start >= 999999999:
+            break
+        val var_end = _find_var_call_end(resolved, var_start)
+        if var_end >= 999999999:
+            break
+        val before = resolved.slice(0, var_start)
+        val after = resolved.slice(var_end + 1, resolved.len())
+        resolved = before + replacement + after
+    resolved
+
+pub fn resolve_css_vars_in_rules(rules: [CssRule], vars: [CssDecl]) -> [CssRule]:
+    if vars.len() == 0:
+        return rules
+    var out: [CssRule] = []
+    var ri = 0
+    while ri < rules.len():
+        val rule = rules[ri]
+        ri = ri + 1
+        var decls: [CssDecl] = []
+        var di = 0
+        while di < rule.declarations.len():
+            val decl = rule.declarations[di]
+            di = di + 1
+            decls.push(CssDecl(
+                property: decl.property,
+                value: resolve_css_vars_in_value(decl.value, vars)
+            ))
+        out.push(CssRule(selector: rule.selector, declarations: decls))
+    out
+
+# =========================================================================
+# Shorthand expansion
+# =========================================================================
+
+fn expand_shorthand(prop: text, value: text) -> [CssDecl]:
+    if prop == "flex":
+        return expand_flex(value)
+    if prop == "flex-flow":
+        return expand_flex_flow(value)
+    if prop == "border":
+        return expand_border(value)
+    if prop == "background":
+        return expand_background(value)
+    if prop == "margin" or prop == "padding":
+        return expand_box_shorthand(prop, value)
+    if prop == "font":
+        return expand_font(value)
+    [CssDecl(property: prop, value: value)]
+
+pub fn expand_flex_flow(value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    var direction = "row"
+    var wrap = "nowrap"
+    var fp_idx = 0
+    while fp_idx < parts.len():
+        val part = parts[fp_idx]
+        fp_idx = fp_idx + 1
+        if part == "row" or part == "column" or part == "row-reverse" or part == "column-reverse":
+            direction = part
+        elif part == "wrap" or part == "nowrap" or part == "wrap-reverse":
+            wrap = part
+    [CssDecl(property: "flex-direction", value: direction),
+     CssDecl(property: "flex-wrap", value: wrap)]
+
+fn expand_font(value: text) -> [CssDecl]:
+    """Extract font-size from font shorthand (simplified)."""
+    val parts = sb_split_ws(value)
+    var decls: [CssDecl] = []
+    var fp2_idx = 0
+    while fp2_idx < parts.len():
+        val part = parts[fp2_idx]
+        fp2_idx = fp2_idx + 1
+        if part.ends_with("px") or part.ends_with("em") or part.ends_with("rem") or part.ends_with("pt"):
+            decls.push(CssDecl(property: "font-size", value: part))
+        elif part.ends_with("%"):
+            decls.push(CssDecl(property: "font-size", value: part))
+        elif part == "bold" or part == "bolder":
+            decls.push(CssDecl(property: "font-weight", value: part))
+        elif part == "italic":
+            pass_dn
+    if decls.len() == 0:
+        decls = [CssDecl(property: "font", value: value)]
+    decls
+
+fn expand_flex(value: text) -> [CssDecl]:
+    if value == "none":
+        return [
+            CssDecl(property: "flex-grow", value: "0"),
+            CssDecl(property: "flex-shrink", value: "0"),
+            CssDecl(property: "flex-basis", value: "auto")
+        ]
+    val parts = sb_split_ws(value)
+    if parts.len() == 1:
+        # flex: N means flex-grow: N, flex-shrink: 1, flex-basis: 0%
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: "1"),
+            CssDecl(property: "flex-basis", value: "0%")
+        ]
+    if parts.len() == 2:
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: parts[1]),
+            CssDecl(property: "flex-basis", value: "0%")
+        ]
+    if parts.len() >= 3:
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: parts[1]),
+            CssDecl(property: "flex-basis", value: parts[2])
+        ]
+    [CssDecl(property: "flex-grow", value: value)]
+
+fn expand_border(value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    var width = "1px"
+    var style = "solid"
+    var color = "black"
+    var bp_idx = 0
+    while bp_idx < parts.len():
+        val part = parts[bp_idx]
+        bp_idx = bp_idx + 1
+        if part.ends_with("px") or part.ends_with("em") or part == "thin" or part == "medium" or part == "thick":
+            width = part
+            if part == "thin":
+                width = "1px"
+            if part == "medium":
+                width = "3px"
+            if part == "thick":
+                width = "5px"
+        elif part == "solid" or part == "dashed" or part == "dotted" or part == "none" or part == "double":
+            style = part
+        else:
+            color = part
+    [
+        CssDecl(property: "border-width", value: width),
+        CssDecl(property: "border-style", value: style),
+        CssDecl(property: "border-color", value: color)
+    ]
+
+fn expand_background(value: text) -> [CssDecl]:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("linear-gradient") and not trimmed.starts_with("radial-gradient"):
+        val color = sb_background_shorthand_color_value(trimmed)
+        if color.len() > 0:
+            return [CssDecl(property: "background-color", value: color)]
+    [CssDecl(property: "background", value: value)]
+
+fn sb_background_shorthand_color_value(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() == 0:
+        return ""
+    var pos = 0
+    while pos < trimmed.len():
+        while pos < trimmed.len() and trimmed.char_at(pos) == " ":
+            pos = pos + 1
+        if pos >= trimmed.len():
+            break
+        val token = sb_background_token_from(trimmed, pos)
+        if token.len() == 0:
+            break
+        val lower = token.lower()
+        if lower.starts_with("url(") or lower.starts_with("linear-gradient") or lower.starts_with("radial-gradient"):
+            pos = pos + token.len()
+            continue
+        if token.starts_with("#") or lower.starts_with("rgb(") or lower.starts_with("rgba(") or lower.starts_with("hsl(") or lower.starts_with("hsla(") or lower == "transparent" or lower == "currentcolor":
+            return token
+        val parsed = parse_color_value(token)
+        if parsed != 0x000000FF or lower == "black":
+            return token
+        pos = pos + token.len()
+    ""
+
+fn sb_background_token_from(value: text, start: i32) -> text:
+    var end = start
+    var depth: i32 = 0
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == " " and depth == 0:
+            break
+        end = end + 1
+    val raw = value.slice(start, end)
+    raw.trim()
+
+fn expand_box_shorthand(prop: text, value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    if parts.len() == 1:
+        return [CssDecl(property: prop, value: parts[0])]
+    if parts.len() == 2:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[0]),
+            CssDecl(property: "{prop}-left", value: parts[1])
+        ]
+    if parts.len() == 3:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[2]),
+            CssDecl(property: "{prop}-left", value: parts[1])
+        ]
+    if parts.len() >= 4:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[2]),
+            CssDecl(property: "{prop}-left", value: parts[3])
+        ]
+    [CssDecl(property: prop, value: value)]

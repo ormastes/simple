@@ -1,0 +1,73 @@
+"""
+# Claude Full Hybrid Transport
+
+Mirrors WebSocket-read plus HTTP-write hybrid transport behavior.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.cli.transports.HybridTransport.*
+
+describe "Claude full HybridTransport":
+    it "should convert websocket ingress URLs to post event URLs":
+        step("Convert a secure websocket URL")
+        val url = convertWsUrlToPostUrl("wss://api.example.com/v2/session_ingress/ws/session-1?x=1")
+        expect(url).to_equal("https://api.example.com/v2/session_ingress/session/session-1/events?x=1")
+
+    it "should delay stream events until flush":
+        step("Write two stream events")
+        val transport = hybridTransportNew("wss://api.example.com/v2/session_ingress/ws/s1", "token")
+        transport.write(hybridMessage("stream_event", "a"))
+        transport.write(hybridMessage("stream_event", "b"))
+        expect(transport.pendingStreamCount()).to_equal(2)
+        expect(transport.streamEventTimerActive).to_equal(true)
+        transport.flushStreamEvents()
+        expect(transport.pendingStreamCount()).to_equal(0)
+        expect(transport.queuedBatchCount()).to_equal(1)
+        expect(transport.firstQueuedTypes()).to_equal("stream_event,stream_event")
+
+    it "should flush buffered stream events before non-stream writes":
+        step("Write stream data followed by a result message")
+        val transport = hybridTransportNew("ws://localhost/ws/s1", "token")
+        transport.write(hybridMessage("stream_event", "a"))
+        transport.write(hybridMessage("result", "done"))
+        expect(transport.postedBatchCount()).to_equal(1)
+        expect(transport.firstPostedTypes()).to_equal("stream_event,result")
+        expect(transport.streamEventTimerActive).to_equal(false)
+
+    it "should prepend buffered stream events to writeBatch":
+        step("Write stream data followed by an explicit batch")
+        val transport = hybridTransportNew("ws://localhost/ws/s1", "token")
+        var batch: [HybridMessage] = []
+        batch.push(hybridMessage("assistant", "m1"))
+        batch.push(hybridMessage("result", "ok"))
+        transport.write(hybridMessage("stream_event", "a"))
+        transport.writeBatch(batch)
+        expect(transport.firstPostedTypes()).to_equal("stream_event,assistant,result")
+
+    it "should classify post statuses like retry policy":
+        step("Classify success, permanent, and retryable statuses")
+        val transport = HybridTransport.withFailureCap("wss://api/ws/s1", "token", 2)
+        expect(transport.postOnceStatus(204).diagnostic).to_equal("success")
+        expect(transport.postOnceStatus(400).permanent).to_equal(true)
+        expect(transport.postOnceStatus(429).retryable).to_equal(true)
+        expect(transport.postOnceStatus(503).retryable).to_equal(true)
+        expect(transport.droppedBatchCount).to_equal(1)
+
+    it "should return without retry when no session token is available":
+        step("Attempt a post without an ingress token")
+        val transport = hybridTransportNew("wss://api/ws/s1", "")
+        val result = transport.postOnceStatus(200)
+        expect(result.diagnostic).to_equal("no-token")
+        expect(result.retryable).to_equal(false)
+
+    it "should clear buffers and close inherited websocket state":
+        step("Close after buffering a stream event")
+        val transport = hybridTransportNew("wss://api/ws/s1", "token")
+        transport.write(hybridMessage("stream_event", "a"))
+        transport.close()
+        expect(transport.closed).to_equal(true)
+        expect(transport.websocketClosed).to_equal(true)
+        expect(transport.pendingStreamCount()).to_equal(0)
+        expect(hybridBatchFlushIntervalMs()).to_equal(100)
+        expect(hybridPostTimeoutMs()).to_equal(15000)
+        expect(hybridCloseGraceMs()).to_equal(3000)

@@ -1,0 +1,255 @@
+# spawn_with_cspace — Per-Instance C-Space Minting (OCap P1)
+#
+# Closes the ambient-authority hole: `_handle_spawn` used `CapabilitySet.full()`
+# (an unpledged empty set = allow-all) and fork inherited it verbatim. This
+# module supplies the least-authority spawn primitive from the OCap privilege
+# architecture (doc/04_architecture/os/security/ocap_privilege_architecture.md,
+# §P1) and the design in
+# doc/01_research/os/security/llm_role_cspace_container_design.md §3.2.
+#
+# "Same immutable binary, different privilege per instance": a SpawnSpec pins an
+# `image_hash` (identical across roles) plus a POUCH RECIPE (grants). Two specs
+# with the SAME image_hash but different grants mint two disjoint C-Spaces — the
+# role IS the injected pouch, never a config file or a code branch.
+#
+# Monotonicity: every minted child token must be authorized by a concrete parent
+# token (capability_kind_allows) AND consume a delegation-depth budget. A recipe
+# that asks for authority the parent lacks (or wider rights than the parent
+# holds) is REJECTED, never widened — the seL4-Mint / zx_handle_duplicate
+# strictly-lesser rule. Fresh C-Spaces are `is_pledged: true`, so an empty pouch
+# denies every check (NOT the ambient allow-all of `full()`).
+#
+# Kernel-side, pure Simple — seed-run verifiable
+# (test/01_unit/os/security/spawn_with_cspace_spec.spl). Full in-kernel syscall
+# enforcement (wiring these mints into the live spawn path + the AT_SIMPLE_CSPACE
+# injection ABI) is P2/P3 and toolchain-blocked at boot; this module + its gate
+# prove the LOGIC.
+
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, capability_kind_allows}
+
+# ============================================================================
+# Recipe types (SpawnSpec / CapGrant / AttenuationSpec)
+# ============================================================================
+
+struct AttenuationSpec:
+    """Monotonic narrowing applied to a delegated capability — NARROW ONLY.
+
+    Every field can only shrink authority relative to the parent source:
+      rights_mask   — 0 keeps the parent's rights; otherwise the child's rights
+                      are `parent_rights & rights_mask` (a subset, never a superset).
+      path_prefix   — "" keeps the parent's prefix; otherwise it replaces the
+                      path prefix and is re-validated against the parent (a
+                      widening prefix fails the monotonic guard and is rejected).
+      depth_limit   — < 0 uses `parent.depth - 1`; otherwise the child depth is
+                      `min(parent.depth - 1, depth_limit)` (never larger).
+      single_use    — advisory single-shot flag for the transfer runtime (P5).
+    """
+    rights_mask: u32
+    path_prefix: text
+    depth_limit: i64
+    single_use: bool
+
+struct CapGrant:
+    """One entry in a pouch recipe: the authority the child should receive.
+
+    `requested` is the target child capability kind; `atten` narrows it further.
+    The mint rejects the grant unless a concrete parent token authorizes the
+    (attenuated) requested kind and still has delegation budget.
+    """
+    label: text                 # role-neutral name the child will see ("ipc.tickets")
+    requested: CapabilityKind   # target child kind (already the intended role authority)
+    atten: AttenuationSpec
+
+struct SpawnSpec:
+    """The full spawn recipe: WHICH image + WHAT pouch + isolation + budget.
+
+    image_hash is the content address (blake3) of the immutable binary. Two
+    specs sharing image_hash but differing in `grants` are the SAME binary at
+    DIFFERENT privilege — the headline property.
+    """
+    image_hash: text
+    grants: [CapGrant]
+    isolation: text             # advisory label for P1 ("sandbox"/"container"/...)
+    budget: u64                 # placeholder resource budget (P6 makes it hierarchical)
+
+struct CspaceMint:
+    """Result of minting a child C-Space.
+
+    caps               — the fresh child CapabilitySet (is_pledged: true, EXACTLY
+                         the authorized+attenuated grants; empty => deny-all).
+    next_generation    — the generation counter after minting (thread onward).
+    next_token_id      — the token-id counter after minting (thread onward).
+    source_token_ids   — parent token_ids each child token was derived from; a
+                         revoke_transitive() over one of these kills the child cap.
+    rejected           — count of recipe grants dropped for lack of monotonic
+                         parent authority (a non-zero value = a caller policy bug).
+    """
+    caps: CapabilitySet
+    next_generation: u64
+    next_token_id: u64
+    source_token_ids: [u64]
+    rejected: i64
+
+# ============================================================================
+# Attenuation helpers
+# ============================================================================
+
+fn atten_identity() -> AttenuationSpec:
+    """No extra narrowing — the child kind is exactly `requested` (still guarded
+    by the parent-authorization check)."""
+    AttenuationSpec(rights_mask: 0u32, path_prefix: "", depth_limit: -1, single_use: false)
+
+fn atten_rights(mask: u32) -> AttenuationSpec:
+    """Narrow a rights-bearing capability to the subset `mask`."""
+    AttenuationSpec(rights_mask: mask, path_prefix: "", depth_limit: -1, single_use: false)
+
+fn _apply_attenuation(kind: CapabilityKind, atten: AttenuationSpec) -> CapabilityKind:
+    """Apply monotonic narrowing to a requested kind.
+
+    Rights are AND-masked (can only drop bits); path prefixes are replaced (the
+    replacement is re-checked against the parent by the mint's authorization
+    guard, so a non-narrowing prefix is rejected rather than granted).
+    """
+    match kind:
+        case CapabilityKind.SharedDataset(obj, generation, rights):
+            var r = rights
+            if atten.rights_mask != 0u32:
+                r = rights & atten.rights_mask
+            CapabilityKind.SharedDataset(object_id: obj, generation: generation, rights: r)
+        case CapabilityKind.ProcessQueue(queue_id, generation, rights):
+            var r = rights
+            if atten.rights_mask != 0u32:
+                r = rights & atten.rights_mask
+            CapabilityKind.ProcessQueue(queue_id: queue_id, generation: generation, rights: r)
+        case CapabilityKind.FileRead(prefix):
+            if atten.path_prefix != "":
+                CapabilityKind.FileRead(path_prefix: atten.path_prefix)
+            else:
+                kind
+        case CapabilityKind.FileWrite(prefix):
+            if atten.path_prefix != "":
+                CapabilityKind.FileWrite(path_prefix: atten.path_prefix)
+            else:
+                kind
+        case _:
+            kind
+
+fn _find_source(parent: CapabilitySet, need: CapabilityKind) -> CapabilityToken?:
+    """Find a concrete parent token that authorizes `need` and still has
+    delegation budget (depth > 0). Returns nil when the parent holds no such
+    authority — the "no designation without authority" fail-closed rule.
+
+    NOTE: an ambient `full()` parent (unpledged + zero tokens) has NO concrete
+    tokens, so it authorizes nothing here — you cannot derive a linked, revocable
+    child C-Space from ambient authority. Root minting (MintRoot) is out of P1
+    scope; the orchestrator model holds real, delegable tokens.
+    """
+    for cap in parent.caps:
+        if cap.depth > 0:
+            if capability_kind_allows(cap.kind, need):
+                return cap
+    nil
+
+# ============================================================================
+# spawn_with_cspace — the least-authority spawn primitive
+# ============================================================================
+
+fn spawn_with_cspace(parent: CapabilitySet, spec: SpawnSpec, child_owner: u64, gen_base: u64, tid_base: u64) -> CspaceMint:
+    """Mint a fresh child C-Space containing EXACTLY the attenuated grants the
+    parent is authorized to delegate — never `full()`, never ambient.
+
+    For each recipe grant: apply attenuation, find an authorizing parent token
+    (monotonic guard), and mint a child token linked by parent_token_id with
+    depth = parent.depth - 1 (delegation budget). Grants the parent cannot
+    authorize are DROPPED and counted in `rejected` (fail closed). The resulting
+    set is `is_pledged: true`, so an empty pouch denies every capability check.
+    """
+    var child_caps: [CapabilityToken] = []
+    var source_ids: [u64] = []
+    var gen = gen_base
+    var tid = tid_base
+    var rejected: i64 = 0
+    for g in spec.grants:
+        val final_kind = _apply_attenuation(g.requested, g.atten)
+        val src_opt = _find_source(parent, final_kind)
+        if src_opt == nil:
+            # Parent lacks the authority (or the request is non-monotonic): drop it.
+            rejected = rejected + 1
+        else:
+            val src = src_opt
+            var child_depth = src.depth - 1
+            if g.atten.depth_limit >= 0:
+                if g.atten.depth_limit < child_depth:
+                    child_depth = g.atten.depth_limit
+            val child_tok = CapabilityToken(
+                kind: final_kind,
+                generation: gen,
+                owner: child_owner,
+                token_id: tid,
+                parent_token_id: src.token_id,
+                depth: child_depth
+            )
+            child_caps.push(child_tok)
+            source_ids.push(src.token_id)
+            gen = gen + 1
+            tid = tid + 1
+    CspaceMint(
+        caps: CapabilitySet(caps: child_caps, is_pledged: true),
+        next_generation: gen,
+        next_token_id: tid,
+        source_token_ids: source_ids,
+        rejected: rejected
+    )
+
+fn fork_cspace(parent: CapabilitySet, child_owner: u64, gen_base: u64, tid_base: u64) -> CspaceMint:
+    """Fork = inherit-attenuated, NEVER full.
+
+    Each parent token with delegation budget is re-delegated to the child at
+    depth - 1 (same authority, one less hop). The child set is always
+    `is_pledged: true`; a fork of ambient `full()` yields an EMPTY pledged set
+    (deny-all), so ambient authority is never propagated across fork.
+    """
+    var child_caps: [CapabilityToken] = []
+    var source_ids: [u64] = []
+    var gen = gen_base
+    var tid = tid_base
+    for cap in parent.caps:
+        if cap.depth > 0:
+            val child_tok = CapabilityToken(
+                kind: cap.kind,
+                generation: gen,
+                owner: child_owner,
+                token_id: tid,
+                parent_token_id: cap.token_id,
+                depth: cap.depth - 1
+            )
+            child_caps.push(child_tok)
+            source_ids.push(cap.token_id)
+            gen = gen + 1
+            tid = tid + 1
+    CspaceMint(
+        caps: CapabilitySet(caps: child_caps, is_pledged: true),
+        next_generation: gen,
+        next_token_id: tid,
+        source_token_ids: source_ids,
+        rejected: 0
+    )
+
+# ============================================================================
+# Compat path (boot / init only)
+# ============================================================================
+
+fn spawn_full() -> CapabilitySet:
+    """Explicit god-mode capability set for the boot/init spawn path ONLY.
+
+    This is the NAMED, greppable compat wrapper that replaces the bare
+    `CapabilitySet.full()` call sites in the legacy spawn handlers. It preserves
+    the boot sequence (which still relies on ambient authority until the
+    injection ABI lands) while making the ambient grant an auditable, migratable
+    decision instead of an implicit default. The DEFAULT for new spawns is
+    spawn_with_cspace (least authority); this wrapper is the deliberate exception.
+
+    REGRESSION GUARD: no NEW `CapabilitySet.full()` call sites — route ambient
+    boot spawns through spawn_full() so they stay countable and migratable.
+    """
+    CapabilitySet.full()

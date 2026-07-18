@@ -1,0 +1,324 @@
+# codex-system-test
+# @tag: rendering, engine2d, vector-font, performance
+# @req REQ-010
+# @evidence-display: links
+"""# Simple 2D Vector Fonts
+
+Loads deterministic repository-owned TTF fixtures through the public Engine2D
+facade, renders real antialiased glyphs, proves warm-cache reuse, preserves the
+active face after invalid input, and restores bitmap fallback on unload.
+
+The fixtures derive from ttf-parser's dual MIT/Apache-2.0 400-byte demo font.
+The scenarios use the CPU backend at 128x72 and write fixtures below
+`build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts`.
+The primary flow captures `ascii_32.argb` as 128x72 straight ARGB bytes.
+Run the paired timing evidence separately with
+`test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use std.nogc_sync_mut.sffi.io.{dir_create_all, file_write_bytes}
+use test.fixtures.fonts.simple_2d_vector.font_fixture.{simple_2d_ascii_font_bytes, simple_2d_latin1_font_bytes}
+
+val FIXTURE_DIR = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts"
+val ASCII_FONT = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts/simple_ascii.ttf"
+val UNICODE_PATH_FONT = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts/simple_é.ttf"
+val LATIN1_FONT = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts/simple_latin1.ttf"
+val MALFORMED_FONT = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts/malformed.ttf"
+val UNSUPPORTED_FONT = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts/unsupported.woff"
+val PRIMARY_CAPTURE = "build/test-artifacts/03_system/app/simple_2d/feature/simple_2d_vector_fonts/ascii_32.argb"
+
+class FontRenderEvidence:
+    checksum: i64
+    painted: i64
+    partial: i64
+    min_x: i32
+    min_y: i32
+    max_x: i32
+    max_y: i32
+    first_x: i32
+    first_y: i32
+    first_pixel: u32
+    corner_pixel: u32
+    last_pixel: u32
+
+fn materialize_vector_font_fixtures() -> bool:
+    dir_create_all(FIXTURE_DIR)
+    val ascii_ok = file_write_bytes(ASCII_FONT, simple_2d_ascii_font_bytes())
+    val unicode_path_ok = file_write_bytes(UNICODE_PATH_FONT, simple_2d_ascii_font_bytes())
+    val latin1_ok = file_write_bytes(LATIN1_FONT, simple_2d_latin1_font_bytes())
+    val malformed_ok = file_write_bytes(MALFORMED_FONT, [0u8, 1u8, 2u8, 3u8])
+    val unsupported_ok = file_write_bytes(UNSUPPORTED_FONT, [0x77u8, 0x4Fu8, 0x46u8, 0x46u8])
+    ascii_ok and unicode_path_ok and latin1_ok and malformed_ok and unsupported_ok
+
+fn load_vector_font_fixture(engine: Engine2D, path: text) -> bool:
+    engine.load_font(path)
+
+fn render_font_fixture_at(engine: Engine2D, content: text, size: i32, x: i32, y: i32) -> FontRenderEvidence:
+    val bg = rgb(3, 7, 11)
+    val fg = rgb(240, 220, 180)
+    engine.clear(bg)
+    engine.draw_text(x, y, content, fg, size)
+    engine.present()
+    val pixels = engine.read_pixels()
+    var checksum: i64 = 0
+    var painted: i64 = 0
+    var partial: i64 = 0
+    var min_x = 128
+    var min_y = 72
+    var max_x = -1
+    var max_y = -1
+    var first_x = -1
+    var first_y = -1
+    var first_pixel: u32 = 0u32
+    var i = 0
+    while i < pixels.len():
+        val pixel = pixels[i]
+        checksum = (checksum + pixel.to_i64() * ((i + 1) as i64)) % 2147483647
+        if pixel != bg:
+            val px = i % 128
+            val py = i / 128
+            painted = painted + 1
+            if first_x < 0:
+                first_x = px
+                first_y = py
+                first_pixel = pixel
+            if px < min_x: min_x = px
+            if py < min_y: min_y = py
+            if px > max_x: max_x = px
+            if py > max_y: max_y = py
+            if pixel != fg:
+                partial = partial + 1
+        i = i + 1
+    FontRenderEvidence(checksum: checksum, painted: painted, partial: partial, min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y, first_x: first_x, first_y: first_y, first_pixel: first_pixel, corner_pixel: pixels[0], last_pixel: pixels[pixels.len() - 1])
+
+fn render_font_fixture(engine: Engine2D, content: text, size: i32) -> FontRenderEvidence:
+    render_font_fixture_at(engine, content, size, 8, 8)
+
+fn capture_current_frame(engine: Engine2D, path: text) -> bool:
+    val pixels = engine.read_pixels()
+    var bytes: [u8] = []
+    for pixel in pixels:
+        bytes.push(((pixel >> 24) & 0xFF).to_u8())
+        bytes.push(((pixel >> 16) & 0xFF).to_u8())
+        bytes.push(((pixel >> 8) & 0xFF).to_u8())
+        bytes.push((pixel & 0xFF).to_u8())
+    file_write_bytes(path, bytes)
+
+fn expect_nonblank_font_pixels(evidence: FontRenderEvidence):
+    expect(evidence.checksum).to_be_greater_than(0)
+    expect(evidence.painted).to_be_greater_than(0)
+
+fn expect_antialiased_font_pixels(evidence: FontRenderEvidence):
+    expect_nonblank_font_pixels(evidence)
+    expect(evidence.partial).to_be_greater_than(0)
+
+describe "Simple 2D vector fonts":
+    # @manual_section: Primary flow
+    # @manual: show
+    # @capture(artifact)
+    # @req REQ-002 REQ-003
+    # @req NFR-007
+    it "should render a selected ASCII vector font at two sizes":
+        """An application selects an owned TTF and receives deterministic antialiased output."""
+        step("Load a vector font fixture")
+        expect(materialize_vector_font_fixtures()).to_be(true)
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        engine.unload_font()
+        expect(load_vector_font_fixture(engine, UNICODE_PATH_FONT)).to_be(true)
+
+        step("Render text through the Simple 2D facade")
+        val small = render_font_fixture(engine, "A A", 16)
+        val large = render_font_fixture(engine, "A A", 32)
+
+        step("Verify glyph layout and pixels")
+        expect_antialiased_font_pixels(small)
+        expect_antialiased_font_pixels(large)
+        expect(small.checksum).to_equal(160012687)
+        expect(small.painted).to_equal(106)
+        expect(small.partial).to_equal(102)
+        expect(small.min_x).to_equal(8)
+        expect(small.min_y).to_equal(14)
+        expect(small.max_x).to_equal(35)
+        expect(small.max_y).to_equal(24)
+        expect(small.first_x).to_equal(11)
+        expect(small.first_y).to_equal(14)
+        expect(small.first_pixel).to_equal(4282268725u32)
+        expect(small.corner_pixel).to_equal(rgb(3, 7, 11))
+        expect(small.last_pixel).to_equal(rgb(3, 7, 11))
+        expect(large.checksum).to_equal(106035644)
+        expect(large.painted).to_equal(334)
+        expect(large.partial).to_equal(216)
+        expect(large.min_x).to_equal(8)
+        expect(large.min_y).to_equal(20)
+        expect(large.max_x).to_equal(63)
+        expect(large.max_y).to_equal(40)
+        expect(capture_current_frame(engine, PRIMARY_CAPTURE)).to_be(true)
+        engine.unload_font()
+        engine.shutdown()
+
+    # @manual_section: Warm cache
+    # @manual: show
+    # @req REQ-006
+    # @req NFR-001 NFR-002 NFR-004
+    it "should reuse every repeated glyph without rerasterization":
+        """A repeated draw reuses every positioned glyph and performs no new rasterization."""
+        step("Load a vector font fixture")
+        expect(materialize_vector_font_fixtures()).to_be(true)
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        engine.unload_font()
+        expect(load_vector_font_fixture(engine, ASCII_FONT)).to_be(true)
+
+        step("Render the same text again")
+        val cold = render_font_fixture(engine, "A A A A", 24)
+        val before = engine.font_cache_stats()
+        val warm = render_font_fixture(engine, "A A A A", 24)
+        val after = engine.font_cache_stats()
+
+        step("Verify cache and performance evidence")
+        expect(cold.checksum).to_equal(warm.checksum)
+        expect(after.hits - before.hits).to_equal(7)
+        expect(after.misses - before.misses).to_equal(0)
+        expect(after.rasterizations - before.rasterizations).to_equal(0)
+        expect(after.entries).to_equal(before.entries)
+        expect(after.bytes).to_equal(before.bytes)
+        expect(after.evictions).to_equal(before.evictions)
+        expect(after.entries).to_be_less_than(513)
+        expect(after.bytes).to_be_less_than(33554433)
+        engine.unload_font()
+        engine.shutdown()
+
+    # @manual_section: Unicode and fallback
+    # @manual: folded
+    # @req REQ-004
+    it "should render a directly mapped Latin-1 glyph and a missing-glyph fallback":
+        """A simple-script Unicode mapping uses the selected face while an absent glyph stays visible."""
+        step("Load a vector font fixture")
+        expect(materialize_vector_font_fixtures()).to_be(true)
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        engine.unload_font()
+        expect(load_vector_font_fixture(engine, LATIN1_FONT)).to_be(true)
+
+        step("Render text through the Simple 2D facade")
+        val latin1 = render_font_fixture(engine, "éé", 24)
+        val fallback = render_font_fixture(engine, "Z", 24)
+
+        step("Verify glyph layout and pixels")
+        expect_antialiased_font_pixels(latin1)
+        expect_nonblank_font_pixels(fallback)
+        expect(latin1.checksum).to_equal(2027554228)
+        expect(latin1.min_x).to_equal(8)
+        expect(latin1.min_y).to_equal(17)
+        expect(latin1.max_x).to_equal(33)
+        expect(latin1.max_y).to_equal(32)
+        expect(fallback.checksum).to_equal(306686342)
+        expect(fallback.painted).to_equal(30)
+        expect(fallback.partial).to_equal(0)
+        engine.unload_font()
+        engine.shutdown()
+
+    # @manual_section: Failure safety
+    # @manual: show
+    # @req REQ-001 REQ-005
+    # @req NFR-006
+    it "should preserve the selected face after invalid input and restore bitmap default":
+        """Rejected paths never replace the active face, and unload returns to bitmap text."""
+        step("Load a vector font fixture")
+        expect(materialize_vector_font_fixtures()).to_be(true)
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        engine.unload_font()
+        expect(load_vector_font_fixture(engine, ASCII_FONT)).to_be(true)
+        val selected = render_font_fixture(engine, "AA", 24)
+        expect(selected.checksum).to_equal(2027554228)
+        val before_invalid = engine.font_cache_stats()
+
+        step("Reject invalid font input")
+        expect(engine.load_font("")).to_be(false)
+        expect(engine.load_font(FIXTURE_DIR + "/missing.ttf")).to_be(false)
+        expect(engine.load_font(MALFORMED_FONT)).to_be(false)
+        expect(engine.load_font(UNSUPPORTED_FONT)).to_be(false)
+        val invalid_size = render_font_fixture(engine, "A", 513)
+        expect(invalid_size.painted).to_equal(0)
+        val after_invalid = engine.font_cache_stats()
+        expect(after_invalid.generation).to_equal(before_invalid.generation)
+        expect(after_invalid.entries).to_equal(before_invalid.entries)
+        expect(after_invalid.bytes).to_equal(before_invalid.bytes)
+        expect(after_invalid.hits).to_equal(before_invalid.hits)
+        expect(after_invalid.misses).to_equal(before_invalid.misses)
+        expect(after_invalid.rasterizations).to_equal(before_invalid.rasterizations)
+        expect(after_invalid.evictions).to_equal(before_invalid.evictions)
+        val preserved = render_font_fixture(engine, "AA", 24)
+        expect(preserved.checksum).to_equal(selected.checksum)
+
+        engine.unload_font()
+        val bitmap = render_font_fixture(engine, "AA", 24)
+        expect_nonblank_font_pixels(bitmap)
+        expect(bitmap.checksum).to_equal(104415593)
+        expect(bitmap.painted).to_equal(324)
+        expect(bitmap.partial).to_equal(0)
+        engine.shutdown()
+
+    # @manual_section: Cache invalidation
+    # @manual: folded
+    # @req REQ-006
+    it "should invalidate cached glyphs when another face is selected":
+        """Successful face replacement drops prior glyph entries and advances native generation."""
+        step("Load a vector font fixture")
+        expect(materialize_vector_font_fixtures()).to_be(true)
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        expect(engine.load_font(ASCII_FONT)).to_be(true)
+        render_font_fixture(engine, "AA", 24)
+        val first = engine.font_cache_stats()
+        expect(first.entries).to_be_greater_than(0)
+
+        expect(engine.load_font(LATIN1_FONT)).to_be(true)
+        val replaced = engine.font_cache_stats()
+        expect(replaced.entries).to_equal(0)
+        render_font_fixture(engine, "éé", 24)
+        val second = engine.font_cache_stats()
+        expect(second.generation).to_be_greater_than(first.generation)
+        expect(second.entries).to_be_greater_than(0)
+        engine.shutdown()
+
+    # @manual_section: Bitmap default
+    # @manual: folded
+    # @req REQ-007
+    it "should keep bitmap text as the default before font selection":
+        """A new engine renders visible bitmap text without loading a vector face."""
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        val bitmap = render_font_fixture(engine, "AA", 24)
+        expect_nonblank_font_pixels(bitmap)
+        expect(bitmap.checksum).to_equal(104415593)
+        expect(bitmap.min_x).to_equal(8)
+        expect(bitmap.min_y).to_equal(8)
+        expect(bitmap.max_x).to_equal(37)
+        expect(bitmap.max_y).to_equal(28)
+        val stats = engine.font_cache_stats()
+        expect(stats.entries).to_equal(0)
+        engine.shutdown()
+
+    # @manual_section: Clipping
+    # @manual: folded
+    # @req REQ-003
+    it "should clip selected vector text at the viewport boundary":
+        """Negative draw coordinates clip pixels without changing the glyph layout."""
+        step("Load a vector font fixture")
+        expect(materialize_vector_font_fixtures()).to_be(true)
+        var engine = Engine2D.create_with_backend(128, 72, "cpu")
+        expect(engine.load_font(ASCII_FONT)).to_be(true)
+
+        step("Render text through the Simple 2D facade")
+        val clipped = render_font_fixture_at(engine, "A A", 24, -4, -4)
+
+        step("Verify glyph layout and pixels")
+        expect(clipped.checksum).to_equal(1011943063)
+        expect(clipped.painted).to_equal(181)
+        expect(clipped.partial).to_equal(134)
+        expect(clipped.min_x).to_equal(0)
+        expect(clipped.min_y).to_equal(5)
+        expect(clipped.max_x).to_equal(36)
+        expect(clipped.max_y).to_equal(20)
+        expect(clipped.last_pixel).to_equal(rgb(3, 7, 11))
+        engine.shutdown()

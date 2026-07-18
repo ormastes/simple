@@ -1,0 +1,156 @@
+# LLM Caret - Retry / Backoff / Timeout
+#
+# Production-grade retry policy matching Claude Code CLI behavior:
+#   - Retries on 429 (rate limit) and 5xx (server error) responses
+#   - Retries on connection errors (non-empty error string, status <= 0)
+#   - Never retries other 4xx responses
+#   - Exponential backoff with deterministic jitter, capped at max_delay_ms
+#   - Honors a caller-supplied Retry-After value (milliseconds) when present
+#   - Per-request timeout and max-attempts are both configurable
+#
+# Pure decision functions (should_retry, backoff_delay_ms) are unit-testable
+# without any I/O. `with_retry` is the only impure piece — it sleeps between
+# attempts and invokes the caller-supplied closure.
+
+use app.io.mod.{rt_sleep_ms, env_get}
+use app.llm_caret.json_helpers.{json_parse_int}
+
+# ============================================================================
+# Policy
+# ============================================================================
+
+struct RetryPolicy:
+    max_attempts: i64
+    base_delay_ms: i64
+    max_delay_ms: i64
+    timeout_ms: i64
+
+fn default_retry_policy() -> RetryPolicy:
+    RetryPolicy(
+        max_attempts: 4,
+        base_delay_ms: 1000,
+        max_delay_ms: 32000,
+        timeout_ms: 600000
+    )
+
+# Build a policy honoring the LLM_CARET_MAX_RETRIES env override (if set and
+# parseable as a positive integer, it replaces max_attempts).
+fn retry_policy_from_env() -> RetryPolicy:
+    var policy = default_retry_policy()
+    val override_raw = env_get("LLM_CARET_MAX_RETRIES") ?? ""
+    if override_raw != "":
+        val parsed = json_parse_int(override_raw)
+        if parsed > 0:
+            policy = RetryPolicy(
+                max_attempts: parsed,
+                base_delay_ms: policy.base_delay_ms,
+                max_delay_ms: policy.max_delay_ms,
+                timeout_ms: policy.timeout_ms
+            )
+    policy
+
+# ============================================================================
+# Result
+# ============================================================================
+
+struct RetryOutcome:
+    status: i64
+    body: text
+    error: text
+    attempts: i64
+
+# ============================================================================
+# Pure decision functions
+# ============================================================================
+
+# A status is "retryable" if it's 429 or any 5xx. Other 4xx (400, 401, 403,
+# 404, ...) are never retried. status <= 0 means a connection-level error
+# (no HTTP status was ever received) and is retryable.
+fn is_retryable_status(status: i64) -> bool:
+    if status <= 0:
+        return true
+    if status == 429:
+        return true
+    if status >= 500 and status < 600:
+        return true
+    false
+
+# Decide whether another attempt should be made, given the status of the
+# attempt just completed (1-indexed) and the policy in effect.
+fn should_retry(status: i64, attempt: i64, policy: RetryPolicy) -> bool:
+    if attempt >= policy.max_attempts:
+        return false
+    is_retryable_status(status)
+
+# Deterministic "jitter": a small, attempt-dependent offset in
+# [0, base_delay_ms / 4) so tests can assert exact values while still
+# spreading retries out in practice. Not cryptographically random by design.
+fn _jitter_ms(attempt: i64, policy: RetryPolicy) -> i64:
+    val spread = policy.base_delay_ms / 4
+    if spread <= 0:
+        return 0
+    (attempt * 37) % (spread + 1)
+
+# Exponential backoff: base * 2^(attempt-1), capped at max_delay_ms, plus
+# deterministic jitter. `attempt` is 1-indexed (the attempt that just failed).
+fn backoff_delay_ms(attempt: i64, policy: RetryPolicy) -> i64:
+    var a = attempt
+    if a < 1:
+        a = 1
+    var delay = policy.base_delay_ms
+    var i = 1
+    while i < a:
+        delay = delay * 2
+        if delay >= policy.max_delay_ms:
+            delay = policy.max_delay_ms
+            break
+        i = i + 1
+    if delay > policy.max_delay_ms:
+        delay = policy.max_delay_ms
+    delay + _jitter_ms(attempt, policy)
+
+# Effective delay before the next attempt: honors a server-supplied
+# Retry-After value (in ms) when positive, otherwise falls back to the
+# computed exponential backoff.
+fn effective_delay_ms(attempt: i64, policy: RetryPolicy, retry_after_ms: i64) -> i64:
+    if retry_after_ms > 0:
+        var capped = retry_after_ms
+        if capped > policy.max_delay_ms:
+            capped = policy.max_delay_ms
+        return capped
+    backoff_delay_ms(attempt, policy)
+
+# ============================================================================
+# Impure: retry driver
+# ============================================================================
+
+# `call` performs one attempt (attempt number, 1-indexed) and returns
+# (status_code, body, error, retry_after_ms). `error` non-empty means a
+# connection-level failure (status is meaningless / <= 0 by convention).
+# `retry_after_ms` should be 0 when the caller has no Retry-After hint.
+fn with_retry(policy: RetryPolicy, call: fn(i64) -> (i64, text, text, i64)) -> RetryOutcome:
+    var attempt = 1
+    while true:
+        val result = call(attempt)
+        val status = result.0
+        val body = result.1
+        val err = result.2
+        val retry_after_ms = result.3
+        val effective_status = if err != "": -1 else: status
+        if not should_retry(effective_status, attempt, policy):
+            return RetryOutcome(
+                status: status,
+                body: body,
+                error: err,
+                attempts: attempt
+            )
+        val delay = effective_delay_ms(attempt, policy, retry_after_ms)
+        rt_sleep_ms(delay)
+        attempt = attempt + 1
+    # unreachable, but keeps the type checker satisfied
+    RetryOutcome(status: 0, body: "", error: "unreachable", attempts: attempt)
+
+export RetryPolicy, RetryOutcome
+export default_retry_policy, retry_policy_from_env
+export is_retryable_status, should_retry, backoff_delay_ms, effective_delay_ms
+export with_retry

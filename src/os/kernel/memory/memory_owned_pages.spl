@@ -1,0 +1,31 @@
+# Transactional ownership of anonymous pages mapped by memory syscalls.
+
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_read_pte, PAGE_SIZE, PTE_PRESENT, PTE_ADDR_MASK}
+use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
+
+fn memory_release_owned_pages(base_addr: u64, page_count: u64):
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: base_addr + offset * PAGE_SIZE)
+        val pte = vmm_read_pte(virt)
+        if (pte & PTE_PRESENT) != 0 and vmm_unmap_page(virt):
+            val phys = PhysAddr(addr: pte & PTE_ADDR_MASK)
+            pmm_free_page(PageFrame.from_phys_addr(phys))
+        offset = offset + 1
+
+fn memory_map_owned_pages(base_addr: u64, page_count: u64, flags: VmFlags) -> bool:
+    var offset: u64 = 0
+    while offset < page_count:
+        val opt_frame = pmm_alloc_page()
+        if val Some(frame) = opt_frame:
+            val virt = VirtAddr(addr: base_addr + offset * PAGE_SIZE)
+            if not vmm_map_page(virt, frame.to_phys_addr(), flags):
+                pmm_free_page(frame)
+                memory_release_owned_pages(base_addr, offset)
+                return false
+        else:
+            memory_release_owned_pages(base_addr, offset)
+            return false
+        offset = offset + 1
+    true

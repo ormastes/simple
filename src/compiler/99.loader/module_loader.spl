@@ -1,0 +1,596 @@
+# Compatibility runtime module loader surface.
+#
+# This file preserves the older method/wrapper loader API re-exported by the
+# root `compiler.loader` package. Newer curated loader consumers should prefer
+# the `compiler.loader.runtime` package and its explicit surface.
+
+extern fn rt_file_exists(path: text) -> bool
+use compiler.loader.jit_instantiator.{JitInstantiator}
+use compiler.loader.compiler_sffi.{TypeInfo, type_to_string}
+use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
+use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64}
+use std.io_runtime.{file_read_bytes}
+
+fn _path_tag(path: text) -> text:
+    val base = path.split("/").last() ?? path
+    val stem = base.split(".").first() ?? base
+    if stem.contains("_"):
+        return stem.split("_").first() ?? stem
+    stem
+
+fn _symbol_matches_path(symbol: text, path: text) -> bool:
+    val tag = _path_tag(path)
+    if tag == "":
+        return false
+    symbol.starts_with(tag + "_") or symbol.contains("_" + tag + "_")
+
+fn _name_in(list: [text], name: text) -> bool:
+    for n in list:
+        if n == name:
+            return true
+    false
+
+fn _push_unique(list: [text], name: text) -> [text]:
+    if _name_in(list, name):
+        return list
+    var out = list
+    out.push(name)
+    out
+
+fn _any_name_in(left: [text], right: [text]) -> bool:
+    for item in left:
+        if _name_in(right, item):
+            return true
+    false
+
+fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
+    loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path)
+
+fn _jit_cache_owner(self: ModuleLoader, sym_name: text, rec_cache) -> text:
+    if rec_cache.has("owner"):
+        return rec_cache["owner"]
+    "__jit__"
+
+fn _jit_cached_loaded_symbol(sym_name: text, rec_cache) -> LoadedSymbol:
+    val code = rec_cache["code"]
+    val addr = rec_cache["address"]
+    LoadedSymbol(
+        name: sym_name,
+        address: addr,
+        size: code.len() as i64,
+        ty: SymbolType.Function,
+        is_jit: true,
+        file_offset: 0
+    )
+
+fn _collect_unload_jit_symbols(self: ModuleLoader, path: text) -> [text]:
+    var remove_jit: [text] = []
+    for sym_name in _metadata_instantiation_symbols(self, path):
+        if not _name_in(remove_jit, sym_name):
+            remove_jit.push(sym_name)
+
+    for sym_name in self.jit.jit_cache.keys():
+        val rec_cache = self.jit.jit_cache[sym_name]
+        val owner = _jit_cache_owner(self, sym_name, rec_cache)
+
+        if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
+            if not _name_in(remove_jit, sym_name):
+                remove_jit.push(sym_name)
+    remove_jit
+
+fn _moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
+    var changed_keys: [text] = [changed_key]
+    var affected: [text] = []
+    var progressed = true
+    while progressed:
+        progressed = false
+        for path in self.modules.keys():
+            if _name_in(affected, path):
+                continue
+            val exports = if self.semantic_exports.has(path):
+                self.semantic_exports[path]
+            else:
+                []
+            val deps = if self.semantic_dependencies.has(path):
+                self.semantic_dependencies[path]
+            else:
+                []
+            if _any_name_in(exports, changed_keys) or _any_name_in(deps, changed_keys):
+                affected = _push_unique(affected, path)
+                changed_keys = _push_unique(changed_keys, path)
+                for key in exports:
+                    changed_keys = _push_unique(changed_keys, key)
+                progressed = true
+    affected
+
+fn _moduleloader_semantic_fingerprint_dependents(self: ModuleLoader, changed_path: text) -> [text]:
+    var changed_paths: [text] = [changed_path]
+    var affected: [text] = []
+    var progressed = true
+    while progressed:
+        progressed = false
+        for path in self.dependency_semantic_fingerprints.keys():
+            if _name_in(affected, path):
+                continue
+            val deps = self.dependency_semantic_fingerprints[path]
+            var depends_on_changed = false
+            for candidate in changed_paths:
+                if deps.has(candidate):
+                    depends_on_changed = true
+            if depends_on_changed:
+                affected = _push_unique(affected, path)
+                changed_paths = _push_unique(changed_paths, path)
+                progressed = true
+    affected
+
+enum SymbolType:
+    Function
+    Data
+
+struct LoadedSymbol:
+    name: text
+    address: i64
+    size: i64
+    ty: SymbolType
+    is_jit: bool
+    file_offset: i64
+
+struct LoadedModule:
+    path: text
+    reader: text
+    symbols: Dict<text, LoadedSymbol>
+    load_time: i64
+    version: i64
+
+impl LoadedModule:
+    fn has_symbol(name: text) -> bool:
+        self.symbols.has(name)
+
+    fn get_symbol(name: text):
+        if self.symbols.has(name):
+            return Some(self.symbols[name])
+        nil
+
+    fn exported_symbols() -> [LoadedSymbol]:
+        var out: [LoadedSymbol] = []
+        for item in self.symbols:
+            out.push(item[1])
+        out
+
+struct ModuleLoaderConfig:
+    enable_jit: bool
+    enable_cache: bool
+    max_cache_size: i64
+    verbose: bool
+    hot_reload: bool
+
+impl ModuleLoaderConfig:
+    static fn default() -> ModuleLoaderConfig:
+        moduleloaderconfig_default()
+
+struct LoaderStats:
+    module_count: i64
+    symbol_count: i64
+    jit_stats: Dict<text, i64>
+    cache_stats: Dict<text, i64>
+
+enum LoadResult:
+    Success(module: LoadedModule)
+    AlreadyLoaded(module: LoadedModule)
+    Error(message: text)
+
+enum SymbolResult:
+    Found(symbol: LoadedSymbol, code: [u8])
+    JitCompiled(symbol: LoadedSymbol, code: [u8])
+    NotFound(name: text)
+    Error(message: text)
+
+struct ModuleLoader:
+    config: ModuleLoaderConfig
+    modules: Dict<text, LoadedModule>
+    global_symbols: Dict<text, (text, LoadedSymbol)>
+    jit: JitInstantiator
+    semantic_exports: Dict<text, [text]>
+    semantic_dependencies: Dict<text, [text]>
+    semantic_fingerprints: Dict<text, text>
+    dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
+
+impl ModuleLoader:
+    static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
+        moduleloader_new(config)
+
+    static fn with_defaults() -> ModuleLoader:
+        moduleloader_with_defaults()
+
+    fn stats() -> LoaderStats:
+        LoaderStats(
+            module_count: self.modules.len() as i64,
+            symbol_count: self.global_symbols.len() as i64,
+            jit_stats: {"cached_count": self.jit.jit_cache.len() as i64},
+            cache_stats: {"template_count": 0, "instance_count": 0}
+        )
+
+    fn is_loaded(path: text) -> bool:
+        self.modules.has(path)
+
+    fn loaded_modules() -> [text]:
+        var out: [text] = []
+        for path in self.modules.keys():
+            out.push(path)
+        out
+
+    # NOTE: the body below is inlined directly (rather than delegating to a
+    # free helper function) because the interpreter used by `bin/simple`
+    # drops self-mutations that happen inside plain (non-`me`) functions once
+    # the call returns -- only mutations performed directly inside a `me`
+    # method body on `self` persist back to the caller's variable. Dict-typed
+    # struct fields (`self.modules`, `self.global_symbols`, ...) need that
+    # direct-mutation guarantee; `self.jit` is a class (reference type) so its
+    # own methods are safe to keep factored out.
+    me load(path: text) -> LoadResult:
+        if self.modules.has(path):
+            return LoadResult.AlreadyLoaded(module: self.modules[path])
+        if not rt_file_exists(path):
+            return LoadResult.Error(message: "module not found: " + path)
+
+        val smf_bytes = file_read_bytes(path)
+        if smf_bytes.len() == 0:
+            return LoadResult.Error(message: "failed to read module bytes: " + path)
+
+        val reader_result = SmfReaderMemory.from_data(smf_bytes)
+        match reader_result:
+            case Err(_):
+                # Non-SMF source path (e.g. a plain `.spl` file). Per the
+                # compat loader contract, register it as a source-only
+                # module: no native symbols, but tracked as loaded so JIT
+                # metadata can still rehydrate from its sidecar.
+                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
+                self.modules[path] = m
+                val _ = self.jit.load_smf_metadata(path)
+                return LoadResult.Success(module: m)
+            case Ok(reader):
+                var symbols: Dict<text, LoadedSymbol> = {}
+                val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
+                for smf_sym in exported_smf_symbols:
+                    val code_result = reader.read_code(smf_sym)
+                    val code = match code_result:
+                        case Ok(value):
+                            value
+                        case Err(err):
+                            return LoadResult.Error(message: err)
+                    val addr = native_alloc_exec_memory(code.len() as i64)
+                    if addr == 0:
+                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    val written = native_write_exec_memory(addr, code, 0)
+                    if written != code.len() as i64:
+                        return LoadResult.Error(message: "Failed to copy executable bytes for {smf_sym.name}")
+                    if not native_make_executable(addr, code.len() as i64):
+                        return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
+                    native_flush_icache(addr, code.len() as i64)
+                    val symbol_size: i64 = smf_sym.size as i64
+                    val symbol_ty: SymbolType = smf_sym.ty
+                    val symbol_file_offset: i64 = smf_sym.offset as i64
+                    val loaded_sym = LoadedSymbol(
+                        name: smf_sym.name,
+                        address: addr,
+                        size: symbol_size,
+                        ty: symbol_ty,
+                        is_jit: false,
+                        file_offset: symbol_file_offset
+                    )
+                    symbols[smf_sym.name] = loaded_sym
+                    self.global_symbols[smf_sym.name] = (path, loaded_sym)
+
+                val ordered_symbols_result = reader.symbols_in_table_order()
+                val ordered_symbols = match ordered_symbols_result:
+                    case Ok(value):
+                        value
+                    case Err(err):
+                        return LoadResult.Error(message: err)
+                val relocs_result = reader.read_relocations()
+                val relocs = match relocs_result:
+                    case Ok(value):
+                        value
+                    case Err(err):
+                        return LoadResult.Error(message: err)
+                if relocs.len() > 0:
+                    for sym_name in symbols.keys():
+                        val loaded_sym = symbols[sym_name]
+                        if not native_make_rw(loaded_sym.address, loaded_sym.size):
+                            return LoadResult.Error(message: "Failed to make memory writable for relocation at {sym_name}")
+                        for reloc in relocs:
+                            if reloc.offset < 0 or reloc.offset >= loaded_sym.size:
+                                return LoadResult.Error(message: "Relocation offset {reloc.offset} out of bounds")
+                            var target_addr = 0i64
+                            if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
+                                val target_name = ordered_symbols[reloc.symbol_index].name
+                                if symbols.has(target_name):
+                                    target_addr = symbols[target_name].address
+                                else:
+                                    if self.global_symbols.has(target_name):
+                                        target_addr = self.global_symbols[target_name][1].address
+                            if target_addr == 0:
+                                return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
+                            match reloc.reloc_type:
+                                1:
+                                    native_reloc_write_i64(loaded_sym.address, reloc.offset, target_addr + reloc.addend)
+                                2:
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                                3:
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                                4:
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                                5:
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr + reloc.addend) as i32)
+                                _:
+                                    return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
+                        if not native_make_executable(loaded_sym.address, loaded_sym.size):
+                            return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
+                        native_flush_icache(loaded_sym.address, loaded_sym.size)
+
+                val metadata_result = self.jit.load_smf_metadata(path)
+                match metadata_result:
+                    case Err(err):
+                        if symbols.len() == 0:
+                            return LoadResult.Error(message: err)
+                    case Ok(_):
+                        pass
+
+                val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
+                self.modules[path] = m
+                return LoadResult.Success(module: m)
+
+    me reload(path: text) -> LoadResult:
+        self.unload(path)
+        if self.modules.has(path):
+            self.modules = self.modules.remove(path)
+        self.load(path)
+
+    me unload(path: text):
+        if not self.modules.has(path):
+            return
+        val remove_jit = _collect_unload_jit_symbols(self, path)
+        for sym_name in remove_jit:
+            self.jit.drop_cached_symbol(sym_name)
+
+        val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
+        val removed_symbols = owned_symbols + remove_jit
+        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
+
+        for sym_name in self.jit.jit_cache.keys():
+            val rec_cache = self.jit.jit_cache[sym_name]
+            val mapped_owner = _jit_cache_owner(self, sym_name, rec_cache)
+            rebuilt_globals[sym_name] = (mapped_owner, _jit_cached_loaded_symbol(sym_name, rec_cache))
+
+        self.global_symbols = rebuilt_globals
+        self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+        self.semantic_exports = self.semantic_exports.remove(path)
+        self.semantic_dependencies = self.semantic_dependencies.remove(path)
+        self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
+        self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
+
+        if self.modules.has(path):
+            self.modules = self.modules.remove(path)
+
+    me record_semantic_export(path: text, key: text):
+        if not self.semantic_exports.has(path):
+            self.semantic_exports[path] = []
+        self.semantic_exports[path] = _push_unique(self.semantic_exports[path], key)
+
+    me record_semantic_dependency(path: text, key: text):
+        if not self.semantic_dependencies.has(path):
+            self.semantic_dependencies[path] = []
+        self.semantic_dependencies[path] = _push_unique(self.semantic_dependencies[path], key)
+
+    # Inlined directly on the `me` receiver (see the NOTE above `me load`):
+    # a plain free function mutating `self.semantic_fingerprints` /
+    # `self.dependency_semantic_fingerprints` would silently lose its writes
+    # once it returns under the interpreter used by `bin/simple`.
+    me record_semantic_fingerprint(path: text, fingerprint: text):
+        self.semantic_fingerprints[path] = fingerprint
+
+    me record_dependency_semantic_fingerprint(dependent_path: text, dependency_path: text, fingerprint: text):
+        var deps: Dict<text, text> = {}
+        if self.dependency_semantic_fingerprints.has(dependent_path):
+            deps = self.dependency_semantic_fingerprints[dependent_path]
+        deps[dependency_path] = fingerprint
+        self.dependency_semantic_fingerprints[dependent_path] = deps
+
+    fn semantic_cache_is_fresh(path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
+        if not self.semantic_fingerprints.has(path):
+            return false
+        if self.semantic_fingerprints[path] != current_fingerprint:
+            return false
+        if not self.dependency_semantic_fingerprints.has(path):
+            return current_dependencies.len() == 0
+        val stored_deps = self.dependency_semantic_fingerprints[path]
+        if stored_deps.len() != current_dependencies.len():
+            return false
+        for dep_path in current_dependencies.keys():
+            if not stored_deps.has(dep_path):
+                return false
+            if stored_deps[dep_path] != current_dependencies[dep_path]:
+                return false
+        true
+
+    fn semantic_dependents_of(changed_path: text) -> [text]:
+        self.semantic_fingerprint_dependents(changed_path)
+
+    fn semantic_dependents(changed_key: text) -> [text]:
+        _moduleloader_semantic_dependents(self, changed_key)
+
+    fn semantic_fingerprint_dependents(changed_path: text) -> [text]:
+        _moduleloader_semantic_fingerprint_dependents(self, changed_path)
+
+    me invalidate_semantic_change(changed_key: text) -> [text]:
+        var affected = self.semantic_dependents(changed_key)
+        affected = _push_unique(affected, changed_key)
+        for path in self.semantic_fingerprint_dependents(changed_key):
+            affected = _push_unique(affected, path)
+        for path in affected:
+            if self.modules.has(path):
+                self.unload(path)
+            else:
+                self.semantic_exports = self.semantic_exports.remove(path)
+                self.semantic_dependencies = self.semantic_dependencies.remove(path)
+                self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
+                self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
+        self.jit.invalidate_by_semantic_key(changed_key)
+        affected
+
+    me resolve_symbol(name: text) -> SymbolResult:
+        if self.global_symbols.has(name):
+            val pair = self.global_symbols[name]
+            return SymbolResult.Found(symbol: pair[1], code: [])
+
+        if self.jit.jit_cache.has(name):
+            val rec_cache = self.jit.jit_cache[name]
+            val code = rec_cache["code"]
+            val owner = _jit_cache_owner(self, name, rec_cache)
+            val sym = _jit_cached_loaded_symbol(name, rec_cache)
+            self.global_symbols[name] = (owner, sym)
+            return SymbolResult.JitCompiled(symbol: sym, code: code)
+
+        match self.jit.try_jit_instantiate(name):
+            case JitInstantiationResult.Success(code, sym_name, address):
+                val addr = match address:
+                    Some(value):
+                        value
+                    nil:
+                        0
+                var owner = "__jit__"
+                val rec = self.jit.exec_mapper.lookup(sym_name)
+                match rec:
+                    Some(value):
+                        if value != nil:
+                            owner = value.owner_id
+                    nil:
+                        pass
+                val sym = LoadedSymbol(
+                    name: sym_name,
+                    address: addr,
+                    size: code.len() as i64,
+                    ty: SymbolType.Function,
+                    is_jit: true,
+                    file_offset: 0
+                )
+                self.global_symbols[sym_name] = (owner, sym)
+                return SymbolResult.JitCompiled(symbol: sym, code: code)
+            case JitInstantiationResult.NotFound(_):
+                return SymbolResult.NotFound(name: name)
+            case JitInstantiationResult.CompilationError(message):
+                return SymbolResult.Error(message: message)
+            case JitInstantiationResult.CircularDependency(cycle):
+                return SymbolResult.Error(message: "circular JIT dependency: " + cycle.join(","))
+            case JitInstantiationResult.UpdateFailed(symbol, error):
+                return SymbolResult.Error(message: "JIT update failed for {symbol}: {error}")
+
+        SymbolResult.NotFound(name: name)
+
+    fn resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
+        self.resolve_symbol(mangle_name(name, type_args))
+
+    fn get_module(path: text):
+        if self.modules.has(path):
+            return Some(self.modules[path])
+        nil
+
+fn moduleloaderconfig_default() -> ModuleLoaderConfig:
+    ModuleLoaderConfig(
+        enable_jit: true,
+        enable_cache: true,
+        max_cache_size: 100,
+        verbose: false,
+        hot_reload: false
+    )
+
+fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
+        ModuleLoader(
+            config: config,
+            modules: {},
+            global_symbols: {},
+            jit: JitInstantiator.new(JitInstantiatorConfig(
+                update_smf: config.enable_cache,
+                max_depth: 50,
+                enabled: config.enable_jit,
+                verbose: config.verbose
+            )),
+            semantic_exports: {},
+            semantic_dependencies: {},
+            semantic_fingerprints: {},
+            dependency_semantic_fingerprints: {}
+    )
+
+fn moduleloader_with_defaults() -> ModuleLoader:
+    moduleloader_new(moduleloaderconfig_default())
+
+fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
+    self.load(path)
+
+fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+    self.reload(path)
+
+fn moduleloader_unload(self: ModuleLoader, path: text):
+    self.unload(path)
+
+fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+    self.resolve_symbol(name)
+
+fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+    self.resolve_symbol(mangle_name(name, type_args))
+
+fn moduleloader_record_semantic_export(self: ModuleLoader, path: text, key: text):
+    self.record_semantic_export(path, key)
+
+fn moduleloader_record_semantic_dependency(self: ModuleLoader, path: text, key: text):
+    self.record_semantic_dependency(path, key)
+
+fn moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
+    self.semantic_fingerprints[path] = fingerprint
+
+fn moduleloader_record_dependency_semantic_fingerprint(self: ModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
+    var deps: Dict<text, text> = {}
+    if self.dependency_semantic_fingerprints.has(dependent_path):
+        deps = self.dependency_semantic_fingerprints[dependent_path]
+    deps[dependency_path] = fingerprint
+    self.dependency_semantic_fingerprints[dependent_path] = deps
+
+fn moduleloader_semantic_cache_is_fresh(self: ModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
+    if not self.semantic_fingerprints.has(path):
+        return false
+    if self.semantic_fingerprints[path] != current_fingerprint:
+        return false
+    if not self.dependency_semantic_fingerprints.has(path):
+        return current_dependencies.len() == 0
+    val stored_deps = self.dependency_semantic_fingerprints[path]
+    if stored_deps.len() != current_dependencies.len():
+        return false
+    for dep_path in current_dependencies.keys():
+        if not stored_deps.has(dep_path):
+            return false
+        if stored_deps[dep_path] != current_dependencies[dep_path]:
+            return false
+    true
+
+fn moduleloader_semantic_dependents_of(self: ModuleLoader, changed_path: text) -> [text]:
+    self.semantic_fingerprint_dependents(changed_path)
+
+fn moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
+    self.semantic_dependents(changed_key)
+
+fn moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text) -> [text]:
+    self.invalidate_semantic_change(changed_key)
+
+fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
+    if type_args.len() == 0:
+        return base
+
+    var names: [text] = []
+    for t in type_args:
+        names.push(type_to_string(t))
+    base + "$" + names.join("_")
+
+fn moduleloader_stats(self: ModuleLoader) -> LoaderStats:
+    self.stats()

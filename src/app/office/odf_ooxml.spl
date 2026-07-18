@@ -1,0 +1,1745 @@
+# ODT / DOCX Import + real .odt Writer
+#
+# Reads the two dominant office container formats into the suite's document
+# model, and writes genuine zipped .odt files:
+#   - .odt  (LibreOffice): content.xml   -> text:h / text:p / list items
+#   - .docx (MS Word):     word/document.xml -> w:p paragraphs, Heading styles,
+#     concatenated w:t runs
+#
+# Parsing is a targeted tag scan (find/strip/unescape), not a general XML DOM —
+# enough to import real documents' text structure faithfully.
+# ponytail: character-run styling (bold/italic spans) imports as plain text;
+# add run-property scanning when styled import matters.
+
+use std.common.archive.zip.{zip_extract, zip_extract_text, zip_write_stored, zip_text_file, ZipFile}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, CommentDef, RevisionDef, revision_def_for, spans_to_plain_text}
+use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.file_formats.{parse_inline_spans, recalculate_formula_cells}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{col_to_letter, parse_cell_ref, CellValue}
+use app.office.sheets.cell_format.{FormatSpec, SheetFormats, empty_sheet_formats, formats_get, formats_set}
+
+# rt_file_* externs already back the compiler's own file IO (see
+# src/compiler/70.backend/linker/lib_smf_writer.spl); declared locally here
+# for the docx image writer/importer's disk round-trip (embed on export,
+# restore-if-missing on import). No new runtime surface, no bootstrap needed.
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+# =========================================================================
+# XML helpers
+# =========================================================================
+
+fn _find_from(s: text, needle: text, from: i32) -> i32:
+    var i = from
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _strip_tags(s: text) -> text:
+    """Remove every <...> span, keeping the character data."""
+    var out = ""
+    var i = 0
+    var in_tag = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "<":
+            in_tag = true
+        elif ch == ">":
+            in_tag = false
+        elif not in_tag:
+            out = "{out}{ch}"
+        i = i + 1
+    out
+
+fn _xml_unescape(s: text) -> text:
+    var r = s
+    r = r.replace("&lt;", "<")
+    r = r.replace("&gt;", ">")
+    r = r.replace("&quot;", "\"")
+    r = r.replace("&apos;", "'")
+    r = r.replace("&amp;", "&")
+    r
+
+fn _span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+
+fn _plain_block(kind: BlockKind, content: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [_span(content)])
+
+# =========================================================================
+# ODT import
+# =========================================================================
+
+fn _odf_heading_kind(level_attr: text) -> BlockKind:
+    if level_attr.contains("\"1\""):
+        return BlockKind.Heading1
+    if level_attr.contains("\"2\""):
+        return BlockKind.Heading2
+    BlockKind.Heading3
+
+fn odt_content_to_document(content_xml: text, title: text) -> RichDocument:
+    """Parse ODF content.xml into a RichDocument (headings, paragraphs, lists)."""
+    var doc = RichDocument.new(title)
+    var i = 0
+    while i < content_xml.len():
+        val h = _find_from(content_xml, "<text:h", i)
+        val p = _find_from(content_xml, "<text:p", i)
+        if h < 0 and p < 0:
+            break
+        val is_heading = h >= 0 and (p < 0 or h < p)
+        val start = if is_heading: h else: p
+        val close = if is_heading: "</text:h>" else: "</text:p>"
+        val tag_end = _find_from(content_xml, ">", start)
+        val end_pos = _find_from(content_xml, close, start)
+        if tag_end < 0 or end_pos < 0:
+            break
+        val attrs = content_xml.slice(start, tag_end)
+        val inner = content_xml.slice(tag_end + 1, end_pos)
+        val content = _xml_unescape(_strip_tags(inner))
+        # A text:p inside a list item becomes a bullet
+        val before = content_xml.slice(_max0(start - 40), start)
+        if is_heading:
+            doc.blocks.push(_plain_block(_odf_heading_kind(attrs), content))
+        elif before.contains("<text:list-item>"):
+            doc.blocks.push(_plain_block(BlockKind.BulletItem, content))
+        elif content.trim() != "":
+            doc.blocks.push(_plain_block(BlockKind.Paragraph, content))
+        i = end_pos + close.len()
+    doc
+
+fn _max0(v: i32) -> i32:
+    if v < 0:
+        return 0
+    v
+
+fn odt_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
+    """Import a real .odt file (zip container) into a RichDocument."""
+    odt_content_to_document(zip_extract_text(zip_bytes, "content.xml"), title)
+
+# =========================================================================
+# DOCX import
+# =========================================================================
+
+fn _docx_para_kind(para_xml: text) -> BlockKind:
+    """Map a paragraph's w:pStyle (or w:numPr) back to its BlockKind. Every
+    style this suite's writer emits (see `_docx_styles_xml`/`_docx_para`) is
+    matched here; a w:pStyle carrying any OTHER value — including no
+    w:pStyle at all — falls back to BlockKind.Paragraph rather than
+    inventing a kind for a style it doesn't recognize (e.g. one authored by
+    a different application)."""
+    if para_xml.contains("<w:numPr>") or para_xml.contains("<w:numPr "):
+        return BlockKind.OrderedItem
+    if para_xml.contains("w:val=\"Heading1\""):
+        return BlockKind.Heading1
+    if para_xml.contains("w:val=\"Heading2\""):
+        return BlockKind.Heading2
+    if para_xml.contains("w:val=\"Heading3\""):
+        return BlockKind.Heading3
+    if para_xml.contains("w:val=\"Quote\""):
+        return BlockKind.Quote
+    if para_xml.contains("w:val=\"Code\""):
+        return BlockKind.CodeBlock
+    if para_xml.contains("w:val=\"ListParagraph\""):
+        return BlockKind.BulletItem
+    BlockKind.Paragraph
+
+struct _DocxRelEntry:
+    """One parsed word/_rels/document.xml.rels <Relationship>: its rId and
+    Target (an absolute URL for hyperlinks, a `media/imageN.png`-relative
+    path for images)."""
+    id: text
+    target: text
+
+fn _parse_docx_rels(rels_xml: text) -> [_DocxRelEntry]:
+    """Parse every self-closing <Relationship Id=".." ... Target=".."/> in a
+    _rels part. Type is not tracked — callers already know from context
+    (hyperlink r:id vs image r:embed) which id they are resolving."""
+    var out: [_DocxRelEntry] = []
+    var i = 0
+    while true:
+        val s = _find_from(rels_xml, "<Relationship ", i)
+        if s < 0:
+            break
+        val e = _find_from(rels_xml, "/>", s)
+        if e < 0:
+            break
+        val tag = rels_xml.slice(s, e + 2)
+        out.push(_DocxRelEntry(id: _xml_attr(tag, "Id"), target: _xml_attr(tag, "Target")))
+        i = e + 2
+    out
+
+fn _docx_rel_target(rels: [_DocxRelEntry], rid: text) -> text:
+    """The Target for a given rId, or "" if unresolved (e.g. the 2-arg
+    `docx_document_xml_to_document` path, which has no rels at all)."""
+    if rid == "":
+        return ""
+    var i = 0
+    while i < rels.len():
+        if rels[i].id == rid:
+            return rels[i].target
+        i = i + 1
+    ""
+
+fn _docx_runs_in(region: text) -> [TextSpan]:
+    """Every <w:r> run's styled span within `region` (w:b -> Bold, w:i ->
+    Italic; bold wins when both are set — the span model carries one style).
+    link_url is always "" here; hyperlink wrapping is applied by the caller.
+    A run holding a <w:footnoteReference w:id="N"/> (no <w:t>) becomes an
+    empty-text span carrying footnote_id=N instead — the footnote reference
+    marker, matching how a link span carries its url instead of visible
+    text. A run holding only the in-footnote auto-number marker
+    (<w:footnoteRef/>, no "erence" suffix, no <w:t>) has neither and is
+    skipped, same as any other run with no extractable content."""
+    var spans: [TextSpan] = []
+    var i = 0
+    while i < region.len():
+        val r = _find_from(region, "<w:r>", i)
+        val r2 = _find_from(region, "<w:r ", i)
+        val start = if r >= 0 and (r2 < 0 or r < r2): r else: r2
+        if start < 0:
+            break
+        val end_pos = _find_from(region, "</w:r>", start)
+        if end_pos < 0:
+            break
+        val run = region.slice(start, end_pos)
+        val t = _find_from(run, "<w:t", 0)
+        val dt = _find_from(run, "<w:delText", 0)
+        if t >= 0 or dt >= 0:
+            val text_start = if dt >= 0: dt else: t
+            val close_tag = if dt >= 0: "</w:delText>" else: "</w:t>"
+            val tag_end = _find_from(run, ">", text_start)
+            val te = _find_from(run, close_tag, text_start)
+            if tag_end >= 0 and te > tag_end:
+                val content = _xml_unescape(run.slice(tag_end + 1, te))
+                var style = InlineStyle.Normal
+                if run.contains("<w:b/>") or run.contains("<w:b "):
+                    style = InlineStyle.Bold
+                elif run.contains("<w:i/>") or run.contains("<w:i "):
+                    style = InlineStyle.Italic
+                spans.push(TextSpan(text: content, style: style, link_url: "", footnote_id: "", comment_id: "", revision_id: ""))
+        else:
+            val fr = _find_from(run, "<w:footnoteReference", 0)
+            if fr >= 0:
+                val fr_end = _find_from(run, "/>", fr)
+                if fr_end >= 0:
+                    val fid = _xml_attr(run.slice(fr, fr_end + 2), "w:id")
+                    spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fid, comment_id: "", revision_id: ""))
+        i = end_pos + 6
+    spans
+
+fn _docx_comment_reference_run(cid: text) -> text:
+    """The zero-width `<w:commentReference w:id="cid"/>` run written right
+    after a commented run's `<w:commentRangeEnd>` — shared by the writer
+    (`_docx_run`) and the reader (`_docx_para_spans`, which needs the exact
+    same literal to recognize and skip it) so the two can never drift apart."""
+    "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"{cid}\"/></w:r>"
+
+struct _DocxSpansResult:
+    """Result of parsing one paragraph's runs: the spans themselves, any
+    RevisionDef entries newly discovered from <w:ins>/<w:del> wrappers in
+    it, and the next fresh revision id to hand the following paragraph.
+    Ids are assigned sequentially across the whole document parse — the
+    original w:id attributes on <w:ins>/<w:del> are NOT preserved (ceiling:
+    see `docx_bytes_to_document`)."""
+    spans: [TextSpan]
+    revisions: [RevisionDef]
+    next_id: i32
+
+fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry], start_id: i32) -> _DocxSpansResult:
+    """Every run in the paragraph as a styled span, resolving <w:hyperlink
+    r:id="..."> wrappers to their external URL (via `rels`; unresolved ids
+    degrade to a plain, non-linked span rather than failing),
+    <w:commentRangeStart w:id="N"/>...<w:commentRangeEnd w:id="N"/> wrappers
+    (written only around the single commented run — see `_docx_run`) to a
+    comment_id on the enclosed span, and <w:ins>/<w:del> wrappers to a fresh
+    revision_id on every enclosed span plus one RevisionDef (author/date read
+    off the wrapper's w:author/w:date attributes, kind "insert"/"delete" from
+    which tag it was; id is freshly assigned from `start_id`, NOT the
+    original w:id — see `_DocxSpansResult`). The immediately-following
+    <w:commentReference> run carries no visible text and is dropped rather
+    than becoming its own span: the model attaches a comment to the
+    COMMENTED span itself, not a separate marker span (mirrors
+    file_formats.spl's `parse_inline_spans`, which attaches the same way at
+    the markdown layer). Ceiling: a <w:del> nested inside a <w:ins> (or vice
+    versa) is not modeled — Word can produce this for an insertion
+    subsequently deleted by another reviewer, but this scan treats whichever
+    wrapper is encountered first as the sole marker for its enclosed runs."""
+    var spans: [TextSpan] = []
+    var revisions: [RevisionDef] = []
+    var next_id = start_id
+    var i = 0
+    while i < para_xml.len():
+        val h = _find_from(para_xml, "<w:hyperlink", i)
+        val cs = _find_from(para_xml, "<w:commentRangeStart", i)
+        val ins_s = _find_from(para_xml, "<w:ins ", i)
+        val del_s = _find_from(para_xml, "<w:del ", i)
+        var marker = -1
+        if h >= 0:
+            marker = h
+        if cs >= 0 and (marker < 0 or cs < marker):
+            marker = cs
+        if ins_s >= 0 and (marker < 0 or ins_s < marker):
+            marker = ins_s
+        if del_s >= 0 and (marker < 0 or del_s < marker):
+            marker = del_s
+        if marker < 0:
+            for sp in _docx_runs_in(para_xml.slice(i, para_xml.len())):
+                spans.push(sp)
+            i = para_xml.len()
+            continue
+        for sp in _docx_runs_in(para_xml.slice(i, marker)):
+            spans.push(sp)
+        var is_ins = false
+        var is_del = false
+        var is_comment = false
+        if marker == ins_s and ins_s >= 0:
+            is_ins = true
+        elif marker == del_s and del_s >= 0:
+            is_del = true
+        elif marker == cs and cs >= 0:
+            is_comment = true
+        if is_ins or is_del:
+            val mark_start = if is_ins: ins_s else: del_s
+            val close_tag = if is_ins: "</w:ins>" else: "</w:del>"
+            val mark_tag_end = _find_from(para_xml, ">", mark_start)
+            if mark_tag_end < 0:
+                i = para_xml.len()
+                continue
+            val open_tag = para_xml.slice(mark_start, mark_tag_end + 1)
+            val author = _xml_unescape(_xml_attr(open_tag, "w:author"))
+            val date_ = _xml_unescape(_xml_attr(open_tag, "w:date"))
+            val mark_end = _find_from(para_xml, close_tag, mark_tag_end)
+            if mark_end < 0:
+                i = para_xml.len()
+                continue
+            val inner = para_xml.slice(mark_tag_end + 1, mark_end)
+            val rid = next_id.to_text()
+            next_id = next_id + 1
+            for sp in _docx_runs_in(inner):
+                spans.push(TextSpan(text: sp.text, style: sp.style, link_url: sp.link_url, footnote_id: sp.footnote_id, comment_id: sp.comment_id, revision_id: rid))
+            var kind_ = "insert"
+            if is_del:
+                kind_ = "delete"
+            revisions.push(RevisionDef(id: rid, author: author, kind: kind_, timestamp_text: date_))
+            i = mark_end + close_tag.len()
+            continue
+        if is_comment:
+            val cs_tag_end = _find_from(para_xml, "/>", cs)
+            if cs_tag_end < 0:
+                i = para_xml.len()
+                continue
+            val cid = _xml_attr(para_xml.slice(cs, cs_tag_end + 2), "w:id")
+            val range_end_tag = "<w:commentRangeEnd w:id=\"{cid}\"/>"
+            val ce = _find_from(para_xml, range_end_tag, cs_tag_end)
+            if ce < 0:
+                i = para_xml.len()
+                continue
+            val inner = para_xml.slice(cs_tag_end + 2, ce)
+            for sp in _docx_runs_in(inner):
+                spans.push(TextSpan(text: sp.text, style: sp.style, link_url: sp.link_url, footnote_id: sp.footnote_id, comment_id: cid, revision_id: sp.revision_id))
+            var after = ce + range_end_tag.len()
+            val cr_run = _docx_comment_reference_run(cid)
+            if after + cr_run.len() <= para_xml.len() and para_xml.slice(after, after + cr_run.len()) == cr_run:
+                after = after + cr_run.len()
+            i = after
+            continue
+        val tag_end = _find_from(para_xml, ">", h)
+        val hclose = _find_from(para_xml, "</w:hyperlink>", h)
+        if tag_end < 0 or hclose < 0:
+            i = para_xml.len()
+            continue
+        val attrs = para_xml.slice(h, tag_end)
+        val url = _docx_rel_target(rels, _xml_attr(attrs, "r:id"))
+        val inner = para_xml.slice(tag_end + 1, hclose)
+        for sp in _docx_runs_in(inner):
+            spans.push(TextSpan(text: sp.text, style: sp.style, link_url: url, footnote_id: sp.footnote_id, comment_id: sp.comment_id, revision_id: sp.revision_id))
+        i = hclose + 14
+    if spans.len() == 0:
+        spans.push(_span(""))
+    _DocxSpansResult(spans: spans, revisions: revisions, next_id: next_id)
+
+fn _docx_para_text(para_xml: text, rels: [_DocxRelEntry]) -> text:
+    """Concatenate every run's text within one paragraph. Revision ids are
+    discarded here (start_id 0, result unused past `.spans`) — this helper
+    only checks whether a paragraph has any text at all."""
+    var out = ""
+    val result = _docx_para_spans(para_xml, rels, 0)
+    for span in result.spans:
+        out = "{out}{span.text}"
+    out
+
+struct _MdImage:
+    """Result of matching a paragraph's plain text against the whole-block
+    `![alt](src)` image convention (mirrors html_render.spl's `_image_html`)."""
+    is_image: bool
+    alt: text
+    src: text
+
+fn _parse_md_image(plain: text) -> _MdImage:
+    val t = plain.trim()
+    if not t.starts_with("!["):
+        return _MdImage(is_image: false, alt: "", src: "")
+    val close_bracket = _find_from(t, "](", 0)
+    if close_bracket < 0 or not t.ends_with(")"):
+        return _MdImage(is_image: false, alt: "", src: "")
+    val alt = t.slice(2, close_bracket)
+    val src = t.slice(close_bracket + 2, t.len() - 1)
+    if src.contains("\"") or src.contains("<") or src.contains(">"):
+        return _MdImage(is_image: false, alt: "", src: "")
+    _MdImage(is_image: true, alt: alt, src: src)
+
+fn _docx_drawing_image(para_xml: text, rels: [_DocxRelEntry], zip_bytes: [u8]) -> DocBlock?:
+    """If `para_xml` contains a <w:drawing>, reconstruct the original
+    ![alt](src) Paragraph block from the wp:docPr name/descr attributes
+    (where the writer stashes alt/src losslessly — see `_docx_drawing_xml`),
+    and restore the embedded PNG bytes to `src` on disk if that path is
+    currently missing (e.g. a fresh checkout opening a .docx someone else
+    produced). Returns nil for paragraphs with no drawing."""
+    val d = _find_from(para_xml, "<w:drawing>", 0)
+    if d < 0:
+        return nil
+    val docpr_s = _find_from(para_xml, "<wp:docPr", d)
+    if docpr_s < 0:
+        return nil
+    val docpr_e = _find_from(para_xml, "/>", docpr_s)
+    if docpr_e < 0:
+        return nil
+    val docpr_tag = para_xml.slice(docpr_s, docpr_e + 2)
+    val alt = _xml_unescape(_xml_attr(docpr_tag, "name"))
+    val src = _xml_unescape(_xml_attr(docpr_tag, "descr"))
+    val blip_s = _find_from(para_xml, "<a:blip ", d)
+    if blip_s >= 0 and src != "":
+        val blip_e = _find_from(para_xml, "/>", blip_s)
+        if blip_e >= 0:
+            val rid = _xml_attr(para_xml.slice(blip_s, blip_e + 2), "r:embed")
+            val target = _docx_rel_target(rels, rid)
+            if target != "" and not rt_file_exists(src):
+                val media_bytes = zip_extract(zip_bytes, "word/{target}")
+                if media_bytes != nil:
+                    rt_file_write_bytes(src, media_bytes)
+    Some(_plain_block(BlockKind.Paragraph, "![{alt}]({src})"))
+
+fn _docx_document_xml_to_document_with_rels(document_xml: text, rels: [_DocxRelEntry], zip_bytes: [u8], title: text) -> RichDocument:
+    var doc = RichDocument.new(title)
+    var next_rev_id = 1
+    var i = 0
+    while i < document_xml.len():
+        val p = _find_from(document_xml, "<w:p ", i)
+        val p2 = _find_from(document_xml, "<w:p>", i)
+        val start = if p >= 0 and (p2 < 0 or p < p2): p else: p2
+        if start < 0:
+            break
+        val end_pos = _find_from(document_xml, "</w:p>", start)
+        if end_pos < 0:
+            break
+        val para = document_xml.slice(start, end_pos)
+        val img_block = _docx_drawing_image(para, rels, zip_bytes)
+        if img_block != nil:
+            doc.blocks.push(img_block)
+        else:
+            val content = _docx_para_text(para, rels)
+            if content.trim() != "":
+                val pr = _docx_para_spans(para, rels, next_rev_id)
+                doc.blocks.push(DocBlock(kind: _docx_para_kind(para), spans: pr.spans))
+                for rd in pr.revisions:
+                    doc.revisions.push(rd)
+                next_rev_id = pr.next_id
+        i = end_pos + 6
+    doc
+
+fn docx_document_xml_to_document(document_xml: text, title: text) -> RichDocument:
+    """Parse OOXML word/document.xml into a RichDocument. No rels/zip access
+    at this level: w:hyperlink r:id and w:drawing r:embed can't be resolved
+    to a URL/media path here, so hyperlinks degrade to plain (non-linked)
+    spans and drawings are skipped as ordinary (empty) paragraphs. Use
+    `docx_bytes_to_document` for the full container, which resolves both."""
+    _docx_document_xml_to_document_with_rels(document_xml, [], [], title)
+
+fn _footnote_def_id(fn_def: DocBlock) -> text:
+    if fn_def.spans.len() > 0:
+        return fn_def.spans[0].footnote_id
+    ""
+
+fn _footnote_def_text(fn_def: DocBlock) -> text:
+    spans_to_plain_text(fn_def.spans)
+
+fn _parse_footnotes_xml(footnotes_xml: text) -> [DocBlock]:
+    """Every real (non-separator) <w:footnote w:id="N">...</w:footnote> in
+    word/footnotes.xml, reconstructed as a FootnoteDef block. The two
+    mandatory separator footnotes (w:id -1/0, both carrying a w:type) are
+    skipped. The note text is whatever `_docx_runs_in` finds inside the
+    footnote's paragraph — the auto-number marker run (<w:footnoteRef/>) has
+    no <w:t> and is naturally skipped there, so only the real text survives."""
+    var out: [DocBlock] = []
+    var i = 0
+    while true:
+        val s = _find_from(footnotes_xml, "<w:footnote ", i)
+        if s < 0:
+            break
+        val tag_end = _find_from(footnotes_xml, ">", s)
+        val e = _find_from(footnotes_xml, "</w:footnote>", s)
+        if tag_end < 0 or e < 0:
+            break
+        val open_tag = footnotes_xml.slice(s, tag_end + 1)
+        val fid = _xml_attr(open_tag, "w:id")
+        val ftype = _xml_attr(open_tag, "w:type")
+        if ftype == "":
+            val inner = footnotes_xml.slice(tag_end + 1, e)
+            val spans = _docx_runs_in(inner)
+            val text_content = spans_to_plain_text(spans)
+            out.push(DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: text_content, style: InlineStyle.Normal, link_url: "", footnote_id: fid, comment_id: "", revision_id: "")]))
+        i = e + 13
+    out
+
+fn _parse_comments_xml(comments_xml: text) -> [CommentDef]:
+    """Every <w:comment w:id="N" w:author="...">...</w:comment> in
+    word/comments.xml, reconstructed as a CommentDef. Mirrors
+    `_parse_footnotes_xml`'s tag-scan shape; comments.xml has no mandatory
+    separator entries to skip."""
+    var out: [CommentDef] = []
+    var i = 0
+    while true:
+        val s = _find_from(comments_xml, "<w:comment ", i)
+        if s < 0:
+            break
+        val tag_end = _find_from(comments_xml, ">", s)
+        val e = _find_from(comments_xml, "</w:comment>", s)
+        if tag_end < 0 or e < 0:
+            break
+        val open_tag = comments_xml.slice(s, tag_end + 1)
+        val cid = _xml_attr(open_tag, "w:id")
+        val author = _xml_unescape(_xml_attr(open_tag, "w:author"))
+        val inner = comments_xml.slice(tag_end + 1, e)
+        val text_content = spans_to_plain_text(_docx_runs_in(inner))
+        out.push(CommentDef(id: cid, author: author, text: text_content))
+        i = e + 12
+    out
+
+fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
+    """Import a real .docx file (zip container) into a RichDocument. Resolves
+    w:hyperlink r:id -> external URL and w:drawing r:embed -> media bytes via
+    word/_rels/document.xml.rels, word/footnotes.xml (if present) into
+    FootnoteDef blocks appended after the body's paragraphs (matching where
+    footnote definitions conventionally sit in markdown source — see
+    file_formats.spl's document_to_markdown), and word/comments.xml (if
+    present) into `doc.comments`. Every <w:ins>/<w:del> wrapper in the body
+    becomes revision-marked spans + one `RevisionDef` in `doc.revisions`
+    (author/kind/date preserved off w:author/w:date/tag-choice — see
+    `_docx_para_spans`). Three ceilings on the revisions read-path: (1) ids
+    are freshly renumbered sequentially per import, NEVER the original
+    document's w:id values; (2) a <w:del> nested inside a <w:ins> (or vice
+    versa) is not modeled — only the outer wrapper is recognized; (3)
+    w:date is read back verbatim as free text (RevisionDef.timestamp_text),
+    no date-format validation or parsing."""
+    val rels = _parse_docx_rels(zip_extract_text(zip_bytes, "word/_rels/document.xml.rels"))
+    var doc = _docx_document_xml_to_document_with_rels(zip_extract_text(zip_bytes, "word/document.xml"), rels, zip_bytes, title)
+    val footnotes_xml = zip_extract_text(zip_bytes, "word/footnotes.xml")
+    if footnotes_xml != "":
+        for fd in _parse_footnotes_xml(footnotes_xml):
+            doc.blocks.push(fd)
+    val comments_xml = zip_extract_text(zip_bytes, "word/comments.xml")
+    if comments_xml != "":
+        for cd in _parse_comments_xml(comments_xml):
+            doc.comments.push(cd)
+    doc
+
+struct DocxHeaderFooter:
+    """Header/footer plain text read back from a .docx's word/header1.xml
+    and word/footer1.xml parts (see `document_to_docx_bytes_hf`). "" for
+    either part means it wasn't present in the container."""
+    header_text: text
+    footer_text: text
+
+fn docx_bytes_to_header_footer(zip_bytes: [u8]) -> DocxHeaderFooter:
+    """Read header1.xml/footer1.xml back to plain text (tags stripped,
+    entities unescaped; the footer's PAGE field carries no literal text so
+    it disappears here, same as it would in a plain-text extraction)."""
+    val header_xml = zip_extract_text(zip_bytes, "word/header1.xml")
+    val footer_xml = zip_extract_text(zip_bytes, "word/footer1.xml")
+    DocxHeaderFooter(
+        header_text: _xml_unescape(_strip_tags(header_xml)),
+        footer_text: _xml_unescape(_strip_tags(footer_xml))
+    )
+
+# =========================================================================
+# Real .odt writer (zip container)
+# =========================================================================
+
+# =========================================================================
+# ODS import (Calc)
+# =========================================================================
+
+fn _ods_cell_value(cell_xml: text) -> text:
+    """The value to store for one table:table-cell — office:value for numbers,
+    formula text if present, else the text:p character data."""
+    val f = _find_from(cell_xml, "table:formula=\"", 0)
+    if f >= 0:
+        val fe = _find_from(cell_xml, "\"", f + 15)
+        if fe > f:
+            var formula = _xml_unescape(cell_xml.slice(f + 15, fe))
+            if formula.starts_with("of:="):
+                formula = "={formula.slice(4, formula.len())}"
+            return formula
+    val v = _find_from(cell_xml, "office:value=\"", 0)
+    if v >= 0:
+        val ve = _find_from(cell_xml, "\"", v + 14)
+        if ve > v:
+            return cell_xml.slice(v + 14, ve)
+    val p = _find_from(cell_xml, "<text:p", 0)
+    if p >= 0:
+        val tag_end = _find_from(cell_xml, ">", p)
+        val pe = _find_from(cell_xml, "</text:p>", p)
+        if tag_end >= 0 and pe > tag_end:
+            return _xml_unescape(_strip_tags(cell_xml.slice(tag_end + 1, pe)))
+    ""
+
+fn ods_content_to_sheet(content_xml: text, name: text) -> Sheet:
+    """Parse ODF spreadsheet content.xml (first table) into a Sheet."""
+    var sheet = Sheet.new(name)
+    var row = 0
+    var i = 0
+    while i < content_xml.len():
+        val r = _find_from(content_xml, "<table:table-row", i)
+        if r < 0:
+            break
+        val r_end = _find_from(content_xml, "</table:table-row>", r)
+        if r_end < 0:
+            break
+        val row_xml = content_xml.slice(r, r_end)
+        var col = 0
+        var j = 0
+        while j < row_xml.len():
+            val c = _find_from(row_xml, "<table:table-cell", j)
+            if c < 0:
+                break
+            val tag_end = _find_from(row_xml, ">", c)
+            if tag_end < 0:
+                break
+            val self_closing = row_xml.slice(tag_end - 1, tag_end) == "/"
+            var cell_xml = row_xml.slice(c, tag_end)
+            var next_j = tag_end + 1
+            if not self_closing:
+                val c_end = _find_from(row_xml, "</table:table-cell>", c)
+                if c_end < 0:
+                    break
+                cell_xml = row_xml.slice(c, c_end)
+                next_j = c_end + 19
+            val value = _ods_cell_value(cell_xml)
+            if value != "":
+                sheet.set_value("{col_to_letter(col)}{row + 1}", value)
+            col = col + 1
+            j = next_j
+        row = row + 1
+        i = r_end + 18
+    recalculate_formula_cells(sheet)
+
+fn ods_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
+    """Import a real .ods file (zip container) into a Sheet."""
+    ods_content_to_sheet(zip_extract_text(zip_bytes, "content.xml"), name)
+
+# =========================================================================
+# XLSX import (Excel)
+# =========================================================================
+
+fn _xlsx_shared_strings(shared_xml: text) -> [text]:
+    """Collect each <si>'s concatenated <t> runs from sharedStrings.xml."""
+    var strings: [text] = []
+    var i = 0
+    while i < shared_xml.len():
+        val s = _find_from(shared_xml, "<si>", i)
+        if s < 0:
+            break
+        val e = _find_from(shared_xml, "</si>", s)
+        if e < 0:
+            break
+        val si = shared_xml.slice(s, e)
+        var out = ""
+        var j = 0
+        while j < si.len():
+            val t = _find_from(si, "<t", j)
+            if t < 0:
+                break
+            val tag_end = _find_from(si, ">", t)
+            val te = _find_from(si, "</t>", t)
+            if tag_end < 0 or te < 0:
+                break
+            out = "{out}{_xml_unescape(si.slice(tag_end + 1, te))}"
+            j = te + 4
+        strings.push(out)
+        i = e + 5
+    strings
+
+fn xlsx_sheet_xml_to_sheet(sheet_xml: text, shared: [text], name: text) -> Sheet:
+    """Parse one OOXML worksheet: <c r="A1" t="s"><v>idx</v></c> cells."""
+    var sheet = Sheet.new(name)
+    var i = 0
+    while i < sheet_xml.len():
+        val c = _find_from(sheet_xml, "<c ", i)
+        if c < 0:
+            break
+        val tag_end = _find_from(sheet_xml, ">", c)
+        if tag_end < 0:
+            break
+        val attrs = sheet_xml.slice(c, tag_end)
+        # cell ref
+        var ref_str = ""
+        val ra = _find_from(attrs, "r=\"", 0)
+        if ra >= 0:
+            val re = _find_from(attrs, "\"", ra + 3)
+            if re > ra:
+                ref_str = attrs.slice(ra + 3, re)
+        val is_shared = attrs.contains("t=\"s\"")
+        val is_inline = attrs.contains("t=\"inlineStr\"")
+        val c_end = _find_from(sheet_xml, "</c>", c)
+        if is_inline and ref_str != "" and c_end > c:
+            # inline string: <is><t>text</t></is>
+            val cell_xml = sheet_xml.slice(c, c_end)
+            val t = _find_from(cell_xml, "<t", 0)
+            if t >= 0:
+                val t_end = _find_from(cell_xml, ">", t)
+                val te = _find_from(cell_xml, "</t>", t)
+                if t_end >= 0 and te > t_end:
+                    sheet.set_value(ref_str, _xml_unescape(cell_xml.slice(t_end + 1, te)))
+        else:
+            val v = _find_from(sheet_xml, "<v>", tag_end)
+            if ref_str != "" and v >= 0 and c_end > v:
+                val ve = _find_from(sheet_xml, "</v>", v)
+                if ve > v and ve < c_end:
+                    var value = _xml_unescape(sheet_xml.slice(v + 3, ve))
+                    if is_shared:
+                        val idx = value.to_i64().to_i32()
+                        if idx >= 0 and idx < shared.len():
+                            value = shared[idx]
+                    sheet.set_value(ref_str, value)
+        i = if c_end > c: c_end + 4 else: tag_end + 1
+    sheet
+
+fn xlsx_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
+    """Import a real .xlsx file: worksheet 1 + shared strings."""
+    val shared = _xlsx_shared_strings(zip_extract_text(zip_bytes, "xl/sharedStrings.xml"))
+    xlsx_sheet_xml_to_sheet(zip_extract_text(zip_bytes, "xl/worksheets/sheet1.xml"), shared, name)
+
+# =========================================================================
+# Real .xlsx writer
+# =========================================================================
+
+fn _xml_escape_x(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r
+
+fn _xlsx_cell_xml(sheet: Sheet, ref_str: text) -> text:
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<c r=\"{ref_str}\"><v>{value}</v></c>"
+        CellValue.FormulaVal(expr, cached_display):
+            val f = _xml_escape_x(expr)
+            return "<c r=\"{ref_str}\"><f>{f}</f><v>{_xml_escape_x(cached_display)}</v></c>"
+        CellValue.BoolVal(value):
+            val b = if value: "1" else: "0"
+            return "<c r=\"{ref_str}\" t=\"b\"><v>{b}</v></c>"
+        CellValue.Empty:
+            return ""
+        _:
+            val display = _xml_escape_x(cell_display_text_of(sheet, ref_str))
+            return "<c r=\"{ref_str}\" t=\"inlineStr\"><is><t>{display}</t></is></c>"
+
+fn cell_display_text_of(sheet: Sheet, ref_str: text) -> text:
+    # tiny indirection to keep _xlsx_cell_xml readable
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.TextVal(value):
+            return value
+        _:
+            return ""
+
+fn sheet_to_xlsx_bytes(sheet: Sheet) -> [u8]:
+    """Build a genuine .xlsx: content types, rels, workbook, one worksheet.
+    Text cells use inline strings (no sharedStrings part needed); formulas
+    carry both <f> and their cached <v>."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var cells = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = "{col_to_letter(c)}{r + 1}"
+                cells = "{cells}{_xlsx_cell_xml(sheet, ref_str)}"
+                c = c + 1
+            rows = "{rows}<row r=\"{r + 1}\">{cells}</row>"
+            r = r + 1
+    val ws = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{rows}</sheetData></worksheet>"
+    val name = _xml_escape_x(sheet.name)
+    val wb = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"{name}\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"
+    val wb_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>"
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("xl/workbook.xml", wb))
+    files.push(zip_text_file("xl/_rels/workbook.xml.rels", wb_rels))
+    files.push(zip_text_file("xl/worksheets/sheet1.xml", ws))
+    zip_write_stored(files)
+
+# =========================================================================
+# XLSX styles (styles.xml): per-cell number formats + bold/bg/fg
+#
+# `sheet_to_xlsx_bytes_formatted` is a sibling of `sheet_to_xlsx_bytes` (which
+# stays untouched/byte-identical for unformatted output) that additionally
+# emits `xl/styles.xml` and references it from each `<c>` via `s="<xf idx>"`.
+# Verification ceiling: no LibreOffice/Excel is available in this environment,
+# so acceptance here is structural (zip integrity + well-formed XML, checked
+# with the system `unzip -t` / `unzip -p`) plus our own importer reading the
+# bytes back into an equal SheetFormats. Visual rendering in a real
+# spreadsheet app was NOT verified.
+# =========================================================================
+
+struct SheetWithFormats:
+    """A Sheet plus the SheetFormats read back from an .xlsx's styles.xml.
+    (Sheet is a `class` -- heap identity -- so embedding it here is safe
+    under this struct's copy-on-return semantics; see cell_format.spl's
+    module docstring for why SheetFormats itself must avoid Dict fields.)"""
+    sheet: Sheet
+    formats: SheetFormats
+
+struct _XlsxFont:
+    bold: bool
+    fg: text
+
+struct _XlsxNumFmt:
+    id: i32
+    code: text
+
+struct _XlsxXf:
+    num_fmt_id: i32
+    font_id: i32
+    fill_id: i32
+
+fn _xlsx_spec_eq(a: FormatSpec, b: FormatSpec) -> bool:
+    a.num_fmt == b.num_fmt and a.bold == b.bold and a.bg == b.bg and a.fg == b.fg
+
+fn _xlsx_spec_is_default(spec: FormatSpec) -> bool:
+    spec.num_fmt == "" and not spec.bold and spec.bg == "" and spec.fg == ""
+
+fn _xlsx_distinct_specs(formats: SheetFormats) -> [FormatSpec]:
+    """Every distinct non-default FormatSpec used across the sheet, in first-
+    seen order. Linear-scan dedupe (not a Dict) per this file's parallel-array
+    idiom for aggregates under copy semantics."""
+    var out: [FormatSpec] = []
+    var i = 0
+    while i < formats.specs.len():
+        val spec = formats.specs[i]
+        if not _xlsx_spec_is_default(spec):
+            var found = false
+            var j = 0
+            while j < out.len():
+                if _xlsx_spec_eq(out[j], spec):
+                    found = true
+                j = j + 1
+            if not found:
+                out.push(spec)
+        i = i + 1
+    out
+
+fn _xlsx_distinct_num_fmts(specs: [FormatSpec]) -> [text]:
+    """Distinct non-empty num_fmt strings, in first-seen order. Custom
+    numFmtIds are assigned 164 + index (164 is the first free built-in id)."""
+    var out: [text] = []
+    var i = 0
+    while i < specs.len():
+        val fmt = specs[i].num_fmt
+        if fmt != "":
+            var found = false
+            var j = 0
+            while j < out.len():
+                if out[j] == fmt:
+                    found = true
+                j = j + 1
+            if not found:
+                out.push(fmt)
+        i = i + 1
+    out
+
+fn _xlsx_num_fmt_id(num_fmts: [text], fmt: text) -> i32:
+    var i = 0
+    while i < num_fmts.len():
+        if num_fmts[i] == fmt:
+            return 164 + i
+        i = i + 1
+    0
+
+fn _xlsx_num_fmt_code(id: i32, num_fmts: [_XlsxNumFmt]) -> text:
+    if id == 0:
+        return ""
+    var i = 0
+    while i < num_fmts.len():
+        if num_fmts[i].id == id:
+            return num_fmts[i].code
+        i = i + 1
+    ""
+
+fn _xlsx_distinct_fonts(specs: [FormatSpec]) -> [_XlsxFont]:
+    """Font table; index 0 is always the plain default font (bold=false,
+    fg="")."""
+    var out: [_XlsxFont] = [_XlsxFont(bold: false, fg: "")]
+    var i = 0
+    while i < specs.len():
+        val spec = specs[i]
+        if spec.bold or spec.fg != "":
+            var found = false
+            var j = 0
+            while j < out.len():
+                if out[j].bold == spec.bold and out[j].fg == spec.fg:
+                    found = true
+                j = j + 1
+            if not found:
+                out.push(_XlsxFont(bold: spec.bold, fg: spec.fg))
+        i = i + 1
+    out
+
+fn _xlsx_font_id(fonts: [_XlsxFont], spec: FormatSpec) -> i32:
+    var i = 0
+    while i < fonts.len():
+        if fonts[i].bold == spec.bold and fonts[i].fg == spec.fg:
+            return i
+        i = i + 1
+    0
+
+fn _xlsx_distinct_fills(specs: [FormatSpec]) -> [text]:
+    """Custom bg colors only; the two reserved fills (none / gray125) that
+    xlsx requires at indices 0-1 are added separately in the XML emitter."""
+    var out: [text] = []
+    var i = 0
+    while i < specs.len():
+        val bg = specs[i].bg
+        if bg != "":
+            var found = false
+            var j = 0
+            while j < out.len():
+                if out[j] == bg:
+                    found = true
+                j = j + 1
+            if not found:
+                out.push(bg)
+        i = i + 1
+    out
+
+fn _xlsx_fill_id(fills: [text], bg: text) -> i32:
+    if bg == "":
+        return 0
+    var i = 0
+    while i < fills.len():
+        if fills[i] == bg:
+            return 2 + i
+        i = i + 1
+    0
+
+fn _xlsx_xf_index_for(distinct_specs: [FormatSpec], spec: FormatSpec) -> i32:
+    """cellXfs index for a spec: 0 is the always-present default xf; custom
+    specs sit at 1 + their position in `distinct_specs`."""
+    if _xlsx_spec_is_default(spec):
+        return 0
+    var i = 0
+    while i < distinct_specs.len():
+        if _xlsx_spec_eq(distinct_specs[i], spec):
+            return i + 1
+        i = i + 1
+    0
+
+fn _xlsx_argb(color: text) -> text:
+    """"#rrggbb" -> "FFrrggbb" (opaque ARGB hex xlsx expects for rgb=).
+    Case is preserved as written so re-importing round-trips exactly."""
+    if color.starts_with("#"):
+        return "FF{color.slice(1, color.len())}"
+    "FF{color}"
+
+fn _xlsx_from_argb(argb: text) -> text:
+    """Inverse of `_xlsx_argb`: "FFrrggbb" -> "#rrggbb"."""
+    if argb.len() >= 8:
+        return "#{argb.slice(2, 8)}"
+    "#{argb}"
+
+fn _xml_attr(tag: text, name: text) -> text:
+    """Value of `name="..."` inside a single XML start-tag fragment, or ""
+    if absent. A targeted attribute scan (this file's XML strategy is a
+    tag scan, not a general DOM), scoped to the caller-supplied fragment."""
+    val needle = "{name}=\""
+    val p = _find_from(tag, needle, 0)
+    if p < 0:
+        return ""
+    val start = p + needle.len()
+    val e = _find_from(tag, "\"", start)
+    if e < 0:
+        return ""
+    tag.slice(start, e)
+
+fn _xml_section(s: text, open_prefix: text, close_tag: text) -> text:
+    """Inner XML of the first `<open_prefix ...>...</close_tag>` element, or
+    "" if not present."""
+    val start = _find_from(s, open_prefix, 0)
+    if start < 0:
+        return ""
+    val tag_end = _find_from(s, ">", start)
+    if tag_end < 0:
+        return ""
+    val end_pos = _find_from(s, close_tag, tag_end)
+    if end_pos < 0:
+        return ""
+    s.slice(tag_end + 1, end_pos)
+
+fn _xlsx_styles_xml(num_fmts: [text], fonts: [_XlsxFont], fills: [text], distinct_specs: [FormatSpec]) -> text:
+    """Build xl/styles.xml: custom numFmts (164+), fonts (default + bold/fg
+    variants), fills (2 reserved defaults + custom bg solids), and cellXfs
+    (xf 0 = default; xf 1..N one per distinct FormatSpec)."""
+    var num_fmts_xml = ""
+    if num_fmts.len() > 0:
+        var entries = ""
+        var i = 0
+        while i < num_fmts.len():
+            entries = "{entries}<numFmt numFmtId=\"{164 + i}\" formatCode=\"{_xml_escape_x(num_fmts[i])}\"/>"
+            i = i + 1
+        num_fmts_xml = "<numFmts count=\"{num_fmts.len()}\">{entries}</numFmts>"
+    var fonts_xml = ""
+    var fi = 0
+    while fi < fonts.len():
+        val font = fonts[fi]
+        val bold_xml = if font.bold: "<b/>" else: ""
+        val color_xml = if font.fg != "": "<color rgb=\"{_xlsx_argb(font.fg)}\"/>" else: ""
+        fonts_xml = "{fonts_xml}<font>{bold_xml}{color_xml}<sz val=\"11\"/><name val=\"Calibri\"/></font>"
+        fi = fi + 1
+    fonts_xml = "<fonts count=\"{fonts.len()}\">{fonts_xml}</fonts>"
+    var fills_xml = "<fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill>"
+    var fli = 0
+    while fli < fills.len():
+        fills_xml = "{fills_xml}<fill><patternFill patternType=\"solid\"><fgColor rgb=\"{_xlsx_argb(fills[fli])}\"/><bgColor indexed=\"64\"/></patternFill></fill>"
+        fli = fli + 1
+    fills_xml = "<fills count=\"{fills.len() + 2}\">{fills_xml}</fills>"
+    val borders_xml = "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"
+    val cell_style_xfs_xml = "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
+    var cell_xfs_xml = "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
+    var si = 0
+    while si < distinct_specs.len():
+        val spec = distinct_specs[si]
+        val num_fmt_id = if spec.num_fmt != "": _xlsx_num_fmt_id(num_fmts, spec.num_fmt) else: 0
+        val font_id = _xlsx_font_id(fonts, spec)
+        val fill_id = _xlsx_fill_id(fills, spec.bg)
+        val apply_num = if spec.num_fmt != "": " applyNumberFormat=\"1\"" else: ""
+        val apply_font = if spec.bold or spec.fg != "": " applyFont=\"1\"" else: ""
+        val apply_fill = if spec.bg != "": " applyFill=\"1\"" else: ""
+        cell_xfs_xml = "{cell_xfs_xml}<xf numFmtId=\"{num_fmt_id}\" fontId=\"{font_id}\" fillId=\"{fill_id}\" borderId=\"0\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}/>"
+        si = si + 1
+    cell_xfs_xml = "<cellXfs count=\"{distinct_specs.len() + 1}\">{cell_xfs_xml}</cellXfs>"
+    val cell_styles_xml = "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">{num_fmts_xml}{fonts_xml}{fills_xml}{borders_xml}{cell_style_xfs_xml}{cell_xfs_xml}{cell_styles_xml}</styleSheet>"
+
+fn _xlsx_s_attr(xf_idx: i32) -> text:
+    if xf_idx == 0:
+        return ""
+    " s=\"{xf_idx}\""
+
+fn _xlsx_cell_xml_styled(sheet: Sheet, ref_str: text, xf_idx: i32) -> text:
+    """Like `_xlsx_cell_xml`, plus an `s="<xf idx>"` attribute when the cell
+    has a non-default format. An Empty cell with a format still emits a
+    self-closing styled `<c/>` (formatting-only cells, e.g. a colored blank);
+    an Empty cell with no format emits nothing, as before."""
+    val cell = sheet.get_cell(ref_str)
+    val s_attr = _xlsx_s_attr(xf_idx)
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<c r=\"{ref_str}\"{s_attr}><v>{value}</v></c>"
+        CellValue.FormulaVal(expr, cached_display):
+            val f = _xml_escape_x(expr)
+            return "<c r=\"{ref_str}\"{s_attr}><f>{f}</f><v>{_xml_escape_x(cached_display)}</v></c>"
+        CellValue.BoolVal(value):
+            val b = if value: "1" else: "0"
+            return "<c r=\"{ref_str}\" t=\"b\"{s_attr}><v>{b}</v></c>"
+        CellValue.Empty:
+            if xf_idx == 0:
+                return ""
+            return "<c r=\"{ref_str}\"{s_attr}/>"
+        _:
+            val display = _xml_escape_x(cell_display_text_of(sheet, ref_str))
+            return "<c r=\"{ref_str}\" t=\"inlineStr\"{s_attr}><is><t>{display}</t></is></c>"
+
+fn sheet_to_xlsx_bytes_formatted(sheet: Sheet, formats: SheetFormats) -> [u8]:
+    """Build a genuine .xlsx like `sheet_to_xlsx_bytes`, plus `xl/styles.xml`
+    carrying per-cell number formats and bold/bg/fg, referenced from cells via
+    `s="<xf idx>"`. `sheet_to_xlsx_bytes` itself is untouched and stays
+    byte-identical for callers that don't need styling."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    val distinct_specs = _xlsx_distinct_specs(formats)
+    val num_fmts = _xlsx_distinct_num_fmts(distinct_specs)
+    val fonts = _xlsx_distinct_fonts(distinct_specs)
+    val fills = _xlsx_distinct_fills(distinct_specs)
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var cells = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = "{col_to_letter(c)}{r + 1}"
+                val spec = formats_get(formats, ref_str)
+                val xf_idx = _xlsx_xf_index_for(distinct_specs, spec)
+                cells = "{cells}{_xlsx_cell_xml_styled(sheet, ref_str, xf_idx)}"
+                c = c + 1
+            rows = "{rows}<row r=\"{r + 1}\">{cells}</row>"
+            r = r + 1
+    val ws = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{rows}</sheetData></worksheet>"
+    val name = _xml_escape_x(sheet.name)
+    val wb = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"{name}\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"
+    val wb_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/></Types>"
+    val styles_xml = _xlsx_styles_xml(num_fmts, fonts, fills, distinct_specs)
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("xl/workbook.xml", wb))
+    files.push(zip_text_file("xl/_rels/workbook.xml.rels", wb_rels))
+    files.push(zip_text_file("xl/worksheets/sheet1.xml", ws))
+    files.push(zip_text_file("xl/styles.xml", styles_xml))
+    zip_write_stored(files)
+
+# =========================================================================
+# XLSX styles import: styles.xml -> SheetFormats
+# =========================================================================
+
+fn _xlsx_parse_num_fmts(styles_xml: text) -> [_XlsxNumFmt]:
+    val section = _xml_section(styles_xml, "<numFmts", "</numFmts>")
+    var out: [_XlsxNumFmt] = []
+    var i = 0
+    while true:
+        val s = _find_from(section, "<numFmt ", i)
+        if s < 0:
+            break
+        val e = _find_from(section, "/>", s)
+        if e < 0:
+            break
+        val tag = section.slice(s, e + 2)
+        val id_str = _xml_attr(tag, "numFmtId")
+        val code = _xml_attr(tag, "formatCode")
+        out.push(_XlsxNumFmt(id: id_str.to_i64().to_i32(), code: _xml_unescape(code)))
+        i = e + 2
+    out
+
+fn _xlsx_parse_fonts(styles_xml: text) -> [_XlsxFont]:
+    val section = _xml_section(styles_xml, "<fonts", "</fonts>")
+    var out: [_XlsxFont] = []
+    var i = 0
+    while true:
+        val s = _find_from(section, "<font>", i)
+        if s < 0:
+            break
+        val e = _find_from(section, "</font>", s)
+        if e < 0:
+            break
+        val body = section.slice(s, e)
+        val bold = body.contains("<b/>")
+        var fg = ""
+        val c = _find_from(body, "<color ", 0)
+        if c >= 0:
+            val ce = _find_from(body, "/>", c)
+            if ce >= 0:
+                val rgb = _xml_attr(body.slice(c, ce + 2), "rgb")
+                if rgb != "":
+                    fg = _xlsx_from_argb(rgb)
+        out.push(_XlsxFont(bold: bold, fg: fg))
+        i = e + 7
+    out
+
+fn _xlsx_parse_fills(styles_xml: text) -> [text]:
+    """Custom fill colors only (indices 0-1 are the reserved defaults, always
+    skipped); result[k] is the bg color for fillId = 2 + k."""
+    val section = _xml_section(styles_xml, "<fills", "</fills>")
+    var out: [text] = []
+    var i = 0
+    var idx = 0
+    while true:
+        val s = _find_from(section, "<fill>", i)
+        if s < 0:
+            break
+        val e = _find_from(section, "</fill>", s)
+        if e < 0:
+            break
+        val body = section.slice(s, e)
+        if idx >= 2:
+            var color = ""
+            if body.contains("patternType=\"solid\""):
+                val c = _find_from(body, "<fgColor ", 0)
+                if c >= 0:
+                    val ce = _find_from(body, "/>", c)
+                    if ce >= 0:
+                        val rgb = _xml_attr(body.slice(c, ce + 2), "rgb")
+                        if rgb != "":
+                            color = _xlsx_from_argb(rgb)
+            out.push(color)
+        idx = idx + 1
+        i = e + 7
+    out
+
+fn _xlsx_parse_cell_xfs(styles_xml: text) -> [_XlsxXf]:
+    val section = _xml_section(styles_xml, "<cellXfs", "</cellXfs>")
+    var out: [_XlsxXf] = []
+    var i = 0
+    while true:
+        val s = _find_from(section, "<xf ", i)
+        if s < 0:
+            break
+        val e = _find_from(section, "/>", s)
+        if e < 0:
+            break
+        val tag = section.slice(s, e + 2)
+        val num_fmt_id = _xml_attr(tag, "numFmtId")
+        val font_id = _xml_attr(tag, "fontId")
+        val fill_id = _xml_attr(tag, "fillId")
+        out.push(_XlsxXf(num_fmt_id: num_fmt_id.to_i64().to_i32(), font_id: font_id.to_i64().to_i32(), fill_id: fill_id.to_i64().to_i32()))
+        i = e + 2
+    out
+
+fn _xlsx_spec_for_xf(xf: _XlsxXf, num_fmts: [_XlsxNumFmt], fonts: [_XlsxFont], fills: [text]) -> FormatSpec:
+    val num_fmt = _xlsx_num_fmt_code(xf.num_fmt_id, num_fmts)
+    var bold = false
+    var fg = ""
+    if xf.font_id > 0 and xf.font_id < fonts.len():
+        bold = fonts[xf.font_id].bold
+        fg = fonts[xf.font_id].fg
+    var bg = ""
+    if xf.fill_id >= 2 and (xf.fill_id - 2) < fills.len():
+        bg = fills[xf.fill_id - 2]
+    FormatSpec(num_fmt: num_fmt, bold: bold, bg: bg, fg: fg)
+
+fn xlsx_sheet_xml_to_sheet_and_formats(sheet_xml: text, shared: [text], name: text, xfs: [_XlsxXf], num_fmts: [_XlsxNumFmt], fonts: [_XlsxFont], fills: [text]) -> SheetWithFormats:
+    """Like `xlsx_sheet_xml_to_sheet`, plus reading each cell's `s="<xf idx>"`
+    attribute back into a SheetFormats. Handles self-closing `<c .../>` cells
+    (a format-only cell with no value)."""
+    var sheet = Sheet.new(name)
+    var formats = empty_sheet_formats()
+    var i = 0
+    while i < sheet_xml.len():
+        val c = _find_from(sheet_xml, "<c ", i)
+        if c < 0:
+            break
+        val tag_end = _find_from(sheet_xml, ">", c)
+        if tag_end < 0:
+            break
+        val attrs = sheet_xml.slice(c, tag_end)
+        val self_closing = sheet_xml.slice(tag_end - 1, tag_end) == "/"
+        var ref_str = ""
+        val ra = _find_from(attrs, "r=\"", 0)
+        if ra >= 0:
+            val re = _find_from(attrs, "\"", ra + 3)
+            if re > ra:
+                ref_str = attrs.slice(ra + 3, re)
+        val s_str = _xml_attr(attrs, "s")
+        val is_shared = attrs.contains("t=\"s\"")
+        val is_inline = attrs.contains("t=\"inlineStr\"")
+        var c_end = tag_end
+        if not self_closing:
+            val found_end = _find_from(sheet_xml, "</c>", c)
+            if found_end < 0:
+                break
+            c_end = found_end
+        if not self_closing:
+            if is_inline and ref_str != "":
+                val cell_xml = sheet_xml.slice(c, c_end)
+                val t = _find_from(cell_xml, "<t", 0)
+                if t >= 0:
+                    val t_end = _find_from(cell_xml, ">", t)
+                    val te = _find_from(cell_xml, "</t>", t)
+                    if t_end >= 0 and te > t_end:
+                        sheet.set_value(ref_str, _xml_unescape(cell_xml.slice(t_end + 1, te)))
+            else:
+                val v = _find_from(sheet_xml, "<v>", tag_end)
+                if ref_str != "" and v >= 0 and v < c_end:
+                    val ve = _find_from(sheet_xml, "</v>", v)
+                    if ve > v and ve < c_end:
+                        var value = _xml_unescape(sheet_xml.slice(v + 3, ve))
+                        if is_shared:
+                            val idx = value.to_i64().to_i32()
+                            if idx >= 0 and idx < shared.len():
+                                value = shared[idx]
+                        sheet.set_value(ref_str, value)
+        if ref_str != "" and s_str != "" and s_str != "0":
+            val xf_idx = s_str.to_i64().to_i32()
+            if xf_idx > 0 and xf_idx < xfs.len():
+                val spec = _xlsx_spec_for_xf(xfs[xf_idx], num_fmts, fonts, fills)
+                formats = formats_set(formats, ref_str, spec)
+        i = if self_closing: tag_end + 1 else: c_end + 4
+    SheetWithFormats(sheet: sheet, formats: formats)
+
+fn xlsx_bytes_to_sheet_formatted(zip_bytes: [u8], name: text) -> SheetWithFormats:
+    """Import a real .xlsx file including its styles.xml, if present, back
+    into a Sheet + SheetFormats. Cells with no matching xf get the default
+    (unformatted) spec."""
+    val shared = _xlsx_shared_strings(zip_extract_text(zip_bytes, "xl/sharedStrings.xml"))
+    val styles_xml = zip_extract_text(zip_bytes, "xl/styles.xml")
+    val num_fmts = _xlsx_parse_num_fmts(styles_xml)
+    val fonts = _xlsx_parse_fonts(styles_xml)
+    val fills = _xlsx_parse_fills(styles_xml)
+    val xfs = _xlsx_parse_cell_xfs(styles_xml)
+    xlsx_sheet_xml_to_sheet_and_formats(zip_extract_text(zip_bytes, "xl/worksheets/sheet1.xml"), shared, name, xfs, num_fmts, fonts, fills)
+
+# =========================================================================
+# Real .ods writer
+# =========================================================================
+
+val _ODS_MANIFEST = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.spreadsheet\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+
+fn sheet_to_ods_bytes(sheet: Sheet) -> [u8]:
+    """Build a genuine zipped .ods from a Sheet, reusing the flat-ODF body."""
+    val flat = sheet_to_fods(sheet)
+    val content = flat.replace("office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\"", "")
+    var files: [ZipFile] = []
+    files.push(zip_text_file("mimetype", "application/vnd.oasis.opendocument.spreadsheet"))
+    files.push(zip_text_file("META-INF/manifest.xml", _ODS_MANIFEST))
+    files.push(zip_text_file("content.xml", content))
+    zip_write_stored(files)
+
+# =========================================================================
+# Real .docx writer
+#
+# Hyperlinks (w:hyperlink r:id + external rels), inline PNG images
+# (w:drawing, wp:inline picture skeleton + word/media/imageN.png + image
+# rels), footnotes (word/footnotes.xml + w:footnoteReference runs), and
+# ordered lists (word/numbering.xml + w:numPr) all need per-document
+# relationship bookkeeping (rId allocation + accumulated <Relationship>
+# entries + extra zip parts). `_DocxRels` is a plain `struct` threaded
+# through paragraph building the same way the rest of this file threads
+# aggregates: every function that adds a relationship returns the UPDATED
+# `_DocxRels` (paired with whatever XML it built) and the caller reassigns —
+# the established copy-return idiom (see `recalculate_formula_cells` in
+# file_formats.spl), used here instead of a mutable `class` builder for
+# reliability under this interpreter.
+# =========================================================================
+
+val _DOCX_NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+val _DOCX_NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+val _DOCX_NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+
+struct _DocxRels:
+    entries: [text]     # extra <Relationship .../> XML fragments (beyond the always-present rId1 styles rel)
+    next_id: i32         # next free rId number (rId1 is reserved for styles.xml)
+    media: [ZipFile]    # extra zip parts: word/media/imageN.png
+
+struct _DocxRidResult:
+    """Result of allocating one relationship: its rId plus the updated rels
+    the caller must reassign."""
+    rid: text
+    rels: _DocxRels
+
+struct _DocxBuildResult:
+    """Result of building one XML fragment that may have allocated
+    relationships along the way: the fragment plus the updated rels."""
+    xml: text
+    rels: _DocxRels
+
+fn _docx_rels_new() -> _DocxRels:
+    _DocxRels(entries: [], next_id: 2, media: [])
+
+fn _docx_rels_add_hyperlink(rels: _DocxRels, url: text) -> _DocxRidResult:
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/hyperlink\" Target=\"{_xml_attr_escape(url)}\" TargetMode=\"External\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_add_image(rels: _DocxRels, bytes: [u8]) -> _DocxRidResult:
+    val idx = rels.media.len() + 1
+    val rid = "rId{rels.next_id}"
+    val target = "media/image{idx}.png"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/image\" Target=\"{target}\"/>")
+    var media = rels.media
+    media.push(ZipFile(name: "word/{target}", data: bytes))
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: media))
+
+fn _docx_rels_add_header(rels: _DocxRels) -> _DocxRidResult:
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/header\" Target=\"header1.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_add_footer(rels: _DocxRels) -> _DocxRidResult:
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/footer\" Target=\"footer1.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_add_footnotes(rels: _DocxRels) -> _DocxRidResult:
+    """word/footnotes.xml isn't referenced by r:id anywhere in the body — Word
+    locates it by relationship TYPE — but the relationship entry must still
+    exist for the part to be found at all. Callers add this once per document
+    when any footnote definition is present; the returned rid is unused."""
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/footnotes\" Target=\"footnotes.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_add_comments(rels: _DocxRels) -> _DocxRidResult:
+    """word/comments.xml, same fixed-name/type-lookup convention as
+    footnotes.xml above (see `_docx_rels_add_footnotes`) — added once per
+    document when any comment is present; the returned rid is unused."""
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/comments\" Target=\"comments.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_add_numbering(rels: _DocxRels) -> _DocxRidResult:
+    """word/numbering.xml, same fixed-name/type-lookup convention as
+    footnotes.xml above — added once per document when any OrderedItem block
+    is present."""
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/numbering\" Target=\"numbering.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_xml(rels: _DocxRels) -> text:
+    var body = "<Relationship Id=\"rId1\" Type=\"{_DOCX_NS_R}/styles\" Target=\"styles.xml\"/>"
+    for e in rels.entries:
+        body = "{body}{e}"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>"
+
+fn _xml_escape_d(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r
+
+fn _xml_attr_escape(s: text) -> text:
+    """Escape for use inside a double-quoted XML attribute value."""
+    _xml_escape_d(s).replace("\"", "&quot;")
+
+fn _docx_run(span: TextSpan, rels: _DocxRels, revisions: [RevisionDef]) -> _DocxBuildResult:
+    """One <w:r> (or <w:hyperlink><w:r>...</w:r></w:hyperlink> when the span
+    carries a link_url), styled runs unaffected by hyperlink-wrapping. A span
+    carrying footnote_id is a footnote reference marker: it renders as
+    <w:footnoteReference w:id="..."/> instead of a text run (span.text is ""
+    for these — see `parse_inline_spans`'s `[^id]` handling) and needs no rels
+    bookkeeping (footnote ids are local to word/footnotes.xml, no external
+    relationship). A span carrying comment_id gets wrapped AROUND (after any
+    hyperlink-wrapping, since it's a separate concept) with
+    <w:commentRangeStart/End w:id="..."/> plus a trailing
+    <w:commentReference w:id="..."/> run (see `_docx_comment_reference_run`);
+    comment ids are likewise local to word/comments.xml, no external
+    relationship needed on the run itself.
+
+    A span carrying revision_id (looked up in `revisions`, the doc-level
+    RevisionDef list — see attributed_text.spl/track_changes.spl) is the
+    OUTERMOST wrap, after hyperlink and comment wrapping: an insert-kind
+    revision wraps the run in <w:ins w:id=".." w:author=".." w:date="..">,
+    a delete-kind revision wraps it in <w:del w:id=".." w:author=".."
+    w:date="..">, and ALSO swaps the run's content tag from <w:t> to
+    <w:delText> (OOXML requires delText inside w:del — Word rejects a plain
+    <w:t> there). w:date is the same fixed constant `_comments_xml` uses
+    ("2026-01-01T00:00:00Z"), keeping export deterministic. Ceiling: a span
+    whose revision_id doesn't resolve to a RevisionDef (dangling id) is
+    written as an ordinary, unwrapped run — same defensive-empty-value
+    contract as `revision_def_for`."""
+    if span.footnote_id != "":
+        val fid = _xml_attr_escape(span.footnote_id)
+        val fr_run = "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{fid}\"/></w:r>"
+        return _DocxBuildResult(xml: fr_run, rels: rels)
+    var rd = RevisionDef(id: "", author: "", kind: "", timestamp_text: "")
+    if span.revision_id != "":
+        rd = revision_def_for(revisions, span.revision_id)
+    val is_delete_rev = rd.id != "" and rd.kind == "delete"
+    var content = ""
+    if is_delete_rev:
+        content = "<w:delText xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:delText>"
+    else:
+        content = "<w:t xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:t>"
+    var run = ""
+    match span.style:
+        case Bold: run = "<w:r><w:rPr><w:b/></w:rPr>{content}</w:r>"
+        case Italic: run = "<w:r><w:rPr><w:i/></w:rPr>{content}</w:r>"
+        _: run = "<w:r>{content}</w:r>"
+    var xml = run
+    var out_rels = rels
+    if span.link_url != "":
+        val added = _docx_rels_add_hyperlink(rels, span.link_url)
+        xml = "<w:hyperlink r:id=\"{added.rid}\">{run}</w:hyperlink>"
+        out_rels = added.rels
+    if span.comment_id != "":
+        val cid = _xml_attr_escape(span.comment_id)
+        xml = "<w:commentRangeStart w:id=\"{cid}\"/>{xml}<w:commentRangeEnd w:id=\"{cid}\"/>{_docx_comment_reference_run(cid)}"
+    if rd.id != "":
+        val rev_id_attr = _xml_attr_escape(rd.id)
+        val author_attr = _xml_attr_escape(rd.author)
+        if rd.kind == "delete":
+            xml = "<w:del w:id=\"{rev_id_attr}\" w:author=\"{author_attr}\" w:date=\"2026-01-01T00:00:00Z\">{xml}</w:del>"
+        else:
+            xml = "<w:ins w:id=\"{rev_id_attr}\" w:author=\"{author_attr}\" w:date=\"2026-01-01T00:00:00Z\">{xml}</w:ins>"
+    _DocxBuildResult(xml: xml, rels: out_rels)
+
+fn _docx_drawing_xml(rid: text, alt: text, src: text) -> text:
+    """Minimal wp:inline DrawingML picture skeleton (PNG only). alt/src are
+    stashed on wp:docPr's name/descr attributes so import can reconstruct
+    the exact `![alt](src)` markdown without needing a separate side-channel
+    (see `_docx_drawing_image`)."""
+    val name_attr = _xml_attr_escape(alt)
+    val descr_attr = _xml_attr_escape(src)
+    "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"990000\" cy=\"792000\"/><wp:docPr id=\"1\" name=\"{name_attr}\" descr=\"{descr_attr}\"/><a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:nvPicPr><pic:cNvPr id=\"0\" name=\"{name_attr}\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"990000\" cy=\"792000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+
+fn _docx_image_run(alt: text, src: text, rels: _DocxRels) -> _DocxBuildResult:
+    """Embed src's bytes as word/media/imageN.png + a minimal inline
+    DrawingML picture. PNG only (documented scope); a missing file or a
+    non-.png src falls back to a plain placeholder run carrying the alt
+    text, never crashing the export."""
+    if src.ends_with(".png") and rt_file_exists(src):
+        val bytes = rt_file_read_bytes(src)
+        val added = _docx_rels_add_image(rels, bytes)
+        return _DocxBuildResult(xml: _docx_drawing_xml(added.rid, alt, src), rels: added.rels)
+    _DocxBuildResult(xml: "<w:r><w:t xml:space=\"preserve\">{_xml_escape_d(alt)}</w:t></w:r>", rels: rels)
+
+fn _docx_para(block: DocBlock, rels: _DocxRels, revisions: [RevisionDef]) -> _DocxBuildResult:
+    """One <w:p>. A block whose whole plain text is `![alt](src)` (the same
+    whole-block image convention html_render.spl uses) renders as an inline
+    picture (or its alt-text fallback) instead of ordinary runs. `revisions`
+    is the doc-level RevisionDef list, threaded through to `_docx_run` for
+    <w:ins>/<w:del> wrapping."""
+    val img = _parse_md_image(spans_to_plain_text(block.spans))
+    if img.is_image:
+        val img_result = _docx_image_run(img.alt, img.src, rels)
+        return _DocxBuildResult(xml: "<w:p>{img_result.xml}</w:p>", rels: img_result.rels)
+    var style = ""
+    match block.kind:
+        case Heading1: style = "<w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>"
+        case Heading2: style = "<w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>"
+        case Heading3: style = "<w:pPr><w:pStyle w:val=\"Heading3\"/></w:pPr>"
+        case BulletItem: style = "<w:pPr><w:pStyle w:val=\"ListParagraph\"/></w:pPr>"
+        case OrderedItem: style = "<w:pPr><w:pStyle w:val=\"ListParagraph\"/><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr>"
+        case Quote: style = "<w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>"
+        case CodeBlock: style = "<w:pPr><w:pStyle w:val=\"Code\"/></w:pPr>"
+        _: style = ""
+    var runs = ""
+    var cur_rels = rels
+    for span in block.spans:
+        val r = _docx_run(span, cur_rels, revisions)
+        runs = "{runs}{r.xml}"
+        cur_rels = r.rels
+    _DocxBuildResult(xml: "<w:p>{style}{runs}</w:p>", rels: cur_rels)
+
+fn _collect_footnote_defs(doc: RichDocument) -> [DocBlock]:
+    """Every FootnoteDef block, in document order (== markdown source order,
+    conventionally the very end of the document — see file_formats.spl)."""
+    var out: [DocBlock] = []
+    for block in doc.blocks:
+        if block.kind == BlockKind.FootnoteDef:
+            out.push(block)
+    out
+
+fn _doc_has_ordered_list(doc: RichDocument) -> bool:
+    for block in doc.blocks:
+        if block.kind == BlockKind.OrderedItem:
+            return true
+    false
+
+fn _footnotes_xml(defs: [DocBlock]) -> text:
+    """word/footnotes.xml: the two mandatory separator footnotes (w:id -1
+    "separator", w:id 0 "continuationSeparator" — required by the ECMA schema
+    even with zero real footnotes) plus one <w:footnote> per definition. The
+    w:id is the markdown footnote id verbatim (this feature's scope is
+    numeric `[^1]`-style ids, matching `<w:footnoteReference w:id="...">` in
+    the body — see `_docx_run`); non-numeric ids would collide with nothing
+    reserved but also wouldn't be a valid ST_DecimalNumber, out of scope."""
+    var body = "<w:footnote w:type=\"separator\" w:id=\"-1\"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"
+    body = "{body}<w:footnote w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"
+    for fn_def in defs:
+        val fid = _xml_attr_escape(_footnote_def_id(fn_def))
+        val text_ = _xml_escape_d(_footnote_def_text(fn_def))
+        body = "{body}<w:footnote w:id=\"{fid}\"><w:p><w:pPr><w:pStyle w:val=\"FootnoteText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space=\"preserve\">{text_}</w:t></w:r></w:p></w:footnote>"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:footnotes xmlns:w=\"{_DOCX_NS_W}\">{body}</w:footnotes>"
+
+fn _comments_xml(comments: [CommentDef]) -> text:
+    """word/comments.xml: one <w:comment> per CommentDef, in document order
+    (mirrors `_footnotes_xml`'s shape, minus the mandatory-separator entries
+    footnotes.xml requires — comments.xml has none). w:date is a fixed
+    constant ("2026-01-01T00:00:00Z") rather than a wall-clock read, keeping
+    export deterministic for round-trip/byte diffs in specs."""
+    var body = ""
+    for c in comments:
+        val cid = _xml_attr_escape(c.id)
+        val author = _xml_attr_escape(c.author)
+        val text_ = _xml_escape_d(c.text)
+        body = "{body}<w:comment w:id=\"{cid}\" w:author=\"{author}\" w:date=\"2026-01-01T00:00:00Z\"><w:p><w:r><w:t xml:space=\"preserve\">{text_}</w:t></w:r></w:p></w:comment>"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:comments xmlns:w=\"{_DOCX_NS_W}\">{body}</w:comments>"
+
+fn _docx_numbering_xml() -> text:
+    """word/numbering.xml: one abstract numbering (decimal, `%1.`) + the one
+    concrete numId (1) `_docx_para` references for every OrderedItem block —
+    the minimal shape LibreOffice/Word need to render `1. / 2. / 3. ...`."""
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"{_DOCX_NS_W}\"><w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num></w:numbering>"
+
+fn _docx_styles_xml() -> text:
+    """word/styles.xml: the real named-style catalog `_docx_para` references
+    via w:pStyle (replacing the old bold-only Heading1-3 placeholder) —
+    Normal (the w:default paragraph style every other style is w:basedOn),
+    Heading1-3 (bold, sizes 32/26/22 half-points = 16pt/13pt/11pt),
+    Quote (italic + a left indent, for blockquote `> text` blocks),
+    Code (monospace rFonts + light paragraph shading, for fenced ``` code
+    blocks), and ListParagraph (plain, used by bullet/ordered items — see
+    `_docx_para`). Import maps w:pStyle back to the matching BlockKind (see
+    `_docx_para_kind`); any OTHER w:pStyle value — or none at all — falls
+    back to BlockKind.Paragraph, by design (no style is ever invented on
+    import)."""
+    var styles_out = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles xmlns:w=\"{_DOCX_NS_W}\">"
+    styles_out = "{styles_out}<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>"
+    val heading_levels: [text] = ["1", "2", "3"]
+    val heading_sizes: [text] = ["32", "26", "22"]
+    var hi = 0
+    while hi < heading_levels.len():
+        val level = heading_levels[hi]
+        val sz = heading_sizes[hi]
+        styles_out = "{styles_out}<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\"><w:name w:val=\"heading {level}\"/><w:basedOn w:val=\"Normal\"/><w:rPr><w:b/><w:sz w:val=\"{sz}\"/><w:szCs w:val=\"{sz}\"/></w:rPr></w:style>"
+        hi = hi + 1
+    styles_out = "{styles_out}<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"
+    styles_out = "{styles_out}<w:style w:type=\"paragraph\" w:styleId=\"Code\"><w:name w:val=\"Code\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:shd w:val=\"clear\" w:fill=\"F5F5F5\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\" w:cs=\"Courier New\"/></w:rPr></w:style>"
+    styles_out = "{styles_out}<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/></w:style>"
+    "{styles_out}</w:styles>"
+
+fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_text: text) -> [u8]:
+    """Shared builder behind `document_to_docx_bytes` (header_text and
+    footer_text both "") and `document_to_docx_bytes_hf`. Hyperlink/image
+    relationships accumulate in `rels` while paragraphs are built (each step
+    returns the updated `rels`, reassigned by the caller — see
+    `_DocxBuildResult`); header/footer parts + the sectPr/rels/content-types
+    wiring are added only when at least one of header_text/footer_text is
+    non-empty, and the xmlns:r / xmlns:wp namespace declarations are added
+    only when a hyperlink, image, or header/footer actually needs them — so
+    a plain document with none of these features produces byte-identical
+    output to this writer before any of the three features existed. Same
+    guarantee for footnotes/ordered-lists/comments added later: FootnoteDef
+    blocks are skipped from the paragraph loop below (they live only in
+    word/footnotes.xml, never in the body) and word/footnotes.xml /
+    word/numbering.xml / word/comments.xml are only emitted when the
+    document actually uses them (a comment-less doc's `doc.comments` is
+    empty, so `has_comments` is false and nothing comment-related is
+    written — same byte-identity guarantee)."""
+    var rels = _docx_rels_new()
+    val footnote_defs = _collect_footnote_defs(doc)
+    val has_footnotes = footnote_defs.len() > 0
+    val has_ordered = _doc_has_ordered_list(doc)
+    val has_comments = doc.comments.len() > 0
+    var paras = ""
+    for block in doc.blocks:
+        if block.kind == BlockKind.FootnoteDef:
+            continue
+        val result = _docx_para(block, rels, doc.revisions)
+        paras = "{paras}{result.xml}"
+        rels = result.rels
+    if has_footnotes:
+        val fn_added = _docx_rels_add_footnotes(rels)
+        rels = fn_added.rels
+    if has_ordered:
+        val num_added = _docx_rels_add_numbering(rels)
+        rels = num_added.rels
+    if has_comments:
+        val cm_added = _docx_rels_add_comments(rels)
+        rels = cm_added.rels
+    val has_hf = header_text != "" or footer_text != ""
+    var sect_pr = ""
+    var header_part = ""
+    var footer_part = ""
+    if has_hf:
+        val header_added = _docx_rels_add_header(rels)
+        rels = header_added.rels
+        val footer_added = _docx_rels_add_footer(rels)
+        rels = footer_added.rels
+        sect_pr = "<w:sectPr><w:headerReference w:type=\"default\" r:id=\"{header_added.rid}\"/><w:footerReference w:type=\"default\" r:id=\"{footer_added.rid}\"/></w:sectPr>"
+        header_part = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:hdr xmlns:w=\"{_DOCX_NS_W}\"><w:p><w:r><w:t xml:space=\"preserve\">{_xml_escape_d(header_text)}</w:t></w:r></w:p></w:hdr>"
+        footer_part = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:ftr xmlns:w=\"{_DOCX_NS_W}\"><w:p><w:r><w:t xml:space=\"preserve\">{_xml_escape_d(footer_text)}</w:t></w:r><w:fldSimple w:instr=\" PAGE \"/></w:p></w:ftr>"
+    val needs_r = rels.entries.len() > 0 or has_hf
+    val needs_wp = rels.media.len() > 0
+    var ns_attrs = " xmlns:w=\"{_DOCX_NS_W}\""
+    if needs_r:
+        ns_attrs = "{ns_attrs} xmlns:r=\"{_DOCX_NS_R}\""
+    if needs_wp:
+        ns_attrs = "{ns_attrs} xmlns:wp=\"{_DOCX_NS_WP}\""
+    val document = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document{ns_attrs}><w:body>{paras}{sect_pr}</w:body></w:document>"
+    val styles = _docx_styles_xml()
+    var overrides = "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
+    if has_hf:
+        overrides = "{overrides}<Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/><Override PartName=\"/word/footer1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>"
+    if has_footnotes:
+        overrides = "{overrides}<Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml\"/>"
+    if has_ordered:
+        overrides = "{overrides}<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
+    if has_comments:
+        overrides = "{overrides}<Override PartName=\"/word/comments.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml\"/>"
+    var default_exts = "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+    if needs_wp:
+        default_exts = "{default_exts}<Default Extension=\"png\" ContentType=\"image/png\"/>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">{default_exts}{overrides}</Types>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"
+    val doc_rels = _docx_rels_xml(rels)
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("word/document.xml", document))
+    files.push(zip_text_file("word/_rels/document.xml.rels", doc_rels))
+    files.push(zip_text_file("word/styles.xml", styles))
+    if has_hf:
+        files.push(zip_text_file("word/header1.xml", header_part))
+        files.push(zip_text_file("word/footer1.xml", footer_part))
+    if has_footnotes:
+        files.push(zip_text_file("word/footnotes.xml", _footnotes_xml(footnote_defs)))
+    if has_ordered:
+        files.push(zip_text_file("word/numbering.xml", _docx_numbering_xml()))
+    if has_comments:
+        files.push(zip_text_file("word/comments.xml", _comments_xml(doc.comments)))
+    for m in rels.media:
+        files.push(m)
+    zip_write_stored(files)
+
+fn document_to_docx_bytes(doc: RichDocument) -> [u8]:
+    """Build a genuine .docx: content types, rels, styles (Heading1-3 +
+    ListParagraph), and word/document.xml with styled runs (w:b/w:i),
+    hyperlinks (w:hyperlink r:id + external rels), inline PNG images
+    (w:drawing), footnotes (word/footnotes.xml + w:footnoteReference),
+    ordered lists (word/numbering.xml + w:numPr), and comments
+    (word/comments.xml + w:commentRangeStart/End + w:commentReference). No
+    header/footer — see
+    `document_to_docx_bytes_hf` — and this function's output is unaffected by
+    that feature by construction (same core builder, called with
+    header_text/footer_text both "")."""
+    _document_to_docx_bytes_core(doc, "", "")
+
+fn document_to_docx_bytes_hf(doc: RichDocument, header_text: text, footer_text: text) -> [u8]:
+    """Like `document_to_docx_bytes`, plus word/header1.xml + word/footer1.xml
+    parts wired via sectPr headerReference/footerReference + rels + content
+    types when header_text/footer_text is non-empty. The footer always
+    carries a PAGE field (`<w:fldSimple w:instr=" PAGE "/>`) after the
+    footer text run."""
+    _document_to_docx_bytes_core(doc, header_text, footer_text)
+
+val _ODT_MANIFEST ="<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.text\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+
+fn document_to_odt_bytes(doc: RichDocument) -> [u8]:
+    """Build a genuine zipped .odt: mimetype (stored first, per spec),
+    META-INF/manifest.xml, and content.xml reusing the flat-ODF body."""
+    val flat = document_to_fodt(doc)
+    # Reuse the flat document's office:body by re-rooting it as content.xml
+    val content = flat.replace("office:mimetype=\"application/vnd.oasis.opendocument.text\"", "")
+    var files: [ZipFile] = []
+    files.push(zip_text_file("mimetype", "application/vnd.oasis.opendocument.text"))
+    files.push(zip_text_file("META-INF/manifest.xml", _ODT_MANIFEST))
+    files.push(zip_text_file("content.xml", content))
+    zip_write_stored(files)

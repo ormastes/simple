@@ -1,0 +1,78 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 80%
+# @tag: unit, gpu, draw_ir, host_gpu_queue
+"""
+# Engine2D Draw IR Runtime Queue Spec
+
+## Overview
+
+This focused spec covers the production bridge from a GPU-selected Draw IR
+batch into the host/GPU runtime queue. It intentionally avoids SGTTI and broad
+browser imports so native verification stays scoped to Engine2D, Draw IR, and
+the runtime queue API.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+The scenario creates a Draw IR batch that requests the GPU backend, submits it
+through an Engine2D host/GPU runtime queue with queue identity `1` and backend
+handle `7`, renders the batch, drains the runtime queue, and asserts that the
+runtime drain reports the backend handle rather than the queue id.
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    draw_ir_batch,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
+
+val BG: u32 = 0xff000000u32
+val GREEN: u32 = 0xff00ff00u32
+
+describe "Engine2D Draw IR runtime queue bridge":
+
+    it "submits and drains a GPU-selected Draw IR batch through the runtime queue":
+        engine2d_host_gpu_runtime_reset()
+        var engine = Engine2D.create_with_backend(32, 24, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch("batch-runtime", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
+            draw_ir_rect("body", 2, 3, 6, 5, GREEN)
+        ])
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+
+        val result = engine2d_draw_ir_adv_batch_runtime_queue(engine, batch, true, queue)
+
+        # Runtime-queued batches dispatch through a "runtime-"-tagged composition
+        # (see draw_ir_runtime_queue.spl payload summary), so the rendered unit id
+        # reflects that composition id, not the bare batch id.
+        expect(result.render.unit_id).to_equal("runtime-batch-runtime")
+        expect(result.render.selected_backend).to_equal("gpu")
+        expect(result.render.rendered_command_count).to_equal(1)
+        expect(result.runtime_submit.submitted).to_be(true)
+        expect(result.runtime_submit.packet_id).to_equal(1)
+        expect(result.runtime_drain.drained).to_equal(1)
+        expect(result.runtime_drain.status).to_equal("completed")
+        expect(result.runtime_drain.queue_handle).to_equal(1)
+        expect(result.runtime_drain.last_backend_handle).to_equal(7)
+        expect(result.queued_for_gpu).to_be(true)
+        expect(result.render.pixels[3 * 32 + 2]).to_equal(GREEN)
+        engine.shutdown()

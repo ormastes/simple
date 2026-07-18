@@ -1,0 +1,88 @@
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+val WRAPPER = "scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+val GUEST_ENTRY = "examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
+val GUEST_COMPOSITOR = "src/os/compositor/compositor.spl"
+val GUEST_SHELL = "src/os/desktop/shell.spl"
+
+describe "SimpleOS WM QEMU evidence wrapper contract":
+    it "hashes every executable artifact and rechecks it before pass":
+        val src = rt_file_read_text(WRAPPER)
+        expect(src).to_contain("simpleos_wm_fullscreen_wrapper=$WRAPPER")
+        expect(src).to_contain("simpleos_wm_fullscreen_wrapper_sha256=$WRAPPER_SHA256")
+        expect(src).to_contain("simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT")
+        expect(src).to_contain("simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256")
+        expect(src).to_contain("simpleos_wm_fullscreen_disk_image=$DISK_IMAGE")
+        expect(src).to_contain("simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256")
+        expect(src).to_contain("WRAPPER_SHA256=\"$(file_sha256 \"$WRAPPER\")\"")
+        expect(src).to_contain("KERNEL_SHA256=\"$(file_sha256 \"$KERNEL_OUTPUT\")\"")
+        expect(src).to_contain("DISK_IMAGE_SHA256=\"$(file_sha256 \"$DISK_IMAGE\")\"")
+        expect(src).to_contain("if [ \"$status\" = pass ]; then")
+        expect(src).to_contain("wrapper_sha256_now=\"$(file_sha256 \"$WRAPPER\")\"")
+        expect(src).to_contain("kernel_sha256_now=\"$(file_sha256 \"$KERNEL_OUTPUT\")\"")
+        expect(src).to_contain("disk_image_sha256_now=\"$(file_sha256 \"$DISK_IMAGE\")\"")
+        expect(src).to_contain("reason=artifact-sha256-mismatch")
+
+    it "invalidates a cached kernel when any owned source dependency changes":
+        val src = rt_file_read_text(WRAPPER)
+        expect(src).to_contain("find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64")
+        expect(src).to_contain("-newer \"$KERNEL_OUTPUT\"")
+
+    it "derives pmem capture geometry from validated guest scanout metadata":
+        val src = rt_file_read_text(WRAPPER)
+        expect(src).to_contain("marker_line \"$SERIAL_LOG\" \"[scanout-evidence]\"")
+        expect(src).to_contain("scanout_size=$((scanout_stride * scanout_height))")
+        expect(src).to_contain("scanout_end=$((scanout_address + scanout_size))")
+        expect(src).to_contain("'pmemsave %d %d")
+        expect(src).to_contain("for y in range(height)")
+        expect(src).to_contain("row = y * pitch")
+        expect(src.contains("pmemsave 0xfd000000 3145728")).to_be(false)
+        expect(src.contains("P6\\n1024 768")).to_be(false)
+
+    it "captures the canonical taskbar clock DrawIR slot without blessing a stale glyph oracle":
+        val src = rt_file_read_text(WRAPPER)
+        val guest = rt_file_read_text(GUEST_ENTRY)
+        expect(src).to_contain("FONT_REGION_EXPECTED_BYTES=8064")
+        expect(src).to_contain("for y in range(height - 48, height)")
+        expect(src).to_contain("for x in range(width - 56, width)")
+        expect(src).to_contain("canonical-taskbar-clock-oracle-pending")
+        expect(src).to_contain("[font-evidence] family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256")
+        expect(guest).to_contain("route=shared-wm-draw-ir component_id=taskbar-clock")
+        expect(guest).to_contain("val TASKBAR_CLOCK_REGION_RGB_SHA256 = \"\"")
+        expect(guest).to_contain("region_sha256 == TASKBAR_CLOCK_REGION_RGB_SHA256")
+        expect(guest).to_contain("[font-evidence] family=Noto Sans Mono asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256={region_sha256}")
+        expect(guest.contains("engine.draw_text(64, 64")).to_be(false)
+
+    it "injects emulated input and maps host nonce to guest sequence evidence":
+        val src = rt_file_read_text(WRAPPER)
+        expect(src).to_contain("\"execute\":\"input-send-event\"")
+        expect(src).to_contain("data\":\"f11\"")
+        expect(src).to_contain("baseline_seq = max_input_seq()")
+        expect(src).to_contain("wait_correlation(baseline_seq, \"maximize\")")
+        expect(src).to_contain("wait_correlation(max_seq, \"restore\", target_window)")
+        expect(src).to_contain("ENTRY=\"examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl\"")
+        expect(src).to_contain("host_nonce=%s baseline_seq=%d maximize_seq=%d restore_seq=%d")
+        expect(src.contains("marker_line \"$SERIAL_LOG\" \"[wm-demo] fullscreen-enter\"")).to_be(false)
+        expect(src.contains("marker_line \"$SERIAL_LOG\" \"[wm-demo] fullscreen-exit\"")).to_be(false)
+
+    it "fails closed on QMP input capture and metadata errors":
+        val src = rt_file_read_text(WRAPPER)
+        expect(src).to_contain("dynamic-scanout-metadata-invalid")
+        expect(src).to_contain("dynamic-scanout-bounds-or-byte-pitch-invalid")
+        expect(src).to_contain("dynamic-scanout-address-range-invalid")
+        expect(src).to_contain("capture-input-or-guest-correlation-failed")
+        expect(src).to_contain("if \"error\" in reply")
+
+    it "uses guest monotonic input sequence for live F11 maximize and restore":
+        val entry = rt_file_read_text(GUEST_ENTRY)
+        val compositor = rt_file_read_text(GUEST_COMPOSITOR)
+        val shell = rt_file_read_text(GUEST_SHELL)
+        expect(entry).to_contain("shell.run_baremetal(wm_frame_executor)")
+        expect(compositor).to_contain("elif sc == 0x57")
+        expect(compositor).to_contain("self.input_sequence = self.input_sequence + 1")
+        expect(shell).to_contain("[wm-input-irq] input_seq=")
+        expect(shell).to_contain("self.compositor.maximize_window")
+        expect(shell).to_contain("self.compositor.restore_window")
+        expect(shell).to_contain("[wm-frame] input_seq=")

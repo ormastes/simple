@@ -1,0 +1,835 @@
+# OCB3 — Offset Codebook Mode v3 Authenticated Encryption
+#
+# AES-128-OCB3 per RFC 7253.  Provides authenticated encryption with
+# associated data (AEAD): one-pass confidentiality + integrity.
+#
+# No SFFI/Rust SFFI — pure Simple language, suitable for baremetal.
+#
+# Reference: RFC 7253 — The OCB Authenticated-Encryption Algorithm
+#   §2  Notation and Conventions
+#   §4  OCB Global Parameters and Key Setup
+#   §5  Processing Associated Data: HASH
+#   §6  OCB-ENCRYPT / OCB-DECRYPT
+#
+# Algorithm summary (128-bit tag, 96-bit nonce, AES-128):
+#   L_* = ENCIPHER(K, 0^128)
+#   L_$ = double(L_*)
+#   L_i = double(L_{i-1})   for i >= 0
+#   Offset_0 derived from nonce via ENCIPHER(K, top) with bottom-bit shift
+#   For each block i: Offset_i = Offset_{i-1} XOR L_{ntz(i)}
+#   C_i  = Offset_i XOR ENCIPHER(K, P_i XOR Offset_i)
+#   Checksum = XOR of all P_i (plus partial last-block contribution)
+#   Tag = ENCIPHER(K, Checksum XOR Offset_m XOR L_$) XOR HASH(K, A)
+#   HASH(K, A): processes AAD blocks similarly with Offset and L values.
+
+use os.crypto.aes128_gcm.{aes128_key_expansion, aes128_encrypt_block}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# ============================================================================
+# GF(2^128) doubling — multiply by x (left-shift with reduction)
+# Polynomial: x^128 + x^7 + x^2 + x + 1
+# If msb(V) == 0:  double(V) = V << 1
+# If msb(V) == 1:  double(V) = (V << 1) XOR 0x00...0087
+# ============================================================================
+
+fn _ocb3_double(block: [u8]) -> [u8]:
+    """GF(2^128) doubling (left shift with conditional XOR 0x87 on last byte)."""
+    var out: [u8] = rt_array_new_with_cap(16)
+    val msb = (_u8_at(block, 0).to_u32() >> 7) & 0x01
+    var i: u64 = 0
+    while i < 15:
+        val cur = _u8_at(block, i).to_u32()
+        val nxt = _u8_at(block, i + 1).to_u32()
+        out.push(((cur << 1 | nxt >> 7) & 0xFF).to_u8())
+        i = i + 1
+    val last = ((_u8_at(block, 15).to_u32() << 1) & 0xFF).to_u8()
+    if msb != 0:
+        out.push((last.to_u32() ^ 0x87).to_u8())
+    else:
+        out.push(last)
+    out
+
+# ============================================================================
+# XOR two 16-byte blocks
+# ============================================================================
+
+fn _xor16(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        out.push(_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    out
+
+# ============================================================================
+# ntz — number of trailing zero bits in a positive integer
+# ntz(1)=0, ntz(2)=1, ntz(3)=0, ntz(4)=2, ...
+# ============================================================================
+
+fn _ntz(n: u64) -> u64:
+    if n == 0:
+        return 64
+    var v = n
+    var count: u64 = 0
+    while (v & 1) == 0:
+        count = count + 1
+        v = v >> 1
+    count
+
+# ============================================================================
+# Build the L table: [L_*, L_$, L_0, L_1, ..., L_30]
+# L_* = ENCIPHER(K, 0^128)
+# L_$ = double(L_*)
+# L_i = double(L_{i-1}) for i >= 0
+# ============================================================================
+
+fn _aes_inv_sbox_table() -> [u8]:
+    var t: [u8] = rt_array_new_with_cap(256)
+    t.push(0x52)
+    t.push(0x09)
+    t.push(0x6a)
+    t.push(0xd5)
+    t.push(0x30)
+    t.push(0x36)
+    t.push(0xa5)
+    t.push(0x38)
+    t.push(0xbf)
+    t.push(0x40)
+    t.push(0xa3)
+    t.push(0x9e)
+    t.push(0x81)
+    t.push(0xf3)
+    t.push(0xd7)
+    t.push(0xfb)
+    t.push(0x7c)
+    t.push(0xe3)
+    t.push(0x39)
+    t.push(0x82)
+    t.push(0x9b)
+    t.push(0x2f)
+    t.push(0xff)
+    t.push(0x87)
+    t.push(0x34)
+    t.push(0x8e)
+    t.push(0x43)
+    t.push(0x44)
+    t.push(0xc4)
+    t.push(0xde)
+    t.push(0xe9)
+    t.push(0xcb)
+    t.push(0x54)
+    t.push(0x7b)
+    t.push(0x94)
+    t.push(0x32)
+    t.push(0xa6)
+    t.push(0xc2)
+    t.push(0x23)
+    t.push(0x3d)
+    t.push(0xee)
+    t.push(0x4c)
+    t.push(0x95)
+    t.push(0x0b)
+    t.push(0x42)
+    t.push(0xfa)
+    t.push(0xc3)
+    t.push(0x4e)
+    t.push(0x08)
+    t.push(0x2e)
+    t.push(0xa1)
+    t.push(0x66)
+    t.push(0x28)
+    t.push(0xd9)
+    t.push(0x24)
+    t.push(0xb2)
+    t.push(0x76)
+    t.push(0x5b)
+    t.push(0xa2)
+    t.push(0x49)
+    t.push(0x6d)
+    t.push(0x8b)
+    t.push(0xd1)
+    t.push(0x25)
+    t.push(0x72)
+    t.push(0xf8)
+    t.push(0xf6)
+    t.push(0x64)
+    t.push(0x86)
+    t.push(0x68)
+    t.push(0x98)
+    t.push(0x16)
+    t.push(0xd4)
+    t.push(0xa4)
+    t.push(0x5c)
+    t.push(0xcc)
+    t.push(0x5d)
+    t.push(0x65)
+    t.push(0xb6)
+    t.push(0x92)
+    t.push(0x6c)
+    t.push(0x70)
+    t.push(0x48)
+    t.push(0x50)
+    t.push(0xfd)
+    t.push(0xed)
+    t.push(0xb9)
+    t.push(0xda)
+    t.push(0x5e)
+    t.push(0x15)
+    t.push(0x46)
+    t.push(0x57)
+    t.push(0xa7)
+    t.push(0x8d)
+    t.push(0x9d)
+    t.push(0x84)
+    t.push(0x90)
+    t.push(0xd8)
+    t.push(0xab)
+    t.push(0x00)
+    t.push(0x8c)
+    t.push(0xbc)
+    t.push(0xd3)
+    t.push(0x0a)
+    t.push(0xf7)
+    t.push(0xe4)
+    t.push(0x58)
+    t.push(0x05)
+    t.push(0xb8)
+    t.push(0xb3)
+    t.push(0x45)
+    t.push(0x06)
+    t.push(0xd0)
+    t.push(0x2c)
+    t.push(0x1e)
+    t.push(0x8f)
+    t.push(0xca)
+    t.push(0x3f)
+    t.push(0x0f)
+    t.push(0x02)
+    t.push(0xc1)
+    t.push(0xaf)
+    t.push(0xbd)
+    t.push(0x03)
+    t.push(0x01)
+    t.push(0x13)
+    t.push(0x8a)
+    t.push(0x6b)
+    t.push(0x3a)
+    t.push(0x91)
+    t.push(0x11)
+    t.push(0x41)
+    t.push(0x4f)
+    t.push(0x67)
+    t.push(0xdc)
+    t.push(0xea)
+    t.push(0x97)
+    t.push(0xf2)
+    t.push(0xcf)
+    t.push(0xce)
+    t.push(0xf0)
+    t.push(0xb4)
+    t.push(0xe6)
+    t.push(0x73)
+    t.push(0x96)
+    t.push(0xac)
+    t.push(0x74)
+    t.push(0x22)
+    t.push(0xe7)
+    t.push(0xad)
+    t.push(0x35)
+    t.push(0x85)
+    t.push(0xe2)
+    t.push(0xf9)
+    t.push(0x37)
+    t.push(0xe8)
+    t.push(0x1c)
+    t.push(0x75)
+    t.push(0xdf)
+    t.push(0x6e)
+    t.push(0x47)
+    t.push(0xf1)
+    t.push(0x1a)
+    t.push(0x71)
+    t.push(0x1d)
+    t.push(0x29)
+    t.push(0xc5)
+    t.push(0x89)
+    t.push(0x6f)
+    t.push(0xb7)
+    t.push(0x62)
+    t.push(0x0e)
+    t.push(0xaa)
+    t.push(0x18)
+    t.push(0xbe)
+    t.push(0x1b)
+    t.push(0xfc)
+    t.push(0x56)
+    t.push(0x3e)
+    t.push(0x4b)
+    t.push(0xc6)
+    t.push(0xd2)
+    t.push(0x79)
+    t.push(0x20)
+    t.push(0x9a)
+    t.push(0xdb)
+    t.push(0xc0)
+    t.push(0xfe)
+    t.push(0x78)
+    t.push(0xcd)
+    t.push(0x5a)
+    t.push(0xf4)
+    t.push(0x1f)
+    t.push(0xdd)
+    t.push(0xa8)
+    t.push(0x33)
+    t.push(0x88)
+    t.push(0x07)
+    t.push(0xc7)
+    t.push(0x31)
+    t.push(0xb1)
+    t.push(0x12)
+    t.push(0x10)
+    t.push(0x59)
+    t.push(0x27)
+    t.push(0x80)
+    t.push(0xec)
+    t.push(0x5f)
+    t.push(0x60)
+    t.push(0x51)
+    t.push(0x7f)
+    t.push(0xa9)
+    t.push(0x19)
+    t.push(0xb5)
+    t.push(0x4a)
+    t.push(0x0d)
+    t.push(0x2d)
+    t.push(0xe5)
+    t.push(0x7a)
+    t.push(0x9f)
+    t.push(0x93)
+    t.push(0xc9)
+    t.push(0x9c)
+    t.push(0xef)
+    t.push(0xa0)
+    t.push(0xe0)
+    t.push(0x3b)
+    t.push(0x4d)
+    t.push(0xae)
+    t.push(0x2a)
+    t.push(0xf5)
+    t.push(0xb0)
+    t.push(0xc8)
+    t.push(0xeb)
+    t.push(0xbb)
+    t.push(0x3c)
+    t.push(0x83)
+    t.push(0x53)
+    t.push(0x99)
+    t.push(0x61)
+    t.push(0x17)
+    t.push(0x2b)
+    t.push(0x04)
+    t.push(0x7e)
+    t.push(0xba)
+    t.push(0x77)
+    t.push(0xd6)
+    t.push(0x26)
+    t.push(0xe1)
+    t.push(0x69)
+    t.push(0x14)
+    t.push(0x63)
+    t.push(0x55)
+    t.push(0x21)
+    t.push(0x0c)
+    t.push(0x7d)
+    t
+
+fn _inv_sbox(index: i64) -> u8:
+    val tbl = _aes_inv_sbox_table()
+    _u8_at(tbl, (index & 0xFF).to_u64())
+
+fn _xtime(b: u32) -> u32:
+    val shifted = (b << 1) & 0xFF
+    if (b & 0x80) != 0:
+        (shifted ^ 0x1B) & 0xFF
+    else:
+        shifted
+
+fn _gf_mul(a: u32, b: u32) -> u32:
+    var result: u32 = 0
+    var aa = a
+    var bb = b
+    var i: u32 = 0
+    while i < 8:
+        if (bb & 1) != 0:
+            result = result ^ aa
+        aa = _xtime(aa)
+        bb = bb >> 1
+        i = i + 1
+    result & 0xFF
+
+fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> [u8]:
+    var state: [u8] = rt_array_new_with_cap(16)
+    var si: u64 = 0
+    while si < 16:
+        state.push(_u8_at(block, si))
+        si = si + 1
+
+    val nr = num_rounds.to_u64()
+    var rk_off: u64 = nr * 16
+    var xi: u64 = 0
+    while xi < 16:
+        state[xi] = _u8_at(state, xi) ^ _u8_at(expanded_key, rk_off + xi)
+        xi = xi + 1
+
+    var rnd: u64 = nr - 1
+    while rnd >= 1:
+        # InvShiftRows (column-major: state[row + col*4])
+        var tmp: [u8] = rt_array_new_with_cap(16)
+        tmp.push(_u8_at(state, 0))   # col0 row0
+        tmp.push(_u8_at(state, 13))  # col0 row1 ← was col3 row1
+        tmp.push(_u8_at(state, 10))  # col0 row2 ← was col2 row2
+        tmp.push(_u8_at(state, 7))   # col0 row3 ← was col1 row3
+        tmp.push(_u8_at(state, 4))   # col1 row0
+        tmp.push(_u8_at(state, 1))   # col1 row1 ← was col0 row1
+        tmp.push(_u8_at(state, 14))  # col1 row2 ← was col3 row2
+        tmp.push(_u8_at(state, 11))  # col1 row3 ← was col2 row3
+        tmp.push(_u8_at(state, 8))   # col2 row0
+        tmp.push(_u8_at(state, 5))   # col2 row1 ← was col1 row1
+        tmp.push(_u8_at(state, 2))   # col2 row2 ← was col0 row2
+        tmp.push(_u8_at(state, 15))  # col2 row3 ← was col3 row3
+        tmp.push(_u8_at(state, 12))  # col3 row0
+        tmp.push(_u8_at(state, 9))   # col3 row1 ← was col2 row1
+        tmp.push(_u8_at(state, 6))   # col3 row2 ← was col1 row2
+        tmp.push(_u8_at(state, 3))   # col3 row3 ← was col0 row3
+
+        # InvSubBytes
+        var sub: [u8] = rt_array_new_with_cap(16)
+        var ssi: u64 = 0
+        while ssi < 16:
+            sub.push(_inv_sbox(_u8_at(tmp, ssi).to_i64()))
+            ssi = ssi + 1
+
+        # AddRoundKey
+        rk_off = rnd * 16
+        var ark: [u8] = rt_array_new_with_cap(16)
+        var ai: u64 = 0
+        while ai < 16:
+            ark.push(_u8_at(sub, ai) ^ _u8_at(expanded_key, rk_off + ai))
+            ai = ai + 1
+
+        # InvMixColumns (column-major)
+        var mc: [u8] = rt_array_new_with_cap(16)
+        var col: u64 = 0
+        while col < 4:
+            val b0 = _u8_at(ark, col * 4).to_u32()
+            val b1 = _u8_at(ark, col * 4 + 1).to_u32()
+            val b2 = _u8_at(ark, col * 4 + 2).to_u32()
+            val b3 = _u8_at(ark, col * 4 + 3).to_u32()
+            mc.push((_gf_mul(0x0e, b0) ^ _gf_mul(0x0b, b1) ^ _gf_mul(0x0d, b2) ^ _gf_mul(0x09, b3)).to_u8())
+            mc.push((_gf_mul(0x09, b0) ^ _gf_mul(0x0e, b1) ^ _gf_mul(0x0b, b2) ^ _gf_mul(0x0d, b3)).to_u8())
+            mc.push((_gf_mul(0x0d, b0) ^ _gf_mul(0x09, b1) ^ _gf_mul(0x0e, b2) ^ _gf_mul(0x0b, b3)).to_u8())
+            mc.push((_gf_mul(0x0b, b0) ^ _gf_mul(0x0d, b1) ^ _gf_mul(0x09, b2) ^ _gf_mul(0x0e, b3)).to_u8())
+            col = col + 1
+
+        state = mc
+        rnd = rnd - 1
+
+    # Final round (no InvMixColumns)
+    var ftmp: [u8] = rt_array_new_with_cap(16)
+    ftmp.push(_u8_at(state, 0))
+    ftmp.push(_u8_at(state, 13))
+    ftmp.push(_u8_at(state, 10))
+    ftmp.push(_u8_at(state, 7))
+    ftmp.push(_u8_at(state, 4))
+    ftmp.push(_u8_at(state, 1))
+    ftmp.push(_u8_at(state, 14))
+    ftmp.push(_u8_at(state, 11))
+    ftmp.push(_u8_at(state, 8))
+    ftmp.push(_u8_at(state, 5))
+    ftmp.push(_u8_at(state, 2))
+    ftmp.push(_u8_at(state, 15))
+    ftmp.push(_u8_at(state, 12))
+    ftmp.push(_u8_at(state, 9))
+    ftmp.push(_u8_at(state, 6))
+    ftmp.push(_u8_at(state, 3))
+
+    var fsub: [u8] = rt_array_new_with_cap(16)
+    var fi: u64 = 0
+    while fi < 16:
+        fsub.push(_inv_sbox(_u8_at(ftmp, fi).to_i64()))
+        fi = fi + 1
+
+    var result: [u8] = rt_array_new_with_cap(16)
+    var ri: u64 = 0
+    while ri < 16:
+        result.push(_u8_at(fsub, ri) ^ _u8_at(expanded_key, ri))
+        ri = ri + 1
+
+    result
+
+fn _aes128_decrypt_block(block: [u8], round_keys: [u8]) -> [u8]:
+    _aes_decrypt_block_pure(block, round_keys, 10)
+
+fn _ocb3_build_l_table(round_keys: [u8]) -> [[u8]]:
+    """Returns [L_*, L_$, L_0, L_1, ..., L_30]."""
+    var zero: [u8] = rt_array_new_with_cap(16)
+    var zi: u64 = 0
+    while zi < 16:
+        zero.push(0x00)
+        zi = zi + 1
+
+    val l_star = aes128_encrypt_block(zero, round_keys)
+    val l_dollar = _ocb3_double(l_star)
+
+    var table: [[u8]] = []
+    table.push(l_star)
+    table.push(l_dollar)
+
+    # L_0 .. L_30  (index 2 .. 32 in table)
+    var prev = l_star
+    var idx: u64 = 0
+    while idx < 31:
+        val next = _ocb3_double(prev)
+        table.push(next)
+        prev = next
+        idx = idx + 1
+
+    table
+
+# Index into a [[u8]] table by iterating (Simple has no generic list indexer).
+fn _table_get(table: [[u8]], idx: u64) -> [u8]:
+    var i: u64 = 0
+    for entry in table:
+        if i == idx:
+            return entry
+        i = i + 1
+    # Fallback — should not reach here.
+    var fallback: [u8] = rt_array_new_with_cap(16)
+    var j: u64 = 0
+    while j < 16:
+        fallback.push(0x00)
+        j = j + 1
+    fallback
+
+# Retrieve L_{ntz(block_num)} from the table.
+# Table layout: index 0 = L_*, index 1 = L_$, index 2+k = L_k.
+fn _l_ntz(table: [[u8]], block_num: u64) -> [u8]:
+    _table_get(table, _ntz(block_num) + 2)
+
+# ============================================================================
+# Nonce-to-Offset_0 derivation (RFC 7253 §4)
+#
+# For TAGLEN=128, nlen=12 (96-bit nonce):
+#   128-bit Nonce value = 0x00000001 || N[0..11]
+#   bottom = last 6 bits of Nonce128  (= last 6 bits of N[11])
+#   top    = Nonce128 with last 6 bits zeroed
+#   Ktop   = ENCIPHER(K, top)
+#   Stretch = Ktop || (Ktop[0..7] XOR Ktop[1..8])  (24 bytes)
+#   Offset_0 = Stretch[bottom .. bottom+127]  (bit-addressed window)
+# ============================================================================
+
+fn _ocb3_nonce_to_offset(round_keys: [u8], nonce: [u8]) -> [u8]:
+    """Derive Offset_0 from key and 12-byte nonce per RFC 7253 §4."""
+    # Build the 128-bit Nonce value: [0x00, 0x00, 0x00, 0x01, nonce[0..11]]
+    var nonce128: [u8] = rt_array_new_with_cap(16)
+    nonce128.push(0x00)
+    nonce128.push(0x00)
+    nonce128.push(0x00)
+    nonce128.push(0x01)
+    var ni: u64 = 0
+    while ni < 12:
+        nonce128.push(_u8_at(nonce, ni))
+        ni = ni + 1
+
+    # bottom = last 6 bits of nonce128[15]
+    val bottom: u64 = (_u8_at(nonce128, 15).to_u32() & 0x3F).to_u64()
+
+    # top = nonce128 with last 6 bits cleared
+    var top: [u8] = rt_array_new_with_cap(16)
+    var ti: u64 = 0
+    while ti < 15:
+        top.push(_u8_at(nonce128, ti))
+        ti = ti + 1
+    top.push((_u8_at(nonce128, 15).to_u32() & 0xC0).to_u8())
+
+    # Ktop = ENCIPHER(K, top)
+    val ktop = aes128_encrypt_block(top, round_keys)
+
+    # Stretch = Ktop || (Ktop[0..7] XOR Ktop[1..8])  (24 bytes)
+    var stretch: [u8] = rt_array_new_with_cap(24)
+    var si: u64 = 0
+    while si < 16:
+        stretch.push(_u8_at(ktop, si))
+        si = si + 1
+    si = 0
+    while si < 8:
+        stretch.push(_u8_at(ktop, si) ^ _u8_at(ktop, si + 1))
+        si = si + 1
+
+    # Offset_0 = Stretch[bottom..bottom+127] (bit-addressed)
+    val byte_shift: u64 = bottom >> 3
+    val bit_shift: u32 = (bottom & 7).to_u32()
+
+    var offset: [u8] = rt_array_new_with_cap(16)
+    if bit_shift == 0:
+        var oi: u64 = 0
+        while oi < 16:
+            offset.push(_u8_at(stretch, byte_shift + oi))
+            oi = oi + 1
+    else:
+        val rshift: u32 = 8 - bit_shift
+        var oi: u64 = 0
+        while oi < 16:
+            val cur = _u8_at(stretch, byte_shift + oi).to_u32()
+            val nxt = _u8_at(stretch, byte_shift + oi + 1).to_u32()
+            offset.push(((cur << bit_shift | nxt >> rshift) & 0xFF).to_u8())
+            oi = oi + 1
+    offset
+
+# ============================================================================
+# HASH(K, A) — process AAD (RFC 7253 §5)
+# Returns a 16-byte sum used to blind the authentication tag.
+# ============================================================================
+
+fn _ocb3_hash(round_keys: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
+    """Compute HASH(K, A) for OCB3.  Returns a 16-byte authentication offset."""
+    var sum: [u8] = rt_array_new_with_cap(16)
+    var si: u64 = 0
+    while si < 16:
+        sum.push(0x00)
+        si = si + 1
+
+    var offset_h: [u8] = rt_array_new_with_cap(16)
+    var oi: u64 = 0
+    while oi < 16:
+        offset_h.push(0x00)
+        oi = oi + 1
+
+    val num_full = aad.len() / 16
+    var i: u64 = 0
+    while i < num_full:
+        # Offset_i = Offset_{i-1} XOR L_{ntz(i+1)}
+        offset_h = _xor16(offset_h, _l_ntz(l_table, i + 1))
+
+        var blk: [u8] = rt_array_new_with_cap(16)
+        var bi: u64 = 0
+        while bi < 16:
+            blk.push(_u8_at(aad, i * 16 + bi))
+            bi = bi + 1
+
+        sum = _xor16(sum, aes128_encrypt_block(_xor16(offset_h, blk), round_keys))
+        i = i + 1
+
+    # Process partial last block (if any)
+    val rem = aad.len() % 16
+    if rem > 0:
+        # Offset_* = Offset_last XOR L_*
+        offset_h = _xor16(offset_h, _table_get(l_table, 0))
+
+        # Pad partial block with 1 || 0*
+        var pad_blk: [u8] = rt_array_new_with_cap(16)
+        var pi: u64 = 0
+        while pi < rem:
+            pad_blk.push(_u8_at(aad, num_full * 16 + pi))
+            pi = pi + 1
+        pad_blk.push(0x80)
+        while pad_blk.len() < 16:
+            pad_blk.push(0x00)
+
+        sum = _xor16(sum, aes128_encrypt_block(_xor16(offset_h, pad_blk), round_keys))
+
+    sum
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+enum Ocb3Result:
+    Ok(data: [u8])
+    Err(msg: text)
+
+fn ocb3_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
+    """OCB3 authenticated encryption (AES-128, 128-bit tag).
+
+    Args:
+        key:       16-byte AES-128 key.
+        nonce:     12-byte nonce (must be unique per key).
+        aad:       Additional authenticated data (not encrypted).
+        plaintext: Message to encrypt.
+
+    Returns: ciphertext || 16-byte authentication tag (concatenated).
+    """
+    val round_keys = aes128_key_expansion(key)
+    val l_table = _ocb3_build_l_table(round_keys)
+    val l_dollar = _table_get(l_table, 1)
+
+    var offset: [u8] = _ocb3_nonce_to_offset(round_keys, nonce)
+    var checksum: [u8] = rt_array_new_with_cap(16)
+    var ci: u64 = 0
+    while ci < 16:
+        checksum.push(0x00)
+        ci = ci + 1
+
+    val num_full = plaintext.len() / 16
+    var out: [u8] = rt_array_new_with_cap(plaintext.len().to_i64())
+
+    # Process full 16-byte plaintext blocks
+    var i: u64 = 0
+    while i < num_full:
+        offset = _xor16(offset, _l_ntz(l_table, i + 1))
+
+        var p_blk: [u8] = rt_array_new_with_cap(16)
+        var bi: u64 = 0
+        while bi < 16:
+            p_blk.push(_u8_at(plaintext, i * 16 + bi))
+            bi = bi + 1
+
+        checksum = _xor16(checksum, p_blk)
+
+        val c_blk = _xor16(offset, aes128_encrypt_block(_xor16(offset, p_blk), round_keys))
+        bi = 0
+        while bi < 16:
+            out.push(_u8_at(c_blk, bi))
+            bi = bi + 1
+        i = i + 1
+
+    # Process partial last block (if any)
+    val rem = plaintext.len() % 16
+    if rem > 0:
+        # Offset_* = Offset_m XOR L_*
+        offset = _xor16(offset, _table_get(l_table, 0))
+
+        # Pad = ENCIPHER(K, Offset_*)
+        val pad = aes128_encrypt_block(offset, round_keys)
+
+        # C_last[0..rem] = P_last[0..rem] XOR Pad[0..rem]
+        # Checksum XOR= P_last || 0x80 || 0*  (padded to 16 bytes)
+        var p_last: [u8] = rt_array_new_with_cap(16)
+        var pi: u64 = 0
+        while pi < rem:
+            val byte = _u8_at(plaintext, num_full * 16 + pi)
+            p_last.push(byte)
+            out.push(byte ^ _u8_at(pad, pi))
+            pi = pi + 1
+        p_last.push(0x80)
+        while p_last.len() < 16:
+            p_last.push(0x00)
+        checksum = _xor16(checksum, p_last)
+
+    # Tag = ENCIPHER(K, Checksum XOR Offset_* XOR L_$) XOR HASH(K, A)
+    val tag_input = _xor16(_xor16(checksum, offset), l_dollar)
+    val tag_base = aes128_encrypt_block(tag_input, round_keys)
+    val hash_val = _ocb3_hash(round_keys, aad, l_table)
+    val tag = _xor16(tag_base, hash_val)
+
+    # Append 16-byte tag to ciphertext
+    var ti: u64 = 0
+    while ti < 16:
+        out.push(_u8_at(tag, ti))
+        ti = ti + 1
+
+    out
+
+fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3Result:
+    """OCB3 authenticated decryption (AES-128, 128-bit tag).
+
+    Args:
+        key:            16-byte AES-128 key.
+        nonce:          12-byte nonce.
+        aad:            Additional authenticated data.
+        ciphertext_tag: ciphertext || 16-byte tag (last 16 bytes = tag).
+
+    Returns: Ocb3Result.Ok(plaintext) on success,
+             Ocb3Result.Err on authentication failure.
+
+    Full-block decryption uses the pure Simple AES inverse cipher
+    (_aes_decrypt_block_pure). Partial final blocks continue to use the
+    RFC 7253 ENCIPHER(K, Offset_*) pad path.
+    """
+    if ciphertext_tag.len() < 16:
+        return Ocb3Result.Err("input too short: missing tag")
+
+    val ct_len = ciphertext_tag.len() - 16
+
+    # Extract received tag (last 16 bytes)
+    var tag_rcv: [u8] = rt_array_new_with_cap(16)
+    var ti: u64 = 0
+    while ti < 16:
+        tag_rcv.push(_u8_at(ciphertext_tag, ct_len.to_u64() + ti))
+        ti = ti + 1
+
+    val round_keys = aes128_key_expansion(key)
+    val l_table = _ocb3_build_l_table(round_keys)
+    val l_dollar = _table_get(l_table, 1)
+
+    var offset: [u8] = _ocb3_nonce_to_offset(round_keys, nonce)
+    var checksum: [u8] = rt_array_new_with_cap(16)
+    var ci: u64 = 0
+    while ci < 16:
+        checksum.push(0x00)
+        ci = ci + 1
+
+    val num_full = ct_len / 16
+    var plaintext: [u8] = rt_array_new_with_cap(ct_len.to_i64())
+
+    # Process full 16-byte ciphertext blocks:
+    #   P_i = Offset_i XOR DECIPHER(K, C_i XOR Offset_i)
+    var i: u64 = 0
+    while i < num_full:
+        offset = _xor16(offset, _l_ntz(l_table, i + 1))
+
+        var c_blk: [u8] = rt_array_new_with_cap(16)
+        var bi: u64 = 0
+        while bi < 16:
+            c_blk.push(_u8_at(ciphertext_tag, i * 16 + bi))
+            bi = bi + 1
+
+        val p_blk = _xor16(offset, _aes128_decrypt_block(_xor16(offset, c_blk), round_keys))
+        checksum = _xor16(checksum, p_blk)
+        bi = 0
+        while bi < 16:
+            plaintext.push(_u8_at(p_blk, bi))
+            bi = bi + 1
+        i = i + 1
+
+    # Process partial last block (CTR-mode; uses ENCIPHER, correct)
+    val rem = ct_len % 16
+    if rem > 0:
+        offset = _xor16(offset, _table_get(l_table, 0))
+
+        val pad = aes128_encrypt_block(offset, round_keys)
+
+        var p_last: [u8] = rt_array_new_with_cap(16)
+        var pi: u64 = 0
+        while pi < rem:
+            val byte = _u8_at(ciphertext_tag, num_full * 16 + pi) ^ _u8_at(pad, pi)
+            p_last.push(byte)
+            plaintext.push(byte)
+            pi = pi + 1
+        p_last.push(0x80)
+        while p_last.len() < 16:
+            p_last.push(0x00)
+        checksum = _xor16(checksum, p_last)
+
+    # Recompute expected tag
+    val tag_input = _xor16(_xor16(checksum, offset), l_dollar)
+    val tag_base = aes128_encrypt_block(tag_input, round_keys)
+    val hash_val = _ocb3_hash(round_keys, aad, l_table)
+    val tag_exp = _xor16(tag_base, hash_val)
+
+    # Constant-time tag comparison
+    var diff: u8 = 0x00
+    ti = 0
+    while ti < 16:
+        diff = diff | (_u8_at(tag_exp, ti) ^ _u8_at(tag_rcv, ti))
+        ti = ti + 1
+
+    if diff != 0:
+        return Ocb3Result.Err("authentication tag mismatch")
+
+    Ocb3Result.Ok(data: plaintext)

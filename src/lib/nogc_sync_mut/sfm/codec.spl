@@ -1,0 +1,235 @@
+# SFM container codec — pure byte in / byte out (AC-1).
+#
+# Byte layout (all little-endian):
+#   "SFM1"(4) | ver_major u16 | ver_minor u16 | manifest_len u32 | smf_len u32
+#   | manifest_blob (manifest_len bytes) | embedded SMF blob (smf_len bytes, opaque)
+#
+# Manifest blob (all LE, strings are u32-length-prefixed UTF-8 so arbitrary
+# names round-trip exactly — unlike the fixed-ASCII driver-manifest path):
+#   name_str | version_str | security_level u8 | layer_count u32
+#   per layer: kind u8 | privileged u8 | role_str | entry_symbol_str
+#
+# The codec is pure (no FFI) so AC-1 round-trips in memory under a
+# `bin/simple run` probe. All `[u8]` building uses pre-size + index-poke
+# (never `push(expr as u8)` — that marshals empty across FFI). The SMF blob
+# is the final segment and is never re-encoded; the reader hands it back
+# verbatim to the existing SMF loader path.
+
+use std.sfm.manifest.{
+    FeatureManifest,
+    LayerDescriptor,
+    LayerKind,
+    SfmSecurityLevel,
+    layer_kind_to_byte,
+    layer_kind_from_byte,
+    security_level_to_byte,
+    security_level_from_byte
+}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val SFM_FORMAT_MAJOR: i32 = 1
+val SFM_FORMAT_MINOR: i32 = 0
+val SFM_HEADER_BYTES: i32 = 16   # 4 magic + 2 + 2 + 4 + 4
+
+# --- byte builder: pre-size + index-poke, never push(expr as u8) ---
+
+# Append the low byte of `value` to `buf` via index-poke.
+fn push_u8(buf: [u8], value: i32) -> [u8]:
+    val n: i32 = buf.len() as i32
+    buf.append(0 as u8)
+    buf[n] = (value & 0xff) as u8
+    return buf
+
+fn push_u16_le(buf: [u8], value: i32) -> [u8]:
+    var out = push_u8(buf, value & 0xff)
+    out = push_u8(out, (value >> 8) & 0xff)
+    return out
+
+fn push_u32_le(buf: [u8], value: i32) -> [u8]:
+    var out = push_u8(buf, value & 0xff)
+    out = push_u8(out, (value >> 8) & 0xff)
+    out = push_u8(out, (value >> 16) & 0xff)
+    out = push_u8(out, (value >> 24) & 0xff)
+    return out
+
+# Append a u32 length prefix followed by the UTF-8 bytes of `s`.
+fn push_str(buf: [u8], s: text) -> [u8]:
+    val src: [u8] = rt_text_to_bytes(s)
+    val n: i32 = src.len() as i32
+    var out = push_u32_le(buf, n)
+    var i: i32 = 0
+    while i < n:
+        out = push_u8(out, src[i] as i32)
+        i = i + 1
+    return out
+
+# Append all bytes of `src` to `buf`.
+fn push_bytes(buf: [u8], src: [u8]) -> [u8]:
+    var out = buf
+    var i: i32 = 0
+    val n: i32 = src.len() as i32
+    while i < n:
+        out = push_u8(out, src[i] as i32)
+        i = i + 1
+    return out
+
+# --- byte readers ---
+
+fn read_u16_le(buf: [u8], at: i32) -> i32:
+    val b0: i32 = buf[at]     as i32
+    val b1: i32 = buf[at + 1] as i32
+    return (b0 & 0xff) | ((b1 & 0xff) << 8)
+
+fn read_u32_le(buf: [u8], at: i32) -> i32:
+    val b0: i32 = buf[at]     as i32
+    val b1: i32 = buf[at + 1] as i32
+    val b2: i32 = buf[at + 2] as i32
+    val b3: i32 = buf[at + 3] as i32
+    return (b0 & 0xff) | ((b1 & 0xff) << 8) | ((b2 & 0xff) << 16) | ((b3 & 0xff) << 24)
+
+# --- public encode / decode ---
+
+# AC-2: serialize the feature manifest blob (without the outer header).
+fn encode_manifest_blob(m: FeatureManifest) -> [u8]:
+    var buf: [u8] = []
+    buf = push_str(buf, m.name)
+    buf = push_str(buf, m.version)
+    buf = push_u8(buf, security_level_to_byte(m.security_level))
+    val count: i32 = m.layers.len() as i32
+    buf = push_u32_le(buf, count)
+    var i: i32 = 0
+    while i < count:
+        val layer = m.layers[i]
+        buf = push_u8(buf, layer_kind_to_byte(layer.kind))
+        if layer.privileged:
+            buf = push_u8(buf, 1)
+        else:
+            buf = push_u8(buf, 0)
+        buf = push_str(buf, layer.role)
+        buf = push_str(buf, layer.entry_symbol)
+        i = i + 1
+    return buf
+
+# AC-1: encode a full `.sfm` container: header + manifest blob + opaque SMF blob.
+fn encode_sfm(m: FeatureManifest, smf_bytes: [u8]) -> [u8]:
+    val manifest_blob: [u8] = encode_manifest_blob(m)
+    var buf: [u8] = []
+    # magic "SFM1"
+    buf = push_u8(buf, 83)   # 'S'
+    buf = push_u8(buf, 70)   # 'F'
+    buf = push_u8(buf, 77)   # 'M'
+    buf = push_u8(buf, 49)   # '1'
+    buf = push_u16_le(buf, SFM_FORMAT_MAJOR)
+    buf = push_u16_le(buf, SFM_FORMAT_MINOR)
+    buf = push_u32_le(buf, manifest_blob.len() as i32)
+    buf = push_u32_le(buf, smf_bytes.len() as i32)
+    buf = push_bytes(buf, manifest_blob)
+    buf = push_bytes(buf, smf_bytes)
+    return buf
+
+# Pure-Simple UTF-8 continuation-byte test (no FFI; `rt_bytes_to_text` does not
+# round-trip Simple-constructed [u8], so decoding is done in-language here).
+fn utf8_is_cont(b: i64) -> bool:
+    return (b & 192) == 128
+
+# Decode `n` UTF-8 bytes of `buf` starting at `start` into text.
+fn decode_utf8(buf: [u8], start: i32, n: i32) -> text:
+    var out: text = ""
+    var i: i32 = 0
+    while i < n:
+        val b0: i64 = buf[start + i] as i64
+        if b0 < 128:
+            out = out + b0.chr()
+            i = i + 1
+        elif b0 >= 194 and b0 < 224 and i + 1 < n and utf8_is_cont(buf[start + i + 1] as i64):
+            val b1: i64 = buf[start + i + 1] as i64
+            out = out + (((b0 & 31) << 6) | (b1 & 63)).chr()
+            i = i + 2
+        elif b0 >= 224 and b0 < 240 and i + 2 < n and utf8_is_cont(buf[start + i + 1] as i64) and utf8_is_cont(buf[start + i + 2] as i64):
+            val b1: i64 = buf[start + i + 1] as i64
+            val b2: i64 = buf[start + i + 2] as i64
+            out = out + (((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63)).chr()
+            i = i + 3
+        elif b0 >= 240 and b0 < 245 and i + 3 < n and utf8_is_cont(buf[start + i + 1] as i64) and utf8_is_cont(buf[start + i + 2] as i64) and utf8_is_cont(buf[start + i + 3] as i64):
+            val b1: i64 = buf[start + i + 1] as i64
+            val b2: i64 = buf[start + i + 2] as i64
+            val b3: i64 = buf[start + i + 3] as i64
+            out = out + (((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63)).chr()
+            i = i + 4
+        else:
+            out = out + 65533.chr()
+            i = i + 1
+    return out
+
+# Read a u32-length-prefixed UTF-8 string at `at`; returns (text, next_offset).
+fn decode_str(buf: [u8], at: i32) -> (text, i32):
+    val n: i32 = read_u32_le(buf, at)
+    val s: text = decode_utf8(buf, at + 4, n)
+    return (s, at + 4 + n)
+
+# AC-1 / AC-2: decode the full container -> (manifest, embedded SMF bytes).
+fn decode_sfm(bytes: [u8]) -> Result<(FeatureManifest, [u8]), text>:
+    val total: i32 = bytes.len() as i32
+    if total < SFM_HEADER_BYTES:
+        return Err("sfm: too short for header")
+    if bytes[0] != (83 as u8) or bytes[1] != (70 as u8) or bytes[2] != (77 as u8) or bytes[3] != (49 as u8):
+        return Err("sfm: bad magic")
+
+    val manifest_len: i32 = read_u32_le(bytes, 8)
+    val smf_len: i32 = read_u32_le(bytes, 12)
+    if SFM_HEADER_BYTES + manifest_len + smf_len > total:
+        return Err("sfm: truncated payload")
+
+    # --- manifest blob ---
+    var off: i32 = SFM_HEADER_BYTES
+    val (name, off1) = decode_str(bytes, off)
+    val (version, off2) = decode_str(bytes, off1)
+    off = off2
+    val level: SfmSecurityLevel = security_level_from_byte(bytes[off] as i32)
+    off = off + 1
+    val layer_count: i32 = read_u32_le(bytes, off)
+    off = off + 4
+
+    var layers: [LayerDescriptor] = []
+    var i: i32 = 0
+    while i < layer_count:
+        val kind: LayerKind = layer_kind_from_byte(bytes[off] as i32)
+        off = off + 1
+        val priv_byte: i32 = bytes[off] as i32
+        off = off + 1
+        val (role, off_a) = decode_str(bytes, off)
+        off = off_a
+        val (entry, off_b) = decode_str(bytes, off)
+        off = off_b
+        val layer = LayerDescriptor(
+            role: role,
+            kind: kind,
+            entry_symbol: entry,
+            privileged: priv_byte != 0
+        )
+        layers.append(layer)
+        i = i + 1
+
+    val manifest = FeatureManifest(
+        name: name,
+        version: version,
+        security_level: level,
+        layers: layers
+    )
+
+    # --- embedded SMF blob (opaque, never re-encoded) ---
+    val smf_start: i32 = SFM_HEADER_BYTES + manifest_len
+    var smf: [u8] = []
+    var j: i32 = 0
+    while j < smf_len:
+        smf = push_u8(smf, bytes[smf_start + j] as i32)
+        j = j + 1
+
+    return Ok((manifest, smf))
+
+# LE helper exposed per arch.md interface list.
+fn sfm_u32_le_bytes(v: i32) -> [u8]:
+    var buf: [u8] = []
+    buf = push_u32_le(buf, v)
+    return buf

@@ -1,0 +1,310 @@
+# graphics_2d_showcase_gui.spl — native window entry for the Engine2D gallery.
+# Also supports WM-client mode when SIMPLE_WM_APP_MODE=client is set.
+
+# NOTE: sibling-relative import (not examples.ui.graphics_2d_showcase): the seed
+# resolver only matches dot-form numbered dirs (NN.name), so the examples.ui.*
+# path fails at module load under src/compiler_rust/target/bootstrap/simple
+# ("Cannot resolve module: examples.ui.graphics_2d_showcase"). The sibling form
+# resolves file-relative and works in both lanes.
+use graphics_2d_showcase.{run_graphics_2d_showcase}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.io_runtime.{env_get, getpid, file_write}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, wm_app_mode_is_client, wm_graphics_2d_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_graphics_2d_showcase_event_path, wm_graphics_2d_showcase_frame_seq_path}
+
+# Design-space reference dimensions. The gallery below is authored in this
+# 800x600 coordinate space and scaled up to the resolved render resolution.
+# These are kept named W/H (identical value to the imported module's W/H, so
+# the same-name import leak is value-harmless), used ONLY as scaling
+# denominators — the actual render size is the dynamic render_w/render_h.
+val W: i32 = 800
+val H: i32 = 600
+val BG: u32 = 0xFF101522u32
+val PANEL: u32 = 0xFF1B2435u32
+val WHITE: u32 = 0xFFF3F6FCu32
+val BLUE: u32 = 0xFF3B82F6u32
+val CYAN: u32 = 0xFF22D3EEu32
+val GREEN: u32 = 0xFF22C55Eu32
+val AMBER: u32 = 0xFFF59E0Bu32
+val RED: u32 = 0xFFEF4444u32
+val PURPLE: u32 = 0xFFA855F7u32
+
+# Shared showcase render-defaults convention:
+#   SHOWCASE_RESOLUTION: unset/"4k" => 3840x2160 (DEFAULT); "8k" => 7680x4320;
+#                        "WxH" (e.g. "1920x1080") => that exact size.
+#   SHOWCASE_DPI:        default 300; scales stroke widths / detail / text
+#                        relative to a 96-dpi baseline (crisp at high-res).
+# NOTE: full 4K/8K rendering is compiled-lane-gated — the interpreter lane is
+# far too slow for millions of pixels of software rasterization. Verify the
+# parameterization at a small rung (e.g. SHOWCASE_RESOLUTION=320x240).
+val SHOWCASE_RESOLUTION_ENV: text = "SHOWCASE_RESOLUTION"
+val SHOWCASE_DPI_ENV: text = "SHOWCASE_DPI"
+val SHOWCASE_DRY_RUN_ENV: text = "SHOWCASE_DRY_RUN"
+
+class ShowcaseSize:
+    width: i32
+    height: i32
+
+fn parse_dim_int(s: text, default: i32) -> i32:
+    val trimmed = s.trim()
+    val n = trimmed.len()
+    if n == 0:
+        return default
+    val zero = "0".to_i64()
+    var result: i64 = 0
+    var i = 0
+    while i < n:
+        val digit = trimmed.char_at(i).to_i64() - zero
+        if digit < 0 or digit > 9:
+            return default
+        result = result * 10 + digit
+        i = i + 1
+    return result.to_i32()
+
+fn resolve_showcase_dimensions() -> ShowcaseSize:
+    val raw = (env_get(SHOWCASE_RESOLUTION_ENV) ?? "").trim()
+    if raw == "" or raw == "4k" or raw == "4K":
+        return ShowcaseSize(width: 3840, height: 2160)
+    if raw == "8k" or raw == "8K":
+        return ShowcaseSize(width: 7680, height: 4320)
+    var parts = raw.split("x")
+    if parts.len() != 2:
+        parts = raw.split("X")
+    if parts.len() == 2:
+        val w = parse_dim_int(parts[0], 0)
+        val h = parse_dim_int(parts[1], 0)
+        if w > 0 and h > 0:
+            return ShowcaseSize(width: w, height: h)
+    # Unrecognized spec -> default 4K.
+    return ShowcaseSize(width: 3840, height: 2160)
+
+fn resolve_showcase_dpi() -> i32:
+    val raw = (env_get(SHOWCASE_DPI_ENV) ?? "").trim()
+    if raw == "":
+        return 300
+    val d = parse_dim_int(raw, 300)
+    if d < 1:
+        return 300
+    d
+
+# Coordinate/size scaling from 800x600 design space to render_w x render_h.
+fn sx(v: i32, rw: i32) -> i32:
+    v * rw / W
+fn sy(v: i32, rh: i32) -> i32:
+    v * rh / H
+# Stroke / text / detail scale: resolution factor modulated by DPI (96 base).
+fn sd(v: i32, rw: i32, dpi: i32) -> i32:
+    val r = v * rw / W * dpi / 96
+    if r < 1:
+        return 1
+    r
+
+# WORKAROUND for doc/08_tracking/bug/cross_module_imported_fn_mutation_not_propagating_2026-07-12.md:
+# draw_showcase must be defined in THIS module — imported cross-module it
+# mutates a copy and the engine stays blank. Delete this copy and re-import
+# once that bug is fixed.
+# NOTE: the mutating function and its direct helper are renamed (wm_ prefix)
+# because this module ALSO imports graphics_2d_showcase.{run_graphics_2d_showcase};
+# that import leaks the source module's own same-named draw_showcase/label
+# into scope, and unprefixed local copies lose the name-resolution race to
+# those leaked (copy-mutating) originals, reproducing the same blank-frame bug.
+# showcase_mask is likewise renamed wm_showcase_mask (its signature changed to
+# take render dims, so an ambiguous collision with the leaked 0-arg version is
+# avoided too).
+fn checker_pixels() -> [u32]:
+    [RED, AMBER, GREEN, CYAN, BLUE, PURPLE, WHITE, PANEL,
+     CYAN, BLUE, PURPLE, RED, AMBER, GREEN, PANEL, WHITE]
+
+fn wm_showcase_mask(rw: i32, rh: i32) -> [u8]:
+    var mask: [u8] = [0u8; rw * rh]
+    val xlo = sx(610, rw)
+    val xhi = sx(780, rw)
+    val ylo = sy(350, rh)
+    val yhi = sy(430, rh)
+    var y = 0
+    while y < rh:
+        var x = 0
+        while x < rw:
+            if x >= xlo and x < xhi and y >= ylo and y < yhi:
+                mask[y * rw + x] = 255u8
+            x = x + 1
+        y = y + 1
+    mask
+
+# Return-threaded (NOT plain engine params): paints made through an Engine2D
+# function parameter are lost to the caller on the deployed interpreter
+# (param-detach), yielding an all-zero frame. Callers must reassign.
+fn wm_label(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, x: i32, y: i32, value: text) -> Engine2D:
+    e.draw_text_bg(sx(x, rw), sy(y, rh), value, WHITE, 0xCC101522u32, sd(12, rw, dpi))
+    e
+
+fn wm_draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.clear(BG)
+    e.draw_text(sx(20, rw), sy(12, rh), "Simple Engine2D — complete primitive showcase", WHITE, sd(18, rw, dpi))
+
+    # Rectangles, outlines, rounded geometry, and line families.
+    e.draw_rect_filled(sx(18, rw), sy(48, rh), sx(245, rw), sy(150, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 28, 55, "RECT / LINE")
+    e.draw_rect(sx(30, rw), sy(80, rh), sx(55, rw), sy(38, rh), BLUE)
+    e.draw_rect_filled(sx(94, rw), sy(80, rh), sx(55, rw), sy(38, rh), CYAN)
+    e.draw_rect_thick(sx(158, rw), sy(80, rh), sx(55, rw), sy(38, rh), GREEN, sd(4, rw, dpi))
+    e.draw_rounded_rect(sx(30, rw), sy(130, rh), sx(80, rw), sy(45, rh), sx(12, rw), PURPLE)
+    e.draw_rounded_rect_outline(sx(122, rw), sy(130, rh), sx(92, rw), sy(45, rh), sx(12, rw), AMBER, sd(3, rw, dpi))
+    e.draw_line(sx(30, rw), sy(185, rh), sx(215, rw), sy(185, rh), RED, sd(3, rw, dpi))
+    e.draw_polyline([sx(30, rw), sx(65, rw), sx(100, rw), sx(140, rw), sx(180, rw), sx(215, rw)], [sy(190, rh), sy(178, rh), sy(194, rh), sy(176, rh), sy(193, rh), sy(180, rh)], 6, CYAN, sd(2, rw, dpi))
+
+    # Circles, ellipses, arcs, triangles, polygon, and cubic bezier.
+    e.draw_rect_filled(sx(276, rw), sy(48, rh), sx(250, rw), sy(245, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 286, 55, "CURVES / SHAPES")
+    e.draw_circle(sx(310, rw), sy(105, rh), sx(25, rw), BLUE)
+    e.draw_circle_filled(sx(375, rw), sy(105, rh), sx(25, rw), GREEN)
+    e.draw_circle_thick(sx(440, rw), sy(105, rh), sx(25, rw), AMBER, sd(5, rw, dpi))
+    e.draw_ellipse(sx(320, rw), sy(165, rh), sx(35, rw), sy(20, rh), CYAN)
+    e.draw_ellipse_filled(sx(405, rw), sy(165, rh), sx(35, rw), sy(20, rh), PURPLE)
+    e.draw_arc(sx(480, rw), sy(165, rh), sx(30, rw), 30, 300, RED, sd(4, rw, dpi))
+    e.draw_triangle_filled(sx(295, rw), sy(225, rh), sx(345, rw), sy(190, rh), sx(365, rw), sy(245, rh), BLUE)
+    e.draw_triangle_outline(sx(375, rw), sy(245, rh), sx(410, rw), sy(195, rh), sx(450, rw), sy(245, rh), WHITE, sd(3, rw, dpi))
+    e.draw_polygon_filled([sx(465, rw), sx(495, rw), sx(520, rw), sx(505, rw), sx(475, rw)], [sy(205, rh), sy(190, rh), sy(215, rh), sy(248, rh), sy(245, rh)], 5, GREEN)
+    e.draw_bezier(sx(290, rw), sy(275, rh), sx(345, rw), sy(235, rh), sx(430, rw), sy(315, rh), sx(510, rw), sy(270, rh), AMBER, sd(3, rw, dpi))
+
+    # Vertical, horizontal, and radial gradients.
+    e.draw_rect_filled(sx(539, rw), sy(48, rh), sx(243, rw), sy(245, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 549, 55, "GRADIENT / EFFECT")
+    e.draw_gradient_rect(sx(551, rw), sy(82, rh), sx(65, rw), sy(70, rh), BLUE, PURPLE)
+    e.draw_gradient_rect_h(sx(626, rw), sy(82, rh), sx(65, rw), sy(70, rh), GREEN, CYAN)
+    e.draw_radial_gradient(sx(739, rw), sy(117, rh), sx(38, rw), WHITE, RED)
+    e.draw_shadow_rect(sx(558, rw), sy(180, rh), sx(85, rw), sy(55, rh), sx(8, rw), sy(8, rh), sd(8, rw, dpi), 0xAA000000u32)
+    e.draw_rect_filled(sx(558, rw), sy(180, rh), sx(85, rw), sy(55, rh), BLUE)
+    e.draw_gradient_rect(sx(660, rw), sy(177, rh), sx(105, rw), sy(62, rh), CYAN, PURPLE)
+    e.draw_blur_rect(sx(680, rw), sy(192, rh), sx(65, rw), sy(32, rh), sd(5, rw, dpi))
+    e.draw_rect_blend(sx(558, rw), sy(252, rh), sx(65, rw), sy(25, rh), 0x887C3AEDu32)
+    e.draw_rect_blend_mode(sx(635, rw), sy(252, rh), sx(65, rw), sy(25, rh), 0xAA22C55Eu32, 1)
+
+    # Generated image operations and text backgrounds. draw_image/draw_image_blend
+    # take the source dimensions (4x4) as w/h — those stay unscaled; only the
+    # destination position scales. draw_image_scaled scales its dst_w/dst_h.
+    e.draw_rect_filled(sx(18, rw), sy(307, rh), sx(365, rw), sy(130, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 28, 315, "IMAGE / TEXT")
+    val image = checker_pixels()
+    e.draw_image(sx(30, rw), sy(345, rh), 4, 4, image)
+    e.draw_image_blend(sx(65, rw), sy(345, rh), 4, 4, image)
+    e.draw_image_scaled(sx(105, rw), sy(345, rh), sx(64, rw), sy(64, rh), 4, 4, image)
+    e.draw_image_transform(sx(185, rw), sy(345, rh), 4, 4, 256, 64, 0, 256, 0, 0, image)
+    e.draw_text(sx(235, rw), sy(350, rh), "glyph text", GREEN, sd(14, rw, dpi))
+    e.draw_text_bg(sx(235, rw), sy(380, rh), "text background", WHITE, BLUE, sd(14, rw, dpi))
+
+    # Clip is visibly confined to the cyan frame.
+    e.draw_rect_filled(sx(397, rw), sy(307, rh), sx(180, rw), sy(130, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 407, 315, "CLIP")
+    e.draw_rect(sx(414, rw), sy(346, rh), sx(142, rw), sy(70, rh), CYAN)
+    e.set_clip(sx(416, rw), sy(348, rh), sx(138, rw), sy(66, rh))
+    e.draw_circle_filled(sx(416, rw), sy(380, rh), sx(55, rw), RED)
+    e.draw_rect_filled(sx(480, rw), sy(340, rh), sx(100, rw), sy(85, rh), PURPLE)
+    e.clear_clip()
+
+    # Full-frame alpha mask confines this draw to the lower-right mask region.
+    e.draw_rect_filled(sx(591, rw), sy(307, rh), sx(191, rw), sy(130, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 601, 315, "MASK")
+    val mask = wm_showcase_mask(rw, rh)
+    e.set_mask(mask, rw, rh)
+    e.draw_gradient_rect_h(sx(600, rw), sy(350, rh), sx(180, rw), sy(80, rh), AMBER, RED)
+    e.clear_mask()
+
+    # Engine-to-engine composition. The child engine keeps its native 80x60
+    # size (its internal draws are child-local); only its placement scales.
+    var child = Engine2D.create_with_backend_fast(80, 60, "software")
+    child.clear(0x00000000u32)
+    child.draw_rounded_rect(5, 5, 70, 50, 10, BLUE)
+    child.draw_circle_filled(40, 30, 16, AMBER)
+    child.present()
+    e.draw_rect_filled(sx(18, rw), sy(452, rh), sx(570, rw), sy(125, rh), PANEL)
+    e = wm_label(e, rw, rh, dpi, 28, 460, "ENGINE COMPOSITION / OPACITY")
+    e.draw_engine(sx(38, rw), sy(495, rh), child)
+    e.draw_engine_opacity(sx(138, rw), sy(495, rh), child, 450)
+    child.shutdown()
+    e
+
+# Same SHOWCASE_PPM_SCALE contract as widget_showcase_gui.showcase_ppm_scale():
+# only 8/4/2 accepted, anything else = 1 (full size).
+fn wm_frame_scale() -> i32:
+    val raw = env_get("SHOWCASE_PPM_SCALE") ?? ""
+    if raw == "8":
+        return 8
+    if raw == "4":
+        return 4
+    if raw == "2":
+        return 2
+    1
+
+fn run_wm_client_graphics_2d() -> i64:
+    val size = resolve_showcase_dimensions()
+    val render_w = size.width
+    val render_h = size.height
+    val dpi = resolve_showcase_dpi()
+    print "[wm-graphics-2d-client] resolved_resolution={render_w}x{render_h} dpi={dpi}"
+
+    # Dry run: report the resolved size and exit before the (compiled-lane-gated)
+    # full render. Lets the resolver be verified at 4k/8k instantly.
+    if (env_get(SHOWCASE_DRY_RUN_ENV) ?? "") == "1":
+        print "[wm-graphics-2d-client] dry-run=1 resolution-resolved skipping-render"
+        return 0
+
+    val bridge_path = env_get(WM_BRIDGE_FILE_ENV) ?? ""
+    val frame_path = env_get(WM_FRAME_FILE_ENV) ?? ""
+    if bridge_path == "" or frame_path == "":
+        print "[wm-graphics-2d-client] error=missing-bridge-env"
+        return 2
+
+    # Bridge FIRST, frame second: the host's bridge wait must not sit behind
+    # the (interpreted, slow) first render. SHOWCASE_PPM_SCALE shrinks the
+    # rendered frame directly (8 => 480x270 from the 4k design) — the WM cell
+    # verifies composition, not native resolution.
+    val frame_scale = wm_frame_scale()
+    val frame_w = render_w / frame_scale
+    val frame_h = render_h / frame_scale
+    val pid = getpid()
+    val req = wm_graphics_2d_showcase_bridge_request_sized(pid, frame_path, frame_w + 8, frame_h + 32)
+    if not file_write(bridge_path, wm_fs_bridge_encode(req)):
+        print "[wm-graphics-2d-client] error=bridge-write-failed path={bridge_path}"
+        return 1
+
+    var engine = Engine2D.create_offscreen(frame_w, frame_h)
+    engine = wm_draw_showcase(engine, frame_w, frame_h, dpi)
+    engine.present()
+    # read_pixels_with_source() performs the real backend readback (the
+    # standalone showcase uses it); the bare read_pixels() returns a blank
+    # buffer here, producing an all-zero PPM frame.
+    val pixels = engine.read_pixels_with_source().pixels
+
+    if pixels.len() != frame_w * frame_h:
+        print "[wm-graphics-2d-client] error=render-failed pixels={pixels.len()}"
+        engine.shutdown()
+        return 1
+
+    val bytes = encode_ppm_p6(frame_w.to_u32(), frame_h.to_u32(), pixels)
+    if bytes.len() == 0 or not file_write_bytes(frame_path, bytes):
+        print "[wm-graphics-2d-client] error=frame-write-failed path={frame_path}"
+        engine.shutdown()
+        return 1
+
+    val seq_path = wm_graphics_2d_showcase_frame_seq_path(frame_path)
+    if not file_write(seq_path, "1"):
+        print "[wm-graphics-2d-client] error=seq-write-failed path={seq_path}"
+        engine.shutdown()
+        return 1
+
+    print "[wm-graphics-2d-client] source=graphics_2d_showcase_gui.spl pid={pid} bridge={bridge_path} frame={frame_path}"
+
+    if (env_get(WM_CLIENT_HOLD_ENV) ?? "") == "1":
+        while true:
+            thread_sleep(100)
+
+    engine.shutdown()
+    0
+
+fn main() -> i64:
+    if wm_app_mode_is_client(env_get(WM_APP_MODE_ENV) ?? ""):
+        return run_wm_client_graphics_2d()
+    run_graphics_2d_showcase(true, "software")

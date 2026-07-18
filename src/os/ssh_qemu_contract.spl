@@ -1,0 +1,126 @@
+# Host-side QEMU contract for production SSHD live scenarios.
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn run_ssh_probe(lane: text, cmd_parts: [text], timeout_ms: u64) -> (text, text, i32):
+    val serial_path = "build/os/{lane}-ssh-live.serial.log"
+    val good_path = "build/os/{lane}-ssh-live.openssh-good.txt"
+    val bad_path = "build/os/{lane}-ssh-live.openssh-bad-auth.txt"
+    val session_smf_path = "build/os/{lane}-ssh-live.session-smf.txt"
+    val session_exec_path = "build/os/{lane}-ssh-live.session-exec.txt"
+    val askpass_ok = "build/os/{lane}-ssh-live.askpass-ok.sh"
+    val askpass_bad = "build/os/{lane}-ssh-live.askpass-bad.sh"
+    val known_hosts = "build/os/{lane}-ssh-live.known-hosts"
+    val ssh_timeout_seconds = if lane == "rv64": "180" else: "30"
+    val ssh_opts =
+        "-F /dev/null " +
+        "-p 2222 " +
+        "-o StrictHostKeyChecking=no " +
+        "-o UserKnownHostsFile=" + known_hosts + " " +
+        "-o GlobalKnownHostsFile=/dev/null " +
+        "-o ConnectTimeout=10 " +
+        "-o PreferredAuthentications=password " +
+        "-o PasswordAuthentication=yes " +
+        "-o PubkeyAuthentication=no " +
+        "-o HostKeyAlgorithms=ssh-ed25519,rsa-sha2-256,rsa-sha2-512 " +
+        "-o KbdInteractiveAuthentication=no " +
+        "-o NumberOfPasswordPrompts=1 " +
+        "-o BatchMode=no " +
+        "-o LogLevel=DEBUG3 "
+    val shell_cmd =
+        "rm -f \"" + serial_path + "\" \"" + good_path + "\" \"" + bad_path + "\" \"" + session_smf_path + "\" \"" + session_exec_path + "\" \"" + askpass_ok + "\" \"" + askpass_bad + "\" \"" + known_hosts + "\"; " +
+        "printf '#!/bin/sh\\necho simpleos\\n' > \"" + askpass_ok + "\"; chmod +x \"" + askpass_ok + "\"; " +
+        "printf '#!/bin/sh\\necho wrongpass\\n' > \"" + askpass_bad + "\"; chmod +x \"" + askpass_bad + "\"; " +
+        "setsid_cmd=''; if command -v setsid >/dev/null 2>&1; then setsid_cmd='setsid'; fi; " +
+        cmd_parts.join(" ") + " > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
+        "echo '[ssh-host] qemu-pid='\"$qpid\"; " +
+        "ready=0; for i in $(seq 1 160); do " +
+        "if grep -a -q '\\[sshd\\] accept loop start' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; " +
+        "echo '[ssh-host] accept-ready='\"$ready\"; " +
+        "grep -a -E '\\[sshd\\] (SSH daemon listening|accept loop start|accept wait ticks|accepted client)' \"" + serial_path + "\" 2>/dev/null | tail -20 || true; " +
+        "if [ \"$ready\" = 1 ]; then sleep 1; fi; " +
+        "good_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "echo '[ssh-host] openssh-good-start'; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 true > \"" + good_path + "\" 2>&1; " +
+        "good_exit=$?; echo '[ssh-host] openssh-good-exit='\"$good_exit\"; fi; " +
+        "session_smf_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "echo '[ssh-host] session-smf-start'; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 \"simple.smf --version\" > \"" + session_smf_path + "\" 2>&1; " +
+        "session_smf_exit=$?; echo '[ssh-host] session-smf-exit='\"$session_smf_exit\"; fi; " +
+        "session_exec_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "echo '[ssh-host] session-exec-start'; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 \"simple --check\" > \"" + session_exec_path + "\" 2>&1; " +
+        "session_exec_exit=$?; echo '[ssh-host] session-exec-exit='\"$session_exec_exit\"; fi; " +
+        "bad_exit=0; if [ \"$ready\" = 1 ]; then " +
+        "echo '[ssh-host] openssh-bad-auth-start'; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_bad + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 true > \"" + bad_path + "\" 2>&1; " +
+        "bad_exit=$?; echo '[ssh-host] openssh-bad-exit='\"$bad_exit\"; fi; " +
+        "good_seen=0; bad_seen=0; session_smf_seen=0; session_exec_seen=0; if [ \"$ready\" = 1 ]; then " +
+        "for i in $(seq 1 80); do " +
+        "if grep -a -q '\\[sshd-session\\] auth ok user=root method=password' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[sshd-session\\] exec command=true' \"" + serial_path + "\" 2>/dev/null; then good_seen=1; fi; " +
+        "if grep -a -q '\\[sshd-session\\] auth password fail branch' \"" + serial_path + "\" 2>/dev/null; then bad_seen=1; fi; " +
+        "if grep -a -q 'SESSION OK shell simple.smf path=/usr/bin/simple.smf alias=/SYS/APPS/SIMPLSTC.SMF' \"" + session_smf_path + "\" 2>/dev/null; then session_smf_seen=1; fi; " +
+        "if grep -a -q 'SESSION OK shell simple path=/usr/bin/simple alias=/SYS/APPS/SIMPLSTC.SMF' \"" + session_exec_path + "\" 2>/dev/null; then session_exec_seen=1; fi; " +
+        "if [ \"$good_seen\" = 1 ] && [ \"$bad_seen\" = 1 ] && [ \"$session_smf_seen\" = 1 ] && [ \"$session_exec_seen\" = 1 ]; then break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; fi; " +
+        "echo '[ssh-host] good_seen='\"$good_seen\"' bad_seen='\"$bad_seen\"' session_smf_seen='\"$session_smf_seen\"' session_exec_seen='\"$session_exec_seen\"; " +
+        "kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; " +
+        "cat \"" + serial_path + "\"; echo '[ssh-host] openssh-good:'; cat \"" + good_path + "\" 2>/dev/null || true; echo '[ssh-host] session-smf:'; cat \"" + session_smf_path + "\" 2>/dev/null || true; echo '[ssh-host] session-exec:'; cat \"" + session_exec_path + "\" 2>/dev/null || true; echo '[ssh-host] openssh-bad-auth:'; cat \"" + bad_path + "\" 2>/dev/null || true; " +
+        "if [ \"$ready\" = 1 ] && [ \"$good_exit\" = 0 ] && [ \"$session_smf_exit\" = 0 ] && [ \"$session_exec_exit\" = 0 ] && [ \"$bad_exit\" != 0 ] && [ \"$good_seen\" = 1 ] && [ \"$bad_seen\" = 1 ] && [ \"$session_smf_seen\" = 1 ] && [ \"$session_exec_seen\" = 1 ]; then echo 'TEST PASSED'; else echo 'TEST FAILED'; exit 2; fi"
+    rt_process_run_timeout("/bin/bash", ["-c", shell_cmd], timeout_ms as i64)
+
+fn run_rv64_ssh_single_connection_probe(cmd_parts: [text], timeout_ms: u64) -> (text, text, i32):
+    val lane = "rv64"
+    val serial_path = "build/os/{lane}-ssh-live.serial.log"
+    val good_path = "build/os/{lane}-ssh-live.openssh-good.txt"
+    val askpass_ok = "build/os/{lane}-ssh-live.askpass-ok.sh"
+    val known_hosts = "build/os/{lane}-ssh-live.known-hosts"
+    val ssh_opts =
+        "-F /dev/null " +
+        "-p 2222 " +
+        "-o StrictHostKeyChecking=no " +
+        "-o UserKnownHostsFile=" + known_hosts + " " +
+        "-o GlobalKnownHostsFile=/dev/null " +
+        "-o ConnectTimeout=10 " +
+        "-o PreferredAuthentications=password " +
+        "-o PasswordAuthentication=yes " +
+        "-o PubkeyAuthentication=no " +
+        "-o HostKeyAlgorithms=ssh-ed25519,rsa-sha2-256,rsa-sha2-512 " +
+        "-o KbdInteractiveAuthentication=no " +
+        "-o NumberOfPasswordPrompts=1 " +
+        "-o BatchMode=no " +
+        "-o LogLevel=DEBUG3 "
+    val shell_cmd =
+        "rm -f \"" + serial_path + "\" \"" + good_path + "\" \"" + askpass_ok + "\" \"" + known_hosts + "\"; " +
+        "printf '#!/bin/sh\\necho simpleos\\n' > \"" + askpass_ok + "\"; chmod +x \"" + askpass_ok + "\"; " +
+        "setsid_cmd=''; if command -v setsid >/dev/null 2>&1; then setsid_cmd='setsid'; fi; " +
+        cmd_parts.join(" ") + " > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
+        "echo '[ssh-host] qemu-pid='\"$qpid\"; " +
+        "ready=0; for i in $(seq 1 160); do " +
+        "if grep -a -q '\\[sshd\\] accept loop start' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; " +
+        "echo '[ssh-host] accept-ready='\"$ready\"; " +
+        "grep -a -E '\\[sshd\\] (SSH daemon listening|accept loop start|accepted client)' \"" + serial_path + "\" 2>/dev/null | tail -20 || true; " +
+        "if [ \"$ready\" = 1 ]; then sleep 1; fi; " +
+        "good_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "echo '[ssh-host] rv64-combined-start'; " +
+        "timeout 180 env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 \"simple.smf --version; simple --check\" > \"" + good_path + "\" 2>&1; " +
+        "good_exit=$?; echo '[ssh-host] rv64-combined-exit='\"$good_exit\"; fi; " +
+        "good_seen=0; session_smf_seen=0; session_exec_seen=0; if [ \"$ready\" = 1 ]; then " +
+        "if grep -a -q '\\[sshd-session\\] auth ok user=root method=password' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[sshd-session\\] exec command=rv64-combined' \"" + serial_path + "\" 2>/dev/null; then good_seen=1; fi; " +
+        "if grep -a -q 'SESSION OK shell simple.smf path=/usr/bin/simple.smf alias=/SYS/APPS/SIMPLSTC.SMF' \"" + good_path + "\" 2>/dev/null; then session_smf_seen=1; fi; " +
+        "if grep -a -q 'SESSION OK shell simple path=/usr/bin/simple alias=/SYS/APPS/SIMPLSTC.SMF' \"" + good_path + "\" 2>/dev/null; then session_exec_seen=1; fi; fi; " +
+        "echo '[ssh-host] good_seen='\"$good_seen\"' session_smf_seen='\"$session_smf_seen\"' session_exec_seen='\"$session_exec_seen\"; " +
+        "kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; " +
+        "cat \"" + serial_path + "\"; echo '[ssh-host] rv64-combined:'; cat \"" + good_path + "\" 2>/dev/null || true; " +
+        "if [ \"$ready\" = 1 ] && [ \"$good_exit\" = 0 ] && [ \"$good_seen\" = 1 ] && [ \"$session_smf_seen\" = 1 ] && [ \"$session_exec_seen\" = 1 ]; then echo 'TEST PASSED'; else echo 'TEST FAILED'; exit 2; fi"
+    rt_process_run_timeout("/bin/bash", ["-c", shell_cmd], timeout_ms as i64)
+
+pub fn run_x64_ssh_probe(cmd_parts: [text], timeout_ms: u64) -> (text, text, i32):
+    run_ssh_probe("x64", cmd_parts, timeout_ms)
+
+pub fn run_rv64_ssh_probe(cmd_parts: [text], timeout_ms: u64) -> (text, text, i32):
+    run_rv64_ssh_single_connection_probe(cmd_parts, timeout_ms)

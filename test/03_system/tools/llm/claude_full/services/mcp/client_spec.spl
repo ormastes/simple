@@ -1,0 +1,98 @@
+"""
+# Claude Full MCP Client
+
+## Overview
+
+Checks deterministic parity for the large Claude CLI MCP client surface:
+typed errors, auth cache, timeout/config helpers, connection classification,
+tool inclusion, result transforms, and tool-call error mapping.
+
+**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Plan:** N/A - target selected from strict checker output.
+**Design:** N/A - source mirror for `tmp/claude/claude-code-main/src/services/mcp/client.ts`.
+**Research:** N/A - upstream TypeScript file is the source reference.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.services.mcp.client.*
+
+describe "Claude full MCP client":
+    it "should expose MCP client error classes":
+        step("Create auth, session, and tool-call errors")
+        val auth = McpAuthError.new("srv", "needs auth")
+        val expired = McpSessionExpiredError.new("srv")
+        val tool = McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS.new("bad", "safe bad", "meta")
+        expect(auth.name).to_equal("McpAuthError")
+        expect(expired.message).to_contain("session expired")
+        expect(tool.name).to_equal("McpToolCallError")
+
+    it "should detect expired MCP sessions":
+        step("Check HTTP and JSON-RPC session expiration")
+        expect(isMcpSessionExpiredError(404, -32001, "Session not found")).to_equal(true)
+        expect(isMcpSessionExpiredError(500, 0, "oops")).to_equal(false)
+
+    it "should manage auth cache entries":
+        step("Set, read, and clear keyed auth cache")
+        val cache = McpAuthCacheData.new()
+        val updated = setMcpAuthCacheEntry(cache, "srv", true)
+        expect(isMcpAuthCached(updated, "srv")).to_equal(true)
+        expect(clearMcpAuthCache(updated).keys.len()).to_equal(0)
+
+    it "should compute timeout and batch defaults":
+        step("Read defaults and overrides")
+        expect(getMcpToolTimeoutMs("")).to_equal(120000)
+        expect(getMcpToolTimeoutMs("500")).to_equal(500)
+        expect(getConnectionTimeoutMs("")).to_equal(30000)
+        expect(getMcpServerConnectionBatchSize("")).to_equal(5)
+        expect(getRemoteMcpServerConnectionBatchSize("")).to_equal(2)
+
+    it "should classify servers and included tools":
+        step("Check local server and include tool allow-list")
+        val config = McpServerConfig.new("srv", "stdio")
+        config.command = "node"
+        config.includeTools = ["read"]
+        expect(isLocalMcpServer(config)).to_equal(true)
+        expect(isIncludedMcpTool(config, "read")).to_equal(true)
+        expect(isIncludedMcpTool(config, "write")).to_equal(false)
+        expect(getServerCacheKey(config)).to_contain("srv|stdio")
+
+    it "should redact websocket headers for logging":
+        step("Redact authorization header")
+        val headers = wsHeadersForLogging(["Authorization=Bearer secret", "x=a"])
+        expect(headers[0]).to_equal("authorization=[REDACTED]")
+        expect(headers[1]).to_equal("x=a")
+
+    it "should compare configs and clear server cache":
+        step("Compare stable fields")
+        val a = McpServerConfig.new("srv", "http")
+        a.url = "https://a"
+        val b = McpServerConfig.new("srv", "http")
+        b.url = "https://a"
+        expect(areMcpConfigsEqual(a, b)).to_equal(true)
+        val remaining = clearServerCache(["srv|1", "other|1"], "srv")
+        expect(remaining.len()).to_equal(1)
+        expect(remaining[0]).to_equal("other|1")
+
+    it "should transform MCP result content":
+        step("Convert blob and detect image schema")
+        val textBlock = MCPContentBlock.textBlock("hello")
+        val imageBlock = MCPContentBlock.image("abc", "image/png")
+        val result = transformMCPResult([textBlock, imageBlock], false)
+        expect(result.resultType).to_equal("image")
+        expect(contentContainsImages(result.content)).to_equal(true)
+        val blob = MCPContentBlock(typeName: "blob", text: "", mimeType: "application/octet-stream", data: "xx")
+        expect(persistBlobToTextBlock(blob).text).to_equal("[binary blob saved]")
+
+    it "should map tool calls to typed outcomes":
+        step("Call tool status helpers")
+        expect(callMCPTool("srv", "read", "needs-auth")).to_equal("McpAuthError")
+        expect(callMCPTool("srv", "read", "expired")).to_equal("McpSessionExpiredError")
+        val processed = processMCPResult("srv", "read", [MCPContentBlock.textBlock("bad")], true, "meta")
+        expect(processed.result.summary).to_equal("bad")
+
+    it "should expose source-backed helpers":
+        step("Pin helper surface")
+        expect(mcpBaseUrlAnalytics("https://mcp.example/path")).to_equal("mcp.example")
+        expect(extractToolUseId("x tool_use_id=abc")).to_equal("abc")
+        expect(setupSdkMcpClients([McpServerConfig.new("a", "http")])).to_equal(1)
+        expect(mcpClientSourceLinesModeled()).to_equal(3348)

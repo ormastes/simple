@@ -1,0 +1,161 @@
+"""
+# Claude Full First Party Event Logging Exporter
+
+## Overview
+
+This SSpec pins the Claude CLI `FirstPartyEventLoggingExporter` parity slice in
+Simple. It checks that the exporter keeps the same public telemetry contract:
+only OpenTelemetry event-scope logs are transformed, GrowthBook experiment logs
+use their own envelope, internal Claude Code events retain event names and safe
+metadata, failed POSTs are queued, auth is skipped or retried according to the
+source rules, queued failures are drained when the endpoint becomes healthy, and
+shutdown stops further exports.
+
+The Simple implementation is deterministic and in-memory. Network calls are
+represented by a planned `postPlan`, failed JSONL storage is represented by the
+`queued` and `previousFiles` arrays, and scheduled timers are represented by
+`scheduledDelays`. That keeps the spec fast while still checking the branch
+logic that matters for source parity.
+
+## Requirements
+
+**Requirements:** N/A - parity lane for upstream Claude CLI source surface.
+**Plan:** N/A - targeted parity slice selected by strict checker output.
+**Design:** N/A - implementation mirrors
+`tmp/claude/claude-code-main/src/services/analytics/firstPartyEventLoggingExporter.ts`.
+**Research:** N/A - local upstream TypeScript source is the controlling
+reference.
+
+## Syntax
+
+Each scenario uses modern SSpec `describe`, `it`, `step`, and focused
+`expect(...).to_equal(...)` / `to_contain(...)` assertions. The spec avoids
+placeholder passes and uses only deterministic in-memory fixtures.
+
+## Examples
+
+Run this focused spec with:
+
+`bin/simple test test/03_system/tools/llm/claude_full/services/analytics/firstPartyEventLoggingExporter_spec.spl --mode=interpreter`
+
+Regenerate the manual with:
+
+`bin/simple spipe-docgen test/03_system/tools/llm/claude_full/services/analytics/firstPartyEventLoggingExporter_spec.spl`
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.services.analytics.firstPartyEventLoggingExporter.*
+
+describe "Claude full FirstPartyEventLoggingExporter":
+    it "should build default endpoint and transform only event scope logs":
+        step("Create mixed scope logs")
+        val exporter = firstPartyExporterDefault()
+        val logs = [
+            FirstPartyReadableLogRecord.event("tool_call", "evt-1"),
+            FirstPartyReadableLogRecord.otherScope("ignored"),
+            FirstPartyReadableLogRecord.growthbook("gb-1", "experiment-a"),
+        ]
+        val events = exporter.transformLogsToEvents(logs)
+        expect(exporter.endpoint).to_equal("https://api.anthropic.com/api/event_logging/batch")
+        expect(events.len()).to_equal(2)
+        expect(events[0].eventType).to_equal("ClaudeCodeInternalEvent")
+        expect(events[1].eventType).to_equal("GrowthbookExperimentEvent")
+
+    it "should emit transform error when core metadata is missing":
+        step("Transform a log without core metadata")
+        val exporter = firstPartyExporterDefault()
+        var log = FirstPartyReadableLogRecord.event("", "evt-2")
+        log.body = "body-name"
+        log.coreMetadata = false
+        val events = exporter.transformLogsToEvents([log])
+        expect(events[0].eventName).to_equal("body-name")
+        expect(events[0].eventData).to_contain("transform_error")
+
+    it "should strip proto metadata from additional metadata":
+        step("Transform a log with hoisted proto keys")
+        val exporter = firstPartyExporterDefault()
+        var log = FirstPartyReadableLogRecord.event("startup", "evt-3")
+        log.userEmail = "a@example.com"
+        log.protoSkillName = "skill-a"
+        log.additionalMetadata = "safe=1,_PROTO_secret=drop"
+        val events = exporter.transformLogsToEvents([log])
+        expect(events[0].eventData).to_contain("skill:skill-a")
+        expect(events[0].eventData).to_contain("additional:safe=1,")
+
+    it "should chunk posts and short circuit remaining batches after failure":
+        step("Export three events with max batch size two and a failing first post")
+        val options = FirstPartyExporterOptions.new()
+        options.maxBatchSize = 2
+        val exporter = FirstPartyEventLoggingExporter.new(options)
+        exporter.postPlan = [FirstPartyPostResult.fail(503, "503 Service Unavailable")]
+        val result = exporter.export([
+            FirstPartyReadableLogRecord.event("a", "1"),
+            FirstPartyReadableLogRecord.event("b", "2"),
+            FirstPartyReadableLogRecord.event("c", "3"),
+        ])
+        expect(result.code).to_equal("FAILED")
+        expect(result.error).to_contain("3 events")
+        expect(exporter.posts.len()).to_equal(1)
+        expect(exporter.getQueuedEventCount()).to_equal(3)
+        expect(exporter.scheduledDelays[0]).to_equal(500)
+
+    it "should retry authenticated 401 without auth":
+        step("Plan a 401 followed by a successful unauthenticated POST")
+        val exporter = firstPartyExporterDefault()
+        exporter.postPlan = [FirstPartyPostResult.fail(401, "401 Unauthorized"), FirstPartyPostResult.ok(200)]
+        val result = exporter.export([FirstPartyReadableLogRecord.event("auth", "4")])
+        expect(result.code).to_equal("SUCCESS")
+        expect(exporter.posts.len()).to_equal(2)
+        expect(exporter.posts[0]).to_contain("|auth")
+        expect(exporter.posts[1]).to_contain("|noauth")
+
+    it "should skip auth when trust is missing or oauth is expired":
+        step("Compare trust and subscriber skip-auth gates")
+        val trustOptions = FirstPartyExporterOptions.new()
+        trustOptions.trusted = false
+        val trustExporter = FirstPartyEventLoggingExporter.new(trustOptions)
+        expect(trustExporter.shouldUseAuth()).to_equal(false)
+        val oauthOptions = FirstPartyExporterOptions.new()
+        oauthOptions.subscriber = true
+        oauthOptions.oauthExpired = true
+        val oauthExporter = FirstPartyEventLoggingExporter.new(oauthOptions)
+        expect(oauthExporter.shouldUseAuth()).to_equal(false)
+
+    it "should drain queued failures after a healthy export":
+        step("Seed failed queue and make the new export succeed")
+        val exporter = firstPartyExporterDefault()
+        exporter.queued = [FirstPartyEventLoggingEvent.new("ClaudeCodeInternalEvent", "old", "old-1", "old")]
+        val result = exporter.export([FirstPartyReadableLogRecord.event("new", "5")])
+        expect(result.code).to_equal("SUCCESS")
+        expect(exporter.getQueuedEventCount()).to_equal(0)
+        expect(exporter.attempts).to_equal(0)
+
+    it "should drop queued events after max attempts and cancel on shutdown":
+        step("Retry with max attempts already reached")
+        val exporter = firstPartyExporterDefault()
+        exporter.queued = [FirstPartyEventLoggingEvent.new("ClaudeCodeInternalEvent", "old", "old-2", "old")]
+        exporter.attempts = 8
+        exporter.retryFailedEvents()
+        expect(exporter.getQueuedEventCount()).to_equal(0)
+        exporter.cancelBackoff = true
+        exporter.shutdown()
+        expect(exporter.shutdownFlag).to_equal(true)
+        expect(exporter.cancelBackoff).to_equal(false)
+        val result = exporter.export([FirstPartyReadableLogRecord.event("after", "6")])
+        expect(result.code).to_equal("FAILED")
+
+    it "should retry previous batch files and rewrite only failures":
+        step("Load two previous synthetic files")
+        val exporter = firstPartyExporterDefault()
+        exporter.previousFiles = [
+            [FirstPartyEventLoggingEvent.new("ClaudeCodeInternalEvent", "a", "1", "a")],
+            [],
+        ]
+        exporter.postPlan = [FirstPartyPostResult.fail(503, "down")]
+        exporter.retryPreviousBatches()
+        expect(exporter.previousFiles[0].len()).to_equal(1)
+        expect(exporter.deletedFiles).to_equal(1)
+
+    it "should expose source-backed constants":
+        step("Pin modeled source surface")
+        expect(firstPartyExporterSourceLinesModeled()).to_equal(720)

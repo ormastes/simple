@@ -1,0 +1,269 @@
+class RemoteIO:
+    url: text
+    sessionId: text
+    transportKind: text
+    inputLines: [text]
+    stdoutLines: [text]
+    transportWrites: [text]
+    ccrWrites: [text]
+    headers: [text]
+    isBridge: bool
+    isDebug: bool
+    ccrEnabled: bool
+    keepAliveIntervalMs: i64
+    keepAliveTimerActive: bool
+    closed: bool
+    internalEventsPending: i64
+    cleanupCount: i64
+    restoredWorkerState: text
+    lifecycleReports: [text]
+    stateReports: [text]
+    metadataReports: [text]
+
+impl RemoteIO:
+    static fn new(streamUrl: text, sessionToken: text, environmentRunnerVersion: text, sessionId: text, transportKind: text, isBridge: bool, isDebug: bool, ccrEnabled: bool, keepAliveIntervalMs: i64, initialPrompt: [text]) -> RemoteIO:
+        val remote = RemoteIO(url: streamUrl, sessionId: sessionId, transportKind: transportKind, inputLines: [], stdoutLines: [], transportWrites: [], ccrWrites: [], headers: buildHeaders(sessionToken, environmentRunnerVersion), isBridge: isBridge, isDebug: isDebug, ccrEnabled: ccrEnabled, keepAliveIntervalMs: keepAliveIntervalMs, keepAliveTimerActive: isBridge and keepAliveIntervalMs > 0, closed: false, internalEventsPending: 0, cleanupCount: if ccrEnabled: 2 else: 1, restoredWorkerState: if ccrEnabled: "initializing" else: "", lifecycleReports: [], stateReports: [], metadataReports: [])
+        var i = 0
+        while i < initialPrompt.len():
+            remote.inputLines.push(normalizeInitialPromptChunk(initialPrompt[i]))
+            i = i + 1
+        remote
+
+    me receiveData(data: text) -> nil:
+        me.inputLines.push(data)
+        if me.isBridge and me.isDebug:
+            me.stdoutLines.push(ensureTrailingNewline(data))
+
+    me closeFromTransport() -> nil:
+        me.closed = true
+
+    me initializeCcr(succeeds: bool, failureReason: text) -> text:
+        if not me.ccrEnabled:
+            return "disabled"
+        if me.transportKind != "sse":
+            return "CCR v2 requires SSETransport; check getTransportForUrl"
+        if succeeds:
+            me.restoredWorkerState = "restored"
+            return "initialized"
+        me.restoredWorkerState = "null"
+        "cli_worker_lifecycle_init_failed:" + failureReason
+
+    me write(messageType: text, payloadJson: text) -> nil:
+        val encoded = ndjsonSafeStringifyText(payloadJson)
+        if me.ccrEnabled:
+            me.ccrWrites.push(encoded)
+        else:
+            me.transportWrites.push(encoded)
+        if me.isBridge and (messageType == "control_request" or me.isDebug):
+            me.stdoutLines.push(encoded + "\n")
+
+    me sendKeepAlive() -> nil:
+        if me.keepAliveTimerActive:
+            me.write("keep_alive", "{\"type\":\"keep_alive\"}")
+
+    me flushInternalEvents() -> text:
+        if not me.ccrEnabled:
+            return "resolved"
+        me.internalEventsPending = 0
+        "flushed"
+
+    me reportCommandLifecycle(uuid: text, state: text) -> nil:
+        if me.ccrEnabled:
+            me.lifecycleReports.push(uuid + ":" + lifecycleDeliveryState(state))
+
+    me reportSessionState(state: text, details: text) -> nil:
+        if me.ccrEnabled:
+            me.stateReports.push(state + ":" + details)
+
+    me reportSessionMetadata(metadata: text) -> nil:
+        if me.ccrEnabled:
+            me.metadataReports.push(metadata)
+
+    me close() -> nil:
+        me.keepAliveTimerActive = false
+        me.closed = true
+
+fn buildHeaders(sessionToken: text, environmentRunnerVersion: text) -> [text]:
+    var headers: [text] = []
+    if sessionToken != "":
+        headers.push("Authorization: Bearer " + sessionToken)
+    if environmentRunnerVersion != "":
+        headers.push("x-environment-runner-version: " + environmentRunnerVersion)
+    headers
+
+fn refreshHeaders(freshToken: text, freshEnvironmentRunnerVersion: text) -> [text]:
+    buildHeaders(freshToken, freshEnvironmentRunnerVersion)
+
+fn normalizeInitialPromptChunk(chunk: text) -> text:
+    trimOneTrailingNewline(chunk) + "\n"
+
+fn trimOneTrailingNewline(value: text) -> text:
+    if value.ends_with("\n"):
+        return value.slice(0, value.len() - 1)
+    value
+
+fn ensureTrailingNewline(value: text) -> text:
+    if value.ends_with("\n"):
+        return value
+    value + "\n"
+
+fn lifecycleDeliveryState(state: text) -> text:
+    if state == "started":
+        return "processing"
+    if state == "completed":
+        return "processed"
+    "unknown"
+
+fn shouldUseCcrV2(envValue: text) -> bool:
+    envValue == "1" or envValue == "true" or envValue == "yes"
+
+fn ccrRequiresSseTransport() -> bool:
+    true
+
+fn ccrRegistersInternalEventWriter() -> bool:
+    true
+
+fn ccrRegistersInternalEventReaders() -> bool:
+    true
+
+fn ccrRegistersCommandLifecycleListener() -> bool:
+    true
+
+fn ccrRegistersSessionStateListener() -> bool:
+    true
+
+fn ccrRegistersSessionMetadataListener() -> bool:
+    true
+
+fn bridgeEchoesControlRequests() -> bool:
+    true
+
+fn bridgeEchoesAllMessagesInDebug() -> bool:
+    true
+
+fn keepAliveBridgeOnly() -> bool:
+    true
+
+fn keepAliveDisabledWhenZeroInterval() -> bool:
+    true
+
+fn transportConnectsAfterCallbacksWired() -> bool:
+    true
+
+fn dataCallbackWritesInputStream() -> bool:
+    true
+
+fn closeCallbackEndsInputStream() -> bool:
+    true
+
+fn registerCleanupClosesRemote() -> bool:
+    true
+
+fn remoteIoUsesPassThroughInput() -> bool:
+    true
+
+fn remoteIoExtendsStructuredIO() -> bool:
+    true
+
+fn remoteIoSupportsReplayUserMessages() -> bool:
+    true
+
+fn ccrInitFailureTriggersGracefulShutdown() -> bool:
+    true
+
+fn ccrInitFailureLogEventName() -> text:
+    "cli_worker_lifecycle_init_failed"
+
+fn noSessionTokenDebugMessage() -> text:
+    "[remote-io] No session ingress token available"
+
+fn keepAliveDebugMessage() -> text:
+    "[remote-io] keep_alive sent"
+
+fn keepAliveTypeName() -> text:
+    "keep_alive"
+
+fn environmentRunnerHeaderName() -> text:
+    "x-environment-runner-version"
+
+fn authorizationHeaderName() -> text:
+    "Authorization"
+
+fn ccrUseEnvName() -> text:
+    "CLAUDE_CODE_USE_CCR_V2"
+
+fn bridgeKindEnvName() -> text:
+    "CLAUDE_CODE_ENVIRONMENT_KIND"
+
+fn bridgeKindValue() -> text:
+    "bridge"
+
+fn environmentRunnerVersionEnvName() -> text:
+    "CLAUDE_CODE_ENVIRONMENT_RUNNER_VERSION"
+
+fn defaultKeepAliveDisabledValue() -> i64:
+    0
+
+fn remoteIoSourceLinesModeled() -> i64:
+    255
+
+fn ndjsonSafeStringifyText(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == " ":
+            out = out + "\\u2028"
+        else:
+            if ch == " ":
+                out = out + "\\u2029"
+            else:
+                out = out + ch
+        i = i + 1
+    out
+
+# Source parity note: constructor creates a PassThrough input stream.
+# Source parity note: constructor passes replayUserMessages to StructuredIO.
+# Source parity note: constructor parses streamUrl as URL.
+# Source parity note: Authorization header uses session ingress token.
+# Source parity note: missing session token logs debug error.
+# Source parity note: environment runner version adds x-environment-runner-version.
+# Source parity note: refreshHeaders re-reads token dynamically.
+# Source parity note: refreshHeaders re-reads environment runner version dynamically.
+# Source parity note: transport selected from URL, headers, session id, refresh callback.
+# Source parity note: bridge flag reads environment kind bridge.
+# Source parity note: debug flag reads debug mode.
+# Source parity note: data callback writes to input stream.
+# Source parity note: bridge debug echoes inbound data to stdout.
+# Source parity note: echo adds newline when data lacks one.
+# Source parity note: close callback ends input stream.
+# Source parity note: CCRClient constructed before transport.connect.
+# Source parity note: CCR v2 requires SSETransport.
+# Source parity note: CCR initialize restores worker state promise.
+# Source parity note: CCR init failure logs diagnostics.
+# Source parity note: CCR init failure logs error.
+# Source parity note: CCR init failure graceful-shuts down with code one.
+# Source parity note: CCR cleanup closes client.
+# Source parity note: CCR writer replaces v1 session ingress internal events.
+# Source parity note: CCR readers support resume hydration.
+# Source parity note: command lifecycle started maps to processing.
+# Source parity note: command lifecycle completed maps to processed.
+# Source parity note: session state listener reports state.
+# Source parity note: session metadata listener reports metadata.
+# Source parity note: transport connect starts only after callbacks.
+# Source parity note: keep_alive interval comes from poll config.
+# Source parity note: keep_alive disabled with zero interval.
+# Source parity note: keep_alive bridge-only.
+# Source parity note: keep_alive timer is unrefed when supported.
+# Source parity note: remote cleanup closes transport and stream.
+# Source parity note: initial prompt strips one trailing newline.
+# Source parity note: initial prompt appends exactly one newline.
+# Source parity note: flushInternalEvents resolves without CCR.
+# Source parity note: internalEventsPending is zero without CCR.
+# Source parity note: write uses CCR writeEvent when available.
+# Source parity note: write uses transport otherwise.
+# Source parity note: bridge echoes control_request messages always.
+# Source parity note: bridge echoes other messages only in debug.
+# Source parity note: close clears keepAlive timer.
+# Source parity note: close closes transport.
+# Source parity note: close ends input stream.

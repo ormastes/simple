@@ -1,0 +1,145 @@
+# SimpleOS libc — pure-Simple string copy/concat functions
+#
+# Value-returning copy and concatenation functions for exact-length [u8] buffers.
+# No implicit NUL terminators; functions return fresh arrays (value semantics).
+# Replaces musl-style C implementations (strcpy, strncpy, strcat, strncat, strdup, strndup, strnlen).
+
+fn libc_strcpy(src: [u8]) -> [u8]:
+    """Return a fresh copy of src bytes."""
+    var out: [u8] = []
+    var i = 0
+    val n = src.len()
+    while i < n:
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn libc_strncpy(src: [u8], n: i64) -> [u8]:
+    """Return first min(len(src), n) bytes of src, padded with zeros to length n.
+    Negative n is clamped to 0."""
+    val len_src = src.len()
+    val n_clamped = if n < 0: 0 else: n
+    var out: [u8] = []
+    var i = 0
+    while i < n_clamped:
+        if i < len_src:
+            out.push(src[i])
+        else:
+            out.push(0)
+        i = i + 1
+    out
+
+fn libc_strcat(a: [u8], b: [u8]) -> [u8]:
+    """Return a new array with a's bytes followed by b's bytes."""
+    var out: [u8] = []
+    var i = 0
+    val len_a = a.len()
+    val len_b = b.len()
+    while i < len_a:
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < len_b:
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn libc_strncat(a: [u8], b: [u8], n: i64) -> [u8]:
+    """Return a new array with a's bytes followed by first min(len(b), n) bytes of b.
+    Negative n is clamped to 0."""
+    val len_a = a.len()
+    val len_b = b.len()
+    val n_clamped = if n < 0: 0 else: n
+    val n_to_copy = if n_clamped < len_b: n_clamped else: len_b
+    var out: [u8] = []
+    var i = 0
+    while i < len_a:
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < n_to_copy:
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn libc_strdup(s: [u8]) -> [u8]:
+    """Return a fresh copy of s (identical to strcpy, exists for C API parity)."""
+    var out: [u8] = []
+    var i = 0
+    val n = s.len()
+    while i < n:
+        out.push(s[i])
+        i = i + 1
+    out
+
+fn libc_strndup(s: [u8], n: i64) -> [u8]:
+    """Return first min(len(s), n) bytes of s (no padding).
+    Negative n is clamped to 0."""
+    val len_s = s.len()
+    val n_clamped = if n < 0: 0 else: n
+    val n_to_copy = if n_clamped < len_s: n_clamped else: len_s
+    var out: [u8] = []
+    var i = 0
+    while i < n_to_copy:
+        out.push(s[i])
+        i = i + 1
+    out
+
+fn libc_strnlen(s: [u8], maxlen: i64) -> i64:
+    """Return min(len(s), maxlen). Negative maxlen is clamped to 0."""
+    val len_s = s.len()
+    if maxlen < 0:
+        0
+    elif maxlen < len_s:
+        maxlen
+    else:
+        len_s
+
+# ---- strlcpy / strlcat (BSD, size-bounded) ---------------------------------
+# C returns size_t = the would-be total length (for truncation detection) and
+# writes a NUL-terminated, truncated copy. Value-returning model: `bytes` is the
+# truncated content that fits (NUL slot reserved, so dstsize-1 max), `total` is
+# the would-be length the caller checks against dstsize.
+
+struct LcResult:
+    bytes: [u8]
+    total: i64
+
+fn libc_strlcpy(src: [u8], dstsize: i64) -> LcResult:
+    """Copy src into a dstsize-bounded buffer. bytes = first min(len(src),
+    dstsize-1) bytes (room for the NUL); total = len(src). dstsize<=0 copies
+    nothing but still reports the full src length."""
+    val srclen = src.len()
+    var cap = dstsize - 1
+    if cap < 0:
+        cap = 0
+    val copylen = if srclen < cap: srclen else: cap
+    var out: [u8] = []
+    var i = 0
+    while i < copylen:
+        out.push(src[i])
+        i = i + 1
+    LcResult(bytes: out, total: srclen)
+
+fn libc_strlcat(dst: [u8], src: [u8], dstsize: i64) -> LcResult:
+    """Append src to dst within a dstsize-bounded buffer. dstlen = min(len(dst),
+    dstsize); if the buffer is already full, dst is returned unchanged and total
+    = dstsize + len(src). Otherwise bytes = dst ++ first (dstsize-dstlen-1) bytes
+    of src; total = dstlen + len(src)."""
+    val dstlen_raw = dst.len()
+    val srclen = src.len()
+    val dstlen = if dstlen_raw < dstsize: dstlen_raw else: dstsize
+    var out: [u8] = []
+    var j = 0
+    while j < dstlen:
+        out.push(dst[j])
+        j = j + 1
+    if dstlen >= dstsize:
+        return LcResult(bytes: out, total: dstsize + srclen)
+    val remain = dstsize - dstlen - 1
+    val copylen = if srclen < remain: srclen else: remain
+    var i = 0
+    while i < copylen:
+        out.push(src[i])
+        i = i + 1
+    LcResult(bytes: out, total: dstlen + srclen)

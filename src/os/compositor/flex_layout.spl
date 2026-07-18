@@ -1,0 +1,87 @@
+# Flex Layout — Lightweight horizontal/vertical layout engine
+#
+# Pure Simple implementation of a flexbox-like layout system.
+# Replaces QEMU's rt_layout_* C FFI functions with a portable alternative.
+# Used by desktop_chrome.spl for system bar item positioning.
+#
+# Supports Fixed (exact size) and Fill (proportional remaining space) items.
+
+# ============================================================================
+# Layout Types
+# ============================================================================
+
+struct FlexItem:
+    """A single item in a flex layout."""
+    fixed_size: i32     # Size if kind=Fixed, ignored if kind=Fill
+    weight: i32         # Weight for Fill items (proportional), 0 for Fixed
+    result_pos: i32     # Computed position (output)
+    result_size: i32    # Computed size (output)
+
+# ============================================================================
+# Layout Computation
+# ============================================================================
+
+fn flex_fixed(size: i32) -> FlexItem:
+    """Create a fixed-size layout item."""
+    FlexItem(fixed_size: size, weight: 0, result_pos: 0, result_size: size)
+
+fn flex_fill(weight: i32) -> FlexItem:
+    """Create a fill item that takes proportional remaining space."""
+    FlexItem(fixed_size: 0, weight: weight, result_pos: 0, result_size: 0)
+
+fn flex_compute(items: [FlexItem], container_size: i32, spacing: i32) -> [FlexItem]:
+    """Compute layout positions for a horizontal flex layout.
+
+    Fixed items get their exact size. Fill items share remaining space
+    proportional to their weight. Items are separated by `spacing` pixels.
+    """
+    # Pass 1: sum fixed sizes + total spacing + fill weights
+    var total_fixed: i32 = 0
+    var total_weight: i32 = 0
+    var count: i32 = 0
+    for item in items:
+        if item.weight > 0:
+            total_weight = total_weight + item.weight
+        else:
+            total_fixed = total_fixed + item.fixed_size
+        count = count + 1
+
+    val total_spacing = if count > 1: (count - 1) * spacing else: 0
+    val remaining = container_size - total_fixed - total_spacing
+    val fill_pool = if remaining > 0: remaining else: 0
+
+    # Pass 2: compute sizes and positions
+    var result: [FlexItem] = []
+    var pos: i32 = 0
+    for item in items:
+        var size: i32 = 0
+        if item.weight > 0:
+            # Fill item: proportional share of remaining space
+            size = if total_weight > 0: fill_pool * item.weight / total_weight else: 0
+        else:
+            size = item.fixed_size
+
+        result = result.push(FlexItem(
+            fixed_size: item.fixed_size,
+            weight: item.weight,
+            result_pos: pos,
+            result_size: size
+        ))
+        pos = pos + size + spacing
+    result
+
+# ============================================================================
+# Convenience Accessors
+# ============================================================================
+
+fn flex_x(items: [FlexItem], index: i32) -> i32:
+    """Get the computed x-position of item at index."""
+    if index >= 0 and index < items.len():
+        return items[index].result_pos
+    0
+
+fn flex_w(items: [FlexItem], index: i32) -> i32:
+    """Get the computed width of item at index."""
+    if index >= 0 and index < items.len():
+        return items[index].result_size
+    0

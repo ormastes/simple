@@ -1,0 +1,67 @@
+"""
+# Production Host WM Fullscreen Evidence Contract
+
+Pins the fail-closed launcher contract for REQ-1, REQ-5, REQ-6, REQ-7, and
+REQ-8. Negative cases prove that forbidden compilers and missing cached
+production artifacts cannot launch a GUI or fabricate evidence.
+"""
+
+# @tag: system, gui, wm, fullscreen, evidence, pure-simple
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+describe "Production host WM fullscreen evidence contract":
+
+    it "rejects a Rust seed resolved path before production launch":
+        step("Run the production evidence gate with an explicit Rust seed path")
+        val root = "build/test-wm-production-fullscreen-rust-seed"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/debug/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-wm-production-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("wm_production_fullscreen_reason=simple-bin-forbidden")
+        expect(output).to_contain("wm_production_fullscreen_simple_bin_status=forbidden")
+        expect(output).to_contain("wm_production_fullscreen_launch_log=missing")
+
+    it "rejects a missing explicitly selected cached production artifact":
+        step("Run the gate with a nonexistent compiled hosted entry")
+        val root = "build/test-wm-production-fullscreen-artifact"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=bin/simple HOSTED_WM_ARTIFACT=" + root + "/missing-hosted-entry BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-wm-production-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("wm_production_fullscreen_reason=cached-production-artifact-missing")
+        expect(output).to_contain("wm_production_fullscreen_entry=src/os/hosted/hosted_entry.spl")
+        expect(output).to_contain("wm_production_fullscreen_simple_bin_status=pass")
+        expect(output).to_contain("wm_production_fullscreen_snapshot_hook=ready")
+        expect(output).to_contain("wm_production_fullscreen_capture_hook=ready")
+        expect(output).to_contain("wm_production_fullscreen_input_hook=ready")
+        expect(output).to_contain("wm_production_fullscreen_windowed_capture=missing")
+        expect(output).to_contain("wm_production_fullscreen_fullscreen_capture=missing")
+        expect(output).to_contain("wm_production_fullscreen_restored_capture=missing")
+        expect(output).to_contain("wm_production_fullscreen_launch_log=missing")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -e " + root + "/out/launch.log && test ! -e " + root + "/out/windowed.ppm && test ! -e " + root + "/out/fullscreen.ppm && test ! -e " + root + "/out/restored.ppm"])
+        expect(files_code).to_equal(0)
+
+    it "implements the complete live evidence contract and never targets examples":
+        step("Inspect the production wrapper contract")
+        val script = file_read("scripts/check/check-wm-production-fullscreen-evidence.shs")
+        expect(script).to_contain("SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH")
+        expect(script).to_contain("SIMPLE_WM_EVIDENCE_CAPTURE_PATH")
+        expect(script).to_contain("SIMPLE_WM_EVIDENCE_INPUT_FIFO")
+        expect(script).to_contain("internal-scene-changed-across-physical-mode")
+        expect(script).to_contain("restored-native-geometry-mismatch")
+        expect(script).to_contain("snapshot-provenance-invalid")
+        expect(script).to_contain("ppm-invalid-or-semantic-pixels-missing")
+        expect(script).to_contain("fullscreen-capture-not-distinct")
+        expect(script).to_contain("issue 8 'maximize'")
+        expect(script).to_contain("internal-maximize-geometry-mismatch")
+        expect(script).to_contain("internal-maximize-restore-mismatch")
+        expect(script).to_contain("wm_production_fullscreen_internal_maximize_hook=verified")
+        expect(script.contains("unsupported-v1")).to_be(false)
+        expect(script).to_contain("production-native-build-incomplete")
+        expect(script).to_contain("-newer \"$NATIVE_BIN\"")
+        expect(script).to_contain("Generating [1-9][0-9]* stub functions")
+        expect(script).to_contain("HOSTED_WM_ARTIFACT")
+        expect(script.contains("examples/")).to_be(false)

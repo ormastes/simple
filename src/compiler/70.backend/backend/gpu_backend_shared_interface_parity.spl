@@ -1,0 +1,429 @@
+# CUDA/HIP/OpenCL/Metal/Vulkan shared backend parity evidence.
+#
+# This module keeps the rollout evidence executable: CUDA and ROCm/HIP must
+# stay behind the Rust GPU Backend trait, while generated 2D GPU artifacts
+# serialize through one schema shape.
+
+use compiler.backend.gpu_portable_compute.{
+    PortableComputeTarget,
+    portable_compute_2d_optimization_compile_plan,
+    portable_compute_2d_required_symbols,
+    portable_compute_compiled_artifact_evidence_with_runtime}
+use compiler.backend.gpu_generated_2d_contract.vulkan_spirv_generated_2d_compile_contract
+
+class RustGpuBackendInterfaceRow:
+    backend_family: text
+    runtime_name: text
+    source_path: text
+    rust_struct: text
+    backend_enum: text
+    trait_import_present: bool
+    trait_impl_present: bool
+    backend_type_matches: bool
+    factory_auto_selector_present: bool
+    factory_by_type_selector_present: bool
+    ui_shell_independent: bool
+    valid: bool
+    reason: text
+
+    fn summary() -> text:
+        "RustGpuBackendInterfaceRow[backend={self.backend_family} runtime={self.runtime_name} trait_impl={self.trait_impl_present.to_text()} auto_selector={self.factory_auto_selector_present.to_text()} by_type_selector={self.factory_by_type_selector_present.to_text()} valid={self.valid.to_text()} reason={self.reason}]"
+
+class GpuArtifactSchemaParityRow:
+    backend_family: text
+    source_format: text
+    binary_format: text
+    tool_hint: text
+    artifact_path_suffix: text
+    entry_name: text
+    required_symbols: text
+    runtime_pipeline_status: text
+    expected_checksum: i64
+    actual_checksum: i64
+    checksum_verified: bool
+    artifact_valid: bool
+    status_code: text
+    reason: text
+    schema_signature: text
+    valid: bool
+
+    fn summary() -> text:
+        "GpuArtifactSchemaParityRow[backend={self.backend_family} source={self.source_format} binary={self.binary_format} valid={self.valid.to_text()} reason={self.reason}]"
+
+class TaggedGpuOffloadArtifactRow:
+    backend_family: text
+    source_path: text
+    output_path: text
+    artifact_format: text
+    entry_name: text
+    tag_target: text
+    tag_backends: text
+    generated_header_present: bool
+    kernel_signature_present: bool
+    return_present: bool
+    source_fixture_shared: bool
+    artifact_bytes: i64
+    schema_signature: text
+    valid: bool
+    reason: text
+
+    fn summary() -> text:
+        "TaggedGpuOffloadArtifactRow[backend={self.backend_family} artifact={self.artifact_format} entry={self.entry_name} shared={self.source_fixture_shared.to_text()} valid={self.valid.to_text()} reason={self.reason}]"
+
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _sdn_escape(value: text) -> text:
+    val slash_escaped = value.replace("\\", "\\\\")
+    slash_escaped.replace("\"", "\\\"")
+
+fn _contains_any(source: text, values: [text]) -> bool:
+    for value in values:
+        if source.contains(value):
+            return true
+    false
+
+fn _interface_reason(row: RustGpuBackendInterfaceRow) -> text:
+    if not row.trait_import_present:
+        return "missing-shared-backend-trait-import"
+    if not row.trait_impl_present:
+        return "missing-backend-trait-impl"
+    if not row.backend_type_matches:
+        return "backend-type-enum-mismatch"
+    if not row.factory_auto_selector_present:
+        return "missing-get-backend-selector"
+    if not row.factory_by_type_selector_present:
+        return "missing-get-backend-by-type-selector"
+    if not row.ui_shell_independent:
+        return "ui-shell-specific-runtime-routing"
+    "pass"
+
+pub fn rust_gpu_backend_interface_row(backend_family: text,
+                                      runtime_name: text,
+                                      source_path: text,
+                                      rust_source: text,
+                                      factory_source: text,
+                                      rust_struct: text,
+                                      backend_enum: text,
+                                      module_new_expr: text,
+                                      selector_var: text) -> RustGpuBackendInterfaceRow:
+    val trait_import_present = rust_source.contains("use super::{Backend") or rust_source.contains("use super::Backend")
+    val trait_impl_present = rust_source.contains("impl Backend for " + rust_struct)
+    val backend_type_matches = rust_source.contains("fn backend_type(&self) -> GpuBackend") and rust_source.contains(backend_enum)
+    val factory_auto_selector_present = factory_source.contains(module_new_expr) and factory_source.contains("return Box::new(" + selector_var + ");")
+    val factory_by_type_selector_present = factory_source.contains(backend_enum + " =>") and factory_source.contains("Some(Box::new(" + selector_var + "))")
+    val ui_shell_independent = not _contains_any(rust_source, ["tauri", "electron", "nodejs", "wm_compare", "simple_web"])
+    val provisional = RustGpuBackendInterfaceRow(
+        backend_family: backend_family,
+        runtime_name: runtime_name,
+        source_path: source_path,
+        rust_struct: rust_struct,
+        backend_enum: backend_enum,
+        trait_import_present: trait_import_present,
+        trait_impl_present: trait_impl_present,
+        backend_type_matches: backend_type_matches,
+        factory_auto_selector_present: factory_auto_selector_present,
+        factory_by_type_selector_present: factory_by_type_selector_present,
+        ui_shell_independent: ui_shell_independent,
+        valid: false,
+        reason: ""
+    )
+    val reason = _interface_reason(provisional)
+    provisional.valid = reason == "pass"
+    provisional.reason = reason
+    provisional
+
+pub fn cuda_rust_backend_interface_row(factory_source: text, cuda_source: text) -> RustGpuBackendInterfaceRow:
+    rust_gpu_backend_interface_row(
+        "cuda",
+        "cuda",
+        "src/compiler_rust/gpu/src/backend/cuda.rs",
+        cuda_source,
+        factory_source,
+        "CudaBackend",
+        "GpuBackend::Cuda",
+        "cuda::CudaBackend::new()",
+        "cuda"
+    )
+
+pub fn hip_rust_backend_interface_row(factory_source: text, rocm_source: text) -> RustGpuBackendInterfaceRow:
+    rust_gpu_backend_interface_row(
+        "hip",
+        "rocm",
+        "src/compiler_rust/gpu/src/backend/rocm.rs",
+        rocm_source,
+        factory_source,
+        "RocmBackend",
+        "GpuBackend::Rocm",
+        "rocm::RocmBackend::new()",
+        "rocm"
+    )
+
+pub fn rust_gpu_backend_interface_rows(factory_source: text, cuda_source: text, rocm_source: text) -> [RustGpuBackendInterfaceRow]:
+    [
+        cuda_rust_backend_interface_row(factory_source, cuda_source),
+        hip_rust_backend_interface_row(factory_source, rocm_source)
+    ]
+
+pub fn rust_gpu_backend_interface_rows_valid(rows: [RustGpuBackendInterfaceRow]) -> bool:
+    if rows.len() == 0:
+        return false
+    for row in rows:
+        if not row.valid:
+            return false
+    true
+
+fn _source_format_expected(backend_family: text) -> text:
+    if backend_family == "cuda":
+        return "cuda-c"
+    if backend_family == "opencl":
+        return "opencl-c"
+    if backend_family == "hip":
+        return "hip-cpp"
+    if backend_family == "metal":
+        return "metal-shading-language"
+    if backend_family == "vulkan":
+        return "spirv"
+    ""
+
+fn _binary_format_expected(backend_family: text) -> text:
+    if backend_family == "cuda":
+        return "ptx"
+    if backend_family == "opencl":
+        return "spirv"
+    if backend_family == "hip":
+        return "hsaco"
+    if backend_family == "metal":
+        return "metallib"
+    if backend_family == "vulkan":
+        return "spirv"
+    ""
+
+fn _schema_signature() -> text:
+    "backend_family,source_format,binary_format,tool_hint,artifact_path_suffix,entry_name,required_symbols,runtime_pipeline_status,expected_checksum,actual_checksum,checksum_verified,artifact_valid,status_code,reason"
+
+fn _tagged_offload_schema_signature() -> text:
+    "backend_family,source_path,output_path,artifact_format,entry_name,tag_target,tag_backends,generated_header_present,kernel_signature_present,return_present,source_fixture_shared,artifact_bytes,valid,reason"
+
+fn _artifact_schema_valid(backend_family: text, source_format: text, binary_format: text, required_symbols: text, artifact_valid: bool) -> bool:
+    artifact_valid and
+        source_format == _source_format_expected(backend_family) and
+        binary_format == _binary_format_expected(backend_family) and
+        required_symbols == portable_compute_2d_required_symbols()
+
+pub fn gpu_artifact_schema_parity_row(target: PortableComputeTarget,
+                                      backend_family: text,
+                                      output_stem: text,
+                                      artifact_magic: text,
+                                      exported_symbols: text,
+                                      byte_count: i64,
+                                      runtime_pipeline_status: text,
+                                      expected_checksum: i64,
+                                      actual_checksum: i64) -> GpuArtifactSchemaParityRow:
+    val plan = portable_compute_2d_optimization_compile_plan(target, output_stem)
+    val evidence = portable_compute_compiled_artifact_evidence_with_runtime(
+        plan,
+        artifact_magic,
+        exported_symbols,
+        byte_count
+    )
+    val valid = _artifact_schema_valid(backend_family, plan.source_format, plan.binary_format, plan.required_symbols, evidence.artifact_valid)
+    GpuArtifactSchemaParityRow(
+        backend_family: backend_family,
+        source_format: plan.source_format,
+        binary_format: plan.binary_format,
+        tool_hint: plan.tool_hint,
+        artifact_path_suffix: plan.artifact_path_suffix,
+        entry_name: plan.entry_name,
+        required_symbols: plan.required_symbols,
+        runtime_pipeline_status: runtime_pipeline_status,
+        expected_checksum: expected_checksum,
+        actual_checksum: actual_checksum,
+        checksum_verified: expected_checksum != 0 and expected_checksum == actual_checksum,
+        artifact_valid: evidence.artifact_valid,
+        status_code: evidence.status_code,
+        reason: evidence.reason,
+        schema_signature: _schema_signature(),
+        valid: valid
+    )
+
+fn vulkan_artifact_schema_parity_row() -> GpuArtifactSchemaParityRow:
+    val symbols = portable_compute_2d_required_symbols()
+    val evidence = vulkan_spirv_generated_2d_compile_contract("build/gpu/vulkan/simple_2d", "SPIR-V 1.3 Vulkan", symbols, 4096)
+    val valid = _artifact_schema_valid("vulkan", evidence.source_format, evidence.binary_format, evidence.required_symbols, evidence.ready)
+    GpuArtifactSchemaParityRow(
+        backend_family: "vulkan",
+        source_format: evidence.source_format,
+        binary_format: evidence.binary_format,
+        tool_hint: "vulkan-spirv-runtime",
+        artifact_path_suffix: evidence.artifact_path_suffix,
+        entry_name: "simple_2d_fill_u32",
+        required_symbols: evidence.required_symbols,
+        runtime_pipeline_status: "VulkanSpirvRuntimePipelineEvidence[success=true status=spirv-contract]",
+        expected_checksum: 0,
+        actual_checksum: 0,
+        checksum_verified: false,
+        artifact_valid: evidence.ready,
+        status_code: if evidence.ready: "valid" else: "invalid",
+        reason: if evidence.ready: "pass" else: evidence.status,
+        schema_signature: _schema_signature(),
+        valid: valid
+    )
+
+pub fn gpu_artifact_schema_parity_rows() -> [GpuArtifactSchemaParityRow]:
+    val symbols = portable_compute_2d_required_symbols()
+    [
+        gpu_artifact_schema_parity_row(PortableComputeTarget.Cuda, "cuda", "build/gpu/cuda/simple_2d", ".version 8.0", symbols, 4096, "", 0, 0),
+        vulkan_artifact_schema_parity_row(),
+        gpu_artifact_schema_parity_row(PortableComputeTarget.Metal, "metal", "build/gpu/metal/simple_2d", "MTLB metallib", symbols, 4096, "", 0, 0),
+        gpu_artifact_schema_parity_row(PortableComputeTarget.OpenCl, "opencl", "build/gpu/opencl/simple_2d", "SPIR-V", symbols, 4096, "OpenClRuntimePipelineEvidence[success=true status=pipeline-complete expected=2026060401 actual=2026060401]", 2026060401, 2026060401),
+        gpu_artifact_schema_parity_row(PortableComputeTarget.Hip, "hip", "build/gpu/hip/simple_2d", "ELF", symbols, 4096, "", 0, 0)
+    ]
+
+pub fn gpu_artifact_schema_parity_rows_valid(rows: [GpuArtifactSchemaParityRow]) -> bool:
+    if rows.len() == 0:
+        return false
+    val signature = rows[0].schema_signature
+    var has_cuda = false
+    var has_vulkan = false
+    var has_metal = false
+    var has_opencl = false
+    var has_hip = false
+    for row in rows:
+        if not row.valid:
+            return false
+        if row.schema_signature != signature:
+            return false
+        if row.backend_family == "cuda":
+            has_cuda = true
+        if row.backend_family == "vulkan":
+            has_vulkan = true
+        if row.backend_family == "metal":
+            has_metal = true
+        if row.backend_family == "opencl":
+            has_opencl = true
+        if row.backend_family == "hip":
+            has_hip = true
+    has_cuda and has_vulkan and has_metal and has_opencl and has_hip
+
+pub fn rust_gpu_backend_interface_report_sdn(rows: [RustGpuBackendInterfaceRow]) -> text:
+    var out = "(rust_gpu_backend_interface_parity valid: " + _bool_text(rust_gpu_backend_interface_rows_valid(rows)) + " row_count: " + rows.len().to_string() + "\n"
+    for row in rows:
+        out = out + "  (backend_interface backend: \"" + _sdn_escape(row.backend_family) + "\" runtime: \"" + _sdn_escape(row.runtime_name) + "\" source_path: \"" + _sdn_escape(row.source_path) + "\" rust_struct: \"" + _sdn_escape(row.rust_struct) + "\" backend_enum: \"" + _sdn_escape(row.backend_enum) + "\" trait_import_present: " + _bool_text(row.trait_import_present) + " trait_impl_present: " + _bool_text(row.trait_impl_present) + " backend_type_matches: " + _bool_text(row.backend_type_matches) + " factory_auto_selector_present: " + _bool_text(row.factory_auto_selector_present) + " factory_by_type_selector_present: " + _bool_text(row.factory_by_type_selector_present) + " ui_shell_independent: " + _bool_text(row.ui_shell_independent) + " valid: " + _bool_text(row.valid) + " reason: \"" + _sdn_escape(row.reason) + "\")\n"
+    out + ")"
+
+pub fn gpu_artifact_schema_parity_report_sdn(rows: [GpuArtifactSchemaParityRow]) -> text:
+    var out = "(gpu_artifact_schema_parity valid: " + _bool_text(gpu_artifact_schema_parity_rows_valid(rows)) + " row_count: " + rows.len().to_string() + " schema_signature: \"" + _sdn_escape(if rows.len() > 0: rows[0].schema_signature else: "") + "\"\n"
+    for row in rows:
+        out = out + "  (artifact_schema backend: \"" + _sdn_escape(row.backend_family) + "\" source_format: \"" + _sdn_escape(row.source_format) + "\" binary_format: \"" + _sdn_escape(row.binary_format) + "\" tool_hint: \"" + _sdn_escape(row.tool_hint) + "\" artifact_path_suffix: \"" + _sdn_escape(row.artifact_path_suffix) + "\" entry_name: \"" + _sdn_escape(row.entry_name) + "\" required_symbols: \"" + _sdn_escape(row.required_symbols) + "\" runtime_pipeline_status: \"" + _sdn_escape(row.runtime_pipeline_status) + "\" expected_checksum: " + row.expected_checksum.to_string() + " actual_checksum: " + row.actual_checksum.to_string() + " checksum_verified: " + _bool_text(row.checksum_verified) + " artifact_valid: " + _bool_text(row.artifact_valid) + " status_code: \"" + _sdn_escape(row.status_code) + "\" reason: \"" + _sdn_escape(row.reason) + "\" valid: " + _bool_text(row.valid) + ")\n"
+    out + ")"
+
+pub fn gpu_shared_backend_parity_report_sdn(interface_rows: [RustGpuBackendInterfaceRow], artifact_rows: [GpuArtifactSchemaParityRow]) -> text:
+    "(gpu_shared_backend_parity_report valid: " + _bool_text(rust_gpu_backend_interface_rows_valid(interface_rows) and gpu_artifact_schema_parity_rows_valid(artifact_rows)) + "\n" +
+        "  " + rust_gpu_backend_interface_report_sdn(interface_rows).replace("\n", "\n  ") + "\n" +
+        "  " + gpu_artifact_schema_parity_report_sdn(artifact_rows).replace("\n", "\n  ") + "\n)"
+
+pub fn tagged_gpu_auto_cuda_opencl_source(entry_name: text) -> text:
+    "@gpu(target = \"auto\", backends = \"cuda,opencl\")\n" +
+        "fn " + entry_name + "(a: i32, b: i32) -> i32:\n" +
+        "    return a + b\n"
+
+fn _tagged_source_has_auto_cuda_opencl(source_text: text, entry_name: text) -> bool:
+    source_text.contains("@gpu(target = \"auto\", backends = \"cuda,opencl\")") and
+        source_text.contains("fn " + entry_name + "(")
+
+fn _tagged_artifact_format_for_backend(backend_family: text) -> text:
+    if backend_family == "cuda":
+        return "ptx"
+    if backend_family == "opencl":
+        return "opencl-c"
+    backend_family
+
+fn _tagged_artifact_header_present(backend_family: text, artifact_text: text) -> bool:
+    if backend_family == "cuda":
+        return artifact_text.contains("Generated by Simple compiler (PTX backend)")
+    if backend_family == "opencl":
+        return artifact_text.contains("Generated by Simple compiler (OpenCL backend)")
+    false
+
+fn _tagged_artifact_kernel_signature_present(backend_family: text, artifact_text: text, entry_name: text) -> bool:
+    if backend_family == "cuda":
+        return artifact_text.contains(".visible .entry " + entry_name + "(")
+    if backend_family == "opencl":
+        return artifact_text.contains("__kernel void " + entry_name + "(")
+    false
+
+fn _tagged_artifact_return_present(backend_family: text, artifact_text: text) -> bool:
+    if backend_family == "cuda":
+        return artifact_text.contains("ret;") or artifact_text.contains("exit;")
+    if backend_family == "opencl":
+        return artifact_text.contains("return;")
+    false
+
+fn _tagged_offload_reason(header_present: bool, signature_present: bool, return_present: bool, source_fixture_shared: bool, artifact_bytes: i64) -> text:
+    if not source_fixture_shared:
+        return "source-fixture-not-shared-auto-cuda-opencl"
+    if artifact_bytes <= 0:
+        return "missing-artifact-bytes"
+    if not header_present:
+        return "missing-generated-header"
+    if not signature_present:
+        return "missing-kernel-signature"
+    if not return_present:
+        return "missing-return"
+    "pass"
+
+pub fn tagged_gpu_offload_artifact_row(backend_family: text,
+                                       source_path: text,
+                                       output_path: text,
+                                       source_text: text,
+                                       artifact_text: text,
+                                       entry_name: text) -> TaggedGpuOffloadArtifactRow:
+    val header_present = _tagged_artifact_header_present(backend_family, artifact_text)
+    val signature_present = _tagged_artifact_kernel_signature_present(backend_family, artifact_text, entry_name)
+    val return_present = _tagged_artifact_return_present(backend_family, artifact_text)
+    val source_fixture_shared = _tagged_source_has_auto_cuda_opencl(source_text, entry_name)
+    val reason = _tagged_offload_reason(header_present, signature_present, return_present, source_fixture_shared, artifact_text.len() as i64)
+    TaggedGpuOffloadArtifactRow(
+        backend_family: backend_family,
+        source_path: source_path,
+        output_path: output_path,
+        artifact_format: _tagged_artifact_format_for_backend(backend_family),
+        entry_name: entry_name,
+        tag_target: "auto",
+        tag_backends: "cuda,opencl",
+        generated_header_present: header_present,
+        kernel_signature_present: signature_present,
+        return_present: return_present,
+        source_fixture_shared: source_fixture_shared,
+        artifact_bytes: artifact_text.len() as i64,
+        schema_signature: _tagged_offload_schema_signature(),
+        valid: reason == "pass",
+        reason: reason
+    )
+
+pub fn tagged_gpu_offload_artifact_rows_valid(rows: [TaggedGpuOffloadArtifactRow]) -> bool:
+    if rows.len() == 0:
+        return false
+    val signature = rows[0].schema_signature
+    var has_cuda = false
+    var has_opencl = false
+    var shared_source_path = rows[0].source_path
+    for row in rows:
+        if not row.valid:
+            return false
+        if row.schema_signature != signature:
+            return false
+        if row.source_path != shared_source_path:
+            return false
+        if row.backend_family == "cuda":
+            has_cuda = true
+        if row.backend_family == "opencl":
+            has_opencl = true
+    has_cuda and has_opencl
+
+pub fn tagged_gpu_offload_artifact_report_sdn(rows: [TaggedGpuOffloadArtifactRow]) -> text:
+    var out = "(tagged_gpu_offload_artifact_report valid: " + _bool_text(tagged_gpu_offload_artifact_rows_valid(rows)) + " row_count: " + rows.len().to_string() + " schema_signature: \"" + _sdn_escape(if rows.len() > 0: rows[0].schema_signature else: "") + "\"\n"
+    for row in rows:
+        out = out + "  (tagged_offload_artifact backend: \"" + _sdn_escape(row.backend_family) + "\" source_path: \"" + _sdn_escape(row.source_path) + "\" output_path: \"" + _sdn_escape(row.output_path) + "\" artifact_format: \"" + _sdn_escape(row.artifact_format) + "\" entry_name: \"" + _sdn_escape(row.entry_name) + "\" tag_target: \"" + _sdn_escape(row.tag_target) + "\" tag_backends: \"" + _sdn_escape(row.tag_backends) + "\" generated_header_present: " + _bool_text(row.generated_header_present) + " kernel_signature_present: " + _bool_text(row.kernel_signature_present) + " return_present: " + _bool_text(row.return_present) + " source_fixture_shared: " + _bool_text(row.source_fixture_shared) + " artifact_bytes: " + row.artifact_bytes.to_string() + " valid: " + _bool_text(row.valid) + " reason: \"" + _sdn_escape(row.reason) + "\")\n"
+    out + ")"

@@ -1,0 +1,895 @@
+# Interpreter eval: call/function/method dispatch and numeric/array methods.
+use compiler.frontend.core.interpreter.eval_ops.*
+# Core Interpreter — Complex Expression Evaluators
+#
+# Split from eval.spl. Contains:
+# - Float parsing utilities (parse_float_text, char_digit)
+# - Call evaluation (eval_call, eval_function_call, eval_struct_constructor)
+# - Method dispatch (eval_method_call, eval_method_with_args)
+# - Built-in type methods (eval_array_method, eval_text_method)
+# - Access evaluation (eval_field_access, eval_index_expr, eval_slice_expr)
+# - Collection literals (eval_array_lit, eval_struct_lit)
+# - Assignment (eval_assign_expr, eval_compound_assign_expr)
+# - Misc (eval_return_expr, eval_interpolated_string, eval_null_coalesce)
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
+use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
+use compiler.core.ast_types.{CoreExpr}
+
+extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
+extern fn rt_host_gpu_active_backend_handle() -> i64
+extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
+extern fn rt_host_gpu_queue_submit(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_complete(max_packets: i64) -> i64
+
+val HOST_GPU_RUNTIME_LANE_HOST: i64 = 1
+val HOST_GPU_RUNTIME_LANE_GPU: i64 = 2
+val HOST_GPU_RUNTIME_PHASE_BEGIN: i64 = 1
+val HOST_GPU_RUNTIME_PHASE_END: i64 = 2
+val HOST_GPU_RUNTIME_KIND_DRAW_IR: i64 = 1
+
+var _yield_cache: {} = {}
+
+# ===== Float Parsing Utilities =====
+
+fn parse_float_text(s: text) -> f64:
+    """Parse a float from text representation (e.g. '3.14', '-2.5', '1e3')."""
+    var result: f64 = 0.0
+    var negative = false
+    var i = 0
+    # Handle sign
+    if s.len() > 0 and s[0] == "-":
+        negative = true
+        i = 1
+    elif s.len() > 0 and s[0] == "+":
+        i = 1
+    # Parse integer part
+    while i < s.len():
+        val c = s[i]
+        if c == ".": break
+        if c == "e" or c == "E": break
+        if c != "_":
+            val d = char_digit(c)
+            if d >= 0.0:
+                result = result * 10.0 + d
+        i = i + 1
+    # Parse fractional part
+    if i < s.len() and s[i] == ".":
+        i = i + 1
+        var frac: f64 = 0.0
+        var frac_div: f64 = 1.0
+        while i < s.len():
+            val c = s[i]
+            if c == "e" or c == "E": break
+            if c != "_":
+                val d = char_digit(c)
+                if d >= 0.0:
+                    frac = frac * 10.0 + d
+                    frac_div = frac_div * 10.0
+            i = i + 1
+        result = result + frac / frac_div
+    # Parse exponent
+    if i < s.len() and (s[i] == "e" or s[i] == "E"):
+        i = i + 1
+        var exp_neg = false
+        if i < s.len() and s[i] == "-":
+            exp_neg = true
+            i = i + 1
+        elif i < s.len() and s[i] == "+":
+            i = i + 1
+        var exp_val: f64 = 0.0
+        while i < s.len():
+            val c = s[i]
+            if c != "_":
+                val d = char_digit(c)
+                if d >= 0.0:
+                    exp_val = exp_val * 10.0 + d
+            i = i + 1
+        var power: f64 = 1.0
+        var ei = 0
+        while ei < int(exp_val):
+            power = power * 10.0
+            ei = ei + 1
+        if exp_neg:
+            result = result / power
+        else:
+            result = result * power
+    if negative:
+        0.0 - result
+    else:
+        result
+
+fn char_digit(c: text) -> f64:
+    """Convert single-char text to digit value, or -1.0 if not a digit."""
+    if c == "0": 0.0
+    elif c == "1": 1.0
+    elif c == "2": 2.0
+    elif c == "3": 3.0
+    elif c == "4": 4.0
+    elif c == "5": 5.0
+    elif c == "6": 6.0
+    elif c == "7": 7.0
+    elif c == "8": 8.0
+    elif c == "9": 9.0
+    else: -1.0
+
+# ===== Call Expression =====
+
+fn eval_call(eid: i64) -> i64:
+    val e_node: CoreExpr = expr_get(eid)
+    val callee_eid = e_node.left
+    val arg_eids = e_node.args
+    val arg_names = expr_get_arg_names(eid)
+
+    # Evaluate callee
+    val callee_node = expr_get(callee_eid)
+    val callee_tag = callee_node.tag
+
+    # Direct function call by name
+    if callee_tag == EXPR_IDENT:
+        val name = callee_node.s_val
+
+        if name == "host" or name == "gpu":
+            return eval_host_gpu_lane_call(name, arg_eids)
+
+        # Check for struct constructor (only uppercase names)
+        val first_ch = name[0]
+        if first_ch >= "A" and first_ch <= "Z":
+            val struct_decl = struct_table_lookup(name)
+            if struct_decl >= 0:
+                # A direct zero-argument class call uses its declared static
+                # constructor. Calls made by that constructor with field
+                # arguments still fall through to ordinary field assembly.
+                if arg_eids.len() == 0:
+                    val new_decl = func_table_lookup(name + "__new")
+                    if new_decl >= 0:
+                        val new_node = decl_get(new_decl)
+                        var new_is_active = false
+                        for active_decl in eval_implicit_new_stack:
+                            if active_decl == new_decl:
+                                new_is_active = true
+                                break
+                        if new_node.param_names.len() == 0 and not new_is_active:
+                            eval_implicit_new_stack.push(new_decl)
+                            val result = eval_function_call(new_decl, arg_eids, arg_names)
+                            eval_implicit_new_stack.pop()
+                            return result
+                return eval_struct_constructor(name, struct_decl, arg_eids, arg_names)
+
+        # Check for builtin
+        val builtin_result = eval_builtin_call(name, arg_eids)
+        if builtin_result >= -1:
+            return builtin_result
+
+        # Check function table
+        val decl_id = func_table_lookup(name)
+        if decl_id >= 0:
+            return eval_function_call(decl_id, arg_eids, arg_names)
+
+        # Check environment for function value
+        val fn_vid = env_lookup(name)
+        if fn_vid >= 0:
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                return eval_function_call(fn_decl, arg_eids, arg_names)
+
+        eval_set_error("undefined function: " + name)
+        return -1
+
+    # Path call: Type.method(args) or Enum.Variant(args)
+    if callee_tag == EXPR_FIELD_ACCESS:
+        val base_eid = callee_node.left
+        val member_name = callee_node.s_val
+        val base_node = expr_get(base_eid)
+        val base_tag = base_node.tag
+        if base_tag == EXPR_IDENT:
+            val type_name = base_node.s_val
+            # Check enum variant constructor: Enum.Variant(payload)
+            val enum_variants = enum_table_lookup(type_name)
+            if enum_variants != "":
+                return eval_enum_variant_call(type_name, member_name, arg_eids)
+            # Check static method: Type.method() → Type__method in func table
+            val static_fn_name = type_name + "__" + member_name
+            val static_decl = func_table_lookup(static_fn_name)
+            if static_decl >= 0:
+                return eval_function_call(static_decl, arg_eids, arg_names)
+            # Check struct constructor with module prefix: Module.Struct(args)
+            val struct_decl2 = struct_table_lookup(member_name)
+            if struct_decl2 >= 0:
+                return eval_struct_constructor(member_name, struct_decl2, arg_eids, arg_names)
+
+    # Indirect call (call on expression result)
+    val callee_val = eval_expr(callee_eid)
+    if eval_had_error: return -1
+    if val_is_function(callee_val):
+        val fn_decl = val_get_func_decl(callee_val)
+        return eval_function_call(fn_decl, arg_eids, arg_names)
+
+    eval_set_error("value is not callable")
+    -1
+
+fn eval_host_gpu_lane_call(name: text, arg_eids: [i64]) -> i64:
+    if arg_eids.len() != 2:
+        eval_set_error(name + " lane requires marker and lambda body")
+        return -1
+    val lambda_eid = arg_eids[1]
+    val lambda_node = expr_get(lambda_eid)
+    if lambda_node.tag != EXPR_LAMBDA:
+        eval_set_error(name + " lane body must be a lambda")
+        return -1
+
+    eval_expr(arg_eids[0])
+    if eval_had_error:
+        return -1
+
+    val lane_code: i64 = if name == "gpu": HOST_GPU_RUNTIME_LANE_GPU else: HOST_GPU_RUNTIME_LANE_HOST
+    rt_host_gpu_lane_event(lane_code, HOST_GPU_RUNTIME_PHASE_BEGIN)
+    if lane_code == HOST_GPU_RUNTIME_LANE_GPU:
+        val backend_handle = rt_host_gpu_active_backend_handle()
+        rt_host_gpu_queue_emit(lane_code, HOST_GPU_RUNTIME_KIND_DRAW_IR, 0, backend_handle)
+        rt_host_gpu_queue_submit(1)
+
+    val result = eval_block(lambda_node.stmts, -1)
+
+    rt_host_gpu_lane_event(lane_code, HOST_GPU_RUNTIME_PHASE_END)
+    if lane_code == HOST_GPU_RUNTIME_LANE_GPU:
+        rt_host_gpu_queue_complete(1)
+
+    result
+
+fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
+    val d_node = decl_get(decl_id)
+    val fn_name = d_node.name
+    val param_names = d_node.param_names
+    val param_types = d_node.param_types
+    val type_params = d_node.type_params
+    val body_stmts = d_node.body_stmts
+
+    # Record call for JIT threshold tracking
+    jit_record_call(fn_name)
+
+    # Evaluate arguments
+    var arg_values: [i64] = []
+    for aeid in arg_eids:
+        val av = eval_expr(aeid)
+        if eval_had_error: return -1
+        arg_values.push(av)
+
+    var has_named_args = false
+    for arg_name in arg_names:
+        if arg_name != "":
+            has_named_args = true
+            break
+    if has_named_args:
+        if arg_values.len() > param_names.len():
+            eval_set_error("too many arguments for function '" + fn_name + "'")
+            return -1
+        var ordered_values: [i64] = []
+        for pname in param_names:
+            ordered_values.push(-1)
+        var next_pos: i64 = 0
+        var ai: i64 = 0
+        while ai < arg_values.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var pi: i64 = 0
+                while pi < param_names.len():
+                    if param_names[pi] == arg_name:
+                        target = pi
+                        break
+                    pi = pi + 1
+                if target < 0:
+                    eval_set_error("unknown argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+                if ordered_values[target] >= 0:
+                    eval_set_error("duplicate argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+            else:
+                while next_pos < ordered_values.len() and ordered_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= ordered_values.len():
+                    eval_set_error("too many arguments for function '" + fn_name + "'")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            ordered_values[target] = arg_values[ai]
+            ai = ai + 1
+        var pi: i64 = 0
+        while pi < ordered_values.len():
+            if ordered_values[pi] < 0:
+                ordered_values[pi] = val_make_nil()
+            pi = pi + 1
+        arg_values = ordered_values
+
+    # Check if function is generic (has type parameters)
+    # If so, look up or create monomorphic instance
+    var actual_decl_id = decl_id
+    if type_params.len() > 0:
+        val type_args_str = infer_type_args_from_values(arg_values)
+        val cache_key = fn_name + "__" + type_args_str
+        val cached_decl = mono_cache_lookup(cache_key)
+        if cached_decl >= 0:
+            actual_decl_id = cached_decl
+        else:
+            val type_tags = infer_type_tags_from_values(arg_values)
+            val specialized_decl = mono_specialize(decl_id, type_params, type_tags)
+            mono_cache_register(cache_key, specialized_decl)
+            actual_decl_id = specialized_decl
+
+    # Type check arguments if parameter types are specified
+    if param_types.len() > 0:
+        var pi: i64 = 0
+        for av in arg_values:
+            if pi < param_types.len():
+                val expected_type = param_types[pi]
+                if expected_type != 0:  # 0 = TYPE_VOID means no type annotation
+                    val type_matches = type_check_value(av, expected_type)
+                    if not type_matches:
+                        val param_name = param_names[pi]
+                        eval_set_error("type error: argument '" + param_name + "' in function '" + fn_name + "' type mismatch")
+                        return -1
+            pi = pi + 1
+
+    # Try JIT execution if function is compiled
+    if jit_is_compiled(fn_name):
+        # Convert value_ids to raw i64s for JIT calling convention
+        var raw_args: [i64] = []
+        for av in arg_values:
+            if val_is_int(av):
+                raw_args.push(val_get_int(av))
+            else:
+                raw_args.push(av)
+        val jit_result = jit_try_execute(fn_name, raw_args)
+        if jit_result != -1:
+            return val_make_int(jit_result)
+
+    # Fall back to tree-walking
+    val local_count = resolve_cached_local_count(actual_decl_id)
+    val prev_decl_id = eval_current_decl_id
+    eval_current_decl_id = actual_decl_id
+    if local_count > 0:
+        env_push_frame(local_count)
+    env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
+
+    var pi: i64 = 0
+    for pname in param_names:
+        var pval = val_make_nil()
+        if pi < arg_values.len():
+            pval = arg_values[pi]
+        env_define(pname, pval)
+        # LOAD_FAST: set fast local for non-shadowed params
+        if local_count > 0:
+            val is_shadowed = resolve_is_slot_shadowed(actual_decl_id, pi)
+            if is_shadowed == false:
+                env_set_local(pi, pval)
+        pi = pi + 1
+
+    # Generator detection: push yield accumulator if body contains yield
+    val yield_key = "{actual_decl_id}"
+    var is_gen = false
+    val cached_yield = _yield_cache[yield_key]
+    if cached_yield.?:
+        is_gen = cached_yield == "y"
+    else:
+        is_gen = stmts_contain_yield(body_stmts)
+        _yield_cache[yield_key] = if is_gen: "y" else: "n"
+    if is_gen:
+        eval_yield_stack.push([])
+
+    # Execute body
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    # Handle return
+    var had_explicit_return = false
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+        had_explicit_return = true
+
+    # Generator: pop accumulator and return collected array
+    if is_gen:
+        val ys_len = eval_yield_stack.len()
+        val yielded = eval_yield_stack[ys_len - 1]
+        eval_yield_stack = eval_yield_stack[0:ys_len - 1]
+        if had_explicit_return == false:
+            last_val = val_make_array(yielded)
+
+    var write_back_names: [text] = []
+    var write_back_field_bases: [i64] = []
+    var write_back_field_names: [text] = []
+    var write_back_values: [i64] = []
+
+    var arg_i: i64 = 0
+    while arg_i < arg_eids.len():
+        if arg_i < param_names.len():
+            val arg_eid = arg_eids[arg_i]
+            val arg_tag = expr_get_tag(arg_eid)
+            val current_val = env_lookup(param_names[arg_i])
+            val current_kind = val_get_kind(current_val)
+            if current_kind == VAL_ARRAY or current_kind == VAL_STRUCT:
+                if arg_tag == EXPR_IDENT:
+                    write_back_names.push(expr_get(arg_eid).s_val)
+                    write_back_field_bases.push(-1)
+                    write_back_field_names.push("")
+                    write_back_values.push(current_val)
+                elif arg_tag == EXPR_FIELD_ACCESS:
+                    write_back_names.push("")
+                    write_back_field_bases.push(expr_get(arg_eid).left)
+                    write_back_field_names.push(expr_get(arg_eid).s_val)
+                    write_back_values.push(current_val)
+        arg_i = arg_i + 1
+
+    # Run defer/errdefer at this depth (mirrors eval_block pattern)
+    val saved_returning = eval_returning
+    val saved_had_error = eval_had_error
+    eval_returning = false
+    eval_had_error = false
+
+    # Run defer (always)
+    var di = eval_defer_eids.len() - 1
+    while di >= 0:
+        if eval_defer_depths[di] == my_depth:
+            eval_expr(eval_defer_eids[di])
+            eval_defer_eids[di] = -1
+            eval_defer_depths[di] = -1
+        di = di - 1
+
+    # Run errdefer (only on error)
+    if saved_had_error:
+        var edi = eval_errdefer_eids.len() - 1
+        while edi >= 0:
+            if eval_errdefer_depths[edi] == my_depth:
+                eval_expr(eval_errdefer_eids[edi])
+                eval_errdefer_eids[edi] = -1
+                eval_errdefer_depths[edi] = -1
+            edi = edi - 1
+    else:
+        var edi2 = eval_errdefer_eids.len() - 1
+        while edi2 >= 0:
+            if eval_errdefer_depths[edi2] == my_depth:
+                eval_errdefer_eids[edi2] = -1
+                eval_errdefer_depths[edi2] = -1
+            edi2 = edi2 - 1
+
+    eval_returning = saved_returning
+    eval_had_error = saved_had_error
+
+    # Trim tombstones
+    while eval_defer_eids.len() > 0 and eval_defer_eids[eval_defer_eids.len() - 1] == -1:
+        eval_defer_eids.pop()
+        eval_defer_depths.pop()
+    while eval_errdefer_eids.len() > 0 and eval_errdefer_eids[eval_errdefer_eids.len() - 1] == -1:
+        eval_errdefer_eids.pop()
+        eval_errdefer_depths.pop()
+
+    eval_defer_depth = eval_defer_depth - 1
+    env_pop_scope()
+    if local_count > 0:
+        env_pop_frame()
+    eval_current_decl_id = prev_decl_id
+
+    var wb_i: i64 = 0
+    while wb_i < write_back_values.len():
+        if write_back_field_bases[wb_i] >= 0:
+            val base_val = eval_expr(write_back_field_bases[wb_i])
+            if eval_had_error:
+                return -1
+            if val_is_struct(base_val):
+                val_struct_set_field(base_val, write_back_field_names[wb_i], write_back_values[wb_i])
+        else:
+            env_assign(write_back_names[wb_i], write_back_values[wb_i])
+        wb_i = wb_i + 1
+
+    last_val
+
+fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
+    val d_node = decl_get(decl_id)
+    val field_names = d_node.field_names
+    val field_defaults = d_node.field_defaults
+    var field_values: [i64] = []
+    for fname in field_names:
+        field_values.push(-1)
+
+    var base_struct: i64 = -1
+    var arg_index: i64 = 0
+    var next_pos: i64 = 0
+    for aeid in arg_eids:
+        val etag = expr_get_tag(aeid)
+        if etag == EXPR_SPREAD:
+            val inner_eid = expr_get_left(aeid)
+            base_struct = eval_expr(inner_eid)
+            if eval_had_error: return -1
+        else:
+            val av = eval_expr(aeid)
+            if eval_had_error: return -1
+            val arg_name = if arg_index < arg_names.len(): arg_names[arg_index] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var fi: i64 = 0
+                while fi < field_names.len():
+                    if field_names[fi] == arg_name:
+                        target = fi
+                        break
+                    fi = fi + 1
+                if target < 0:
+                    eval_set_error("unknown field '" + arg_name + "' in " + name + " constructor")
+                    return -1
+                if field_values[target] >= 0:
+                    eval_set_error("duplicate field '" + arg_name + "' in " + name + " constructor")
+                    return -1
+            else:
+                while next_pos < field_values.len() and field_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= field_values.len():
+                    eval_set_error("too many arguments for " + name + " constructor")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            field_values[target] = av
+        arg_index = arg_index + 1
+
+    # Fill remaining fields: use base struct then defaults then nil
+    var i: i64 = 0
+    for fname in field_names:
+        if field_values[i] < 0:
+            var fv: i64 = -1
+            # Try base struct field
+            if base_struct >= 0:
+                val bfv = val_struct_get_field(base_struct, fname)
+                if bfv >= 0:
+                    fv = bfv
+            # Try declared default
+            if fv < 0:
+                if i < field_defaults.len():
+                    val def_eid = field_defaults[i]
+                    if def_eid >= 0:
+                        fv = eval_expr(def_eid)
+                        if eval_had_error: return -1
+            if fv < 0:
+                fv = val_make_nil()
+            field_values[i] = fv
+        i = i + 1
+
+    val_make_struct(name, field_names, field_values)
+
+# ===== Method Call =====
+
+fn eval_method_call(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val receiver_eid = e_node.left
+    val method_name = e_node.s_val
+    val arg_eids = e_node.args
+    val arg_names = expr_get_arg_names(eid)
+
+    val receiver = eval_expr(receiver_eid)
+    if eval_had_error: return -1
+
+    # Built-in methods on types
+    val kind = val_get_kind(receiver)
+
+    # Array methods
+    if kind == VAL_ARRAY:
+        return eval_array_method(receiver, method_name, arg_eids)
+
+    # Text methods
+    if kind == VAL_TEXT:
+        return eval_text_method(receiver, method_name, arg_eids)
+
+    # Int methods
+    if kind == VAL_INT:
+        return eval_int_method(receiver, method_name, arg_eids)
+
+    # Dictionary built-ins use the established dynamic-field struct.
+    if kind == VAL_STRUCT and val_get_struct_name(receiver) == "__dict":
+        if method_name == "len":
+            return val_make_int(val_get_struct_fields(receiver).len())
+        if method_name == "keys":
+            var key_values: [i64] = []
+            for key in val_get_struct_fields(receiver):
+                key_values.push(val_make_text(key))
+            return val_make_array(key_values)
+        if method_name == "values":
+            return val_make_array(val_get_struct_values(receiver))
+        if method_name == "contains" or method_name == "contains_key":
+            if arg_eids.len() == 0: return val_make_bool(false)
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_bool(val_struct_find_field_idx(receiver, val_to_text(key)) >= 0)
+        if method_name == "get":
+            if arg_eids.len() == 0: return val_make_nil()
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val field_value = val_struct_get_field(receiver, val_to_text(key))
+            if field_value >= 0: return field_value
+            return val_make_nil()
+        if method_name == "get_or":
+            if arg_eids.len() < 2: return val_make_nil()
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val field_value = val_struct_get_field(receiver, val_to_text(key))
+            if field_value >= 0: return field_value
+            return eval_expr(arg_eids[1])
+        if method_name == "set" or method_name == "insert":
+            if arg_eids.len() < 2: return receiver
+            val key = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val new_value = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val_struct_upsert_field(receiver, val_to_text(key), new_value)
+            return receiver
+
+    # Struct methods — look up Type__method in function table
+    if kind == VAL_STRUCT:
+        val type_name = val_get_struct_name(receiver)
+        val full_name = type_name + "__" + method_name
+        val decl_id = func_table_lookup(full_name)
+        if decl_id >= 0:
+            # Evaluate args, then call with receiver prepended
+            var arg_values: [i64] = []
+            arg_values.push(receiver)
+            for aeid in arg_eids:
+                val av = eval_expr(aeid)
+                if eval_had_error: return -1
+                arg_values.push(av)
+            return eval_method_with_args(decl_id, arg_values, arg_eids, arg_names)
+
+        # Callable field fallback — if method_name is a fn-typed field, call it
+        val field_val = val_struct_get_field(receiver, method_name)
+        if field_val >= 0:
+            if val_is_function(field_val):
+                val fn_decl = val_get_func_decl(field_val)
+                return eval_function_call(fn_decl, arg_eids, expr_get_arg_names(eid))
+
+    eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
+    -1
+
+fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64], arg_names: [text]) -> i64:
+    val d_node = decl_get(decl_id)
+    val param_names = d_node.param_names
+    val body_stmts = d_node.body_stmts
+
+    var bound_values: [i64] = arg_values
+    var bound_eids: [i64] = arg_eids
+    var has_named_args = false
+    for arg_name in arg_names:
+        if arg_name != "":
+            has_named_args = true
+            break
+    if has_named_args:
+        if arg_eids.len() + 1 > param_names.len():
+            eval_set_error("too many arguments for method '" + d_node.name + "'")
+            return -1
+        var ordered_values: [i64] = []
+        var ordered_eids: [i64] = []
+        var remap_pi: i64 = 0
+        while remap_pi < param_names.len():
+            if remap_pi == 0 and arg_values.len() > 0:
+                ordered_values.push(arg_values[0])
+            else:
+                ordered_values.push(-1)
+            if remap_pi > 0:
+                ordered_eids.push(-1)
+            remap_pi = remap_pi + 1
+        var next_pos: i64 = 1
+        var ai: i64 = 0
+        while ai < arg_eids.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                remap_pi = 1
+                while remap_pi < param_names.len():
+                    if param_names[remap_pi] == arg_name:
+                        target = remap_pi
+                        break
+                    remap_pi = remap_pi + 1
+                if target < 0:
+                    eval_set_error("unknown argument '" + arg_name + "' in method '" + d_node.name + "'")
+                    return -1
+                if ordered_values[target] >= 0:
+                    eval_set_error("duplicate argument '" + arg_name + "' in method '" + d_node.name + "'")
+                    return -1
+            else:
+                while next_pos < ordered_values.len() and ordered_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= ordered_values.len():
+                    eval_set_error("too many arguments for method '" + d_node.name + "'")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            ordered_values[target] = arg_values[ai + 1]
+            ordered_eids[target - 1] = arg_eids[ai]
+            ai = ai + 1
+        remap_pi = 1
+        while remap_pi < ordered_values.len():
+            if ordered_values[remap_pi] < 0:
+                ordered_values[remap_pi] = val_make_nil()
+            remap_pi = remap_pi + 1
+        bound_values = ordered_values
+        bound_eids = ordered_eids
+
+    var write_back_names: [text] = []
+    var write_back_values: [i64] = []
+
+    env_push_scope()
+    # Bind self + params
+    var pi: i64 = 0
+    for pname in param_names:
+        if pi < bound_values.len():
+            env_define(pname, bound_values[pi])
+        else:
+            env_define(pname, val_make_nil())
+        pi = pi + 1
+
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+
+    var arg_i: i64 = 0
+    while arg_i < bound_eids.len():
+        val param_i = arg_i + 1
+        if param_i < param_names.len():
+            val arg_eid = bound_eids[arg_i]
+            if arg_eid >= 0 and expr_get_tag(arg_eid) == EXPR_IDENT:
+                val current_val = env_lookup(param_names[param_i])
+                val current_kind = val_get_kind(current_val)
+                if current_kind == VAL_ARRAY or current_kind == VAL_STRUCT:
+                    write_back_names.push(expr_get(arg_eid).s_val)
+                    write_back_values.push(current_val)
+        arg_i = arg_i + 1
+
+    env_pop_scope()
+
+    var wb_i: i64 = 0
+    while wb_i < write_back_names.len():
+        env_assign(write_back_names[wb_i], write_back_values[wb_i])
+        wb_i = wb_i + 1
+
+    last_val
+
+# ===== Array Methods =====
+
+fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val elements = val_get_array(receiver)
+
+    if method_name == "len":
+        return val_make_int(elements.len())
+
+    if method_name == "push":
+        if arg_eids.len() > 0:
+            val new_elem = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            var new_elems = elements
+            new_elems.push(new_elem)
+            val_arrays[receiver] = new_elems
+            return receiver
+        return receiver
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            for e in elements:
+                if val_equals(e, target): return val_make_bool(true)
+            return val_make_bool(false)
+        return val_make_bool(false)
+
+    if method_name == "map":
+        if arg_eids.len() > 0:
+            val fn_vid = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                var map_result: [i64] = []
+                for item in elements:
+                    val mapped = eval_method_with_args(fn_decl, [item], [], [])
+                    if eval_had_error: return -1
+                    map_result.push(mapped)
+                return val_make_array(map_result)
+        return val_make_array(elements)
+
+    if method_name == "filter":
+        if arg_eids.len() > 0:
+            val fn_vid = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                var filter_result: [i64] = []
+                for item in elements:
+                    val keep = eval_method_with_args(fn_decl, [item], [], [])
+                    if eval_had_error: return -1
+                    if val_is_truthy(keep):
+                        filter_result.push(item)
+                return val_make_array(filter_result)
+        return val_make_array(elements)
+
+    if method_name == "flat_map" or method_name == "flatmap":
+        if arg_eids.len() > 0:
+            val fn_vid = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                var flat_result: [i64] = []
+                for item in elements:
+                    val sub = eval_method_with_args(fn_decl, [item], [], [])
+                    if eval_had_error: return -1
+                    if val_is_array(sub):
+                        val sub_elems = val_get_array(sub)
+                        for se in sub_elems:
+                            flat_result.push(se)
+                    else:
+                        flat_result.push(sub)
+                return val_make_array(flat_result)
+        return val_make_array(elements)
+
+    if method_name == "any":
+        if arg_eids.len() > 0:
+            val fn_vid = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                for item in elements:
+                    val ok = eval_method_with_args(fn_decl, [item], [], [])
+                    if eval_had_error: return -1
+                    if val_is_truthy(ok): return val_make_bool(true)
+                return val_make_bool(false)
+        return val_make_bool(elements.len() > 0)
+
+    if method_name == "all":
+        if arg_eids.len() > 0:
+            val fn_vid = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                for item in elements:
+                    val ok = eval_method_with_args(fn_decl, [item], [], [])
+                    if eval_had_error: return -1
+                    if not val_is_truthy(ok): return val_make_bool(false)
+                return val_make_bool(true)
+        return val_make_bool(true)
+
+    if method_name == "enumerate":
+        var enum_result: [i64] = []
+        var enum_i: i64 = 0
+        for item in elements:
+            enum_result.push(val_make_array([val_make_int(enum_i), item]))
+            enum_i = enum_i + 1
+        return val_make_array(enum_result)
+
+    eval_set_error("no method '" + method_name + "' on array")
+    -1
+
+# ===== Int Methods =====
+
+fn eval_int_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val n = val_get_int(receiver)
+
+    if method_name == "chr":
+        if arg_eids.len() > 0:
+            eval_set_error("chr() takes no arguments")
+            return -1
+        if n < 0 or n > 0x10FFFF:
+            eval_set_error("type mismatch: " + n.to_string() + " is not a valid Unicode code point")
+            return -1
+        return val_make_text(n.chr())
+
+    eval_set_error("no method '" + method_name + "' on int")
+    -1
+
+# ===== Text Methods =====

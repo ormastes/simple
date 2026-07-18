@@ -1,0 +1,354 @@
+#!/bin/sh
+# check-simpleos-x86-64-wm-render-event-evidence.shs
+#
+# Default-runnable (NEVER silently skips) QEMU evidence lane for the x86_64
+# bare-metal glass window manager (examples/09_embedded/simple_os/arch/x86_64/
+# wm_entry.spl):
+#
+#   1. Builds (or reuses a fresh) multiboot kernel ELF from wm_entry.spl with
+#      the same native-build recipe as the wm-simple-web lane (plus an explicit
+#      --mode dynload: the worker wrapper injects a now-rejected
+#      --mode=interpreter default; last --mode wins).
+#   2. Boots it under qemu-system-x86_64 (q35/qemu64/2G, BGA std VGA,
+#      -display none, serial -> file, QMP unix socket).
+#   3. RENDER GATE: waits for the "[WM] Glass desktop rendered!" serial marker,
+#      captures the framebuffer via QMP (screendump; pmemsave 0xfd000000
+#      fallback) into build/os/wm_x86_64_screendump.ppm and validates
+#      non-black scene anchors with
+#      scripts/check/validate_simpleos_x86_64_wm_ppm.spl (real RGB printed).
+#   4. EVENT GATE: injects synthetic input over QMP input-send-event
+#      (Tab key, M key, relative mouse move, left click press+release) and
+#      asserts the serial log contains the counted structured markers
+#      "[wm-event] type=key|focus|window|mouse_move|mouse_button ... count=N"
+#      with increasing counts.
+#
+# Any missing tool or failed step prints a named blocker and exits nonzero.
+set -u
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="$ROOT_DIR/bin/simple"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+KERNEL_OUTPUT="build/os/simpleos_wm_x86_64.elf"
+VALIDATOR="scripts/check/validate_simpleos_x86_64_wm_ppm.spl"
+PPM_OUT="build/os/wm_x86_64_screendump.ppm"
+SERIAL_LOG="build/os/wm_x86_64_serial.log"
+SERIAL_CLEAN="build/os/wm_x86_64_serial.clean.log"
+QMP_SOCKET="build/os/wm_x86_64_qmp.sock"
+QEMU_STDERR="build/os/wm_x86_64_qemu.stderr.log"
+BUILD_LOG="build/os/wm_x86_64_build.log"
+READY_MARKER="[WM] Glass desktop rendered!"
+READY_TIMEOUT_MS="${WM_X86_64_READY_TIMEOUT_MS:-120000}"
+EVENT_TIMEOUT_MS="${WM_X86_64_EVENT_TIMEOUT_MS:-30000}"
+
+QEMU_PID=""
+render_gate=FAIL
+event_gate=FAIL
+render_channel=none
+
+fail_blocker() {
+    echo "simpleos_x86_64_wm_render_event_status=fail"
+    echo "simpleos_x86_64_wm_render_event_blocker=$1"
+    echo "RESULT: FAIL (blocker: $1)"
+    exit 1
+}
+
+cleanup() {
+    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+    fi
+    rm -f "$QMP_SOCKET"
+}
+trap cleanup EXIT INT TERM
+
+refresh_clean_serial() {
+    # Guest serial can interleave NULs/control bytes; keep a printable copy.
+    tr -cd '\11\12\15\40-\176' <"$SERIAL_LOG" >"$SERIAL_CLEAN" 2>/dev/null || true
+}
+
+wait_serial_marker() {
+    # $1 = literal marker, $2 = timeout ms. Returns 0 when found.
+    _waited=0
+    while [ "$_waited" -le "$2" ]; do
+        if [ -f "$SERIAL_LOG" ]; then
+            refresh_clean_serial
+            if grep -qF "$1" "$SERIAL_CLEAN" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        if [ -n "$QEMU_PID" ] && ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            return 1
+        fi
+        sleep 0.2
+        _waited=$((_waited + 200))
+    done
+    return 1
+}
+
+qmp() {
+    # $1 = python QMP body (uses pre-opened QMP file object `f`).
+    python3 - "$QMP_SOCKET" <<PY
+import json, socket, sys
+
+def write_qmp(f, obj):
+    f.write(json.dumps(obj).encode() + b"\n")
+    f.flush()
+    return f.readline()
+
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sys.argv[1])
+f = s.makefile("rwb", buffering=0)
+f.readline()
+write_qmp(f, {"execute": "qmp_capabilities"})
+$1
+PY
+}
+
+# --- Preflight: named blockers, never a silent skip -------------------------
+command -v qemu-system-x86_64 >/dev/null 2>&1 || fail_blocker "qemu-system-x86_64-not-on-PATH"
+command -v python3 >/dev/null 2>&1 || fail_blocker "python3-not-on-PATH(needed-for-QMP)"
+[ -x "$SIMPLE_BIN" ] || fail_blocker "bin/simple-missing-or-not-executable"
+[ -f "$ENTRY" ] || fail_blocker "wm-entry-source-missing:$ENTRY"
+[ -f "$LINKER_SCRIPT" ] || fail_blocker "linker-script-missing:$LINKER_SCRIPT"
+[ -f "$VALIDATOR" ] || fail_blocker "ppm-validator-missing:$VALIDATOR"
+OBJCOPY_PREFIX=""
+for candidate_dir in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/lib/llvm-17/bin /usr/bin; do
+    if [ -x "$candidate_dir/llvm-objcopy" ]; then
+        OBJCOPY_PREFIX="$candidate_dir"
+        break
+    fi
+done
+[ -n "$OBJCOPY_PREFIX" ] || fail_blocker "llvm-objcopy-not-found"
+command -v grub-mkstandalone >/dev/null 2>&1 || fail_blocker "grub-mkstandalone-not-on-PATH"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+[ -f "$OVMF_CODE" ] || fail_blocker "OVMF_CODE-not-found:$OVMF_CODE"
+[ -f "$OVMF_VARS_SRC" ] || fail_blocker "OVMF_VARS-not-found:$OVMF_VARS_SRC"
+
+mkdir -p build/os
+
+# --- 1. Build the WM kernel (reuse if newer than the entry source) ----------
+if [ ! -f "$KERNEL_OUTPUT" ] || [ "$ENTRY" -nt "$KERNEL_OUTPUT" ]; then
+    mkdir -p build/os/generated/generated
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    echo "building: $KERNEL_OUTPUT (log: $BUILD_LOG)"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="$OBJCOPY_PREFIX:$PATH" \
+        "$SIMPLE_BIN" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --mode dynload \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" \
+        >"$BUILD_LOG" 2>&1
+    build_code=$?
+    if [ "$build_code" -ne 0 ] || [ ! -f "$KERNEL_OUTPUT" ]; then
+        echo "--- build log tail ---"
+        tail -20 "$BUILD_LOG"
+        fail_blocker "wm-kernel-build-failed(exit=$build_code,log=$BUILD_LOG)"
+    fi
+fi
+echo "kernel: $KERNEL_OUTPUT ($(wc -c <"$KERNEL_OUTPUT") bytes)"
+
+# --- 2. Package the kernel as a self-contained UEFI boot app (OVMF pflash) --
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path semantics. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84): grub-mkstandalone builds a
+# self-contained BOOTX64.EFI with the multiboot1 kernel + grub.cfg embedded in
+# an in-memory memdisk, so OVMF -> GRUB -> multiboot -> kernel _start runs the
+# full real-firmware handoff instead of QEMU's kernel-injection shortcut.
+UEFI_BUILD="build/os/wm_x86_64_uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM render-event (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_OUTPUT"
+[ -f "$EFIAPP" ] || fail_blocker "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+
+# --- 3. Boot under REAL UEFI firmware (OVMF pflash) with QMP -----------------
+rm -f "$QMP_SOCKET" "$SERIAL_LOG" "$SERIAL_CLEAN" "$QEMU_STDERR" "$PPM_OUT" "$PPM_OUT.raw"
+qemu-system-x86_64 \
+    -no-user-config -monitor none -net none \
+    -machine q35 -cpu qemu64 -m 2G \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL_LOG" \
+    -display none \
+    -no-reboot \
+    -vga std \
+    -qmp "unix:$QMP_SOCKET,server,nowait" \
+    2>"$QEMU_STDERR" &
+QEMU_PID=$!
+
+waited=0
+while [ "$waited" -le 15000 ]; do
+    [ -S "$QMP_SOCKET" ] && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 0.1
+    waited=$((waited + 100))
+done
+[ -S "$QMP_SOCKET" ] || { tail -5 "$QEMU_STDERR" 2>/dev/null; fail_blocker "qmp-socket-missing"; }
+kill -0 "$QEMU_PID" 2>/dev/null || { tail -5 "$QEMU_STDERR" 2>/dev/null; fail_blocker "qemu-exited-early"; }
+
+# --- Migration-correctness ladder (isolates OVMF boot-path success from
+# kernel render correctness, which is tracked separately) ---
+rung() { grep -qa "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
+
+# --- 3. RENDER GATE: ready marker -> QMP capture -> anchor validation -------
+if ! wait_serial_marker "$READY_MARKER" "$READY_TIMEOUT_MS"; then
+    echo "--- serial tail ---"
+    refresh_clean_serial
+    tail -20 "$SERIAL_CLEAN" 2>/dev/null
+    fail_blocker "wm-ready-marker-missing:$READY_MARKER"
+fi
+echo "ready marker seen: $READY_MARKER"
+sleep 1  # paint settle
+
+capture_screendump() {
+    qmp "write_qmp(f, {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"$ROOT_DIR/$PPM_OUT\"}})" >/dev/null 2>&1
+    [ -s "$PPM_OUT" ]
+}
+
+capture_pmemsave() {
+    qmp "
+import os, time
+write_qmp(f, {\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": 'pmemsave 0xfd000000 3145728 \"$ROOT_DIR/$PPM_OUT.raw\"'}})
+for _ in range(100):
+    if os.path.exists(\"$ROOT_DIR/$PPM_OUT.raw\") and os.path.getsize(\"$ROOT_DIR/$PPM_OUT.raw\") >= 3145728:
+        break
+    time.sleep(0.1)
+data = open(\"$ROOT_DIR/$PPM_OUT.raw\", \"rb\").read()
+if len(data) == 3145728:
+    pix = bytearray()
+    for i in range(0, 1024 * 768 * 4, 4):
+        pix.extend([data[i + 2], data[i + 1], data[i]])
+    with open(\"$ROOT_DIR/$PPM_OUT\", \"wb\") as out:
+        out.write(b\"P6\n1024 768\n255\n\" + bytes(pix))
+print(\"pmemsave bytes=%d\" % len(data))
+" >/dev/null 2>&1
+    [ -s "$PPM_OUT" ]
+}
+
+run_validator() {
+    SIMPLEOS_X86_64_WM_PPM="$ROOT_DIR/$PPM_OUT" "$SIMPLE_BIN" run "$VALIDATOR" --mode=interpreter 2>/dev/null
+}
+
+validator_out=""
+if capture_screendump; then
+    render_channel=qmp-screendump
+    validator_out="$(run_validator)"
+fi
+if ! printf '%s\n' "$validator_out" | grep -q "simpleos_x86_64_wm_ppm_status=pass"; then
+    rm -f "$PPM_OUT"
+    if capture_pmemsave; then
+        render_channel=qmp-pmemsave-0xfd000000
+        validator_out="$(run_validator)"
+    fi
+fi
+echo "--- ppm anchor validation (channel=$render_channel) ---"
+printf '%s\n' "$validator_out"
+if printf '%s\n' "$validator_out" | grep -q "simpleos_x86_64_wm_ppm_status=pass"; then
+    render_gate=PASS
+fi
+
+# --- 4. EVENT GATE: QMP synthetic input -> [wm-event] serial markers --------
+# Order matters: Tab first (focus cycle 1->2), then M (minimize win2: WM
+# shortcut is active because the focused window is not the terminal), then a
+# relative mouse move and a left click press+release.
+qmp "
+import time
+def send(events):
+    write_qmp(f, {\"execute\": \"input-send-event\", \"arguments\": {\"events\": events}})
+    time.sleep(0.4)
+send([{\"type\": \"key\", \"data\": {\"down\": True,  \"key\": {\"type\": \"qcode\", \"data\": \"tab\"}}}])
+send([{\"type\": \"key\", \"data\": {\"down\": False, \"key\": {\"type\": \"qcode\", \"data\": \"tab\"}}}])
+send([{\"type\": \"key\", \"data\": {\"down\": True,  \"key\": {\"type\": \"qcode\", \"data\": \"m\"}}}])
+send([{\"type\": \"key\", \"data\": {\"down\": False, \"key\": {\"type\": \"qcode\", \"data\": \"m\"}}}])
+send([{\"type\": \"rel\", \"data\": {\"axis\": \"x\", \"value\": 100}},
+      {\"type\": \"rel\", \"data\": {\"axis\": \"y\", \"value\": 50}}])
+send([{\"type\": \"btn\", \"data\": {\"down\": True,  \"button\": \"left\"}}])
+send([{\"type\": \"btn\", \"data\": {\"down\": False, \"button\": \"left\"}}])
+print(\"input-injected\")
+" || fail_blocker "qmp-input-send-event-failed"
+
+# Wait until the last expected marker type appears (button release = count=2).
+wait_serial_marker "type=mouse_button" "$EVENT_TIMEOUT_MS" || true
+sleep 1
+refresh_clean_serial
+
+echo "--- [wm-event] serial evidence ---"
+grep -F "[wm-event]" "$SERIAL_CLEAN" | head -40
+
+ev_ok=1
+check_marker() {
+    # $1 = description, $2 = grep pattern
+    if grep -qE "$2" "$SERIAL_CLEAN"; then
+        echo "event-check PASS: $1"
+    else
+        echo "event-check FAIL: $1 (pattern: $2)"
+        ev_ok=0
+    fi
+}
+check_marker "key count=1"            "\[wm-event\] type=key detail=scancode=[0-9]+ count=1"
+check_marker "key count=2 (increasing)" "\[wm-event\] type=key detail=scancode=[0-9]+ count=2"
+check_marker "focus count=1"          "\[wm-event\] type=focus detail=action=(cycle|select),win=[0-9]+ count=1"
+check_marker "window count=1"         "\[wm-event\] type=window detail=action=(minimize|close|restore).* count=1"
+check_marker "mouse_move count=1"     "\[wm-event\] type=mouse_move detail=x=[0-9]+,y=[0-9]+ count=1"
+check_marker "mouse_button count=1"   "\[wm-event\] type=mouse_button detail=left=[0-9],x=[0-9]+,y=[0-9]+ count=1"
+check_marker "mouse_button count=2 (increasing)" "\[wm-event\] type=mouse_button detail=left=[0-9],x=[0-9]+,y=[0-9]+ count=2"
+[ "$ev_ok" -eq 1 ] && event_gate=PASS
+
+# --- Verdicts ----------------------------------------------------------------
+echo ""
+echo "=== simpleos x86_64 WM render+event evidence ==="
+echo "kernel: $KERNEL_OUTPUT"
+echo "serial log: $SERIAL_LOG (clean: $SERIAL_CLEAN)"
+echo "ppm: $PPM_OUT (channel: $render_channel)"
+echo "GATE render: $render_gate"
+echo "GATE events: $event_gate"
+if [ "$render_gate" = PASS ] && [ "$event_gate" = PASS ]; then
+    echo "RESULT: PASS"
+    exit 0
+fi
+echo "RESULT: FAIL"
+exit 1

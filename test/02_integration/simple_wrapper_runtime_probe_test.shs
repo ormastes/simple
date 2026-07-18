@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+TMP_ROOT="build/tmp/simple_wrapper_runtime_probe"
+TMP_ROOT_ABS="$ROOT_DIR/$TMP_ROOT"
+rm -rf "$TMP_ROOT"
+mkdir -p "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu" "$TMP_ROOT/src/app/sj"
+
+fail() {
+    echo "simple_wrapper_runtime_probe=false"
+    echo "error=$1"
+    exit 1
+}
+
+make_stale_release_wrapper() {
+    cat > "$TMP_ROOT/bin/release/simple" <<'SH'
+#!/bin/sh
+exec "$(dirname "$0")/missing/simple" "$@"
+SH
+    chmod +x "$TMP_ROOT/bin/release/simple"
+}
+
+make_fake_runtime() {
+    path="$1"
+    cat > "$path" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "Simple fake runtime"
+    exit 0
+fi
+printf 'runtime=%s\n' "$0"
+i=1
+for arg in "$@"; do
+    printf 'arg%s=%s\n' "$i" "$arg"
+    i=$((i + 1))
+done
+SH
+    chmod +x "$path"
+}
+
+cp bin/sj "$TMP_ROOT/bin/sj"
+cp bin/simple-interp "$TMP_ROOT/bin/simple-interp"
+chmod +x "$TMP_ROOT/bin/sj" "$TMP_ROOT/bin/simple-interp"
+make_stale_release_wrapper
+make_fake_runtime "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+
+SJ_OUT="$($TMP_ROOT/bin/sj status 2>&1)" || fail "sj wrapper failed"
+case "$SJ_OUT" in
+    *"runtime=$TMP_ROOT_ABS/bin/release/x86_64-unknown-linux-gnu/simple"* ) ;;
+    *) fail "sj did not skip stale release wrapper" ;;
+esac
+case "$SJ_OUT" in
+    *"arg1=run"* ) ;;
+    *) fail "sj did not invoke runtime run path" ;;
+esac
+
+INTERP_OUT="$($TMP_ROOT/bin/simple-interp --probe 2>&1)" || fail "simple-interp wrapper failed"
+case "$INTERP_OUT" in
+    *"runtime=$TMP_ROOT_ABS/bin/release/x86_64-unknown-linux-gnu/simple"* ) ;;
+    *) fail "simple-interp did not skip stale release wrapper" ;;
+esac
+case "$INTERP_OUT" in
+    *"arg1=--probe"* ) ;;
+    *) fail "simple-interp did not pass through arguments" ;;
+esac
+
+echo "simple_wrapper_runtime_probe=true"

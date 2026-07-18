@@ -1,0 +1,94 @@
+"""MC/DC auto-instrumentation runtime specification.
+
+Proves the *automatic* MC/DC path — the one an instrumenter emits — is a real
+measurement. Instead of hand-writing each `record_evaluation(...)` call with its
+value/mask vectors, the decision `A and (B or C)` is registered once as an
+operator tree via `register_decision_tree`, and every test vector is fed through
+a single `mcdc_eval(id, [a, b, c])` call. `mcdc_eval` replays short-circuit
+evaluation over the tree to derive BOTH the outcome and the per-condition
+`evaluated` (masking) vector automatically.
+
+Short-circuit evaluation of `A and (B or C)`:
+  - A always evaluated
+  - B evaluated iff A
+  - C evaluated iff A and not B
+
+This is the runtime that makes MC/DC measurable on real programs (not just the
+library self-test): the source-to-source instrumenter at
+`scripts/check/cert/mcdc_instrument.spl` rewrites decision sites into exactly
+these `register_decision_tree` + `mcdc_eval` calls.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.mcdc.*
+
+# operator tree for `A and (B or C)` (atoms a=0, b=1, c=2; root = last node)
+fn _register_and_or() -> i64:
+    val nodes = [mcdc_atom(0), mcdc_atom(1), mcdc_atom(2), mcdc_or(1, 2), mcdc_and(0, 3)]
+    register_decision_tree("A and (B or C)", ["A", "B", "C"], "mixed", "flight.spl", 42, nodes)
+
+describe "MCDC auto-instrumentation runtime":
+    """Automatic MC/DC recording via a registered decision tree and mcdc_eval."""
+
+    it "derives short-circuit masks so the adequate vector set reaches 100% MC/DC":
+        enable_mcdc_tag()
+        clear_mcdc_data()
+        clear_mcdc_trees()
+        val id = _register_and_or()
+        # MC/DC-adequate vector set — masks are derived automatically:
+        val r1 = mcdc_eval(id, [false, false, false])   # A=F -> F ; B,C masked
+        val r2 = mcdc_eval(id, [true, true, false])      # A,B=T -> T ; C masked
+        val r3 = mcdc_eval(id, [true, false, true])      # -> T ; all evaluated
+        val r4 = mcdc_eval(id, [true, false, false])     # -> F ; all evaluated
+        # outcomes returned by mcdc_eval match the real boolean value
+        assert_false(r1)
+        assert_true(r2)
+        assert_true(r3)
+        assert_false(r4)
+
+        val rep = build_decision_report(id)
+        expect(rep.condition_count).to_equal(3)
+        expect(rep.conditions_covered).to_equal(3)
+        expect(rep.evaluation_count).to_equal(4)
+        assert_true(rep.is_covered)
+        assert_contains(rep.covered_conditions, "A")
+        assert_contains(rep.covered_conditions, "B")
+        assert_contains(rep.covered_conditions, "C")
+        expect(rep.uncovered_conditions.len()).to_equal(0)
+        disable_mcdc_tag()
+
+    it "drops below 100% and names the uncovered condition when a vector is removed":
+        enable_mcdc_tag()
+        clear_mcdc_data()
+        clear_mcdc_trees()
+        val id = _register_and_or()
+        # Omit [true, false, true]: C is now only ever evaluated with value F,
+        # so it loses its independence pair and becomes uncovered.
+        mcdc_eval(id, [false, false, false])
+        mcdc_eval(id, [true, true, false])
+        mcdc_eval(id, [true, false, false])
+
+        val rep = build_decision_report(id)
+        expect(rep.conditions_covered).to_equal(2)
+        assert_false(rep.is_covered)
+        expect(rep.uncovered_conditions.len()).to_equal(1)
+        assert_contains(rep.uncovered_conditions, "C")
+        assert_contains(rep.uncovered_indices, 2)
+        assert_contains(rep.covered_conditions, "A")
+        assert_contains(rep.covered_conditions, "B")
+        disable_mcdc_tag()
+
+    it "renders a human-readable auto-instrumented report naming the uncovered condition":
+        enable_mcdc_tag()
+        clear_mcdc_data()
+        clear_mcdc_trees()
+        val id = _register_and_or()
+        mcdc_eval(id, [false, false, false])
+        mcdc_eval(id, [true, true, false])
+        mcdc_eval(id, [true, false, false])
+
+        val text_report = format_decision_report(id)
+        assert_contains(text_report, "A and (B or C)")
+        assert_contains(text_report, "Uncovered")
+        assert_contains(text_report, "C")
+        disable_mcdc_tag()

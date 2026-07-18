@@ -1,0 +1,61 @@
+# Verifies AC-5: generated responsive CSS derives @media thresholds from
+# common.ui.profile breakpoints with exact boundary parity to classify() semantics.
+#
+# classify(dimension, bp): dimension < compact_max → Compact; < regular_max → Regular; else Expanded
+# CSS parity: Compact = max-width: (compact_max-1)px; Regular = min-width: compact_max px and max-width: (regular_max-1)px
+#
+# @cover src/app/ui.web/html.spl
+# @tag: unit, ui, responsive, ac5
+
+use std.spec.*
+use common.ui.profile.{Breakpoints, default_breakpoints}
+use app.ui.web.html.{responsive_css, generate_css}
+
+describe "responsive_css — single-source breakpoints, boundary parity with classify()":
+
+    it "default_breakpoints compact query uses compact_max-1 as max-width":
+        val bp = default_breakpoints()
+        val css = responsive_css(bp)
+        val compact_edge = bp.compact_max - 1
+        val expected = "@media (max-width: {compact_edge}px)"
+        expect(css).to_contain(expected)
+
+    it "default_breakpoints regular query uses compact_max as min-width and regular_max-1 as max-width":
+        val bp = default_breakpoints()
+        val css = responsive_css(bp)
+        val compact_min = bp.compact_max
+        val regular_edge = bp.regular_max - 1
+        val expected = "@media (min-width: {compact_min}px) and (max-width: {regular_edge}px)"
+        expect(css).to_contain(expected)
+
+    it "custom breakpoints (700/1000) produces correct boundary strings":
+        val bp = Breakpoints(compact_max: 700, regular_max: 1000)
+        val css = responsive_css(bp)
+        expect(css).to_contain("699px")
+        expect(css).to_contain("700px")
+        expect(css).to_contain("999px")
+
+    it "custom breakpoints (700/1000) does not contain stale default compact boundary":
+        val bp = Breakpoints(compact_max: 700, regular_max: 1000)
+        val css = responsive_css(bp)
+        # 600 should not appear as a max-width media boundary when compact_max is 700
+        expect(css.contains("(max-width: 600px)")).to_equal(false)
+
+    it "stale-literal guard: default breakpoints CSS contains the regular_max-1 boundary, not 1200":
+        val bp = default_breakpoints()
+        val css = responsive_css(bp)
+        val regular_edge = bp.regular_max - 1
+        # CSS must contain the derived regular boundary
+        val expected = "{regular_edge}px"
+        expect(css).to_contain(expected)
+        # And must not contain stale 1200 unless regular_max IS 1201
+        # (if regular_max changed from 1200 to 840, then "1200" must not appear as a boundary)
+        if bp.regular_max != 1201:
+            expect(css.contains("(max-width: 1200px)")).to_equal(false)
+
+    it "generate_css feeds default_breakpoints into responsive_css (compact query present)":
+        val bp = default_breakpoints()
+        val compact_edge = bp.compact_max - 1
+        val expected = "@media (max-width: {compact_edge}px)"
+        val css = generate_css("modern")
+        expect(css).to_contain(expected)

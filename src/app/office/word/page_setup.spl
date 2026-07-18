@@ -1,0 +1,88 @@
+# Word Page Setup + Section Breaks
+#
+# Pure functions for Word-style page setup (size/margins/orientation/columns)
+# and document sections (a section is a run of blocks sharing one PageSetup
+# and a break kind that says how the next section starts).
+#
+# Provides: PageSetup, page_setup_letter, page_setup_landscape,
+# page_setup_with_columns, content_width_tw, column_width_tw, Section,
+# section_new, sectpr_xml, sections_summary.
+#
+# Units: all sizes are in twips (1/1440 inch). US Letter portrait is
+# 8.5in x 11in => 12240 x 15840 twips.
+
+struct PageSetup:
+    width_tw: i32
+    height_tw: i32
+    margin_tw: i32
+    orientation: text
+    columns: i32
+
+struct Section:
+    title: text
+    setup: PageSetup
+    break_kind: text
+
+fn _gutter_tw() -> i32:
+    """Fixed inter-column gutter: 0.5in = 720 twips."""
+    720
+
+fn page_setup_letter() -> PageSetup:
+    """US Letter, portrait, 1in margins, single column."""
+    PageSetup(width_tw: 12240, height_tw: 15840, margin_tw: 1440, orientation: "portrait", columns: 1)
+
+fn page_setup_landscape(base: PageSetup) -> PageSetup:
+    """Return a copy of `base` rotated to landscape: width/height swapped."""
+    PageSetup(
+        width_tw: base.height_tw,
+        height_tw: base.width_tw,
+        margin_tw: base.margin_tw,
+        orientation: "landscape",
+        columns: base.columns
+    )
+
+fn page_setup_with_columns(base: PageSetup, n: i32) -> PageSetup:
+    """Return a copy of `base` with the text column count set to `n`."""
+    PageSetup(
+        width_tw: base.width_tw,
+        height_tw: base.height_tw,
+        margin_tw: base.margin_tw,
+        orientation: base.orientation,
+        columns: n
+    )
+
+fn content_width_tw(setup: PageSetup) -> i32:
+    """Usable text width: page width minus both side margins."""
+    setup.width_tw - 2 * setup.margin_tw
+
+fn column_width_tw(setup: PageSetup) -> i32:
+    """Width of a single text column, after splitting content width across
+    `setup.columns` columns separated by a fixed gutter."""
+    val content = content_width_tw(setup)
+    if setup.columns <= 1:
+        content
+    else:
+        val gutter_total = (setup.columns - 1) * _gutter_tw()
+        (content - gutter_total) / setup.columns
+
+fn section_new(title: text, setup: PageSetup, break_kind: text) -> Section:
+    Section(title: title, setup: setup, break_kind: break_kind)
+
+fn sectpr_xml(section: Section) -> text:
+    """Render the Word <w:sectPr> fragment for a section: page size, margins,
+    columns, and the section break type."""
+    val setup = section.setup
+    val pg_sz = "<w:pgSz w:w=\"{setup.width_tw}\" w:h=\"{setup.height_tw}\" w:orient=\"{setup.orientation}\"/>"
+    val pg_mar = "<w:pgMar w:top=\"{setup.margin_tw}\" w:bottom=\"{setup.margin_tw}\" w:left=\"{setup.margin_tw}\" w:right=\"{setup.margin_tw}\"/>"
+    val cols = "<w:cols w:num=\"{setup.columns}\"/>"
+    val break_type = "<w:type w:val=\"{section.break_kind}\"/>"
+    "<w:sectPr>{pg_sz}{pg_mar}{cols}{break_type}</w:sectPr>"
+
+fn sections_summary(sections: [Section]) -> [text]:
+    """One summary line per section: "<title>: <orientation> <columns>col break=<break_kind>"."""
+    var lines: [text] = []
+    for section in sections:
+        val setup = section.setup
+        val line = "{section.title}: {setup.orientation} {setup.columns}col break={section.break_kind}"
+        lines.push(line)
+    lines

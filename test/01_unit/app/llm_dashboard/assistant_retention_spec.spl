@@ -1,0 +1,103 @@
+use app.dashboard.assistant_collectors.{AssistantDashboardSnapshot}
+use app.dashboard.assistant_retention.{
+    AssistantDashboardRetentionPolicy,
+    assistant_dashboard_retention_projection
+}
+use app.mcp.assistant.{AssistantTimelineRecord}
+
+fn make_event(index: i64, kind: text, detail: text, signal: text) -> AssistantTimelineRecord:
+    AssistantTimelineRecord(
+        event_id: "event-{index}",
+        session_id: "session-retention",
+        parent_session_id: "",
+        child_task_id: "",
+        timestamp_ms: index,
+        kind: kind,
+        severity: "info",
+        title: detail,
+        detail: detail,
+        message: detail,
+        signal: signal,
+        source: "assistant",
+        correlation_id: ""
+    )
+
+fn make_snapshot(timeline: [AssistantTimelineRecord], notifications: [AssistantTimelineRecord]) -> AssistantDashboardSnapshot:
+    AssistantDashboardSnapshot(
+        selected_session_id: "session-retention",
+        total_sessions: 0,
+        sessions: [],
+        timeline: timeline,
+        notifications: notifications,
+        source_root: ".build/llm_dashboard/assistant",
+        mode: "replay"
+    )
+
+fn tight_policy() -> AssistantDashboardRetentionPolicy:
+    AssistantDashboardRetentionPolicy(
+        max_timeline_events: 5,
+        max_notifications: 3,
+        coalesce_after_repeats: 2,
+        backpressure_after_dropped: 1
+    )
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+fn expect_absence_marker_hidden(value: text):
+    expect(value.split(absence_marker()).len()).to_equal(1)
+
+describe "assistant dashboard retention":
+    it "keeps bounded tails and reports backpressure without internal absence marker text":
+        var timeline: [AssistantTimelineRecord] = []
+        var i: i64 = 0
+        while i < 8:
+            timeline.push(make_event(i, "state", "state-{i}", ""))
+            i = i + 1
+        var notifications: [AssistantTimelineRecord] = []
+        notifications.push(make_event(10, "notice", "one", ""))
+        notifications.push(make_event(11, "notice", "two", ""))
+        notifications.push(make_event(12, "notice", "three", ""))
+        notifications.push(make_event(13, "notice", "four", ""))
+
+        val projection = assistant_dashboard_retention_projection(make_snapshot(timeline, notifications), tight_policy())
+
+        expect(projection.retained_timeline_count).to_equal(5)
+        expect(projection.retained_notification_count).to_equal(3)
+        expect(projection.dropped_timeline_count).to_equal(3)
+        expect(projection.dropped_notification_count).to_equal(1)
+        expect(projection.backpressure_state).to_equal("backpressure")
+        expect_absence_marker_hidden(projection.notice)
+        expect(projection.visible_timeline[0].event_id).to_equal("event-3")
+
+    it "coalesces repeated signal and notification bursts":
+        var timeline: [AssistantTimelineRecord] = []
+        var i: i64 = 0
+        while i < 5:
+            timeline.push(make_event(i, "signal_event", "wake", "poke"))
+            i = i + 1
+        var notifications: [AssistantTimelineRecord] = []
+        notifications.push(make_event(20, "notice", "same", ""))
+        notifications.push(make_event(21, "notice", "same", ""))
+        notifications.push(make_event(22, "notice", "same", ""))
+        notifications.push(make_event(23, "notice", "same", ""))
+
+        val projection = assistant_dashboard_retention_projection(make_snapshot(timeline, notifications), tight_policy())
+
+        expect(projection.retained_timeline_count).to_equal(2)
+        expect(projection.retained_notification_count).to_equal(2)
+        expect(projection.coalesced_signal_count).to_equal(3)
+        expect(projection.coalesced_notification_count).to_equal(1)
+        expect(projection.dropped_timeline_count).to_equal(0)
+        expect(projection.dropped_notification_count).to_equal(1)
+        expect(projection.notice).to_contain("signals_coalesced=3")
+
+    it "stays normal when events fit the retention policy":
+        val timeline = [make_event(1, "state", "ready", "")]
+        val notifications = [make_event(2, "notice", "ready", "")]
+        val projection = assistant_dashboard_retention_projection(make_snapshot(timeline, notifications), tight_policy())
+
+        expect(projection.backpressure_state).to_equal("normal")
+        expect(projection.notice).to_equal("retention normal")
+        expect(projection.dropped_timeline_count).to_equal(0)
+        expect(projection.dropped_notification_count).to_equal(0)

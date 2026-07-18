@@ -1,0 +1,173 @@
+#!/bin/sh
+# Install platform-specific MCP configs for Claude Code and Codex CLI.
+# Usage: sh config/mcp/install.shs
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+OS="$(uname -s)"
+
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+case "$OS" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        SRC="$SCRIPT_DIR/win/.mcp.json"
+        EXT=".cmd"
+        ;;
+    *)
+        SRC="$SCRIPT_DIR/common/.mcp.json"
+        EXT=""
+        ;;
+esac
+
+# --- Claude Code (.mcp.json) ---
+if [ "$EXT" = "" ]; then
+    SIMPLE_MCP_CMD="$PROJECT_ROOT/bin/simple_mcp_server"
+    SIMPLE_LSP_MCP_CMD="$PROJECT_ROOT/bin/simple_lsp_mcp_server"
+    BRIDGE_CMD="$PROJECT_ROOT/bin/mcp_stdio_bridge.js"
+    STITCH_CMD="$PROJECT_ROOT/bin/codex_stitch_mcp.js"
+    SIMPLE_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$SIMPLE_MCP_CMD")"
+    SIMPLE_LSP_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$SIMPLE_LSP_MCP_CMD")"
+    STITCH_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- node $(shell_quote "$STITCH_CMD")"
+    cat > "$PROJECT_ROOT/.mcp.json" <<EOF
+{
+  "_comment": "MCP Servers Configuration (local absolute paths for Claude Code)",
+
+  "mcpServers": {
+    "simple-pipe-mcp": {
+      "_info": "Cached native Simple MCP server, exposed under the SPipe-linked name.",
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "simple-mcp": {
+      "_info": "Cached native Simple MCP server.",
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "simple-lsp-mcp": {
+      "_info": "Cached native Simple LSP MCP server.",
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_LSP_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "stitch": {
+      "_info": "Google Stitch MCP proxy launched through the repo wrapper",
+      "command": "/bin/sh",
+      "args": ["-lc", "$STITCH_LAUNCH"]
+    }
+  }
+}
+EOF
+else
+    cp "$SRC" "$PROJECT_ROOT/.mcp.json"
+fi
+echo "Installed .mcp.json for $OS"
+
+# --- Gemini CLI project settings ---
+if [ "$EXT" = "" ] && [ -d "$PROJECT_ROOT/.gemini" ]; then
+    cat > "$PROJECT_ROOT/.gemini/settings.json" <<EOF
+{
+  "context": {
+    "fileName": ["GEMINI.md", "CLAUDE.md"]
+  },
+  "hooks": {
+  },
+  "mcpServers": {
+    "simple-pipe-mcp": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "simple-mcp": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "simple-lsp-mcp": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_LSP_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "stitch": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$STITCH_LAUNCH"]
+    }
+  }
+}
+EOF
+    echo "Installed Gemini MCP settings for $OS"
+fi
+
+# --- Codex CLI (global ~/.codex/config.toml) ---
+if command -v codex >/dev/null 2>&1; then
+    SERVERS="simple-pipe-mcp simple-mcp simple-lsp-mcp"
+    for NAME in $SERVERS; do
+        # Convert server name to wrapper name (simple-mcp -> simple_mcp_server)
+        WRAPPER=$(echo "$NAME" | sed 's/-/_/g')_server
+        CMD="$PROJECT_ROOT/bin/${WRAPPER}${EXT}"
+        if { [ "$NAME" = "simple-mcp" ] || [ "$NAME" = "simple-pipe-mcp" ]; } && [ "$EXT" = "" ]; then
+            CMD="$PROJECT_ROOT/bin/simple_mcp_server"
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$CMD")"
+        elif [ "$NAME" = "simple-lsp-mcp" ] && [ "$EXT" = "" ]; then
+            CMD="$PROJECT_ROOT/bin/simple_lsp_mcp_server"
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$CMD")"
+        else
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$CMD")"
+        fi
+        if [ -e "$CMD" ] || [ -L "$CMD" ]; then
+            codex mcp remove "$NAME" 2>/dev/null || true
+            codex mcp add "$NAME" --env SIMPLE_LOG=error --env RUST_LOG=error --env SIMPLE_LIB="$PROJECT_ROOT/src" -- /bin/sh -lc "$LAUNCH"
+        else
+            echo "Warning: $CMD not found, skipping $NAME"
+        fi
+    done
+    # Retire old optional browser MCP registrations that are no longer part of
+    # the default Codex setup.
+    codex mcp remove "chrome-devtools" 2>/dev/null || true
+    if command -v node >/dev/null 2>&1; then
+        STITCH_CMD="$PROJECT_ROOT/bin/codex_stitch_mcp.js"
+        if [ -f "$STITCH_CMD" ]; then
+            codex mcp remove "stitch-mcp" 2>/dev/null || true
+            codex mcp remove "stitch" 2>/dev/null || true
+            STITCH_CODEX_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- node $(shell_quote "$STITCH_CMD")"
+            codex mcp add "stitch-mcp" -- /bin/sh -lc "$STITCH_CODEX_LAUNCH"
+        else
+            echo "Warning: $STITCH_CMD not found, skipping stitch"
+        fi
+    else
+        echo "Warning: node not found, skipping stitch"
+    fi
+    echo "Installed Codex MCP servers for $OS"
+else
+    echo "Codex CLI not found, skipping Codex MCP setup"
+fi

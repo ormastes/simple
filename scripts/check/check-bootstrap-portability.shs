@@ -1,0 +1,692 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${root}"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+for script in \
+  scripts/bootstrap/bootstrap-from-scratch.sh \
+  scripts/check/check-bootstrap-essential-tools-smoke.shs \
+  scripts/check/check-freebsd-bootstrap-qemu.shs \
+  scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
+  scripts/setup/platform-detect.shs \
+  scripts/setup/setup.shs; do
+  sh -n "${script}" || fail "shell syntax: ${script}"
+done
+bash -n scripts/bootstrap/bootstrap-windows.sh || fail "shell syntax: bootstrap-windows.sh"
+
+help=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --help)
+printf '%s\n' "${help}" | grep -q -- '--full-cli' || fail "missing --full-cli help"
+printf '%s\n' "${help}" | grep -q -- '--full-bootstrap' || fail "missing --full-bootstrap help"
+printf '%s\n' "${help}" | grep -q -- 'default: llvm; cranelift also supported' || fail "LLVM default/backend support missing from help"
+
+grep -q 'command -v shasum' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS SHA-256 fallback"
+grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS timeout fallback"
+grep -q '^backend="llvm"$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap default backend is not LLVM"
+if grep -q 'stage4_backend' scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "Stage 4 still overrides the selected backend"
+fi
+backend_use_count=$(grep -F -- '--backend "${backend}"' scripts/bootstrap/bootstrap-from-scratch.sh | wc -l | tr -d ' ')
+[ "${backend_use_count}" -ge 4 ] || fail "not every bootstrap stage honors the selected backend"
+if grep -q -- '--backend cranelift' scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "bootstrap still hardcodes Cranelift"
+fi
+grep -q 'bootstrap_stage_sanity "${stage2_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 2 compiler sanity"
+grep -q 'bootstrap_stage_sanity "${stage3_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 3 compiler sanity"
+grep -Fq 'CANDIDATE_FRONTEND_BACKEND="${backend}" candidate_frontend_smoke "${candidate}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not run native fixture with the selected backend"
+grep -Fq 'unknown command '\''run'\''' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not reject unsupported run"
+grep -Fq 'stage4-essential-tools-smoke' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 essential-tools smoke hook missing"
+grep -Fq 'SIMPLE_BINARY="$(absolute_path "${full_bin}")"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "essential-tools smoke does not receive the fresh Stage 4 binary"
+essential_tools_smoke=scripts/check/check-bootstrap-essential-tools-smoke.shs
+grep -Fq 'essential_test_runner_smoke=true' "${essential_tools_smoke}" || fail "test-runner bootstrap smoke missing"
+grep -Fq 'essential_list_constructor_smoke=true' "${essential_tools_smoke}" || fail "List constructor bootstrap smoke missing"
+grep -Fq 'essential_lint_smoke=true' "${essential_tools_smoke}" || fail "lint bootstrap smoke missing"
+grep -Fq 'essential_duplicate_checker_smoke=true' "${essential_tools_smoke}" || fail "duplicate-check bootstrap smoke missing"
+grep -Fq 'bootstrap_essential_tools_smoke=true' "${essential_tools_smoke}" || fail "essential-tools aggregate pass marker missing"
+grep -Fq 'run_duplicate_check(filtered_args)' src/app/cli/_CliMain/main_and_help.spl || fail "duplicate-check is not linked into the full CLI"
+if grep -Fq 'cli_run_file("src/compiler/90.tools/duplicate_check/main.spl"' src/app/cli/_CliMain/main_and_help.spl; then
+  fail "duplicate-check still delegates to repository source"
+fi
+grep -Fq 'fn run_duplicate_check(raw_args: [text]) -> i64:' src/compiler/90.tools/duplicate_check/main.spl || fail "duplicate-check shared CLI owner missing"
+if grep -q 'bootstrap-freebsd-seed.sh' scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "dead FreeBSD dispatcher remains"
+fi
+
+multiplatform=.github/workflows/rust-bootstrap-multiplatform.yml
+freebsd_workflow=.github/workflows/freebsd-build.yml
+matrix_backends_for() {
+  awk -v name="$1" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    line == "name: " name {
+      getline
+      sub(/^[[:space:]]*backend:[[:space:]]*/, "")
+      print
+    }
+  ' "${multiplatform}" | LC_ALL=C sort | tr '\n' ' '
+}
+for platform_name in "Linux x86_64" "macOS aarch64" "macOS x86_64" "Windows x86_64"; do
+  [ "$(matrix_backends_for "${platform_name}")" = "cranelift llvm " ] ||
+    fail "multiplatform backend pair missing: ${platform_name}"
+done
+grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runner missing"
+[ "$(grep -c "scripts/setup/platform-detect.shs" "${multiplatform}")" -eq 2 ] || fail "platform detection trigger missing"
+[ "$(grep -Fc "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" "${multiplatform}")" -eq 4 ] || fail "stage fixture triggers or Windows ARM64 use missing"
+[ "$(grep -c "scripts/check/check-llvm-simd-row-native-arch.shs" "${multiplatform}")" -eq 3 ] || fail "native architecture gate wiring missing"
+[ "$(grep -Fc "scripts/check/check-stage4-hosted-dynload-provider-archive.shs" "${multiplatform}")" -eq 4 ] || fail "hosted and MinGW Stage4 dynload checker triggers or wiring missing"
+[ "$(grep -Fc "scripts/check/validate_stage4_hosted_dynload_provider_archive.spl" "${multiplatform}")" -eq 2 ] || fail "hosted Stage4 dynload validator triggers missing"
+[ "$(grep -c "scripts/check/native-smoke-matrix.shs" "${multiplatform}")" -eq 3 ] || fail "native smoke trigger or wiring missing"
+[ "$(grep -c "scripts/check/native-smoke-matrix.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD native smoke triggers missing"
+[ "$(grep -Fc "scripts/check/check-stage4-hosted-dynload-provider-archive.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Stage4 dynload checker triggers missing"
+[ "$(grep -Fc "scripts/check/validate_stage4_hosted_dynload_provider_archive.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Stage4 dynload validator triggers missing"
+[ "$(grep -Fc "scripts/check/check-native-seed-parity.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option parity trigger missing"
+[ "$(grep -Fc "test/fixtures/compiler/native_option_try_*_loud.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option fixture trigger missing"
+[ "$(grep -Fc "test/fixtures/native_crossmodule_result_u8/**" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Result try fixture trigger missing"
+grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "Linux LLVM fresh MCP bootstrap lane missing"
+grep -Fq 'mcp_flag=--no-mcp' "${multiplatform}" || fail "non-proof bootstrap lanes do not skip duplicate MCP builds"
+grep -Fq 'if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then' "${multiplatform}" || fail "fresh MCP proof is not scoped to Linux LLVM"
+grep -Fq '"$mcp_flag" \' "${multiplatform}" || fail "bootstrap does not receive the selected MCP mode"
+[ "$(grep -c "scripts/check/check-mcp-native-smoke.shs" "${multiplatform}")" -eq 2 ] || fail "fresh MCP smoke workflow triggers missing"
+[ "$(grep -c "src/app/mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "MCP source workflow triggers missing"
+[ "$(grep -c "src/app/simple_lsp_mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "LSP MCP source workflow triggers missing"
+grep -Fq 'MCP_NATIVE_BOOTSTRAP_FRESH=1 \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 5 MCP smoke does not require fresh artifacts"
+grep -Fq 'sh scripts/check/check-mcp-native-smoke.shs' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 5 MCP smoke wiring missing"
+grep -Fq 'NATIVE_SMOKE_BACKEND=${{ matrix.backend }} \' "${multiplatform}" || fail "native smoke does not receive the matrix backend"
+grep -Fq 'sh scripts/check/native-smoke-matrix.shs' "${multiplatform}" || fail "native smoke execution wiring missing"
+grep -Fq 'sh scripts/check/check-llvm-simd-row-native-arch.shs' "${multiplatform}" || fail "native architecture execution wiring missing"
+grep -Fq 'CRANELIFT_CROSS_EXECUTE=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "Cranelift cross-execution wiring missing"
+grep -Fq 'sh scripts/check/check-cranelift-aot-aggregate-cross.shs' "${multiplatform}" || fail "Cranelift cross-execution gate missing"
+grep -Fq 'choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade' "${multiplatform}" || fail "Windows LLVM install cannot replace an incompatible preinstalled version"
+grep -Fq 'run: sh scripts/check/check-bootstrap-portability.shs' "${multiplatform}" || fail "bootstrap portability contracts are not executed in CI"
+dynload_archive_body=$(awk '
+$0 == "      - name: Validate hosted Stage4 dynload provider archive" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+for required in \
+  "if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'" \
+  'stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"' \
+  'test -n "$stage3"' \
+  'if [ "$RUNNER_OS" = "Windows" ]; then' \
+  'command -v clang >/dev/null 2>&1' \
+  'command -v llvm-ar >/dev/null 2>&1' \
+  'command -v llvm-nm >/dev/null 2>&1' \
+  'command -v llvm-objdump >/dev/null 2>&1' \
+  'compiler_target=$(clang --print-target-triple)' \
+  'x86_64-*-windows-msvc*) ;;' \
+  '*) printf '\''%s\n'\'' "unexpected Windows clang target: $compiler_target" >&2; exit 1 ;;' \
+  'export CC=clang AR=llvm-ar SIMPLE_NM=llvm-nm SIMPLE_OBJDUMP=llvm-objdump SIMPLE_WINDOWS_ABI=msvc' \
+  'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$stage3" sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs'; do
+  printf '%s\n' "${dynload_archive_body}" | grep -Fq -- "${required}" || fail "hosted Stage4 dynload archive gate missing: ${required}"
+done
+if printf '%s\n' "${dynload_archive_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release|src/compiler_rust/target|SIMPLE_RUNTIME_PATH|--backend'; then
+  fail "hosted Stage4 dynload archive gate is optional, uses a fallback, or overrides the fresh staged compiler backend"
+fi
+dynload_archive_check=scripts/check/check-stage4-hosted-dynload-provider-archive.shs
+dynload_archive_validator=scripts/check/validate_stage4_hosted_dynload_provider_archive.spl
+grep -Fq 'Linux) archive_format=elf ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the Linux ELF mapping"
+grep -Fq 'Darwin) archive_format=macho ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the macOS Mach-O mapping"
+grep -Fq 'FreeBSD) archive_format=elf ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the FreeBSD ELF mapping"
+for required in \
+  'cross_target=${SIMPLE_STAGE4_DYNLOAD_ARCHIVE_CROSS_TARGET:-}' \
+  'case "$cross_target" in' \
+  '    "")' \
+  '    x86_64-w64-mingw32)' \
+  '[ "$host_os" = "Linux" ] || die "MinGW cross proof requires Linux"' \
+  'archive_format=coff-mingw' \
+  '*) die "unsupported archive cross target: $cross_target" ;;' \
+  'object_name=runtime_dynload.o' \
+  'archive_name=libsimple_stage4_dynload.a' \
+  'MINGW*|MSYS*|CYGWIN*|Windows*)' \
+  '[ "${SIMPLE_WINDOWS_ABI:-}" = "msvc" ] || die "Windows proof requires SIMPLE_WINDOWS_ABI=msvc"' \
+  'archive_format=coff-msvc' \
+  'object_name=runtime_dynload.obj' \
+  'archive_name=simple_stage4_dynload.lib' \
+  '*) die "requires Linux, macOS, FreeBSD, or Windows MSVC" ;;' \
+  'compiler_target=$("$CC" -dumpmachine 2>/dev/null)' \
+  '[ "$compiler_target" = "x86_64-w64-mingw32" ]' \
+  '|| die "MinGW proof requires x86_64-w64-mingw32 (found: $compiler_target)"' \
+  'compiler_target=$("$CC" --print-target-triple 2>/dev/null)' \
+  'x86_64-*-windows-msvc*) ;;' \
+  '*) die "Windows proof requires x86_64 Windows MSVC clang (found: $compiler_target)" ;;' \
+  'command -v cygpath >/dev/null 2>&1 || die "Windows MSVC proof requires cygpath"' \
+  'BUILD_DIR=$(cygpath -m "$BUILD_DIR")' \
+  'object="$BUILD_DIR/$lane/$object_name"' \
+  'archive="$BUILD_DIR/$lane/$archive_name"' \
+  'members=$("$AR" t "$archive") \' \
+  '|| die "failed to list archive members for lane $lane"' \
+  'members=$(printf '\''%s'\'' "$members" | tr -d '\''\r'\'')' \
+  '[ "$members" = "$object_name" ]' \
+  'archive_a="$BUILD_DIR/a/$archive_name"' \
+  'archive_b="$BUILD_DIR/b/$archive_name"'; do
+  grep -Fq -- "${required}" "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks hosted name/target portability: ${required}"
+done
+grep -Fq 'for lane in a b; do' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks independent builds"
+grep -Fq 'SOURCE=src/runtime/runtime_dynload.c' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong source owner"
+grep -Fq '"$AR" rcsD "$archive" "$object"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks deterministic archive mode"
+grep -Fq 'cmp -s "$archive_a" "$archive_b"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not compare independent bytes"
+grep -Fq 'sha256_file() {' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks its SHA-256 helper"
+grep -Fq 'command -v sha256sum' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks sha256sum support"
+grep -Fq 'command -v shasum' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the macOS hash fallback"
+grep -Fq 'checksum=$(shasum -a 256 "$1")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong shasum mode"
+grep -Fq 'elif command -v sha256 >/dev/null 2>&1; then' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the FreeBSD hash fallback"
+grep -Fq 'checksum=$(sha256 -q "$1")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong FreeBSD sha256 mode"
+grep -Fq 'die "requires sha256sum, shasum, or sha256"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not fail without a SHA-256 tool"
+grep -Fq 'sha_a=$(sha256_file "$archive_a")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not hash archive A"
+grep -Fq 'sha_b=$(sha256_file "$archive_b")' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not hash archive B"
+grep -Fq '[ "$sha_a" = "$sha_b" ] || die "independent archive SHA-256 values differ"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not compare independent SHA-256 values"
+grep -Fq 'validator_output=$(env \' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not capture validator status"
+grep -Fq 'SIMPLE_STAGE4_DYNLOAD_ARCHIVE_FORMAT="$archive_format" \' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not pass the measured archive format"
+grep -Fq 'printf '\''%s\n'\'' "$validator_output" | grep -qx '\''stage4_dynload_provider_archive=true'\'' || die "validator success receipt missing"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not require its exact success receipt"
+grep -Fq 'llvm_stage4_candidate_archive_inventory' "${dynload_archive_validator}" || fail "Stage4 dynload validator bypasses the canonical archive inventory"
+dynload_format_guard=$(awk '
+$0 == "    val archive_format = env_get(\"SIMPLE_STAGE4_DYNLOAD_ARCHIVE_FORMAT\")" { inside=1 }
+/match llvm_stage4_candidate_archive_inventory/ { exit }
+inside { print }
+' "${dynload_archive_validator}")
+for required in \
+  'if archive_format == "":' \
+  'if archive_format != "elf" and archive_format != "macho" and archive_format != "coff-msvc" and archive_format != "coff-mingw":'; do
+  printf '%s\n' "${dynload_format_guard}" | grep -Fq -- "${required}" || fail "Stage4 dynload validator does not reject missing or unknown formats before scanning: ${required}"
+done
+grep -Fq 'stage4_validate_dynload_provider_symbol_contract(scans[0], archive_format)' "${dynload_archive_validator}" || fail "Stage4 dynload validator bypasses the canonical archive A symbol contract"
+grep -Fq 'stage4_validate_dynload_provider_symbol_contract(scans[1], archive_format)' "${dynload_archive_validator}" || fail "Stage4 dynload validator bypasses the canonical archive B symbol contract"
+grep -Fq 'gcc-mingw-w64-x86-64 qemu-user' "${multiplatform}" || fail "MinGW Stage4 dynload archive toolchain install missing"
+native_architectures_body=$(awk '
+$0 == "  native-architectures:" { inside=1 }
+inside && $0 ~ /^  [[:alnum:]_-]+:$/ && $0 != "  native-architectures:" { exit }
+inside { print }
+' "${multiplatform}")
+for required in \
+  'needs: native' \
+  'name: bootstrap-Linux x86_64-llvm-${{ github.sha }}' \
+  'path: build/bootstrap-linux'; do
+  printf '%s\n' "${native_architectures_body}" | grep -Fq -- "${required}" || fail "MinGW Stage4 dynload archive proof lacks the same-run Linux Stage3 artifact: ${required}"
+done
+mingw_dynload_archive_body=$(awk '
+$0 == "      - name: Validate MinGW Stage4 dynload provider archive" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+for required in \
+  'compiler="$PWD/build/bootstrap-linux/stage3/x86_64-unknown-linux-gnu/simple"' \
+  'chmod +x "$compiler"' \
+  'test -x "$compiler"' \
+  'command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1' \
+  'command -v x86_64-w64-mingw32-ar >/dev/null 2>&1' \
+  'command -v llvm-nm-18 >/dev/null 2>&1' \
+  'command -v llvm-objdump-18 >/dev/null 2>&1' \
+  'compiler_target=$(x86_64-w64-mingw32-gcc -dumpmachine)' \
+  'test "$compiler_target" = "x86_64-w64-mingw32"' \
+  'SIMPLE_STAGE4_DYNLOAD_ARCHIVE_CROSS_TARGET=x86_64-w64-mingw32 \' \
+  'CC=x86_64-w64-mingw32-gcc \' \
+  'AR=x86_64-w64-mingw32-ar \' \
+  'SIMPLE_NM=llvm-nm-18 \' \
+  'SIMPLE_OBJDUMP=llvm-objdump-18 \' \
+  'SIMPLE_NO_STUB_FALLBACK=1 \' \
+  'SIMPLE_BINARY="$compiler" \' \
+  'BUILD_DIR=build/check/stage4-mingw-dynload-provider \' \
+  'sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs'; do
+  printf '%s\n' "${mingw_dynload_archive_body}" | grep -Fq -- "${required}" || fail "MinGW Stage4 dynload archive proof missing: ${required}"
+done
+if printf '%s\n' "${mingw_dynload_archive_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release|src/compiler_rust/target|SIMPLE_RUNTIME_PATH|--backend'; then
+  fail "MinGW Stage4 dynload archive proof is optional, uses fallback tooling, or overrides the fresh staged compiler backend"
+fi
+windows_arm64_body=$(awk '
+$0 == "      - name: Run Windows ARM64 default-LLVM COFF object gate" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+[ -n "${windows_arm64_body}" ] || fail "Windows ARM64 object gate missing"
+for required in \
+  "if: runner.os == 'Windows' && matrix.backend == 'llvm'" \
+  'stage3="$(find build/bootstrap/stage3' \
+  'test -n "$stage3"' \
+  'SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap"' \
+  'SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build' \
+  '--target aarch64-pc-windows-msvc' \
+  '--emit-object' \
+  '--entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl' \
+  'test -s "$arm64_obj"' \
+  'llvm-readobj --file-headers "$arm64_obj"' \
+  'Format: COFF-ARM64' \
+  'Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' \
+  'sh scripts/check/check-native-option-try-target-fail.shs' \
+  'aarch64-pc-windows-msvc llvm'; do
+  printf '%s\n' "${windows_arm64_body}" | grep -Fq -- "${required}" || fail "Windows ARM64 gate missing: ${required}"
+done
+[ "$(printf '%s\n' "${windows_arm64_body}" | grep -Fc -- '--target aarch64-pc-windows-msvc')" -eq 1 ] || fail "Windows ARM64 target must occur once"
+[ "$(printf '%s\n' "${windows_arm64_body}" | grep -Fc -- '--emit-object')" -eq 1 ] || fail "Windows ARM64 emit-object must occur once"
+if printf '%s\n' "${windows_arm64_body}" | grep -Eq -- '--backend([=[:space:]]|$)|NATIVE_SMOKE_BACKEND|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release/'; then
+  fail "Windows ARM64 gate is explicit-backend, optional, or has fallback tooling"
+fi
+windows_arm64_cranelift_body=$(awk '
+$0 == "      - name: Run Windows ARM64 explicit-Cranelift COFF object gate" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
+[ -n "${windows_arm64_cranelift_body}" ] || fail "Windows ARM64 explicit-Cranelift object gate missing"
+for required in \
+  "if: runner.os == 'Windows' && matrix.backend == 'llvm'" \
+  'stage3="$(find build/bootstrap/stage3' \
+  'test -n "$stage3"' \
+  'SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap"' \
+  'SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build' \
+  '--backend cranelift \' \
+  '--target aarch64-pc-windows-msvc' \
+  '--emit-object' \
+  '--entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl' \
+  'test -s "$arm64_obj"' \
+  'llvm-readobj --file-headers "$arm64_obj"' \
+  'Format: COFF-ARM64' \
+  'Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' \
+  'sh scripts/check/check-native-option-try-target-fail.shs' \
+  'aarch64-pc-windows-msvc cranelift'; do
+  printf '%s\n' "${windows_arm64_cranelift_body}" | grep -Fq -- "${required}" || fail "Windows ARM64 Cranelift gate missing: ${required}"
+done
+[ "$(printf '%s\n' "${windows_arm64_cranelift_body}" | grep -Ec -- '--backend([=[:space:]]|$)')" -eq 1 ] || fail "Windows ARM64 Cranelift gate must select one backend"
+[ "$(printf '%s\n' "${windows_arm64_cranelift_body}" | grep -Fc -- '--target aarch64-pc-windows-msvc')" -eq 1 ] || fail "Windows ARM64 Cranelift target must occur once"
+[ "$(printf '%s\n' "${windows_arm64_cranelift_body}" | grep -Fc -- '--emit-object')" -eq 1 ] || fail "Windows ARM64 Cranelift emit-object must occur once"
+if printf '%s\n' "${windows_arm64_cranelift_body}" | grep -Eq -- 'NATIVE_SMOKE_BACKEND|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release/'; then
+  fail "Windows ARM64 Cranelift gate is optional or has fallback tooling"
+fi
+if grep -q '^  windows-arm64:' .github/workflows/windows-tests.yml; then
+  fail "legacy Windows ARM64 no-op job still present"
+fi
+[ "$(grep -Fc "'.github/workflows/windows-tests.yml'" "${multiplatform}")" -eq 2 ] || fail "legacy Windows workflow trigger missing"
+[ "$(grep -Fc "'.github/workflows/freebsd-build.yml'" "${multiplatform}")" -eq 2 ] || fail "FreeBSD workflow trigger missing"
+[ "$(grep -Fc "'scripts/check/check-native-option-try-target-fail.shs'" "${multiplatform}")" -eq 2 ] || fail "target Option compile helper workflow trigger missing"
+[ "$(grep -Fc "'test/fixtures/compiler/native_option_try_*_loud.spl'" "${multiplatform}")" -eq 2 ] || fail "target Option compile fixture workflow trigger missing"
+grep -Fq 'run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download' "${freebsd_workflow}" || fail "FreeBSD full execution wiring missing"
+grep -Fq 'STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
+freebsd_dynload_archive_body=$(awk '
+$0 == "    info \"Running FreeBSD Stage4 dynload provider archive proof...\"" { inside=1; print; next }
+inside && /^    info "/ { exit }
+inside { print }
+' scripts/check/check-freebsd-bootstrap-qemu.shs)
+for required in \
+  'AR=llvm-ar' \
+  'SIMPLE_NO_STUB_FALLBACK=1' \
+  'SIMPLE_BINARY=${STAGE_BIN}' \
+  'sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs 2>&1; echo EXIT:\$?' \
+  'DYNLOAD_ARCHIVE_EXIT=$(printf '\''%s'\'' "$DYNLOAD_ARCHIVE_OUT" | grep '\''^EXIT:'\'' | tail -1 | cut -d: -f2)' \
+  '[ "$DYNLOAD_ARCHIVE_EXIT" = "0" ]' \
+  'printf '\''%s\n'\'' "$DYNLOAD_ARCHIVE_OUT" | grep -qx '\''stage4_dynload_provider_archive=true'\'''; do
+  printf '%s\n' "${freebsd_dynload_archive_body}" | grep -Fq -- "${required}" || fail "FreeBSD Stage4 dynload archive proof missing: ${required}"
+done
+if printf '%s\n' "${freebsd_dynload_archive_body}" | grep -Eq '\|\|[[:space:]]*true|bin/release|src/compiler_rust/target|--backend'; then
+  fail "FreeBSD Stage4 dynload archive proof is optional, uses fallback tooling, or overrides the fresh staged compiler backend"
+fi
+grep -Eq '^[[:space:]]*SMOKE_OUT=.*native-build .*--backend cranelift .*--output \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe build missing"
+grep -Eq '^[[:space:]]*SMOKE_RESULT=.*test -x \$\{SMOKE_DIR\}/probe && \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe execution missing"
+grep -Fq 'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity backend selection missing"
+grep -Fq "NATIVE_PARITY_CASES='option_try_annotated_loud option_try_direct_loud option_try_unresolved_method_loud'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity cases missing"
+grep -Fq 'for PARITY_BACKEND in llvm cranelift; do' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity does not cover both backends"
+grep -Fq '[ "$PARITY_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity exit status is not enforced"
+grep -Fq 'total=3 pass=3 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity strict summary missing"
+grep -Fq "NATIVE_PARITY_CASES='class_array_field_mutation nested_struct_value_copy text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp method_owner_dispatch dynload_tagged_text option_is_none_map'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity cases missing"
+grep -Fq '[ "$SELECTED_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity exit status is not enforced"
+grep -Fq 'total=20 pass=20 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity strict summary missing"
+[ "$(grep -c "test/fixtures/compiler/llvm_simd_row_native_probe.spl" "${multiplatform}")" -eq 2 ] || fail "native architecture probe trigger missing"
+[ "$(grep -c "test/fixtures/compiler/stage4_struct_enum_array_probe.spl" "${multiplatform}")" -eq 2 ] || fail "Cranelift aggregate probe trigger missing"
+core_pipeline=.github/workflows/core-mcp-dev-pipeline.yml
+collision_fixture=test/fixtures/compiler/native_runtime_local_name_collision.spl
+[ "$(grep -Fc "'${collision_fixture}'" "${core_pipeline}")" -eq 2 ] || fail "runtime/local collision fixture must trigger push and pull-request Cranelift checks"
+non_generic_collision_fixture=test/fixtures/compiler/native_runtime_local_name_collision_non_generic.spl
+[ "$(grep -Fc "'${non_generic_collision_fixture}'" "${core_pipeline}")" -eq 2 ] || fail "non-generic runtime/local collision fixture must trigger push and pull-request Cranelift checks"
+collision_gate=scripts/check/check-cranelift-aot-aggregates.shs
+for required in \
+  'src/compiler_rust/compiler/src/codegen/common_backend.rs' \
+  'src/compiler_rust/compiler/src/codegen/instr/calls.rs' \
+  'build_fixture "$FIXTURE_DIR/native_runtime_local_name_collision.spl" "$COLLISION_BIN"' \
+  'build_fixture "$FIXTURE_DIR/native_runtime_local_name_collision_non_generic.spl" "$NON_GENERIC_COLLISION_BIN"' \
+  'printf '\''4\n20\n25\n'\'' >"$BUILD_DIR/collision.expected"' \
+  'cmp "$BUILD_DIR/collision.expected" "$BUILD_DIR/collision.actual"' \
+  'test ! -s "$BUILD_DIR/collision.stderr"'; do
+  grep -Fq -- "${required}" "${collision_gate}" || fail "runtime/local collision gate missing: ${required}"
+done
+grep -Fq 'printf '\''3\n'\'' >"$BUILD_DIR/collision-non-generic.expected"' "${collision_gate}" || fail "non-generic runtime/local collision expected output missing"
+grep -Fq 'cmp "$BUILD_DIR/collision-non-generic.expected" "$BUILD_DIR/collision-non-generic.actual"' "${collision_gate}" || fail "non-generic runtime/local collision exact-output check missing"
+grep -Fq 'test ! -s "$BUILD_DIR/collision-non-generic.stderr"' "${collision_gate}" || fail "non-generic runtime/local collision stderr check missing"
+generic_origin_repro=test/fixtures/compiler/native_runtime_generic_call_origin_collision_repro.spl
+test -f "${generic_origin_repro}" || fail "generic runtime call-origin reproducer missing"
+[ "$(grep -Fc "'${generic_origin_repro}'" "${core_pipeline}")" -eq 2 ] || fail "generic runtime call-origin reproducer must trigger push and pull-request checks"
+grep -Fq 'print(rt_array_new(0))' "${generic_origin_repro}" || fail "generic runtime call-origin reproducer lost explicit source call"
+interp_scope_spec=test/01_unit/compiler/frontend/interp_fragment_sticky_error_spec.spl
+list_constructor_spec=test/01_unit/lib/core/list_constructor_hardening_spec.spl
+for focused_spec in "${interp_scope_spec}" "${list_constructor_spec}"; do
+  test -f "${focused_spec}" || fail "focused interpreter regression missing: ${focused_spec}"
+  [ "$(grep -Fc "'${focused_spec}'" "${core_pipeline}")" -eq 2 ] || fail "focused interpreter regression must trigger push and pull-request checks: ${focused_spec}"
+  grep -Fq "SIMPLE_LIB=src \"\$SIMPLE_BINARY\" test ${focused_spec} --mode=interpreter" "${core_pipeline}" || fail "focused interpreter regression is not executed: ${focused_spec}"
+done
+grep -Fq 'SIMPLE_LIB=src "$SIMPLE_BINARY" run src/compiler/10.frontend/core/interpreter/test_interp.spl' "${core_pipeline}" || fail "pure-Simple core interpreter integration is not executed"
+for rust_constructor_owner in \
+  src/compiler_rust/parser/src/expressions/postfix.rs \
+  src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs; do
+  [ "$(grep -Fc "'${rust_constructor_owner}'" "${core_pipeline}")" -eq 2 ] || fail "Rust constructor owner must trigger push and pull-request checks: ${rust_constructor_owner}"
+done
+if grep -R -E --include='*.spl' '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+(rt_array_new|rt_array_new_with_cap|rt_array_new_with_cap_u64|rt_byte_array_new|rt_array_push|rt_dict_new|rt_dict_insert|rt_tuple_new|rt_tuple_set|rt_enum_new)[[:space:]<(]' src/compiler src/app src/lib >/dev/null; then
+  fail "owned code defines a guarded compiler-generated runtime helper before MIR call origin exists"
+fi
+grep -q 'bootstrap-from-scratch.sh' "${multiplatform}" || fail "multiplatform workflow bypasses canonical bootstrap"
+grep -q '^  native-architectures:' "${multiplatform}" || fail "pure-Simple native architecture job missing"
+grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native architecture job does not consume Linux LLVM pure stage"
+grep -q 'chmod +x "$compiler"' "${multiplatform}" || fail "downloaded pure-Simple compiler executable mode is not restored"
+grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "native architecture gate permits stub fallback"
+grep -Fq 'binutils-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 object inspection toolchain missing"
+grep -Fq 'check_unsupported_arm32' scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection gate missing"
+grep -Fq "Backend cranelift does not support target arm" scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection diagnostic is not checked"
+grep -Fq 'if [ "$NATIVE_SMOKE_BACKEND" = cranelift ]; then' scripts/check/native-smoke-matrix.shs || fail "native smoke lacks explicit Cranelift branch"
+grep -Fq 'set -- "$@" --backend=cranelift' scripts/check/native-smoke-matrix.shs || fail "native smoke does not select Cranelift explicitly"
+if grep -Fq -- '--backend "$NATIVE_SMOKE_BACKEND"' scripts/check/native-smoke-matrix.shs; then
+  fail "native smoke does not exercise default LLVM"
+fi
+grep -Fq 'record_id="$1"; record_mode="$2"; record_status="$3"; record_detail="$4"' scripts/check/check-native-seed-parity.shs || fail "native parity result recording clobbers caller state"
+grep -Fq 'NATIVE_PARITY_BACKEND="${NATIVE_PARITY_BACKEND:-llvm}"' scripts/check/check-native-seed-parity.shs || fail "native parity backend default missing"
+parity_build_native=$(sed -n '/^build_native() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+if printf '%s\n' "${parity_build_native}" | grep -Fq 'NATIVE_PARITY_BACKEND'; then
+  fail "native parity backend selector leaks into shared dual-backend builds"
+fi
+brace_literal_scope_body=$(sed -n '/^write_case_brace_literal_scope_exact() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+for required in \
+  'fn open_brace(x: text) -> text:' \
+  '    " { "' \
+  'fn main():' \
+  '    val ob = open_brace("unused")' \
+  '    val rule = ".a" + ob + "color: red" + " } "' \
+  '    print("RULE: [" + rule + "]")' \
+  'main()'; do
+  printf '%s\n' "${brace_literal_scope_body}" | grep -Fxq -- "${required}" || fail "exact brace-literal scope reproduction missing: ${required}"
+done
+if printf '%s\n' "${brace_literal_scope_body}" | grep -Eq 'fn main\(\) -> i64:|^[[:space:]]+return 0$'; then
+  fail "brace-literal scope reproduction was adapted away from the original trigger"
+fi
+open_bug_repros=$(sed -n '/^if \[ "${NATIVE_OPEN_BUG_REPROS:-0}" = 1 \]; then$/,/^fi$/p' scripts/check/check-native-seed-parity.shs)
+for required in \
+  'run_strict_dual_backend_case class_array_param_field_mutation test/fixtures/compiler/native_class_array_param_field_mutation.spl "1"' \
+  'run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl "3377777700"'; do
+  printf '%s\n' "${open_bug_repros}" | grep -Fq -- "${required}" || fail "known-red native reproduction escaped its opt-in block: ${required}"
+  [ "$(grep -Fc -- "${required}" scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "known-red native reproduction must be registered exactly once: ${required}"
+done
+printf '%s\n' "${open_bug_repros}" | grep -Fq 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' || fail "exact brace-literal scope reproduction is not an opt-in known-red case"
+[ "$(grep -Fc 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "exact brace-literal scope reproduction must be registered exactly once"
+grep -Fq 'run_parity_case brace_literal_scope write_case_brace_literal_scope "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs || fail "adapted brace-literal scope parity registration missing"
+case_table=$(sed -n '/^# Case table\.$/,$p' scripts/check/check-native-seed-parity.shs)
+all_cases=$(printf '%s\n' "${case_table}" | grep -Ec '^[[:space:]]*run_(strict_dual_backend_case|parity_case|native_authoritative_case|loud_fail_case|runtime_fail_case) ')
+all_strict=$(printf '%s\n' "${case_table}" | grep -c '^[[:space:]]*run_strict_dual_backend_case ')
+open_cases=$(printf '%s\n' "${open_bug_repros}" | grep -Ec '^[[:space:]]*run_(strict_dual_backend_case|parity_case|native_authoritative_case|loud_fail_case|runtime_fail_case) ')
+open_strict=$(printf '%s\n' "${open_bug_repros}" | grep -c '^[[:space:]]*run_strict_dual_backend_case ')
+default_cases=$((all_cases - open_cases))
+default_strict=$((all_strict - open_strict))
+default_checks=$((default_cases + default_strict))
+all_checks=$((all_cases + all_strict))
+parity_plan=doc/03_plan/compiler/backend/native_entry_build_correctness_2026-07-14.md
+grep -Fq "**${default_cases} logical cases / ${default_checks} recorded checks**" "${parity_plan}" || fail "default parity registration totals are stale in ${parity_plan}"
+grep -Fq "NATIVE_OPEN_BUG_REPROS=1\` expands this" "${parity_plan}" || fail "known-red parity expansion is undocumented"
+grep -Fq "**${all_cases} logical cases / ${all_checks} recorded checks**" "${parity_plan}" || fail "expanded parity registration totals are stale in ${parity_plan}"
+parity_loud_fail=$(sed -n '/^run_loud_fail_case() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+printf '%s\n' "${parity_loud_fail}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "loud-fail parity backend selection missing"
+printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "loud-fail parity does not select Cranelift explicitly"
+printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" || build_rc=$?' || fail "loud-fail parity does not preserve flagless LLVM"
+parity_native_authoritative=$(sed -n '/^run_native_authoritative_case() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "native-authoritative parity backend selection missing"
+printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "native-authoritative parity does not select Cranelift explicitly"
+printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'elif build_native "$src" "$bin" "$build_log"; then' || fail "native-authoritative parity does not preserve flagless LLVM"
+option_parity_body=$(sed -n '/- name: Run strict Option native-authoritative parity/,/- name: Run full native seed parity gate/p' "${multiplatform}")
+for required in \
+  'SIMPLE_BINARY="$stage3"' \
+  'NATIVE_PARITY_BACKEND=${{ matrix.backend }}' \
+  'NATIVE_PARITY_CASES="option_try_annotated_loud option_try_direct_loud option_try_unresolved_method_loud"' \
+  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
+  'sh scripts/check/check-native-seed-parity.shs'; do
+  printf '%s\n' "${option_parity_body}" | grep -Fq -- "${required}" || fail "hosted Option parity gate missing: ${required}"
+done
+if printf '%s\n' "${option_parity_body}" | grep -Eq '^[[:space:]]*if:|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
+  fail "hosted Option parity gate is optional"
+fi
+selected_parity_body=$(sed -n '/- name: Run strict selected native parity/,/- name: Run Windows ARM64 default-LLVM COFF object gate/p' "${multiplatform}")
+for required in \
+  "if: runner.os != 'Linux' && matrix.backend == 'llvm'" \
+  'SIMPLE_BINARY="$stage3"' \
+  'NATIVE_PARITY_CASES="class_array_field_mutation nested_struct_value_copy text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch option_is_none_map"' \
+  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
+  'sh scripts/check/check-native-seed-parity.shs'; do
+  printf '%s\n' "${selected_parity_body}" | grep -Fq -- "${required}" || fail "hosted selected parity gate missing: ${required}"
+done
+if printf '%s\n' "${selected_parity_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
+  fail "hosted selected parity gate is optional"
+fi
+full_parity_body=$(sed -n '/- name: Run full native seed parity gate/,/- name: Run non-Linux strict dynload parity/p' "${multiplatform}")
+for required in \
+  "if: runner.os == 'Linux' && matrix.backend == 'llvm'" \
+  'SIMPLE_BINARY="$stage3"' \
+  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
+  'PARITY_WORK_DIR="build/check/native-parity-full"' \
+  'sh scripts/check/check-native-seed-parity.shs'; do
+  printf '%s\n' "${full_parity_body}" | grep -Fq -- "${required}" || fail "full native parity gate missing: ${required}"
+done
+if printf '%s\n' "${full_parity_body}" | grep -Eq 'NATIVE_PARITY_CASES|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
+  fail "full native parity gate is filtered or optional"
+fi
+dynload_parity_body=$(sed -n '/- name: Run non-Linux strict dynload parity/,/- name: Run strict selected native parity/p' "${multiplatform}")
+for required in \
+  "if: runner.os != 'Linux' && matrix.backend == 'llvm'" \
+  'SIMPLE_BINARY="$stage3"' \
+  'NATIVE_PARITY_CASES=dynload_tagged_text' \
+  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
+  'PARITY_WORK_DIR="build/check/native-parity-${{ matrix.backend }}"' \
+  'sh scripts/check/check-native-seed-parity.shs'; do
+  printf '%s\n' "${dynload_parity_body}" | grep -Fq -- "${required}" || fail "hosted dynload parity gate missing: ${required}"
+done
+if printf '%s\n' "${dynload_parity_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|NATIVE_OPEN_BUG_REPROS'; then
+  fail "hosted dynload parity gate is optional or enables known-red reproductions"
+fi
+if grep -Fq 'NATIVE_OPEN_BUG_REPROS=1' "${multiplatform}" scripts/check/check-freebsd-bootstrap-qemu.shs; then
+  fail "hosted CI enables known-red native reproductions"
+fi
+arch_gate=scripts/check/check-llvm-simd-row-native-arch.shs
+for invocation in \
+  'build_object_arch arm32 armv7-unknown-linux-gnueabihf' \
+  'build_arch x86_64 x86_64-unknown-linux-gnu' \
+  'build_arch aarch64 aarch64-unknown-linux-gnu' \
+  'build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu' \
+  'build_arch riscv64_rvv riscv64-unknown-linux-gnu' \
+  'build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu'; do
+  grep -Fq "${invocation}" "${arch_gate}" || fail "native architecture invocation missing: ${invocation}"
+done
+grep -qx 'check_unsupported_riscv32_hosted' "${arch_gate}" || fail "hosted RV32 rejection invocation missing"
+grep -qx 'build_riscv32_baremetal_object' "${arch_gate}" || fail "bare-metal RV32 recovery invocation missing"
+grep -qx 'build_riscv32_crossmodule_object' "${arch_gate}" || fail "RV32 crossmodule correctness invocation missing"
+rv32_hosted_body=$(sed -n '/^check_unsupported_riscv32_hosted() {$/,/^}$/p' "${arch_gate}")
+for required in \
+  'target=riscv32-unknown-linux-gnu' \
+  'SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build' \
+  '--mode one-binary' \
+  '[ "$status" -ne 0 ]' \
+  '[ ! -e "$out" ]' \
+  'grep -Fq "host C runtime/entry compilation unsupported: target '\''$target'\''" "$log"'; do
+  printf '%s\n' "${rv32_hosted_body}" | grep -Fq -- "${required}" || fail "hosted RV32 rejection gate missing: ${required}"
+done
+if printf '%s\n' "${rv32_hosted_body}" | grep -Eq -- '--backend|\|\|[[:space:]]*true'; then
+  fail "hosted RV32 rejection gate bypasses default LLVM or is optional"
+fi
+rv32_baremetal_body=$(sed -n '/^build_riscv32_baremetal_object() {$/,/^}$/p' "${arch_gate}")
+for required in \
+  'target=riscv32-unknown-none-elf' \
+  'SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build' \
+  '--emit-object' \
+  '--entry "$RV32_HOSTED_PROBE" --target "$target"' \
+  '--cache-dir "$cache" --output "$out"' \
+  'check_riscv32_baremetal_object "$out" riscv32_baremetal_object'; do
+  printf '%s\n' "${rv32_baremetal_body}" | grep -Fq -- "${required}" || fail "bare-metal RV32 recovery gate missing: ${required}"
+done
+if printf '%s\n' "${rv32_baremetal_body}" | grep -Eq -- '--backend|\|\|[[:space:]]*true'; then
+  fail "bare-metal RV32 recovery gate bypasses default LLVM or is optional"
+fi
+rv32_crossmodule_body=$(sed -n '/^build_riscv32_crossmodule_object() {$/,/^}$/p' "${arch_gate}")
+for required in \
+  'target=riscv32-unknown-none-elf' \
+  'out="$BUILD_DIR/riscv32-crossmodule/result-u8.o"' \
+  'cache="$BUILD_DIR/riscv32-crossmodule/cache"' \
+  'SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build' \
+  '--emit-object --source test/fixtures --source src/lib --entry-closure' \
+  '--entry "$CROSSMODULE_PROBE" --target "$target"' \
+  '--cache-dir "$cache" --output "$out"' \
+  'check_riscv32_baremetal_object "$out" riscv32_crossmodule_object'; do
+  printf '%s\n' "${rv32_crossmodule_body}" | grep -Fq -- "${required}" || fail "RV32 crossmodule correctness object gate missing: ${required}"
+done
+if printf '%s\n' "${rv32_crossmodule_body}" | grep -Eq -- '--backend|\|\|[[:space:]]*true'; then
+  fail "RV32 crossmodule correctness object gate bypasses default LLVM or is optional"
+fi
+rv32_object_check_body=$(sed -n '/^check_riscv32_baremetal_object() {$/,/^}$/p' "${arch_gate}")
+for required in \
+  'test -s "$checked_out"' \
+  "grep -Fq 'ELF 32-bit'" \
+  "grep -Fq 'relocatable'" \
+  "grep -Fq 'RISC-V'" \
+  "grep -Fq 'soft-float ABI'" \
+  'riscv64-linux-gnu-readelf -h "$checked_out"' \
+  'riscv64-linux-gnu-readelf -A "$checked_out"' \
+  "grep -Eq 'Class:[[:space:]]+ELF32'" \
+  "grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'" \
+  "grep -Eq 'Machine:[[:space:]]+RISC-V'" \
+  "grep -Eq 'Flags:.*RVC, soft-float ABI'" \
+  "grep -Eq 'Tag_RISCV_arch:.*rv32i.*_m.*_a.*_c'" \
+  "grep -Eq '_f[0-9]|_d[0-9]' && exit 1"; do
+  printf '%s\n' "${rv32_object_check_body}" | grep -Fq -- "${required}" || fail "bare-metal RV32 object inspection missing: ${required}"
+done
+grep -Fq 'install_hint: "Hosted RISC-V32 is unsupported; use riscv32-unknown-none-elf"' \
+  src/compiler/70.backend/backend/llvm_cross_target.spl || fail "hosted RV32 bare-metal recovery hint missing"
+rv32_guard_spec=test/01_unit/compiler/backend/hosted_c_target_guard_spec.spl
+for required in \
+  'toolchain_for_target(CodegenTarget.Riscv32)' \
+  'expect(toolchain.linker).to_equal("")' \
+  'expect(toolchain.sysroot).to_equal("")' \
+  'expect(toolchain.crt_dir).to_equal("")' \
+  'hosted_c_compiler_plan("riscv32-unknown-linux-gnu", "linux", "x86_64")' \
+  'hosted_c_compiler_plan("rv32", "linux", "x86_64")' \
+  'expect(full.supported).to_be(false)' \
+  'expect(alias.supported).to_be(false)' \
+  'expect(hosted_cross_c_compiler_name("riscv32-unknown-linux-gnu", "linux", "x86_64")).to_equal("")'; do
+  grep -Fq -- "${required}" "${rv32_guard_spec}" || fail "hosted RV32 source guard missing: ${required}"
+done
+rv32_guard_path_count=$(grep -Fc "'${rv32_guard_spec}'" "${multiplatform}")
+[ "${rv32_guard_path_count}" -eq 2 ] || fail "hosted RV32 source guard must trigger push and pull-request architecture checks"
+grep -Fq 'sh scripts/check/check-native-option-try-target-fail.shs' "${arch_gate}" || fail "ARM32 Option compile helper missing"
+grep -Fq 'armv7-unknown-linux-gnueabihf llvm' "${arch_gate}" || fail "ARM32 Option compile target/backend missing"
+if grep -Fq 'check-native-option-try-target-fail.shs' scripts/check/check-cranelift-aot-aggregate-cross.shs; then
+  fail "unsupported Cranelift ARM32 lane must not claim Option target compilation"
+fi
+arm_object_body=$(sed -n '/^build_object_arch() {$/,/^}$/p' "${arch_gate}")
+printf '%s\n' "${arm_object_body}" | grep -Fq -- '--emit-object' || fail "ARM32 object gate does not emit an object"
+if printf '%s\n' "${arm_object_body}" | grep -Fq -- '--backend'; then
+  fail "ARM32 object gate does not exercise default LLVM"
+fi
+grep -Fq "Machine:[[:space:]]+ARM" "${arch_gate}" || fail "ARM32 object gate does not inspect the ELF machine"
+grep -Fq "Class:[[:space:]]+ELF32" "${arch_gate}" || fail "ARM32 object gate does not require ELF32"
+grep -Fq "Type:[[:space:]]+REL" "${arch_gate}" || fail "ARM32 object gate does not require a relocatable object"
+option_target_gate=scripts/check/check-native-option-try-target-fail.shs
+for required in \
+  'test/fixtures/compiler/native_option_try_annotated_loud.spl' \
+  'test/fixtures/compiler/native_option_try_direct_loud.spl' \
+  'test/fixtures/compiler/native_option_try_unresolved_method_loud.spl' \
+  '"$SIMPLE_BIN" native-build --backend cranelift --emit-object' \
+  '"$SIMPLE_BIN" native-build --emit-object --target "$TARGET"' \
+  '[ "$status" -eq 0 ]' \
+  '[ -s "$out" ]' \
+  'if grep -qF "$DIAGNOSTIC" "$log"; then'; do
+  grep -Fq -- "${required}" "${option_target_gate}" || fail "target Option compile gate missing: ${required}"
+done
+if grep -Eq -- '--backend([=[:space:]]+)(llvm|"\$BACKEND")|\|\|[[:space:]]*true' "${option_target_gate}"; then
+  fail "target Option compile gate does not preserve flagless LLVM or is optional"
+fi
+grep -Fq 'cp test/fixtures/compiler/native_option_try_annotated_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "annotated Option parity fixture drift"
+grep -Fq 'cp test/fixtures/compiler/native_option_try_direct_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "direct Option parity fixture drift"
+grep -Fq 'cp test/fixtures/compiler/native_option_try_unresolved_method_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "unresolved-method Option parity fixture drift"
+grep -Fq 'val value: i64? = 5' test/fixtures/compiler/native_option_try_annotated_loud.spl || fail "annotated Option fixture must use a non-sentinel present payload"
+grep -Fq '    4' test/fixtures/compiler/native_option_try_direct_loud.spl || fail "direct Option fixture payload drift"
+grep -Fq 'val payload = source.maybe()?' test/fixtures/compiler/native_option_try_unresolved_method_loud.spl || fail "unresolved-method Option fixture must exercise method-return provenance"
+grep -Fq 'run_native_authoritative_case option_try_annotated_loud write_case_option_try_annotated_loud "5"' scripts/check/check-native-seed-parity.shs || fail "annotated Option expected payload drift"
+grep -Fq 'run_native_authoritative_case option_try_direct_loud write_case_option_try_direct_loud "4"' scripts/check/check-native-seed-parity.shs || fail "direct Option expected payload drift"
+grep -Fq 'run_native_authoritative_case option_try_unresolved_method_loud write_case_option_try_unresolved_method_loud "6"' scripts/check/check-native-seed-parity.shs || fail "unresolved-method Option expected payload drift"
+result_try_fixture=test/fixtures/native_crossmodule_result_u8/main.spl
+for required in \
+  'val data = load_bytes()?' \
+  'val data = fail_bytes()?' \
+  'match forward_load_bytes():' \
+  'match forward_fail_bytes():' \
+  'fn cross_target_arithmetic_ok() -> bool:' \
+  'if not (signed_int < 41.5) or 41.5 < signed_int:' \
+  'val high: u64 = 0x8000000000000000u64' \
+  'if not (small < high) or high < small:' \
+  'if not (high > 0.0) or not (0.0 < high):' \
+  'high < 9223372036854775808.0' \
+  'high / 2u64 != 0x4000000000000000u64' \
+  'high % 3u64 != 2u64' \
+  'high >> 63u64 != 1u64' \
+  'negative >> unsigned_count != -1' \
+  'signed_dividend / 2 != -4' \
+  'signed_dividend % 2 != -1' \
+  'print("result-u8-ok")'; do
+  grep -Fq -- "${required}" "${result_try_fixture}" || fail "cross-architecture Result try fixture missing: ${required}"
+done
+grep -Fq 'CROSSMODULE_PROBE="test/fixtures/native_crossmodule_result_u8/main.spl"' "${arch_gate}" || fail "LLVM cross-architecture Result try fixture missing"
+cranelift_cross=scripts/check/check-cranelift-aot-aggregate-cross.shs
+grep -Fq 'EXEC_FIXTURE="test/fixtures/native_crossmodule_result_u8/main.spl"' "${cranelift_cross}" || fail "Cranelift cross-architecture Result try fixture missing"
+for required in \
+  'if [ "${CRANELIFT_CROSS_EXECUTE:-0}" = 1 ]; then' \
+  'check_execution "$target" qemu-aarch64 /usr/aarch64-linux-gnu' \
+  'check_execution "$target" qemu-riscv64 /usr/riscv64-linux-gnu' \
+  "printf 'result-u8-ok\\n' | cmp - \"\$actual\"" \
+  'test ! -s "$stderr"'; do
+  grep -Fq -- "${required}" "${cranelift_cross}" || fail "Cranelift cross-architecture execution guard missing: ${required}"
+done
+freebsd_crossmodule=scripts/check/check-native-crossmodule-result-u8.shs
+for required in \
+  'FIXTURE="test/fixtures/native_crossmodule_result_u8/main.spl"' \
+  'EXPECTED="result-u8-ok"' \
+  'for backend in default-llvm cranelift; do' \
+  '--backend=cranelift' \
+  'actual="$(timeout 20 "$binary"' \
+  'test "$actual" = "$EXPECTED"'; do
+  grep -Fq -- "${required}" "${freebsd_crossmodule}" || fail "FreeBSD Result try execution owner missing: ${required}"
+done
+grep -Fq 'sh scripts/check/check-native-crossmodule-result-u8.shs' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Result try execution wiring missing"
+grep -q 'build/bootstrap/stage2/\*\*/simple\*' "${multiplatform}" || fail "multiplatform Stage 2 artifact missing"
+grep -q 'build/bootstrap/stage3/\*\*/simple\*' "${multiplatform}" || fail "multiplatform Stage 3 artifact missing"
+if grep -q 'src/compiler_rust/target/bootstrap/simple\*' "${multiplatform}"; then
+  fail "multiplatform workflow still uploads the Rust seed"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-platform.XXXXXX")
+trap 'rm -rf "${tmp}"' EXIT HUP INT TERM
+cat >"${tmp}/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  -m) echo x86_64 ;;
+  *) echo MINGW64_NT-10.0 ;;
+esac
+EOF
+chmod +x "${tmp}/uname"
+
+mingw=$(PATH="${tmp}:${PATH}" MSYSTEM=MINGW64 sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$PLATFORM_TRIPLE"')
+[ "${mingw}" = "x86_64-pc-windows-gnu" ] || fail "MinGW triple: ${mingw}"
+
+msvc=$(PATH="${tmp}:${PATH}" MSYSTEM= SIMPLE_WINDOWS_ABI=msvc sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$PLATFORM_TRIPLE"')
+[ "${msvc}" = "x86_64-pc-windows-msvc" ] || fail "MSVC triple: ${msvc}"
+
+set +e
+freebsd_out=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 2>&1)
+freebsd_status=$?
+set -e
+[ "${freebsd_status}" -ne 0 ] || fail "Linux host accepted direct FreeBSD bootstrap"
+printf '%s\n' "${freebsd_out}" | grep -q 'check-freebsd-bootstrap-qemu.shs --full' || fail "missing FreeBSD QEMU handoff"
+
+echo "Bootstrap portability contract PASS"

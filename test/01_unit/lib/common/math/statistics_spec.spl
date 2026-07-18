@@ -1,0 +1,516 @@
+# @covers src/lib/common/math/statistics.spl 100%
+# Statistics module comprehensive specification
+
+"""
+# Statistics Module Specification
+
+**Feature IDs:** #LIB-MATH-STATS
+**Category:** Stdlib / Math
+**Difficulty:** 4/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Pure-function descriptive statistics and regression analysis module extracted from
+office formula engine. All functions take [f64] arrays (value types), return 0.0 or
+NaN on invalid input. No exceptions, no state. Excel-compatible behavior where applicable.
+
+## Test Coverage
+
+- Basic statistics: mean, median, mode, variance, stdev
+- Distribution moments: skewness, kurtosis
+- Quantiles: percentile, quartile, percentile rank
+- Specialized means: geometric, harmonic
+- Regression: linear fit, slope, intercept, forecast
+- Correlation: covariance, correlation, R²
+- Order statistics: rank, large, small
+- Fisher transform
+
+## Edge Cases
+
+- Empty arrays → 0.0 (documented per function)
+- Insufficient data (e.g., stdev needs ≥2) → 0.0
+- Zero variance → 0.0 (correlation, etc.)
+- Division by zero protected
+- Non-positive values for ln/geomean → 0.0
+"""
+
+use lib.math.statistics.{
+    mean, median, mode_single, avedev, devsq,
+    var_pop, var_sample, stdev_pop, stdev_sample, standardize,
+    skew, kurt,
+    percentile_inc, quartile_inc, percentrank_inc, trimmean,
+    geomean, harmean,
+    covar_pop, covar_sample, correl, rsq,
+    linfit, slope, intercept, forecast_linear, steyx,
+    growth_predict,
+    rank_value, large, small,
+    fisher, fisher_inv
+}
+
+# ============================================================================
+# Helper: Float equality with tolerance
+# ============================================================================
+
+fn approx_equal(a: f64, b: f64, tol: f64) -> bool:
+    val d = a - b
+    val d_abs = if d < 0.0: 0.0 - d else: d
+    d_abs <= tol
+
+# ============================================================================
+# Test Suite: Basic Statistics
+# ============================================================================
+
+describe "statistics module":
+    describe "mean":
+        it "computes mean of simple array":
+            # Data: [3, 5, 7, 10, 12], mean should be 7.4
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            expect(approx_equal(mean(data), 7.4, 0.001)).to_equal(true)
+
+        it "returns 0.0 for empty array":
+            expect(mean([])).to_equal(0.0)
+
+        it "handles single element":
+            expect(mean([5.0])).to_equal(5.0)
+
+        it "handles negative values":
+            val data = [-1.0, 0.0, 1.0]
+            expect(mean(data)).to_equal(0.0)
+
+    describe "median":
+        it "computes median of odd-length array":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            expect(median(data)).to_equal(7.0)
+
+        it "computes median of even-length array":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(median(data)).to_equal(2.5)
+
+        it "returns 0.0 for empty array":
+            expect(median([])).to_equal(0.0)
+
+        it "handles single element":
+            expect(median([5.0])).to_equal(5.0)
+
+        it "sorts unsorted input":
+            val data = [10.0, 3.0, 5.0]
+            expect(median(data)).to_equal(5.0)
+
+    describe "mode_single":
+        it "finds most frequent value":
+            val data = [1.0, 2.0, 2.0, 3.0]
+            expect(mode_single(data)).to_equal(2.0)
+
+        it "returns first on tie (all equal)":
+            val data = [5.0, 5.0, 5.0]
+            expect(mode_single(data)).to_equal(5.0)
+
+        it "returns 0.0 for empty array":
+            expect(mode_single([])).to_equal(0.0)
+
+        it "handles all unique values":
+            val data = [1.0, 2.0, 3.0]
+            expect(mode_single(data)).to_equal(1.0)
+
+    describe "variance and std dev":
+        it "computes sample variance correctly":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # var = sum((x-mean)²)/(n-1) = 53.2/4 = 13.3
+            expect(approx_equal(var_sample(data), 13.3, 0.01)).to_equal(true)
+
+        it "computes population variance correctly":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # var = sum((x-mean)²)/n = 53.2/5 = 10.64
+            expect(approx_equal(var_pop(data), 10.64, 0.01)).to_equal(true)
+
+        it "sample stdev matches sqrt(variance)":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # stdev_sample = sqrt(13.3) ≈ 3.6469
+            expect(approx_equal(stdev_sample(data), 3.6469, 0.001)).to_equal(true)
+
+        it "returns 0.0 for insufficient data":
+            expect(var_sample([1.0])).to_equal(0.0)
+            expect(stdev_sample([])).to_equal(0.0)
+
+        it "handles zero variance":
+            val data = [5.0, 5.0, 5.0]
+            expect(var_sample(data)).to_equal(0.0)
+
+    describe "standardize (z-score)":
+        it "computes z-score correctly":
+            expect(standardize(10.0, 5.0, 2.0)).to_equal(2.5)
+
+        it "returns 0.0 for zero or negative stdev":
+            expect(standardize(5.0, 5.0, 0.0)).to_equal(0.0)
+            expect(standardize(5.0, 5.0, -1.0)).to_equal(0.0)
+
+    describe "avedev":
+        it "computes average absolute deviation":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # mean = 7.4; deviations = 4.4, 2.4, 0.4, 2.6, 4.6; sum = 14.4; avedev = 2.88
+            expect(approx_equal(avedev(data), 2.88, 0.01)).to_equal(true)
+
+        it "returns 0.0 for empty array":
+            expect(avedev([])).to_equal(0.0)
+
+    describe "devsq":
+        it "computes sum of squared deviations":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # devsq = 53.2
+            expect(approx_equal(devsq(data), 53.2, 0.01)).to_equal(true)
+
+        it "returns 0.0 for empty array":
+            expect(devsq([])).to_equal(0.0)
+
+    describe "skewness":
+        it "is zero for symmetric data [3,4,5,2,1]":
+            # [3,4,5,2,1] is a permutation of 1..5: mean=3, devs -2,-1,0,1,2
+            # z³ terms cancel pairwise → Excel SKEW = 0 exactly
+            val data = [3.0, 4.0, 5.0, 2.0, 1.0]
+            expect(approx_equal(skew(data), 0.0, 0.000001)).to_equal(true)
+
+        it "computes skewness of asymmetric data [1,2,3,4,10]":
+            # mean=4; devs -3,-2,-1,0,6; sq sum=50; sd=sqrt(50/4)=3.5355339
+            # z³ sum = 4.887522 - 0.610940 - 0.181019 - 0.022627 = 4.072936
+            # coef = 5/(4*3) = 0.4166667; skew = 0.4166667*4.072936 = 1.697056
+            val data = [1.0, 2.0, 3.0, 4.0, 10.0]
+            expect(approx_equal(skew(data), 1.697056, 0.0001)).to_equal(true)
+
+        it "returns 0.0 for insufficient data":
+            expect(skew([1.0, 2.0])).to_equal(0.0)
+
+        it "returns 0.0 for zero stdev":
+            expect(skew([5.0, 5.0, 5.0])).to_equal(0.0)
+
+    describe "kurtosis":
+        it "returns 0.0 for insufficient data":
+            expect(kurt([1.0, 2.0, 3.0])).to_equal(0.0)
+
+        it "returns 0.0 for zero stdev":
+            expect(kurt([5.0, 5.0, 5.0, 5.0])).to_equal(0.0)
+
+        it "computes kurtosis of [3,4,5,2,1] (= -1.2 exactly)":
+            # mean=3; devs -2,-1,0,1,2; sq sum=10; sd=sqrt(10/4)=1.5811388
+            # z⁴ sum = 2*(2/1.5811388)⁴ + 2*(1/1.5811388)⁴ = 2*2.56 + 2*0.16 = 5.44
+            # a = 5*6/(4*3*2) = 1.25; b = 3*16/(3*2) = 8; kurt = 1.25*5.44 - 8 = -1.2
+            val data = [3.0, 4.0, 5.0, 2.0, 1.0]
+            expect(approx_equal(kurt(data), -1.2, 0.000001)).to_equal(true)
+
+    describe "percentile_inc":
+        it "computes 0th percentile (minimum)":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(percentile_inc(data, 0.0)).to_equal(1.0)
+
+        it "computes 100th percentile (maximum)":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(percentile_inc(data, 1.0)).to_equal(4.0)
+
+        it "computes 30th percentile":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            # pos = 0.3 * 3 = 0.9; lo=0, frac=0.9; result = 1 + 0.9*1 = 1.9
+            expect(approx_equal(percentile_inc(data, 0.3), 1.9, 0.001)).to_equal(true)
+
+        it "returns 0.0 for empty array":
+            expect(percentile_inc([], 0.5)).to_equal(0.0)
+
+        it "returns 0.0 for p out of range":
+            val data = [1.0, 2.0, 3.0]
+            expect(percentile_inc(data, -0.1)).to_equal(0.0)
+            expect(percentile_inc(data, 1.1)).to_equal(0.0)
+
+    describe "quartile_inc":
+        it "computes Q0 (minimum)":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(quartile_inc(data, 0.0)).to_equal(1.0)
+
+        it "computes Q2 (median)":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(quartile_inc(data, 2.0)).to_equal(2.5)
+
+        it "computes Q4 (maximum)":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(quartile_inc(data, 4.0)).to_equal(4.0)
+
+        it "computes Q1 (first quartile)":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            # Q1: pos = 1/4 * 3 = 0.75; lo=0, frac=0.75; result = 1 + 0.75*1 = 1.75
+            expect(approx_equal(quartile_inc(data, 1.0), 1.75, 0.001)).to_equal(true)
+
+        it "returns 0.0 for empty or invalid":
+            expect(quartile_inc([], 1.0)).to_equal(0.0)
+            expect(quartile_inc([1.0, 2.0], 5.0)).to_equal(0.0)
+
+    describe "percentrank_inc":
+        it "computes percentile rank of value in middle":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            val rank = percentrank_inc(data, 2.0)
+            # x=2 at sorted index 1; rank = 1/3 = 0.33333, truncated to 3 sig figs = 0.333
+            expect(approx_equal(rank, 0.333, 0.0005)).to_equal(true)
+
+        it "returns 0.0 for x out of range":
+            val data = [1.0, 2.0, 3.0, 4.0]
+            expect(percentrank_inc(data, 0.5)).to_equal(0.0)
+            expect(percentrank_inc(data, 5.0)).to_equal(0.0)
+
+        it "returns 0.0 for empty array":
+            expect(percentrank_inc([], 2.0)).to_equal(0.0)
+
+    describe "trimmean":
+        it "computes mean after trimming":
+            val data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+            # trim 0.2: drop 1 from each end → mean of 2..9 = 5.5
+            expect(approx_equal(trimmean(data, 0.2), 5.5, 0.001)).to_equal(true)
+
+        it "returns 0.0 for invalid percent":
+            expect(trimmean([1.0, 2.0], -0.1)).to_equal(0.0)
+            expect(trimmean([1.0, 2.0], 1.0)).to_equal(0.0)
+
+        it "returns 0.0 for empty array":
+            expect(trimmean([], 0.2)).to_equal(0.0)
+
+    describe "geomean":
+        it "computes geometric mean":
+            val data = [1.0, 2.0, 4.0]
+            # geomean = (1*2*4)^(1/3) = 8^(1/3) = 2.0
+            expect(approx_equal(geomean(data), 2.0, 0.001)).to_equal(true)
+
+        it "computes for data [3,5,7,10,12]":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # geomean ≈ 6.7047
+            expect(approx_equal(geomean(data), 6.6081, 0.001)).to_equal(true)
+
+        it "returns 0.0 for non-positive values":
+            expect(geomean([1.0, 0.0, 2.0])).to_equal(0.0)
+            expect(geomean([-1.0, 2.0])).to_equal(0.0)
+            expect(geomean([])).to_equal(0.0)
+
+    describe "harmean":
+        it "computes harmonic mean":
+            val data = [1.0, 2.0, 4.0]
+            # harmean = 3 / (1 + 0.5 + 0.25) = 3 / 1.75 ≈ 1.714
+            expect(approx_equal(harmean(data), 1.714, 0.001)).to_equal(true)
+
+        it "computes for data [3,5,7,10,12]":
+            val data = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # harmean ≈ 5.9880
+            expect(approx_equal(harmean(data), 5.8172, 0.001)).to_equal(true)
+
+        it "returns 0.0 for zero or empty":
+            expect(harmean([1.0, 0.0, 2.0])).to_equal(0.0)
+            expect(harmean([])).to_equal(0.0)
+
+    describe "covariance":
+        it "computes population covariance":
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [2.0, 4.0, 6.0, 8.0, 10.0]
+            # ys = 2*xs; cov = var(xs) = 2
+            val cov = covar_pop(ys, xs)
+            expect(cov > 0.0).to_equal(true)
+
+        it "returns 0.0 for mismatched lengths":
+            expect(covar_pop([1.0], [1.0, 2.0])).to_equal(0.0)
+
+        it "returns 0.0 for empty arrays":
+            expect(covar_pop([], [])).to_equal(0.0)
+
+        it "computes sample covariance":
+            val xs = [1.0, 2.0, 3.0]
+            val ys = [2.0, 4.0, 6.0]
+            val s_cov = covar_sample(ys, xs)
+            expect(s_cov > 0.0).to_equal(true)
+
+        it "sample cov returns 0.0 for n < 2":
+            expect(covar_sample([1.0], [1.0])).to_equal(0.0)
+
+    describe "correlation":
+        it "perfect positive correlation":
+            val xs = [1.0, 2.0, 3.0, 4.0]
+            val ys = [2.0, 4.0, 6.0, 8.0]
+            expect(approx_equal(correl(ys, xs), 1.0, 0.001)).to_equal(true)
+
+        it "returns 0.0 for insufficient data":
+            expect(correl([1.0], [1.0])).to_equal(0.0)
+
+        it "returns 0.0 for zero variance":
+            val xs = [1.0, 1.0, 1.0]
+            val ys = [2.0, 2.0, 2.0]
+            expect(correl(ys, xs)).to_equal(0.0)
+
+        it "returns 0.0 for mismatched lengths":
+            expect(correl([1.0, 2.0], [1.0])).to_equal(0.0)
+
+    describe "R²":
+        it "perfect fit has rsq = 1.0":
+            val xs = [1.0, 2.0, 3.0, 4.0]
+            val ys = [2.0, 4.0, 6.0, 8.0]
+            expect(approx_equal(rsq(ys, xs), 1.0, 0.001)).to_equal(true)
+
+        it "returns 0.0 for insufficient data":
+            expect(rsq([1.0], [1.0])).to_equal(0.0)
+
+        it "computes rsq for ys=[3,5,7,10,12], xs=[1..5]":
+            # cov_pop = 23/5 = 4.6; var_pop(x) = 2; var_pop(y) = 53.2/5 = 10.64
+            # r = 4.6/sqrt(2*10.64) = 23/sqrt(10*53.2) = 23/23.06513 = 0.9971801
+            # r² = 529/532 = 0.9943609
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [3.0, 5.0, 7.0, 10.0, 12.0]
+            expect(approx_equal(rsq(ys, xs), 0.9943609, 0.00001)).to_equal(true)
+
+    describe "linear regression":
+        it "linfit on simple slope":
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # Expect slope ≈ 2.3, intercept ≈ 0.5
+            val fit = linfit(ys, xs)
+            expect(approx_equal(fit[0], 2.3, 0.000001)).to_equal(true)
+            expect(approx_equal(fit[1], 0.5, 0.000001)).to_equal(true)
+
+        it "linfit returns [0,0] on error":
+            expect(linfit([1.0], [1.0])).to_equal([0.0, 0.0])
+            expect(linfit([], [])).to_equal([0.0, 0.0])
+
+        it "slope matches linfit":
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [3.0, 5.0, 7.0, 10.0, 12.0]
+            val m = slope(ys, xs)
+            val fit_m = linfit(ys, xs)[0]
+            expect(m).to_equal(fit_m)
+
+        it "intercept matches linfit":
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [3.0, 5.0, 7.0, 10.0, 12.0]
+            val b = intercept(ys, xs)
+            val fit_b = linfit(ys, xs)[1]
+            expect(b).to_equal(fit_b)
+
+        it "forecast_linear predicts at new x":
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [3.0, 5.0, 7.0, 10.0, 12.0]
+            # slope ≈ 2.3, intercept ≈ 0.5; forecast(6) ≈ 0.5 + 2.3*6 = 14.3
+            val pred = forecast_linear(6.0, ys, xs)
+            expect(approx_equal(pred, 14.3, 0.000001)).to_equal(true)
+
+        it "forecast_linear returns 0.0 on error":
+            expect(forecast_linear(5.0, [1.0], [1.0])).to_equal(0.0)
+
+    describe "standard error of estimate":
+        it "computes steyx":
+            # fit: y = 2.3x + 0.5; preds 2.8,5.1,7.4,9.7,12.0
+            # residuals 0.2,-0.1,-0.4,0.3,0.0; SSR = 0.30
+            # steyx = sqrt(0.30/(5-2)) = sqrt(0.1) = 0.3162278
+            val xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val ys = [3.0, 5.0, 7.0, 10.0, 12.0]
+            val se = steyx(ys, xs)
+            expect(approx_equal(se, 0.3162278, 0.0001)).to_equal(true)
+
+        it "steyx returns 0.0 on error":
+            expect(steyx([1.0], [1.0])).to_equal(0.0)
+
+    describe "growth (exponential)":
+        it "growth_predict computes exp fit":
+            val xs = [1.0, 2.0, 3.0]
+            val ys = [2.0, 4.0, 8.0]
+            # Exponential ys ≈ 2*2^xs; predict at x=4 → ≈ 32
+            val pred = growth_predict(4.0, ys, xs)
+            expect(pred > 0.0).to_equal(true)
+
+        it "growth_predict returns 0.0 on non-positive y":
+            val xs = [1.0, 2.0, 3.0]
+            val ys = [2.0, 0.0, 8.0]
+            expect(growth_predict(4.0, ys, xs)).to_equal(0.0)
+
+        it "growth_predict returns 0.0 on error":
+            expect(growth_predict(5.0, [1.0], [1.0])).to_equal(0.0)
+
+    describe "order statistics":
+        it "rank_value (descending)":
+            val data = [5.0, 1.0, 9.0, 3.0]
+            # Descending (default): 9 is rank 1, 5 is rank 2, 3 is rank 3, 1 is rank 4
+            expect(rank_value(5.0, data, false)).to_equal(2.0)
+
+        it "rank_value (ascending)":
+            val data = [5.0, 1.0, 9.0, 3.0]
+            # Ascending: 1 is rank 1, 3 is rank 2, 5 is rank 3, 9 is rank 4
+            expect(rank_value(5.0, data, true)).to_equal(3.0)
+
+        it "rank_value returns 0.0 for empty":
+            expect(rank_value(5.0, [], false)).to_equal(0.0)
+
+        it "large gets k-th largest":
+            val data = [5.0, 1.0, 9.0, 3.0]
+            expect(large(data, 1)).to_equal(9.0)
+            expect(large(data, 2)).to_equal(5.0)
+            expect(large(data, 3)).to_equal(3.0)
+
+        it "large returns 0.0 for k out of range":
+            val data = [5.0, 1.0, 9.0]
+            expect(large(data, 0)).to_equal(0.0)
+            expect(large(data, 4)).to_equal(0.0)
+            expect(large([], 1)).to_equal(0.0)
+
+        it "small gets k-th smallest":
+            val data = [5.0, 1.0, 9.0, 3.0]
+            expect(small(data, 1)).to_equal(1.0)
+            expect(small(data, 2)).to_equal(3.0)
+            expect(small(data, 3)).to_equal(5.0)
+
+        it "small returns 0.0 for k out of range":
+            val data = [5.0, 1.0, 9.0]
+            expect(small(data, 0)).to_equal(0.0)
+            expect(small(data, 4)).to_equal(0.0)
+            expect(small([], 1)).to_equal(0.0)
+
+    describe "fisher transform":
+        it "fisher and fisher_inv are inverses":
+            val x = 0.5
+            val z = fisher(x)
+            # z ≈ 0.5493061
+            expect(approx_equal(z, 0.5493061, 0.001)).to_equal(true)
+            val x_recovered = fisher_inv(z)
+            expect(approx_equal(x_recovered, x, 0.001)).to_equal(true)
+
+        it "fisher returns 0.0 for x out of (-1,1)":
+            expect(fisher(-1.0)).to_equal(0.0)
+            expect(fisher(1.0)).to_equal(0.0)
+            expect(fisher(-1.5)).to_equal(0.0)
+
+        it "fisher_inv always returns a value":
+            val z = 0.5
+            val x = fisher_inv(z)
+            expect(x > -1.0 and x < 1.0).to_equal(true)
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+    describe "integration tests":
+        it "full statistical pipeline on sample data":
+            val data = [10.0, 12.0, 23.0, 23.0, 16.0, 23.0, 21.0, 16.0]
+            val m = mean(data)
+            val med = median(data)
+            val sd = stdev_sample(data)
+            expect(m > 0.0).to_equal(true)
+            expect(med > 0.0).to_equal(true)
+            expect(sd > 0.0).to_equal(true)
+
+        it "regression and prediction work together":
+            val xs = [1.0, 2.0, 3.0, 4.0]
+            val ys = [2.0, 4.0, 6.0, 8.0]
+            val m = slope(ys, xs)
+            val b = intercept(ys, xs)
+            val pred_at_5 = forecast_linear(5.0, ys, xs)
+            # For perfect fit: pred = 8 + 2*5 = 18
+            expect(approx_equal(pred_at_5, 10.0, 0.1)).to_equal(true)
+
+        it "quantile functions are monotonic":
+            val data = [1.0, 2.0, 3.0, 4.0, 5.0]
+            val p25 = percentile_inc(data, 0.25)
+            val p50 = percentile_inc(data, 0.50)
+            val p75 = percentile_inc(data, 0.75)
+            expect(p25 <= p50).to_equal(true)
+            expect(p50 <= p75).to_equal(true)

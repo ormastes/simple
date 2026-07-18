@@ -1,0 +1,429 @@
+# Apple Metal SFFI Bindings
+#
+# SFFI pattern for Apple GPU compute + graphics via Metal.
+# Note: These require macOS/iOS with Metal-capable hardware.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw SFFI)
+# ============================================================================
+
+# Device
+extern fn rt_metal_init() -> bool
+extern fn rt_metal_is_available() -> bool
+extern fn rt_metal_device_count() -> i64
+extern fn rt_metal_device_name(device: i64) -> text
+extern fn rt_metal_device_memory(device: i64) -> i64
+extern fn rt_metal_create_device(device: i64) -> i64
+extern fn rt_metal_destroy_device(device: i64) -> bool
+
+# Memory
+extern fn rt_metal_alloc_buffer(device: i64, size: i64) -> i64
+extern fn rt_metal_free_buffer(buffer: i64) -> bool
+extern fn rt_metal_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool
+extern fn rt_metal_buffer_download(data: [u8], buffer: i64, size: i64) -> bool
+
+# Compute
+extern fn rt_metal_compile_shader(device: i64, source: text) -> i64
+extern fn rt_metal_destroy_shader(shader: i64) -> bool
+extern fn rt_metal_create_compute_pipeline(device: i64, shader: i64, entry: text) -> i64
+extern fn rt_metal_destroy_pipeline(pipeline: i64) -> bool
+extern fn rt_metal_dispatch_compute(encoder: i64, pipeline: i64, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> bool
+
+# Graphics
+extern fn rt_metal_create_render_pipeline(device: i64, vertex_fn: i64, fragment_fn: i64, pixel_format: i64) -> i64
+extern fn rt_metal_destroy_render_pipeline(pipeline: i64) -> bool
+extern fn rt_metal_create_texture(device: i64, width: i64, height: i64, format: i64) -> i64
+extern fn rt_metal_free_texture(texture: i64) -> bool
+extern fn rt_metal_begin_render_pass(cmd_buffer: i64, texture: i64, clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64) -> i64
+extern fn rt_metal_end_render_pass(encoder: i64) -> bool
+extern fn rt_metal_draw_indexed(encoder: i64, index_count: i64, index_buffer: i64) -> bool
+extern fn rt_metal_draw_primitives(encoder: i64, vertex_count: i64) -> bool
+
+# Command Queue
+extern fn rt_metal_create_command_queue(device: i64) -> i64
+extern fn rt_metal_destroy_command_queue(queue: i64) -> bool
+extern fn rt_metal_create_command_buffer(queue: i64) -> i64
+extern fn rt_metal_destroy_command_buffer(cmd_buffer: i64) -> bool
+extern fn rt_metal_commit_command_buffer(cmd_buffer: i64) -> bool
+extern fn rt_metal_wait_completed(cmd_buffer: i64) -> bool
+extern fn rt_metal_create_compute_encoder(cmd_buffer: i64) -> i64
+extern fn rt_metal_end_compute_encoder(encoder: i64) -> bool
+extern fn rt_metal_destroy_compute_encoder(encoder: i64) -> bool
+extern fn rt_metal_set_buffer(encoder: i64, buffer: i64, offset: i64, index: i64) -> bool
+extern fn rt_metal_set_bytes(encoder: i64, data: [u8], length: i64, index: i64) -> bool
+extern fn rt_metal_get_last_error() -> i64
+extern fn rt_cstring_to_text(cstr: i64) -> text
+extern fn rt_metal_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params_ptr: i64, params_size: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
+
+# Deferred submission ownership. A failed wait can mean a terminal Metal error
+# or an invalid/unknown registry handle. rt_metal_wait_completed blocks for a
+# known command; after that call, successful registry removal proves that the
+# command existed and reached a terminal state even when its Metal status was
+# an error. Keep every dependency when neither fact can be proven.
+var _metal_quarantine_commands: [i64] = []
+var _metal_quarantine_encoders: [i64] = []
+var _metal_quarantine_sources: [i64] = []
+var _metal_quarantine_framebuffers: [i64] = []
+
+fn metal_sffi_quarantine_submission(command: i64, encoder: i64, source: i64, framebuffer: i64) -> bool:
+    if command <= 0:
+        return false
+    _metal_quarantine_commands.push(command)
+    _metal_quarantine_encoders.push(encoder)
+    _metal_quarantine_sources.push(source)
+    _metal_quarantine_framebuffers.push(framebuffer)
+    true
+
+# A failed commit means the command was absent from the runtime registry and
+# was never submitted through the Metal API. Reclaim every still-known local
+# dependency immediately; this state must never enter the completion quarantine.
+fn metal_sffi_release_uncommitted_submission(command: i64, encoder: i64, source: i64):
+    if encoder > 0:
+        rt_metal_destroy_compute_encoder(encoder)
+    if command > 0:
+        rt_metal_destroy_command_buffer(command)
+    if source > 0:
+        rt_metal_free_buffer(source)
+
+fn metal_sffi_quarantine_release_proven(wait_succeeded: bool, existing_command_released_after_wait: bool) -> bool:
+    wait_succeeded or existing_command_released_after_wait
+
+fn metal_sffi_reap_submission_quarantine() -> bool:
+    var keep_commands: [i64] = []
+    var keep_encoders: [i64] = []
+    var keep_sources: [i64] = []
+    var keep_framebuffers: [i64] = []
+    var i = 0
+    while i < _metal_quarantine_commands.len():
+        val command = _metal_quarantine_commands[i]
+        val encoder = _metal_quarantine_encoders[i]
+        val source = _metal_quarantine_sources[i]
+        val framebuffer = _metal_quarantine_framebuffers[i]
+        val wait_succeeded = rt_metal_wait_completed(command)
+        val existing_command_released_after_wait = rt_metal_destroy_command_buffer(command)
+        if metal_sffi_quarantine_release_proven(wait_succeeded, existing_command_released_after_wait):
+            if encoder > 0:
+                rt_metal_destroy_compute_encoder(encoder)
+            if source > 0:
+                rt_metal_free_buffer(source)
+            if framebuffer > 0:
+                rt_metal_free_buffer(framebuffer)
+        else:
+            keep_commands.push(command)
+            keep_encoders.push(encoder)
+            keep_sources.push(source)
+            keep_framebuffers.push(framebuffer)
+        i = i + 1
+    _metal_quarantine_commands = keep_commands
+    _metal_quarantine_encoders = keep_encoders
+    _metal_quarantine_sources = keep_sources
+    _metal_quarantine_framebuffers = keep_framebuffers
+    _metal_quarantine_commands.len() == 0
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+fn metal_available() -> bool:
+    rt_metal_is_available()
+
+fn metal_init() -> bool:
+    rt_metal_init()
+
+fn metal_device_count() -> i64:
+    rt_metal_device_count()
+
+struct MetalDeviceInfo:
+    id: i64
+    name: text
+    total_memory: i64
+
+fn metal_device_info(id: i64) -> MetalDeviceInfo:
+    MetalDeviceInfo(id: id, name: rt_metal_device_name(id), total_memory: rt_metal_device_memory(id))
+
+struct MetalDevice:
+    handle: i64
+    id: i64
+    is_valid: bool
+
+fn metal_create_device(id: i64) -> MetalDevice:
+    val handle = rt_metal_create_device(id)
+    MetalDevice(handle: handle, id: id, is_valid: handle > 0)
+
+fn metal_destroy_device(device: MetalDevice) -> bool:
+    if device.is_valid:
+        rt_metal_destroy_device(device.handle)
+    else:
+        true
+
+struct MetalBuffer:
+    handle: i64
+    size: i64
+    is_valid: bool
+
+fn metal_alloc_buffer(device: MetalDevice, size: i64) -> MetalBuffer:
+    if not device.is_valid:
+        MetalBuffer(handle: 0, size: size, is_valid: false)
+    else:
+        val handle = rt_metal_alloc_buffer(device.handle, size)
+        MetalBuffer(handle: handle, size: size, is_valid: handle > 0)
+
+fn metal_free_buffer(buf: MetalBuffer) -> bool:
+    if buf.is_valid:
+        rt_metal_free_buffer(buf.handle)
+    else:
+        true
+
+fn metal_upload(buf: MetalBuffer, data: [u8]) -> bool:
+    if not buf.is_valid:
+        false
+    else:
+        rt_metal_buffer_upload(buf.handle, data, data.len())
+
+fn metal_download(data: [u8], buf: MetalBuffer) -> bool:
+    if not buf.is_valid:
+        false
+    else:
+        rt_metal_buffer_download(data, buf.handle, data.len())
+
+struct MetalShader:
+    handle: i64
+    is_valid: bool
+
+fn metal_compile_shader(device: MetalDevice, source: text) -> MetalShader:
+    if not device.is_valid:
+        MetalShader(handle: 0, is_valid: false)
+    else:
+        val handle = rt_metal_compile_shader(device.handle, source)
+        MetalShader(handle: handle, is_valid: handle > 0)
+
+fn metal_destroy_shader(shader: MetalShader) -> bool:
+    if shader.is_valid:
+        rt_metal_destroy_shader(shader.handle)
+    else:
+        true
+
+struct MetalComputePipeline:
+    handle: i64
+    is_valid: bool
+
+fn metal_create_compute_pipeline(device: MetalDevice, shader: MetalShader, entry: text) -> MetalComputePipeline:
+    if not device.is_valid or not shader.is_valid:
+        MetalComputePipeline(handle: 0, is_valid: false)
+    else:
+        val handle = rt_metal_create_compute_pipeline(device.handle, shader.handle, entry)
+        MetalComputePipeline(handle: handle, is_valid: handle > 0)
+
+fn metal_destroy_pipeline(pipe: MetalComputePipeline) -> bool:
+    if pipe.is_valid:
+        rt_metal_destroy_pipeline(pipe.handle)
+    else:
+        true
+
+struct MetalRenderPipeline:
+    handle: i64
+    is_valid: bool
+
+# reason: positional io metal_sffi API
+fn metal_create_render_pipeline(device: MetalDevice, vertex_fn: MetalShader, fragment_fn: MetalShader, pixel_format: i64) -> MetalRenderPipeline:
+    if not device.is_valid or not vertex_fn.is_valid or not fragment_fn.is_valid:
+        MetalRenderPipeline(handle: 0, is_valid: false)
+    else:
+        val handle = rt_metal_create_render_pipeline(device.handle, vertex_fn.handle, fragment_fn.handle, pixel_format)
+        MetalRenderPipeline(handle: handle, is_valid: handle > 0)
+
+fn metal_destroy_render_pipeline(pipe: MetalRenderPipeline) -> bool:
+    if pipe.is_valid:
+        rt_metal_destroy_render_pipeline(pipe.handle)
+    else:
+        true
+
+struct MetalTexture:
+    handle: i64
+    width: i64
+    height: i64
+    is_valid: bool
+
+# reason: positional io metal_sffi API
+fn metal_create_texture(device: MetalDevice, width: i64, height: i64, format: i64) -> MetalTexture:
+    if not device.is_valid:
+        MetalTexture(handle: 0, width: width, height: height, is_valid: false)
+    else:
+        val handle = rt_metal_create_texture(device.handle, width, height, format)
+        MetalTexture(handle: handle, width: width, height: height, is_valid: handle > 0)
+
+fn metal_free_texture(tex: MetalTexture) -> bool:
+    if tex.is_valid:
+        rt_metal_free_texture(tex.handle)
+    else:
+        true
+
+struct MetalCommandQueue:
+    handle: i64
+    is_valid: bool
+
+fn metal_create_command_queue(device: MetalDevice) -> MetalCommandQueue:
+    if not device.is_valid:
+        MetalCommandQueue(handle: 0, is_valid: false)
+    else:
+        val handle = rt_metal_create_command_queue(device.handle)
+        MetalCommandQueue(handle: handle, is_valid: handle > 0)
+
+fn metal_destroy_command_queue(queue: MetalCommandQueue) -> bool:
+    if queue.is_valid:
+        rt_metal_destroy_command_queue(queue.handle)
+    else:
+        true
+
+struct MetalCommandBuffer:
+    handle: i64
+    is_valid: bool
+
+fn metal_create_command_buffer(queue: MetalCommandQueue) -> MetalCommandBuffer:
+    if not queue.is_valid:
+        MetalCommandBuffer(handle: 0, is_valid: false)
+    else:
+        val handle = rt_metal_create_command_buffer(queue.handle)
+        MetalCommandBuffer(handle: handle, is_valid: handle > 0)
+
+fn metal_destroy_command_buffer(cmd: MetalCommandBuffer) -> bool:
+    if cmd.is_valid:
+        rt_metal_destroy_command_buffer(cmd.handle)
+    else:
+        true
+
+fn metal_commit(cmd: MetalCommandBuffer) -> bool:
+    if cmd.is_valid:
+        rt_metal_commit_command_buffer(cmd.handle)
+    else:
+        false
+
+fn metal_wait(cmd: MetalCommandBuffer) -> bool:
+    if cmd.is_valid:
+        rt_metal_wait_completed(cmd.handle)
+    else:
+        true
+
+fn metal_sffi_init() -> bool:
+    rt_metal_init()
+
+fn metal_sffi_is_available() -> bool:
+    rt_metal_is_available()
+
+fn metal_sffi_device_count() -> i64:
+    rt_metal_device_count()
+
+fn metal_sffi_create_device(device_id: i64) -> i64:
+    rt_metal_create_device(device_id)
+
+fn metal_sffi_destroy_device(device: i64) -> bool:
+    rt_metal_destroy_device(device)
+
+fn metal_sffi_alloc_buffer(device: i64, size: i64) -> i64:
+    rt_metal_alloc_buffer(device, size)
+
+fn metal_sffi_free_buffer(buffer: i64) -> bool:
+    rt_metal_free_buffer(buffer)
+
+fn metal_sffi_compile_shader(device: i64, source: text) -> i64:
+    rt_metal_compile_shader(device, source)
+
+fn metal_sffi_destroy_shader(shader: i64) -> bool:
+    rt_metal_destroy_shader(shader)
+
+fn metal_sffi_create_compute_pipeline(device: i64, shader: i64, entry: text) -> i64:
+    rt_metal_create_compute_pipeline(device, shader, entry)
+
+fn metal_sffi_destroy_pipeline(pipeline: i64) -> bool:
+    rt_metal_destroy_pipeline(pipeline)
+
+fn metal_sffi_create_command_queue(device: i64) -> i64:
+    rt_metal_create_command_queue(device)
+
+fn metal_sffi_destroy_command_queue(queue: i64) -> bool:
+    rt_metal_destroy_command_queue(queue)
+
+fn metal_sffi_create_command_buffer(queue: i64) -> i64:
+    rt_metal_create_command_buffer(queue)
+
+fn metal_sffi_destroy_command_buffer(cmd_buffer: i64) -> bool:
+    rt_metal_destroy_command_buffer(cmd_buffer)
+
+fn metal_sffi_commit_command_buffer(cmd_buffer: i64) -> bool:
+    rt_metal_commit_command_buffer(cmd_buffer)
+
+fn metal_sffi_wait_completed(cmd_buffer: i64) -> bool:
+    rt_metal_wait_completed(cmd_buffer)
+
+fn metal_sffi_dispatch_compute(encoder: i64, pipeline: i64, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> bool:
+    rt_metal_dispatch_compute(encoder, pipeline, grid_x, grid_y, grid_z, block_x, block_y, block_z)
+
+fn metal_sffi_create_compute_encoder(cmd_buffer: i64) -> i64:
+    rt_metal_create_compute_encoder(cmd_buffer)
+
+fn metal_sffi_end_compute_encoder(encoder: i64) -> bool:
+    rt_metal_end_compute_encoder(encoder)
+
+fn metal_sffi_destroy_compute_encoder(encoder: i64) -> bool:
+    rt_metal_destroy_compute_encoder(encoder)
+
+fn metal_sffi_set_buffer(encoder: i64, buffer: i64, offset: i64, index: i64) -> bool:
+    rt_metal_set_buffer(encoder, buffer, offset, index)
+
+fn metal_sffi_set_bytes(encoder: i64, data: [u8], length: i64, index: i64) -> bool:
+    rt_metal_set_bytes(encoder, data, length, index)
+
+fn metal_sffi_buffer_download(data: [u8], buffer: i64, size: i64) -> bool:
+    rt_metal_buffer_download(data, buffer, size)
+
+fn metal_sffi_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool:
+    rt_metal_buffer_upload(buffer, data, size)
+
+# reason: positional io metal_sffi API mirrors the frozen runtime ABI
+fn metal_sffi_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params: [u8], gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> bool:
+    rt_metal_run_compute_frame(queue, pipeline, buf0, buf1, params.data_ptr(), params.len(), gx, gy, gz, bx, by, bz) == 1
+
+fn metal_last_error() -> text:
+    val cstr = rt_metal_get_last_error()
+    rt_cstring_to_text(cstr)
+
+# ============================================================================
+# Graphics — Missing Stubs
+# ============================================================================
+
+extern fn rt_metal_create_sampler(device: i64) -> i64
+extern fn rt_metal_destroy_sampler(sampler: i64) -> bool
+extern fn rt_metal_set_viewport(encoder: i64, x: f64, y: f64, w: f64, h: f64) -> bool
+extern fn rt_metal_set_scissor(encoder: i64, x: i64, y: i64, w: i64, h: i64) -> bool
+extern fn rt_metal_create_swapchain(device: i64, window: i64, width: i64, height: i64) -> i64
+extern fn rt_metal_destroy_swapchain(swapchain: i64) -> bool
+extern fn rt_metal_present(swapchain: i64) -> bool
+
+struct MetalSampler:
+    handle: i64
+
+impl MetalSampler:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+struct MetalSwapchain:
+    handle: i64
+    width: i64
+    height: i64
+
+impl MetalSwapchain:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+fn metal_create_sampler(device: i64) -> MetalSampler:
+    val h = rt_metal_create_sampler(device)
+    MetalSampler(handle: h)
+
+# reason: positional io metal_sffi API
+fn metal_create_swapchain(device: i64, window: i64, width: i64, height: i64) -> MetalSwapchain:
+    val h = rt_metal_create_swapchain(device, window, width, height)
+    MetalSwapchain(handle: h, width: width, height: height)
+
+# ============================================================================
+# Exports
+# ============================================================================

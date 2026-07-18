@@ -1,0 +1,174 @@
+# @tag:system
+# @tag:gui
+# @tag:qemu
+#
+# Live ARM64 WM ramfb screendump proof. This is intentionally narrower than
+# full visual parity: it waits for the guest render marker, then asks QMP for a
+# real framebuffer screendump and decodes the returned PPM.
+
+use std.spec.*
+
+use os.compositor.qemu_capture.{qemu_screendump_to_file}
+use os.qemu_runner.{_native_build_failure_log_path, _tail_lines, build_os, scenario_arm64_wm_ramfb, scenario_target}
+use test.system.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, read_qemu_stderr_log, read_serial_log,
+    spawn_guest_with_qmp, stop_guest, wait_for_serial_marker}
+use app.io.mod.{cwd, file_delete, file_exists as io_file_exists, file_read_text, file_write}
+use app.io.mod.{getpid, process_run_timeout, time_now_unix_micros}
+
+fn _arm64_wm_screendump_blocker_path() -> text:
+    "build/os/arm64_wm_ramfb_screendump.blocker.txt"
+
+fn _arm64_wm_screendump_run_id() -> text:
+    "{getpid()}-{time_now_unix_micros()}"
+
+fn _write_arm64_wm_screendump_blocker(reason: text, detail: text) -> bool:
+    file_write(
+        _arm64_wm_screendump_blocker_path(),
+        "arm64_wm_ramfb_screendump_status=blocked\nreason={reason}\n{detail}"
+    )
+
+fn _arm64_wm_build_failure_detail() -> text:
+    val target = scenario_target(scenario_arm64_wm_ramfb())
+    val path = _native_build_failure_log_path(target.arch)
+    if not io_file_exists(path):
+        return "native_build_failure_log=\"{path}\"\nnative_build_failure_tail=\"missing\"\n"
+    val log = file_read_text(path) ?? ""
+    "native_build_failure_log=\"{path}\"\nnative_build_failure_tail=\"\"\"\n" + _tail_lines(log, 30) + "\"\"\"\n"
+
+fn _arm64_wm_guest_failure_detail(serial: text, stderr: text) -> text:
+    "serial_tail=\"\"\"\n" + _tail_lines(serial, 80) + "\"\"\"\nqemu_stderr_tail=\"\"\"\n" + _tail_lines(stderr, 80) + "\"\"\"\n"
+
+fn _cleanup_arm64_wm_guest(handle, qmp_socket: text, serial_log: text):
+    stop_guest(handle)
+    process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "pkill -f \"$1\" >/dev/null 2>&1 || true; pkill -f \"$2\" >/dev/null 2>&1 || true",
+            "sh",
+            qmp_socket,
+            serial_log
+        ],
+        5000
+    )
+    if io_file_exists(qmp_socket):
+        file_delete(qmp_socket)
+
+fn _ppm_header_valid(path: text) -> bool:
+    val script =
+        "import sys;" +
+        "p=sys.argv[1];" +
+        "data=open(p,'rb').read(128).split();" +
+        "sys.exit(2) if len(data)<4 or data[0]!=b'P6' else sys.exit(0 if int(data[1])>0 and int(data[2])>0 else 3)"
+    val result = process_run_timeout("python3", ["-c", script, path], 5000)
+    result[2] == 0
+
+fn _ppm_has_dock_icon_artwork(path: text) -> bool:
+    val script =
+        "import sys\n" +
+        "from pathlib import Path\n" +
+        "data=Path(sys.argv[1]).read_bytes()\n" +
+        "i=0\n" +
+        "tokens=[]\n" +
+        "while len(tokens)<4:\n" +
+        "    while data[i] in b' \\t\\r\\n': i+=1\n" +
+        "    if data[i:i+1]==b'#':\n" +
+        "        while data[i] not in b'\\r\\n': i+=1\n" +
+        "        continue\n" +
+        "    j=i\n" +
+        "    while data[j] not in b' \\t\\r\\n': j+=1\n" +
+        "    tokens.append(data[i:j]); i=j\n" +
+        "while data[i] in b' \\t\\r\\n': i+=1\n" +
+        "if tokens[0]!=b'P6': sys.exit(2)\n" +
+        "w=int(tokens[1]); h=int(tokens[2]); maxv=int(tokens[3])\n" +
+        "pix=data[i:]\n" +
+        "lefts=[312,370,428,486,544,602,660]\n" +
+        "hits=0\n" +
+        "for left in lefts:\n" +
+        "    bright=dark=accent=0\n" +
+        "    for y in range(716,739):\n" +
+        "        for x in range(left+7,left+34):\n" +
+        "            o=(y*w+x)*3\n" +
+        "            r,g,b=pix[o],pix[o+1],pix[o+2]\n" +
+        "            if r>205 and g>205 and b>205: bright+=1\n" +
+        "            if r<55 and g<55 and b<80: dark+=1\n" +
+        "            if max(r,g,b)-min(r,g,b)>70: accent+=1\n" +
+        "    if dark>=100 and (bright+accent)>=15: hits+=1\n" +
+        "sys.exit(0 if hits>=6 else 5)\n"
+    val result = process_run_timeout("python3", ["-c", script, path], 5000)
+    result[2] == 0
+
+fn _build_arm64_wm_once() -> bool:
+    val target = scenario_target(scenario_arm64_wm_ramfb())
+    if not file_exists(target.output):
+        return build_os(target)
+    val newer = process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", target.entry, target.output], 2000)
+    if newer[2] == 0:
+        return build_os(target)
+    true
+
+fn _print_arm64_guest_diagnostics(prefix: text, serial: text, stderr: text):
+    print "{prefix} serial_len={serial.len()} stderr_len={stderr.len()}"
+    if serial != "":
+        print "{prefix} serial:\n{serial}"
+    if stderr != "":
+        print "{prefix} qemu stderr:\n{stderr}"
+
+describe "SimpleOS ARM64 WM ramfb screendump":
+
+    it "captures a real QMP screendump after the WM render marker":
+        if io_file_exists(_arm64_wm_screendump_blocker_path()):
+            expect(file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
+        val scenario = scenario_arm64_wm_ramfb()
+        val target = scenario_target(scenario)
+        val built = _build_arm64_wm_once()
+        if not built:
+            print "[arm64_wm_ramfb_screendump_spec] live screendump blocked: ARM64 WM target did not build"
+            expect(_write_arm64_wm_screendump_blocker("arm64-wm-target-did-not-build", _arm64_wm_build_failure_detail())).to_equal(true)
+        else:
+            if not can_run_target(target):
+                print "[arm64_wm_ramfb_screendump_spec] qemu-system-aarch64 or kernel artifact unavailable, skipping live screendump"
+                expect(_write_arm64_wm_screendump_blocker("qemu-or-kernel-artifact-unavailable", "")).to_equal(true)
+                expect(file_exists(target.output)).to_equal(true)
+            else:
+                val repo_cwd = cwd()
+                val run_id = _arm64_wm_screendump_run_id()
+                val qmp_socket = "/tmp/arm64_wm_ramfb_screendump_qmp_{run_id}.sock"
+                val serial_log = "build/os/arm64_wm_ramfb_screendump.{run_id}.serial.log"
+                val capture_ppm = "{repo_cwd}/build/os/arm64_wm_ramfb_screendump.{run_id}.ppm"
+                match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+                    Ok(handle):
+                        val saw_render = wait_for_serial_marker(handle, "[desktop-gui-arm64] desktop-ready revision=", 45000)
+                        val serial = read_serial_log(handle)
+                        if not saw_render:
+                            print "[arm64_wm_ramfb_screendump_spec] missing ARM64 WM render marker"
+                            val stderr = read_qemu_stderr_log(handle)
+                            _print_arm64_guest_diagnostics("[arm64_wm_ramfb_screendump_spec]", serial, stderr)
+                            _write_arm64_wm_screendump_blocker("arm64-wm-render-marker-missing", _arm64_wm_guest_failure_detail(serial, stderr))
+                            _cleanup_arm64_wm_guest(handle, qmp_socket, serial_log)
+                            expect(saw_render).to_equal(true)
+                        else:
+                            val dumped = qemu_screendump_to_file(qmp_socket, capture_ppm)
+                            if not dumped:
+                                print "[arm64_wm_ramfb_screendump_spec] QMP screendump failed"
+                                val stderr = read_qemu_stderr_log(handle)
+                                _print_arm64_guest_diagnostics("[arm64_wm_ramfb_screendump_spec]", serial, stderr)
+                                _write_arm64_wm_screendump_blocker("qmp-screendump-failed", _arm64_wm_guest_failure_detail(serial, stderr))
+                                _cleanup_arm64_wm_guest(handle, qmp_socket, serial_log)
+                                expect(dumped).to_equal(true)
+                            else:
+                                _cleanup_arm64_wm_guest(handle, qmp_socket, serial_log)
+                                val header_ok = _ppm_header_valid(capture_ppm)
+                                val artwork_ok = _ppm_has_dock_icon_artwork(capture_ppm)
+                                val capture_ok = file_exists(capture_ppm) and header_ok and artwork_ok
+                                if not capture_ok:
+                                    _write_arm64_wm_screendump_blocker("ppm-capture-assertion-failed", "ppm_path=\"{capture_ppm}\"\nexists={file_exists(capture_ppm)}\nheader_ok={header_ok}\nartwork_ok={artwork_ok}\n")
+                                else:
+                                    if io_file_exists(_arm64_wm_screendump_blocker_path()):
+                                        expect(file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
+                                expect(capture_ok).to_equal(true)
+                    Err(err):
+                        print "[arm64_wm_ramfb_screendump_spec] failed to spawn guest: {err}"
+                        _write_arm64_wm_screendump_blocker("qemu-spawn-failed", "spawn_error=\"\"\"\n{err}\"\"\"\n")
+                        fail("arm64 WM ramfb guest spawn failed: " + err)

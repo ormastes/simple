@@ -1,0 +1,773 @@
+# Data Operations
+#
+# Sort ranges and filter rows in spreadsheets.
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellValue, CellRef, CellStyle, parse_cell_ref, cell_ref_to_string, cell_display_text, empty_cell, text_cell, number_cell, default_style, letter_to_col}
+use app.office.sheets.cell_ref.{CellRange, parse_range}
+use common.office.number.{office_parse_signed_decimal_f64}
+
+# =========================================================================
+# Sort Range
+# =========================================================================
+
+fn sheet_sort_range(sheet: Sheet, range_a1: text, key_col: i32, ascending: bool, has_header: bool) -> Sheet:
+    """Sort rows in a range by a key column.
+
+    Args:
+        sheet: The Sheet to sort
+        range_a1: Range in A1 notation (e.g. "A1:C10")
+        key_col: 0-based column within the range
+        ascending: true for ascending, false for descending
+        has_header: if true, first row stays in place
+
+    Returns a new Sheet with sorted rows.
+    """
+    val range = parse_range(range_a1)
+    if range == nil:
+        return sheet
+
+    val rng = range
+    # Normalize range bounds
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+
+    # Validate key_col
+    if key_col < 0 or key_col > (max_col - min_col):
+        return sheet
+
+    # Capture rows as arrays of cells
+    var rows: [[Cell]] = []
+
+    var r = min_row
+    while r <= max_row:
+        var row_cells: [Cell] = []
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell = sheet.get_cell(ref_str)
+            row_cells.push(cell)
+            c = c + 1
+        rows.push(row_cells)
+        r = r + 1
+
+    # Sort rows (stable insertion sort)
+    var start_idx = 0
+    if has_header:
+        start_idx = 1
+
+    var i = start_idx + 1
+    while i < rows.len():
+        val key_row = rows[i]
+
+        var j = i - 1
+        while j >= start_idx:
+            val comp_row = rows[j]
+            val cmp = _compare_row_cells(comp_row, key_row, key_col, ascending)
+            if cmp <= 0:
+                break
+            rows[j + 1] = comp_row
+            j = j - 1
+
+        rows[j + 1] = key_row
+        i = i + 1
+
+    # Write sorted rows back to sheet
+    var result = sheet
+    var row_idx = 0
+    while row_idx < rows.len():
+        val row_cells = rows[row_idx]
+        var col_idx = 0
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: min_row + row_idx)
+            val ref_str = cell_ref_to_string(ref)
+            if col_idx < row_cells.len():
+                result.set_cell(ref_str, row_cells[col_idx])
+            col_idx = col_idx + 1
+            c = c + 1
+        row_idx = row_idx + 1
+
+    result
+
+# =========================================================================
+# Filter Rows
+# =========================================================================
+
+fn sheet_filter_rows(sheet: Sheet, range_a1: text, col: i32, criteria: text) -> [i64]:
+    """Filter rows by criteria in a column.
+
+    Args:
+        sheet: The Sheet to filter
+        range_a1: Range in A1 notation (e.g. "A1:C10")
+        col: 0-based column within the range
+        criteria: ">5", "<=3", "<>x", or bare value (case-insensitive equality)
+
+    Returns 1-based sheet row numbers that match the criteria.
+    """
+    val range = parse_range(range_a1)
+    if range == nil:
+        return []
+
+    val rng = range
+    # Normalize range bounds
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+
+    # Validate col
+    if col < 0 or col > (max_col - min_col):
+        return []
+
+    var result: [i64] = []
+
+    var r = min_row
+    while r <= max_row:
+        val actual_col = min_col + col
+        val ref = CellRef(col: actual_col, row: r)
+        val ref_str = cell_ref_to_string(ref)
+        val cell = sheet.get_cell(ref_str)
+
+        if _cell_matches_criteria(cell, criteria):
+            result.push((r + 1).to_i64())
+
+        r = r + 1
+
+    result
+
+# =========================================================================
+# AutoFilter
+# =========================================================================
+
+fn sheet_autofilter(sheet: Sheet, header_row: i64, col_letter: text, criteria_text: text) -> Sheet:
+    """Excel-style AutoFilter over one column. header_row is the 1-based row
+    holding the column headers (never hidden). Every data row below it whose
+    cell in col_letter does not match criteria_text is hidden via
+    Sheet.hide_row; matching rows are explicitly unhidden via
+    Sheet.unhide_row, so re-running with a different criteria updates
+    cleanly without a prior sheet_clear_filter. The data extent is the
+    contiguous run of non-empty cells in col_letter starting at
+    header_row+1 (stops at the first blank cell) — a single blank row ends
+    the table, matching how Excel detects a filter's data range.
+
+    Criteria semantics reuse _cell_matches_criteria — the SAME matcher
+    sheet_filter_rows uses (">n"/"<n"/">=n"/"<=n"/"<>x"/bare
+    case-insensitive text equality) — so AutoFilter and manual row-filter
+    agree on what "matches" means.
+
+    Composes with SUBTOTAL 101-111 / AGGREGATE options 5/7: those skip rows
+    Sheet.is_row_hidden reports hidden, so SUBTOTAL(109,...) over a
+    filtered range returns the visible-only aggregate."""
+    val col = letter_to_col(col_letter)
+    val max_r = sheet.row_count.to_i64()
+    var r = header_row + 1
+    while r <= max_r:
+        val ref = CellRef(col: col, row: (r - 1).to_i32())
+        val cell = sheet.get_cell(cell_ref_to_string(ref))
+        if cell_display_text(cell) == "":
+            r = max_r + 1
+        else:
+            if _cell_matches_criteria(cell, criteria_text):
+                sheet.unhide_row(r)
+            else:
+                sheet.hide_row(r)
+            r = r + 1
+    sheet
+
+fn sheet_clear_filter(sheet: Sheet) -> Sheet:
+    """Unhide every row — clears any AutoFilter (or manual hide_row/
+    hide_rows) applied to the sheet."""
+    sheet.unhide_all_rows()
+    sheet
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _min_i32(a: i32, b: i32) -> i32:
+    if a < b:
+        return a
+    b
+
+fn _max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        return a
+    b
+
+fn _compare_row_cells(row1: [Cell], row2: [Cell], key_col: i32, ascending: bool) -> i32:
+    """Compare two rows by key column. Returns < 0 if row1 < row2, > 0 if row1 > row2, 0 if equal.
+    Result is negated if descending."""
+    if key_col < 0 or key_col >= row1.len() or key_col >= row2.len():
+        return 0
+
+    val cell1 = row1[key_col]
+    val cell2 = row2[key_col]
+
+    val cmp = _compare_cells(cell1, cell2)
+    val result = if ascending:
+        cmp
+    else:
+        -cmp
+    result
+
+fn _compare_cells(c1: Cell, c2: Cell) -> i32:
+    """Compare two cells for sorting.
+    Numbers sort numerically, text sorts lexicographically.
+    Numbers sort before text.
+    Empty cells sort last.
+    Returns < 0 if c1 < c2, > 0 if c1 > c2, 0 if equal."""
+
+    match c1.value:
+        CellValue.Empty:
+            match c2.value:
+                CellValue.Empty:
+                    return 0
+                _:
+                    return 1  # Empty sorts last
+        CellValue.NumberVal(v1):
+            match c2.value:
+                CellValue.Empty:
+                    return -1
+                CellValue.NumberVal(v2):
+                    if v1 < v2:
+                        return -1
+                    if v1 > v2:
+                        return 1
+                    return 0
+                _:
+                    return -1  # Numbers sort before text
+        CellValue.TextVal(t1):
+            match c2.value:
+                CellValue.Empty:
+                    return -1
+                CellValue.NumberVal(_):
+                    return 1  # Text sorts after numbers
+                CellValue.TextVal(t2):
+                    val lower1 = t1.lower()
+                    val lower2 = t2.lower()
+                    if lower1 < lower2:
+                        return -1
+                    if lower1 > lower2:
+                        return 1
+                    return 0
+                _:
+                    val lower1 = t1.lower()
+                    val lower2 = cell_display_text(c2).lower()
+                    if lower1 < lower2:
+                        return -1
+                    if lower1 > lower2:
+                        return 1
+                    return 0
+        _:
+            # BoolVal, FormulaVal, ErrorVal: compare by display text
+            match c2.value:
+                CellValue.Empty:
+                    return -1
+                CellValue.NumberVal(_):
+                    return 1
+                _:
+                    val t1 = cell_display_text(c1).lower()
+                    val t2 = cell_display_text(c2).lower()
+                    if t1 < t2:
+                        return -1
+                    if t1 > t2:
+                        return 1
+                    return 0
+
+pub fn cell_matches_criteria(cell: Cell, criteria: text) -> bool:
+    """Public wrapper around `_cell_matches_criteria` for callers outside this
+    module (e.g. query.spl's sheet_select) that need the exact same criteria
+    semantics (">n"/"<=n"/"<>x", bare case-insensitive equality) without
+    duplicating the parsing logic."""
+    _cell_matches_criteria(cell, criteria)
+
+pub fn compare_cells_for_sort(c1: Cell, c2: Cell) -> i32:
+    """Public wrapper around `_compare_cells` for callers outside this module
+    (e.g. query.spl's sheet_sort_by) that need the same numeric-aware,
+    text-fallback cell ordering (numbers < text, empties last) without
+    duplicating the comparison logic."""
+    _compare_cells(c1, c2)
+
+fn _cell_matches_criteria(cell: Cell, criteria: text) -> bool:
+    """Check if a cell matches the criteria (">5", "<=3", "<>x", or bare value)."""
+    val trimmed = criteria.trim()
+
+    # Check for comparison operators
+    if trimmed.starts_with(">="):
+        val val_str = trimmed.substring(2)
+        val target = _parse_cell_value(val_str)
+        return _compare_cells(cell, target) >= 0
+
+    if trimmed.starts_with("<="):
+        val val_str = trimmed.substring(2)
+        val target = _parse_cell_value(val_str)
+        return _compare_cells(cell, target) <= 0
+
+    if trimmed.starts_with("<>"):
+        val val_str = trimmed.substring(2)
+        val target = _parse_cell_value(val_str)
+        return _compare_cells(cell, target) != 0
+
+    if trimmed.starts_with(">"):
+        val val_str = trimmed.substring(1)
+        val target = _parse_cell_value(val_str)
+        return _compare_cells(cell, target) > 0
+
+    if trimmed.starts_with("<"):
+        val val_str = trimmed.substring(1)
+        val target = _parse_cell_value(val_str)
+        return _compare_cells(cell, target) < 0
+
+    # Bare value: case-insensitive equality
+    val display = cell_display_text(cell).lower()
+    display == trimmed.lower()
+
+fn _parse_cell_value(s: text) -> Cell:
+    """Parse a string into a Cell value (number, text, or empty)."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return empty_cell()
+
+    # Try to parse as number
+    val num = _try_parse_number(trimmed)
+    if num != nil:
+        return number_cell(num)
+
+    # Otherwise text
+    return text_cell(trimmed)
+
+fn _try_parse_number(s: text) -> f64?:
+    """Try to parse a number from text."""
+    if s.len() == 0:
+        return nil
+    var has_dot = false
+    var has_digit = false
+    var i = 0
+
+    # Allow leading minus
+    if s.char_at(0) == "-":
+        if s.len() == 1:
+            return nil
+        i = 1
+
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == ".":
+            if has_dot:
+                return nil
+            has_dot = true
+        elif _is_digit(c):
+            has_digit = true
+        else:
+            return nil
+        i = i + 1
+
+    if not has_digit:
+        return nil
+
+    # Parse using stdlib
+    return office_parse_signed_decimal_f64(s)
+
+fn _is_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
+     c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+# =========================================================================
+# Find & Replace
+# =========================================================================
+
+fn _cell_is_formula(cell: Cell) -> bool:
+    """True when the cell holds a formula (protected from value replacement)."""
+    match cell.value:
+        CellValue.FormulaVal(expr, cached):
+            true
+        _:
+            false
+
+fn _ci_replace_all(haystack: text, needle: text, replacement: text) -> text:
+    """Case-insensitive replace-all: matches needle ignoring case, substitutes
+    replacement verbatim. Scans left-to-right (no index_of in the runtime)."""
+    if needle.len() == 0:
+        return haystack
+    val nlow = needle.lower()
+    var result = ""
+    var i = 0
+    while i < haystack.len():
+        val window = haystack.slice(i, i + needle.len())
+        if window.len() == needle.len() and window.lower() == nlow:
+            result = "{result}{replacement}"
+            i = i + needle.len()
+        else:
+            result = "{result}{haystack.char_at(i)}"
+            i = i + 1
+    result
+
+fn sheet_find(sheet: Sheet, needle: text, match_case: bool) -> [text]:
+    """A1 refs (row-major over the used range) whose display text contains
+    needle. Case-insensitive unless match_case is true. Empty needle → []."""
+    if needle.len() == 0:
+        return []
+    val range_a1 = sheet.used_range()
+    val range = parse_range(range_a1)
+    if range == nil:
+        return []
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+    val nlow = needle.lower()
+
+    var result: [text] = []
+    var r = min_row
+    while r <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell = sheet.get_cell(ref_str)
+            val display = cell_display_text(cell)
+            var hit = false
+            if match_case:
+                hit = display.contains(needle)
+            else:
+                hit = display.lower().contains(nlow)
+            if hit:
+                result.push(ref_str)
+            c = c + 1
+        r = r + 1
+    result
+
+# =========================================================================
+# Remove Duplicates
+# =========================================================================
+
+fn _parse_col_index(s: text) -> i32:
+    """Parse a 0-based column index from text. Returns -1 when the text is
+    not a plain non-negative integer (fail closed)."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return -1
+    var value = 0
+    var i = 0
+    while i < trimmed.len():
+        val c = trimmed.char_at(i)
+        if not _is_digit(c):
+            return -1
+        var d = 0
+        if c == "1":
+            d = 1
+        elif c == "2":
+            d = 2
+        elif c == "3":
+            d = 3
+        elif c == "4":
+            d = 4
+        elif c == "5":
+            d = 5
+        elif c == "6":
+            d = 6
+        elif c == "7":
+            d = 7
+        elif c == "8":
+            d = 8
+        elif c == "9":
+            d = 9
+        value = value * 10 + d
+        i = i + 1
+    value
+
+fn sheet_remove_duplicates(sheet: Sheet, range_a1: text, key_cols: text, has_header: bool) -> Sheet:
+    """Remove duplicate rows in a range, keeping the FIRST occurrence of each
+    key combination (Excel Remove Duplicates).
+
+    Args:
+        sheet: The Sheet to deduplicate
+        range_a1: Range in A1 notation (e.g. "A1:C10")
+        key_cols: comma-separated 0-based column indexes within the range
+                  (e.g. "0" or "0,2"); keys compare case-insensitively on
+                  display text
+        has_header: if true, the first row stays in place and is not a key row
+
+    Later duplicate rows are removed by shifting the remaining rows up and
+    clearing the tail. Returns the mutated Sheet (return-the-object
+    convention). Invalid range or key_cols → sheet unchanged.
+    """
+    var result = sheet
+    val range = parse_range(range_a1)
+    if range == nil:
+        return result
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+    val width = max_col - min_col
+
+    # Parse key_cols (fail closed on any bad or out-of-range index)
+    var key_idx: [i32] = []
+    val pieces = key_cols.split(",")
+    var p = 0
+    while p < pieces.len():
+        val piece = pieces[p]
+        val kc = _parse_col_index(piece)
+        if kc < 0 or kc > width:
+            return result
+        key_idx.push(kc)
+        p = p + 1
+    if key_idx.len() == 0:
+        return result
+
+    var data_start = min_row
+    if has_header:
+        data_start = data_start + 1
+    if data_start > max_row:
+        return result
+
+    # Capture data rows as arrays of cells (same idiom as sheet_sort_range)
+    var rows: [[Cell]] = []
+    var r = data_start
+    while r <= max_row:
+        var row_cells: [Cell] = []
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell = result.get_cell(ref_str)
+            row_cells.push(cell)
+            c = c + 1
+        rows.push(row_cells)
+        r = r + 1
+
+    # Keep the first occurrence of each key combination
+    var seen: [text] = []
+    var keep: [[Cell]] = []
+    var i = 0
+    while i < rows.len():
+        val row_cells = rows[i]
+        var key = ""
+        var k = 0
+        while k < key_idx.len():
+            val kc = key_idx[k]
+            val key_cell = row_cells[kc]
+            val display = cell_display_text(key_cell)
+            val dl = display.lower()
+            key = "{key}<|>{dl}"
+            k = k + 1
+        var found = false
+        var s = 0
+        while s < seen.len():
+            val seen_key = seen[s]
+            if seen_key == key:
+                found = true
+                break
+            s = s + 1
+        if not found:
+            seen.push(key)
+            keep.push(row_cells)
+        i = i + 1
+
+    # Write survivors back (shifted up), then clear the tail rows
+    var row_idx = 0
+    while row_idx < keep.len():
+        val row_cells = keep[row_idx]
+        var col_idx = 0
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: data_start + row_idx)
+            val ref_str = cell_ref_to_string(ref)
+            if col_idx < row_cells.len():
+                result.set_cell(ref_str, row_cells[col_idx])
+            col_idx = col_idx + 1
+            c = c + 1
+        row_idx = row_idx + 1
+
+    while data_start + row_idx <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: data_start + row_idx)
+            val ref_str = cell_ref_to_string(ref)
+            result.set_cell(ref_str, empty_cell())
+            c = c + 1
+        row_idx = row_idx + 1
+
+    result
+
+# =========================================================================
+# Text to Columns
+# =========================================================================
+
+fn sheet_text_to_columns(sheet: Sheet, range_a1: text, delimiter: text) -> Sheet:
+    """Split each cell's display text on `delimiter` and write the pieces into
+    the adjacent columns rightward, overwriting whatever is there (Excel
+    Text-to-Columns). The first piece stays in the original cell.
+
+    Only single-COLUMN ranges are processed (multi-column range → sheet
+    unchanged). Cells whose display text does not contain the delimiter are
+    left untouched. Returns the mutated Sheet (return-the-object convention).
+    """
+    var result = sheet
+    if delimiter.len() == 0:
+        return result
+    val range = parse_range(range_a1)
+    if range == nil:
+        return result
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+    if min_col != max_col:
+        return result
+
+    var r = min_row
+    while r <= max_row:
+        val ref = CellRef(col: min_col, row: r)
+        val ref_str = cell_ref_to_string(ref)
+        val cell = result.get_cell(ref_str)
+        val display = cell_display_text(cell)
+        if display.contains(delimiter):
+            val parts = display.split(delimiter)
+            var pi = 0
+            while pi < parts.len():
+                val out_ref = CellRef(col: min_col + pi, row: r)
+                val out_str = cell_ref_to_string(out_ref)
+                val piece = parts[pi]
+                result.set_value(out_str, piece)
+                pi = pi + 1
+        r = r + 1
+    result
+
+# =========================================================================
+# Subtotals
+# =========================================================================
+
+fn sheet_subtotals(sheet: Sheet, range_a1: text, group_col: i32, value_col: i32) -> [text]:
+    """Group rows by the display text of `group_col` (first-seen order) and
+    sum the numeric values of `value_col` per group.
+
+    Args:
+        sheet: The Sheet to summarize (never mutated — pure summary)
+        range_a1: Range in A1 notation (e.g. "A1:B10")
+        group_col: 0-based column within the range holding group labels
+        value_col: 0-based column within the range holding values
+
+    Returns lines "Group: SUM" per group plus a final "Grand Total: N".
+    Non-numeric value cells are excluded from the sums (a group whose rows
+    are all non-numeric still appears, with sum 0). Invalid range or column
+    indexes → [].
+    """
+    val range = parse_range(range_a1)
+    if range == nil:
+        return []
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+    val width = max_col - min_col
+    if group_col < 0 or group_col > width:
+        return []
+    if value_col < 0 or value_col > width:
+        return []
+
+    # Parallel arrays (first-seen order); avoids Dict-in-loop subtleties
+    var names: [text] = []
+    var sums: [f64] = []
+    var grand = 0.0
+
+    var r = min_row
+    while r <= max_row:
+        val g_ref = CellRef(col: min_col + group_col, row: r)
+        val g_str = cell_ref_to_string(g_ref)
+        val g_cell = sheet.get_cell(g_str)
+        val g_name = cell_display_text(g_cell)
+
+        var gi = 0
+        var found = false
+        var s = 0
+        while s < names.len():
+            val existing = names[s]
+            if existing == g_name:
+                found = true
+                gi = s
+                break
+            s = s + 1
+        if not found:
+            gi = s
+            names.push(g_name)
+            sums.push(0.0)
+
+        val v_ref = CellRef(col: min_col + value_col, row: r)
+        val v_str = cell_ref_to_string(v_ref)
+        val v_cell = sheet.get_cell(v_str)
+        match v_cell.value:
+            CellValue.NumberVal(v):
+                val cur = sums[gi]
+                sums[gi] = cur + v
+                grand = grand + v
+            _:
+                pass_do_nothing
+
+        r = r + 1
+
+    var lines: [text] = []
+    var li = 0
+    while li < names.len():
+        val g_name = names[li]
+        val sum_v = sums[li]
+        val sum_cell = number_cell(sum_v)
+        val sum_text = cell_display_text(sum_cell)
+        lines.push("{g_name}: {sum_text}")
+        li = li + 1
+    val grand_cell = number_cell(grand)
+    val grand_text = cell_display_text(grand_cell)
+    lines.push("Grand Total: {grand_text}")
+    lines
+
+fn sheet_replace(sheet: Sheet, needle: text, replacement: text, match_case: bool) -> Sheet:
+    """Replace needle with replacement in the display value of every non-formula
+    cell in the used range (formula cells are left untouched). Returns the
+    mutated sheet (Sheet is a class, but the return preserves the codebase's
+    return-the-object convention)."""
+    var result_sheet = sheet
+    if needle.len() == 0:
+        return result_sheet
+    val range_a1 = result_sheet.used_range()
+    val range = parse_range(range_a1)
+    if range == nil:
+        return result_sheet
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+
+    var r = min_row
+    while r <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell = result_sheet.get_cell(ref_str)
+            if not _cell_is_formula(cell):
+                val display = cell_display_text(cell)
+                var matched = false
+                if match_case:
+                    matched = display.contains(needle)
+                else:
+                    matched = display.lower().contains(needle.lower())
+                if matched:
+                    var replaced = ""
+                    if match_case:
+                        replaced = display.replace(needle, replacement)
+                    else:
+                        replaced = _ci_replace_all(display, needle, replacement)
+                    result_sheet.set_value(ref_str, replaced)
+            c = c + 1
+        r = r + 1
+    result_sheet

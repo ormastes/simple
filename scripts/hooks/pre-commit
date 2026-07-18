@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    SIMPLE="$SIMPLE_BIN"
+elif [ -x src/compiler_rust/target/debug/simple ]; then
+    SIMPLE="src/compiler_rust/target/debug/simple"
+else
+    SIMPLE="./bin/simple"
+fi
+
+sh scripts/check-workspace-root-guard.shs audit --staged
+
+# UI backend-isolation gate (baseline-ratcheted; new violations only — see
+# scripts/check/ui_backend_isolation_baseline.txt to shrink existing debt).
+sh scripts/check/check-ui-backend-isolation.shs
+
+# CPU-lane per-element-loop hot-path gate (baseline-ratcheted; new violations
+# only — see scripts/check/cpu_lane_hotloop_baseline.txt to shrink existing
+# debt). doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §6.
+sh scripts/check/check-cpu-hotloop-idiom.shs
+
+# SimpleOS native-surface policy: only when boot/runtime/manifest files change,
+# fail-closed if a stray/undeclared native boot source slipped into a covered
+# arch (the boot-dir auto-glob footgun). Skipped for unrelated commits.
+if git diff --cached --name-only \
+    | grep -qE '(examples/09_embedded/simple_os/arch/[^/]+/boot/|src/os/kernel/arch/[^/]+/boot/|src/os/libc/|src/os/port/simpleos_multiplatform_build)'; then
+    sh scripts/check-simpleos-native-surface.shs
+fi
+
+run_tracking_generation() {
+    if [ ! -x "$SIMPLE" ]; then
+        echo "tracking hook: $SIMPLE is not executable" >&2
+        exit 1
+    fi
+
+    "$SIMPLE" todo-scan --log-mode=json --progress=summary >/dev/null
+    "$SIMPLE" todo-gen --log-mode=json --progress=summary >/dev/null
+    "$SIMPLE" feature-gen --db doc/08_tracking/feature/feature_db.sdn -o doc/08_tracking/feature >/dev/null
+    "$SIMPLE" task-gen --db doc/08_tracking/task/task_db.sdn -o doc/08_tracking/task >/dev/null
+    "$SIMPLE" bug-gen --db doc/08_tracking/bug/bug_db.sdn -o doc/08_tracking/bug >/dev/null
+}
+
+run_tracking_checks() {
+    "$SIMPLE" check-dbs --strict
+    "$SIMPLE" tracking check --kind=feature
+    "$SIMPLE" traceability-check --scope=all
+}
+
+require_generated_tracking_staged() {
+    changed="$(git diff --name-only -- \
+        doc/TODO.md \
+        doc/08_tracking/bug/bug_db.sdn \
+        doc/08_tracking/bug/recent_bugs.md \
+        doc/08_tracking/bug/bug_report.md \
+        doc/08_tracking/feature \
+        doc/08_tracking/task \
+        doc/08_tracking/todo/todo_db.sdn || true)"
+    if [ -n "$changed" ]; then
+        echo "tracking hook: generated tracking files changed; review and stage them:" >&2
+        echo "$changed" >&2
+        exit 1
+    fi
+}
+
+run_tracking_generation
+require_generated_tracking_staged
+run_tracking_checks

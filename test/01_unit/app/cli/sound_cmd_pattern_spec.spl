@@ -1,0 +1,201 @@
+# @cover src/app/sound/main.spl 80%
+"""
+# sound CLI pattern (tracker-LITE step sequencing)
+
+**Feature IDs:** #sound-cmd-pattern
+**Category:** App / CLI Surface
+**Status:** Implemented
+
+## Overview
+
+`sound.kind: "pattern"` is a step-sequencer front end over the existing
+`"sequence"` flat event list — a pure lowering, no new mixing code. Each
+`pattern.tracks[].steps` string is one character per step: `x` triggers the
+track's clip at gain 0.7, `X` triggers it accented at gain 1.0, `.` rests.
+Step duration is `60000 / bpm / steps_per_beat` ms; step `i` of repeat `r`
+fires at `(r * steps.len() + i) * step_ms`. All tracks must share one
+`steps` length. `simple sound render` lowers a pattern to `events` and
+renders it through the unchanged sequence mixer.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Pattern SDN | `sound.pattern: { bpm, steps_per_beat, repeat, tracks: [{clip, steps}] }` |
+| Step chars | `x` = trigger (gain 0.7), `X` = accent (gain 1.0), `.` = rest |
+| Step duration | `60000 / bpm / steps_per_beat` ms, truncated to whole ms when applied |
+| Repeat | Pattern replayed `repeat` times, each repeat offset by the full pattern length |
+| Validation | `bpm > 0`, `steps_per_beat > 0`, `repeat >= 1`, equal-length `steps` across tracks, referenced clips must exist |
+| Exit codes | 0 success, 1 failure (bad pattern shape, missing clip), 2 usage error |
+
+## Syntax
+
+```
+sound:
+  kind: "pattern"
+  sample_rate: 22050
+  pattern:
+    bpm: 120
+    steps_per_beat: 4
+    repeat: 2
+    tracks:
+      - { clip: "kick.sdn", steps: "x...x...x...x..." }
+      - { clip: "hat.wav",  steps: "..x...x...x...x." }
+```
+
+## Examples
+
+```
+simple sound render pattern.sdn -o pattern.wav
+wrote pattern.wav (1796 bytes, 1000 Hz)
+```
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/app/game_tools/sound_music_effects_plan.md
+**Design:** N/A
+**Research:** N/A
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, ShellResult, file_write_bytes, file_read_bytes, file_hash_sha256, write_file, mkdir_p}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+use std.common.audio.wav_decode.{decode_wav}
+
+val CLI = "bin/simple src/app/sound/main.spl"
+val OUT_DIR = "build/test-artifacts/sound_pattern_cmd"
+val CLICK_WAV = OUT_DIR + "/click.wav"
+val HAT_WAV = OUT_DIR + "/hat.wav"
+
+fn run_cli(args: text) -> ShellResult:
+    shell(CLI + " " + args)
+
+fn _write_clips() -> bool:
+    mkdir_p(OUT_DIR)
+    # click.wav: single sample @ 0.5, hat.wav: single sample @ 0.25, both mono @ 1000 Hz
+    # (encoder pinned by wav_encode_spec.spl — reused here only as a
+    # deterministic clip source, not re-testing the encoder itself).
+    val click: [f32] = [0.5]
+    val hat: [f32] = [0.25]
+    var ok = file_write_bytes(CLICK_WAV, encode_wav_pcm16(click, 1, 1000))
+    ok = ok and file_write_bytes(HAT_WAV, encode_wav_pcm16(hat, 1, 1000))
+    ok
+
+fn _write_sdn(path: text, steps_body: text) -> bool:
+    write_file(path, "sound:\n  kind: \"pattern\"\n  sample_rate: 1000\n  pattern:\n    bpm: 120\n    steps_per_beat: 4\n" + steps_body)
+
+describe "simple sound render (pattern)":
+    # One `expect` per `it` below (interpreter test-runner file-summary
+    # last-expect-wins caveat — see wav_decode_spec.spl header).
+
+    it "120bpm/4 steps-per-beat gives an exact 125ms step duration (single hit at step index 1 lands on frame 125, not 124/126)":
+        step("Write a 2-step pattern \".X\" — the only (accented) hit is step index 1")
+        expect(_write_clips()).to_equal(true)
+        val sdn = OUT_DIR + "/step_duration.sdn"
+        expect(_write_sdn(sdn, "    tracks: [ { clip: \"click.wav\", steps: \".X\" } ]\n")).to_equal(true)
+
+        step("Render and decode; the hit must land exactly at frame 125 (125ms @ 1000Hz)")
+        val out = OUT_DIR + "/step_duration.wav"
+        val r = run_cli("render " + sdn + " -o " + out)
+        var samples: [f32] = []
+        if val Ok(a) = decode_wav(file_read_bytes(out)):
+            samples = a.samples
+        val ok = (r.exit_code == 0 and samples.len() == 126 and samples[124] == 0.0 and samples[125] == 0.5)
+        expect(ok).to_equal(true)
+
+    it "steps \"x..x\" produce events at exactly 0ms and 375ms":
+        step("Write a 4-step pattern \"x..x\" (hits at step 0 and step 3)")
+        expect(_write_clips()).to_equal(true)
+        val sdn = OUT_DIR + "/xdotdotx.sdn"
+        expect(_write_sdn(sdn, "    tracks: [ { clip: \"click.wav\", steps: \"x..x\" } ]\n")).to_equal(true)
+
+        step("Render and decode; hits at frame 0 and frame 375, both at gain 0.7 (0.5 * 0.7 quantized)")
+        val out = OUT_DIR + "/xdotdotx.wav"
+        val r = run_cli("render " + sdn + " -o " + out)
+        var samples: [f32] = []
+        if val Ok(a) = decode_wav(file_read_bytes(out)):
+            samples = a.samples
+        val ok = (r.exit_code == 0 and samples.len() == 376 and
+            samples[0] == 0.34997558593750 and samples[375] == 0.34997558593750)
+        expect(ok).to_equal(true)
+
+    it "accent 'X' lowers to gain 1.0 versus 'x' gain 0.7 — exact quantized amplitudes":
+        step("Render single-step patterns \"x\" and \"X\" from the same 0.5-amplitude clip")
+        expect(_write_clips()).to_equal(true)
+        val sdn_x = OUT_DIR + "/accent_x.sdn"
+        val sdn_upper_x = OUT_DIR + "/accent_upper_x.sdn"
+        expect(_write_sdn(sdn_x, "    tracks: [ { clip: \"click.wav\", steps: \"x\" } ]\n")).to_equal(true)
+        expect(_write_sdn(sdn_upper_x, "    tracks: [ { clip: \"click.wav\", steps: \"X\" } ]\n")).to_equal(true)
+
+        step("Render both; decode sample[0] of each")
+        val out_x = OUT_DIR + "/accent_x.wav"
+        val out_upper_x = OUT_DIR + "/accent_upper_x.wav"
+        val rx = run_cli("render " + sdn_x + " -o " + out_x)
+        val rX = run_cli("render " + sdn_upper_x + " -o " + out_upper_x)
+        var samples_x: [f32] = []
+        if val Ok(a) = decode_wav(file_read_bytes(out_x)):
+            samples_x = a.samples
+        var samples_upper_x: [f32] = []
+        if val Ok(a) = decode_wav(file_read_bytes(out_upper_x)):
+            samples_upper_x = a.samples
+
+        step("Then 'x' quantizes to 0.5*0.7 and 'X' quantizes to 0.5*1.0 exactly")
+        val ok = (rx.exit_code == 0 and rX.exit_code == 0 and
+            samples_x[0] == 0.34997558593750 and samples_upper_x[0] == 0.5)
+        expect(ok).to_equal(true)
+
+    it "repeat:2 duplicates the pattern's events offset by exactly the pattern length (4 steps * 125ms = 500ms)":
+        step("Write the same \"x..x\" pattern with repeat: 2")
+        expect(_write_clips()).to_equal(true)
+        val sdn = OUT_DIR + "/repeat2.sdn"
+        expect(_write_sdn(sdn, "    repeat: 2\n    tracks: [ { clip: \"click.wav\", steps: \"x..x\" } ]\n")).to_equal(true)
+
+        step("Render and decode; hits at frames 0, 375 (repeat 0) and 500, 875 (repeat 1)")
+        val out = OUT_DIR + "/repeat2.wav"
+        val r = run_cli("render " + sdn + " -o " + out)
+        var samples: [f32] = []
+        if val Ok(a) = decode_wav(file_read_bytes(out)):
+            samples = a.samples
+        val ok = (r.exit_code == 0 and samples.len() == 876 and
+            samples[0] == 0.34997558593750 and samples[375] == 0.34997558593750 and
+            samples[500] == 0.34997558593750 and samples[875] == 0.34997558593750)
+        expect(ok).to_equal(true)
+
+    it "two tracks triggering the same step mix to the exact summed sample":
+        step("Write a 1-step pattern where both tracks (click 0.5, hat 0.25) hit accented on step 0")
+        expect(_write_clips()).to_equal(true)
+        val sdn = OUT_DIR + "/collide.sdn"
+        expect(_write_sdn(sdn, "    tracks: [ { clip: \"click.wav\", steps: \"X\" }, { clip: \"hat.wav\", steps: \"X\" } ]\n")).to_equal(true)
+
+        step("Render and decode; the single frame is exactly click(0.5) + hat(0.25) = 0.75")
+        val out = OUT_DIR + "/collide.wav"
+        run_cli("render " + sdn + " -o " + out)
+        var samples: [f32] = []
+        if val Ok(a) = decode_wav(file_read_bytes(out)):
+            samples = a.samples
+        expect(samples[0]).to_equal(0.75)
+
+    it "produces byte-identical WAV output across two separate pattern render invocations":
+        step("Render the same pattern SDN twice to two separate files")
+        expect(_write_clips()).to_equal(true)
+        val sdn = OUT_DIR + "/det.sdn"
+        expect(_write_sdn(sdn, "    repeat: 2\n    tracks: [ { clip: \"click.wav\", steps: \"x..x\" } ]\n")).to_equal(true)
+        val out_a = OUT_DIR + "/det_a.wav"
+        val out_b = OUT_DIR + "/det_b.wav"
+        val ra = run_cli("render " + sdn + " -o " + out_a)
+        val rb = run_cli("render " + sdn + " -o " + out_b)
+
+        step("Then both files hash identically")
+        val ok = (ra.exit_code == 0 and rb.exit_code == 0 and
+            file_hash_sha256(out_a) == file_hash_sha256(out_b))
+        expect(ok).to_equal(true)
+
+    it "exits 1 when tracks have mismatched step-string lengths":
+        step("Write a pattern where track 0 has 4 steps and track 1 has 3")
+        expect(_write_clips()).to_equal(true)
+        val sdn = OUT_DIR + "/mismatch.sdn"
+        expect(_write_sdn(sdn, "    tracks: [ { clip: \"click.wav\", steps: \"x..x\" }, { clip: \"hat.wav\", steps: \"x..\" } ]\n")).to_equal(true)
+
+        step("Then render fails (exit 1) naming the length mismatch")
+        val r = run_cli("render " + sdn + " -o " + OUT_DIR + "/mismatch_never.wav")
+        val ok = (r.exit_code == 1 and r.stdout.contains("does not match"))
+        expect(ok).to_equal(true)

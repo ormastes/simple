@@ -1,0 +1,210 @@
+# JavaScript parser for the Simple Browser Platform.
+# Recursive-descent parser with Pratt precedence climbing for expressions.
+# Produces AST nodes from the ast_types module (JsStatement / JsExpression enums).
+#
+# Split files:
+#   parser_statements.spl  — all statement parsing (var/if/for/while/try/switch/class etc.)
+#   parser_expressions.spl — full expression precedence chain (assignment down to primary)
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.ast_types.{JsExpression, JsStatement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec, JsAstFactory}
+use std.js.engine.lexer.{JsLexer}
+
+# Load impl blocks so all parser methods are available in interpreter mode
+use std.js.engine.parser_statements.*
+use std.js.engine.parser_expressions.*
+
+# ── Parser ───────────────────────────────────────────────────────────────
+
+class JsParser:
+    lexer: JsLexer
+    current_kind: text
+    current_value: text
+    current_line: i64
+    current_col: i64
+    previous_kind: text
+    previous_value: text
+    previous_line: i64
+    previous_col: i64
+    logger: Logger
+
+    static fn new(input: text, logger: Logger) -> JsParser:
+        JsParser.create(input, logger)
+
+    static fn create(input: text, logger: Logger) -> JsParser:
+        var lex = JsLexer.create(input, logger)
+        val _ = lex.next_token()
+        JsParser(
+            lexer: lex,
+            current_kind: lex.current_kind,
+            current_value: lex.current_value.substring(0, lex.current_value.len()),
+            current_line: lex.current_line,
+            current_col: lex.current_col,
+            previous_kind: "Eof",
+            previous_value: "",
+            previous_line: 1,
+            previous_col: 1,
+            logger: logger,
+        )
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+
+    # Advance to the next token, returning the consumed one
+    me advance():
+        self.previous_kind = self.current_kind
+        self.previous_value = self.current_value.substring(0, self.current_value.len())
+        self.previous_line = self.current_line
+        self.previous_col = self.current_col
+        val _ = self.lexer.next_token()
+        self.current_kind = self.lexer.current_kind
+        self.current_value = self.lexer.current_value.substring(0, self.lexer.current_value.len())
+        self.current_line = self.lexer.current_line
+        self.current_col = self.lexer.current_col
+
+    # Check if the current token matches a given kind
+    fn check(kind: text) -> bool:
+        self.current_kind == kind
+
+    fn ident_name(expr: JsExpression) -> text:
+        match expr:
+            JsExpression.Identifier(name): name
+            _: ""
+
+    # Consume the current token if it matches, return true; otherwise false
+    me match_token(kind: text) -> bool:
+        if self.current_kind == kind:
+            self.advance()
+            return true
+        false
+
+    # Expect the current token to be a given kind; consume and return it, or error
+    me expect(kind: text) -> BrowserResult<text>:
+        if self.current_kind == kind:
+            val value = self.current_value.substring(0, self.current_value.len())
+            self.advance()
+            return Ok(value)
+        val msg = "Expected token kind {kind} but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
+        self.logger.error(msg)
+        Err(script_error(msg))
+
+    me expect_member_property_name() -> BrowserResult<text>:
+        val kind = self.current_kind
+        if kind == "Identifier" or
+           kind == "Catch" or
+           kind == "Finally" or
+           kind == "Default" or
+           kind == "Function" or
+           kind == "Return" or
+           kind == "If" or
+           kind == "Else" or
+           kind == "While" or
+           kind == "For" or
+           kind == "Do" or
+           kind == "Break" or
+           kind == "Continue" or
+           kind == "Switch" or
+           kind == "Case" or
+           kind == "Throw" or
+           kind == "Try" or
+           kind == "New" or
+           kind == "Delete" or
+           kind == "Typeof" or
+           kind == "Instanceof" or
+           kind == "In" or
+           kind == "Of" or
+           kind == "Void" or
+           kind == "Class" or
+           kind == "Extends" or
+           kind == "Super" or
+           kind == "This" or
+           kind == "Import" or
+           kind == "Export" or
+           kind == "From" or
+           kind == "As" or
+           kind == "Async" or
+           kind == "Await":
+            val value = self.current_value.substring(0, self.current_value.len())
+            self.advance()
+            return Ok(value)
+        val msg = "Expected member property name but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
+        self.logger.error(msg)
+        Err(script_error(msg))
+
+    # Check if we've reached end-of-file
+    fn is_at_end() -> bool:
+        self.current_kind == "Eof"
+
+    # ── Program ──────────────────────────────────────────────────────────
+
+    me parse_program() -> BrowserResult<[JsStatement]>:
+        var stmts: [JsStatement] = []
+        while not self.is_at_end():
+            val stmt = self.parse_statement()?
+            stmts.push(stmt)
+        Ok(stmts)
+
+    # ── Statements ───────────────────────────────────────────────────────
+
+    me parse_statement() -> BrowserResult<JsStatement>:
+        val kind = self.current_kind
+
+        if kind == "Var" or kind == "Let" or kind == "Const":
+            return self.parse_var_declaration(self.current_value)
+
+        if kind == "Function":
+            return self.parse_function_declaration()
+
+        if kind == "Return":
+            return self.parse_return_statement()
+
+        if kind == "If":
+            return self.parse_if_statement()
+
+        if kind == "While":
+            return self.parse_while_statement()
+
+        if kind == "For":
+            return self.parse_for_statement()
+
+        if kind == "OpenBrace":
+            val block = self.parse_block()?
+            return Ok(JsAstFactory.block(stmts: block))
+
+        if kind == "Try":
+            return self.parse_try_statement()
+
+        if kind == "Switch":
+            return self.parse_switch_statement()
+
+        if kind == "Throw":
+            return self.parse_throw_statement()
+
+        if kind == "Class":
+            return self.parse_class_declaration()
+
+        if kind == "Break":
+            self.advance()
+            self.match_token("Semicolon")
+            return Ok(JsAstFactory.break_stmt())
+
+        if kind == "Continue":
+            self.advance()
+            self.match_token("Semicolon")
+            return Ok(JsAstFactory.continue_stmt())
+
+        if kind == "Do":
+            return self.parse_do_while_statement()
+
+        self.parse_expression_statement()
+
+    # Block { ... }
+    me parse_block() -> BrowserResult<[JsStatement]>:
+        self.expect("OpenBrace")?
+        var stmts: [JsStatement] = []
+        while not self.check("CloseBrace") and not self.is_at_end():
+            val stmt = self.parse_statement()?
+            stmts.push(stmt)
+        self.expect("CloseBrace")?
+        Ok(stmts)

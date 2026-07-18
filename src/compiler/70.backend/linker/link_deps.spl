@@ -1,0 +1,205 @@
+# Link Dependency Manager - Merges platform defaults with SDN config
+#
+# Resolves the final set of link dependencies by merging:
+#   1. platform_defaults(os, arch)  — baseline per-OS/arch
+#   2. [links]                      — project-wide overrides from simple.sdn
+#   3. [links.{os}]                — OS-specific overrides
+#   4. [links.{os}.{arch}]         — OS+arch-specific overrides
+#
+# Also provides check_links() for verifying library availability.
+
+use std.io_runtime.{host_os, host_arch, file_exists, shell_output, cwd}
+use std.io_runtime.{file_read}
+use std.config_parser.{parse_sdn_config, find_section, get_config_list, get_config_field, get_config_bool}
+use compiler.backend.linker.platform_defaults.{PlatformLinkDefaults, platform_defaults}
+
+# ============================================================================
+# Resolved Link Dependencies
+# ============================================================================
+
+struct ResolvedLinkDeps:
+    libraries: [text]
+    library_dirs: [text]
+    crt_search_dirs: [text]
+    dynamic_linker_candidates: [text]
+    extra_link_flags: [text]
+    no_default_libs: bool
+
+# ============================================================================
+# Main API
+# ============================================================================
+
+fn resolve_link_deps() -> ResolvedLinkDeps:
+    val os = host_os()
+    val arch = host_arch()
+    resolve_link_deps_for(os, arch)
+
+fn resolve_link_deps_for(os: text, arch: text) -> ResolvedLinkDeps:
+    val defaults = platform_defaults(os, arch)
+
+    # Try to read simple.sdn
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    if not file_exists(sdn_path):
+        return from_defaults(defaults)
+
+    val content = file_read(sdn_path)
+    if content == "":
+        return from_defaults(defaults)
+
+    val config = parse_sdn_config(content)
+
+    # Check for no-default-libs first
+    var no_default_libs = false
+    val links_section = find_section(config, "links")
+    if links_section != nil:
+        no_default_libs = get_config_bool(links_section, "no-default-libs") ?? false
+
+    # Start with defaults (or empty if no-default-libs)
+    var libraries: [text] = []
+    var library_dirs: [text] = []
+    var extra_flags: [text] = []
+
+    if not no_default_libs:
+        libraries = copy_list(defaults.libraries)
+        library_dirs = copy_list(defaults.library_dirs)
+
+    # Merge [links] section
+    if links_section != nil:
+        val extra_libs = get_config_list(links_section, "libraries", ",")
+        for lib in extra_libs:
+            val trimmed = lib.trim()
+            if trimmed != "":
+                libraries.push(trimmed)
+
+        val extra_dirs = get_config_list(links_section, "library-dirs", ",")
+        for dir in extra_dirs:
+            val trimmed = dir.trim()
+            if trimmed != "":
+                library_dirs.push(trimmed)
+
+        val flags = get_config_list(links_section, "extra-flags", ",")
+        for flag in flags:
+            val trimmed = flag.trim()
+            if trimmed != "":
+                extra_flags.push(trimmed)
+
+    # Merge [links.{os}] section
+    val os_section = find_section(config, "links.{os}")
+    if os_section != nil:
+        val os_libs = get_config_list(os_section, "libraries", ",")
+        for lib in os_libs:
+            val trimmed = lib.trim()
+            if trimmed != "":
+                libraries.push(trimmed)
+
+        val os_dirs = get_config_list(os_section, "library-dirs", ",")
+        for dir in os_dirs:
+            val trimmed = dir.trim()
+            if trimmed != "":
+                library_dirs.push(trimmed)
+
+    # Merge [links.{os}.{arch}] section
+    val os_arch_section = find_section(config, "links.{os}.{arch}")
+    if os_arch_section != nil:
+        val arch_libs = get_config_list(os_arch_section, "libraries", ",")
+        for lib in arch_libs:
+            val trimmed = lib.trim()
+            if trimmed != "":
+                libraries.push(trimmed)
+
+        val arch_dirs = get_config_list(os_arch_section, "library-dirs", ",")
+        for dir in arch_dirs:
+            val trimmed = dir.trim()
+            if trimmed != "":
+                library_dirs.push(trimmed)
+
+    ResolvedLinkDeps(
+        libraries: libraries,
+        library_dirs: library_dirs,
+        crt_search_dirs: defaults.crt_search_dirs,
+        dynamic_linker_candidates: defaults.dynamic_linker_candidates,
+        extra_link_flags: extra_flags,
+        no_default_libs: no_default_libs
+    )
+
+# ============================================================================
+# Check Links - Verify library availability
+# ============================================================================
+
+struct LinkCheckResult:
+    library: text
+    found: bool
+    path: text
+
+fn check_links() -> [LinkCheckResult]:
+    val os = host_os()
+    val arch = host_arch()
+    check_links_for(os, arch)
+
+fn check_links_for(os: text, arch: text) -> [LinkCheckResult]:
+    val deps = resolve_link_deps_for(os, arch)
+    var results: [LinkCheckResult] = []
+
+    for lib in deps.libraries:
+        val found_path = find_library(lib, os)
+        val is_found = found_path != ""
+        results.push(LinkCheckResult(
+            library: lib,
+            found: is_found,
+            path: found_path
+        ))
+
+    results
+
+fn find_library(lib: text, os: text) -> text:
+    if os == "windows":
+        # On Windows, check common lib paths
+        var candidates = [
+            "C:\\Windows\\System32\\{lib}.dll",
+            "C:\\Windows\\SysWOW64\\{lib}.dll"
+        ]
+        for path in candidates:
+            if file_exists(path):
+                return path
+        return ""
+
+    # Unix: use ldconfig or direct probing
+    val ldconfig_result = shell_output("ldconfig -p 2>/dev/null | grep 'lib{lib}\\.so' | head -1 | sed 's/.*=> //'")
+    val trimmed = ldconfig_result.trim()
+    if trimmed != "" and file_exists(trimmed):
+        return trimmed
+
+    # Fallback: probe common paths
+    var probe_paths = [
+        "/usr/lib/x86_64-linux-gnu/lib{lib}.so",
+        "/usr/lib/lib{lib}.so",
+        "/usr/lib64/lib{lib}.so",
+        "/lib/x86_64-linux-gnu/lib{lib}.so",
+        "/lib/lib{lib}.so"
+    ]
+    for path in probe_paths:
+        if file_exists(path):
+            return path
+
+    ""
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn from_defaults(defaults: PlatformLinkDefaults) -> ResolvedLinkDeps:
+    ResolvedLinkDeps(
+        libraries: defaults.libraries,
+        library_dirs: defaults.library_dirs,
+        crt_search_dirs: defaults.crt_search_dirs,
+        dynamic_linker_candidates: defaults.dynamic_linker_candidates,
+        extra_link_flags: defaults.extra_link_flags,
+        no_default_libs: false
+    )
+
+fn copy_list(src: [text]) -> [text]:
+    var result: [text] = []
+    for item in src:
+        result.push(item)
+    result

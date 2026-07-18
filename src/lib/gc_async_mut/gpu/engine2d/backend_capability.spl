@@ -1,0 +1,113 @@
+# 2D Engine — Backend Capability Descriptor
+#
+# A small, honest self-description each Engine2D backend can advertise so
+# callers can decide which ops actually run on hardware and which fall through
+# to the shared software emulation layer (backend_emu.spl).
+#
+# Convention (NOT a RenderBackend trait requirement — adding a trait method
+# would force all ~20 backends to reimplement it at once): a backend advertises
+# its capability via a `capability()` method or a `backend_capability_*` free
+# function. Ops NOT listed in `accelerated_ops` are understood to fall through
+# to the shared software path.
+#
+# This phase only provides the type + honest defaults for the software / emu
+# lanes. Per-backend population (real-gpu backends listing their genuinely
+# GPU-accelerated ops) is deferred to a later phase.
+
+# ============================================================================
+# Engine2dBackendKind — what class of executor a backend is
+# ============================================================================
+
+enum Engine2dBackendKind:
+    """The execution class a backend belongs to."""
+    RealGpu            # dispatches ops to a physical GPU device
+    SoftwareEmulation  # correct CPU implementation, no device
+    Inert              # no-op / probe-only backend, produces no pixels
+
+impl Engine2dBackendKind:
+    fn to_text() -> text:
+        match self:
+            case RealGpu: "real-gpu"
+            case SoftwareEmulation: "software-emulation"
+            case Inert: "inert"
+
+# ============================================================================
+# BackendCapability — a backend's honest self-description
+# ============================================================================
+
+class BackendCapability:
+    kind: Engine2dBackendKind
+    device_present: bool
+    accelerated_ops: [text]
+
+impl BackendCapability:
+    fn is_accelerated(op: text) -> bool:
+        """Whether `op` runs on the backend's accelerated path (else it falls
+        through to shared software emulation)."""
+        var i = 0
+        val n = self.accelerated_ops.len()
+        while i < n:
+            if self.accelerated_ops[i] == op:
+                return true
+            i = i + 1
+        false
+
+    fn to_text() -> text:
+        "BackendCapability(kind:{self.kind.to_text()} device:{self.device_present} accel:{self.accelerated_ops.len()})"
+
+# ============================================================================
+# Honest defaults — software-emulation, no device, no accelerated ops.
+# Per-backend population is deferred to a later phase.
+# ============================================================================
+
+fn backend_capability_default() -> BackendCapability:
+    BackendCapability(kind: Engine2dBackendKind.SoftwareEmulation, device_present: false, accelerated_ops: [])
+
+fn backend_capability_software() -> BackendCapability:
+    """Honest default for the pure-CPU SoftwareBackend."""
+    backend_capability_default()
+
+fn backend_capability_emu() -> BackendCapability:
+    """Honest default for the stateless emulation layer (backend_emu)."""
+    backend_capability_default()
+
+# ============================================================================
+# Op strings — the canonical `accelerated_ops` names shared between a
+# backend's descriptor and its dispatch/parity code, so a typo can't silently
+# desync "advertised as accelerated" from "actually dispatched".
+# ============================================================================
+
+# GPU-dict pilot (design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md):
+# buffer-backed palette LUT indexed_fill, first op wired through this seam.
+val OP_INDEXED_FILL: text = "indexed_fill"
+
+# GPU-dict use case #2 (design cpu_gpu_dual_algorithm.md, W4): buffer-backed
+# glyph atlas LUT backing kernel_glyph_atlas_blit, the draw_text accelerator.
+val OP_GLYPH_ATLAS_BLIT: text = "glyph_atlas_blit"
+
+# W3 (design cpu_gpu_dual_algorithm_plan.md): plain data-parallel kernel (no
+# GpuLut) — kernel_draw_gradient_rect, the vertical-lerp fill. Unlike the two
+# GpuLut ops above this needs no buffer upload/version tracking, only the
+# compute pipeline; registered here so MetalBackend.capability() reports it
+# honestly (device present AND pipe_gradient actually compiled) instead of
+# leaving a genuinely GPU-dispatched op unrepresented in accelerated_ops.
+val OP_DRAW_GRADIENT_RECT: text = "draw_gradient_rect"
+
+# Rounded-rect FILL dual-algorithm parity fix (2026-07-07): kernel_draw_rounded_rect
+# is, like kernel_draw_gradient_rect, a plain data-parallel kernel (no GpuLut) —
+# registered here so MetalBackend.capability() reports it honestly (device
+# present AND pipe_rounded_rect actually compiled).
+val OP_DRAW_ROUNDED_RECT: text = "draw_rounded_rect"
+
+# draw_image parity-coverage close (2026-07-07 sweep): kernel_blit_image is,
+# like the two ops above, a plain data-parallel kernel (raw src->fb copy with
+# a px/py bounds clip, no blend, no GpuLut) — it had a real Metal dispatch
+# path (backend_metal.spl draw_image(), gated on session.pipe_blit) since the
+# GPU-offload work landed, but was never registered in accelerated_ops nor
+# exercised by engine2d_cpu_metal_parity_run.spl / engine2d_gpu_offload_evidence.spl
+# (verification GAP, not a correctness bug — reproduction confirmed CPU vs
+# Metal is already bit-exact for it). Registered here for the same honesty
+# reason as gradient_rect/rounded_rect above.
+val OP_DRAW_IMAGE: text = "draw_image"
+
+export OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT, OP_DRAW_GRADIENT_RECT, OP_DRAW_ROUNDED_RECT, OP_DRAW_IMAGE

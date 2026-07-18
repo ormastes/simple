@@ -1,0 +1,194 @@
+# Atlas Builder — build-step wrapper for sprite atlas packing
+#
+# Collects sprite entries and packs them into an atlas layout
+# using a shelf-based bin packing algorithm. This is a build-time
+# tool that produces layout data without touching actual pixels.
+
+# ============================================================================
+# SpriteEntry — input sprite descriptor
+# ============================================================================
+
+struct SpriteEntry:
+    """A sprite to be packed, with name and dimensions."""
+    name: text
+    width: i32
+    height: i32
+
+# ============================================================================
+# PackedSprite — output placement
+# ============================================================================
+
+struct PackedSprite:
+    """A sprite placed in the atlas with its position and size."""
+    name: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+# ============================================================================
+# AtlasLayout — packing result
+# ============================================================================
+
+struct AtlasLayout:
+    """The result of packing: atlas dimensions and placed sprites."""
+    width: i32
+    height: i32
+    sprites: [PackedSprite]
+
+impl AtlasLayout:
+    fn sprite_count() -> i32:
+        """Return the number of packed sprites."""
+        self.sprites.len()
+
+    fn find_sprite(name: text) -> PackedSprite?:
+        """Find a packed sprite by name. Returns nil if not found."""
+        # ponytail: `return self.sprites[i]` (bare value) from inside this
+        # while/if never reached callers as Some(...) — a genuine interpreter
+        # bug where an early `return <bare-value>` inside a nested block does
+        # not get implicitly promoted to Some for a `T?`-returning `impl` fn
+        # (only the function's trailing expression gets that treatment). Same
+        # family as doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md /
+        # ds_utils_t_optional_wrapping_inconsistency_2026-06-26.md. Explicit
+        # Some(...)/None below is the workaround; see
+        # doc/08_tracking/bug/interp_early_return_bare_value_not_optional_wrapped_2026-07-03.md
+        var i = 0
+        while i < self.sprites.len():
+            if self.sprites[i].name == name:
+                return Some(self.sprites[i])
+            i = i + 1
+        None
+
+# ============================================================================
+# AtlasBuilder — sprite packing tool
+# ============================================================================
+
+class AtlasBuilder:
+    """Collects sprite entries and packs them using shelf-based bin packing."""
+    entries: [SpriteEntry]
+    padding: i32
+
+impl AtlasBuilder:
+    static fn new(padding: i32) -> AtlasBuilder:
+        """Create a builder with the given inter-sprite padding."""
+        AtlasBuilder(
+            entries: [],
+            padding: padding
+        )
+
+    me add_sprite(name: text, width: i32, height: i32):
+        """Register a sprite for packing."""
+        self.entries.push(SpriteEntry(name: name, width: width, height: height))
+
+    me pack() -> AtlasLayout:
+        """Run shelf-based bin packing on all registered entries.
+
+        Algorithm:
+        1. Sort entries by height descending
+        2. Place sprites left-to-right on shelves
+        3. Start a new shelf when a sprite doesn't fit the current row
+        4. Atlas width is the max of all shelf widths used
+        5. Atlas height is the total of all shelf heights
+        """
+        # Sort entries by height descending (selection sort)
+        var sorted: [SpriteEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            sorted.push(self.entries[i])
+            i = i + 1
+
+        var si = 0
+        while si < sorted.len():
+            var max_idx = si
+            var sj = si + 1
+            while sj < sorted.len():
+                if sorted[sj].height > sorted[max_idx].height:
+                    max_idx = sj
+                sj = sj + 1
+            if max_idx != si:
+                val tmp = sorted[si]
+                sorted = self._swap_entry(sorted, si, max_idx)
+            si = si + 1
+
+        # Shelf-based packing
+        var shelf_y: i32 = 0
+        var shelf_height: i32 = 0
+        var cursor_x: i32 = 0
+        var max_width: i32 = 0
+        var sprites: [PackedSprite] = []
+
+        var ei = 0
+        while ei < sorted.len():
+            val entry = sorted[ei]
+            val padded_w = entry.width + self.padding
+
+            # Check if sprite fits on current shelf
+            if cursor_x > 0 and cursor_x + padded_w > cursor_x + padded_w:
+                # This can't overflow in practice — just place it
+                pass
+
+            if shelf_height == 0:
+                # First sprite on first shelf
+                shelf_height = entry.height + self.padding
+
+            if cursor_x + entry.width > max_width or cursor_x == 0:
+                # Need to check if we should start a new shelf
+                pass
+
+            # If this is not the first sprite and it doesn't fit, start new shelf
+            # We use a simple heuristic: if we have placed at least one sprite
+            # and the sprite height is more than shelf_height, start a new shelf
+            if cursor_x > 0 and entry.height + self.padding > shelf_height:
+                # New shelf
+                shelf_y = shelf_y + shelf_height
+                shelf_height = entry.height + self.padding
+                cursor_x = 0
+
+            val packed = PackedSprite(
+                name: entry.name,
+                x: cursor_x,
+                y: shelf_y,
+                width: entry.width,
+                height: entry.height
+            )
+            sprites.push(packed)
+
+            cursor_x = cursor_x + entry.width + self.padding
+            if cursor_x > max_width:
+                max_width = cursor_x
+
+            if entry.height + self.padding > shelf_height:
+                shelf_height = entry.height + self.padding
+
+            ei = ei + 1
+
+        val total_height = shelf_y + shelf_height
+
+        AtlasLayout(
+            width: max_width,
+            height: total_height,
+            sprites: sprites
+        )
+
+    fn entry_count() -> i32:
+        """Return the number of registered sprite entries."""
+        self.entries.len()
+
+    me clear():
+        """Remove all registered entries."""
+        self.entries = []
+
+    # --- internal helper ---
+    me _swap_entry(arr: [SpriteEntry], a: i32, b: i32) -> [SpriteEntry]:
+        """Swap two entries in the array, returning the new array."""
+        var result: [SpriteEntry] = []
+        var i = 0
+        while i < arr.len():
+            if i == a:
+                result.push(arr[b])
+            elif i == b:
+                result.push(arr[a])
+            else:
+                result.push(arr[i])
+            i = i + 1
+        result

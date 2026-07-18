@@ -1,0 +1,133 @@
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+# mutglobal lane (module-level `var` mutation storage, see
+# scratchpad/mutglobal_plan.md). MirModule.statics/MirStatic previously had
+# no producer (nothing ever populated them) and no consumer (no backend ever
+# emitted or referenced them) -- pure dead scaffolding. This spec hand-builds
+# a MirModule carrying one `MirStatic` entry (mirroring what
+# `_MirLowering/module_lowering.spl:lower_static` now produces for a
+# module-level `var`) plus a function using the new `LoadGlobal`/
+# `StoreGlobal` MIR instructions (mirroring what a module-var read/write
+# would lower to, once another lane wires real identifier resolution through
+# to them -- see the gap-analysis doc for what that still requires), and
+# verifies `MirToLlvm.translate_module` emits correct LLVM IR: a real
+# `@g_counter` global declaration, a load off it, and a store back to it.
+# This proves the backend codegen slice in isolation, independent of the
+# (not-yet-wired) HIR/MIR frontend hookup.
+
+fn build_mutable_global_module() -> MirModule:
+    val i64_type = MirType.i64()
+    val counter_symbol = SymbolId(id: 42)
+
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[counter_symbol] = MirStatic(
+        symbol: counter_symbol,
+        name: "counter",
+        type_: i64_type,
+        init: Some(MirConstant(symbol: counter_symbol, name: "counter", type_: i64_type, value: MirConstValue.Int(5))),
+        is_mutable: true
+    )
+
+    # fn bump(): counter = counter + 10
+    val bump_fn = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "bump",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 0), name: Some("cur"), type_: i64_type, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 1), name: Some("ten"), type_: i64_type, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 2), name: Some("sum"), type_: i64_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 0), counter_symbol), span: nil),
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(10), i64_type), span: nil),
+                    MirInst(
+                        kind: MirInstKind.BinOp(
+                            LocalId(id: 2),
+                            MirBinOp.Add,
+                            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                        ),
+                        span: nil
+                    ),
+                    MirInst(
+                        kind: MirInstKind.StoreGlobal(counter_symbol, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))),
+                        span: nil
+                    )
+                ],
+                terminator: MirTerminator.Ret(nil)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[bump_fn.symbol] = bump_fn
+    MirModule(name: "test.llvm.mutable_global", functions: functions, statics: statics, constants: {}, types: {})
+
+fn translate_literal_globals() -> text:
+    val source = "var count = 5\nvar ratio = 1.5\nvar flag = false\nvar name = \"\"\n"
+    val ast = parse_full_frontend(source, "literal_globals.spl", "literal_globals.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("literal_globals.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    MirToLlvm.create("test.llvm.literal_globals", CodegenTarget.X86_64, nil).translate_module(mir)
+
+describe "LLVM mutable global static (mutglobal lane)":
+    it "emits a real @global declaration with the static's initializer":
+        val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_mutable_global_module())
+
+        expect(output).to_contain("@g_counter = global i64 5")
+
+    it "translates LoadGlobal as a load off the real global":
+        val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_mutable_global_module())
+
+        expect(output).to_contain("load i64, ptr @g_counter")
+
+    it "translates StoreGlobal as a store back to the real global":
+        val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_mutable_global_module())
+
+        expect(output).to_contain("store i64 %l2, ptr @g_counter")
+
+    it "infers primitive literal types for unannotated module globals", tag: ["only-compiled"]:
+        val output = translate_literal_globals()
+
+        expect(output).to_contain("@g_count = global i64 5")
+        expect(output).to_contain("@g_ratio = global double 1.5")
+        expect(output).to_contain("@g_flag = global i1 0")
+        expect(output).to_contain("@g_name = global ptr getelementptr inbounds")
+        expect(output.contains("global i64 getelementptr")).to_equal(false)

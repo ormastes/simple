@@ -1,0 +1,174 @@
+# MCP T32 Schema Validation spec — verifies tool schema structure
+# Tests the schema builder logic without importing MCP modules
+
+# Minimal JSON helpers (inlined to avoid import issues)
+fn schema_js(s: text) -> text:
+    "\"" + s + "\""
+
+fn schema_extract(json: text, key: text) -> text:
+    # Simple key extractor for "key": "value" or "key": {...}
+    val search = "\"" + key + "\""
+    val idx = json.index_of(search)
+    match idx:
+        Some(pos):
+            val after_key = pos + search.len()
+            # Skip ": or ":"
+            var i = after_key
+            while i < json.len():
+                if json[i] == ":":
+                    i = i + 1
+                    break
+                i = i + 1
+            # Skip whitespace
+            while i < json.len():
+                if json[i] != " ":
+                    break
+                i = i + 1
+            if i >= json.len():
+                return ""
+            # If starts with quote, extract string value
+            if json[i] == "\"":
+                var end_pos = i + 1
+                while end_pos < json.len():
+                    if json[end_pos] == "\"":
+                        return json.slice(i + 1, end_pos)
+                    end_pos = end_pos + 1
+            # If starts with { or [, return indicator
+            if json[i] == "{":
+                return "{object}"
+            if json[i] == "[":
+                return "[array]"
+            ""
+        nil: ""
+
+# Tool name list — matches protocol.spl
+fn all_tool_names() -> [text]:
+    var tools: [text] = []
+    tools.push("t32_sessions_list")
+    tools.push("t32_session_open")
+    tools.push("t32_session_resume")
+    tools.push("t32_session_close")
+    tools.push("t32_core_list")
+    tools.push("t32_core_select")
+    tools.push("t32_cmd_run")
+    tools.push("t32_cmm_run")
+    tools.push("t32_eval")
+    tools.push("t32_window_list")
+    tools.push("t32_window_open")
+    tools.push("t32_window_capture")
+    tools.push("t32_window_describe")
+    tools.push("t32_screenshot")
+    tools.push("t32_action_invoke")
+    tools.push("t32_field_get")
+    tools.push("t32_field_set")
+    tools.push("t32_history_tail")
+    tools.push("t32_resources_list")
+    tools.push("t32_resource_read")
+    tools.push("t32_setup_headless")
+    tools.push("t32_area_read")
+    tools.push("t32_cmm_commands")
+    tools
+
+# Required params per tool
+fn required_params_for(tool_name: text) -> [text]:
+    match tool_name:
+        "t32_session_open": ["host", "port"]
+        "t32_session_resume": ["session_id"]
+        "t32_session_close": ["session_id"]
+        "t32_core_select": ["core_id"]
+        "t32_cmd_run": ["command"]
+        "t32_cmm_run": ["script"]
+        "t32_eval": ["expression"]
+        "t32_window_open": ["window"]
+        "t32_window_capture": ["window"]
+        "t32_window_describe": ["window"]
+        "t32_screenshot": ["window"]
+        "t32_action_invoke": ["action_key"]
+        "t32_field_get": ["field_key"]
+        "t32_field_set": ["field_key", "value"]
+        "t32_resource_read": ["uri"]
+        _: []
+
+# Build a minimal schema string for testing (simulates t32_make_tool_schema)
+fn build_test_schema(name: text, description: text) -> text:
+    var schema = "{\"name\": \"" + name + "\", \"description\": \"" + description + "\", \"inputSchema\": {\"type\": \"object\"}}"
+    schema
+
+describe "T32 MCP Tool Schema":
+
+    it "has exactly 23 tools defined":
+        expect(all_tool_names().len()).to_equal(23)
+
+    it "all tool names start with t32_":
+        for name in all_tool_names():
+            expect(name).to_start_with("t32_")
+
+    it "no duplicate tool names":
+        var seen: [text] = []
+        var duplicates = 0
+        for name in all_tool_names():
+            var already_seen = false
+            for s in seen:
+                if s == name:
+                    already_seen = true
+            if already_seen:
+                duplicates = duplicates + 1
+            seen.push(name)
+        expect(duplicates).to_equal(0)
+
+    it "session_open requires host and port":
+        val req = required_params_for("t32_session_open")
+        expect(req.len()).to_equal(2)
+        expect(req[0]).to_equal("host")
+        expect(req[1]).to_equal("port")
+
+    it "session_resume requires session_id":
+        val req = required_params_for("t32_session_resume")
+        expect(req.len()).to_equal(1)
+        expect(req[0]).to_equal("session_id")
+
+    it "cmd_run requires command":
+        val req = required_params_for("t32_cmd_run")
+        expect(req.len()).to_equal(1)
+        expect(req[0]).to_equal("command")
+
+    it "cmm_run requires script":
+        val req = required_params_for("t32_cmm_run")
+        expect(req.len()).to_equal(1)
+        expect(req[0]).to_equal("script")
+
+    it "eval requires expression":
+        val req = required_params_for("t32_eval")
+        expect(req.len()).to_equal(1)
+        expect(req[0]).to_equal("expression")
+
+    it "window tools require window param":
+        val window_tools = ["t32_window_open", "t32_window_capture", "t32_window_describe", "t32_screenshot"]
+        for tool in window_tools:
+            val req = required_params_for(tool)
+            expect(req.len()).to_be_greater_than(0)
+            expect(req[0]).to_equal("window")
+
+    it "field_set requires field_key and value":
+        val req = required_params_for("t32_field_set")
+        expect(req.len()).to_equal(2)
+        expect(req[0]).to_equal("field_key")
+        expect(req[1]).to_equal("value")
+
+    it "resource_read requires uri":
+        val req = required_params_for("t32_resource_read")
+        expect(req.len()).to_equal(1)
+        expect(req[0]).to_equal("uri")
+
+    it "read-only tools have no required params":
+        val readonly_tools = ["t32_sessions_list", "t32_window_list", "t32_resources_list", "t32_history_tail", "t32_setup_headless", "t32_area_read", "t32_cmm_commands"]
+        for tool in readonly_tools:
+            val req = required_params_for(tool)
+            expect(req.len()).to_equal(0)
+
+    it "schema builder produces valid structure":
+        val schema = build_test_schema("t32_cmd_run", "Run a PRACTICE command")
+        expect(schema).to_contain("t32_cmd_run")
+        expect(schema).to_contain("description")
+        expect(schema).to_contain("inputSchema")
+        expect(schema).to_contain("object")

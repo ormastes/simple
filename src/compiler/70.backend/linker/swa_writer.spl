@@ -1,0 +1,502 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SWA Writer - Create Simple Web Archive files
+#
+# This module provides functionality to bundle compiled modules, static assets,
+# and a deployment descriptor into a single SWA (.swa) file.
+#
+# Usage:
+#   val builder = SwaBuilder.new()
+#   builder.set_descriptor("webapp:\n  name: myapp\n  version: 1.0.0\n")
+#   builder.add_module("app/controllers/home", "path/to/home.smf")
+#   builder.add_asset("css/style.css", "path/to/style.css")
+#   builder.write("myapp.swa")
+
+use app.io.{file_write, file_read, file_exists}
+use compiler.backend.linker.swa.{SwaHeader, AssetIndexEntry, SWA_HEADER_SIZE, SWA_ASSET_ENTRY_SIZE}
+use compiler.backend.linker.lib_smf.{ModuleIndexEntry, LSMF_INDEX_ENTRY_SIZE, fnv1a_hash}
+
+# ============================================================================
+# SWA Builder
+# ============================================================================
+
+"""Builder for creating Simple Web Archive files.
+
+Example:
+    val builder = SwaBuilder.new()
+    builder.set_descriptor("webapp:\\n  name: myapp\\n  version: 1.0.0\\n")
+    builder.add_module("app/controllers/home", "home.smf")
+    builder.add_asset("css/style.css", "public/css/style.css")
+    builder.set_port(3000)
+    builder.write("myapp.swa")
+"""
+struct SwaBuilder:
+    modules: [ModuleEntry]
+    assets: [AssetEntry]
+    descriptor: text
+    default_port: u16
+    verbose: bool
+
+struct ModuleEntry:
+    name: text               # Module path (e.g., "app/controllers/home")
+    smf_path: text           # Path to SMF file
+    data: [u8]               # SMF file data (cached)
+    hash: u64                # FNV-1a hash of SMF data
+    obj_path: text           # Path to object file (empty if none)
+    obj_data: [u8]           # Object file data (empty if none)
+    obj_hash: u64            # FNV-1a hash of object data (0 if none)
+
+struct AssetEntry:
+    path: text               # Relative path (e.g., "css/style.css")
+    data: [u8]               # File contents
+    hash: u64                # FNV-1a hash of data
+    mime_type: text           # Content-Type (e.g., "text/css")
+
+impl SwaBuilder:
+    """Create a new SWA builder."""
+    static fn new() -> SwaBuilder:
+        SwaBuilder(
+            modules: [],
+            assets: [],
+            descriptor: "",
+            default_port: 8080,
+            verbose: false
+        )
+
+    """Enable verbose output."""
+    me set_verbose(verbose: bool):
+        self.verbose = verbose
+
+    """Add a compiled module to the archive.
+
+    Args:
+        name: Module path (e.g., "app/controllers/home")
+        smf_path: Path to SMF file
+
+    Returns:
+        Result indicating success or error
+    """
+    me add_module(name: text, smf_path: text) -> Result<(), text>:
+        # Check if file exists
+        if not file_exists(smf_path):
+            return Err("SMF file not found: {smf_path}")
+
+        # Read SMF data
+        val data_result = file_read(smf_path)
+        if data_result.is_err():
+            return Err("Failed to read SMF file: {smf_path}")
+
+        val data_text = data_result.unwrap()
+        val data = text_to_bytes(data_text)
+
+        # Calculate hash
+        val hash = fnv1a_hash(data)
+
+        # Add to modules list
+        val entry = ModuleEntry(
+            name: name,
+            smf_path: smf_path,
+            data: data,
+            hash: hash,
+            obj_path: "",
+            obj_data: [],
+            obj_hash: 0
+        )
+        self.modules.push(entry)
+
+        if self.verbose:
+            print "[swa-writer] Added module: {name} ({data.len()} bytes, hash: {hash})"
+
+        Ok(())
+
+    """Add a static asset from a file on disk.
+
+    The mime type is auto-detected from the file extension.
+
+    Args:
+        path: Relative path in archive (e.g., "css/style.css")
+        file_path: Path to file on disk
+
+    Returns:
+        Result indicating success or error
+    """
+    me add_asset(path: text, file_path: text) -> Result<(), text>:
+        # Check if file exists
+        if not file_exists(file_path):
+            return Err("Asset file not found: {file_path}")
+
+        # Read file data
+        val data_result = file_read(file_path)
+        if data_result.is_err():
+            return Err("Failed to read asset file: {file_path}")
+
+        val data_text = data_result.unwrap()
+        val data = text_to_bytes(data_text)
+
+        # Calculate hash
+        val hash = fnv1a_hash(data)
+
+        # Auto-detect mime type from file extension
+        val mime_type = mime_from_path(path)
+
+        # Add to assets list
+        val entry = AssetEntry(
+            path: path,
+            data: data,
+            hash: hash,
+            mime_type: mime_type
+        )
+        self.assets.push(entry)
+
+        if self.verbose:
+            print "[swa-writer] Added asset: {path} ({data.len()} bytes, mime: {mime_type})"
+
+        Ok(())
+
+    """Add a static asset from in-memory data.
+
+    Args:
+        path: Relative path in archive (e.g., "css/style.css")
+        data: File contents as bytes
+        mime_type: Content-Type string (e.g., "text/css")
+
+    Returns:
+        Result indicating success or error
+    """
+    me add_asset_data(path: text, data: [u8], mime_type: text) -> Result<(), text>:
+        # Calculate hash
+        val hash = fnv1a_hash(data)
+
+        # Add to assets list
+        val entry = AssetEntry(
+            path: path,
+            data: data,
+            hash: hash,
+            mime_type: mime_type
+        )
+        self.assets.push(entry)
+
+        if self.verbose:
+            print "[swa-writer] Added asset: {path} ({data.len()} bytes, mime: {mime_type})"
+
+        Ok(())
+
+    """Set the deployment descriptor content (webapp.sdn).
+
+    Args:
+        content: The webapp.sdn content as text
+    """
+    me set_descriptor(content: text):
+        self.descriptor = content
+
+    """Set the default server port.
+
+    Args:
+        port: Port number (e.g., 8080)
+    """
+    me set_port(port: u16):
+        self.default_port = port
+
+    """Write the SWA archive file.
+
+    Layout:
+    1. Header (256 bytes)
+    2. Module index (128 bytes x module_count)
+    3. Asset index (128 bytes x asset_count)
+    4. Descriptor (variable length)
+    5. Module data (concatenated SMF data)
+    6. Asset data (concatenated asset data)
+
+    Args:
+        output_path: Path to output .swa file
+
+    Returns:
+        Result indicating success or error
+    """
+    fn write(output_path: text) -> Result<(), text>:
+        if self.descriptor.len() == 0:
+            return Err("No deployment descriptor set")
+
+        if self.verbose:
+            print "[swa-writer] Writing SWA with {self.modules.len()} modules, {self.assets.len()} assets to {output_path}"
+
+        # Calculate section sizes
+        val module_index_size = LSMF_INDEX_ENTRY_SIZE * (self.modules.len() as i64)
+        val asset_index_size = SWA_ASSET_ENTRY_SIZE * (self.assets.len() as i64)
+        val descriptor_bytes = text_to_bytes(self.descriptor)
+        val descriptor_size = descriptor_bytes.len()
+
+        # Calculate offsets
+        # Module index starts right after header (offset 256)
+        val module_index_offset = SWA_HEADER_SIZE
+        # Asset index starts after module index
+        val asset_index_offset = module_index_offset + module_index_size
+        # Descriptor starts after asset index
+        val descriptor_offset = asset_index_offset + asset_index_size
+        # Module data starts after descriptor
+        val module_data_offset = descriptor_offset + descriptor_size
+
+        # Calculate total module data size
+        var total_module_size = 0
+        for entry in self.modules:
+            total_module_size = total_module_size + entry.data.len()
+
+        # Asset data starts after module data
+        val asset_data_offset = module_data_offset + total_module_size
+
+        # Build module index entries
+        var module_index_entries: [ModuleIndexEntry] = []
+        var current_module_offset = module_data_offset
+        for entry in self.modules:
+            val smf_offset = current_module_offset as u64
+            val smf_size = entry.data.len() as u64
+
+            val index_entry = ModuleIndexEntry.new(
+                entry.name,
+                smf_offset,
+                smf_size,
+                entry.hash
+            )
+            module_index_entries.push(index_entry)
+            current_module_offset = current_module_offset + entry.data.len()
+
+        # Build asset index entries
+        var asset_index_entries: [AssetIndexEntry] = []
+        var current_asset_offset = asset_data_offset
+        for entry in self.assets:
+            val a_offset = current_asset_offset as u64
+            val a_size = entry.data.len() as u64
+
+            val index_entry = AssetIndexEntry.new(
+                entry.path,
+                a_offset,
+                a_size,
+                entry.hash,
+                entry.mime_type
+            )
+            asset_index_entries.push(index_entry)
+            current_asset_offset = current_asset_offset + entry.data.len()
+
+        # Build header
+        var header = SwaHeader.new_default()
+        header.module_count = self.modules.len() as u32
+        header.asset_count = self.assets.len() as u32
+        header.descriptor_offset = descriptor_offset as u64
+        header.descriptor_size = descriptor_size as u64
+        header.module_index_offset = module_index_offset as u64
+        header.asset_index_offset = asset_index_offset as u64
+        header.module_data_offset = module_data_offset as u64
+        header.asset_data_offset = asset_data_offset as u64
+        header.default_port = self.default_port
+
+        # Serialize module index bytes
+        var module_index_bytes: [u8] = []
+        for entry in module_index_entries:
+            module_index_bytes = module_index_bytes + (entry.to_bytes())
+
+        # Serialize asset index bytes
+        var asset_index_bytes: [u8] = []
+        for entry in asset_index_entries:
+            asset_index_bytes = asset_index_bytes + (entry.to_bytes())
+
+        # Build complete file data
+        var file_data: [u8] = []
+
+        # 1. Header (placeholder, will be updated with hash)
+        file_data = file_data + (header.to_bytes())
+
+        # 2. Module index table
+        for b in module_index_bytes:
+            file_data.push(b)
+
+        # 3. Asset index table
+        for b in asset_index_bytes:
+            file_data.push(b)
+
+        # 4. Descriptor
+        for b in descriptor_bytes:
+            file_data.push(b)
+
+        # 5. Module data
+        for entry in self.modules:
+            for b in entry.data:
+                file_data.push(b)
+
+        # 6. Asset data
+        for entry in self.assets:
+            for b in entry.data:
+                file_data.push(b)
+
+        # Calculate archive hash (everything after header)
+        var content_for_hash: [u8] = []
+        for b in module_index_bytes:
+            content_for_hash.push(b)
+        for b in asset_index_bytes:
+            content_for_hash.push(b)
+        for b in descriptor_bytes:
+            content_for_hash.push(b)
+        for entry in self.modules:
+            for b in entry.data:
+                content_for_hash.push(b)
+        for entry in self.assets:
+            for b in entry.data:
+                content_for_hash.push(b)
+        header.archive_hash = fnv1a_hash(content_for_hash)
+
+        # Update header with archive hash
+        val header_bytes = header.to_bytes()
+        var i = 0
+        while i < header_bytes.len():
+            file_data[i] = header_bytes[i]
+            i = i + 1
+
+        # Write to file
+        val file_text = bytes_to_text(file_data)
+        val write_result = file_write(output_path, file_text)
+        if write_result.is_err():
+            return Err("Failed to write SWA file: {output_path}")
+
+        if self.verbose:
+            print "[swa-writer] Wrote {file_data.len()} bytes to {output_path}"
+            print "[swa-writer]   {self.modules.len()} modules, {self.assets.len()} assets"
+            print "[swa-writer]   descriptor: {descriptor_size} bytes"
+            print "[swa-writer]   archive hash: {header.archive_hash}"
+
+        Ok(())
+
+    """Get number of modules in the builder."""
+    fn module_count() -> i64:
+        self.modules.len()
+
+    """Get number of assets in the builder."""
+    fn asset_count() -> i64:
+        self.assets.len()
+
+    """Get module names."""
+    fn module_names() -> [text]:
+        var names: [text] = []
+        for entry in self.modules:
+            names.push(entry.name)
+        names
+
+    """Get asset paths."""
+    fn asset_paths() -> [text]:
+        var paths: [text] = []
+        for entry in self.assets:
+            paths.push(entry.path)
+        paths
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Convert text to bytes."""
+fn text_to_bytes(t: text) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < t.len():
+        bytes.push(t[i] as u8)
+        i = i + 1
+    bytes
+
+"""Convert bytes to text."""
+fn bytes_to_text(bytes: [u8]) -> text:
+    var chars: [text] = []
+    for b in bytes:
+        val c = b as i64
+        chars.push("{c}")
+    chars.join("")
+
+"""Detect MIME type from file path extension."""
+fn mime_from_path(path: text) -> text:
+    if path.ends_with(".html") or path.ends_with(".htm"):
+        return "text/html"
+    if path.ends_with(".css"):
+        return "text/css"
+    if path.ends_with(".js"):
+        return "application/javascript"
+    if path.ends_with(".json"):
+        return "application/json"
+    if path.ends_with(".xml"):
+        return "text/xml"
+    if path.ends_with(".txt"):
+        return "text/plain"
+    if path.ends_with(".png"):
+        return "image/png"
+    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
+        return "image/jpeg"
+    if path.ends_with(".gif"):
+        return "image/gif"
+    if path.ends_with(".svg"):
+        return "image/svg+xml"
+    if path.ends_with(".ico"):
+        return "image/x-icon"
+    if path.ends_with(".webp"):
+        return "image/webp"
+    if path.ends_with(".woff"):
+        return "font/woff"
+    if path.ends_with(".woff2"):
+        return "font/woff2"
+    if path.ends_with(".ttf"):
+        return "font/ttf"
+    if path.ends_with(".pdf"):
+        return "application/pdf"
+    if path.ends_with(".mp3"):
+        return "audio/mpeg"
+    if path.ends_with(".wav"):
+        return "audio/wav"
+    if path.ends_with(".mp4"):
+        return "video/mp4"
+    if path.ends_with(".webm"):
+        return "video/webm"
+    "application/octet-stream"
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+"""Create an SWA archive from lists of modules, assets, and a descriptor.
+
+Args:
+    modules: Array of (module_name, smf_path) tuples
+    assets: Array of (asset_path, file_path) tuples
+    descriptor: webapp.sdn content as text
+    output_path: Path to output .swa file
+    verbose: Enable verbose output
+
+Returns:
+    Result indicating success or error
+
+Example:
+    val modules = [
+        ("app/controllers/home", "home.smf"),
+        ("app/controllers/api", "api.smf")
+    ]
+    val assets = [
+        ("index.html", "public/index.html"),
+        ("css/style.css", "public/css/style.css")
+    ]
+    val descriptor = "webapp:\\n  name: myapp\\n  version: 1.0.0\\n"
+    create_swa(modules, assets, descriptor, "myapp.swa", true)
+"""
+fn create_swa(modules: [(text, text)], assets: [(text, text)], descriptor: text, output_path: text, verbose: bool) -> Result<(), text>:
+    var builder = SwaBuilder.new()
+    builder.set_verbose(verbose)
+    builder.set_descriptor(descriptor)
+
+    for module_info in modules:
+        val (name, smf_path) = module_info
+        val add_result = builder.add_module(name, smf_path)
+        if add_result.is_err():
+            return add_result
+
+    for asset_info in assets:
+        val (path, file_path) = asset_info
+        val add_result = builder.add_asset(path, file_path)
+        if add_result.is_err():
+            return add_result
+
+    builder.write(output_path)
+
+# ============================================================================
+# Exports
+# ============================================================================

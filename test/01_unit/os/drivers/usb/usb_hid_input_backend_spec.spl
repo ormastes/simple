@@ -1,0 +1,135 @@
+# USB HID Input Backend Spec
+#
+# Proves USB HID boot-protocol keyboard/mouse reports are translated into
+# the shared KeyEvent/MouseEvent input types and — through the same
+# Compositor input multiplexer the WM uses (Compositor.with_backends +
+# handle_input) — reach a focused window: a click focuses the window under
+# the cursor, a key press lands as the pending shortcut.
+
+use std.spec
+use os.drivers.usb.usb_hid_input_backend.{UsbHidInputBackend, hid_usage_to_key}
+use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
+use os.compositor.compositor.{Compositor}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+
+describe "hid_usage_to_key":
+    it "maps letter usages":
+        expect(hid_usage_to_key(0x04)).to_equal(Key.A)
+        expect(hid_usage_to_key(0x1D)).to_equal(Key.Z)
+
+    it "maps digits, controls, and arrows":
+        expect(hid_usage_to_key(0x1E)).to_equal(Key.Num1)
+        expect(hid_usage_to_key(0x28)).to_equal(Key.Enter)
+        expect(hid_usage_to_key(0x29)).to_equal(Key.Escape)
+        expect(hid_usage_to_key(0x2C)).to_equal(Key.Space)
+        expect(hid_usage_to_key(0x52)).to_equal(Key.Up)
+
+    it "maps unknown usages to Unknown":
+        expect(hid_usage_to_key(0xE8)).to_equal(Key.Unknown)
+
+describe "UsbHidInputBackend keyboard reports":
+    it "emits Press on key down and Release on key up":
+        var backend = UsbHidInputBackend.create(640, 480)
+        # 'A' held (usage 0x04)
+        expect(backend.push_keyboard_report([0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])).to_equal(true)
+        val ev = backend.poll_key()
+        expect(ev != nil).to_equal(true)
+        if val Press(key) = ev:
+            expect(key).to_equal(Key.A)
+        # all keys released
+        expect(backend.push_keyboard_report([0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])).to_equal(true)
+        val ev2 = backend.poll_key()
+        expect(ev2 != nil).to_equal(true)
+        if val Release(key2) = ev2:
+            expect(key2).to_equal(Key.A)
+
+    it "does not re-press a held key across reports":
+        var backend = UsbHidInputBackend.create(640, 480)
+        backend.push_keyboard_report([0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])
+        backend.poll_key()
+        # same key still held in the next report -> no new event
+        backend.push_keyboard_report([0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])
+        expect(backend.poll_key()).to_equal(nil)
+
+    it "tracks modifiers and shifts key_to_char":
+        var backend = UsbHidInputBackend.create(640, 480)
+        backend.push_keyboard_report([0x02u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])
+        expect(backend.shift_held()).to_equal(true)
+        expect(backend.alt_held()).to_equal(false)
+        val shifted = backend.key_to_char(Key.A)
+        expect(shifted != nil).to_equal(true)
+        if val Some(ch) = shifted:
+            expect(ch).to_equal("A")
+
+    it "drops malformed and rollover reports without changing state (fail-closed)":
+        var backend = UsbHidInputBackend.create(640, 480)
+        expect(backend.push_keyboard_report([0x00u8, 0x00u8])).to_equal(false)
+        # 0x01 in a key slot = error rollover
+        expect(backend.push_keyboard_report([0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])).to_equal(false)
+        expect(backend.poll_key()).to_equal(nil)
+
+describe "UsbHidInputBackend mouse reports":
+    it "integrates deltas into a clamped absolute position":
+        var backend = UsbHidInputBackend.create(100, 80)
+        # starts centered (50, 40); move +10, +5
+        expect(backend.push_mouse_report([0x00u8, 0x0Au8, 0x05u8])).to_equal(true)
+        val ev = backend.poll_mouse()
+        expect(ev != nil).to_equal(true)
+        expect(ev.x).to_equal(60)
+        expect(ev.y).to_equal(45)
+
+    it "sign-extends negative deltas and reports button edges":
+        var backend = UsbHidInputBackend.create(100, 80)
+        # 0xF6 = -10 dx, left button down
+        backend.push_mouse_report([0x01u8, 0xF6u8, 0x00u8])
+        val ev = backend.poll_mouse()
+        expect(ev.x).to_equal(40)
+        expect(ev.left_pressed).to_equal(true)
+        expect(ev.left_just_pressed).to_equal(true)
+        # release
+        backend.push_mouse_report([0x00u8, 0x00u8, 0x00u8])
+        val ev2 = backend.poll_mouse()
+        expect(ev2.left_pressed).to_equal(false)
+        expect(ev2.left_just_released).to_equal(true)
+
+    it "drops short mouse reports (fail-closed)":
+        var backend = UsbHidInputBackend.create(100, 80)
+        expect(backend.push_mouse_report([0x01u8])).to_equal(false)
+        expect(backend.poll_mouse()).to_equal(nil)
+
+describe "USB HID drives the compositor input multiplexer":
+    it "focuses the window under a HID mouse click":
+        val display = HeadlessHostCompositorBackend.new(100, 80)
+        var hid = UsbHidInputBackend.create(100, 80)
+        var comp = Compositor.with_backends(display, hid, 100, 80)
+        # left half window (created first), right half window (created second,
+        # takes initial focus)
+        val left_id = comp.create_window("left", 0, 0, 40, 80)
+        comp.create_window("right", 45, 0, 55, 80)
+        expect(comp.focused_idx).to_equal(1)
+        # cursor starts at (50, 40) inside "right"; move into "left" and click
+        hid.push_mouse_report([0x01u8, 0xE2u8, 0x00u8])   # dx = -30 -> (20, 40), left down
+        comp.handle_input()
+        # focus_window raises the clicked window to the top of the Z-order,
+        # so the focused surface is the LAST one and must be "left"
+        expect(comp.surfaces[comp.focused_idx].id).to_equal(left_id)
+        expect(comp.surfaces[comp.focused_idx].title).to_equal("left")
+        expect(comp.cursor.x).to_equal(20)
+        expect(comp.cursor.y).to_equal(40)
+
+    it "delivers a HID key press as the pending shortcut":
+        val display = HeadlessHostCompositorBackend.new(100, 80)
+        var hid = UsbHidInputBackend.create(100, 80)
+        var comp = Compositor.with_backends(display, hid, 100, 80)
+        comp.create_window("focused", 0, 0, 100, 80)
+        hid.push_keyboard_report([0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])
+        comp.handle_input()
+        expect(comp.pending_shortcut).to_equal("a")
+
+    it "flags the meta key when alt is held in the HID report":
+        val display = HeadlessHostCompositorBackend.new(100, 80)
+        var hid = UsbHidInputBackend.create(100, 80)
+        var comp = Compositor.with_backends(display, hid, 100, 80)
+        hid.push_keyboard_report([0x04u8, 0x00u8, 0x2Bu8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])
+        comp.handle_input()
+        expect(comp.pending_meta_key).to_equal(1)

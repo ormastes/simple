@@ -1,0 +1,225 @@
+"""Browser WebGPU context MVP used by WebEngine/WASM integration specs."""
+
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{WebGPUResourceTable}
+
+pub class GPUShaderModule:
+    id: i32
+    label: text
+    source: text
+    valid: bool
+
+pub class GPUPipelineHandle:
+    id: i32
+    valid: bool
+    kind: text
+
+pub class WebGPUDeviceLostInfo:
+    lost: bool
+    reason: text
+
+pub class GPUCommandBufferHandle:
+    label: text
+    render_pass_count: i32
+    draw_call_count: i32
+    compute_pass_count: i32
+    dispatched_workgroups: i64
+    valid: bool
+
+pub class WebGPUQueue:
+    write_count: i32
+    submitted: [GPUCommandBufferHandle]
+
+    static fn create() -> WebGPUQueue:
+        WebGPUQueue(write_count: 0, submitted: [])
+
+pub fn webgpu_is_available() -> bool:
+    true
+
+pub fn webgpu_preferred_canvas_format() -> text:
+    "bgra8unorm"
+
+pub fn webgpu_validate_wgsl(source: text) -> bool:
+    source.trim() != ""
+
+export webgpu_is_available
+export webgpu_preferred_canvas_format
+export webgpu_validate_wgsl
+
+pub class WebGPUCommandEncoder:
+    label: text
+    active_render: bool
+    active_compute: bool
+    render_pass_count: i32
+    draw_call_count: i32
+    compute_pass_count: i32
+    dispatched_workgroups: i64
+    valid: bool
+
+    static fn create(label: text) -> WebGPUCommandEncoder:
+        WebGPUCommandEncoder(label: label, active_render: false, active_compute: false, render_pass_count: 0, draw_call_count: 0, compute_pass_count: 0, dispatched_workgroups: 0, valid: true)
+
+    me begin_render_pass() -> bool:
+        if not self.valid or self.active_render or self.active_compute:
+            self.valid = false
+            return false
+        self.active_render = true
+        self.render_pass_count = self.render_pass_count + 1
+        true
+
+    me begin_compute_pass() -> bool:
+        if not self.valid or self.active_compute or self.active_render:
+            self.valid = false
+            return false
+        self.active_compute = true
+        self.compute_pass_count = self.compute_pass_count + 1
+        true
+
+    me set_render_pipeline(pipeline_id: i32) -> bool:
+        if not self.active_render or pipeline_id <= 0:
+            self.valid = false
+            return false
+        true
+
+    me set_pipeline(pipeline_id: i32) -> bool:
+        if not self.active_compute or pipeline_id <= 0:
+            self.valid = false
+            return false
+        true
+
+    me draw(vertex_count: i64, instance_count: i64) -> bool:
+        if not self.active_render or vertex_count <= 0 or instance_count <= 0:
+            self.valid = false
+            return false
+        self.draw_call_count = self.draw_call_count + 1
+        true
+
+    me dispatch_workgroups(x: i64, y: i64, z: i64) -> bool:
+        if not self.active_compute or x <= 0 or y <= 0 or z <= 0:
+            self.valid = false
+            return false
+        self.dispatched_workgroups = self.dispatched_workgroups + (x * y * z)
+        true
+
+    me end_compute_pass() -> bool:
+        if not self.active_compute:
+            self.valid = false
+            return false
+        self.active_compute = false
+        true
+
+    me end_render_pass() -> bool:
+        if not self.active_render:
+            self.valid = false
+            return false
+        self.active_render = false
+        true
+
+    me finish(label: text) -> GPUCommandBufferHandle:
+        GPUCommandBufferHandle(label: label, render_pass_count: self.render_pass_count, draw_call_count: self.draw_call_count, compute_pass_count: self.compute_pass_count, dispatched_workgroups: self.dispatched_workgroups, valid: self.valid and not self.active_render and not self.active_compute)
+
+pub class WebGPUContext:
+    secure_context: bool
+    device_ready: bool
+    device_lost: bool
+    canvas_configured: bool
+    present_count: i32
+    last_error: text
+    next_shader_id: i32
+    next_pipeline_id: i32
+    resources: WebGPUResourceTable
+    queue: WebGPUQueue
+
+    static fn create(secure_context: bool) -> WebGPUContext:
+        WebGPUContext(
+            secure_context: secure_context,
+            device_ready: false,
+            device_lost: false,
+            canvas_configured: false,
+            present_count: 0,
+            last_error: "",
+            next_shader_id: 1,
+            next_pipeline_id: 1,
+            resources: WebGPUResourceTable.create(),
+            queue: WebGPUQueue.create()
+        )
+
+    me is_available() -> bool:
+        self.secure_context and not self.device_lost
+
+    me request_device() -> bool:
+        if not self.secure_context:
+            self.last_error = "WebGPU requires a secure context"
+            return false
+        if self.device_lost:
+            self.last_error = "WebGPU device is lost"
+            return false
+        self.device_ready = true
+        true
+
+    me configure() -> bool:
+        if not self.device_ready or self.device_lost:
+            self.last_error = "WebGPU device is not ready"
+            return false
+        self.canvas_configured = true
+        true
+
+    me present() -> bool:
+        if not self.canvas_configured:
+            self.last_error = "WebGPU canvas is not configured"
+            return false
+        self.present_count = self.present_count + 1
+        true
+
+    me create_shader_module(label: text, source: text) -> GPUShaderModule:
+        val valid = self.device_ready and source.trim() != ""
+        val module = GPUShaderModule(id: self.next_shader_id, label: label, source: source, valid: valid)
+        self.next_shader_id = self.next_shader_id + 1
+        module
+
+    me create_render_pipeline(vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
+        val valid = self.device_ready and vertex.valid and fragment.valid
+        val pipeline = GPUPipelineHandle(id: self.next_pipeline_id, valid: valid, kind: "render")
+        self.next_pipeline_id = self.next_pipeline_id + 1
+        pipeline
+
+    me create_compute_pipeline(shader: GPUShaderModule) -> GPUPipelineHandle:
+        val valid = self.device_ready and shader.valid
+        val pipeline = GPUPipelineHandle(id: self.next_pipeline_id, valid: valid, kind: "compute")
+        self.next_pipeline_id = self.next_pipeline_id + 1
+        pipeline
+
+    me queue_write_buffer(buffer_id: i32, offset: i64, size: i64) -> bool:
+        if self.device_lost:
+            self.last_error = "WebGPU device is lost"
+            return false
+        if not self.resources.buffer_exists(buffer_id):
+            self.last_error = "buffer {buffer_id} does not exist"
+            return false
+        if offset < 0 or size < 0:
+            self.last_error = "invalid queue write range"
+            return false
+        self.queue.write_count = self.queue.write_count + 1
+        true
+
+    me create_command_encoder(label: text) -> WebGPUCommandEncoder:
+        WebGPUCommandEncoder.create(label)
+
+    me queue_submit(buffers: [GPUCommandBufferHandle]) -> bool:
+        if self.device_lost:
+            self.last_error = "WebGPU device is lost"
+            return false
+        for buffer in buffers:
+            if not buffer.valid:
+                self.last_error = "invalid command buffer"
+                return false
+        self.queue.submitted = self.queue.submitted + buffers
+        true
+
+    me lose_device(reason: text) -> WebGPUDeviceLostInfo:
+        self.device_lost = true
+        self.device_ready = false
+        self.last_error = "WebGPU device is lost: {reason}"
+        WebGPUDeviceLostInfo(lost: true, reason: reason)
+
+pub fn webgpu_create_context(secure_context: bool) -> WebGPUContext:
+    WebGPUContext.create(secure_context)

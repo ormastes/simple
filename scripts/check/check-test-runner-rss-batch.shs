@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+ROOT="${TEST_RUNNER_RSS_ROOT:-build/qualification-test-runner-rss}"
+FILE_COUNT="${TEST_RUNNER_RSS_FILE_COUNT:-500}"
+BATCH_SIZE="${TEST_RUNNER_RSS_BATCH_SIZE:-50}"
+RSS_MAX_KIB="${TEST_RUNNER_RSS_MAX_KIB:-1048576}"
+FIXTURE="test/fixtures/pure_simple_tooling/sibling_describe_green_fixture.spl"
+
+case "$FILE_COUNT:$BATCH_SIZE" in *[!0-9:]*) echo "error=invalid_count"; exit 2 ;; esac
+[ "$FILE_COUNT" -gt 0 ] && [ "$BATCH_SIZE" -gt 0 ] || { echo "error=invalid_count"; exit 2; }
+[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; exit 2; }
+command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; exit 2; }
+
+rm -rf "$ROOT"
+mkdir -p "$ROOT/specs"
+i=1
+while [ "$i" -le "$FILE_COUNT" ]; do
+  cp "$FIXTURE" "$ROOT/specs/batch_${i}_spec.spl"
+  i=$((i + 1))
+done
+
+set +e
+/usr/bin/time -f %M -o "$ROOT/parent-rss-kib" \
+  timeout 300 bin/simple test "$ROOT/specs" --batch-size="$BATCH_SIZE" \
+    --no-session-daemon --assert-ran --no-db >"$ROOT/output.log" 2>"$ROOT/error.log"
+status=$?
+set -e
+[ "$status" -eq 0 ] || { echo "error=runner_failed:$status"; exit 1; }
+
+expected_batches=$(( (FILE_COUNT + BATCH_SIZE - 1) / BATCH_SIZE ))
+worker_count="$(grep 'Batch worker: pid=' "$ROOT/output.log" | sed 's/^.*pid=//; s/ .*$//' | sort -u | wc -l | tr -d ' ')"
+boundary_count="$(grep -c 'Batch boundary:' "$ROOT/output.log" || true)"
+parent_rss_kib="$(sed -n '1p' "$ROOT/parent-rss-kib")"
+expected_examples=$(( FILE_COUNT * 2 ))
+
+[ "$worker_count" -eq "$expected_batches" ] || { echo "error=worker_reexec_count:$worker_count"; exit 1; }
+[ "$boundary_count" -eq "$expected_batches" ] || { echo "error=batch_boundary_count:$boundary_count"; exit 1; }
+grep -q "Batch boundary: completed=${FILE_COUNT}/${FILE_COUNT}" "$ROOT/output.log"
+grep -q "Passed: ${expected_examples}" "$ROOT/output.log"
+[ "$parent_rss_kib" -lt "$RSS_MAX_KIB" ] || { echo "error=parent_rss_kib:$parent_rss_kib"; exit 1; }
+
+echo "test_runner_batch_files=$FILE_COUNT"
+echo "test_runner_batch_examples=$expected_examples"
+echo "test_runner_batch_size=$BATCH_SIZE"
+echo "test_runner_worker_count=$worker_count"
+echo "test_runner_boundary_count=$boundary_count"
+echo "test_runner_parent_max_rss_kib=$parent_rss_kib"
+echo "test_runner_rss_batch_status=pass"

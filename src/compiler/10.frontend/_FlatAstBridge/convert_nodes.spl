@@ -1,0 +1,1724 @@
+# Flat AST Bridge: flat expr/stmt/type/decl conversion helpers.
+use compiler.frontend.flat_ast_bridge.*
+# Flat AST Bridge
+#
+# Converts the core parser's flat, index-based AST into the richer frontend
+# Module shape expected by HIR lowering. This is used as the bootstrap-safe
+# frontend path when the newer parser surface is unavailable.
+
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get, parser_set_had_error}
+use compiler.core.parser.{parser_diagnostics_suppressed_get, parser_diagnostics_suppressed_set}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.parser_expr.{parse_expr}
+use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.core.tokens.{TOK_EOF}
+use compiler.core.ast.*
+use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
+use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel}
+use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
+use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
+use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args}
+use compiler.core.ast.{decl_is_packed}
+use compiler.core.ast.{elif_get_else}
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
+use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str}
+use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
+use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
+use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
+use compiler.core.types.{is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# Iteration 17 probe plumbing (UNGATED, Trap D): trace ExprKind discs at
+# construction time to find where the stage4 flat-bridge Expr goes bad.
+
+use compiler.frontend.lexer_types.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+extern fn rt_env_get(key: text) -> text
+
+fn flat_bridge_env_get(key: text) -> text:
+    rt_env_get(key)
+
+fn flat_bridge_trace_enabled() -> bool:
+    (flat_bridge_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn flat_is_bootstrap_entry_path(path: text) -> bool:
+    # Match the bootstrap entry regardless of how the path is spelled by the
+    # caller. The native-build driver passes it as `src/app/cli/bootstrap_main.spl`
+    # (no leading `/` or `./`), which the previous `/src/...` / `./src/...`
+    # patterns missed — so flat_ast_to_module returned an empty module and the
+    # entry's real functions never reached HIR/MIR lowering (bug
+    # bootstrap_stage2_empty_mir_bodies_2026-07-05).
+    #
+    # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 means the driver (driver.spl
+    # parse_all_impl / lower_and_check_impl) is treating EVERY source in the
+    # resolved --entry-closure import closure as needing real HIR lowering,
+    # not just the single --entry file. Without this check, every non-entry
+    # module in the closure (e.g. a plain helper imported by the entry) still
+    # got routed to flat_empty_module() here at the parse layer, so its
+    # functions never reached HIR — cross-module calls into it then failed
+    # HIR name resolution ("unresolved name: <fn>") even though the driver
+    # believed it had lowered the whole closure (bug
+    # bootstrap_stage2_empty_mir_bodies_2026-07-05, cross-module closure gap).
+    if flat_bridge_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") == "1":
+        return true
+    val native_entry = flat_bridge_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if native_entry != "":
+        return path == native_entry or path.ends_with("/" + native_entry)
+    path.ends_with("bootstrap_main.spl")
+
+fn flat_bootstrap_function_count() -> i64:
+    if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] fn-count:start")
+    var count = 0
+    var i = 0
+    val decl_count = module_decl_count_get()
+    while i < 64 and i < decl_count:
+        val decl_idx = module_decl_at(i)
+        if decl_get_tag(decl_idx) == 1:
+            count = count + 1
+        i = i + 1
+    if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] fn-count:done {count}")
+    count
+
+fn flat_bootstrap_function_at(index: i64) -> Function:
+    if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] fn-at:start {index}")
+    var seen = 0
+    var i = 0
+    val decl_count = module_decl_count_get()
+    while i < 64 and i < decl_count:
+        val decl_idx = module_decl_at(i)
+        if decl_get_tag(decl_idx) == 1:
+            if seen == index:
+                if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+                    eprint("[flat-bridge] fn-at:decl {decl_idx}")
+                val fn_: Function = convert_decl_fn(decl_idx)
+                if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+                    eprint("[flat-bridge] fn-at:done")
+                return fn_
+            seen = seen + 1
+        i = i + 1
+    parser_function_new(
+        "",
+        [],
+        [],
+        false,
+        Type(kind: TypeKind.Infer, span: make_span()),
+        Block(stmts: [], span: make_span()),
+        Visibility.Private,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        [],
+        false,
+        "",
+        make_span()
+    )
+
+fn flat_bootstrap_function_decl_at(index: i64) -> i64:
+    var seen = 0
+    var i = 0
+    val decl_count = module_decl_count_get()
+    while i < 64 and i < decl_count:
+        val decl_idx = module_decl_at(i)
+        if decl_get_tag(decl_idx) == 1:
+            if seen == index:
+                return decl_idx
+            seen = seen + 1
+        i = i + 1
+    -1
+
+fn flat_bootstrap_body_at(index: i64) -> Block:
+    Block(stmts: [], span: make_span())
+
+fn make_span() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+
+fn flat_empty_module(path: text) -> Module:
+    parser_module_new(
+        name: path,
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        functions: {},
+        function_order: [],
+        classes: {},
+        actors: {},
+        actor_order: [],
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        type_aliases: {},
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
+
+fn convert_decl_visibility(idx: i64) -> Visibility:
+    val vis_text = decl_get_visibility_text(idx)
+    if vis_text == "public":
+        return Visibility.Public
+    if vis_text == "peer":
+        return Visibility.Peer
+    if vis_text == "up":
+        return Visibility.Up
+    if vis_text == "internal":
+        return Visibility.Internal
+    if vis_text == "package":
+        return Visibility.Package
+    Visibility.Private
+
+fn convert_decl_is_public(idx: i64) -> bool:
+    decl_get_visibility_text(idx) == "public"
+
+fn convert_flat_type(type_expr_idx: i64) -> Type:
+    if type_expr_idx <= 0:
+        return Type(kind: TypeKind.Infer, span: make_span())
+    # Stage4 generic equality tags the parameter but reads TYPE_* module vals
+    # raw (2 became 16 and falsely matched TYPE_OPTION_F64).  Ordered literal
+    # bounds keep the authoritative flat i64 tag on the raw integer path.
+    if type_expr_idx > 1 and type_expr_idx < 3:
+        return Type(kind: TypeKind.Named("i64", []), span: make_span())
+    if type_expr_idx == TYPE_VOID:
+        return Type(kind: TypeKind.Named("void", []), span: make_span())
+    if type_expr_idx == TYPE_BOOL:
+        return Type(kind: TypeKind.Named("bool", []), span: make_span())
+    if type_expr_idx == TYPE_I64:
+        return Type(kind: TypeKind.Named("i64", []), span: make_span())
+    if type_expr_idx == TYPE_U8:
+        return Type(kind: TypeKind.Named("u8", []), span: make_span())
+    if type_expr_idx == TYPE_U16:
+        return Type(kind: TypeKind.Named("u16", []), span: make_span())
+    if type_expr_idx == TYPE_U32:
+        return Type(kind: TypeKind.Named("u32", []), span: make_span())
+    if type_expr_idx == TYPE_U64:
+        return Type(kind: TypeKind.Named("u64", []), span: make_span())
+    if type_expr_idx == TYPE_I8:
+        return Type(kind: TypeKind.Named("i8", []), span: make_span())
+    if type_expr_idx == TYPE_I16:
+        return Type(kind: TypeKind.Named("i16", []), span: make_span())
+    if type_expr_idx == TYPE_I32:
+        return Type(kind: TypeKind.Named("i32", []), span: make_span())
+    if type_expr_idx == TYPE_F64:
+        return Type(kind: TypeKind.Named("f64", []), span: make_span())
+    if type_expr_idx == TYPE_TEXT:
+        return Type(kind: TypeKind.Named("text", []), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_I64:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_TEXT:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_BOOL:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_ANY:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ANY:
+        return Type(kind: TypeKind.Named("Any", []), span: make_span())
+    if type_expr_idx == TYPE_NIL:
+        return Type(kind: TypeKind.Named("nil", []), span: make_span())
+    if type_expr_idx == TYPE_DICT:
+        return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+    # Dict<K,V> specialization (bug: dicttype): the parser registers each
+    # distinct Dict<K,V> annotation's key/value tags and encodes the result
+    # as TYPE_DICT_BASE + id (see core.types.dict_type_register). Recover the
+    # real key/value Type args here instead of silently collapsing to the
+    # bare, argless Dict above -- this check must precede the generic
+    # `>= TYPE_UNION_BASE` catch-all below since is_dict_tag's range also
+    # satisfies that comparison.
+    if is_dict_tag(type_expr_idx):
+        val did = dict_tag_to_id(type_expr_idx)
+        val key_tag = dict_type_get_key(did)
+        val value_tag = dict_type_get_value(did)
+        return Type(kind: TypeKind.Named("Dict", [convert_flat_type(key_tag), convert_flat_type(value_tag)]), span: make_span())
+    if type_expr_idx == TYPE_FN:
+        return Type(kind: TypeKind.Named("fn", []), span: make_span())
+    if type_expr_idx == TYPE_OPTION:
+        return Type(kind: TypeKind.Named("Option", []), span: make_span())
+    if type_expr_idx == TYPE_OPTION_I64:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("i64", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_F64:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("f64", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_TEXT:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("text", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_BOOL:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("bool", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_RESULT:
+        return Type(kind: TypeKind.Named("Result", []), span: make_span())
+    if is_result_tag(type_expr_idx):
+        val rid = result_tag_to_id(type_expr_idx)
+        return Type(kind: TypeKind.Named("Result", [convert_flat_type(result_type_get_ok(rid)), convert_flat_type(result_type_get_err(rid))]), span: make_span())
+    # Tuple type annotation `(A, B, C)` (e.g. an extern fn's declared tuple
+    # return): the parser registers the element tags (types.spl
+    # TYPE_TUPLE_BASE registry, mirroring Dict<K,V>/Result above) instead of
+    # collapsing to TYPE_ANY. Rebuild the real TypeKind.Tuple here so HIR
+    # lower_type produces HirTypeKind.Tuple and a destructure of a
+    # tuple-returning call types each element correctly (parity case
+    # process_run_timeout). Must precede the `>= TYPE_UNION_BASE` catch-all
+    # below, same as the dict/result checks.
+    if is_tuple_type_tag(type_expr_idx):
+        val tuple_tag_id = tuple_type_tag_to_id(type_expr_idx)
+        val tuple_elem_type_tags = tuple_type_get_elems(tuple_tag_id)
+        var tuple_elem_types: [Type] = []
+        var tt_i = 0
+        while tt_i < tuple_elem_type_tags.len():
+            tuple_elem_types.push(convert_flat_type(tuple_elem_type_tags[tt_i]))
+            tt_i = tt_i + 1
+        return Type(kind: TypeKind.Tuple(tuple_elem_types), span: make_span())
+    # Array element-type specialization (bug: array-class-param-sigsegv): the
+    # array-type parser (parser.spl's `[T]` branch) only has dedicated flat
+    # tags for i64/text/bool/Any element types; a named class/struct/enum
+    # element (e.g. `[Counter]`) registers its element tag here instead of
+    # silently collapsing to bare TYPE_ARRAY_I64 -- see
+    # TYPE_ARRAY_GENERIC_BASE. Must precede the generic `>= TYPE_UNION_BASE`
+    # catch-all below, same as the dict/result/tuple checks.
+    if is_array_generic_tag(type_expr_idx):
+        val arr_generic_id = array_generic_tag_to_id(type_expr_idx)
+        val arr_elem_tag = array_generic_type_get_elem(arr_generic_id)
+        return Type(kind: TypeKind.Array(convert_flat_type(arr_elem_tag), nil), span: make_span())
+    if type_expr_idx == TYPE_FUTURE:
+        return Type(kind: TypeKind.Named("Future", []), span: make_span())
+    if type_expr_idx == TYPE_POLL:
+        return Type(kind: TypeKind.Named("Poll", []), span: make_span())
+    if type_expr_idx == TYPE_TASK:
+        return Type(kind: TypeKind.Named("Task", []), span: make_span())
+    if type_expr_idx == TYPE_GENERIC_ERASED:
+        return Type(kind: TypeKind.Named("Generic", []), span: make_span())
+    if type_expr_idx >= TYPE_UNION_BASE:
+        return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
+    # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so
+    # it must be a real expr-arena index. It can go stale when it was captured
+    # (e.g. an extern fn's `-> T` return type, threaded through by #146) before
+    # an interleaved ast_reset() cleared/refilled the shared flat AST arena --
+    # observed OOB (index 48, length 13) crashing the seed interpreter on
+    # src/app/io/process_ops.spl. Bounds-check against the live arena length and
+    # fall back to Infer (pre-#146 behavior) rather than reading out of range;
+    # note this does not catch a stale-but-in-bounds index from a *smaller*
+    # reset that still covers type_expr_idx.
+    if type_expr_idx >= expr_count():
+        return Type(kind: TypeKind.Infer, span: make_span())
+    val tag = expr_get_tag(type_expr_idx)
+    if tag == EXPR_IDENT:
+        Type(kind: TypeKind.Named(expr_get_str(type_expr_idx), []), span: make_span())
+    elif tag == EXPR_INDEX:
+        val base_name = expr_get_str(expr_get_left(type_expr_idx))
+        var type_args: [Type] = []
+        val arg_idx = expr_get_right(type_expr_idx)
+        if arg_idx >= 0:
+            type_args.push(convert_flat_type(arg_idx))
+        Type(kind: TypeKind.Named(base_name, type_args), span: make_span())
+    elif tag == EXPR_TUPLE:
+        # Tuple TYPE annotation, e.g. an extern fn's `-> (text, text, i32)`
+        # return (threaded through as an expr-arena index by #146, same as
+        # `-> T`): the flat tag space has no TYPE_TUPLE, so the parser stores
+        # the parenthesized element list as an EXPR_TUPLE node. Previously
+        # this fell into the Infer catch-all below, erasing the element types
+        # -- HIR lower_type then produced Error/i64 defaults and a tuple
+        # destructure of the call result printed text handles as decimal
+        # integers (parity case process_run_timeout).
+        val tuple_type_args = expr_get_args(type_expr_idx)
+        var tuple_type_elems: [Type] = []
+        var tt_i = 0
+        while tt_i < tuple_type_args.len():
+            tuple_type_elems.push(convert_flat_type(tuple_type_args[tt_i]))
+            tt_i = tt_i + 1
+        Type(kind: TypeKind.Tuple(tuple_type_elems), span: make_span())
+    else:
+        Type(kind: TypeKind.Infer, span: make_span())
+
+fn op_kind_to_binop(kind: i64) -> BinOp:
+    if kind == 55: return BinOp.And
+    if kind == 56: return BinOp.Or
+    if kind == 60: return BinOp.Add
+    if kind == 61: return BinOp.Sub
+    if kind == 62: return BinOp.Mul
+    if kind == 63: return BinOp.Div
+    if kind == 64: return BinOp.Mod
+    if kind == 65: return BinOp.Pow
+    if kind == 66: return BinOp.Shl
+    if kind == 67: return BinOp.Shr
+    if kind == 80: return BinOp.Eq
+    if kind == 81: return BinOp.NotEq
+    if kind == 82: return BinOp.Lt
+    if kind == 83: return BinOp.Gt
+    if kind == 84: return BinOp.LtEq
+    if kind == 85: return BinOp.GtEq
+    if kind == 120: return BinOp.BitAnd
+    if kind == 121: return BinOp.BitOr
+    if kind == 122: return BinOp.BitXor
+    assert false, "unsupported flat binary operator kind {kind}"
+    BinOp.Add
+
+fn flat_compound_assign_op(kind: i64) -> AssignOp:
+    # Op codes match parse_assignment()'s expr_compound_assign() calls in
+    # core/parser_expr.spl (60=+=, 61=-=, 62=*=, 63=/=, 64=%=) -- the same
+    # additive/multiplicative binary-op numbering used by op_kind_to_binop
+    # above.
+    if kind == 60: return AssignOp.Add
+    if kind == 61: return AssignOp.Sub
+    if kind == 62: return AssignOp.Mul
+    if kind == 63: return AssignOp.Div
+    if kind == 64: return AssignOp.Mod
+    AssignOp.Add
+
+# #148: op-kind decode for EXPR_UNARY (see parse_unary in parser_expr.spl for
+# the token-kind -> expr_unary(kind, ...) mapping). kind == TOK_MINUS (61) is
+# `-x` (Neg), kind == TOK_NOT (57) is `not x` (Not), kind == TOK_TILDE (123)
+# is `~x` (BitNot). Mirrors op_kind_to_binop above.
+fn op_kind_to_unaryop(kind: i64) -> UnaryOp:
+    if kind == 57: return UnaryOp.Not
+    if kind == 123: return UnaryOp.BitNot
+    UnaryOp.Neg
+
+# Convert an expression-form if/else branch (stored as an EXPR id) into a Block.
+# Block-form branches are EXPR_BLOCK (tag 18) carrying STMTS; ternary/inline
+# branches are a bare expr wrapped as a single expression statement. Used by the
+# EXPR_IF bridge so expression-if then/else bodies are not dropped.
+fn flat_if_branch_block(branch_idx: i64, span: Span) -> Block:
+    if branch_idx < 0:
+        return Block(stmts: [], span: span)
+    if expr_get_tag(branch_idx) == 18:
+        val b_stmts = expr_get_stmts(branch_idx)
+        var b_body: [Stmt] = []
+        var bi = 0
+        while bi < b_stmts.len():
+            b_body.push(convert_flat_stmt(b_stmts[bi]))
+            bi = bi + 1
+        return Block(stmts: b_body, span: span)
+    var single: [Stmt] = []
+    single.push(Stmt(kind: StmtKind.Expr(convert_flat_expr(branch_idx)), span: span))
+    return Block(stmts: single, span: span)
+
+fn flat_copy_text_list(values: [text]) -> [text]:
+    var out: [text] = []
+    for value in values:
+        out.push(value)
+    out
+
+fn flat_asm_expr(asm_template_text: text, span: Span) -> AsmExpr:
+    AsmExpr(
+        asm_template: asm_template_text,
+        is_volatile: true,
+        constraints: [],
+        clobbers: [],
+        span: span
+    )
+
+fn flat_asm_spec_from_arm(arm_idx: i64, span: Span) -> AsmTargetSpec:
+    var versions: [AsmVersionConstraint] = []
+    val ops = asm_arm_ver_ops[arm_idx]
+    val vals = asm_arm_ver_vals[arm_idx]
+    var vi = 0
+    while vi < ops.len() and vi < vals.len():
+        versions.push(AsmVersionConstraint(op: ops[vi], version: vals[vi]))
+        vi = vi + 1
+    AsmTargetSpec(
+        archs: flat_copy_text_list(asm_arm_archs[arm_idx]),
+        has_os: asm_arm_os[arm_idx] != "",
+        os: asm_arm_os[arm_idx],
+        has_abi: asm_arm_abi[arm_idx] != "",
+        abi: asm_arm_abi[arm_idx],
+        has_backend: asm_arm_backend[arm_idx] != "",
+        backend: asm_arm_backend[arm_idx],
+        version_constraints: versions,
+        span: span
+    )
+
+fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
+    val is_compile_error = asm_arm_is_compile_error[arm_idx]
+    val wildcard = asm_arm_is_wildcard[arm_idx]
+    AsmMatchArm(
+        has_spec: not wildcard,
+        spec: flat_asm_spec_from_arm(arm_idx, span),
+        is_wildcard: wildcard,
+        has_asm_body: not is_compile_error,
+        asm_body: flat_asm_expr(asm_arm_asm_text[arm_idx], span),
+        is_compile_error: is_compile_error,
+        error_message: asm_arm_error_msg[arm_idx],
+        span: span
+    )
+
+fn flat_bridge_parse_interp_inner(inner: text) -> i64:
+    # Sub-lex + parse a single expression from `inner`, APPENDING to the shared
+    # flat AST arena (no ast_reset), so the outer conversion's arena stays
+    # intact. This is safe because the lexer is idle during flat->frontend
+    # conversion: parse_and_build_module runs parse_module_body() to completion
+    # (filling the arena) BEFORE flat_ast_to_module() converts it. Returns the
+    # parsed expr idx, or -1 when `inner` is not a single clean expression
+    # (leftover tokens / parse failure) so the caller can fall back to a plain
+    # literal.
+    # Sticky par_had_error guard (bug: driver.spl's phase-2 gate reads
+    # par_had_error_get() right after this file's parse_full_frontend()
+    # returns; parser_tok_save/restore only snapshot kind/line/col/text, not
+    # this flag, so a recovered failure here — deliberately swallowed below
+    # via the idx<0 fallback-to-literal path — would otherwise stay set and
+    # fail phase 2 on a file whose real AST is fine). Save/restore around the
+    # whole speculative fragment parse so only a REAL top-level parse error
+    # (raised outside this function, on the real module lex) can trip the
+    # gate.
+    val had_error_before = parser_has_errors()
+    val diagnostics_suppressed_before = parser_diagnostics_suppressed_get()
+    parser_diagnostics_suppressed_set(true)
+    # Bug interp_brace_literal_collides_with_string_interpolation: a
+    # placeholder written with padding spaces (e.g. `{ x }`, the common style
+    # for JSON/SDN-shaped text) previously sub-lexed the RAW inner text
+    # including the surrounding whitespace; something about that leading/
+    # trailing padding made the sub-parse fail to land exactly on TOK_EOF, so
+    # `part_idx` came back -1 and the whole placeholder silently fell back to
+    # printing its literal `{ x }` text -- even though `x` is a perfectly
+    # valid, declared variable. The seed oracle trims this padding before
+    # parsing (`{ x }` interpolates fine there); do the same here so a
+    # spaced-out placeholder behaves identically to its unspaced `{x}` form.
+    lex_init_with_path(inner.trim(), "")
+    parser_advance()
+    val idx = parse_expr()
+    if idx < 0:
+        parser_set_had_error(had_error_before)
+        parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
+        return -1
+    if par_kind_get() != TOK_EOF:
+        parser_set_had_error(had_error_before)
+        parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
+        return -1
+    parser_set_had_error(had_error_before)
+    parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
+    idx
+
+fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
+    # Bug #136 (normal native path): the core lexer copies each `{expr}`
+    # interpolation region VERBATIM into the string token and never parses the
+    # inner expression, so the bridge previously emitted StringLit(value, nil)
+    # and the MIR interpolation lowering (lower_string_interpolation) had no
+    # parts to splice -- `{expr}` printed literally. Scan top-level `{...}`
+    # regions here (brace-depth tracked so nested braces stay in one region,
+    # mirroring the MIR split logic) and sub-parse each inner into a real Expr
+    # so the HIR/MIR interpolation chain can evaluate and splice it. If any
+    # region is not a clean single expression, return [] so the string is
+    # treated as a plain literal (preserves brace-bearing non-interp strings
+    # like CSS/JSON).
+    var interps: [Interpolation] = []
+    var depth = 0
+    var inner = ""
+    var i = 0
+    val n = value.len()
+    while i < n:
+        val ch = value[i:i + 1]
+        val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
+        if depth == 0 and ch == "{" and ch_next == "{":
+            # `{{` escape (Python f-string / Rust format! parity; doc
+            # interp_brace_literal_collides_with_string_interpolation): a
+            # literal `{` written doubled so it is never mistaken for the
+            # start of an interpolation region. Do not open a region --
+            # split_interpolation_segments (MIR layer) applies the same
+            # doubled-brace skip so the literal-segment positions stay
+            # aligned with this function's interps list.
+            i = i + 1
+        elif depth == 0 and ch == "}" and ch_next == "}":
+            # `}}` escape, mirror of `{{` above.
+            i = i + 1
+        elif depth == 0 and ch == "{":
+            depth = 1
+            inner = ""
+        elif depth > 0 and ch == "{":
+            depth = depth + 1
+            inner = inner + ch
+        elif depth > 0 and ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                val part_idx = flat_bridge_parse_interp_inner(inner)
+                if part_idx < 0:
+                    return []
+                interps.push(Interpolation(
+                    expr: convert_flat_expr(part_idx),
+                    has_format: false,
+                    format: "",
+                    span: span
+                ))
+            else:
+                inner = inner + ch
+        elif depth > 0:
+            inner = inner + ch
+        i = i + 1
+    if depth != 0:
+        return []
+    interps
+
+fn flat_bridge_decode_brace_escapes(value: text) -> text:
+    """Bug interp_brace_literal_collides_with_string_interpolation: a string
+    made up ENTIRELY of `{{`/`}}` escapes (no real `{expr}` placeholder) skips
+    the MIR interpolation-lowering path entirely (has_interps stays false, see
+    expr_dispatch.spl), so nothing downstream ever decodes the doubled braces
+    -- decode them to single literal ones here, directly on the plain-literal
+    text. (When a real placeholder IS also present, str_val is left untouched
+    and split_interpolation_segments -- 50.mir -- does this same decode while
+    splitting segments, since that path needs positional alignment with the
+    interps list instead of a standalone text rewrite.)
+
+    NOTE: does not use an Option-based "still needs processing" signal here
+    on purpose -- this runtime's `[T]?` representation cannot distinguish
+    `Some([])` from `nil` (an empty list and an absent value both come back
+    as an empty/false `.?` check), so signaling through the interps field
+    silently degrades an intended `Some([])` into `nil`.
+    """
+    var result = ""
+    var i = 0
+    val n = value.len()
+    while i < n:
+        val ch = value[i:i + 1]
+        val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
+        if ch == "{" and ch_next == "{":
+            result = result + "{"
+            i = i + 2
+        elif ch == "}" and ch_next == "}":
+            result = result + "}"
+            i = i + 2
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
+fn convert_flat_expr(idx: i64) -> Expr:
+    if idx < 0:
+        return Expr(kind: ExprKind.NilLit, span: make_span())
+    val tag = expr_get_tag(idx)
+    val span = make_span()
+    if tag <= 0:
+        print "[flat-bridge] missing expr tag idx={idx} tag={tag}"
+        return Expr(kind: ExprKind.NilLit, span: span)
+    if tag == EXPR_INT_LIT:
+        return Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
+    elif tag == EXPR_FLOAT_LIT:
+        return Expr(kind: ExprKind.FloatLit(expr_get_float(idx).to_float()), span: span)
+    elif tag == EXPR_STRING_LIT:
+        val str_val = expr_get_str(idx)
+        if expr_get_int(idx) == 1:
+            return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
+        val str_interps = flat_bridge_build_string_interps(str_val, span)
+        if str_interps.len() > 0:
+            return Expr(kind: ExprKind.StringLit(str_val, str_interps), span: span)
+        else:
+            # No real `{expr}` placeholder (str_interps is empty). Decode any
+            # `{{`/`}}` escapes directly since nothing downstream will (see
+            # flat_bridge_decode_brace_escapes).
+            return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_val), nil), span: span)
+    elif tag == EXPR_BOOL_LIT:
+        return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
+    elif tag == EXPR_NIL_LIT:
+        return Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_IDENT:
+        return Expr(kind: ExprKind.Ident(expr_get_str(idx)), span: span)
+    elif tag == EXPR_CALL:
+        val callee = convert_flat_expr(expr_get_left(idx))
+        val arg_indices = expr_get_args(idx)
+        val arg_names = expr_get_arg_names(idx)
+        var args: [CallArg] = []
+        var ai = 0
+        while ai < arg_indices.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            args = args.push(CallArg(
+                has_name: arg_name != "",
+                name: arg_name,
+                value: convert_flat_expr(arg_indices[ai]),
+                span: span
+            ))
+            ai = ai + 1
+        val call_kind: ExprKind = ExprKind.Call(callee, args)
+        return Expr(kind: call_kind, span: span)
+    elif tag == EXPR_BINARY:
+        val left = convert_flat_expr(expr_get_left(idx))
+        val right = convert_flat_expr(expr_get_right(idx))
+        val op = op_kind_to_binop(expr_get_int(idx))
+        return Expr(kind: ExprKind.Binary(op, left, right), span: span)
+    elif tag == EXPR_UNARY:
+        # #148: this used to hardcode UnaryOp.Neg for EVERY unary expression,
+        # discarding the actual operator code (expr_get_int) entirely -- so
+        # `not x` silently compiled as `-x`. For a 0/1 boolean operand, `-x`
+        # negated ARITHMETICALLY happens to preserve the SAME truthiness as
+        # `x` itself (`-1 != 0` iff `1 != 0`, and `-0 == 0`), so `not <bool>`
+        # behaved as an identity no-op instead of a logical inversion -- e.g.
+        # `if not a.starts_with(...)` took the SAME branch `if
+        # a.starts_with(...)` would have. Decode the real operator via
+        # op_kind_to_unaryop (mirrors op_kind_to_binop just above for Binary).
+        val operand = convert_flat_expr(expr_get_left(idx))
+        val unary_op = op_kind_to_unaryop(expr_get_int(idx))
+        return Expr(kind: ExprKind.Unary(unary_op, operand), span: span)
+    elif tag == EXPR_FIELD_ACCESS:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        val field_name = expr_get_str(idx)
+        return Expr(kind: ExprKind.Field(obj, field_name), span: span)
+    elif tag == EXPR_METHOD_CALL:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        val method_name = expr_get_str(idx)
+        val m_arg_indices = expr_get_args(idx)
+        val m_arg_names = expr_get_arg_names(idx)
+        var m_args: [CallArg] = []
+        var mai = 0
+        while mai < m_arg_indices.len():
+            val m_arg_name = if mai < m_arg_names.len(): m_arg_names[mai] else: ""
+            m_args = m_args.push(CallArg(
+                has_name: m_arg_name != "",
+                name: m_arg_name,
+                value: convert_flat_expr(m_arg_indices[mai]),
+                span: span
+            ))
+            mai = mai + 1
+        return Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span)
+    elif tag == EXPR_INDEX:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        val index = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.Index(obj, index), span: span)
+    elif tag == EXPR_SLICE:
+        # Bug (array/string slice-index silently -> NilLit -> SIGSEGV): a
+        # bracket-colon slice `a[1:3]` parses as a DEDICATED EXPR_SLICE flat
+        # node (LEFT=base, RIGHT=start, EXTRA=end) -- NOT an EXPR_INDEX over
+        # an EXPR_RANGE, and NOT any node handled by this if/elif chain at
+        # all. It fell all the way to the final `else: return
+        # Expr(kind: ExprKind.NilLit, ...)` fallback below, silently
+        # producing a bare nil/0 value in place of the sliced result. On the
+        # ARRAY-index read path (expr_dispatch.spl's `case Index`) that nil
+        # then got inttoptr'd and GEP/load'd as if it were a real array
+        # pointer -- a NULL-pointer dereference (SIGSEGV) instead of a clean
+        # build error, the worst form of "silent wrong" this lane must catch.
+        # `ExprKind` (parser_types_expr.spl) has no dedicated Slice variant
+        # of its own to preserve the 3-operand shape, but `lower_method_call`
+        # (method_calls_literals.spl) already has a real, tested `"slice"`/
+        # `"substring"` implementation for STRING receivers (spl_str_slice) --
+        # reusing that MethodCall shape here both (a) makes `s[1:3]` on a
+        # string receiver actually WORK for the first time (previously it hit
+        # this same NilLit fallback), and (b) makes an ARRAY receiver (which
+        # that method-call arm does not special-case) fall through cleanly to
+        # the existing generic `case Unresolved:` "unresolved method call:
+        # slice" LOUD build failure -- matching the established loud-fail
+        # convention for other genuinely-unsupported array operations
+        # (.pop()/.first()/.last()) instead of crashing at runtime.
+        val slice_obj = convert_flat_expr(expr_get_left(idx))
+        val slice_start = convert_flat_expr(expr_get_right(idx))
+        val slice_end = convert_flat_expr(expr_get_extra(idx))
+        val slice_call_args: [CallArg] = [
+            CallArg(has_name: false, name: "", value: slice_start, span: span),
+            CallArg(has_name: false, name: "", value: slice_end, span: span)
+        ]
+        return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span)
+    elif tag == EXPR_ARRAY_LIT:
+        val elem_indices = expr_get_args(idx)
+        var elems: [Expr] = []
+        var ei = 0
+        while ei < elem_indices.len():
+            elems.push(convert_flat_expr(elem_indices[ei]))
+            ei = ei + 1
+        return Expr(kind: ExprKind.ArrayLit(elems), span: span)
+    elif tag == EXPR_ARRAY_REPEAT:
+        val rep_value = convert_flat_expr(expr_get_left(idx))
+        val rep_count = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.ArrayRepeat(rep_value, rep_count), span: span)
+    elif tag == EXPR_INTERPOLATED_STRING:
+        val parts = expr_get_args(idx)
+        var interpolations: [Interpolation] = []
+        var ii = 0
+        while ii < parts.len():
+            interpolations.push(Interpolation(
+                expr: convert_flat_expr(parts[ii]),
+                has_format: false,
+                format: "",
+                span: span
+            ))
+            ii = ii + 1
+        return Expr(kind: ExprKind.StringLit(expr_get_str(idx), interpolations), span: span)
+    elif tag == EXPR_IF:
+        # Expression-form if: parser stores cond in LEFT, the then-branch in
+        # RIGHT and the else-branch in EXTRA (each an EXPR_BLOCK or bare expr;
+        # EXTRA is EXPR_UNIT (tag 33) when there is no else). elif/`else if`
+        # chains arrive as a nested EXPR_IF in EXTRA and recurse naturally.
+        val cond = convert_flat_expr(expr_get_left(idx))
+        val then_block = flat_if_branch_block(expr_get_right(idx), span)
+        val if_else_idx = expr_get_extra(idx)
+        if if_else_idx >= 0 and expr_get_tag(if_else_idx) != 33:
+            val else_block = flat_if_branch_block(if_else_idx, span)
+            return Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)
+        return Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
+    elif tag == EXPR_MATCH:
+        # `match` used as a VALUE, e.g. `val r = match n: case 1: 10 case _:
+        # 99`. Mirrors the STMT_MATCH conversion below (same arm-id/pattern/
+        # guard/body accessors -- expr_match_expr's parser constructor stores
+        # scrutinee in LEFT and arms in ARGS, exactly like stmt_match_stmt
+        # stores them in EXPR/BODY) but returns a real ExprKind.MatchCase
+        # directly instead of wrapping a statement, so match-as-a-value
+        # reaches HIR/MIR lowering as a genuine value-producing expression
+        # instead of being silently dropped by the fallback NilLit case below.
+        val em_scrut = convert_flat_expr(expr_get_left(idx))
+        val em_arm_ids = expr_get_args(idx)
+        var em_arms: [MatchArm] = []
+        var emi = 0
+        while emi < em_arm_ids.len():
+            val em_arm_id = em_arm_ids[emi]
+            val em_pat = convert_flat_pattern(arm_get_pattern(em_arm_id))
+            val em_body_ids: [i64] = arm_get_body(em_arm_id)
+            var em_arm_body: [Stmt] = []
+            var embi = 0
+            while embi < em_body_ids.len():
+                val em_expanded = convert_flat_stmt_in_list(em_body_ids[embi], false)
+                var emk = 0
+                while emk < em_expanded.len():
+                    em_arm_body.push(em_expanded[emk])
+                    emk = emk + 1
+                embi = embi + 1
+            val em_guard_eid = arm_get_guard(em_arm_id)
+            var em_g_has = false
+            var em_g_expr = Expr(kind: ExprKind.NilLit, span: span)
+            if em_guard_eid >= 0:
+                em_g_has = true
+                em_g_expr = convert_flat_expr(em_guard_eid)
+            em_arms.push(MatchArm(
+                pattern: em_pat,
+                has_guard: em_g_has,
+                guard: em_g_expr,
+                body: Block(stmts: em_arm_body, span: span),
+                span: span
+            ))
+            emi = emi + 1
+        return Expr(kind: ExprKind.MatchCase(em_scrut, em_arms), span: span)
+    elif tag == EXPR_RETURN:
+        val ret_expr = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.Return(ret_expr), span: span)
+    elif tag == EXPR_LAMBDA:
+        val lambda_body_exprs = expr_get_stmts(idx)
+        # A block-bodied lambda (`\x:` followed by an indented multi-statement
+        # body) is parsed by wrapping the WHOLE statement list in a single
+        # EXPR_BLOCK node (tag 18; see _ParserPrimary/primary_expr.spl's
+        # backslash-lambda case: `lam_stmts.push(expr_block(blk_stmts, -1, 0))`)
+        # -- lambda_body_exprs is always a 1-element list, holding either that
+        # EXPR_BLOCK node or a bare expression (single-expression body).
+        # convert_flat_expr has NO case for EXPR_BLOCK (only flat_if_branch_block,
+        # used by if/else expression branches, knows how to unwrap it), so
+        # calling convert_flat_expr directly on an EXPR_BLOCK silently fell
+        # through to the generic fallback (NilLit), discarding every statement
+        # AND the tail value -- every block-bodied lambda call returned the
+        # same garbage constant regardless of input. Reuse the same EXPR_BLOCK
+        # -> Block conversion the if-expression bridge already uses, then wrap
+        # it as ExprKind.Block so HIR/MIR thread the tail value through
+        # lower_hir_block / lower_block exactly like if/match arm bodies do.
+        val body_expr = if lambda_body_exprs.len() > 0:
+            val lam_body0 = lambda_body_exprs[0]
+            if expr_get_tag(lam_body0) == EXPR_BLOCK:
+                Expr(kind: ExprKind.Block(flat_if_branch_block(lam_body0, span)), span: span)
+            else:
+                convert_flat_expr(lam_body0)
+        else:
+            Expr(kind: ExprKind.NilLit, span: span)
+        var lambda_params: [LambdaParam] = []
+        val lp_names = expr_get_args(idx)
+        var lpi = 0
+        while lpi < lp_names.len():
+            val lp_idx = lp_names[lpi]
+            lambda_params.push(LambdaParam(
+                name: expr_get_str(lp_idx),
+                has_type_: false,
+                type_: Type(kind: TypeKind.Infer, span: span),
+                span: span
+            ))
+            lpi = lpi + 1
+        return Expr(kind: ExprKind.Lambda(lambda_params, body_expr), span: span)
+    elif tag == EXPR_NULL_COALESCE:
+        val lhs = convert_flat_expr(expr_get_left(idx))
+        val rhs = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.NullCoalesce(lhs, rhs), span: span)
+    elif tag == EXPR_OPTIONAL_CHAIN:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.OptionalChain(obj, expr_get_str(idx)), span: span)
+    elif tag == EXPR_STRUCT_LIT:
+        val struct_name = expr_get_str(idx)
+        val field_exprs = expr_get_args(idx)
+        var fields: [(text, Expr)] = []
+        var fi = 0
+        while fi < field_exprs.len():
+            val field_idx = field_exprs[fi]
+            fields.push((expr_get_str(field_idx), convert_flat_expr(expr_get_left(field_idx))))
+            fi = fi + 1
+        return Expr(kind: ExprKind.StructLit(struct_name, fields), span: span)
+    elif tag == EXPR_TUPLE:
+        val tuple_args = expr_get_args(idx)
+        var tuple_elems: [Expr] = []
+        var tui = 0
+        while tui < tuple_args.len():
+            tuple_elems.push(convert_flat_expr(tuple_args[tui]))
+            tui = tui + 1
+        return Expr(kind: ExprKind.TupleLit(tuple_elems), span: span)
+    elif tag == EXPR_DICT_LIT:
+        # Dict literal `{k: v, ...}`: the parser stores key node indices in the
+        # ARGS slot and value node indices in the STMTS slot (see
+        # expr_dict_lit(keys, vals, ...) / placeholder_lambda EXPR_DICT_LIT). The
+        # bridge previously dropped both and emitted an empty DictLit, so every
+        # `{...}` compiled to an empty dict (native path: rt_dict_new with no
+        # rt_dict_set). Rebuild the (key, value) entries here.
+        val dict_key_indices = expr_get_args(idx)
+        val dict_val_indices = expr_get_stmts(idx)
+        var dict_entries: [(Expr, Expr)] = []
+        var dict_ei = 0
+        while dict_ei < dict_key_indices.len() and dict_ei < dict_val_indices.len():
+            val dict_key = convert_flat_expr(dict_key_indices[dict_ei])
+            val dict_val = convert_flat_expr(dict_val_indices[dict_ei])
+            dict_entries.push((dict_key, dict_val))
+            dict_ei = dict_ei + 1
+        return Expr(kind: ExprKind.DictLit(dict_entries), span: span)
+    elif tag == EXPR_UNIT:
+        return Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
+        return Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_EXISTS_CHECK:
+        val inner = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.ExistsCheck(inner), span: span)
+    elif tag == EXPR_FORCE_UNWRAP:
+        val fu_inner = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.ForceUnwrap(fu_inner), span: span)
+    elif tag == EXPR_TRY:
+        val try_inner = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.Try(try_inner), span: span)
+    elif tag == EXPR_CAST:
+        # `expr as Type` -- expr_cast() stores the operand in LEFT and the
+        # already-resolved target type tag (from parser_parse_type()) in the
+        # I slot. Without this case, casts fell through to the final `else`
+        # below and silently became NilLit -- e.g. a bitfield read's tail
+        # expression `inst.opcode as u32` turned into a no-op, which surfaced
+        # downstream as a bogus Unit-typed MIR local.
+        val cast_operand = convert_flat_expr(expr_get_left(idx))
+        val cast_type = convert_flat_type(expr_get_int(idx))
+        return Expr(kind: ExprKind.Cast(cast_operand, cast_type), span: span)
+    elif tag == EXPR_ASM:
+        return Expr(kind: ExprKind.AsmBlock(flat_asm_expr(expr_get_str(idx), span)), span: span)
+    elif tag == EXPR_ASM_MATCH:
+        var arms: [AsmMatchArm] = []
+        val arm_indices = expr_get_args(idx)
+        var ai = 0
+        while ai < arm_indices.len():
+            arms.push(flat_asm_match_arm(arm_indices[ai], span))
+            ai = ai + 1
+        return Expr(kind: ExprKind.AsmMatch(arms), span: span)
+    elif tag == EXPR_ASSIGN:
+        # `target = value` -- the flat parser emits assignment as an
+        # EXPRESSION statement (stmt_expr_stmt(expr_assign(...))), never
+        # STMT_ASSIGN. Without this case, assignments fell through to the
+        # final `else` and silently became NilLit -- e.g. a bitfield field
+        # write `inst.opcode = next_opcode` vanished from MIR entirely
+        # (same drop pattern as EXPR_CAST above).
+        val assign_target = convert_flat_expr(expr_get_left(idx))
+        val assign_value = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.Assign(assign_target, nil, assign_value), span: span)
+    elif tag == EXPR_COMPOUND_ASSIGN:
+        # `target += value` (and -=, *=, /=, %=) -- the parser already builds
+        # a dedicated EXPR_COMPOUND_ASSIGN node (op code in the I slot, target
+        # in LEFT, value in RIGHT; see expr_compound_assign() in
+        # core/_AstExpr/nodes.spl). This bridge had NO case for it, so every
+        # compound-assign fell through to the final `else` below and silently
+        # became NilLit -- e.g. `x += 5` compiled to a no-op that left `x`
+        # unchanged on the native --entry build path (same silent-drop
+        # pattern as EXPR_CAST/EXPR_ASSIGN/EXPR_RANGE above). Mirrors the
+        # plain EXPR_ASSIGN case just above; HIR lowering
+        # (hir_lowering/statements.spl's lower_hir_assign_op_opt) already
+        # fully supports the AssignOp slot, it just never received one.
+        val compound_target = convert_flat_expr(expr_get_left(idx))
+        val compound_value = convert_flat_expr(expr_get_right(idx))
+        val compound_op = flat_compound_assign_op(expr_get_int(idx))
+        return Expr(kind: ExprKind.Assign(compound_target, Some(compound_op), compound_value), span: span)
+    elif tag == EXPR_LIST_COMP:
+        val comp_body = convert_flat_expr(expr_get_right(idx))
+        val comp_iterable = convert_flat_expr(expr_get_left(idx))
+        val comp_iter_name = expr_get_str(idx)
+        var comp_clauses: [ComprehensionClause] = []
+        comp_clauses.push(ComprehensionClause(
+            kind: ComprehensionKind.For(comp_iter_name, comp_iterable),
+            span: span
+        ))
+        val comp_cond_idx = expr_get_extra(idx)
+        if comp_cond_idx >= 0:
+            val comp_cond_expr = convert_flat_expr(comp_cond_idx)
+            comp_clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.If(comp_cond_expr),
+                span: span
+            ))
+        return Expr(kind: ExprKind.ListComprehension(comp_body, comp_clauses), span: span)
+    elif tag == EXPR_RANGE:
+        # Root cause for the native `--entry` build path: this bridge is the
+        # sole translator from the flat/tree-sitter-style AST (expr_alloc
+        # nodes) into the tree-shaped Expr used by the rest of the pipeline
+        # (resolve -> hir_lowering -> mir lowering). EXPR_RANGE had NO case
+        # here, so every `for i in start..end:` iterable silently fell to
+        # the `else:` catch-all at the bottom of this function and came out
+        # as `ExprKind.NilLit` instead of `ExprKind.Range(...)`. Downstream,
+        # mir_lowering_stmts.spl's `lower_for` never saw a Range `iter.kind`,
+        # so it ALWAYS took the generic iterator-protocol fallback
+        # (lower_for_iterator), which panics with "for-in over non-array
+        # iterables is not supported" for anything that isn't a runtime
+        # array -- i.e. every native-build range-based `for` loop crashed at
+        # runtime. Mirrors the accessor calls already used for the exact
+        # same EXPR_RANGE node shape by the other backends in this
+        # directory (see cg_stmt.spl / cg_expr.spl / eval.spl): LEFT=start,
+        # RIGHT=end, I=inclusive flag. This flat node has no step slot
+        # (expr_range() takes no step argument), so step is always nil here.
+        val range_start_idx = expr_get_left(idx)
+        val range_end_idx = expr_get_right(idx)
+        val range_start: Expr? = if range_start_idx >= 0: convert_flat_expr(range_start_idx) else: nil
+        val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: nil
+        val range_inclusive = expr_get_int(idx) != 0
+        return Expr(kind: ExprKind.Range(range_start, range_end, range_inclusive, nil), span: span)
+    elif tag == EXPR_DICT_COMP:
+        val dc_args = expr_get_args(idx)
+        if dc_args.len() < 2:
+            return Expr(kind: ExprKind.NilLit, span: span)
+        val dc_key = convert_flat_expr(dc_args[0])
+        val dc_val = convert_flat_expr(dc_args[1])
+        val dc_iterable = convert_flat_expr(expr_get_left(idx))
+        val dc_iter_name = expr_get_str(idx)
+        var dc_clauses: [ComprehensionClause] = []
+        dc_clauses.push(ComprehensionClause(
+            kind: ComprehensionKind.For(dc_iter_name, dc_iterable),
+            span: span
+        ))
+        val dc_cond_idx = expr_get_extra(idx)
+        if dc_cond_idx >= 0:
+            val dc_cond_expr = convert_flat_expr(dc_cond_idx)
+            dc_clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.If(dc_cond_expr),
+                span: span
+            ))
+        return Expr(kind: ExprKind.DictComprehension(dc_key, dc_val, dc_clauses), span: span)
+    else:
+        return Expr(kind: ExprKind.NilLit, span: span)
+
+fn convert_flat_pattern(pat_eid: i64) -> Pattern:
+    """Convert a match-arm 'pattern' (parsed as an EXPRESSION in the flat AST)
+    into a structured Pattern. `Shape.Circle(x)` is EXPR_CALL over an
+    EXPR_FIELD_ACCESS -> Enum(Shape, Circle, Tuple([Binding x])); bare
+    `Shape.Red` -> unit Enum; `_` -> Wildcard; other ident -> Binding;
+    literal -> Literal."""
+    val pspan = make_span()
+    if pat_eid < 0:
+        return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    val ptag = expr_get_tag(pat_eid)
+    if ptag == EXPR_METHOD_CALL:
+        # `Shape.Circle(x)` parses as a METHOD_CALL: receiver=Shape (obj),
+        # method=Circle (variant), args=[x] (payload bindings) -- same form as
+        # enum construction.
+        val mc_obj = expr_get_left(pat_eid)
+        val mc_enum = if expr_get_tag(mc_obj) == EXPR_IDENT: expr_get_str(mc_obj) else: ""
+        val mc_variant = expr_get_str(pat_eid)
+        var mc_sub: [Pattern] = []
+        for a_eid in expr_get_args(pat_eid):
+            if expr_get_tag(a_eid) == EXPR_IDENT:
+                mc_sub.push(Pattern(kind: PatternKind.Binding(expr_get_str(a_eid), false), span: pspan))
+            else:
+                mc_sub.push(convert_flat_pattern(a_eid))
+        if mc_sub.len() == 0:
+            return Pattern(kind: PatternKind.Enum(mc_enum, mc_variant, nil), span: pspan)
+        return Pattern(kind: PatternKind.Enum(mc_enum, mc_variant, EnumPatternPayload.Tuple(mc_sub)), span: pspan)
+    elif ptag == EXPR_CALL:
+        val callee = expr_get_left(pat_eid)
+        if expr_get_tag(callee) == EXPR_FIELD_ACCESS:
+            val base = expr_get_left(callee)
+            val enum_name = if expr_get_tag(base) == EXPR_IDENT: expr_get_str(base) else: ""
+            val variant = expr_get_str(callee)
+            var sub: [Pattern] = []
+            for a_eid in expr_get_args(pat_eid):
+                if expr_get_tag(a_eid) == EXPR_IDENT:
+                    sub.push(Pattern(kind: PatternKind.Binding(expr_get_str(a_eid), false), span: pspan))
+                else:
+                    sub.push(convert_flat_pattern(a_eid))
+            return Pattern(kind: PatternKind.Enum(enum_name, variant, EnumPatternPayload.Tuple(sub)), span: pspan)
+        if expr_get_tag(callee) == EXPR_IDENT:
+            # Bare variant pattern `Circle(r)` (no enum qualifier). Keep the
+            # variant name and an empty enum name; MIR lowering resolves it
+            # against the registered enums (never silently a Wildcard, which
+            # made these arms fall through).
+            val bare_variant = expr_get_str(callee)
+            var bsub: [Pattern] = []
+            for b_eid in expr_get_args(pat_eid):
+                if expr_get_tag(b_eid) == EXPR_IDENT:
+                    bsub.push(Pattern(kind: PatternKind.Binding(expr_get_str(b_eid), false), span: pspan))
+                else:
+                    bsub.push(convert_flat_pattern(b_eid))
+            return Pattern(kind: PatternKind.Enum("", bare_variant, EnumPatternPayload.Tuple(bsub)), span: pspan)
+        return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    elif ptag == EXPR_FIELD_ACCESS:
+        val fbase = expr_get_left(pat_eid)
+        val f_enum = if expr_get_tag(fbase) == EXPR_IDENT: expr_get_str(fbase) else: ""
+        return Pattern(kind: PatternKind.Enum(f_enum, expr_get_str(pat_eid), nil), span: pspan)
+    elif ptag == EXPR_IDENT:
+        val nm = expr_get_str(pat_eid)
+        if nm == "_":
+            return Pattern(kind: PatternKind.Wildcard, span: pspan)
+        return Pattern(kind: PatternKind.Binding(nm, false), span: pspan)
+    elif ptag == EXPR_INT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT:
+        return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
+    elif ptag == EXPR_BINARY:
+        # `1 | 2 | 3` (or-pattern) parses as a chain of EXPR_BINARY(BitOr)
+        # nodes -- patterns are parsed via the general expression parser
+        # (see this function's docstring), and `|` has no dedicated
+        # pattern-level token. Before this case existed, EXPR_BINARY had NO
+        # match-pattern handling at all and fell through to the Wildcard
+        # catch-all below -- so `case 1 | 2 | 3:` silently became an
+        # UNCONDITIONAL Wildcard arm (matching every scrutinee value, not
+        # just 1/2/3), and a genuine trailing `case _:` then tripped MIR's
+        # "match has multiple wildcard arms" diagnostic -- which native-build
+        # does not gate on, so the build "succeeded" and ran with a garbage
+        # return value (matchpat lane finding). Only BitOr is a genuine
+        # or-pattern; any other binary operator in pattern position has no
+        # pattern meaning and still falls through to Wildcard unchanged
+        # (pre-existing behavior, not tightened here).
+        val pat_bin_op = op_kind_to_binop(expr_get_int(pat_eid))
+        if pat_bin_op == BinOp.BitOr:
+            val pat_bin_left = convert_flat_pattern(expr_get_left(pat_eid))
+            val pat_bin_right = convert_flat_pattern(expr_get_right(pat_eid))
+            var or_alts: [Pattern] = [pat_bin_left]
+            match pat_bin_right.kind:
+                case PatternKind.Or(more_alts):
+                    for m_alt in more_alts:
+                        or_alts.push(m_alt)
+                case _:
+                    or_alts.push(pat_bin_right)
+            return Pattern(kind: PatternKind.Or(or_alts), span: pspan)
+        return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    elif ptag == EXPR_TUPLE:
+        # `(a, b, ...)` tuple-destructure pattern. Before this case existed,
+        # EXPR_TUPLE fell through to the Wildcard catch-all below, so
+        # `case (a, b): return a + b` silently matched anything WITHOUT
+        # binding a/b -- the arm body's `a`/`b` references then resolved to
+        # nothing, which happened to loud-fail downstream as "unresolved
+        # name" (lucky side effect, not by design). Build the real Tuple
+        # pattern so the a/b bindings actually exist.
+        val tup_pat_indices = expr_get_args(pat_eid)
+        var tup_pat_elems: [Pattern] = []
+        var tpi = 0
+        while tpi < tup_pat_indices.len():
+            tup_pat_elems.push(convert_flat_pattern(tup_pat_indices[tpi]))
+            tpi = tpi + 1
+        return Pattern(kind: PatternKind.Tuple(tup_pat_elems), span: pspan)
+    elif ptag == EXPR_RANGE:
+        # `1..5` / `1..=5` range pattern -- mirrors the EXPR_RANGE gap fixed
+        # elsewhere in this file for `for i in start..end:` iterables.
+        # Before this case existed, EXPR_RANGE fell through to Wildcard.
+        val rp_start_idx = expr_get_left(pat_eid)
+        val rp_end_idx = expr_get_right(pat_eid)
+        val rp_start: Expr? = if rp_start_idx >= 0: convert_flat_expr(rp_start_idx) else: nil
+        val rp_end: Expr? = if rp_end_idx >= 0: convert_flat_expr(rp_end_idx) else: nil
+        val rp_inclusive = expr_get_int(pat_eid) != 0
+        return Pattern(kind: PatternKind.Range(rp_start, rp_end, rp_inclusive), span: pspan)
+    return Pattern(kind: PatternKind.Wildcard, span: pspan)
+
+# ============================================================================
+# defer / errdefer support (native flat-AST-bridge path)
+#
+# ROOT CAUSE (bug #172): `StmtKind` (parser_types_expr.spl) has no Defer /
+# ErrDefer variant, and `convert_flat_stmt`'s final `else:` branch silently
+# turned any unrecognized raw tag (including STMT_DEFER=14 / STMT_ERRDEFER)
+# into a no-op `NilLit` expression statement — the deferred statement's effect
+# was discarded with zero diagnostics, while the rest of the function compiled
+# and ran normally (silent wrong answer).
+#
+# Scope shipped here (task option 2, not full function-scope defer): a `defer`
+# registered directly at the TOP LEVEL of a function body runs, in LIFO order,
+# before every `return` in that function (including early returns nested in
+# if/while/for) and at fall-off-the-end -- including when ordinary statements
+# follow the `defer` (e.g. `fn work(): defer f(); g(); h()`, no explicit
+# `return`), as long as the function has no declared `-> T` return type (see
+# the `has_ret` fall-off-the-end block in `convert_decl_fn` below for why that
+# guard exists: a declared return type gives the body's last statement an
+# implicit-tail-value role that an appended defer-replay would silently
+# steal, so that shape stays refused). Any OTHER placement — nested inside
+# if/while/for/match, or `errdefer` anywhere — is refused with a LOUD build
+# failure instead of a silent drop: it lowers to a reference to a
+# deliberately-nonexistent identifier, which HIR name resolution rejects with
+# "unresolved name: ..." (HIR lowering errors are fatal by default) and, as a
+# second layer of insurance, MIR expression lowering independently rejects the same
+# unresolved reference with "undefined variable: ..." (an existing fatal
+# prefix in `_mir_error_is_fatal`, 80.driver/driver_pipeline.spl). No new
+# classification entry is needed, so the build stops with a non-zero exit and
+# no binary is produced.
+#
+# Block-form `defer:` (bug #172 follow-up, 2026-07-17): the pure-Simple
+# parser (parser_stmts.spl) previously had no grammar for `defer:` /
+# `errdefer:` followed by an indented body at all -- every such program
+# failed to PARSE, before this bridge ever ran. `stmt_defer_block_stmt` /
+# `stmt_errdefer_block_stmt` (ast_stmt.spl) now parse it, storing the body
+# via `stmt_body` (EXPR left at the -1 "no expr" sentinel). This bridge
+# extends the SAME top-level-only scope to the block form: a top-level
+# `defer:` registers its whole body as one group in `g_pending_defers`
+# (see the type's doc comment below) so it still replays as a single LIFO
+# unit relative to other defers. Nested placement and `errdefer:` (block or
+# single-line) remain refused exactly as before -- this only widens WHERE a
+# `defer`'s own body can come from, not WHERE a `defer` may be written.
+fn defer_unsupported_marker(span: Span) -> Stmt:
+    Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Ident("__defer_unsupported_placement__"), span: span)), span: span)
+
+# Per-function stack of pending top-level `defer` replay statements, in
+# encounter (registration) order. Reset/saved-and-restored around each
+# `convert_decl_fn` call so nested function-like conversions (if any reuse
+# this bridge) can't cross-contaminate an enclosing function's defer list.
+#
+# Each entry is a GROUP: the 1+ statements that make up ONE `defer`
+# registration's replay body. A single-line `defer expr` group always has
+# exactly one statement; a block-form `defer:` group (bug #172 follow-up) can
+# have several. LIFO ordering applies BETWEEN groups (last-registered defer
+# replays first); a group's OWN statements always replay in their original
+# top-to-bottom order, since only one defer body is unwinding at a time.
+var g_pending_defers: [[Stmt]] = []
+
+# Convert one raw statement for inclusion in a statement LIST (function body,
+# if/while/for/match body, ...). Unlike `convert_flat_stmt` (one raw stmt ->
+# exactly one `Stmt`), this can expand to zero statements (a top-level defer
+# registers itself and contributes nothing at its own position) or more than
+# one (a `return` — at any nesting depth in this function — gets the current
+# pending defers spliced in LIFO order immediately before it).
+fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
+    val tag = stmt_get_tag(idx)
+    if tag == STMT_DEFER:
+        if is_top_level:
+            val d_span = make_span()
+            val d_body = stmt_get_body(idx)
+            if d_body.len() > 0:
+                # Block-form `defer:` -- convert each body statement (in its
+                # own written order) and register the whole group as one
+                # pending-defer entry.
+                var d_group: [Stmt] = []
+                var dbi = 0
+                while dbi < d_body.len():
+                    val d_expanded = convert_flat_stmt_in_list(d_body[dbi], false)
+                    var dbk = 0
+                    while dbk < d_expanded.len():
+                        d_group.push(d_expanded[dbk])
+                        dbk = dbk + 1
+                    dbi = dbi + 1
+                g_pending_defers.push(d_group)
+            else:
+                val d_expr = convert_flat_expr(stmt_get_expr(idx))
+                g_pending_defers.push([Stmt(kind: StmtKind.Expr(d_expr), span: d_span)])
+            return []
+        else:
+            return [defer_unsupported_marker(make_span())]
+    elif tag == STMT_ERRDEFER:
+        # errdefer (run-only-on-error) semantics are not implemented on the
+        # native path at all yet — refuse loudly everywhere, top-level or not.
+        return [defer_unsupported_marker(make_span())]
+    elif tag == STMT_RETURN:
+        var out: [Stmt] = []
+        var di = g_pending_defers.len() - 1
+        while di >= 0:
+            val d_replay_group = g_pending_defers[di]
+            var dgi = 0
+            while dgi < d_replay_group.len():
+                out.push(d_replay_group[dgi])
+                dgi = dgi + 1
+            di = di - 1
+        out.push(convert_flat_stmt(idx))
+        return out
+    else:
+        return [convert_flat_stmt(idx)]
+
+fn convert_flat_stmt(idx: i64) -> Stmt:
+    if idx < 0:
+        val nil_span = make_span()
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: nil_span)), span: nil_span)
+    val tag = stmt_get_tag(idx)
+    val span = make_span()
+    if tag <= 0:
+        print "[flat-bridge] missing stmt tag idx={idx} tag={tag}"
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    if tag == STMT_EXPR:
+        val e = convert_flat_expr(stmt_get_expr(idx))
+        return Stmt(kind: StmtKind.Expr(e), span: span)
+    elif tag == STMT_RETURN:
+        val ret_idx = stmt_get_expr(idx)
+        if ret_idx >= 0:
+            val e = convert_flat_expr(ret_idx)
+            return Stmt(kind: StmtKind.Return(e), span: span)
+        else:
+            return Stmt(kind: StmtKind.Return(nil), span: span)
+    elif tag == STMT_VAL_DECL:
+        val name = stmt_get_name(idx)
+        val type_idx = stmt_get_type(idx)
+        val init_idx = stmt_get_expr(idx)
+        val type_ = convert_flat_type(type_idx)
+        val init_expr = convert_flat_expr(init_idx)
+        return Stmt(kind: StmtKind.Val(name, type_, init_expr), span: span)
+    elif tag == STMT_VAR_DECL:
+        val name = stmt_get_name(idx)
+        val type_idx = stmt_get_type(idx)
+        val init_idx = stmt_get_expr(idx)
+        val type_ = convert_flat_type(type_idx)
+        if init_idx >= 0:
+            val init_expr = convert_flat_expr(init_idx)
+            return Stmt(kind: StmtKind.Var(name, type_, init_expr), span: span)
+        else:
+            return Stmt(kind: StmtKind.Var(name, type_, nil), span: span)
+    elif tag == STMT_ASSIGN:
+        val target = convert_flat_expr(stmt_get_expr(idx))
+        val body = stmt_get_body(idx)
+        if body.len() < 1:
+            return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+        val value = convert_flat_expr(body[0])
+        return Stmt(kind: StmtKind.Assign(target, nil, value), span: span)
+    elif tag == STMT_IF:
+        val cond = convert_flat_expr(stmt_get_expr(idx))
+        val then_stmts = stmt_get_body(idx)
+        var then_body: [Stmt] = []
+        var si = 0
+        while si < then_stmts.len():
+            val then_expanded = convert_flat_stmt_in_list(then_stmts[si], false)
+            var tk = 0
+            while tk < then_expanded.len():
+                then_body.push(then_expanded[tk])
+                tk = tk + 1
+            si = si + 1
+        val then_block = Block(stmts: then_body, span: span)
+        # else/elif fidelity: the parser stores the else body (or a nested
+        # if-stmt for `elif`/`else if` chains) in the elif arena, indexed by
+        # the stmt's TYPE field. elif chains are nested STMT_IF nodes inside
+        # else_stmts and convert recursively. Pass nil (not an empty Block)
+        # when there is no else, so codegen sees None vs Some(empty).
+        val if_elif_idx = stmt_get_type(idx)
+        val if_else_stmts = elif_get_else(if_elif_idx)
+        if if_else_stmts.len() > 0:
+            var if_else_body: [Stmt] = []
+            var ei = 0
+            while ei < if_else_stmts.len():
+                val else_expanded = convert_flat_stmt_in_list(if_else_stmts[ei], false)
+                var ek = 0
+                while ek < else_expanded.len():
+                    if_else_body.push(else_expanded[ek])
+                    ek = ek + 1
+                ei = ei + 1
+            val else_block = Block(stmts: if_else_body, span: span)
+            return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)), span: span)
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, nil), span: span)), span: span)
+    elif tag == STMT_WHILE:
+        val cond = convert_flat_expr(stmt_get_expr(idx))
+        val body_stmts = stmt_get_body(idx)
+        var body: [Stmt] = []
+        var wi = 0
+        while wi < body_stmts.len():
+            val w_expanded = convert_flat_stmt_in_list(body_stmts[wi], false)
+            var wk = 0
+            while wk < w_expanded.len():
+                body.push(w_expanded[wk])
+                wk = wk + 1
+            wi = wi + 1
+        val block = Block(stmts: body, span: span)
+        return Stmt(kind: StmtKind.While(cond, block), span: span)
+    elif tag == STMT_FOR:
+        val iter_name = stmt_get_name(idx)
+        val iterable = convert_flat_expr(stmt_get_expr(idx))
+        val body_stmts = stmt_get_body(idx)
+        var body: [Stmt] = []
+        var fi = 0
+        while fi < body_stmts.len():
+            val f_expanded = convert_flat_stmt_in_list(body_stmts[fi], false)
+            var fk = 0
+            while fk < f_expanded.len():
+                body.push(f_expanded[fk])
+                fk = fk + 1
+            fi = fi + 1
+        val block = Block(stmts: body, span: span)
+        return Stmt(kind: StmtKind.For(iter_name, iterable, block), span: span)
+    elif tag == STMT_BREAK:
+        return Stmt(kind: StmtKind.Break(nil), span: span)
+    elif tag == STMT_CONTINUE:
+        return Stmt(kind: StmtKind.Continue(nil), span: span)
+    elif tag == STMT_BLOCK:
+        val body_stmts = stmt_get_body(idx)
+        var body: [Stmt] = []
+        var bi = 0
+        while bi < body_stmts.len():
+            val b_expanded = convert_flat_stmt_in_list(body_stmts[bi], false)
+            var bk = 0
+            while bk < b_expanded.len():
+                body.push(b_expanded[bk])
+                bk = bk + 1
+            bi = bi + 1
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
+    elif tag == STMT_GPU_LAUNCH:
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    elif tag == STMT_MATCH:
+        # Ordinary `match s: Pat => body` was previously dropped to NilLit here,
+        # so match never reached HIR lowering on the native path. Build a real
+        # MatchCase: scrutinee from EXPR, arms from BODY. Each arm's "pattern"
+        # is an expression eid (convert_flat_pattern reclassifies enum variants).
+        val m_scrut = convert_flat_expr(stmt_get_expr(idx))
+        val m_arm_ids = stmt_get_body(idx)
+        var m_arms: [MatchArm] = []
+        var mi = 0
+        while mi < m_arm_ids.len():
+            val arm_id = m_arm_ids[mi]
+            val m_pat = convert_flat_pattern(arm_get_pattern(arm_id))
+            # Explicit type: arm_get_body returns [i64] but the deployed seed
+            # erases the nested-[[i64]] element to a boxed i64 handle on a bare
+            # `val`, so `.len()` fails with "len on i64". The annotation forces
+            # the list decode (same ANY-field landmine as the MatchArm rebind).
+            val m_body_ids: [i64] = arm_get_body(arm_id)
+            var m_arm_body: [Stmt] = []
+            var mbi = 0
+            while mbi < m_body_ids.len():
+                val m_expanded = convert_flat_stmt_in_list(m_body_ids[mbi], false)
+                var mk = 0
+                while mk < m_expanded.len():
+                    m_arm_body.push(m_expanded[mk])
+                    mk = mk + 1
+                mbi = mbi + 1
+
+            val m_guard_eid = arm_get_guard(arm_id)
+            var m_g_has = false
+            var m_g_expr = Expr(kind: ExprKind.NilLit, span: span)
+            if m_guard_eid >= 0:
+                m_g_has = true
+                m_g_expr = convert_flat_expr(m_guard_eid)
+            m_arms.push(MatchArm(
+                pattern: m_pat,
+                has_guard: m_g_has,
+                guard: m_g_expr,
+                body: Block(stmts: m_arm_body, span: span),
+                span: span
+            ))
+            mi = mi + 1
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.MatchCase(m_scrut, m_arms), span: span)), span: span)
+    elif tag == STMT_DEFER or tag == STMT_ERRDEFER:
+        # Defensive catch-all: any call site that didn't route through
+        # `convert_flat_stmt_in_list` (see above) — e.g. a future/unaudited
+        # nested-body loop — must never silently drop a defer. Refuse loudly
+        # instead of falling through to the generic NilLit no-op below.
+        return defer_unsupported_marker(span)
+    else:
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+
+fn convert_decl_fn(idx: i64) -> Function:
+    val name = decl_get_name(idx)
+    if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] fn:start {name}")
+    val p_names = decl_get_param_names(idx)
+    val p_types = decl_get_param_types(idx)
+    # Per-parameter `mut` marker (native_freefn_mut_param_no_mutate fix),
+    # parallel to p_names/p_types; parser_skip_mut_if_present's PARAM_MUTS
+    # side table (fn_struct_decls.spl) is the only surviving record that a
+    # free-function param was declared `mut name: T` -- thread it onto Param
+    # here so it reaches HirParam (declaration_lowering.spl's lower_param)
+    # and, from there, MIR function_lowering.spl's by-reference bind.
+    val p_muts = decl_get_param_muts(idx)
+    val span = make_span()
+    var params: [Param] = []
+    var pi = 0
+    while pi < p_names.len():
+        val p_type = if pi < p_types.len(): p_types[pi] else: 0
+        val has_t = p_type > 0
+        val p_is_mut = pi < p_muts.len() and p_muts[pi] != 0
+        params.push(Param(
+            name: p_names[pi],
+            has_type_: has_t,
+            type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: span),
+            span: span,
+            is_mutable: p_is_mut
+        ))
+        pi = pi + 1
+
+    val ret = decl_get_ret_type(idx)
+    # Computed here (before the body/defer conversion below) rather than at its
+    # original call site further down, because the fall-off-the-end defer
+    # replay logic needs to know, per function, whether a `-> T` return type
+    # was declared. See the `has_ret` usage inside the `g_pending_defers`
+    # fall-off-the-end block for why this matters.
+    val has_ret = ret > 0
+    if flat_bridge_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+        eprint("[simpleos-flat-ret] name={name} tag={ret}")
+    val body = decl_get_body(idx)
+    val trace_reset = (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1"
+    if trace_reset and body.len() > 0 and body[body.len() - 1] >= stmt_count():
+        print "[convert_decl_fn] STALE-BODY-SUSPECT name={name} body_len={body.len()} body_first={body[0]} body_last={body[body.len() - 1]} live_stmt_count={stmt_count()} reset_seq={ast_reset_seq_get()}"
+    var stmts: [Stmt] = []
+    # Save/restore the pending-defer stack around this function's own body so
+    # a re-entrant conversion (if any future caller nests one) can't leak
+    # defers across function boundaries. See convert_flat_stmt_in_list above.
+    val saved_pending_defers: [[Stmt]] = g_pending_defers
+    g_pending_defers = []
+    var si = 0
+    val body_len = body.len()
+    while si < body_len:
+        if trace_reset and body[si] >= stmt_count():
+            print "[convert_decl_fn] OOB-ABOUT-TO-HIT name={name} si={si} stmt_idx={body[si]} live_stmt_count={stmt_count()}"
+        val expanded = convert_flat_stmt_in_list(body[si], true)
+        var k = 0
+        while k < expanded.len():
+            stmts.push(expanded[k])
+            k = k + 1
+        si = si + 1
+
+    if g_pending_defers.len() > 0:
+        # Fall-off-the-end replay. Already safe to append when the function's
+        # last raw top-level statement was `defer` itself (nothing trails it,
+        # so the append is truly the new last statement with nothing to
+        # disturb) -- see the STMT_DEFER arm below. If the last raw statement
+        # was already an explicit `return`, `convert_flat_stmt_in_list`'s
+        # STMT_RETURN case already spliced the defers before it -- appending
+        # again here would be dead code AFTER that return, so it is skipped,
+        # not duplicated (see the `last_raw_tag != STMT_RETURN` guard below).
+        #
+        # The remaining shape -- the body falls off the end with ordinary
+        # statements AFTER the last `defer` (bug #172 follow-up, the MOST
+        # COMMON defer pattern: `fn work(): defer f(); g(); h()`, no explicit
+        # `return`) -- is handled here too, but ONLY when the function has NO
+        # declared `-> T` return type (`has_ret == false`). That guard exists
+        # because of how HIR lowering picks a lowering path for the body
+        # (`_Items/declaration_lowering.spl`, gated on `fn_.has_return_type`):
+        #   - has_ret == false -> `lower_hir_block_unit`: every statement,
+        #     INCLUDING a trailing expression-statement, stays a plain
+        #     statement; no tail value is ever extracted. Appending the
+        #     defer-replay statements after the real last statement is
+        #     unconditionally safe here -- there is no implicit return value
+        #     for the append to clobber.
+        #   - has_ret == true -> `lower_hir_block`: the LAST statement (if an
+        #     expression-statement) is lifted out of `stmts` and used as the
+        #     block's implicit tail-value / return value. Appending a
+        #     defer-replay statement after it would silently steal that slot
+        #     (the defer's own expression, not the function's real value,
+        #     would become the return value) -- so that shape is intentionally
+        #     left OUT OF SCOPE and still refused loudly rather than risking a
+        #     silently wrong return value.
+        val last_raw_tag = if body_len > 0: stmt_get_tag(body[body_len - 1]) else: -1
+        if last_raw_tag == STMT_DEFER:
+            var dj = g_pending_defers.len() - 1
+            while dj >= 0:
+                val dj_group = g_pending_defers[dj]
+                var dji = 0
+                while dji < dj_group.len():
+                    stmts.push(dj_group[dji])
+                    dji = dji + 1
+                dj = dj - 1
+        elif last_raw_tag != STMT_RETURN:
+            if has_ret:
+                stmts.push(defer_unsupported_marker(make_span()))
+            else:
+                var ej = g_pending_defers.len() - 1
+                while ej >= 0:
+                    val ej_group = g_pending_defers[ej]
+                    var eji = 0
+                    while eji < ej_group.len():
+                        stmts.push(ej_group[eji])
+                        eji = eji + 1
+                    ej = ej - 1
+    g_pending_defers = saved_pending_defers
+
+    val visibility = convert_decl_visibility(idx)
+    val fn_params: [Param] = params
+    # decl_get_type_params returns the `<T, U, ...>` names captured by
+    # parse_type_params() at parse time. This bridge previously discarded
+    # them entirely -- `parser_function_new` below was always called with a
+    # hardcoded `[]`, so `Function.type_params` was empty by the time HIR
+    # (and every downstream check gated on it) ever saw the function, turning
+    # `fn id<T>(x: T) -> T` into a silent-wrong native build (bug: generic
+    # functions on the native --entry path return 0 instead of the argument).
+    # Thread the real names through as `[TypeParam]` so HIR lowering can see
+    # (and reject) generic functions instead of erasing them.
+    val tp_names = decl_get_type_params(idx)
+    var fn_type_params: [TypeParam] = []
+    var tpi = 0
+    while tpi < tp_names.len():
+        fn_type_params.push(TypeParam(
+            name: tp_names[tpi],
+            bounds: [],
+            has_default: false,
+            default: Type(kind: TypeKind.Infer, span: span),
+            span: span
+        ))
+        tpi = tpi + 1
+    # decl_get_ret_type returns a type tag (>0 when a `-> T` return type was
+    # declared). This was previously fetched into `ret` and then discarded --
+    # the function was always constructed with has_return_type=false and an
+    # Infer return type, silently dropping every declared return type through
+    # the flat-AST bridge. Thread the real return type through instead.
+    # (`has_ret` itself is computed earlier, right after `ret` -- see the
+    # fall-off-the-end defer replay block above for why.)
+    val inferred_ret: Type = if has_ret: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span)
+    val body_block = Block(stmts: stmts, span: span)
+    var fn_attributes: [Attribute] = []
+    if decl_get_is_gpu_kernel(idx) != 0:
+        var gpu_args: [Expr] = []
+        val gpu_target = decl_get_gpu_target_text(idx)
+        val gpu_target_arg_name = decl_get_gpu_target_arg_name_text(idx)
+        val gpu_backends = decl_get_gpu_backends_text(idx)
+        if gpu_target.len() > 0:
+            if gpu_target_arg_name.len() > 0:
+                val left = Expr(kind: ExprKind.Ident(gpu_target_arg_name), span: span)
+                val right = Expr(kind: ExprKind.StringLit(gpu_target, nil), span: span)
+                gpu_args.push(Expr(kind: ExprKind.Assign(left, nil, right), span: span))
+            else:
+                gpu_args.push(Expr(kind: ExprKind.StringLit(gpu_target, nil), span: span))
+        if gpu_backends.len() > 0:
+            val left = Expr(kind: ExprKind.Ident("backends"), span: span)
+            val right = Expr(kind: ExprKind.StringLit(gpu_backends, nil), span: span)
+            gpu_args.push(Expr(kind: ExprKind.Assign(left, nil, right), span: span))
+        fn_attributes.push(Attribute(name: "gpu", args: gpu_args, span: span))
+    if decl_get_is_hardware(idx) != 0:
+        fn_attributes.push(Attribute(name: "hardware", args: [], span: span))
+        val clocked_names = decl_get_clocked_args(idx)
+        if clocked_names.len() > 0:
+            var clocked_args: [Expr] = []
+            for cn in clocked_names:
+                clocked_args.push(Expr(kind: ExprKind.Ident(cn), span: span))
+            fn_attributes.push(Attribute(name: "clocked", args: clocked_args, span: span))
+    val converted: Function = parser_function_new(
+        name,
+        fn_type_params,
+        fn_params,
+        has_ret,
+        inferred_ret,
+        body_block,
+        visibility,
+        decl_get_is_async(idx) != 0,
+        false,
+        convert_decl_is_public(idx),
+        false,
+        false,
+        decl_get_is_comptime(idx),
+        decl_get_is_gpu_kernel(idx) != 0,
+        false,
+        fn_attributes,
+        false,
+        "",
+        span
+    )
+    if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] fn:done {name}")
+    converted
+
+fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
+    # NOTE: must use field access, not a positional `case Function(...)`
+    # destructure — wide positional class matches silently fail to match in
+    # the interpreter and SIGSEGV in cranelift-compiled binaries (see
+    # doc/08_tracking/bug/positional_class_match_wide_destructure_2026-06-11.md).
+    val base: Function = convert_decl_fn(idx)
+    val method_mode = decl_get_is_async(idx)
+    val prefix = target_name + "__"
+    val method_name = if base.name.starts_with(prefix):
+        base.name.substring(prefix.len(), base.name.len())
+    else:
+        base.name
+    parser_function_new(
+        method_name,
+        base.type_params,
+        base.params,
+        base.has_return_type,
+        base.return_type,
+        base.body,
+        base.visibility,
+        false,
+        method_mode == 1,
+        base.is_public,
+        method_mode != 1,
+        method_mode == 2,
+        base.is_const,
+        base.is_kernel,
+        base.is_extern,
+        base.attributes,
+        base.has_doc_comment,
+        base.doc_comment,
+        base.span
+    )
+
+fn convert_decl_extern_fn(idx: i64) -> Function:
+    val name = decl_get_name(idx)
+    val p_names = decl_get_param_names(idx)
+    val p_types = decl_get_param_types(idx)
+    val span = make_span()
+    var params: [Param] = []
+    var pi = 0
+    while pi < p_names.len():
+        val p_type = if pi < p_types.len(): p_types[pi] else: 0
+        val has_t = p_type > 0
+        params.push(Param(
+            name: p_names[pi],
+            has_type_: has_t,
+            type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: span),
+            span: span,
+            is_mutable: false
+        ))
+        pi = pi + 1
+
+    # decl_get_ret_type returns a type tag (>0 when a `-> T` return type was
+    # declared). This was previously fetched into `ret` and then discarded --
+    # every extern function was constructed with has_return_type=false and an
+    # Infer return type, silently dropping the declared return type. Downstream,
+    # the symbol's Function type then carried a Unit return (module_lowering),
+    # so MIR lowered any extern call in value position as void (dest=None),
+    # emitting `call void @f()` plus an orphaned `bitcast void %l to T` that
+    # llc rejects ("void type only allowed for function results"). Mirror the
+    # convert_decl_fn fix: thread the real return type through. (#146)
+    val ret = decl_get_ret_type(idx)
+    val extern_params: [Param] = params
+    val extern_has_ret = ret > 0
+    val extern_inferred_ret = if extern_has_ret: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span)
+    parser_function_new(
+        name,
+        [],
+        extern_params,
+        extern_has_ret,
+        extern_inferred_ret,
+        Block(stmts: [], span: span),
+        Visibility.Private,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        [],
+        false,
+        "",
+        span
+    )
+
+fn text_parse_int_simple(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        result = result * 10
+        val ch = s[i]
+        if ch == "1":
+            result = result + 1
+        elif ch == "2":
+            result = result + 2
+        elif ch == "3":
+            result = result + 3
+        elif ch == "4":
+            result = result + 4
+        elif ch == "5":
+            result = result + 5
+        elif ch == "6":
+            result = result + 6
+        elif ch == "7":
+            result = result + 7
+        elif ch == "8":
+            result = result + 8
+        elif ch == "9":
+            result = result + 9
+        i = i + 1
+    result

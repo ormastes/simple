@@ -1,0 +1,190 @@
+# Font Loading SFFI — stb_truetype wrapper
+#
+# Loads TrueType fonts and renders glyph bitmaps via C runtime (runtime_font.c).
+# All handles are i64 (opaque pointers cast in C).
+
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.common.encoding.sfnt.{font_runtime_ttf_default_supported}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, selected_font_asset_identity, load_selected_font_file}
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw SFFI)
+# ============================================================================
+
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+extern fn rt_font_load_bytes(data_ptr: i64, data_len: i64) -> i64
+extern fn rt_font_load(path: text) -> i64
+extern fn rt_font_free(handle: i64)
+extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
+extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
+extern fn rt_font_bitmap_free(bitmap_handle: i64)
+extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_line_height(font_handle: i64, size: f64) -> i64
+extern fn rt_font_ascent(font_handle: i64, size: f64) -> i64
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper
+# ============================================================================
+
+class FontHandle:
+    handle: i64
+    generation: i64 = 0
+    path: text
+
+impl FontHandle:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+    fn is_live() -> bool:
+        font_face_is_live(self.handle, self.generation)
+
+# ponytail: process-local linear registry; replace with a locked map only if
+# concurrent font load/free or measured lookup volume requires it.
+var _font_face_handles: [i64] = []
+var _font_face_generations: [i64] = []
+var _font_face_identities: [text] = []
+var _next_font_face_generation: i64 = 1
+
+fn _register_font_face(handle: i64, identity: text) -> i64:
+    val generation = _next_font_face_generation
+    _next_font_face_generation = _next_font_face_generation + 1
+    var i = 0
+    while i < _font_face_handles.len():
+        if _font_face_handles[i] == 0:
+            _font_face_handles[i] = handle
+            _font_face_generations[i] = generation
+            _font_face_identities[i] = identity
+            return generation
+        i = i + 1
+    _font_face_handles.push(handle)
+    _font_face_generations.push(generation)
+    _font_face_identities.push(identity)
+    generation
+
+fn font_face_is_live(handle: i64, generation: i64) -> bool:
+    var i = 0
+    while i < _font_face_handles.len():
+        if _font_face_handles[i] == handle and _font_face_generations[i] == generation:
+            return handle > 0 and generation > 0
+        i = i + 1
+    false
+
+fn font_face_current_generation(handle: i64) -> i64:
+    var i = 0
+    while i < _font_face_handles.len():
+        if _font_face_handles[i] == handle:
+            return _font_face_generations[i]
+        i = i + 1
+    0
+
+fn font_face_handle_for_generation(generation: i64) -> i64:
+    var i = 0
+    while i < _font_face_generations.len():
+        if _font_face_generations[i] == generation:
+            return _font_face_handles[i]
+        i = i + 1
+    0
+
+fn font_face_identity(handle: i64, generation: i64) -> text:
+    var i = 0
+    while i < _font_face_handles.len():
+        if (_font_face_handles[i] == handle and
+            _font_face_generations[i] == generation):
+            return _font_face_identities[i]
+        i = i + 1
+    ""
+
+fn _unregister_font_face(handle: i64, generation: i64) -> bool:
+    var i = 0
+    while i < _font_face_handles.len():
+        if _font_face_handles[i] == handle and _font_face_generations[i] == generation:
+            _font_face_handles[i] = 0
+            _font_face_generations[i] = 0
+            _font_face_identities[i] = ""
+            return true
+        i = i + 1
+    false
+
+class GlyphMetrics:
+    width: i64
+    height: i64
+    advance: i64
+    codepoint: i64
+
+class GlyphBitmap:
+    bitmap_handle: i64
+    width: i64
+    height: i64
+    metrics: GlyphMetrics
+
+impl GlyphBitmap:
+    fn is_valid() -> bool:
+        self.bitmap_handle > 0 and self.width > 0 and self.height > 0
+
+    fn get_pixel(x: i64, y: i64) -> i64:
+        if not self.is_valid():
+            return 0
+        rt_font_bitmap_get_pixel(self.bitmap_handle, x, y)
+
+fn load_font(path: text) -> FontHandle?:
+    val selected = selected_font_asset_candidate_for_path(path)
+    val blob = if selected != nil:
+        val loaded = load_selected_font_file(path)
+        val validation = loaded.1
+        if not validation.valid:
+            return nil
+        loaded.0
+    else:
+        file_read_bytes(path)
+    if not font_runtime_ttf_default_supported(blob):
+        return nil
+    val h = if selected != nil:
+        rt_font_load_bytes(rt_array_data_ptr_u8(blob), blob.len())
+    else:
+        rt_font_load(path)
+    if h == 0:
+        return nil
+    val identity = if selected != nil:
+        selected_font_asset_identity(selected.?)
+    else:
+        "sha256={sha256_u8_hex(blob)};axes=default"
+    FontHandle(handle: h, generation: _register_font_face(h, identity), path: path)
+
+fn free_font(font: FontHandle):
+    if _unregister_font_face(font.handle, font.generation):
+        rt_font_free(font.handle)
+
+fn get_glyph(font: FontHandle, codepoint: i64, size_px: f64) -> GlyphBitmap?:
+    if not font.is_live():
+        return nil
+    val bmp_handle = rt_font_glyph_bitmap(font.handle, codepoint, size_px)
+    if bmp_handle == 0:
+        return nil
+    val w = rt_font_bitmap_width(bmp_handle)
+    val h = rt_font_bitmap_height(bmp_handle)
+    val adv = rt_font_glyph_advance(font.handle, codepoint, size_px)
+    val metrics = GlyphMetrics(width: w, height: h, advance: adv, codepoint: codepoint)
+    GlyphBitmap(bitmap_handle: bmp_handle, width: w, height: h, metrics: metrics)
+
+fn glyph_index(font: FontHandle, codepoint: i64) -> i64:
+    if not font.is_live():
+        return 0
+    rt_font_glyph_index(font.handle, codepoint)
+
+fn free_glyph_bitmap(bmp: GlyphBitmap):
+    if bmp.is_valid():
+        rt_font_bitmap_free(bmp.bitmap_handle)
+
+fn get_line_height(font: FontHandle, size_px: f64) -> i64:
+    if not font.is_live():
+        return 0
+    rt_font_line_height(font.handle, size_px)
+
+fn font_face_ascent(handle: i64, generation: i64, size_px: i32) -> i32:
+    if not font_face_is_live(handle, generation) or size_px <= 0:
+        return 0
+    rt_font_ascent(handle, size_px.to_f64()).to_i32()

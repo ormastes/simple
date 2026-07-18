@@ -1,0 +1,182 @@
+# @cover src/lib/common/ui/window_scene_draw_ir.spl 80%
+# @tag: unit, ui, draw_ir, wm
+
+use std.spec
+use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
+use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_scene_layout_key, shared_wm_translate_pointer_event, shared_wm_translate_pointer_event_cached}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _tree(title: text):
+    build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
+fn _taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "terminal", display_name: "Terminal", icon: "term"),
+            AppRef(app_id: "browser", display_name: "Browser", icon: "browser")
+        ],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "Window One", minimized: false),
+            WindowRef(window_id: "win2", app_id: "demo.two", title: "Window Two", minimized: false)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "09:41", icon: "clock")
+        ]
+    )
+
+fn _scene():
+    var manager = WindowManager.new()
+    val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+    val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+    var registry = UiWindowSurfaceRegistry.new()
+    registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+    registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+    shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+describe "window scene Draw IR projection":
+
+    it "retains readable bitmap text when selected metrics are unavailable":
+        val source = rt_file_read_text("src/lib/common/ui/window_scene_draw_ir.spl")
+        val draw_ir_route = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        val engine = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        val baremetal = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl")
+        val fallback = draw_ir_text("fallback", 1, 2, "A", 0xffffffffu32)
+        expect(fallback.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(fallback.computed_style.len()).to_equal(0)
+        expect(source).to_contain("draw_ir_text(component_id, x, legacy_y, value, color)")
+        expect(source.contains("draw_ir_rect(component_id, x, legacy_y, bar_w, 2, color)")).to_equal(false)
+        expect(draw_ir_route).to_contain("if font_identity != \"\":")
+        expect(draw_ir_route).to_contain("eng.draw_text(x, y, command.text_value, command.color")
+        expect(engine).to_contain("if selected != nil:")
+        expect(engine).to_contain("bm.draw_text(x, y, text_val, color, font_size)")
+        expect(baremetal).to_contain("render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, color, font_size)")
+
+    it "projects the window manager chrome and windows into composed Draw IR batches":
+        val scene = _scene()
+        val composition = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+
+        expect(composition.composition_id).to_equal("wm-composite")
+        expect(composition.scene_key).to_equal(shared_wm_scene_layout_key(scene))
+        expect(composition.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
+        expect(composition.batches.len()).to_equal(5)
+        expect(composition.batches[0].embedding.component_id).to_equal("desktop")
+        expect(composition.batches[1].embedding.component_id).to_equal("wm-chrome")
+        expect(composition.batches[2].embedding.surface_id).to_equal("surf1")
+        expect(composition.batches[3].embedding.surface_id).to_equal("surf2")
+        expect(composition.batches[4].embedding.component_id).to_equal("wm-taskbar-objects")
+        val clock = composition.batches[4].commands[10]
+        expect(clock.component_id).to_equal("taskbar-clock")
+        expect(clock.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(clock.text_value).to_equal("09:41")
+        expect(clock.computed_style.len()).to_be_greater_than(3)
+        expect(clock.computed_style[0].value).to_equal("Noto Sans Mono")
+        expect(clock.computed_style[1].value).to_start_with("sha256=")
+        expect(clock.computed_style[3].value).to_equal("12")
+        expect(composition.batches[0].source.source_kind).to_equal(DRAW_IR_SOURCE_WM_SCENE)
+        expect(composition.batches[1].source.source_id).to_equal("wm.chrome")
+        expect(composition.batches[2].source.source_id).to_equal("wm.window.win1")
+        expect(composition.batches[2].source.style_key).to_equal("wm.window")
+        expect(composition.batches[2].source.style_revision).to_contain("xy=10,40")
+        expect(composition.batches[2].source.style_revision).to_contain("size=300x200")
+        expect(composition.batches[2].embedding.x).to_equal(10)
+        expect(composition.batches[2].embedding.y).to_equal(40)
+        expect(composition.batches[2].embedding.width).to_equal(305)
+        expect(composition.batches[2].embedding.height).to_equal(206)
+        expect(composition.batches[3].embedding.x).to_equal(80)
+        expect(composition.batches[3].embedding.y).to_equal(120)
+        expect(composition.batches[3].commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
+        expect(composition.batches[3].commands[6].kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        val title = composition.batches[3].commands[6]
+        if title.computed_style.len() > 0:
+            expect(title.computed_style[0].value).to_equal("Noto Sans Mono")
+            expect(title.computed_style[1].value).to_start_with("sha256=")
+            expect(title.computed_style[2].value).to_contain(",")
+            expect(title.width).to_be_greater_than(0)
+
+    it "keeps Draw IR source revisions stable for unchanged scenes":
+        val scene = _scene()
+        val first = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val second = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+
+        expect(second.batches[0].source.style_revision).to_equal(first.batches[0].source.style_revision)
+        expect(second.batches[1].source.style_revision).to_equal(first.batches[1].source.style_revision)
+        expect(second.batches[2].source.style_revision).to_equal(first.batches[2].source.style_revision)
+        expect(second.batches[3].source.style_revision).to_equal(first.batches[3].source.style_revision)
+
+    it "enriches WM window boxes with hit clip and z-index metadata":
+        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val window_batch = composition.batches[2]
+        val body = window_batch.commands[1]
+        val titlebar = window_batch.commands[2]
+
+        expect(body.hit_rect.present).to_equal(true)
+        expect(body.hit_rect.width).to_equal(300)
+        expect(body.width).to_equal(300)
+        expect(body.height).to_equal(200)
+        expect(body.clip_rect.present).to_equal(true)
+        expect(body.clip_rect.height).to_equal(200)
+        expect(body.computed_style[0].key).to_equal("source")
+        expect(body.computed_style[1].value).to_equal("body")
+        expect(body.computed_style[2].key).to_equal("z-index")
+        expect(titlebar.hit_rect.height).to_equal(28)
+        expect(titlebar.computed_style[1].value).to_equal("titlebar")
+
+    it "lets Simple 2D plan a GPU-targeted WM composition with CPU fallback":
+        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val plan = simple_2d_draw_ir_adv_composition_plan(composition, false)
+
+        expect(plan.composition_id).to_equal("wm-composite")
+        expect(plan.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
+        expect(plan.selected_backend).to_equal("cpu")
+        expect(plan.batch_count).to_equal(5)
+        expect(plan.command_count).to_equal(34)
+        expect(plan.fallback_required).to_equal(true)
+
+    it "changes composition scene key after drag and rejects stale event translation cache":
+        val scene = _scene()
+        val first = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, DRAW_IR_BACKEND_GPU)
+        val moved = shared_wm_drag_window(scene, "surf2", 100, 0)
+        val original_composition = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val moved_composition = shared_wm_scene_draw_ir_composition(moved, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val stale_checked = shared_wm_translate_pointer_event_cached(moved, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, DRAW_IR_BACKEND_GPU, first.cache)
+
+        expect(first.translation.scene_key).to_equal(shared_wm_scene_layout_key(scene))
+        expect(moved_composition.scene_key).to_equal(shared_wm_scene_layout_key(moved))
+        expect(moved_composition.batches[2].source.style_revision).to_equal(original_composition.batches[2].source.style_revision)
+        expect(original_composition.batches[3].source.style_revision).to_contain("xy=80,120")
+        expect(moved_composition.batches[3].source.style_revision).to_contain("xy=180,120")
+        expect(stale_checked.translation.cache_hit).to_equal(false)
+        expect(stale_checked.translation.stale_cache_rejected).to_equal(true)
+        expect(stale_checked.translation.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
+
+    it "maps translated WM events to draw processing batch context":
+        val scene = _scene()
+        val composition = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val translation = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, DRAW_IR_BACKEND_GPU).translation
+        val context = draw_ir_event_target_context(
+            composition,
+            translation.scene_key,
+            translation.input_key,
+            translation.action,
+            translation.target_id,
+            translation.component_kind,
+            translation.local_x,
+            translation.local_y,
+            translation.backend_target
+        )
+
+        expect(context.resolved).to_equal(true)
+        expect(context.stale_scene_rejected).to_equal(false)
+        expect(context.batch_id).to_equal("window-win2")
+        expect(context.surface_id).to_equal("surf2")
+        expect(context.component_id).to_equal("win2")
+        expect(context.component_kind).to_equal("window")
+        expect(context.batch_local_x).to_equal(10)
+        expect(context.batch_local_y).to_equal(5)
+        expect(context.backend_target).to_equal(DRAW_IR_BACKEND_GPU)

@@ -1,0 +1,177 @@
+"""
+# Generated 2D native readback wrapper evidence
+
+## Overview
+
+Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated
+build-local evidence directories and asserts their deterministic `evidence.env`
+contracts. Linux hosts without Metal or ROCm are expected to fail closed with
+typed unavailable evidence; native host passes must prove submit plus readback
+availability and matching operation checksums.
+
+**Plan:** doc/03_plan/sys_test/production_gui_web_host_gpu_queue_readback.md
+**Requirements:** doc/02_requirements/feature/host_gpu_lane.md
+**Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/05_design/host_gpu_lane.md
+**Report:** doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md
+
+## Syntax
+
+Run wrappers with isolated evidence directories:
+
+```sh
+BUILD_DIR=build/test-metal-generated-2d-readback \
+REPORT_PATH=build/test-metal-generated-2d-readback/report.md \
+sh scripts/check/check-metal-generated-2d-readback.shs
+
+BUILD_DIR=build/test-rocm-generated-2d-readback \
+REPORT_PATH=build/test-rocm-generated-2d-readback/report.md \
+sh scripts/check/check-rocm-generated-2d-readback.shs
+```
+
+Each wrapper writes direct evidence keys such as:
+
+```text
+metal_generated_2d_readback_status=unavailable
+metal_generated_2d_readback_readback_available=false
+metal_generated_2d_readback_required_path='Metal source -> metallib -> MTLDevice -> compute pipeline -> command buffer/encoder -> submit -> wait -> buffer readback -> per-op checksums'
+rocm_generated_2d_readback_status=unavailable
+rocm_generated_2d_readback_readback_available=false
+rocm_generated_2d_readback_required_path='HIP source -> HSACO -> ROCm loader -> device/module/kernel handles -> launch -> synchronize -> host readback -> per-op checksums'
+```
+
+## Examples
+
+A native pass must report `status=pass`, `submit_attempted=true`, and
+`readback_available=true`. Metal and ROCm/HIP report per-operation checksums for
+`fill`, `copy`, `alpha`, and `scroll`; those must match their expected values.
+
+## Acceptance
+
+- Metal evidence includes runtime, tool, module, submit, readback, checksum,
+  and operation keys.
+- ROCm/HIP evidence includes loader, probe, module, submit, readback, checksum,
+  and operation keys.
+- Unavailable evidence must report `readback_available=false`.
+- Pass evidence must prove submit/readback and matching checksums.
+"""
+
+# @tag: system, gpu, metal, rocm, readback, evidence
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _value_of(lines: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = lines.split("\n")
+    var found = ""
+    for line in parts:
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+fn _run_wrapper(build_dir: text, script: text) -> text:
+    val command = "rm -rf " + build_dir + " && BUILD_DIR=" + build_dir + " REPORT_PATH=" + build_dir + "/report.md sh " + script + " || true"
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+    rt_file_read_text(build_dir + "/evidence.env")
+
+fn _fake_metal_harness_command(build_dir: text, harness_rows: text) -> text:
+    "rm -rf " + build_dir + " && mkdir -p " + build_dir + "/fakebin " + build_dir + "/toolchains && " +
+    "printf 'simple_2d_fill_u32\\nsimple_2d_copy_u32\\nsimple_2d_alpha_u32\\nsimple_2d_scroll_u32\\n' > " + build_dir + "/toolchains/simple_2d_optimization.metallib && " +
+    "printf '#!/bin/sh\\nprintf \"Darwin\\\\n\"\\n' > " + build_dir + "/fakebin/uname && chmod +x " + build_dir + "/fakebin/uname && " +
+    "printf '#!/bin/sh\\nexit 0\\n' > " + build_dir + "/fakebin/metal && chmod +x " + build_dir + "/fakebin/metal && " +
+    "printf '#!/bin/sh\\nexit 0\\n' > " + build_dir + "/fakebin/metallib && chmod +x " + build_dir + "/fakebin/metallib && " +
+    "printf '#!/bin/sh\\nprintf \"Metal: Apple GPU\\\\n\"\\n' > " + build_dir + "/fakebin/system_profiler && chmod +x " + build_dir + "/fakebin/system_profiler && " +
+    "printf '#!/bin/sh\\nprintf \"" + harness_rows + "\"\\n' > " + build_dir + "/fakebin/simple && chmod +x " + build_dir + "/fakebin/simple && " +
+    "PATH=" + build_dir + "/fakebin:$PATH BUILD_DIR=" + build_dir + " REPORT_PATH=" + build_dir + "/report.md METALLIB_PATH=" + build_dir + "/toolchains/simple_2d_optimization.metallib METAL_TOOL=metal METALLIB_TOOL=metallib METAL_RUNTIME_PROBE=system_profiler SIMPLE_BIN=" + build_dir + "/fakebin/simple sh scripts/check/check-metal-generated-2d-readback.shs || true"
+
+describe "Generated 2D native readback wrappers":
+
+    it "writes fail-closed Metal generated readback evidence":
+        val evidence = _run_wrapper("build/test-metal-generated-2d-readback", "scripts/check/check-metal-generated-2d-readback.shs")
+        expect(evidence).to_contain("metal_generated_2d_readback_status=")
+        expect(evidence).to_contain("metal_generated_2d_readback_reason=")
+        expect(evidence).to_contain("metal_generated_2d_readback_runtime_present=")
+        expect(evidence).to_contain("metal_generated_2d_readback_metal_tool_present=")
+        expect(evidence).to_contain("metal_generated_2d_readback_metallib_tool_present=")
+        expect(evidence).to_contain("metal_generated_2d_readback_module_verified=")
+        expect(evidence).to_contain("metal_generated_2d_readback_submit_attempted=")
+        expect(evidence).to_contain("metal_generated_2d_readback_readback_available=")
+        expect(evidence).to_contain("metal_generated_2d_readback_ops=fill,copy,alpha,scroll")
+        expect(evidence).to_contain("metal_generated_2d_readback_required_path='Metal source -> metallib -> MTLDevice -> compute pipeline -> command buffer/encoder -> submit -> wait -> buffer readback -> per-op checksums'")
+
+        val status = _value_of(evidence, "metal_generated_2d_readback_status")
+        val readback = _value_of(evidence, "metal_generated_2d_readback_readback_available")
+        val submit = _value_of(evidence, "metal_generated_2d_readback_submit_attempted")
+        val reason = _value_of(evidence, "metal_generated_2d_readback_reason")
+        if status == "pass":
+            expect(submit).to_equal("true")
+            expect(readback).to_equal("true")
+            expect(_value_of(evidence, "metal_generated_2d_readback_fill_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_fill_expected"))
+            expect(_value_of(evidence, "metal_generated_2d_readback_copy_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_copy_expected"))
+            expect(_value_of(evidence, "metal_generated_2d_readback_alpha_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_alpha_expected"))
+            expect(_value_of(evidence, "metal_generated_2d_readback_scroll_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_scroll_expected"))
+        else:
+            expect(status).to_equal("unavailable")
+            expect(readback).to_equal("false")
+            expect(reason.len()).to_be_greater_than(0)
+
+    it "rejects forged Metal harness pass with mismatched per-op checksums":
+        val rows = "status=pass\\nfill_checksum=1\\nfill_expected=1\\ncopy_checksum=2\\ncopy_expected=2\\nalpha_checksum=3\\nalpha_expected=999\\nscroll_checksum=4\\nscroll_expected=4\\nsubmit_attempted=true\\nreadback_available=true\\n"
+        val command = _fake_metal_harness_command("build/test-metal-generated-2d-readback-forged", rows)
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-metal-generated-2d-readback-forged/evidence.env")
+        expect(evidence).to_contain("metal_generated_2d_readback_status=fail")
+        expect(evidence).to_contain("metal_generated_2d_readback_reason=alpha-checksum-mismatch")
+        expect(evidence).to_contain("metal_generated_2d_readback_expected_checksum=1006")
+        expect(evidence).to_contain("metal_generated_2d_readback_actual_checksum=10")
+        expect(evidence).to_contain("metal_generated_2d_readback_alpha_checksum=3")
+        expect(evidence).to_contain("metal_generated_2d_readback_alpha_expected=999")
+
+    it "accepts Metal harness pass only after matching nonzero per-op checksums":
+        val rows = "status=pass\\nfill_checksum=1\\nfill_expected=1\\ncopy_checksum=2\\ncopy_expected=2\\nalpha_checksum=3\\nalpha_expected=3\\nscroll_checksum=4\\nscroll_expected=4\\nsubmit_attempted=true\\nreadback_available=true\\n"
+        val command = _fake_metal_harness_command("build/test-metal-generated-2d-readback-harness-pass", rows)
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-metal-generated-2d-readback-harness-pass/evidence.env")
+        expect(evidence).to_contain("metal_generated_2d_readback_status=pass")
+        expect(evidence).to_contain("metal_generated_2d_readback_reason=gpu-readback-verified")
+        expect(evidence).to_contain("metal_generated_2d_readback_expected_checksum=10")
+        expect(evidence).to_contain("metal_generated_2d_readback_actual_checksum=10")
+        expect(evidence).to_contain("metal_generated_2d_readback_submit_attempted=true")
+        expect(evidence).to_contain("metal_generated_2d_readback_readback_available=true")
+
+    it "writes fail-closed ROCm generated readback evidence":
+        val evidence = _run_wrapper("build/test-rocm-generated-2d-readback", "scripts/check/check-rocm-generated-2d-readback.shs")
+        expect(evidence).to_contain("rocm_generated_2d_readback_status=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_reason=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_loader_present=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_probe_tool_present=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_module_verified=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_submit_attempted=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_readback_available=")
+        expect(evidence).to_contain("rocm_generated_2d_readback_ops=fill,copy,alpha,scroll")
+        expect(evidence).to_contain("rocm_generated_2d_readback_required_path='HIP source -> HSACO -> ROCm loader -> device/module/kernel handles -> launch -> synchronize -> host readback -> per-op checksums'")
+
+        val status = _value_of(evidence, "rocm_generated_2d_readback_status")
+        val readback = _value_of(evidence, "rocm_generated_2d_readback_readback_available")
+        val submit = _value_of(evidence, "rocm_generated_2d_readback_submit_attempted")
+        val reason = _value_of(evidence, "rocm_generated_2d_readback_reason")
+        if status == "pass":
+            expect(submit).to_equal("true")
+            expect(readback).to_equal("true")
+            expect(_value_of(evidence, "rocm_generated_2d_readback_fill_checksum")).to_equal(_value_of(evidence, "rocm_generated_2d_readback_fill_expected"))
+            expect(_value_of(evidence, "rocm_generated_2d_readback_copy_checksum")).to_equal(_value_of(evidence, "rocm_generated_2d_readback_copy_expected"))
+            expect(_value_of(evidence, "rocm_generated_2d_readback_alpha_checksum")).to_equal(_value_of(evidence, "rocm_generated_2d_readback_alpha_expected"))
+            expect(_value_of(evidence, "rocm_generated_2d_readback_scroll_checksum")).to_equal(_value_of(evidence, "rocm_generated_2d_readback_scroll_expected"))
+        else:
+            expect(status).to_equal("unavailable")
+            expect(readback).to_equal("false")
+            expect(reason.len()).to_be_greater_than(0)

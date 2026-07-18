@@ -1,0 +1,149 @@
+use std.spec.*
+use std.memory_leveling.{
+    MEMORY_DMA_DIRECTION_TO_DEVICE,
+    simple_memory_iso_cpu_cold,
+    simple_memory_device_gpu,
+    simple_memory_placement_config_from_intent,
+    memory_leveling_policy_from_intent
+}
+use os.kernel.memory.memory_leveling_manager.{
+    memory_leveling_manager_new,
+    simpleos_memory_leveling_config_default,
+    simpleos_memory_leveling_config_for_physical_capacity,
+    simpleos_memory_leveling_config_validate
+}
+use os.kernel.memory.memory_swap.{memory_swap_store_new}
+
+describe "SimpleOS memory leveling manager":
+
+    it "derives OS watermarks and reservations from physical capacity":
+        val config = simpleos_memory_leveling_config_for_physical_capacity(256 * 1024 * 1024)
+        expect(config.physical_capacity_bytes).to_equal(256 * 1024 * 1024)
+        expect(config.cpu_low_watermark_bytes).to_equal(32 * 1024 * 1024)
+        expect(config.cpu_high_watermark_bytes).to_equal(64 * 1024 * 1024)
+        expect(simpleos_memory_leveling_config_validate(config)).to_equal("ok")
+
+    it "keeps language placement and SimpleOS capacity configs independent":
+        val intent = simple_memory_iso_cpu_cold()
+        var placement = simple_memory_placement_config_from_intent(intent)
+        var os_config = simpleos_memory_leveling_config_default()
+
+        placement.movable = false
+        os_config.pressure_batch_limit = 7
+
+        expect(placement.movable).to_equal(false)
+        expect(os_config.pressure_batch_limit).to_equal(7)
+        expect(placement.preferred_tier.name).to_equal("cpu_cold")
+        expect(os_config.swap_enabled).to_equal(true)
+
+    it "validates SimpleOS policy without changing language placement":
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        var config = simpleos_memory_leveling_config_default()
+        config.cpu_low_watermark_bytes = config.cpu_high_watermark_bytes + 1
+
+        expect(simpleos_memory_leveling_config_validate(config)).to_equal("invalid-watermark")
+        expect(placement.preferred_tier.name).to_equal("cpu_cold")
+
+    it "rejects restore when resident capacity was consumed while swapped":
+        var config = simpleos_memory_leveling_config_default()
+        config.physical_capacity_bytes = 10
+        config.cpu_capacity_bytes = 10
+        config.cpu_reserved_bytes = 0
+        config.cpu_low_watermark_bytes = 0
+        config.cpu_high_watermark_bytes = 10
+        config.gpu_reserved_bytes = 0
+        config.nic_reserved_bytes = 0
+        config.dma_reserved_bytes = 0
+        val manager = memory_leveling_manager_new(config)
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        val policy = memory_leveling_policy_from_intent(intent)
+        val swapped = manager.request(placement, policy, 10, 1, 1)
+        expect(manager.prepare_swap(swapped.allocation_id, 1).ok).to_equal(true)
+        expect(manager.commit_swap(swapped.allocation_id, 1, 1).ok).to_equal(true)
+        expect(manager.request(placement, policy, 10, 1, 2).ok).to_equal(true)
+
+        expect(manager.prepare_restore(swapped.allocation_id, 1).reason).to_equal("domain-capacity")
+        expect(manager.get(swapped.allocation_id).unwrap().state.name).to_equal("swapped")
+
+    it "enforces ordered DMA ownership and balanced protection counters":
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        val policy = memory_leveling_policy_from_intent(intent)
+        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+        val requested = manager.request(placement, policy, 4096, 1, 77)
+
+        expect(requested.ok).to_equal(true)
+        expect(manager.sync_for_device(requested.allocation_id, 77).reason).to_equal("sync-required")
+        expect(manager.pin(requested.allocation_id, 77).ok).to_equal(true)
+        expect(manager.pin(requested.allocation_id, 77).ok).to_equal(true)
+        expect(manager.unpin(requested.allocation_id, 77).ok).to_equal(true)
+        expect(manager.unpin(requested.allocation_id, 77).ok).to_equal(true)
+        expect(manager.unpin(requested.allocation_id, 77).reason).to_equal("pin-underflow")
+
+        expect(manager.map_device(requested.allocation_id, 77, MEMORY_DMA_DIRECTION_TO_DEVICE, true).state).to_equal("syncing_for_device")
+        expect(manager.sync_for_device(requested.allocation_id, 77).state).to_equal("device_owned")
+        expect(manager.begin_in_flight(requested.allocation_id, 77).ok).to_equal(true)
+        expect(manager.sync_for_cpu(requested.allocation_id, 77).reason).to_equal("in-flight")
+        expect(manager.complete_in_flight(requested.allocation_id, 77).ok).to_equal(true)
+        expect(manager.sync_for_cpu(requested.allocation_id, 77).state).to_equal("syncing_for_cpu")
+        expect(manager.unmap_device(requested.allocation_id, 77).state).to_equal("cpu_owned")
+
+    it "inspects no more than 64 pressure candidates":
+        var config = simpleos_memory_leveling_config_default()
+        config.pressure_batch_limit = 1000
+        val manager = memory_leveling_manager_new(config)
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        val policy = memory_leveling_policy_from_intent(intent)
+        var i: u64 = 0
+        while i < 80:
+            expect(manager.request(placement, policy, 4096, 1, i + 1).ok).to_equal(true)
+            i = i + 1
+
+        val report = manager.apply_pressure("critical")
+        expect(report.inspected).to_equal(64)
+        expect(report.selected).to_equal(64)
+        expect(report.candidate_ids.len()).to_equal(64)
+
+    it "preserves CPU and device reservations in shared physical capacity":
+        var config = simpleos_memory_leveling_config_default()
+        config.physical_capacity_bytes = 100
+        config.cpu_capacity_bytes = 100
+        config.cpu_reserved_bytes = 20
+        config.cpu_low_watermark_bytes = 25
+        config.cpu_high_watermark_bytes = 50
+        config.gpu_capacity_bytes = 50
+        config.gpu_reserved_bytes = 10
+        config.nic_reserved_bytes = 10
+        config.dma_reserved_bytes = 10
+        val manager = memory_leveling_manager_new(config)
+        val cpu_intent = simple_memory_iso_cpu_cold()
+        expect(manager.request(simple_memory_placement_config_from_intent(cpu_intent), memory_leveling_policy_from_intent(cpu_intent), 71, 1, 1).reason).to_equal("reservation-protected")
+        expect(manager.request(simple_memory_placement_config_from_intent(cpu_intent), memory_leveling_policy_from_intent(cpu_intent), 70, 1, 1).ok).to_equal(true)
+
+        val gpu_intent = simple_memory_device_gpu()
+        expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 10, 1, 2).ok).to_equal(true)
+        expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 1, 1, 2).reason).to_equal("reservation-protected")
+
+    it "commits swap only around a validated byte round trip":
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        val policy = memory_leveling_policy_from_intent(intent)
+        val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+        val store = memory_swap_store_new(true, 1)
+        val requested = manager.request(placement, policy, 4, 1, 55)
+        val contents: [u8] = [9, 8, 7, 6]
+
+        expect(manager.prepare_swap(requested.allocation_id, 55).state).to_equal("migrating")
+        val written = store.write(requested.allocation_id, 0, contents)
+        expect(written.ok).to_equal(true)
+        expect(manager.commit_swap(requested.allocation_id, 55, written.slot_id).state).to_equal("swapped")
+
+        expect(manager.prepare_restore(requested.allocation_id, 55).state).to_equal("migrating")
+        val restored = store.read(written.slot_id, requested.allocation_id, 0)
+        expect(restored.bytes).to_equal(contents)
+        expect(manager.commit_restore(requested.allocation_id, 55).state).to_equal("cpu_owned")
+        expect(store.release(written.slot_id, requested.allocation_id).ok).to_equal(true)
+        expect(manager.snapshot().swap_bytes).to_equal(0)

@@ -1,0 +1,412 @@
+# DMA helpers — coherent allocation + cache-maintenance barriers.
+#
+# Drivers that let devices DMA into or out of CPU memory must deal with
+# two hazards:
+#
+#   1. Translation: the device sees physical addresses, the CPU sees
+#      virtual. dma_alloc returns both.
+#   2. Coherency: on non-coherent arches (ARM, RISC-V without Svadu /
+#      full CMO) the CPU must flush-then-invalidate around device writes
+#      or the CPU will read stale cache. On x86 this is a no-op.
+#
+# This file is arch-agnostic. The actual cache-maintenance primitives
+# are provided by per-arch runtime functions (`rt_dma_*`) declared
+# extern; each arch's baremetal runtime supplies the implementation. A
+# pure-Simple fallback that uses `rt_memory_barrier()` from volatile_ops
+# is safe on cache-coherent hosts (x86, userspace-hosted) and correct-
+# but-over-conservative elsewhere.
+#
+# Usage:
+#
+#   use std.io.dma.{dma_alloc, dma_free, dma_sync_for_device,
+#                   dma_sync_for_cpu, DmaBuffer, DmaDir}
+#
+#   val b: DmaBuffer = dma_alloc(4096, DmaDir.Bidirectional)?
+#   # ... fill CPU-side ...
+#   dma_sync_for_device(b)
+#   program_device_with_phys(b.phys)
+#   # ... wait for IRQ ...
+#   dma_sync_for_cpu(b)
+#   # CPU can now read data
+#   dma_free(b)
+
+use std.driver.error.{DriverError}
+use std.io.volatile_ops.{memory_barrier, load_barrier, store_barrier}
+
+# Direction hint — lets the backend pick the minimal cache op per call.
+enum DmaDir:
+    ToDevice        # CPU writes, device reads (clean required)
+    FromDevice      # device writes, CPU reads (invalidate required)
+    Bidirectional   # both (clean + invalidate)
+
+# Cache policy advertised for a DMA mapping. Coherent platforms may map all
+# three sync helpers to barriers/no-ops, but callers still carry the policy so
+# non-coherent backends do not silently assume write-back memory.
+enum DmaCachePolicy:
+    Coherent
+    FlushRequired
+    Uncached
+    WriteCombining
+
+# Buffer descriptor. Held by the driver for the lifetime of the DMA.
+struct DmaBuffer:
+    virt:   i64     # CPU-visible address
+    phys:   i64     # device-visible address
+    size:   i64     # bytes
+    handle: i64     # opaque runtime handle, passed back to rt_dma_free
+    dir:    DmaDir
+
+struct DmaOwner:
+    """Ownership identity attached to a DMA descriptor."""
+    task_id: u64
+    bdf_bus: u8
+    bdf_device: u8
+    bdf_function: u8
+
+struct SharedDmaBuffer:
+    """Canonical DMA descriptor shared by drivers and direct-I/O callers."""
+    cpu_virt_addr: u64
+    host_phys_addr: u64
+    device_addr: u64
+    byte_len: u64
+    cache_policy: DmaCachePolicy
+    owner: DmaOwner
+    allocation_id: u64
+
+# A DMA segment is explicit even when the mapping has one segment. Callers
+# must not infer `device_addr + offset` from a base address without this proof.
+struct DmaSegment:
+    cpu_addr: u64
+    host_phys_addr: u64
+    device_addr: u64
+    byte_len: u64
+
+struct DmaLayoutProof:
+    """Proves coverage and, only when set, physical/device contiguity."""
+    segments: [DmaSegment]
+    segment_count: u64
+    is_contiguous: bool
+    contiguity_proven: bool
+
+enum DmaMappingState:
+    Unmapped
+    CpuOwned
+    DeviceOwned
+    Released
+
+struct SharedDmaMapping:
+    """Metadata-preserving mapping wrapper for the legacy shared descriptor."""
+    buffer: SharedDmaBuffer
+    direction: DmaDir
+    layout: DmaLayoutProof
+    mapping_token: u64
+    state: DmaMappingState
+
+impl SharedDmaBuffer:
+    fn cpu_addr() -> u64:
+        self.cpu_virt_addr
+
+    fn phys_addr() -> u64:
+        self.host_phys_addr
+
+    fn device_visible_addr() -> u64:
+        self.device_addr
+
+    fn len() -> u64:
+        self.byte_len
+
+    fn is_valid() -> bool:
+        self.cpu_virt_addr != 0 and self.host_phys_addr != 0 and self.device_addr != 0 and self.byte_len > 0
+
+    fn is_owned_by(task_id: u64) -> bool:
+        self.owner.task_id == task_id
+
+    fn matches_bdf(bus: u8, device: u8, func: u8) -> bool:
+        self.owner.bdf_bus == bus and self.owner.bdf_device == device and self.owner.bdf_function == func
+
+    # Compatibility entry point: old callers keep constructing SharedDmaBuffer
+    # directly; new callers attach direction and layout proof at map time.
+    fn map_with_metadata(direction: DmaDir, layout: DmaLayoutProof, mapping_token: u64) -> Result<SharedDmaMapping, DriverError>:
+        dma_shared_mapping(self, direction, layout, mapping_token)
+
+
+impl DmaSegment:
+    fn is_valid() -> bool:
+        self.cpu_addr != 0 and self.host_phys_addr != 0 and self.device_addr != 0 and self.byte_len > 0
+
+
+impl DmaLayoutProof:
+    fn is_valid_for(buf: SharedDmaBuffer) -> bool:
+        if self.segment_count == 0 or self.segment_count != self.segments.len() as u64:
+            return false
+        var total: u64 = 0u64
+        var i: u64 = 0u64
+        while i < self.segment_count:
+            val segment = self.segments[i as i64]
+            if not segment.is_valid() or segment.byte_len > buf.byte_len or total > buf.byte_len - segment.byte_len:
+                return false
+            if segment.cpu_addr != buf.cpu_virt_addr + total:
+                return false
+            total = total + segment.byte_len
+            i = i + 1u64
+        if total != buf.byte_len:
+            return false
+        if self.is_contiguous:
+            if not self.contiguity_proven or self.segment_count != 1u64:
+                return false
+            val segment = self.segments[0]
+            return segment.cpu_addr == buf.cpu_virt_addr and segment.host_phys_addr == buf.host_phys_addr and segment.device_addr == buf.device_addr and segment.byte_len == buf.byte_len
+        not self.contiguity_proven
+
+    fn has_contiguous_proof() -> bool:
+        self.is_contiguous and self.contiguity_proven and self.segment_count == 1u64
+
+
+impl SharedDmaMapping:
+    fn is_valid() -> bool:
+        self.mapping_token != 0u64 and self.state != DmaMappingState.Released and self.buffer.is_valid() and self.layout.is_valid_for(self.buffer)
+
+    fn direction_hint() -> DmaDir:
+        self.direction
+
+    fn segment_count() -> u64:
+        self.layout.segment_count
+
+    fn has_contiguous_proof() -> bool:
+        self.is_valid() and self.layout.has_contiguous_proof()
+
+    fn can_use_contiguous() -> bool:
+        self.state != DmaMappingState.Unmapped and self.state != DmaMappingState.Released and self.has_contiguous_proof()
+
+    fn can_map() -> bool:
+        self.is_valid() and self.state == DmaMappingState.Unmapped
+
+    fn can_sync_for_device() -> bool:
+        self.is_valid() and self.state == DmaMappingState.CpuOwned
+
+    fn can_sync_for_cpu() -> bool:
+        self.is_valid() and self.state == DmaMappingState.DeviceOwned
+
+    fn can_unmap() -> bool:
+        self.is_valid() and self.state == DmaMappingState.CpuOwned
+
+    fn can_release() -> bool:
+        self.is_valid() and self.state == DmaMappingState.Unmapped
+
+struct DmaReleaseRequest:
+    """Authority tuple supplied when releasing a shared DMA descriptor."""
+    requester_task_id: u64
+    requester_bdf_bus: u8
+    requester_bdf_device: u8
+    requester_bdf_function: u8
+    requested_byte_len: u64
+    allocation_id: u64
+    already_released: bool
+
+# --- Runtime hooks (per-arch impls live in src/runtime/baremetal) ---
+
+extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
+extern fn rt_dma_free(handle: i64)
+extern fn rt_dma_virt_of(handle: i64) -> i64
+extern fn rt_dma_phys_of(handle: i64) -> i64
+extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
+extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+# FR-DRIVER-0005 AC-3: drivers align hot structures to the arch's
+# cache line. Per-arch value lives in dma_<arch>.c.
+extern fn rt_dma_cache_line_size() -> i64
+
+# Interpreter fallback stubs (ignored in compiled mode where externs are provided).
+# Same extern+fallback pattern as src/lib/nogc_sync_mut/io/volatile_ops.spl.
+fn rt_dma_alloc__fallback(size: i64, dir_raw: i32) -> i64:
+    val _dir = dir_raw
+    if size <= 0:
+        return -1
+    return size
+
+fn rt_dma_free__fallback(handle: i64):
+    val _handle = handle
+
+fn rt_dma_virt_of__fallback(handle: i64) -> i64:
+    if handle <= 0:
+        return 0
+    return handle
+
+fn rt_dma_phys_of__fallback(handle: i64) -> i64:
+    if handle <= 0:
+        return 0
+    return handle
+fn rt_dma_sync_for_device__fallback(handle: i64, dir_raw: i32): memory_barrier()
+fn rt_dma_sync_for_cpu__fallback(handle: i64, dir_raw: i32): memory_barrier()
+# 64 B is safe floor — correct on x86/arm64, over-aligns elsewhere.
+fn rt_dma_cache_line_size__fallback() -> i64: 64
+
+# --- Public API ---
+
+fn dma_alloc(size: i64, dir: DmaDir) -> Result<DmaBuffer, DriverError>:
+    val dir_raw: i32 = dir_to_raw(dir)
+    val h: i64 = rt_dma_alloc(size, dir_raw)
+    if h < 0:
+        return Err(DriverError.NoMemory)
+    val v: i64 = rt_dma_virt_of(h)
+    val p: i64 = rt_dma_phys_of(h)
+    return Ok(DmaBuffer(virt: v, phys: p, size: size, handle: h, dir: dir))
+
+fn dma_buffer_to_shared(buf: DmaBuffer, owner: DmaOwner, policy: DmaCachePolicy, allocation_id: u64) -> SharedDmaBuffer:
+    """Promote the legacy DmaBuffer shape into the canonical descriptor."""
+    SharedDmaBuffer(
+        cpu_virt_addr: buf.virt as u64,
+        host_phys_addr: buf.phys as u64,
+        device_addr: buf.phys as u64,
+        byte_len: buf.size as u64,
+        cache_policy: policy,
+        owner: owner,
+        allocation_id: allocation_id
+    )
+
+fn dma_segment(cpu_addr: u64, host_phys_addr: u64, device_addr: u64, byte_len: u64) -> DmaSegment:
+    DmaSegment(cpu_addr: cpu_addr, host_phys_addr: host_phys_addr, device_addr: device_addr, byte_len: byte_len)
+
+fn dma_contiguous_layout(segment: DmaSegment) -> DmaLayoutProof:
+    DmaLayoutProof(
+        segments: [segment],
+        segment_count: 1u64,
+        is_contiguous: true,
+        contiguity_proven: true
+    )
+
+fn dma_scatter_layout(segments: [DmaSegment]) -> DmaLayoutProof:
+    DmaLayoutProof(
+        segments: segments,
+        segment_count: segments.len() as u64,
+        is_contiguous: false,
+        contiguity_proven: false
+    )
+
+fn dma_shared_mapping(buf: SharedDmaBuffer, direction: DmaDir, layout: DmaLayoutProof, mapping_token: u64) -> Result<SharedDmaMapping, DriverError>:
+    if not buf.is_valid() or mapping_token == 0u64 or not layout.is_valid_for(buf):
+        return Err(DriverError.BadArg)
+    Ok(SharedDmaMapping(
+        buffer: buf,
+        direction: direction,
+        layout: layout,
+        mapping_token: mapping_token,
+        state: DmaMappingState.Unmapped
+    ))
+
+fn dma_buffer_to_shared_mapping(buf: DmaBuffer, owner: DmaOwner, policy: DmaCachePolicy, allocation_id: u64, mapping_token: u64) -> Result<SharedDmaMapping, DriverError>:
+    if buf.virt <= 0 or buf.phys <= 0 or buf.size <= 0:
+        return Err(DriverError.BadArg)
+    val shared = dma_buffer_to_shared(buf, owner, policy, allocation_id)
+    val segment = dma_segment(buf.virt as u64, buf.phys as u64, buf.phys as u64, buf.size as u64)
+    dma_shared_mapping(shared, buf.dir, dma_contiguous_layout(segment), mapping_token)
+
+fn dma_mapping_map(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
+    if not mapping.is_valid():
+        return Err(DriverError.BadArg)
+    if not mapping.can_map():
+        return Err(DriverError.Busy)
+    var next = mapping
+    next.state = DmaMappingState.CpuOwned
+    Ok(next)
+
+fn dma_mapping_sync_for_device(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
+    if not mapping.is_valid():
+        return Err(DriverError.BadArg)
+    if not mapping.can_sync_for_device():
+        return Err(DriverError.Busy)
+    var next = mapping
+    next.state = DmaMappingState.DeviceOwned
+    Ok(next)
+
+fn dma_mapping_sync_for_cpu(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
+    if not mapping.is_valid():
+        return Err(DriverError.BadArg)
+    if not mapping.can_sync_for_cpu():
+        return Err(DriverError.Busy)
+    var next = mapping
+    next.state = DmaMappingState.CpuOwned
+    Ok(next)
+
+fn dma_mapping_unmap(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
+    if not mapping.is_valid():
+        return Err(DriverError.BadArg)
+    if not mapping.can_unmap():
+        return Err(DriverError.Busy)
+    var next = mapping
+    next.state = DmaMappingState.Unmapped
+    Ok(next)
+
+fn dma_mapping_release(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
+    if not mapping.is_valid():
+        return Err(DriverError.BadArg)
+    if not mapping.can_release():
+        return Err(DriverError.Busy)
+    var next = mapping
+    next.state = DmaMappingState.Released
+    Ok(next)
+
+# Free-function forms keep capability checks usable from code that does not
+# use method syntax and deliberately return false for invalid metadata.
+fn dma_mapping_can_map(mapping: SharedDmaMapping) -> bool: mapping.can_map()
+fn dma_mapping_can_sync_for_device(mapping: SharedDmaMapping) -> bool: mapping.can_sync_for_device()
+fn dma_mapping_can_sync_for_cpu(mapping: SharedDmaMapping) -> bool: mapping.can_sync_for_cpu()
+fn dma_mapping_can_unmap(mapping: SharedDmaMapping) -> bool: mapping.can_unmap()
+fn dma_mapping_can_release(mapping: SharedDmaMapping) -> bool: mapping.can_release()
+fn dma_mapping_can_use_contiguous(mapping: SharedDmaMapping) -> bool: mapping.can_use_contiguous()
+fn dma_mapping_allows_cpu_to_device(mapping: SharedDmaMapping) -> bool:
+    mapping.is_valid() and mapping.direction != DmaDir.FromDevice
+fn dma_mapping_allows_device_to_cpu(mapping: SharedDmaMapping) -> bool:
+    mapping.is_valid() and mapping.direction != DmaDir.ToDevice
+
+fn validate_shared_dma_release(buf: SharedDmaBuffer, req: DmaReleaseRequest) -> Result<bool, DriverError>:
+    """Validate release authority before the backing allocator is called."""
+    if not buf.is_valid():
+        return Err(DriverError.BadArg)
+    if req.already_released:
+        return Err(DriverError.BadArg)
+    if buf.byte_len != req.requested_byte_len:
+        return Err(DriverError.BadArg)
+    if buf.allocation_id != req.allocation_id:
+        return Err(DriverError.BadArg)
+    if not buf.is_owned_by(req.requester_task_id):
+        return Err(DriverError.Busy)
+    if not buf.matches_bdf(bus: req.requester_bdf_bus, device: req.requester_bdf_device, func: req.requester_bdf_function):
+        return Err(DriverError.Busy)
+    Ok(true)
+
+fn dma_free(buf: DmaBuffer):
+    rt_dma_free(buf.handle)
+
+fn dma_sync_for_device(buf: DmaBuffer):
+    val dir_raw: i32 = dir_to_raw(buf.dir)
+    store_barrier()
+    rt_dma_sync_for_device(buf.handle, dir_raw)
+
+fn dma_sync_for_cpu(buf: DmaBuffer):
+    val dir_raw: i32 = dir_to_raw(buf.dir)
+    rt_dma_sync_for_cpu(buf.handle, dir_raw)
+    load_barrier()
+
+fn dma_shared_sync_cpu_to_device(buf: SharedDmaBuffer):
+    store_barrier()
+    if buf.cache_policy == DmaCachePolicy.Coherent:
+        memory_barrier()
+    else:
+        memory_barrier()
+
+fn dma_shared_sync_device_to_cpu(buf: SharedDmaBuffer):
+    if buf.cache_policy == DmaCachePolicy.Coherent:
+        memory_barrier()
+    else:
+        memory_barrier()
+    load_barrier()
+
+fn dir_to_raw(d: DmaDir) -> i32:
+    match d:
+        DmaDir.ToDevice      -> return 0
+        DmaDir.FromDevice    -> return 1
+        DmaDir.Bidirectional -> return 2
+
+# Public accessor for the arch's cache-line size (bytes).
+fn dma_cache_line_size() -> i64:
+    return rt_dma_cache_line_size()

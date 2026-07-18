@@ -1,0 +1,430 @@
+# codex-system-test
+# @tag: rendering, font, shaping, exact-face
+"""# Exact-face Shared Font Shaping Acceptance
+
+Exercises the selected bundled face through loading, Pure Simple shaping, and
+the canonical FontRenderer material path. Complex-script completion stays an
+explicit release blocker until GSUB/GPOS is complete.
+"""
+
+use std.spec.*
+use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_coverage_cell, selected_font_simple_tuple_accepted}
+use std.common.encoding.utf8.{text_codepoints}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font, glyph_index, font_face_identity, font_face_is_live}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, resolve_font_metrics_with_language, font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
+use std.skia.entity.font.{SkFont, sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
+use std.skia.feature.glyph.ot_parser.{OtFont, find_table, parse_offset_table, read_u16_be}
+use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
+use std.skia.feature.glyph.ot_parser_metrics.{parse_hmtx}
+use std.skia.feature.shaper.font_fallback.{fallback_chain_new, fallback_chain_add}
+use std.skia.feature.shaper.shaper.{ShapedRun, Shaper, shaper_new, shaper_with_ot_face, shaper_shape_with_language, shaped_run_to_font_glyph_run}
+use std.skia.feature.shaper.script_detect.{Script}
+
+class SelectedShapingFixture:
+    asset: FontAssetCandidate
+    handle: FontHandle
+    font: SkFont
+    parsed: OtFont
+    shaper: Shaper
+    renderer: FontRenderer
+
+class SimpleShapingRow:
+    language: text
+    category: text
+    proposed_status: text
+    family: text
+    witness: text
+    script: Script
+
+fn _simple_row(language: text, category: text, proposed_status: text, family: text) -> SimpleShapingRow:
+    if language == "en": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "English", script: Script.Latin)
+    if language == "zh": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "中文", script: Script.CJK)
+    if language == "es": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Español", script: Script.Latin)
+    if language == "fr": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "français", script: Script.Latin)
+    if language == "pt": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Português", script: Script.Latin)
+    if language == "ru": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Русский", script: Script.Cyrillic)
+    if language == "id": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Indonesia", script: Script.Latin)
+    fail("unsupported simple shaping language: " + language)
+
+fn _simple_rows(category: text, proposed_status: text, family: text, languages: [text]) -> [SimpleShapingRow]:
+    var rows: [SimpleShapingRow] = []
+    for language in languages:
+        rows.push(_simple_row(language, category, proposed_status, family))
+    rows
+
+fn simple_shaping_acceptance_rows() -> [SimpleShapingRow]:
+    var rows: [SimpleShapingRow] = []
+    for row in _simple_rows("sans", "native", "Noto Sans SC", ["en", "zh", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("serif", "native", "Noto Serif SC", ["en", "zh", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("mono", "native", "Noto Sans Mono", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    rows.push(_simple_row("zh", "mono", "fallback", "Noto Sans SC"))
+    for row in _simple_rows("display", "native", "Bungee", ["en", "es", "fr", "pt", "id"]):
+        rows.push(row)
+    for row in _simple_rows("rounded", "native", "Nunito", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("handwriting", "native", "Caveat", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("slab", "native", "Roboto Slab", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("blackletter", "native", "UnifrakturCook", ["en", "es", "fr", "pt", "id"]):
+        rows.push(row)
+    for row in _simple_rows("pixel", "native", "Pixelify Sans", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    rows
+
+fn _simple_row_for_cell(rows: [SimpleShapingRow], language: text,
+                        category: text) -> SimpleShapingRow:
+    for row in rows:
+        if row.language == language and row.category == category: return row
+    fail("missing simple shaping cell: " + language + "/" + category)
+
+fn _selected_face(family: text) -> FontAssetCandidate:
+    for asset in selected_font_asset_candidates():
+        if asset.family == family: return asset
+    fail("missing selected shaping face: " + family)
+
+fn _codepoints(content: text) -> [u32]:
+    var result: [u32] = []
+    for codepoint in text_codepoints(content): result.push(codepoint as u32)
+    result
+
+fn setup_selected_shaping_face(family: text) -> SelectedShapingFixture:
+    val asset = _selected_face(family)
+    val handle = load_font(asset.local_path)
+    if handle == nil: fail("selected shaping face did not load")
+    val owned = handle.?
+    val parsed = parse_offset_table(file_read_bytes(asset.local_path))
+    if parsed == nil:
+        free_font(owned)
+        fail("selected shaping face did not parse")
+    val typeface = sk_typeface_from_attached_font(asset.family, sk_font_style_normal(),
+        asset.local_path, owned.handle)
+    val font = sk_font_new(typeface, 32.0)
+    val ot_font = parsed.unwrap()
+    val shaper = shaper_with_ot_face(shaper_new(fallback_chain_new(font)),
+        owned.handle, ot_font)
+    SelectedShapingFixture(asset: asset, handle: owned, font: font, parsed: ot_font, shaper: shaper,
+        renderer: FontRenderer.with_ttf(owned.handle))
+
+fn _fixture_for_family(fixtures: [SelectedShapingFixture], family: text) -> SelectedShapingFixture:
+    for fixture in fixtures:
+        if fixture.asset.family == family: return fixture
+    fail("missing loaded shaping fixture: " + family)
+
+fn _zh_mono_fallback_fixture(primary: SelectedShapingFixture,
+                             fallback: SelectedShapingFixture) -> SelectedShapingFixture:
+    val chain = fallback_chain_add(fallback_chain_new(primary.font), fallback.font)
+    val with_primary = shaper_with_ot_face(shaper_new(chain), primary.handle.handle, primary.parsed)
+    val with_fallback = shaper_with_ot_face(with_primary, fallback.handle.handle, fallback.parsed)
+    SelectedShapingFixture(asset: fallback.asset, handle: fallback.handle, font: primary.font,
+        parsed: fallback.parsed, shaper: with_fallback, renderer: fallback.renderer)
+
+fn _exact_advance(font: OtFont, glyph_id: u32, size: f64) -> f64:
+    val head = find_table(font, 1751474532u32)
+    val hhea = find_table(font, 1751672161u32)
+    if head == nil or hhea == nil: fail("selected face lacks head/hhea")
+    val units_per_em = read_u16_be(font.blob, head.unwrap().offset as i64 + 18)
+    val long_metrics = read_u16_be(font.blob, hhea.unwrap().offset as i64 + 34)
+    if units_per_em == 0u32 or long_metrics == 0u32: fail("selected face has invalid metrics")
+    val metrics = parse_hmtx(font, long_metrics, glyph_id)
+    if metrics == nil: fail("selected face lacks bounded glyph metrics")
+    metrics.unwrap().advance_width as f64 * size / units_per_em as f64
+
+fn expect_simple_identity_run(fixture: SelectedShapingFixture, content: text,
+                              language: text, script: Script) -> ShapedRun:
+    val codepoints = _codepoints(content)
+    val runs = shaper_shape_with_language(fixture.shaper, _codepoints(content), fixture.font,
+        0.0, 0.0, language)
+    expect(runs.len()).to_equal(1)
+    val run = runs[0]
+    expect(run.font_handle).to_equal(fixture.handle.handle)
+    expect(run.font_generation).to_equal(fixture.handle.generation)
+    expect(run.script).to_equal(script)
+    expect(run.language).to_equal(language)
+    expect(run.is_rtl).to_be(false)
+    expect(run.glyph_indices_valid).to_be(true)
+    expect(run.substitution_complete).to_be(true)
+    expect(run.positioning_complete).to_be(true)
+    expect(run.glyph_ids.len()).to_equal(codepoints.len())
+    var x = 0.0
+    var index: i64 = 0
+    while index < codepoints.len():
+        val mapped = cmap_glyph_id(fixture.parsed, codepoints[index])
+        assert_not_equal(mapped, 0u32)
+        expect(run.glyph_ids[index]).to_equal(mapped)
+        expect(glyph_index(fixture.handle, codepoints[index] as i64)).to_equal(mapped as i64)
+        expect(run.glyphs[index].source_index).to_equal(index)
+        expect(run.glyphs[index].cluster).to_equal(index)
+        expect(run.glyphs[index].x_offset).to_equal(0.0)
+        expect(run.glyphs[index].y_offset).to_equal(0.0)
+        expect(run.glyphs[index].y_advance).to_equal(0.0)
+        val advance = _exact_advance(fixture.parsed, mapped, fixture.font.size)
+        expect(advance).to_be_greater_than(0.0)
+        expect(run.glyphs[index].x_advance).to_equal(advance)
+        expect(run.positions[index].x).to_equal(x)
+        expect(run.positions[index].y).to_equal(0.0)
+        x = x + advance
+        index = index + 1
+    run
+
+fn expect_complex_run_rejected(fixture: SelectedShapingFixture, content: text, language: text):
+    val runs = shaper_shape_with_language(fixture.shaper, _codepoints(content),
+        fixture.font, 0.0, 0.0, language)
+    expect(runs.len()).to_be_greater_than(0)
+    for run in runs:
+        expect(run.substitution_complete).to_be(false)
+        expect(run.positioning_complete).to_be(false)
+        expect(shaped_run_to_font_glyph_run(run).valid).to_be(false)
+
+fn expect_selected_unicode_shaping(fixture: SelectedShapingFixture, content: text,
+                                   language: text, script: Script):
+    val runs = shaper_shape_with_language(fixture.shaper, _codepoints(content),
+        fixture.font, 0.0, 0.0, language)
+    expect(runs.len()).to_equal(1)
+    val run = runs[0]
+    expect(run.script).to_equal(script)
+    expect(run.language).to_equal(language)
+    expect(run.font_handle).to_equal(fixture.handle.handle)
+    expect(run.font_generation).to_equal(fixture.handle.generation)
+    expect(run.glyph_indices_valid).to_be(true)
+    expect(run.substitution_complete).to_be(true)
+    expect(run.positioning_complete).to_be(true)
+    expect(run.glyph_ids.len()).to_equal(run.positions.len())
+    expect(run.glyph_ids.len()).to_equal(run.glyphs.len())
+    val glyph_run = shaped_run_to_font_glyph_run(run)
+    expect(glyph_run.valid).to_be(true)
+    val batch = fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32)
+    expect(batch.valid).to_be(true)
+    expect(batch.font_identity).to_equal(selected_font_asset_identity(fixture.asset))
+    expect(batch.face_generation).to_equal(fixture.handle.generation)
+    expect(batch.quads.len()).to_equal(run.glyph_ids.len())
+    for quad in batch.quads:
+        var quad_nonzero: i64 = 0
+        for pixel in font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                                               quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color):
+            if pixel != 0u32: quad_nonzero = quad_nonzero + 1
+        expect(quad_nonzero).to_be_greater_than(0)
+
+fn expect_simple_row_material(fixture: SelectedShapingFixture, row: SimpleShapingRow):
+    expect(fixture.asset.family).to_equal(row.family)
+    val run = expect_simple_identity_run(fixture, row.witness, row.language, row.script)
+    val glyph_run = shaped_run_to_font_glyph_run(run)
+    expect(glyph_run.valid).to_be(true)
+    val batch = fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32)
+    expect(batch.valid).to_be(true)
+    expect(batch.font_identity).to_equal(selected_font_asset_identity(fixture.asset))
+    expect(batch.face_generation).to_equal(fixture.handle.generation)
+    expect(batch.quads.len()).to_equal(run.glyph_ids.len())
+
+describe "shared font shaping acceptance":
+    # @req REQ-003 REQ-007
+    it "should accept 54 identity native cells and the Chinese mono identity fallback":
+        step("Accept exact-face-bound simple-script shaping")
+        val rows = simple_shaping_acceptance_rows()
+        expect(rows.len()).to_equal(55)
+        var native_count: i64 = 0
+        var fallback_count: i64 = 0
+        var keys: [text] = []
+        for row in rows:
+            val key = row.language + "/" + row.category
+            expect(keys.contains(key)).to_be(false)
+            keys.push(key)
+            if row.proposed_status == "native": native_count = native_count + 1
+            elif row.proposed_status == "fallback": fallback_count = fallback_count + 1
+            else: fail("unsupported proposed shaping status: " + row.proposed_status)
+        expect(native_count).to_equal(54)
+        expect(fallback_count).to_equal(1)
+        val fixtures = [
+            setup_selected_shaping_face("Noto Sans SC"),
+            setup_selected_shaping_face("Noto Serif SC"),
+            setup_selected_shaping_face("Noto Sans Mono"),
+            setup_selected_shaping_face("Bungee"),
+            setup_selected_shaping_face("Nunito"),
+            setup_selected_shaping_face("Caveat"),
+            setup_selected_shaping_face("Roboto Slab"),
+            setup_selected_shaping_face("UnifrakturCook"),
+            setup_selected_shaping_face("Pixelify Sans")
+        ]
+        for fixture in fixtures:
+            expect(font_face_is_live(fixture.handle.handle, fixture.handle.generation)).to_be(true)
+        for row in rows:
+            if row.proposed_status == "native":
+                expect_simple_row_material(_fixture_for_family(fixtures, row.family), row)
+
+        val mono = _fixture_for_family(fixtures, "Noto Sans Mono")
+        val sc = _fixture_for_family(fixtures, "Noto Sans SC")
+        assert_not_equal(mono.handle.handle, sc.handle.handle)
+        expect(font_face_is_live(mono.handle.handle, mono.handle.generation)).to_be(true)
+        expect(font_face_is_live(sc.handle.handle, sc.handle.generation)).to_be(true)
+        for codepoint in _codepoints("中文"):
+            expect(cmap_glyph_id(mono.parsed, codepoint)).to_equal(0u32)
+            expect(glyph_index(mono.handle, codepoint as i64)).to_equal(0)
+            assert_not_equal(cmap_glyph_id(sc.parsed, codepoint), 0u32)
+            expect(glyph_index(sc.handle, codepoint as i64) > 0).to_be(true)
+        val fallback_fixture = _zh_mono_fallback_fixture(mono, sc)
+        val fallback_row = _simple_row_for_cell(rows, "zh", "mono")
+        expect(fallback_row.proposed_status).to_equal("fallback")
+        expect(fallback_row.family).to_equal("Noto Sans SC")
+        expect_simple_row_material(fallback_fixture, fallback_row)
+        expect(font_face_is_live(mono.handle.handle, mono.handle.generation)).to_be(true)
+
+        for fixture in fixtures: free_font(fixture.handle)
+
+    # @req REQ-007
+    it "should reject a selected-face missing glyph":
+        val fixture = setup_selected_shaping_face("Bungee")
+        val codepoint = 1114111u32
+        expect(cmap_glyph_id(fixture.parsed, codepoint)).to_equal(0u32)
+        expect(glyph_index(fixture.handle, codepoint as i64)).to_equal(0)
+        val runs = shaper_shape_with_language(fixture.shaper, [codepoint], fixture.font,
+            0.0, 0.0, "und")
+        expect(runs.len()).to_equal(1)
+        expect(runs[0].glyph_indices_valid).to_be(false)
+        expect(runs[0].substitution_complete).to_be(false)
+        expect(runs[0].positioning_complete).to_be(false)
+        expect(shaped_run_to_font_glyph_run(runs[0]).valid).to_be(false)
+        free_font(fixture.handle)
+
+    # @req REQ-007
+    it "should reject shaped material after the selected face becomes stale":
+        val fixture = setup_selected_shaping_face("Bungee")
+        val run = expect_simple_identity_run(fixture, "B", "en", Script.Latin)
+        val glyph_run = shaped_run_to_font_glyph_run(run)
+        free_font(fixture.handle)
+        expect(fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32).valid).to_be(false)
+
+    # @req REQ-009
+    it "should retain unique live face identities across A to B to A and evict stale dependencies":
+        val first = setup_selected_shaping_face("Bungee")
+        val second = setup_selected_shaping_face("Nunito")
+        val first_run = shaped_run_to_font_glyph_run(expect_simple_identity_run(first, "A", "en", Script.Latin))
+        val second_run = shaped_run_to_font_glyph_run(expect_simple_identity_run(second, "B", "en", Script.Latin))
+        val first_identity = selected_font_asset_identity(first.asset)
+        val second_identity = selected_font_asset_identity(second.asset)
+        val combined_identity = "font-faces-v1|" + first_identity.len().to_string() + ":" + first_identity +
+            "|" + second_identity.len().to_string() + ":" + second_identity
+        var renderer = FontRenderer.new()
+
+        val first_batch = renderer.prepare_glyph_run(first_run, 0xFFFFFFFFu32, 32)
+        expect(first_batch.font_identity).to_equal(first_identity)
+        val second_batch = renderer.prepare_glyph_run(second_run, 0xFFFFFFFFu32, 32)
+        expect(second_batch.font_identity).to_equal(combined_identity)
+        val warm_first = renderer.prepare_glyph_run(first_run, 0xFFFFFFFFu32, 32)
+        expect(warm_first.font_identity).to_equal(second_batch.font_identity)
+        expect(warm_first.atlas_generation).to_equal(second_batch.atlas_generation)
+        expect(warm_first.atlas_owner_identity()).to_equal(second_batch.atlas_owner_identity())
+        expect(warm_first.atlas_cache_identity()).to_equal(second_batch.atlas_cache_identity())
+
+        free_font(first.handle)
+        expect(font_face_identity(first.handle.handle, first.handle.generation)).to_equal("")
+        val after_stale = renderer.prepare_glyph_run(second_run, 0xFFFFFFFFu32, 32)
+        expect(after_stale.valid).to_be(true)
+        expect(after_stale.font_identity).to_equal(second_identity)
+        expect(after_stale.atlas_generation).to_be_greater_than(warm_first.atlas_generation)
+        free_font(second.handle)
+
+    # @req REQ-007
+    it "should accept the exact Arabic and Urdu witnesses and reject unselected sequences":
+        step("Shape selected Unicode scripts with the pinned face")
+        expect(selected_font_simple_tuple_accepted("Noto Sans Arabic", "ar")).to_be(true)
+        expect(selected_font_simple_tuple_accepted("Noto Sans Arabic", "ur")).to_be(true)
+        expect(selected_font_simple_tuple_accepted("Noto Naskh Arabic", "ar")).to_be(false)
+        expect(selected_font_simple_tuple_accepted("Noto Naskh Arabic", "ur")).to_be(false)
+        expect(selected_font_coverage_cell("ar", "sans").?.status).to_equal("native")
+        expect(selected_font_coverage_cell("ur", "sans").?.status).to_equal("native")
+        expect(selected_font_coverage_cell("ar", "serif").?.status).to_equal("unavailable")
+        expect(selected_font_coverage_cell("ur", "serif").?.status).to_equal("unavailable")
+        expect(selected_font_asset_for_language_category("ar", "serif")).to_be_nil()
+        expect(selected_font_asset_for_language_category("ur", "serif")).to_be_nil()
+        expect(selected_font_coverage_cell("ar", "mono").?.status).to_equal("fallback")
+        expect(selected_font_coverage_cell("ar", "mono").?.witness_family).to_equal("Noto Sans Arabic")
+        expect(selected_font_coverage_cell("ur", "mono").?.status).to_equal("fallback")
+        expect(selected_font_coverage_cell("ur", "mono").?.witness_family).to_equal("Noto Sans Arabic")
+        val arabic = setup_selected_shaping_face("Noto Sans Arabic")
+        expect_selected_unicode_shaping(arabic, "العربية", "ar", Script.Arabic)
+        expect_selected_unicode_shaping(arabic, "اردو", "ur", Script.Arabic)
+        expect_complex_run_rejected(arabic, "بَ", "ar")
+        free_font(arabic.handle)
+        val naskh = setup_selected_shaping_face("Noto Naskh Arabic")
+        expect_selected_unicode_shaping(naskh, "العربية", "ar", Script.Arabic)
+        expect_selected_unicode_shaping(naskh, "اردو", "ur", Script.Arabic)
+        expect_complex_run_rejected(naskh, "العربية", "ur")
+        expect_complex_run_rejected(naskh, "اردو", "ar")
+        expect_complex_run_rejected(naskh, "بَ", "ar")
+        free_font(naskh.handle)
+
+    # @req REQ-007
+    it "should accept the exact Hindi dev2 witness and reject other complex sequences":
+        expect(selected_font_simple_tuple_accepted("Noto Sans Devanagari", "hi")).to_be(true)
+        expect(selected_font_simple_tuple_accepted("Noto Serif Devanagari", "hi")).to_be(false)
+        expect(selected_font_coverage_cell("hi", "sans").?.status).to_equal("native")
+        expect(selected_font_coverage_cell("hi", "serif").?.status).to_equal("unavailable")
+        expect(selected_font_asset_for_language_category("hi", "serif")).to_be_nil()
+        expect(selected_font_coverage_cell("hi", "mono").?.status).to_equal("fallback")
+        expect(selected_font_coverage_cell("hi", "mono").?.witness_family).to_equal("Noto Sans Devanagari")
+        val devanagari = setup_selected_shaping_face("Noto Sans Devanagari")
+        expect_selected_unicode_shaping(devanagari, "हिन्दी", "hi", Script.Devanagari)
+        expect_complex_run_rejected(devanagari, "र्क", "hi")
+        free_font(devanagari.handle)
+        val serif_devanagari = setup_selected_shaping_face("Noto Serif Devanagari")
+        expect_selected_unicode_shaping(serif_devanagari, "हिन्दी", "hi", Script.Devanagari)
+        expect_complex_run_rejected(serif_devanagari, "र्क", "hi")
+        free_font(serif_devanagari.handle)
+
+    # @req REQ-007
+    it "should accept exact single-codepoint emoji material and reject sequences":
+        val fixture = setup_selected_shaping_face("Noto Emoji")
+        for language in ["en", "zh", "es", "hi", "ar", "fr", "pt", "ru", "ur", "id"]:
+            val run = expect_simple_identity_run(fixture, "😀", language, Script.Emoji)
+            val glyph_run = shaped_run_to_font_glyph_run(run)
+            expect(glyph_run.valid).to_be(true)
+            val batch = fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32)
+            expect(batch.valid).to_be(true)
+            expect(batch.face_generation).to_equal(fixture.handle.generation)
+            expect(batch.quads.len()).to_equal(1)
+            val quad = batch.quads[0]
+            val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
+            var nonzero: i64 = 0
+            for pixel in pixels:
+                if pixel != 0u32: nonzero = nonzero + 1
+            expect(nonzero).to_be_greater_than(0)
+            expect(selected_font_simple_tuple_accepted("Noto Emoji", language)).to_be(true)
+            expect(selected_font_coverage_cell(language, "emoji").?.status).to_equal("native")
+            expect(selected_font_asset_for_language_category(language, "emoji").?.family).to_equal("Noto Emoji")
+        expect_complex_run_rejected(fixture, "😀😀", "und")
+        expect_complex_run_rejected(fixture, "😀️", "und")
+        expect_complex_run_rejected(fixture, "😀🏻", "und")
+        expect_complex_run_rejected(fixture, "😀‍😀", "und")
+        free_font(fixture.handle)
+
+    # @req REQ-007
+    it "should shape and materialize exact registered-only SimpleOS witnesses":
+        step("Accept exact-face-bound simple-script shaping")
+        var registered = 0
+        for asset in selected_font_asset_candidates():
+            if asset.family == "Noto Sans Arabic" or asset.family == "Noto Sans Devanagari":
+                expect(font_renderer_register_selected_bytes(asset.local_path, file_read_bytes(asset.local_path))).to_be(true)
+                registered = registered + 1
+        expect(registered).to_equal(2)
+        font_renderer_use_registered_selected_bytes_only()
+        val arabic = resolve_font_metrics_with_language("sans-serif", "العربية", 32, "ar")
+        val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
+        expect(arabic.reason).to_equal("resolved")
+        expect(arabic.glyph_run.valid).to_be(true)
+        expect(hindi.reason).to_equal("resolved")
+        expect(hindi.glyph_run.valid).to_be(true)
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
+        val arabic_batch = renderer.prepare_selected_glyph_run(arabic.glyph_run, 0xFFFFFFFFu32, 32)
+        expect(arabic_batch.valid).to_be(true)
+        expect(arabic_batch.quads.len()).to_be_greater_than(0)
+        expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)
+        val hindi_batch = renderer.prepare_selected_glyph_run(hindi.glyph_run, 0xFFFFFFFFu32, 32)
+        expect(hindi_batch.valid).to_be(true)
+        expect(hindi_batch.quads.len()).to_be_greater_than(0)

@@ -1,0 +1,34 @@
+use std.spec.*
+use os.kernel.boot.mmio.{mmio_reset_for_test}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_alloc_page_raw, pmm_free_page_raw}
+use os.kernel.memory.vmm.{vmm_init_sparse_for_test, vmm_map_page, vmm_unmap_page, vmm_translate}
+use os.kernel.memory.memory_leveling_vmm.{memory_vmm_prepare_move, memory_vmm_commit_move, memory_vmm_rollback_move, memory_vmm_finalize_move}
+
+describe "memory-leveling VMM mapping effects":
+
+    it "commits and rolls back a real sparse page-table mapping":
+        mmio_reset_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        expect(vmm_init_sparse_for_test(pmm_get_manager(), 0)).to_equal(true)
+        val source = pmm_alloc_page_raw()
+        val destination = pmm_alloc_page_raw()
+        expect(source > 0).to_equal(true)
+        expect(destination > 0).to_equal(true)
+        val virt = VirtAddr(addr: 0x50000000)
+        val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+        expect(vmm_map_page(virt, PhysAddr(addr: source), flags)).to_equal(true)
+
+        val prepared = memory_vmm_prepare_move(virt.addr, destination)
+        expect(prepared.ok).to_equal(true)
+        val committed = memory_vmm_commit_move(prepared.txn)
+        expect(committed.ok).to_equal(true)
+        expect(vmm_translate(virt).unwrap().addr).to_equal(destination)
+        expect(memory_vmm_finalize_move(committed.txn).unwrap().addr).to_equal(source)
+
+        val rolled_back = memory_vmm_rollback_move(committed.txn)
+        expect(rolled_back.ok).to_equal(true)
+        expect(vmm_translate(virt).unwrap().addr).to_equal(source)
+        expect(vmm_unmap_page(virt)).to_equal(true)
+        pmm_free_page_raw(source)
+        pmm_free_page_raw(destination)

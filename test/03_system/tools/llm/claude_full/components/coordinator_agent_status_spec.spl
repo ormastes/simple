@@ -1,0 +1,95 @@
+"""
+# Claude Full CoordinatorAgentStatus
+
+Checks modeled coordinator state, teammate counts, status priority, progress
+summary, rendering, and source parity helpers.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.CoordinatorAgentStatus.*
+
+describe "Claude full CoordinatorAgentStatus component":
+    it "models teammate counts and status priority":
+        step("Sample state includes running, done, and error agents")
+        val state = sampleCoordinatorAgentStatus()
+
+        expect(coordinatorTeammateCount(state)).to_equal(3)
+        expect(coordinatorTotalCount(state)).to_equal(4)
+        expect(coordinatorRunningCount(state)).to_equal(2)
+        expect(coordinatorDoneCount(state)).to_equal(1)
+        expect(coordinatorErrorCount(state)).to_equal(1)
+        expect(coordinatorStatusLabel(state)).to_equal("error")
+        expect(coordinatorHasErrors(state)).to_equal(true)
+        expect(coordinatorAllDone(state)).to_equal(false)
+
+    it "summarizes aggregate progress":
+        step("Progress sums coordinator and teammate steps")
+        val state = sampleCoordinatorAgentStatus()
+
+        expect(coordinatorProgressPercent(state)).to_equal(50)
+        expect(coordinatorProgressSummary(state)).to_equal("error | teammates 3 | running 2 | done 1 | error 1 | progress 50%")
+        expect(state.progressSummary()).to_contain("teammates 3")
+        expect(state.runningCount()).to_equal(2)
+        expect(state.doneCount()).to_equal(1)
+        expect(state.errorCount()).to_equal(1)
+
+    it "normalizes sources and statuses":
+        step("Aliases collapse to stable UI labels")
+        val running = CoordinatorAgent.new("a", "A", " built-in ", "active", 0, 0, "")
+        val done = CoordinatorAgent.new("b", "B", "USER", "completed", 5, 5, "")
+        val failed = CoordinatorAgent.new("c", "C", "other", "blocked", 1, 2, "stuck")
+
+        expect(running.source).to_equal("builtin")
+        expect(running.status).to_equal("running")
+        expect(running.progressText()).to_equal("0/0 0%")
+        expect(done.source).to_equal("user")
+        expect(done.status).to_equal("done")
+        expect(failed.source).to_equal("unknown")
+        expect(failed.status).to_equal("error")
+        expect(coordinatorSourceBadge("project")).to_equal("[Project]")
+        expect(coordinatorStatusBadge("failed")).to_equal("[error]")
+
+    it "renders expanded and collapsed rows":
+        step("Expanded render includes coordinator and teammate rows")
+        val expanded = sampleCoordinatorAgentStatus()
+        val output = renderCoordinatorAgentStatus(expanded)
+
+        expect(output).to_contain("Coordinator agents | error")
+        expect(output).to_contain("updated 12:30")
+        expect(output).to_contain("coordinator Coordinator [Project] [running] 3/5 60%")
+        expect(output).to_contain("teammate QA [User] [running] 1/4 25%")
+        expect(output).to_contain("teammate Docs [Built-in] [done] 2/2 100%")
+        expect(output).to_contain("Needs rebase")
+
+        step("Collapsed render keeps only the coordinator row")
+        val collapsed = CoordinatorAgentStatusState.new(expanded.coordinator, expanded.teammates, "", "", false)
+        val collapsedOutput = collapsed.render()
+        expect(collapsedOutput).to_contain("Coordinator | error")
+        expect(collapsedOutput).to_contain("coordinator Coordinator")
+        expect(collapsedOutput.contains("teammate QA")).to_equal(false)
+
+    it "reports all-done state without errors":
+        step("Done wins when every agent is complete")
+        val state = CoordinatorAgentStatusState.new(
+            CoordinatorAgent.new("coord", "Coordinator", "project", "done", 1, 1, ""),
+            [CoordinatorAgent.new("docs", "Docs", "builtin", "done", 2, 2, "")],
+            "Done lane",
+            "",
+            true
+        )
+
+        expect(coordinatorAllDone(state)).to_equal(true)
+        expect(coordinatorStatusLabel(state)).to_equal("done")
+        expect(coordinatorProgressSummary(state)).to_contain("progress 100%")
+
+    it "exports source helper parity":
+        step("Source helper constants stay pinned")
+        expect(coordinatorSourceOptions()).to_contain("project")
+        expect(coordinatorSourceOptions()).to_contain("user")
+        expect(coordinatorSourceOptions()).to_contain("builtin")
+        expect(coordinatorSourceOptions()).to_contain("unknown")
+        expect(coordinatorAgentStatusModeledSourceFile()).to_equal("src/components/CoordinatorAgentStatus.tsx")
+        expect(coordinatorAgentStatusModeledSourceHelper()).to_equal("getCoordinatorAgentStatus")
+        expect(coordinatorAgentStatusModeledCountsHelper()).to_equal("countCoordinatorAgentsByStatus")
+        expect(coordinatorAgentStatusModeledProgressHelper()).to_equal("formatCoordinatorProgress")
+        expect(coordinatorAgentStatusModeledSourceLines()).to_equal(272)

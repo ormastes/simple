@@ -1,0 +1,967 @@
+#!/bin/sh
+# Validate existing production GUI/web renderer parity evidence without launching
+# Electron, Chrome, Tauri, or GPU checks.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/production_gui_web_renderer_parity_gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_gate_$(date -u +%F).md}"
+SOURCE_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+# Honesty: upstream evidence is only trustworthy for a bounded window. A
+# stale evidence.env (e.g. from a run days ago, before an unrelated code
+# change) must not silently keep this meta-gate green.
+MAX_EVIDENCE_AGE_HOURS="${MAX_EVIDENCE_AGE_HOURS:-72}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_mtime_epoch() {
+    file="$1"
+    if stat -f %m "$file" >/dev/null 2>&1; then
+        stat -f %m "$file"
+    else
+        stat -c %Y "$file" 2>/dev/null
+    fi
+}
+
+missing_commands() {
+    missing=""
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            if [ "$missing" = "" ]; then
+                missing="$cmd"
+            else
+                missing="$missing,$cmd"
+            fi
+        fi
+    done
+    echo "$missing"
+}
+
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+num_positive() {
+    value="$1"
+    awk -v value="$value" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0) exit 0
+        exit 1
+    }'
+}
+
+num_at_least_decimal() {
+    value="$1"
+    min="$2"
+    awk -v value="$value" -v min="$min" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 >= min + 0) exit 0
+        exit 1
+    }'
+}
+
+num_at_most_decimal() {
+    value="$1"
+    max="$2"
+    awk -v value="$value" -v max="$max" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 <= max + 0) exit 0
+        exit 1
+    }'
+}
+
+matches_regex() {
+    value="$1"
+    pattern="$2"
+    printf '%s\n' "$value" | grep -Eq "$pattern"
+}
+
+status_or_missing() {
+    value="$1"
+    if [ "$value" = "" ]; then
+        echo "missing"
+    else
+        echo "$value"
+    fi
+}
+
+reason_or_missing() {
+    value="$1"
+    fallback="$2"
+    if [ "$value" = "" ]; then
+        echo "$fallback"
+    else
+        echo "$value"
+    fi
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "production_gui_web_renderer_parity_gate_status=$status"
+        echo "production_gui_web_renderer_parity_gate_reason=$reason"
+        echo "production_gui_web_renderer_parity_gate_source_env=$SOURCE_ENV"
+        echo "production_gui_web_renderer_parity_gate_source_env_status=${source_env_status:-}"
+        echo "production_gui_web_renderer_parity_gate_source_status=$(status_or_missing "${source_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_source_reason=$(reason_or_missing "${source_reason:-}" "missing-production-parity-source-status")"
+        echo "production_gui_web_renderer_parity_gate_source_partial_status=${source_partial_status:-}"
+        echo "production_gui_web_renderer_parity_gate_source_partial_reason=${source_partial_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_source_env_mtime_epoch=${source_env_mtime_epoch:-}"
+        echo "production_gui_web_renderer_parity_gate_source_env_age_hours=${source_env_age_hours:-}"
+        echo "production_gui_web_renderer_parity_gate_max_evidence_age_hours=$MAX_EVIDENCE_AGE_HOURS"
+        echo "production_gui_web_renderer_parity_gate_simple_bin=${simple_bin:-}"
+        echo "production_gui_web_renderer_parity_gate_simple_bin_source=${simple_bin_source:-}"
+        echo "production_gui_web_renderer_parity_gate_simple_bin_status=$(status_or_missing "${simple_bin_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs"
+        echo "production_gui_web_renderer_parity_gate_matrix_exit_code=${matrix_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_matrix_status=${matrix_status:-}"
+        echo "production_gui_web_renderer_parity_gate_matrix_reason=${matrix_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_matrix_timed_out=${matrix_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_matrix_timeout_secs=${matrix_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_exit_code=${layout_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_status=$(status_or_missing "${layout_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_reason=$(reason_or_missing "${layout_reason:-}" "missing-layout-manifest-evidence")"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_timed_out=${layout_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_timeout_secs=${layout_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_reused=${layout_reused:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_source_env=${layout_source_env:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_case_count=${layout_count:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_pass_count=${layout_pass:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_tracked_count=${layout_tracked:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_fail_count=${layout_fail:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_dependency_status=${layout_dependency_status:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_dependency_reason=${layout_dependency_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_dependency_missing_count=${layout_dependency_missing_count:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_exit_code=${surface_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_status=$(status_or_missing "${surface_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_reason=$(reason_or_missing "${surface_reason:-}" "missing-surface-manifest-evidence")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_timed_out=${surface_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_timeout_secs=${surface_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_resume=${surface_resume:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_case_filter=${surface_case_filter:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_wait_steps=${surface_tauri_wait_steps:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_electron_capture_status=$(status_or_missing "${surface_electron_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_host_uname_s=${surface_host_uname_s:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_host_uname_m=${surface_host_uname_m:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status=$(status_or_missing "${surface_tauri_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_reason=$(reason_or_missing "${surface_tauri_reason:-}" "missing-tauri-capture-evidence")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=${surface_tauri_backend:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=${surface_tauri_required_commands:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_missing_commands=${surface_tauri_missing_commands:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status=$(status_or_missing "${surface_chrome_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_reason=$(reason_or_missing "${surface_chrome_reason:-}" "missing-chrome-capture-evidence")"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=${surface_chrome_backend:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_live_capture=${surface_tauri_live:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_live_capture=${surface_chrome_live:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_case_count=${surface_tauri_count:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_pass_count=${surface_tauri_pass:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_tracked_count=${surface_tauri_tracked:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_fail_count=${surface_tauri_fail:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_case_count=${surface_chrome_count:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_pass_count=${surface_chrome_pass:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_tracked_count=${surface_chrome_tracked:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_fail_count=${surface_chrome_fail:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_tauri_mismatch_count=${surface_tauri_mismatch:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_chrome_mismatch_count=${surface_chrome_mismatch:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_no_fake_capture=${surface_no_fake:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_blur_or_tolerance_used=${surface_tolerance:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_exit_code=${backend_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_status=$(status_or_missing "${backend_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_backend_reason=$(reason_or_missing "${backend_reason:-}" "missing-backend-evidence")"
+        echo "production_gui_web_renderer_parity_gate_backend_timed_out=${backend_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_timeout_secs=${backend_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_exact=${backend_exact:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_cpu_simd_different_pixels=${backend_cpu_diff:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_resolved=${backend_metal_resolved:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_different_pixels=${backend_metal_diff:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_gpu_frame_complete=${backend_metal_frame:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_command_queue_handle=${backend_metal_command_queue_handle:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_software_checksum=${backend_software_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_cpu_simd_checksum=${backend_cpu_simd_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_checksum=${backend_metal_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_gpu_readback_checksum=${backend_metal_gpu_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_checksum_match=${backend_checksum_match:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_same_frame_readback=${backend_same_frame_readback:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_readback_source=${backend_readback_source:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_blur_or_tolerance_used=${backend_tolerance:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_sample_count=${backend_sample_count:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_total_elapsed_us_min=${backend_elapsed_min:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_total_elapsed_us_avg=${backend_elapsed_avg:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_total_elapsed_us_max=${backend_elapsed_max:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_total_pixels_per_second_min=${backend_throughput_min:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_total_pixels_per_second_avg=${backend_throughput_avg:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_total_pixels_per_second_max=${backend_throughput_max:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_timing_budget_us=${backend_timing_budget_us:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_timing_budget_status=${backend_timing_budget_status:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_timing_budget_reason=${backend_timing_budget_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_timing_status=$(status_or_missing "${backend_timing_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_font_offload_exit_code=${font_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_status=$(status_or_missing "${font_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_font_offload_reason=$(reason_or_missing "${font_reason:-}" "missing-font-offload-evidence")"
+        echo "production_gui_web_renderer_parity_gate_font_offload_blocker_doc=${font_blocker_doc:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_timed_out=${font_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_timeout_secs=${font_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_simple_bin=${font_simple_bin:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_simple_bin_source=${font_simple_bin_source:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_simple_bin_status=${font_simple_bin_status:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_runtime_evidence_env=${font_runtime_evidence_env:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_runtime_evidence_status=${font_runtime_evidence_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_exit_code=${metal_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_status=$(status_or_missing "${metal_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_reason=$(reason_or_missing "${metal_reason:-}" "missing-metal-readback-evidence")"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_timed_out=${metal_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_timeout_secs=${metal_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_spec_status=${metal_spec_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_available=${metal_available:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_blur_or_tolerance_used=${metal_tolerance:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_simple_bin=${metal_simple_bin:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_simple_bin_source=${metal_simple_bin_source:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_simple_bin_status=${metal_simple_bin_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_status=$(status_or_missing "${metal_log_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_reason=$(reason_or_missing "${metal_log_reason:-}" "missing-metal-render-log-evidence")"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_required_api=${metal_log_required_api:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_backend_resolved=${metal_log_backend_resolved:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_metal_readback_status=${metal_log_metal_readback_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_generated_readback_gate_status=${metal_log_generated_gate:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_framebuffer_readback_gate_status=${metal_log_framebuffer_gate:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_browser_backing_gate_status=${metal_log_browser_gate:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_pairwise_gate_status=${metal_log_pairwise_gate:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_argb_source_gate_status=${metal_log_argb_source_gate:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_gpu_capture_gate_status=${metal_log_gpu_capture_gate:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_blocked_gate_count=${metal_log_blocked_gate_count:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_blocked_gates=${metal_log_blocked_gates:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_pairwise_status=${metal_log_pairwise_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_gpu_capture_status=${metal_log_gpu_capture_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_gpu_capture_tool=${metal_log_gpu_capture_tool:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_tauri_ios_gate_status=${metal_log_tauri_ios_gate_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_tauri_ios_render_log_validation_status=${metal_log_tauri_ios_validation_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_tauri_ios_render_log_validation_reason=${metal_log_tauri_ios_validation_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_tauri_ios_backend=${metal_log_tauri_ios_backend:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_tauri_ios_expected_gpu_backend=${metal_log_tauri_ios_expected_gpu_backend:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_render_log_tauri_ios_metal_log_status=${metal_log_tauri_ios_metal_log_status:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_exit_code=${event_exit_code:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_status=$(status_or_missing "${event_status:-}")"
+        echo "production_gui_web_renderer_parity_gate_event_routing_reason=$(reason_or_missing "${event_reason:-}" "missing-event-routing-evidence")"
+        echo "production_gui_web_renderer_parity_gate_event_routing_validation_status=${event_validation_status:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_validation_reason=${event_validation_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_symlink_status=${event_proof_symlink_status:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_source=${event_proof_source:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_source_file_status=${event_proof_source_file_status:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_source_size_bytes=${event_proof_source_size_bytes:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_source_actual_size_bytes=${event_proof_source_actual_size_bytes:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_source_file_reason=${event_proof_source_file_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_proof_source_artifact_status=${event_proof_source_artifact_status:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_browser_engine=${event_browser_engine:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_electron_user_agent=${event_electron_user_agent:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_electron_process_version=${event_electron_process_version:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_chrome_process_version=${event_chrome_process_version:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_timed_out=${event_timed_out:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_timeout_secs=${event_timeout_secs:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_ready=${event_ready:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_wm_found=${event_wm_found:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_focus_count=${event_focus_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_move_count=${event_move_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_maximize_count=${event_maximize_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_command_count=${event_title_command_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_text_input_count=${event_text_input_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_pointer_down_count=${event_pointer_down_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_pointer_up_count=${event_pointer_up_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_performance_now_available=${event_performance_now_available:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_performance_now_delta_ms=${event_performance_now_delta_ms:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_input_to_paint_ms=${event_input_to_paint_ms:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_animation_frame_available=${event_animation_frame_available:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_animation_frame_count=${event_animation_frame_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_css_animation_probe=${event_css_animation_probe:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_event_sequence=${event_sequence:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_text=${event_title_text:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_context_text=${event_title_context_text:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_traffic_button_count=${event_traffic_button_count:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_tag=${event_title_input_tag:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_titlebar_height=${event_titlebar_height:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_titlebar_display=${event_titlebar_display:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_titlebar_cursor=${event_titlebar_cursor:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_titlebar_background=${event_titlebar_background:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_color=${event_title_color:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_font_weight=${event_title_font_weight:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_min_width=${event_title_input_min_width:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_width=${event_title_input_width:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_width_px=${event_title_input_width_px:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_height=${event_title_input_height:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_cursor=${event_title_input_cursor:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_input_background=${event_title_input_background:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_close_button_background=${event_close_button_background:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_minimize_button_background=${event_minimize_button_background:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_maximize_button_background=${event_maximize_button_background:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_expected_move_x=${event_expected_move_x:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_expected_move_y=${event_expected_move_y:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_move_payload_x=${event_move_payload_x:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_move_payload_y=${event_move_payload_y:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_move_payload_source=${event_move_payload_source:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_move_payload_window_id_hint=${event_move_payload_window_id_hint:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_title_command_text=${event_title_command_text:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_text_input_text=${event_text_input_text:-}"
+        echo "production_gui_web_renderer_parity_gate_event_routing_blur_or_tolerance_used=${event_tolerance:-}"
+        echo "production_gui_web_renderer_parity_gate_required_source_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_simple_bin_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_simple_bin_nonempty=true"
+        echo "production_gui_web_renderer_parity_gate_required_matrix_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_case_count=50"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count=36"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count=14"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_fail_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_electron_capture_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_capture_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_capture_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_live_capture=true"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_live_capture=true"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_case_count=50"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_pass_count=36"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_tracked_count=14"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_fail_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_case_count=50"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_pass_count=36"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_tracked_count=14"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_fail_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_mismatch_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_chrome_mismatch_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_no_fake_capture=true"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_blur_or_tolerance_used=false"
+        echo "production_gui_web_renderer_parity_gate_required_backend_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_backend_exact=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_cpu_simd_different_pixels=0"
+        echo "production_gui_web_renderer_parity_gate_required_backend_metal_different_pixels=0"
+        echo "production_gui_web_renderer_parity_gate_required_backend_metal_gpu_frame_complete=true when metal_resolved=metal"
+        echo "production_gui_web_renderer_parity_gate_required_backend_metal_command_queue_handle_gt=0 when metal_resolved=metal"
+        echo "production_gui_web_renderer_parity_gate_required_backend_checksums_positive=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_checksums_equal=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_checksum_match=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_same_frame_readback=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_blur_or_tolerance_used=false"
+        echo "production_gui_web_renderer_parity_gate_required_backend_timing_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_backend_timing_budget_status=pass-or-warn"
+        echo "production_gui_web_renderer_parity_gate_required_backend_min_sample_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_backend_positive_total_elapsed_us_min=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_positive_total_elapsed_us_avg=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_positive_total_elapsed_us_max=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_positive_total_pixels_per_second_min=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_positive_total_pixels_per_second_avg=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_positive_total_pixels_per_second_max=true"
+        echo "production_gui_web_renderer_parity_gate_required_font_offload_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_font_offload_runtime_evidence_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_readback_status=pass-or-unavailable-when-metal-requires-macos"
+        echo "production_gui_web_renderer_parity_gate_required_metal_readback_spec_status=pass-when-metal-readback-status-pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_readback_available=true-when-metal-readback-status-pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_readback_blur_or_tolerance_used=false"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_status=pass-when-metal-readback-status-pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_required_api=metal"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_metal_readback_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_generated_readback_gate_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_framebuffer_readback_gate_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_browser_backing_gate_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_pairwise_gate_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_argb_source_gate_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_render_log_blocked_gate_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_proof_symlink_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_proof_source=tools/web-render-backend/wm_event_check.js"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_proof_source_file_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_proof_source_file_reason=pass"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_proof_source_artifact_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_proof_source_min_size_bytes=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_browser_engine=chromium"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_electron_user_agent_contains=Chrome/,Electron/"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_process_versions=decimal-dot"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_ready=true"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_wm_found=true"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_focus_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_move_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_maximize_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_title_command_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_text_input_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_pointer_down_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_pointer_up_count=1"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_performance_now_available=true"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_gt=0"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_lte=1000"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_input_to_paint_ms_gt=0"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_input_to_paint_ms_lte=1000"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_animation_frame_count=2"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_css_animation_probe=true"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_text=Terminal"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_context_text=terminal"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_traffic_button_count=3"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_input_tag=input"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_titlebar_height=34px"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_titlebar_display=flex"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_titlebar_cursor=grab"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_titlebar_background=rgb(229, 231, 235)"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_color=rgb(17, 24, 39)"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_title_font_weight=700"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_input_min_width=142px"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_min_title_input_width_px=142"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_input_height=24px"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_input_cursor=text"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_title_input_background=rgb(241, 245, 249)"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_close_button_background=rgb(239, 68, 68)"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_minimize_button_background=rgb(234, 179, 8)"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_maximize_button_background=rgb(34, 197, 94)"
+        echo "production_gui_web_renderer_parity_gate_required_event_routing_blur_or_tolerance_used=false"
+    } >"$OUT_ENV"
+    {
+        echo "# Production GUI Web Renderer Parity Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- source status: ${source_status:-}"
+        echo "- source reason: ${source_reason:-}"
+        echo "- matrix: ${matrix_status:-} (${matrix_reason:-}; timed out: ${matrix_timed_out:-})"
+        echo "- layout manifest: ${layout_status:-} (${layout_reason:-}; timed out: ${layout_timed_out:-}; ${layout_pass:-}/${layout_count:-} pass, ${layout_tracked:-} tracked, ${layout_fail:-} fail)"
+        echo "- surface manifest: ${surface_status:-} (${surface_reason:-}; timed out: ${surface_timed_out:-}; Tauri ${surface_tauri_pass:-}/${surface_tauri_count:-} pass, ${surface_tauri_tracked:-} tracked, ${surface_tauri_fail:-} fail; Chrome ${surface_chrome_pass:-}/${surface_chrome_count:-} pass, ${surface_chrome_tracked:-} tracked, ${surface_chrome_fail:-} fail)"
+        echo "- surface host: ${surface_host_uname_s:-}/${surface_host_uname_m:-}"
+        echo "- Tauri surface capture backend: ${surface_tauri_backend:-}; missing commands: ${surface_tauri_missing_commands:-}; reason: ${surface_tauri_reason:-}"
+        echo "- Chrome surface capture backend: ${surface_chrome_backend:-}; reason: ${surface_chrome_reason:-}"
+        echo "- live captures: Tauri ${surface_tauri_live:-}, Chrome ${surface_chrome_live:-}; no fake capture: ${surface_no_fake:-}; blur/tolerance: ${surface_tolerance:-}"
+        echo "- backend parity: ${backend_status:-}"
+        echo "- backend timing: ${backend_timing_status:-} (${backend_sample_count:-} samples; elapsed us min/avg/max ${backend_elapsed_min:-}/${backend_elapsed_avg:-}/${backend_elapsed_max:-}; pixels/sec min/avg/max ${backend_throughput_min:-}/${backend_throughput_avg:-}/${backend_throughput_max:-})"
+        echo "- font offload/readback: ${font_status:-}"
+        echo "- raw Metal framebuffer readback: ${metal_status:-}"
+        echo "- Electron event routing: ${event_status:-}"
+        echo "- Electron event proof source: ${event_proof_source_file_status:-} / ${event_proof_source_file_reason:-} / ${event_proof_source_artifact_status:-}; source ${event_proof_source:-}"
+        echo "- Electron browser runtime: engine=${event_browser_engine:-} electron=${event_electron_process_version:-} chrome=${event_chrome_process_version:-}"
+        echo "- Electron event counts: focus=${event_focus_count:-} move=${event_move_count:-} maximize=${event_maximize_count:-} title_command=${event_title_command_count:-} text_input=${event_text_input_count:-} pointer=${event_pointer_down_count:-}/${event_pointer_up_count:-}"
+        echo "- Electron event performance/animation: perf=${event_performance_now_available:-} delta_ms=${event_performance_now_delta_ms:-} input_to_paint_ms=${event_input_to_paint_ms:-} animation=${event_animation_frame_available:-} frames=${event_animation_frame_count:-} css=${event_css_animation_probe:-}"
+        echo "- Electron event sequence: ${event_sequence:-}"
+        echo "- Electron event UI target: title=${event_title_text:-}/${event_title_context_text:-} traffic=${event_traffic_button_count:-} input=${event_title_input_tag:-} titlebar=${event_titlebar_height:-}/${event_titlebar_display:-}/${event_titlebar_cursor:-} input_width_px=${event_title_input_width_px:-}"
+        echo "- Electron event payload: move=${event_move_payload_x:-},${event_move_payload_y:-} expected=${event_expected_move_x:-},${event_expected_move_y:-} source=${event_move_payload_source:-} window=${event_move_payload_window_id_hint:-} title_command=${event_title_command_text:-} text_input=${event_text_input_text:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    source_env_status="missing"
+    source_status=""
+    source_reason="missing-production-parity-evidence"
+    source_partial_status=""
+    source_partial_reason=""
+    matrix_exit_code=""
+    matrix_status=""
+    matrix_reason=""
+    matrix_timed_out=""
+    matrix_timeout_secs=""
+    layout_exit_code=""
+    layout_status=""
+    layout_reason=""
+    layout_timed_out=""
+    layout_timeout_secs=""
+    layout_count=""
+    layout_pass=""
+    layout_tracked=""
+    layout_fail=""
+    surface_exit_code=""
+    surface_status=""
+    surface_reason=""
+    surface_timed_out=""
+    surface_timeout_secs=""
+    surface_electron_status=""
+    surface_host_uname_s=""
+    surface_host_uname_m=""
+    surface_tauri_status=""
+    surface_tauri_reason=""
+    surface_tauri_backend=""
+    surface_tauri_required_commands=""
+    surface_tauri_missing_commands=""
+    surface_chrome_status=""
+    surface_chrome_reason=""
+    surface_chrome_backend=""
+    surface_tauri_live=""
+    surface_chrome_live=""
+    surface_tauri_count=""
+    surface_tauri_pass=""
+    surface_tauri_tracked=""
+    surface_tauri_fail=""
+    surface_chrome_count=""
+    surface_chrome_pass=""
+    surface_chrome_tracked=""
+    surface_chrome_fail=""
+    surface_tauri_mismatch=""
+    surface_chrome_mismatch=""
+    surface_no_fake=""
+    surface_tolerance=""
+    backend_exit_code=""
+    backend_status=""
+    backend_reason=""
+    backend_timed_out=""
+    backend_timeout_secs=""
+    backend_exact=""
+    backend_cpu_diff=""
+    backend_metal_resolved=""
+    backend_metal_diff=""
+    backend_metal_frame=""
+    backend_metal_command_queue_handle=""
+    backend_software_checksum=""
+    backend_cpu_simd_checksum=""
+    backend_metal_checksum=""
+    backend_metal_gpu_checksum=""
+    backend_checksum_match=""
+    backend_same_frame_readback=""
+    backend_readback_source=""
+    backend_tolerance=""
+    backend_sample_count=""
+    backend_elapsed_min=""
+    backend_elapsed_avg=""
+    backend_elapsed_max=""
+    backend_throughput_min=""
+    backend_throughput_avg=""
+    backend_throughput_max=""
+    backend_timing_status=""
+    font_exit_code=""
+    font_status=""
+    font_reason=""
+    font_timed_out=""
+    font_timeout_secs=""
+    metal_exit_code=""
+    metal_status=""
+    metal_reason=""
+    metal_timed_out=""
+    metal_timeout_secs=""
+    metal_spec_status=""
+    metal_available=""
+    metal_tolerance=""
+    event_exit_code=""
+    event_status=""
+    event_reason=""
+    event_proof_source=""
+    event_proof_source_file_status=""
+    event_proof_source_size_bytes=""
+    event_browser_engine=""
+    event_electron_user_agent=""
+    event_electron_process_version=""
+    event_chrome_process_version=""
+    event_timed_out=""
+    event_timeout_secs=""
+    event_ready=""
+    event_wm_found=""
+    event_focus_count=""
+    event_move_count=""
+    event_maximize_count=""
+    event_title_command_count=""
+    event_text_input_count=""
+    event_pointer_down_count=""
+    event_pointer_up_count=""
+    event_performance_now_available=""
+    event_performance_now_delta_ms=""
+    event_input_to_paint_ms=""
+    event_animation_frame_available=""
+    event_animation_frame_count=""
+    event_css_animation_probe=""
+    event_title_text=""
+    event_title_context_text=""
+    event_traffic_button_count=""
+    event_title_input_tag=""
+    event_titlebar_height=""
+    event_titlebar_display=""
+    event_titlebar_cursor=""
+    event_titlebar_background=""
+    event_title_color=""
+    event_title_font_weight=""
+    event_title_input_min_width=""
+    event_title_input_width=""
+    event_title_input_width_px=""
+    event_title_input_height=""
+    event_title_input_cursor=""
+    event_title_input_background=""
+    event_close_button_background=""
+    event_minimize_button_background=""
+    event_maximize_button_background=""
+    event_tolerance=""
+    write_evidence "unavailable" "missing-production-parity-evidence"
+    exit 1
+fi
+
+source_env_mtime_epoch="$(file_mtime_epoch "$SOURCE_ENV")"
+now_epoch="$(date +%s)"
+if [ -n "${source_env_mtime_epoch:-}" ] && [ "$source_env_mtime_epoch" -gt 0 ] 2>/dev/null; then
+    source_env_age_seconds=$((now_epoch - source_env_mtime_epoch))
+    source_env_age_hours=$((source_env_age_seconds / 3600))
+else
+    source_env_age_hours=""
+fi
+
+source_env_status="pass"
+source_status="$(value_of production_gui_web_renderer_parity_status "$SOURCE_ENV")"
+source_reason="$(value_of production_gui_web_renderer_parity_reason "$SOURCE_ENV")"
+source_partial_status=""
+source_partial_reason=""
+simple_bin="$(value_of production_gui_web_renderer_parity_simple_bin "$SOURCE_ENV")"
+simple_bin_source="$(value_of production_gui_web_renderer_parity_simple_bin_source "$SOURCE_ENV")"
+simple_bin_status="$(value_of production_gui_web_renderer_parity_simple_bin_status "$SOURCE_ENV")"
+matrix_exit_code="$(value_of production_gui_web_renderer_parity_matrix_exit_code "$SOURCE_ENV")"
+matrix_status="$(value_of production_gui_web_renderer_parity_matrix_status "$SOURCE_ENV")"
+matrix_reason="$(value_of production_gui_web_renderer_parity_matrix_reason "$SOURCE_ENV")"
+matrix_timed_out="$(value_of production_gui_web_renderer_parity_matrix_timed_out "$SOURCE_ENV")"
+matrix_timeout_secs="$(value_of production_gui_web_renderer_parity_matrix_timeout_secs "$SOURCE_ENV")"
+layout_exit_code="$(value_of production_gui_web_renderer_parity_layout_manifest_exit_code "$SOURCE_ENV")"
+layout_status="$(value_of production_gui_web_renderer_parity_layout_manifest_status "$SOURCE_ENV")"
+layout_reason="$(value_of production_gui_web_renderer_parity_layout_manifest_reason "$SOURCE_ENV")"
+layout_timed_out="$(value_of production_gui_web_renderer_parity_layout_manifest_timed_out "$SOURCE_ENV")"
+layout_timeout_secs="$(value_of production_gui_web_renderer_parity_layout_manifest_timeout_secs "$SOURCE_ENV")"
+layout_reused="$(value_of production_gui_web_renderer_parity_layout_manifest_reused "$SOURCE_ENV")"
+layout_source_env="$(value_of production_gui_web_renderer_parity_layout_manifest_source_env "$SOURCE_ENV")"
+layout_count="$(value_of production_gui_web_renderer_parity_layout_manifest_case_count "$SOURCE_ENV")"
+layout_pass="$(value_of production_gui_web_renderer_parity_layout_manifest_pass_count "$SOURCE_ENV")"
+layout_tracked="$(value_of production_gui_web_renderer_parity_layout_manifest_tracked_count "$SOURCE_ENV")"
+layout_fail="$(value_of production_gui_web_renderer_parity_layout_manifest_fail_count "$SOURCE_ENV")"
+layout_dependency_status="$(value_of production_gui_web_renderer_parity_layout_manifest_dependency_status "$SOURCE_ENV")"
+layout_dependency_reason="$(value_of production_gui_web_renderer_parity_layout_manifest_dependency_reason "$SOURCE_ENV")"
+layout_dependency_missing_count="$(value_of production_gui_web_renderer_parity_layout_manifest_dependency_missing_count "$SOURCE_ENV")"
+surface_exit_code="$(value_of production_gui_web_renderer_parity_surface_manifest_exit_code "$SOURCE_ENV")"
+surface_status="$(value_of production_gui_web_renderer_parity_surface_manifest_status "$SOURCE_ENV")"
+surface_reason="$(value_of production_gui_web_renderer_parity_surface_manifest_reason "$SOURCE_ENV")"
+surface_timed_out="$(value_of production_gui_web_renderer_parity_surface_manifest_timed_out "$SOURCE_ENV")"
+surface_timeout_secs="$(value_of production_gui_web_renderer_parity_surface_manifest_timeout_secs "$SOURCE_ENV")"
+surface_resume="$(value_of production_gui_web_renderer_parity_surface_manifest_resume "$SOURCE_ENV")"
+surface_case_filter="$(value_of production_gui_web_renderer_parity_surface_manifest_case_filter "$SOURCE_ENV")"
+surface_tauri_wait_steps="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_capture_wait_steps "$SOURCE_ENV")"
+surface_electron_status="$(value_of production_gui_web_renderer_parity_surface_manifest_electron_capture_status "$SOURCE_ENV")"
+surface_host_uname_s="$(value_of production_gui_web_renderer_parity_surface_manifest_host_uname_s "$SOURCE_ENV")"
+surface_host_uname_m="$(value_of production_gui_web_renderer_parity_surface_manifest_host_uname_m "$SOURCE_ENV")"
+surface_tauri_status="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_capture_status "$SOURCE_ENV")"
+surface_tauri_reason="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_capture_reason "$SOURCE_ENV")"
+surface_tauri_backend="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_capture_backend "$SOURCE_ENV")"
+surface_tauri_required_commands="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_capture_required_commands "$SOURCE_ENV")"
+surface_tauri_missing_commands="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_capture_missing_commands "$SOURCE_ENV")"
+surface_chrome_status="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_capture_status "$SOURCE_ENV")"
+surface_chrome_reason="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_capture_reason "$SOURCE_ENV")"
+surface_chrome_backend="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_capture_backend "$SOURCE_ENV")"
+if [ "$surface_host_uname_s" = "" ] && [ "$surface_status" != "" ]; then
+    surface_host_uname_s="$(uname -s)"
+fi
+if [ "$surface_host_uname_m" = "" ] && [ "$surface_status" != "" ]; then
+    surface_host_uname_m="$(uname -m)"
+fi
+if [ "$surface_tauri_reason" = "" ]; then
+    surface_tauri_reason="$(value_of surface_tauri_chrome_simple_web_layout_manifest_tauri_capture_reason "$SOURCE_ENV")"
+fi
+if [ "$surface_tauri_backend" = "" ] && [ "$surface_tauri_status" != "" ] && [ "$surface_tauri_status" != "pass" ]; then
+    surface_tauri_backend="x11-xvfb-window-screenshot"
+fi
+if [ "$surface_tauri_required_commands" = "" ] && [ "$surface_tauri_status" != "" ] && [ "$surface_tauri_status" != "pass" ]; then
+    surface_tauri_required_commands="cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node"
+fi
+if [ "$surface_tauri_missing_commands" = "" ] && [ "$surface_tauri_status" != "" ] && [ "$surface_tauri_status" != "pass" ]; then
+    surface_tauri_missing_commands="$(missing_commands cargo xvfb-run dbus-run-session xdotool import convert node)"
+fi
+if [ "$surface_chrome_reason" = "" ]; then
+    surface_chrome_reason="$(value_of surface_tauri_chrome_simple_web_layout_manifest_chrome_capture_reason "$SOURCE_ENV")"
+fi
+if [ "$surface_chrome_backend" = "" ] && [ "$surface_chrome_status" != "" ] && [ "$surface_chrome_status" != "pass" ]; then
+    surface_chrome_backend="chrome-live-bitmap"
+fi
+surface_tauri_live="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_live_capture "$SOURCE_ENV")"
+surface_chrome_live="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_live_capture "$SOURCE_ENV")"
+surface_tauri_count="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_case_count "$SOURCE_ENV")"
+surface_tauri_pass="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_pass_count "$SOURCE_ENV")"
+surface_tauri_tracked="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_tracked_count "$SOURCE_ENV")"
+surface_tauri_fail="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_fail_count "$SOURCE_ENV")"
+surface_chrome_count="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_case_count "$SOURCE_ENV")"
+surface_chrome_pass="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_pass_count "$SOURCE_ENV")"
+surface_chrome_tracked="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_tracked_count "$SOURCE_ENV")"
+surface_chrome_fail="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_fail_count "$SOURCE_ENV")"
+surface_tauri_mismatch="$(value_of production_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count "$SOURCE_ENV")"
+surface_chrome_mismatch="$(value_of production_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count "$SOURCE_ENV")"
+surface_no_fake="$(value_of production_gui_web_renderer_parity_surface_manifest_no_fake_capture "$SOURCE_ENV")"
+surface_tolerance="$(value_of production_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used "$SOURCE_ENV")"
+backend_exit_code="$(value_of production_gui_web_renderer_parity_backend_exit_code "$SOURCE_ENV")"
+backend_status="$(value_of production_gui_web_renderer_parity_backend_status "$SOURCE_ENV")"
+backend_reason="$(value_of production_gui_web_renderer_parity_backend_reason "$SOURCE_ENV")"
+backend_timed_out="$(value_of production_gui_web_renderer_parity_backend_timed_out "$SOURCE_ENV")"
+backend_timeout_secs="$(value_of production_gui_web_renderer_parity_backend_timeout_secs "$SOURCE_ENV")"
+backend_exact="$(value_of production_gui_web_renderer_parity_backend_exact "$SOURCE_ENV")"
+backend_cpu_diff="$(value_of production_gui_web_renderer_parity_backend_cpu_simd_different_pixels "$SOURCE_ENV")"
+backend_metal_resolved="$(value_of production_gui_web_renderer_parity_backend_metal_resolved "$SOURCE_ENV")"
+backend_metal_diff="$(value_of production_gui_web_renderer_parity_backend_metal_different_pixels "$SOURCE_ENV")"
+backend_metal_frame="$(value_of production_gui_web_renderer_parity_backend_metal_gpu_frame_complete "$SOURCE_ENV")"
+backend_metal_command_queue_handle="$(value_of production_gui_web_renderer_parity_backend_metal_command_queue_handle "$SOURCE_ENV")"
+backend_software_checksum="$(value_of production_gui_web_renderer_parity_backend_software_checksum "$SOURCE_ENV")"
+backend_cpu_simd_checksum="$(value_of production_gui_web_renderer_parity_backend_cpu_simd_checksum "$SOURCE_ENV")"
+backend_metal_checksum="$(value_of production_gui_web_renderer_parity_backend_metal_checksum "$SOURCE_ENV")"
+backend_metal_gpu_checksum="$(value_of production_gui_web_renderer_parity_backend_metal_gpu_readback_checksum "$SOURCE_ENV")"
+backend_checksum_match="$(value_of production_gui_web_renderer_parity_backend_checksum_match "$SOURCE_ENV")"
+backend_same_frame_readback="$(value_of production_gui_web_renderer_parity_backend_same_frame_readback "$SOURCE_ENV")"
+backend_readback_source="$(value_of production_gui_web_renderer_parity_backend_readback_source "$SOURCE_ENV")"
+backend_tolerance="$(value_of production_gui_web_renderer_parity_backend_blur_or_tolerance_used "$SOURCE_ENV")"
+backend_sample_count="$(value_of production_gui_web_renderer_parity_backend_sample_count "$SOURCE_ENV")"
+backend_elapsed_min="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_min "$SOURCE_ENV")"
+backend_elapsed_avg="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_avg "$SOURCE_ENV")"
+backend_elapsed_max="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_max "$SOURCE_ENV")"
+backend_throughput_min="$(value_of production_gui_web_renderer_parity_backend_total_pixels_per_second_min "$SOURCE_ENV")"
+backend_throughput_avg="$(value_of production_gui_web_renderer_parity_backend_total_pixels_per_second_avg "$SOURCE_ENV")"
+backend_throughput_max="$(value_of production_gui_web_renderer_parity_backend_total_pixels_per_second_max "$SOURCE_ENV")"
+backend_timing_budget_us="$(value_of production_gui_web_renderer_parity_backend_timing_budget_us "$SOURCE_ENV")"
+backend_timing_budget_status="$(value_of production_gui_web_renderer_parity_backend_timing_budget_status "$SOURCE_ENV")"
+backend_timing_budget_reason="$(value_of production_gui_web_renderer_parity_backend_timing_budget_reason "$SOURCE_ENV")"
+backend_timing_status="$(value_of production_gui_web_renderer_parity_backend_timing_status "$SOURCE_ENV")"
+font_exit_code="$(value_of production_gui_web_renderer_parity_font_offload_exit_code "$SOURCE_ENV")"
+font_status="$(value_of production_gui_web_renderer_parity_font_offload_status "$SOURCE_ENV")"
+font_reason="$(value_of production_gui_web_renderer_parity_font_offload_reason "$SOURCE_ENV")"
+font_blocker_doc="$(value_of production_gui_web_renderer_parity_font_offload_blocker_doc "$SOURCE_ENV")"
+font_timed_out="$(value_of production_gui_web_renderer_parity_font_offload_timed_out "$SOURCE_ENV")"
+font_timeout_secs="$(value_of production_gui_web_renderer_parity_font_offload_timeout_secs "$SOURCE_ENV")"
+font_simple_bin="$(value_of production_gui_web_renderer_parity_font_offload_simple_bin "$SOURCE_ENV")"
+font_simple_bin_source="$(value_of production_gui_web_renderer_parity_font_offload_simple_bin_source "$SOURCE_ENV")"
+font_simple_bin_status="$(value_of production_gui_web_renderer_parity_font_offload_simple_bin_status "$SOURCE_ENV")"
+font_runtime_evidence_env="$(value_of production_gui_web_renderer_parity_font_offload_runtime_evidence_env "$SOURCE_ENV")"
+font_runtime_evidence_status="$(value_of production_gui_web_renderer_parity_font_offload_runtime_evidence_status "$SOURCE_ENV")"
+metal_exit_code="$(value_of production_gui_web_renderer_parity_metal_readback_exit_code "$SOURCE_ENV")"
+metal_status="$(value_of production_gui_web_renderer_parity_metal_readback_status "$SOURCE_ENV")"
+metal_reason="$(value_of production_gui_web_renderer_parity_metal_readback_reason "$SOURCE_ENV")"
+metal_timed_out="$(value_of production_gui_web_renderer_parity_metal_readback_timed_out "$SOURCE_ENV")"
+metal_timeout_secs="$(value_of production_gui_web_renderer_parity_metal_readback_timeout_secs "$SOURCE_ENV")"
+metal_spec_status="$(value_of production_gui_web_renderer_parity_metal_readback_spec_status "$SOURCE_ENV")"
+metal_available="$(value_of production_gui_web_renderer_parity_metal_readback_available "$SOURCE_ENV")"
+metal_tolerance="$(value_of production_gui_web_renderer_parity_metal_readback_blur_or_tolerance_used "$SOURCE_ENV")"
+metal_simple_bin="$(value_of production_gui_web_renderer_parity_metal_readback_simple_bin "$SOURCE_ENV")"
+metal_simple_bin_source="$(value_of production_gui_web_renderer_parity_metal_readback_simple_bin_source "$SOURCE_ENV")"
+metal_simple_bin_status="$(value_of production_gui_web_renderer_parity_metal_readback_simple_bin_status "$SOURCE_ENV")"
+metal_log_status="$(value_of production_gui_web_renderer_parity_metal_render_log_status "$SOURCE_ENV")"
+metal_log_reason="$(value_of production_gui_web_renderer_parity_metal_render_log_reason "$SOURCE_ENV")"
+metal_log_required_api="$(value_of production_gui_web_renderer_parity_metal_render_log_required_api "$SOURCE_ENV")"
+metal_log_backend_resolved="$(value_of production_gui_web_renderer_parity_metal_render_log_backend_resolved "$SOURCE_ENV")"
+metal_log_metal_readback_status="$(value_of production_gui_web_renderer_parity_metal_render_log_metal_readback_status "$SOURCE_ENV")"
+metal_log_generated_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_generated_readback_gate_status "$SOURCE_ENV")"
+metal_log_framebuffer_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_framebuffer_readback_gate_status "$SOURCE_ENV")"
+metal_log_browser_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_browser_backing_gate_status "$SOURCE_ENV")"
+metal_log_pairwise_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_pairwise_gate_status "$SOURCE_ENV")"
+metal_log_argb_source_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_argb_source_gate_status "$SOURCE_ENV")"
+metal_log_gpu_capture_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_gpu_capture_gate_status "$SOURCE_ENV")"
+metal_log_blocked_gate_count="$(value_of production_gui_web_renderer_parity_metal_render_log_blocked_gate_count "$SOURCE_ENV")"
+metal_log_blocked_gates="$(value_of production_gui_web_renderer_parity_metal_render_log_blocked_gates "$SOURCE_ENV")"
+metal_log_pairwise_status="$(value_of production_gui_web_renderer_parity_metal_render_log_pairwise_status "$SOURCE_ENV")"
+metal_log_gpu_capture_status="$(value_of production_gui_web_renderer_parity_metal_render_log_gpu_capture_status "$SOURCE_ENV")"
+metal_log_gpu_capture_tool="$(value_of production_gui_web_renderer_parity_metal_render_log_gpu_capture_tool "$SOURCE_ENV")"
+metal_log_tauri_ios_gate_status="$(value_of production_gui_web_renderer_parity_metal_render_log_tauri_ios_gate_status "$SOURCE_ENV")"
+metal_log_tauri_ios_validation_status="$(value_of production_gui_web_renderer_parity_metal_render_log_tauri_ios_render_log_validation_status "$SOURCE_ENV")"
+metal_log_tauri_ios_validation_reason="$(value_of production_gui_web_renderer_parity_metal_render_log_tauri_ios_render_log_validation_reason "$SOURCE_ENV")"
+metal_log_tauri_ios_backend="$(value_of production_gui_web_renderer_parity_metal_render_log_tauri_ios_backend "$SOURCE_ENV")"
+metal_log_tauri_ios_expected_gpu_backend="$(value_of production_gui_web_renderer_parity_metal_render_log_tauri_ios_expected_gpu_backend "$SOURCE_ENV")"
+metal_log_tauri_ios_metal_log_status="$(value_of production_gui_web_renderer_parity_metal_render_log_tauri_ios_metal_log_status "$SOURCE_ENV")"
+event_exit_code="$(value_of production_gui_web_renderer_parity_event_routing_exit_code "$SOURCE_ENV")"
+event_status="$(value_of production_gui_web_renderer_parity_event_routing_status "$SOURCE_ENV")"
+event_reason="$(value_of production_gui_web_renderer_parity_event_routing_reason "$SOURCE_ENV")"
+event_validation_status="$(value_of production_gui_web_renderer_parity_event_routing_validation_status "$SOURCE_ENV")"
+event_validation_reason="$(value_of production_gui_web_renderer_parity_event_routing_validation_reason "$SOURCE_ENV")"
+event_proof_symlink_status="$(value_of production_gui_web_renderer_parity_event_routing_proof_symlink_status "$SOURCE_ENV")"
+event_proof_source="$(value_of production_gui_web_renderer_parity_event_routing_proof_source "$SOURCE_ENV")"
+event_proof_source_file_status="$(value_of production_gui_web_renderer_parity_event_routing_proof_source_file_status "$SOURCE_ENV")"
+event_proof_source_size_bytes="$(value_of production_gui_web_renderer_parity_event_routing_proof_source_size_bytes "$SOURCE_ENV")"
+event_proof_source_actual_size_bytes="$(value_of production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes "$SOURCE_ENV")"
+event_proof_source_file_reason="$(value_of production_gui_web_renderer_parity_event_routing_proof_source_file_reason "$SOURCE_ENV")"
+event_proof_source_artifact_status="$(value_of production_gui_web_renderer_parity_event_routing_proof_source_artifact_status "$SOURCE_ENV")"
+event_browser_engine="$(value_of production_gui_web_renderer_parity_event_routing_browser_engine "$SOURCE_ENV")"
+event_electron_user_agent="$(value_of production_gui_web_renderer_parity_event_routing_electron_user_agent "$SOURCE_ENV")"
+event_electron_process_version="$(value_of production_gui_web_renderer_parity_event_routing_electron_process_version "$SOURCE_ENV")"
+event_chrome_process_version="$(value_of production_gui_web_renderer_parity_event_routing_chrome_process_version "$SOURCE_ENV")"
+event_timed_out="$(value_of production_gui_web_renderer_parity_event_routing_timed_out "$SOURCE_ENV")"
+event_timeout_secs="$(value_of production_gui_web_renderer_parity_event_routing_timeout_secs "$SOURCE_ENV")"
+event_ready="$(value_of production_gui_web_renderer_parity_event_routing_ready "$SOURCE_ENV")"
+event_wm_found="$(value_of production_gui_web_renderer_parity_event_routing_wm_found "$SOURCE_ENV")"
+event_focus_count="$(value_of production_gui_web_renderer_parity_event_routing_focus_count "$SOURCE_ENV")"
+event_move_count="$(value_of production_gui_web_renderer_parity_event_routing_move_count "$SOURCE_ENV")"
+event_maximize_count="$(value_of production_gui_web_renderer_parity_event_routing_maximize_count "$SOURCE_ENV")"
+event_title_command_count="$(value_of production_gui_web_renderer_parity_event_routing_title_command_count "$SOURCE_ENV")"
+event_text_input_count="$(value_of production_gui_web_renderer_parity_event_routing_text_input_count "$SOURCE_ENV")"
+event_pointer_down_count="$(value_of production_gui_web_renderer_parity_event_routing_pointer_down_count "$SOURCE_ENV")"
+event_pointer_up_count="$(value_of production_gui_web_renderer_parity_event_routing_pointer_up_count "$SOURCE_ENV")"
+event_performance_now_available="$(value_of production_gui_web_renderer_parity_event_routing_performance_now_available "$SOURCE_ENV")"
+event_performance_now_delta_ms="$(value_of production_gui_web_renderer_parity_event_routing_performance_now_delta_ms "$SOURCE_ENV")"
+event_input_to_paint_ms="$(value_of production_gui_web_renderer_parity_event_routing_input_to_paint_ms "$SOURCE_ENV")"
+event_animation_frame_available="$(value_of production_gui_web_renderer_parity_event_routing_animation_frame_available "$SOURCE_ENV")"
+event_animation_frame_count="$(value_of production_gui_web_renderer_parity_event_routing_animation_frame_count "$SOURCE_ENV")"
+event_css_animation_probe="$(value_of production_gui_web_renderer_parity_event_routing_css_animation_probe "$SOURCE_ENV")"
+event_sequence="$(value_of production_gui_web_renderer_parity_event_routing_event_sequence "$SOURCE_ENV")"
+event_title_text="$(value_of production_gui_web_renderer_parity_event_routing_title_text "$SOURCE_ENV")"
+event_title_context_text="$(value_of production_gui_web_renderer_parity_event_routing_title_context_text "$SOURCE_ENV")"
+event_traffic_button_count="$(value_of production_gui_web_renderer_parity_event_routing_traffic_button_count "$SOURCE_ENV")"
+event_title_input_tag="$(value_of production_gui_web_renderer_parity_event_routing_title_input_tag "$SOURCE_ENV")"
+event_titlebar_height="$(value_of production_gui_web_renderer_parity_event_routing_titlebar_height "$SOURCE_ENV")"
+event_titlebar_display="$(value_of production_gui_web_renderer_parity_event_routing_titlebar_display "$SOURCE_ENV")"
+event_titlebar_cursor="$(value_of production_gui_web_renderer_parity_event_routing_titlebar_cursor "$SOURCE_ENV")"
+event_titlebar_background="$(value_of production_gui_web_renderer_parity_event_routing_titlebar_background "$SOURCE_ENV")"
+event_title_color="$(value_of production_gui_web_renderer_parity_event_routing_title_color "$SOURCE_ENV")"
+event_title_font_weight="$(value_of production_gui_web_renderer_parity_event_routing_title_font_weight "$SOURCE_ENV")"
+event_title_input_min_width="$(value_of production_gui_web_renderer_parity_event_routing_title_input_min_width "$SOURCE_ENV")"
+event_title_input_width="$(value_of production_gui_web_renderer_parity_event_routing_title_input_width "$SOURCE_ENV")"
+event_title_input_width_px="$(value_of production_gui_web_renderer_parity_event_routing_title_input_width_px "$SOURCE_ENV")"
+event_title_input_height="$(value_of production_gui_web_renderer_parity_event_routing_title_input_height "$SOURCE_ENV")"
+event_title_input_cursor="$(value_of production_gui_web_renderer_parity_event_routing_title_input_cursor "$SOURCE_ENV")"
+event_title_input_background="$(value_of production_gui_web_renderer_parity_event_routing_title_input_background "$SOURCE_ENV")"
+event_close_button_background="$(value_of production_gui_web_renderer_parity_event_routing_close_button_background "$SOURCE_ENV")"
+event_minimize_button_background="$(value_of production_gui_web_renderer_parity_event_routing_minimize_button_background "$SOURCE_ENV")"
+event_maximize_button_background="$(value_of production_gui_web_renderer_parity_event_routing_maximize_button_background "$SOURCE_ENV")"
+event_expected_move_x="$(value_of production_gui_web_renderer_parity_event_routing_expected_move_x "$SOURCE_ENV")"
+event_expected_move_y="$(value_of production_gui_web_renderer_parity_event_routing_expected_move_y "$SOURCE_ENV")"
+event_move_payload_x="$(value_of production_gui_web_renderer_parity_event_routing_move_payload_x "$SOURCE_ENV")"
+event_move_payload_y="$(value_of production_gui_web_renderer_parity_event_routing_move_payload_y "$SOURCE_ENV")"
+event_move_payload_source="$(value_of production_gui_web_renderer_parity_event_routing_move_payload_source "$SOURCE_ENV")"
+event_move_payload_window_id_hint="$(value_of production_gui_web_renderer_parity_event_routing_move_payload_window_id_hint "$SOURCE_ENV")"
+event_title_command_text="$(value_of production_gui_web_renderer_parity_event_routing_title_command_text "$SOURCE_ENV")"
+event_text_input_text="$(value_of production_gui_web_renderer_parity_event_routing_text_input_text "$SOURCE_ENV")"
+event_tolerance="$(value_of production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used "$SOURCE_ENV")"
+
+if [ "$source_status" = "" ] && grep -q '^production_gui_web_renderer_parity_' "$SOURCE_ENV" 2>/dev/null; then
+    source_partial_status="partial"
+    source_partial_reason="missing-top-level-production-parity-status"
+fi
+
+if [ "$source_status" = "" ]; then
+    if [ "$source_partial_status" = "partial" ]; then
+        write_evidence "fail" "partial-production-parity-source-status"
+    else
+        write_evidence "fail" "${source_reason:-missing-production-parity-source-status}"
+    fi
+elif [ "$source_status" != "pass" ]; then
+    write_evidence "fail" "${source_reason:-production-parity-not-pass}"
+elif [ -z "${source_env_age_hours:-}" ]; then
+    write_evidence "fail" "production-parity-evidence-mtime-unreadable"
+elif [ "$source_env_age_hours" -gt "$MAX_EVIDENCE_AGE_HOURS" ] 2>/dev/null; then
+    write_evidence "fail" "stale-production-parity-evidence-${source_env_age_hours}h-exceeds-${MAX_EVIDENCE_AGE_HOURS}h"
+elif [ "$matrix_status" != "pass" ]; then
+    write_evidence "fail" "matrix-not-pass"
+elif [ "$layout_status" != "pass" ]; then
+    write_evidence "fail" "layout-manifest-not-pass"
+elif [ "$layout_count" != "50" ] || [ "$layout_pass" != "36" ] || [ "$layout_tracked" != "14" ] || [ "$layout_fail" != "0" ]; then
+    write_evidence "fail" "layout-manifest-count-mismatch"
+elif [ "$surface_status" != "pass" ]; then
+    write_evidence "fail" "surface-manifest-not-pass"
+elif [ "$surface_electron_status" != "pass" ] || [ "$surface_tauri_status" != "pass" ] || [ "$surface_chrome_status" != "pass" ]; then
+    write_evidence "fail" "surface-manifest-capture-not-pass"
+elif [ "$surface_tauri_backend" = "" ] || [ "$surface_tauri_required_commands" = "" ] || [ "$surface_chrome_backend" = "" ]; then
+    write_evidence "fail" "surface-manifest-capture-provenance-missing"
+elif [ "$surface_tauri_missing_commands" != "" ]; then
+    write_evidence "fail" "surface-manifest-required-commands-missing"
+elif [ "$surface_tauri_live" != "true" ] || [ "$surface_chrome_live" != "true" ]; then
+    write_evidence "fail" "surface-manifest-live-capture-missing"
+elif [ "$surface_tauri_count" != "50" ] || [ "$surface_tauri_pass" != "36" ] || [ "$surface_tauri_tracked" != "14" ] || [ "$surface_tauri_fail" != "0" ] || \
+    [ "$surface_chrome_count" != "50" ] || [ "$surface_chrome_pass" != "36" ] || [ "$surface_chrome_tracked" != "14" ] || [ "$surface_chrome_fail" != "0" ]; then
+    write_evidence "fail" "surface-manifest-count-mismatch"
+elif [ "$surface_tauri_mismatch" != "0" ] || [ "$surface_chrome_mismatch" != "0" ]; then
+    write_evidence "fail" "surface-manifest-mismatch-count-nonzero"
+elif [ "$surface_no_fake" != "true" ] || [ "$surface_tolerance" != "false" ]; then
+    write_evidence "fail" "surface-manifest-fake-or-tolerance-used"
+elif [ "$backend_status" != "pass" ]; then
+    write_evidence "fail" "backend-parity-not-pass"
+elif [ "$backend_exact" != "true" ] || [ "$backend_cpu_diff" != "0" ] || [ "$backend_metal_diff" != "0" ] || \
+    [ "$backend_checksum_match" != "true" ] || [ "$backend_same_frame_readback" != "true" ] || [ "$backend_readback_source" != "device_readback" ] || \
+    ! num_positive "$backend_software_checksum" || ! num_positive "$backend_cpu_simd_checksum" || ! num_positive "$backend_metal_checksum" || \
+    [ "$backend_software_checksum" != "$backend_cpu_simd_checksum" ] || [ "$backend_software_checksum" != "$backend_metal_checksum" ] || \
+    { [ "$backend_metal_resolved" = "metal" ] && { [ "$backend_metal_frame" != "true" ] || ! num_at_least "$backend_metal_command_queue_handle" 1; }; } || \
+    [ "$backend_tolerance" != "false" ]; then
+    write_evidence "fail" "backend-parity-contract-missing"
+elif [ "$backend_metal_resolved" = "metal" ] && { ! num_positive "$backend_metal_gpu_checksum" || [ "$backend_software_checksum" != "$backend_metal_gpu_checksum" ]; }; then
+    write_evidence "fail" "backend-parity-contract-missing"
+elif [ "$backend_timing_status" != "pass" ] || ! num_at_least "$backend_sample_count" 1 || \
+    ! num_positive "$backend_elapsed_min" || ! num_positive "$backend_elapsed_avg" || ! num_positive "$backend_elapsed_max" || \
+    ! num_positive "$backend_throughput_min" || ! num_positive "$backend_throughput_avg" || ! num_positive "$backend_throughput_max"; then
+    write_evidence "fail" "backend-timing-evidence-failed"
+elif [ "$font_status" != "pass" ]; then
+    write_evidence "fail" "font-offload-not-pass"
+elif [ "$font_runtime_evidence_status" != "pass" ]; then
+    write_evidence "fail" "font-offload-runtime-evidence-missing"
+elif [ "$metal_status" != "pass" ] && [ "$metal_reason" != "metal-requires-macos" ]; then
+    write_evidence "fail" "metal-readback-not-pass"
+elif [ "$metal_status" = "pass" ] && { [ "$metal_spec_status" != "pass" ] || [ "$metal_available" != "true" ]; }; then
+    write_evidence "fail" "metal-readback-contract-missing"
+elif [ "$metal_tolerance" != "false" ]; then
+    write_evidence "fail" "metal-readback-contract-missing"
+elif [ "$metal_status" = "pass" ] && [ "$metal_log_status" != "" ] && { [ "$metal_log_status" != "pass" ] || [ "$metal_log_required_api" != "metal" ] || \
+    [ "$metal_log_metal_readback_status" != "pass" ] || [ "$metal_log_generated_gate" != "pass" ] || \
+    [ "$metal_log_framebuffer_gate" != "pass" ] || [ "$metal_log_browser_gate" != "pass" ] || \
+    [ "$metal_log_pairwise_gate" != "pass" ] || [ "$metal_log_argb_source_gate" != "pass" ] || \
+    { [ "$metal_log_gpu_capture_gate" != "pass" ] && [ "$metal_log_gpu_capture_gate" != "not-required" ]; } || \
+    [ "$metal_log_blocked_gate_count" != "0" ] || [ "$metal_log_pairwise_status" != "pass" ]; }; then
+    write_evidence "fail" "metal-render-log-contract-missing"
+elif [ "$event_status" != "pass" ]; then
+    write_evidence "fail" "event-routing-not-pass"
+elif [ "$event_validation_status" != "pass" ]; then
+    write_evidence "fail" "event-routing-validation-not-pass"
+elif [ "$event_proof_symlink_status" != "pass" ]; then
+    write_evidence "fail" "event-routing-proof-symlink-status-not-pass"
+elif [ "$event_proof_source" != "tools/web-render-backend/wm_event_check.js" ]; then
+    write_evidence "fail" "event-routing-proof-source-missing"
+elif [ "$event_proof_source_file_status" != "pass" ] || ! num_positive "$event_proof_source_size_bytes"; then
+    write_evidence "fail" "event-routing-proof-source-file-missing"
+elif [ "$event_proof_source_file_reason" != "pass" ] || [ "$event_proof_source_artifact_status" != "pass" ]; then
+    case "$event_proof_source_file_reason" in
+        symlink) write_evidence "fail" "event-routing-proof-source-symlink" ;;
+        hardlink) write_evidence "fail" "event-routing-proof-source-hardlink" ;;
+        size-mismatch) write_evidence "fail" "event-routing-proof-source-size-mismatch" ;;
+        *) write_evidence "fail" "event-routing-proof-source-artifact-missing" ;;
+    esac
+elif [ "$event_proof_source_actual_size_bytes" != "$event_proof_source_size_bytes" ]; then
+    write_evidence "fail" "event-routing-proof-source-size-mismatch"
+elif [ "$event_browser_engine" != "chromium" ] || \
+    ! matches_regex "$event_electron_user_agent" 'Chrome/[0-9]' || \
+    ! matches_regex "$event_electron_user_agent" 'Electron/[0-9]' || \
+    ! matches_regex "$event_electron_process_version" '^[0-9]+(\.[0-9]+)*$' || \
+    ! matches_regex "$event_chrome_process_version" '^[0-9]+(\.[0-9]+)*$'; then
+    write_evidence "fail" "event-routing-browser-runtime-missing"
+elif [ "$event_ready" != "true" ] || [ "$event_wm_found" != "true" ]; then
+    write_evidence "fail" "event-routing-ready-missing"
+elif ! num_at_least "$event_focus_count" 1 || ! num_at_least "$event_move_count" 1 || ! num_at_least "$event_maximize_count" 1 || \
+    ! num_at_least "$event_title_command_count" 1 || ! num_at_least "$event_text_input_count" 1 || \
+    ! num_at_least "$event_pointer_down_count" 1 || ! num_at_least "$event_pointer_up_count" 1; then
+    write_evidence "fail" "event-routing-contract-missing"
+elif [ "$event_performance_now_available" != "true" ] || ! num_positive "$event_performance_now_delta_ms" || \
+    ! num_at_most_decimal "$event_performance_now_delta_ms" 1000 || \
+    [ "$event_animation_frame_available" != "true" ] || \
+    ! num_at_least "$event_animation_frame_count" 2 || [ "$event_css_animation_probe" != "true" ]; then
+    write_evidence "fail" "event-routing-performance-animation-contract-missing"
+elif ! num_positive "$event_input_to_paint_ms" || ! num_at_most_decimal "$event_input_to_paint_ms" 1000; then
+    write_evidence "fail" "event-routing-interaction-latency-contract-missing"
+elif [ "$event_sequence" != "host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up" ]; then
+    write_evidence "fail" "event-routing-sequence-contract-missing"
+elif [ "$event_title_text" != "Terminal" ] || [ "$event_title_context_text" != "terminal" ] || \
+    ! num_at_least "$event_traffic_button_count" 3 || [ "$event_title_input_tag" != "input" ] || \
+    [ "$event_titlebar_height" != "34px" ] || [ "$event_titlebar_display" != "flex" ] || \
+    [ "$event_titlebar_cursor" != "grab" ] || [ "$event_titlebar_background" != "rgb(229, 231, 235)" ] || \
+    [ "$event_title_color" != "rgb(17, 24, 39)" ] || ! num_at_least "$event_title_font_weight" 700 || \
+    [ "$event_title_input_min_width" != "142px" ] || ! num_at_least_decimal "$event_title_input_width_px" 142 || \
+    [ "$event_title_input_height" != "24px" ] || [ "$event_title_input_cursor" != "text" ] || \
+    [ "$event_title_input_background" != "rgb(241, 245, 249)" ] || \
+    [ "$event_close_button_background" != "rgb(239, 68, 68)" ] || \
+    [ "$event_minimize_button_background" != "rgb(234, 179, 8)" ] || \
+    [ "$event_maximize_button_background" != "rgb(34, 197, 94)" ]; then
+    write_evidence "fail" "event-routing-ui-contract-missing"
+elif [ "$event_expected_move_x" = "" ] || [ "$event_expected_move_y" = "" ] || \
+    [ "$event_expected_move_x" != "$event_move_payload_x" ] || [ "$event_expected_move_y" != "$event_move_payload_y" ] || \
+    [ "$event_move_payload_source" != "native_event" ] || [ "$event_move_payload_window_id_hint" != "win1" ] || \
+    [ "$event_title_command_text" != "/tmp/project" ] || [ "$event_text_input_text" != "Hello Simple" ]; then
+    write_evidence "fail" "event-routing-payload-contract-missing"
+elif [ "$event_tolerance" != "false" ]; then
+    write_evidence "fail" "event-routing-tolerance-used"
+elif [ "$simple_bin_status" != "pass" ] || [ "$simple_bin" = "" ]; then
+    write_evidence "fail" "simple-bin-provenance-missing"
+else
+    write_evidence "pass" "pass"
+    exit 0
+fi
+exit 1

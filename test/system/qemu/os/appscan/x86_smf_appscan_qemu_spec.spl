@@ -1,0 +1,48 @@
+# x86 SMF Appscan QEMU Tests
+#
+# Verifies the supported x86_64 desktop disk lane through the centralized
+# desktop QEMU contract: filesystem app reads, process-backed launches,
+# native toolchain fixtures, browser render, network smoke, and container
+# markers.
+#
+# @tag: os,qemu,appscan,x86,smf,desktop
+
+use os.desktop_qemu_contract.{desktop_disk_serial_accepts_completion, print_desktop_disk_missing_markers}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+val TIMEOUT_MS: i64 = 240000
+
+var g_x64_desktop_disk_output: text = ""
+var g_x64_desktop_disk_ran: bool = false
+
+fn _can_run(qemu_bin: text) -> bool:
+    val qemu_check = rt_process_run_timeout("which", [qemu_bin], 5000)
+    if qemu_check[2] != 0:
+        print "SKIP: {qemu_bin} not found"
+        return false
+    true
+
+fn _simple_bin() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    "src/compiler_rust/target/debug/simple"
+
+fn _run_x64_desktop_disk_appscan() -> text:
+    val result = rt_process_run_timeout(_simple_bin(), ["os", "test", "--scenario=x64-desktop-disk"], TIMEOUT_MS)
+    result[0] + result[1]
+
+fn _x64_desktop_disk_output() -> text:
+    if not g_x64_desktop_disk_ran:
+        g_x64_desktop_disk_output = _run_x64_desktop_disk_appscan()
+        g_x64_desktop_disk_ran = true
+    g_x64_desktop_disk_output
+
+describe "x86 SMF appscan QEMU":
+    slow_it "launches x64 desktop filesystem apps through the supported disk lane":
+        if _can_run("qemu-system-x86_64"):
+            val output = _x64_desktop_disk_output()
+            if not desktop_disk_serial_accepts_completion(output):
+                print_desktop_disk_missing_markers(output)
+            expect(desktop_disk_serial_accepts_completion(output)).to_equal(true)

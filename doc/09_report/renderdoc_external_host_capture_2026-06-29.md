@@ -1,0 +1,63 @@
+# RenderDoc External Host Capture
+
+- status: pass
+- reason: pass
+- setup status: ready
+- setup reason: ready
+- run capture: 0
+- capture env: build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env
+- capture status: pass
+- capture reason: pass
+- capture file: build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc
+- capture magic: RDOC
+- capture file magic: RDOC
+- capture HTML fixture: /home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- capture log: build/renderdoc/chrome-implicit-layer-default-autocapture/html/renderdoc-html.log
+- GPU process exits: not-recorded count=0 codes=
+- gate status: pass
+- gate reason: pass
+- gate scene: html-css-chrome
+- gate HTML fixture: /home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- gate capture file magic: RDOC
+- gate requested API: vulkan
+- gate requested ANGLE: vulkan
+
+## Raw Evidence
+- rdoc_external_host_capture_status=pass
+- rdoc_external_host_capture_reason=pass
+- rdoc_external_host_setup_status=ready
+- rdoc_external_host_setup_reason=ready
+- rdoc_external_host_run_capture=0
+- rdoc_external_host_capture_env=build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env
+- rdoc_external_host_capture_status_raw=pass
+- rdoc_external_host_capture_reason_raw=pass
+- rdoc_external_host_capture_file=build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc
+- rdoc_external_host_capture_file_status=pass
+- rdoc_external_host_capture_magic=RDOC
+- rdoc_external_host_capture_file_magic=RDOC
+- rdoc_external_host_capture_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- rdoc_external_host_capture_log=build/renderdoc/chrome-implicit-layer-default-autocapture/html/renderdoc-html.log
+- rdoc_external_host_gpu_process_exit_status=not-recorded
+- rdoc_external_host_gpu_process_exit_count=0
+- rdoc_external_host_gpu_process_exit_codes=
+- rdoc_external_host_gpu_process_exit_reason=
+- rdoc_external_host_gate_status=pass
+- rdoc_external_host_gate_reason=pass
+- rdoc_external_host_gate_scene=html-css-chrome
+- rdoc_external_host_gate_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- rdoc_external_host_gate_capture_file_status=pass
+- rdoc_external_host_gate_capture_file_magic=RDOC
+- rdoc_external_host_gate_requested_api=vulkan
+- rdoc_external_host_gate_requested_angle=vulkan
+- rdoc_external_host_gate_requested_features=Vulkan
+- rdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
+- rdoc_external_host_required_backend=original
+- rdoc_external_host_required_scene=html-css-chrome
+- rdoc_external_host_required_status=pass
+- rdoc_external_host_required_magic=RDOC
+- rdoc_external_host_required_api=vulkan
+- rdoc_external_host_required_angle=vulkan
+- rdoc_external_host_required_features=Vulkan
+- rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- rdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan
+- rdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan

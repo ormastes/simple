@@ -1,0 +1,314 @@
+#!/bin/sh
+set -eu
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+MCP_SERVER="${MCP_SERVER:-bin/simple_mcp_server}"
+LSP_MCP_SERVER="${LSP_MCP_SERVER:-bin/simple_lsp_mcp_server}"
+MCP_NATIVE_SMOKE_TIMEOUT="${MCP_NATIVE_SMOKE_TIMEOUT:-15}"
+MCP_NATIVE_STARTUP_MAX_MS="${MCP_NATIVE_STARTUP_MAX_MS:-5000}"
+MCP_NATIVE_BOOTSTRAP_FRESH="${MCP_NATIVE_BOOTSTRAP_FRESH:-0}"
+
+now_ms() {
+    value="$(date +%s%3N 2>/dev/null || true)"
+    case "$value" in
+        *[!0-9]*|'') ;;
+        *) printf '%s\n' "$value"; return ;;
+    esac
+    if command -v gdate >/dev/null 2>&1; then
+        gdate +%s%3N
+    elif command -v perl >/dev/null 2>&1; then
+        perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000'
+    else
+        printf '%s000\n' "$(date +%s)"
+    fi
+}
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "simple_binary_exists=false"
+    echo "error=missing_simple_binary:$SIMPLE_BINARY"
+    exit 1
+fi
+
+if [ ! -x "$MCP_SERVER" ]; then
+    echo "mcp_server_exists=false"
+    echo "error=missing_mcp_server:$MCP_SERVER"
+    exit 1
+fi
+
+if [ ! -x "$LSP_MCP_SERVER" ]; then
+    echo "lsp_mcp_server_exists=false"
+    echo "error=missing_lsp_mcp_server:$LSP_MCP_SERVER"
+    exit 1
+fi
+
+SIMPLE_LIB="${SIMPLE_LIB:-src}" sh scripts/check/check-interface-cache-contract.shs
+sh scripts/check/check-mcp-wrapper-contract.shs
+
+APP_DIRECT_RT_VALID=true
+LSP_APP_DIRECT_RT_VALID=true
+MCPGDB_APP_DIRECT_RT_VALID=true
+UI_MCP_APP_DIRECT_RT_VALID=true
+SERIAL_MCP_APP_DIRECT_RT_VALID=true
+SPEC_DIRECT_RT_VALID=true
+if rg -n '^extern fn rt_' src/app/mcp >/dev/null 2>&1; then
+    APP_DIRECT_RT_VALID=false
+fi
+if rg -n '^extern fn rt_' src/app/simple_lsp_mcp >/dev/null 2>&1; then
+    LSP_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '^extern fn rt_' src/app/mcpgdb >/dev/null 2>&1; then
+    MCPGDB_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '^extern fn rt_' src/app/ui.mcp >/dev/null 2>&1; then
+    UI_MCP_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '^extern fn rt_' src/app/serial_mcp >/dev/null 2>&1; then
+    SERIAL_MCP_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '^extern fn rt_' test/02_integration/app/mcp_stdio_integration_spec.spl >/dev/null 2>&1; then
+    SPEC_DIRECT_RT_VALID=false
+fi
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+
+RT_FORWARD_CACHE_FILE=""
+if [ -x "scripts/setup/refresh-rt-forward-cache.shs" ]; then
+    refresh_out="$(sh scripts/setup/refresh-rt-forward-cache.shs)"
+    RT_FORWARD_CACHE_FILE="$(printf '%s\n' "$refresh_out" | sed -n 's/^rt_forward_cache=//p' | tail -1)"
+    sh scripts/setup/refresh-rt-forward-cache.shs --check
+fi
+
+mcp_init='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+mcp_initialized='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+mcp_tools_list='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_init}" "$mcp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_initialized}" "$mcp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list}" "$mcp_tools_list"
+} > "$TMPDIR/mcp.in"
+
+# The default production wrapper is a separate fast-handshake implementation.
+# Exercise it explicitly because SIMPLE_MCP_FULL=1 bypasses this path.
+core_numeric_init='{"jsonrpc":"2.0","id":17,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+core_string_list='{"jsonrpc":"2.0","id":"request-alpha","method":"tools/list","params":{}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#core_numeric_init}" "$core_numeric_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#core_string_list}" "$core_string_list"
+} > "$TMPDIR/mcp_core.in"
+MCP_CORE_RC=0
+MCP_CORE_IDS_OK=true
+if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" != "1" ]; then
+    set +e
+    SIMPLE_MCP_FULL=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_core.in" > "$TMPDIR/mcp_core.out" 2> "$TMPDIR/mcp_core.err"
+    MCP_CORE_RC=$?
+    set -e
+    MCP_CORE_IDS_OK=false
+fi
+if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" = "1" ] || { \
+   [ "$MCP_CORE_RC" -eq 0 ] && \
+   grep -q '"id":17' "$TMPDIR/mcp_core.out" && \
+   grep -q '"id":"request-alpha"' "$TMPDIR/mcp_core.out" && \
+   ! grep -q '"id":null' "$TMPDIR/mcp_core.out"; }; then
+    MCP_CORE_IDS_OK=true
+fi
+
+set +e
+MCP_START_MS="$(now_ms)"
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp.jsonl" 2> "$TMPDIR/mcp.err"
+MCP_RC=$?
+MCP_END_MS="$(now_ms)"
+set -e
+
+lsp_init='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+lsp_initialized='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+lsp_tools_list='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+lsp_symbols_call='{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"lsp_symbols","arguments":{"file":"src/app/simple_lsp_mcp/main.spl"}}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_init}" "$lsp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_initialized}" "$lsp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_tools_list}" "$lsp_tools_list"
+} > "$TMPDIR/lsp.in"
+
+set +e
+LSP_START_MS="$(now_ms)"
+timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$LSP_MCP_SERVER" < "$TMPDIR/lsp.in" > "$TMPDIR/lsp.out" 2> "$TMPDIR/lsp.err"
+LSP_RC=$?
+LSP_END_MS="$(now_ms)"
+set -e
+
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_init}" "$lsp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_initialized}" "$lsp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_tools_list}" "$lsp_tools_list"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_symbols_call}" "$lsp_symbols_call"
+} > "$TMPDIR/lsp_func.in"
+set +e
+timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$LSP_MCP_SERVER" < "$TMPDIR/lsp_func.in" > "$TMPDIR/lsp_func.out" 2>> "$TMPDIR/lsp.err"
+LSP_FUNC_RC=$?
+set -e
+
+MCP_STARTUP_MS=$((MCP_END_MS - MCP_START_MS))
+LSP_STARTUP_MS=$((LSP_END_MS - LSP_START_MS))
+
+# Detect whether the first MCP run was a cache hit or miss via startup log
+MCP_STARTUP_LOG="${MCP_SERVER%/*}/../.simple/logs/simple_mcp_startup.log"
+MCP_PROBE_CACHE_HIT_FIRST=false
+if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
+    MCP_PROBE_CACHE_HIT_FIRST=true
+fi
+
+# Second wrapper run measures the wrapper cache. Direct fresh artifacts have no
+# wrapper cache, so their bootstrap gate deliberately skips this wrapper-only
+# check while retaining the absolute startup timeout above.
+MCP_RC2=0
+MCP_SECOND_START_MS=0
+if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" != "1" ]; then
+    set +e
+    MCP_START2_MS="$(now_ms)"
+    SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp2.jsonl" 2>> "$TMPDIR/mcp.err"
+    MCP_RC2=$?
+    MCP_END2_MS="$(now_ms)"
+    set -e
+    MCP_SECOND_START_MS=$((MCP_END2_MS - MCP_START2_MS))
+fi
+
+# Functional run (untimed, after both timed runs so it never perturbs the
+# start-timing gates): the MCP server serves a small "core" tool-set on the
+# first tools/list for a fast handshake, then emits notifications/tools/list_changed
+# and serves the full tool-set on the SECOND tools/list (cached full upgrade).
+# This drives the full-set upgrade so the validator can assert the complete tool
+# list (tool count, schema, and play_wm_text_* presence all live in the full set).
+mcp_tools_list2='{"jsonrpc":"2.0","id":"3","method":"tools/list","params":{}}'
+mcp_status_call='{"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"simple_status","arguments":{"paths":"src/app/simple_lsp_mcp/main.spl"}}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_init}" "$mcp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_initialized}" "$mcp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list}" "$mcp_tools_list"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list2}" "$mcp_tools_list2"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_status_call}" "$mcp_status_call"
+} > "$TMPDIR/mcp_func.in"
+set +e
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_func.jsonl" 2>> "$TMPDIR/mcp.err"
+MCP_FUNC_RC=$?
+set -e
+
+# Detect cache hit on second run
+MCP_PROBE_CACHE_HIT=false
+if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
+    MCP_PROBE_CACHE_HIT=true
+fi
+
+if [ "$MCP_RC" -ne 0 ]; then
+    echo "mcp_server_exit_code=$MCP_RC"
+    if [ -s "$TMPDIR/mcp.err" ]; then
+        echo "mcp_server_stderr_begin"
+        sed -n '1,20p' "$TMPDIR/mcp.err"
+        echo "mcp_server_stderr_end"
+    fi
+fi
+
+if [ "$LSP_RC" -ne 0 ]; then
+    echo "lsp_mcp_server_exit_code=$LSP_RC"
+    if [ -s "$TMPDIR/lsp.err" ]; then
+        echo "lsp_mcp_server_stderr_begin"
+        sed -n '1,20p' "$TMPDIR/lsp.err"
+        echo "lsp_mcp_server_stderr_end"
+    fi
+fi
+
+echo "mcp_app_direct_rt_valid=$APP_DIRECT_RT_VALID"
+echo "lsp_mcp_app_direct_rt_valid=$LSP_APP_DIRECT_RT_VALID"
+echo "mcpgdb_app_direct_rt_valid=$MCPGDB_APP_DIRECT_RT_VALID"
+echo "ui_mcp_app_direct_rt_valid=$UI_MCP_APP_DIRECT_RT_VALID"
+echo "serial_mcp_app_direct_rt_valid=$SERIAL_MCP_APP_DIRECT_RT_VALID"
+echo "mcp_stdio_spec_direct_rt_valid=$SPEC_DIRECT_RT_VALID"
+echo "mcp_core_request_ids_preserved=$MCP_CORE_IDS_OK"
+echo "mcp_startup_ms=$MCP_STARTUP_MS"
+echo "lsp_mcp_startup_ms=$LSP_STARTUP_MS"
+echo "mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$MCP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
+echo "lsp_mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$LSP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
+echo "mcp_second_start_ms=$MCP_SECOND_START_MS"
+echo "mcp_probe_cache_hit=$MCP_PROBE_CACHE_HIT"
+
+# Gate: second start must meet timing budget relative to first start.
+# If first start was a cache miss (probe ran): second must be <= 60% of first.
+# If first start was already a cache hit: second must be <= first * 1.2 (both cached).
+MCP_SECOND_START_OK=true
+if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" = "1" ]; then
+    echo "mcp_second_start_note=not_applicable_to_direct_fresh_artifact"
+elif [ "$MCP_PROBE_CACHE_HIT_FIRST" = "false" ] && [ "$MCP_STARTUP_MS" -gt 0 ]; then
+    # First was a miss: second must be <= 60% of first
+    _threshold=$(( MCP_STARTUP_MS * 60 / 100 ))
+    if [ "$MCP_SECOND_START_MS" -gt "$_threshold" ]; then
+        MCP_SECOND_START_OK=false
+        echo "mcp_second_start_note=second_start_${MCP_SECOND_START_MS}ms_exceeds_60pct_of_first_${MCP_STARTUP_MS}ms"
+    fi
+else
+    # First was already cached: second must be <= first * 1.2
+    if [ "$MCP_STARTUP_MS" -gt 0 ]; then
+        _threshold=$(( MCP_STARTUP_MS * 120 / 100 ))
+        if [ "$MCP_SECOND_START_MS" -gt "$_threshold" ]; then
+            MCP_SECOND_START_OK=false
+            echo "mcp_second_start_note=second_start_${MCP_SECOND_START_MS}ms_exceeds_120pct_of_first_${MCP_STARTUP_MS}ms_both_cached"
+        else
+            echo "mcp_second_start_note=both_cached_first_run_already_hit_cache"
+        fi
+    fi
+fi
+echo "mcp_second_start_ok=$MCP_SECOND_START_OK"
+
+# Stale-stamp test: corrupt the stamp for the chosen native candidate, re-run wrapper,
+# verify it still answers correctly (re-probe path).
+MCP_STALE_STAMP_OK=false
+_mcp_probe_cache_dir="${MCP_SERVER%/*}/../.simple/cache/mcp-probe"
+if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" = "1" ]; then
+    MCP_STALE_STAMP_OK=true
+    echo "mcp_stale_stamp_note=not_applicable_exact_destination_removed_before_build"
+elif [ -d "${_mcp_probe_cache_dir}" ]; then
+    _stale_stamp="$(ls "${_mcp_probe_cache_dir}"/*.stamp 2>/dev/null | head -1)"
+    if [ -n "${_stale_stamp}" ]; then
+        printf 'corrupted_stamp_for_test\n' > "${_stale_stamp}"
+        set +e
+        SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
+        _stale_rc=$?
+        set -e
+        if [ "$_stale_rc" -eq 0 ] && grep -q '"play_wm_text_status"' "$TMPDIR/mcp_stale.jsonl" 2>/dev/null; then
+            MCP_STALE_STAMP_OK=true
+        fi
+    else
+        # No stamp exists (e.g. SKIP_NATIVE_PROBE was set); mark as n/a but not a failure
+        MCP_STALE_STAMP_OK=true
+        echo "mcp_stale_stamp_note=no_stamp_found_skipping_stale_test"
+    fi
+else
+    MCP_STALE_STAMP_OK=true
+    echo "mcp_stale_stamp_note=cache_dir_absent_skipping_stale_test"
+fi
+echo "mcp_stale_stamp_reprobe_ok=$MCP_STALE_STAMP_OK"
+
+set +e
+MCP_NATIVE_SMOKE_MCP_OUT="$TMPDIR/mcp_func.jsonl" \
+MCP_NATIVE_SMOKE_LSP_OUT="$TMPDIR/lsp_func.out" \
+MCP_NATIVE_SMOKE_RT_FORWARD_CACHE="$RT_FORWARD_CACHE_FILE" \
+    "$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter
+VALIDATE_RC=$?
+set -e
+
+if [ "$APP_DIRECT_RT_VALID" != "true" ] || [ "$LSP_APP_DIRECT_RT_VALID" != "true" ] || [ "$MCPGDB_APP_DIRECT_RT_VALID" != "true" ] || [ "$UI_MCP_APP_DIRECT_RT_VALID" != "true" ] || [ "$SERIAL_MCP_APP_DIRECT_RT_VALID" != "true" ] || [ "$SPEC_DIRECT_RT_VALID" != "true" ]; then
+    exit 1
+fi
+
+if [ "$MCP_CORE_RC" -ne 0 ] || [ "$MCP_CORE_IDS_OK" != "true" ] || [ "$MCP_RC" -ne 0 ] || [ "$MCP_FUNC_RC" -ne 0 ] || [ "$LSP_RC" -ne 0 ] || [ "$LSP_FUNC_RC" -ne 0 ]; then
+    exit 1
+fi
+if [ "$MCP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ] || [ "$LSP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ]; then
+    exit 1
+fi
+if [ "$MCP_SECOND_START_OK" != "true" ]; then
+    exit 1
+fi
+if [ "$MCP_STALE_STAMP_OK" != "true" ]; then
+    exit 1
+fi
+exit "$VALIDATE_RC"

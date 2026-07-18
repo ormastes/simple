@@ -1,0 +1,806 @@
+use std.nogc_sync_mut.sffi.spl_fonts.{GlyphBitmap}
+use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
+use std.nogc_sync_mut.io.font_sffi.{font_face_is_live}
+use std.io_runtime.{env_get}
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
+
+# Font Rasterizer — glyph rasterization backends and blit helpers.
+#
+# Three backends, in priority order when used via FontRenderer:
+#   1. SFFI spl_fonts TrueType (opt-in via try_enable_ttf)
+#   2. TrueType via rt_font_* SFFI (legacy handle-based API)
+#   3. Vector outline (pure Simple, 2x2 sub-pixel AA)
+#   4. 8x16 VGA bitmap fallback
+
+# ============================================================================
+# Phase 3b: SFFI spl_fonts GlyphBitmap → CachedGlyph adapter
+# ============================================================================
+
+fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> CachedGlyph:
+    val w = gb.width.to_i32()
+    val h = gb.height.to_i32()
+    val adv_raw = gb.advance.to_i32()
+    val adv = if adv_raw > 0: adv_raw else: w + 1
+
+    var pixels: [u8] = []
+    val total = gb.pixels.len()
+    var i = 0
+    while i < total:
+        val alpha = gb.pixels[i]
+        pixels.push(alpha.to_i32().to_u8())
+        i = i + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
+        font_size: font_size,
+        width: w,
+        height: h,
+        advance: adv,
+        bearing_x: gb.bearing_x.to_i32(),
+        bearing_y: gb.bearing_y.to_i32(),
+        pixels: pixels
+    )
+
+# ============================================================================
+# TrueType Rasterization (via SFFI)
+# ============================================================================
+
+extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_glyph_bitmap_index(font_handle: i64, glyph_index: i64, size: f64) -> i64
+extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_xoff(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_yoff(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
+extern fn rt_font_bitmap_free(bitmap_handle: i64)
+extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_glyph_advance_index(font_handle: i64, glyph_index: i64, size: f64) -> i64
+
+fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyph:
+    val bmp = rt_font_glyph_bitmap(font_handle, codepoint.to_i64(), font_size.to_f64())
+    if bmp == 0:
+        return CachedGlyph.empty(codepoint, font_size)
+    val w = rt_font_bitmap_width(bmp).to_i32()
+    val h = rt_font_bitmap_height(bmp).to_i32()
+    val xoff = rt_font_bitmap_xoff(bmp).to_i32()
+    val yoff = rt_font_bitmap_yoff(bmp).to_i32()
+    val adv = rt_font_glyph_advance(font_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
+
+    # Copy bitmap pixels to our cache
+    var pixels: [u8] = []
+    var row = 0
+    while row < h:
+        var col = 0
+        while col < w:
+            val alpha = rt_font_bitmap_get_pixel(bmp, col.to_i64(), row.to_i64())
+            pixels.push(alpha.to_i32().to_u8())
+            col = col + 1
+        row = row + 1
+
+    rt_font_bitmap_free(bmp)
+
+    CachedGlyph(
+        codepoint: codepoint,
+        face_id: font_handle,
+        face_generation: 0,
+        glyph_index: -1,
+        font_size: font_size,
+        width: w,
+        height: h,
+        advance: if adv > 0: adv else: w + 1,
+        bearing_x: xoff,
+        bearing_y: -yoff - h,
+        pixels: pixels
+    )
+
+fn rasterize_ttf_index(font_handle: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+    if not font_face_is_live(font_handle, face_generation) or glyph_index < 0 or font_size <= 0:
+        return CachedGlyph(codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+    val bmp = rt_font_glyph_bitmap_index(font_handle, glyph_index.to_i64(), font_size.to_f64())
+    if bmp == 0:
+        return CachedGlyph(codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+    val w = rt_font_bitmap_width(bmp).to_i32()
+    val h = rt_font_bitmap_height(bmp).to_i32()
+    val xoff = rt_font_bitmap_xoff(bmp).to_i32()
+    val yoff = rt_font_bitmap_yoff(bmp).to_i32()
+    val advance = rt_font_glyph_advance_index(font_handle, glyph_index.to_i64(), font_size.to_f64()).to_i32()
+    var pixels: [u8] = []
+    var row = 0
+    while row < h:
+        var col = 0
+        while col < w:
+            pixels.push(rt_font_bitmap_get_pixel(bmp, col.to_i64(), row.to_i64()).to_i32().to_u8())
+            col = col + 1
+        row = row + 1
+    rt_font_bitmap_free(bmp)
+    CachedGlyph(
+        codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index,
+        font_size: font_size, width: w, height: h,
+        advance: if advance > 0: advance else: w + 1,
+        bearing_x: xoff, bearing_y: -yoff - h, pixels: pixels
+    )
+
+# ============================================================================
+# Vector Font Rasterization (Pure Simple, ported from compositor)
+# ============================================================================
+
+val VF_MOVE: i32 = 0
+val VF_LINE: i32 = 1
+val VF_CLOSE: i32 = 2
+val VF_END: i32 = 3
+
+class VectorFontRasterStats:
+    glyph_rasterizations: i64
+    command_triplets: i64
+    output_pixels: i64
+
+class VectorFontAcceleratorStats:
+    attempts: i64
+    cuda_hits: i64
+    opencl_hits: i64
+    cpu_fallback_hits: i64
+    gpu_returned_glyphs: i64
+    gpu_returned_glyph_pixels: i64
+    unavailable_reason: text
+
+var _vector_font_glyph_rasterizations: i64 = 0
+var _vector_font_command_triplets: i64 = 0
+var _vector_font_output_pixels: i64 = 0
+var _vector_font_accelerator_attempts: i64 = 0
+var _vector_font_cuda_hits: i64 = 0
+var _vector_font_opencl_hits: i64 = 0
+var _vector_font_cpu_fallback_hits: i64 = 0
+var _vector_font_gpu_returned_glyphs: i64 = 0
+var _vector_font_gpu_returned_glyph_pixels: i64 = 0
+var _vector_font_accelerator_unavailable_reason: text = ""
+
+fn reset_vector_font_raster_stats():
+    _vector_font_glyph_rasterizations = 0
+    _vector_font_command_triplets = 0
+    _vector_font_output_pixels = 0
+    _vector_font_accelerator_attempts = 0
+    _vector_font_cuda_hits = 0
+    _vector_font_opencl_hits = 0
+    _vector_font_cpu_fallback_hits = 0
+    _vector_font_gpu_returned_glyphs = 0
+    _vector_font_gpu_returned_glyph_pixels = 0
+    _vector_font_accelerator_unavailable_reason = ""
+
+fn vector_font_raster_stats() -> VectorFontRasterStats:
+    VectorFontRasterStats(
+        glyph_rasterizations: _vector_font_glyph_rasterizations,
+        command_triplets: _vector_font_command_triplets,
+        output_pixels: _vector_font_output_pixels
+    )
+
+fn vector_font_accelerator_stats() -> VectorFontAcceleratorStats:
+    VectorFontAcceleratorStats(
+        attempts: _vector_font_accelerator_attempts,
+        cuda_hits: _vector_font_cuda_hits,
+        opencl_hits: _vector_font_opencl_hits,
+        cpu_fallback_hits: _vector_font_cpu_fallback_hits,
+        gpu_returned_glyphs: _vector_font_gpu_returned_glyphs,
+        gpu_returned_glyph_pixels: _vector_font_gpu_returned_glyph_pixels,
+        unavailable_reason: _vector_font_accelerator_unavailable_reason
+    )
+
+fn _vector_font_env_text(key: text) -> text:
+    env_get(key) ?? ""
+
+fn _vector_font_parse_i64_decimal(raw: text) -> i64:
+    if raw == "":
+        return -1
+    var value: i64 = 0
+    var i = 0
+    while i < raw.len():
+        val ch = raw.char_code_at(i)
+        if ch < 48 or ch > 57:
+            return -1
+        value = value * 10 + (ch - 48).to_i64()
+        i = i + 1
+    value
+
+fn _vector_font_env_i64(key: text) -> i64:
+    val parsed = _vector_font_parse_i64_decimal(_vector_font_env_text(key))
+    if parsed < 0:
+        return 0
+    parsed
+
+fn _vector_font_parse_u8_decimal(raw: text) -> i32:
+    val parsed = _vector_font_parse_i64_decimal(raw)
+    if parsed < 0 or parsed > 255:
+        return -1
+    parsed.to_i32()
+
+fn _vector_font_pixels_checksum(pixels: [u8], width: i32, height: i32, advance: i32) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        val alpha = pixels[i].to_i32().to_i64()
+        if alpha > 0:
+            sum = sum + alpha * ((i + 1) as i64)
+        i = i + 1
+    sum + (width.to_i64() * 31) + (height.to_i64() * 17) + advance.to_i64()
+
+fn _vector_font_env_pixels(key: text, expected_len: i32) -> [u8]:
+    val raw = _vector_font_env_text(key)
+    if raw == "" or expected_len <= 0:
+        return []
+    val parts = raw.split(",")
+    if parts.len() != expected_len:
+        return []
+    var pixels: [u8] = []
+    var i = 0
+    while i < parts.len():
+        val parsed = _vector_font_parse_u8_decimal(parts[i])
+        if parsed < 0 or parsed > 255:
+            return []
+        pixels.push(parsed.to_u8())
+        i = i + 1
+    pixels
+
+fn _try_vector_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val slot_prefix = prefix + "_VECTOR_FONT_GLYPH_" + slot
+    if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
+        return nil
+    if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
+        return nil
+    val width = _vector_font_env_i64(slot_prefix + "_WIDTH").to_i32()
+    val height = _vector_font_env_i64(slot_prefix + "_HEIGHT").to_i32()
+    val advance = _vector_font_env_i64(slot_prefix + "_ADVANCE").to_i32()
+    val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
+    if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
+        return nil
+    val expected_len = width * height
+    val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
+    if pixels.len() != expected_len:
+        return nil
+    val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
+    if checksum != expected_checksum:
+        return nil
+    CachedGlyph(
+        codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
+        font_size: font_size,
+        width: width,
+        height: height,
+        advance: advance,
+        bearing_x: 0,
+        bearing_y: 0,
+        pixels: pixels
+    )
+
+fn _try_vector_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val status = _vector_font_env_text(prefix + "_VECTOR_FONT_STATUS")
+    val reason = _vector_font_env_text(prefix + "_VECTOR_FONT_REASON")
+    if status != "pass" or (not reason.contains("matched-cpu") and not reason.contains("glyph-pixels-returned")):
+        return nil
+    var glyph_count = _vector_font_env_i64(prefix + "_VECTOR_FONT_GLYPH_COUNT")
+    if glyph_count <= 0:
+        glyph_count = 1
+    if glyph_count > 0:
+        val glyph0 = _try_vector_font_glyph_slot(prefix, "0", codepoint, font_size)
+        if glyph0 != nil:
+            return glyph0
+    if glyph_count > 1:
+        val glyph1 = _try_vector_font_glyph_slot(prefix, "1", codepoint, font_size)
+        if glyph1 != nil:
+            return glyph1
+    if glyph_count > 2:
+        val glyph2 = _try_vector_font_glyph_slot(prefix, "2", codepoint, font_size)
+        if glyph2 != nil:
+            return glyph2
+    if glyph_count > 3:
+        val glyph3 = _try_vector_font_glyph_slot(prefix, "3", codepoint, font_size)
+        if glyph3 != nil:
+            return glyph3
+    if glyph_count > 4:
+        val glyph4 = _try_vector_font_glyph_slot(prefix, "4", codepoint, font_size)
+        if glyph4 != nil:
+            return glyph4
+    if glyph_count > 5:
+        val glyph5 = _try_vector_font_glyph_slot(prefix, "5", codepoint, font_size)
+        if glyph5 != nil:
+            return glyph5
+    if glyph_count > 6:
+        val glyph6 = _try_vector_font_glyph_slot(prefix, "6", codepoint, font_size)
+        if glyph6 != nil:
+            return glyph6
+    if glyph_count > 7:
+        val glyph7 = _try_vector_font_glyph_slot(prefix, "7", codepoint, font_size)
+        if glyph7 != nil:
+            return glyph7
+    nil
+
+fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("CUDA", codepoint, font_size)
+
+fn _try_rocm_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("ROCM", codepoint, font_size)
+
+fn _try_hip_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("HIP", codepoint, font_size)
+
+fn _try_metal_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("METAL", codepoint, font_size)
+
+fn _try_opencl_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("OPENCL", codepoint, font_size)
+
+fn _try_vulkan_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("VULKAN", codepoint, font_size)
+
+fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
+    _vector_font_accelerator_attempts = _vector_font_accelerator_attempts + 1
+    val metal_glyph = _try_metal_vector_font_glyph(codepoint, font_size)
+    if metal_glyph != nil:
+        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + metal_glyph.pixels.len().to_i64()
+        _vector_font_accelerator_unavailable_reason = "metal-vector-font-glyph-pixels-returned"
+        return metal_glyph
+    val cuda_glyph = _try_cuda_vector_font_glyph(codepoint, font_size)
+    if cuda_glyph != nil:
+        _vector_font_cuda_hits = _vector_font_cuda_hits + 1
+        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + cuda_glyph.pixels.len().to_i64()
+        if _vector_font_opencl_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "cuda-vector-font-glyph-pixels-returned"
+        return cuda_glyph
+    val rocm_glyph = _try_rocm_vector_font_glyph(codepoint, font_size)
+    if rocm_glyph != nil:
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + rocm_glyph.pixels.len().to_i64()
+        if _vector_font_cuda_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-rocm-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "rocm-vector-font-glyph-pixels-returned"
+        return rocm_glyph
+    val hip_glyph = _try_hip_vector_font_glyph(codepoint, font_size)
+    if hip_glyph != nil:
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + hip_glyph.pixels.len().to_i64()
+        if _vector_font_cuda_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-hip-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "hip-vector-font-glyph-pixels-returned"
+        return hip_glyph
+    val opencl_glyph = _try_opencl_vector_font_glyph(codepoint, font_size)
+    if opencl_glyph != nil:
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + opencl_glyph.pixels.len().to_i64()
+        if _vector_font_cuda_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-glyph-pixels-returned"
+        return opencl_glyph
+    val vulkan_glyph = _try_vulkan_vector_font_glyph(codepoint, font_size)
+    if vulkan_glyph != nil:
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + vulkan_glyph.pixels.len().to_i64()
+        _vector_font_accelerator_unavailable_reason = "vulkan-vector-font-glyph-pixels-returned"
+        return vulkan_glyph
+    val cuda_status = _vector_font_env_text("CUDA_VECTOR_FONT_STATUS")
+    val cuda_checksum = _vector_font_env_i64("CUDA_VECTOR_FONT_CHECKSUM")
+    val cuda_reason = _vector_font_env_text("CUDA_VECTOR_FONT_REASON")
+    val rocm_status = _vector_font_env_text("ROCM_VECTOR_FONT_STATUS")
+    val rocm_checksum = _vector_font_env_i64("ROCM_VECTOR_FONT_CHECKSUM")
+    val rocm_reason = _vector_font_env_text("ROCM_VECTOR_FONT_REASON")
+    val hip_status = _vector_font_env_text("HIP_VECTOR_FONT_STATUS")
+    val hip_checksum = _vector_font_env_i64("HIP_VECTOR_FONT_CHECKSUM")
+    val hip_reason = _vector_font_env_text("HIP_VECTOR_FONT_REASON")
+    val metal_status = _vector_font_env_text("METAL_VECTOR_FONT_STATUS")
+    val metal_checksum = _vector_font_env_i64("METAL_VECTOR_FONT_CHECKSUM")
+    val metal_reason = _vector_font_env_text("METAL_VECTOR_FONT_REASON")
+    val opencl_status = _vector_font_env_text("OPENCL_VECTOR_FONT_STATUS")
+    val opencl_checksum = _vector_font_env_i64("OPENCL_VECTOR_FONT_CHECKSUM")
+    val opencl_reason = _vector_font_env_text("OPENCL_VECTOR_FONT_REASON")
+    if metal_status == "pass" and metal_checksum > 0 and (metal_reason.contains("matched-cpu") or metal_reason.contains("glyph-pixels-returned")):
+        if _vector_font_gpu_returned_glyphs > 0:
+            _vector_font_accelerator_unavailable_reason = "metal-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "metal-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else if cuda_status == "pass" and cuda_checksum > 0 and (cuda_reason.contains("matched-cpu") or cuda_reason.contains("glyph-pixels-returned")):
+        _vector_font_cuda_hits = _vector_font_cuda_hits + 1
+        if _vector_font_gpu_returned_glyphs > 0 and _vector_font_opencl_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
+        else if _vector_font_gpu_returned_glyphs > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "cuda-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else if rocm_status == "pass" and rocm_checksum > 0 and (rocm_reason.contains("matched-cpu") or rocm_reason.contains("glyph-pixels-returned")):
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        if _vector_font_gpu_returned_glyphs > 0:
+            _vector_font_accelerator_unavailable_reason = "rocm-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "rocm-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else if hip_status == "pass" and hip_checksum > 0 and (hip_reason.contains("matched-cpu") or hip_reason.contains("glyph-pixels-returned")):
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        if _vector_font_gpu_returned_glyphs > 0:
+            _vector_font_accelerator_unavailable_reason = "hip-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "hip-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else if opencl_status == "pass" and opencl_checksum > 0 and (opencl_reason.contains("matched-cpu") or opencl_reason.contains("glyph-pixels-returned")):
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        if _vector_font_gpu_returned_glyphs > 0 and _vector_font_cuda_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
+        else if _vector_font_gpu_returned_glyphs > 0:
+            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else:
+        _vector_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"
+    _vector_font_cpu_fallback_hits = _vector_font_cpu_fallback_hits + 1
+    rasterize_vector(cmds, codepoint, font_size)
+
+fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
+    val glyph_w = vf_glyph_width(codepoint)
+    val pixel_w = glyph_w * font_size / 24
+    val pixel_h = font_size
+    if pixel_w <= 0 or pixel_h <= 0:
+        return CachedGlyph.empty(codepoint, font_size)
+
+    _vector_font_glyph_rasterizations = _vector_font_glyph_rasterizations + 1
+    _vector_font_command_triplets = _vector_font_command_triplets + (cmds.len() / 3).to_i64()
+    _vector_font_output_pixels = _vector_font_output_pixels + (pixel_w * pixel_h).to_i64()
+
+    var pixels: [u8] = []
+    val scale_n = font_size * 2
+    val scale_d: i32 = 48
+
+    var row = 0
+    while row < pixel_h:
+        var col = 0
+        while col < pixel_w:
+            # 2x2 sub-pixel AA sampling
+            var coverage = 0
+            if vf_point_inside(cmds, col * 2, row * 2, scale_n, scale_d):
+                coverage = coverage + 1
+            if vf_point_inside(cmds, col * 2 + 1, row * 2, scale_n, scale_d):
+                coverage = coverage + 1
+            if vf_point_inside(cmds, col * 2, row * 2 + 1, scale_n, scale_d):
+                coverage = coverage + 1
+            if vf_point_inside(cmds, col * 2 + 1, row * 2 + 1, scale_n, scale_d):
+                coverage = coverage + 1
+            val alpha = coverage * 255 / 4
+            pixels.push(alpha.to_i32().to_u8())
+            col = col + 1
+        row = row + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
+        font_size: font_size,
+        width: pixel_w,
+        height: pixel_h,
+        advance: pixel_w + 1,
+        bearing_x: 0,
+        bearing_y: 0,
+        pixels: pixels
+    )
+
+fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) -> bool:
+    """Ray-casting point-in-polygon test (even-odd rule)."""
+    var crossings = 0
+    var i = 0
+    var move_x = 0
+    var move_y = 0
+    var cur_x = 0
+    var cur_y = 0
+    while i + 2 < cmds.len():
+        val cmd = cmds[i]
+        val cx = cmds[i + 1] * scale_n / scale_d
+        val cy = cmds[i + 2] * scale_n / scale_d
+        if cmd == VF_MOVE:
+            move_x = cx
+            move_y = cy
+            cur_x = cx
+            cur_y = cy
+        else if cmd == VF_LINE:
+            val y1 = cur_y
+            val y2 = cy
+            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+                val dy = y2 - y1
+                if dy != 0:
+                    val ix = cur_x + (py - y1) * (cx - cur_x) / dy
+                    if px < ix:
+                        crossings = crossings + 1
+            cur_x = cx
+            cur_y = cy
+        else if cmd == VF_CLOSE:
+            val y1 = cur_y
+            val y2 = move_y
+            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+                val dy = y2 - y1
+                if dy != 0:
+                    val ix = cur_x + (py - y1) * (move_x - cur_x) / dy
+                    if px < ix:
+                        crossings = crossings + 1
+            cur_x = move_x
+            cur_y = move_y
+        else if cmd == VF_END:
+            return crossings % 2 == 1
+        i = i + 3
+    crossings % 2 == 1
+
+# ============================================================================
+# Bitmap Font Rasterization (8x16 VGA fallback)
+# ============================================================================
+
+fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
+    # Scale factor from 16px base
+    val scale = if font_size > 16: font_size / 16 else: 1
+    val base_w = 8
+    val base_h = 16
+    val out_w = base_w * scale
+    val out_h = base_h * scale
+
+    val glyph_index = glyph_index_for_char_code(codepoint)
+    var pixels: [u8] = []
+    var row = 0
+    while row < out_h:
+        val base_row = row / scale
+        val source_row = (base_row - 1) / 2
+        val bits = if base_row > 0 and base_row < 15 and source_row < 7:
+            glyph_row_bits(glyph_index, source_row) << 2
+        else:
+            0
+        var col = 0
+        while col < out_w:
+            val base_col = col / scale
+            val mask = 0x80 >> base_col
+            if (bits & mask) != 0:
+                pixels.push(255)
+            else:
+                pixels.push(0)
+            col = col + 1
+        row = row + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
+        font_size: font_size,
+        width: out_w,
+        height: out_h,
+        advance: out_w,
+        bearing_x: 0,
+        bearing_y: 0,
+        pixels: pixels
+    )
+
+# ============================================================================
+# Bitmap Font GPU Offload (accelerator parity with vector path)
+# ============================================================================
+#
+# Mirrors `rasterize_vector_accelerated`: a GPU backend (CUDA/ROCm/HIP/OpenCL)
+# that has rasterized the monospace bitmap glyph publishes its pixels via the
+# same `{PREFIX}_BITMAP_FONT_*` env-var transport used by the vector path. When
+# a matching, checksum-verified payload is present we return the GPU-rasterized
+# glyph and record GPU stats; otherwise we record a CPU-fallback hit and call
+# the deterministic CPU `rasterize_bitmap`. This keeps the CPU path load-bearing
+# (no real GPU on CI) while making genuine GPU offload observable and gated.
+
+class BitmapFontAcceleratorStats:
+    attempts: i64
+    cuda_hits: i64
+    opencl_hits: i64
+    cpu_fallback_hits: i64
+    gpu_returned_glyphs: i64
+    gpu_returned_glyph_pixels: i64
+    unavailable_reason: text
+
+var _bitmap_font_accelerator_attempts: i64 = 0
+var _bitmap_font_cuda_hits: i64 = 0
+var _bitmap_font_opencl_hits: i64 = 0
+var _bitmap_font_cpu_fallback_hits: i64 = 0
+var _bitmap_font_gpu_returned_glyphs: i64 = 0
+var _bitmap_font_gpu_returned_glyph_pixels: i64 = 0
+var _bitmap_font_accelerator_unavailable_reason: text = ""
+
+fn reset_bitmap_font_raster_stats():
+    _bitmap_font_accelerator_attempts = 0
+    _bitmap_font_cuda_hits = 0
+    _bitmap_font_opencl_hits = 0
+    _bitmap_font_cpu_fallback_hits = 0
+    _bitmap_font_gpu_returned_glyphs = 0
+    _bitmap_font_gpu_returned_glyph_pixels = 0
+    _bitmap_font_accelerator_unavailable_reason = ""
+
+fn bitmap_font_accelerator_stats() -> BitmapFontAcceleratorStats:
+    BitmapFontAcceleratorStats(
+        attempts: _bitmap_font_accelerator_attempts,
+        cuda_hits: _bitmap_font_cuda_hits,
+        opencl_hits: _bitmap_font_opencl_hits,
+        cpu_fallback_hits: _bitmap_font_cpu_fallback_hits,
+        gpu_returned_glyphs: _bitmap_font_gpu_returned_glyphs,
+        gpu_returned_glyph_pixels: _bitmap_font_gpu_returned_glyph_pixels,
+        unavailable_reason: _bitmap_font_accelerator_unavailable_reason
+    )
+
+fn _try_bitmap_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val slot_prefix = prefix + "_BITMAP_FONT_GLYPH_" + slot
+    if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
+        return nil
+    if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
+        return nil
+    val width = _vector_font_env_i64(slot_prefix + "_WIDTH").to_i32()
+    val height = _vector_font_env_i64(slot_prefix + "_HEIGHT").to_i32()
+    val advance = _vector_font_env_i64(slot_prefix + "_ADVANCE").to_i32()
+    val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
+    if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
+        return nil
+    val expected_len = width * height
+    val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
+    if pixels.len() != expected_len:
+        return nil
+    val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
+    if checksum != expected_checksum:
+        return nil
+    CachedGlyph(
+        codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
+        font_size: font_size,
+        width: width,
+        height: height,
+        advance: advance,
+        bearing_x: 0,
+        bearing_y: 0,
+        pixels: pixels
+    )
+
+fn _try_bitmap_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val status = _vector_font_env_text(prefix + "_BITMAP_FONT_STATUS")
+    val reason = _vector_font_env_text(prefix + "_BITMAP_FONT_REASON")
+    if status != "pass" or (not reason.contains("matched-cpu") and not reason.contains("glyph-pixels-returned")):
+        return nil
+    var glyph_count = _vector_font_env_i64(prefix + "_BITMAP_FONT_GLYPH_COUNT")
+    if glyph_count <= 0:
+        glyph_count = 1
+    if glyph_count > 0:
+        val glyph0 = _try_bitmap_font_glyph_slot(prefix, "0", codepoint, font_size)
+        if glyph0 != nil:
+            return glyph0
+    if glyph_count > 1:
+        val glyph1 = _try_bitmap_font_glyph_slot(prefix, "1", codepoint, font_size)
+        if glyph1 != nil:
+            return glyph1
+    if glyph_count > 2:
+        val glyph2 = _try_bitmap_font_glyph_slot(prefix, "2", codepoint, font_size)
+        if glyph2 != nil:
+            return glyph2
+    if glyph_count > 3:
+        val glyph3 = _try_bitmap_font_glyph_slot(prefix, "3", codepoint, font_size)
+        if glyph3 != nil:
+            return glyph3
+    nil
+
+fn _try_cuda_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("CUDA", codepoint, font_size)
+
+fn _try_rocm_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("ROCM", codepoint, font_size)
+
+fn _try_hip_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("HIP", codepoint, font_size)
+
+fn _try_metal_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("METAL", codepoint, font_size)
+
+fn _try_opencl_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("OPENCL", codepoint, font_size)
+
+fn _try_vulkan_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("VULKAN", codepoint, font_size)
+
+fn rasterize_bitmap_accelerated(codepoint: i32, font_size: i32) -> CachedGlyph:
+    """GPU-offloaded monospace bitmap rasterization with CPU fallback.
+
+    Returns the GPU-rasterized glyph when a backend has published a matching,
+    checksum-verified payload; otherwise records a CPU-fallback hit and returns
+    the deterministic `rasterize_bitmap` result.
+    """
+    _bitmap_font_accelerator_attempts = _bitmap_font_accelerator_attempts + 1
+    val metal_glyph = _try_metal_bitmap_font_glyph(codepoint, font_size)
+    if metal_glyph != nil:
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + metal_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "metal-bitmap-font-glyph-pixels-returned"
+        return metal_glyph
+    val cuda_glyph = _try_cuda_bitmap_font_glyph(codepoint, font_size)
+    if cuda_glyph != nil:
+        _bitmap_font_cuda_hits = _bitmap_font_cuda_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + cuda_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "cuda-bitmap-font-glyph-pixels-returned"
+        return cuda_glyph
+    val rocm_glyph = _try_rocm_bitmap_font_glyph(codepoint, font_size)
+    if rocm_glyph != nil:
+        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + rocm_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "rocm-bitmap-font-glyph-pixels-returned"
+        return rocm_glyph
+    val hip_glyph = _try_hip_bitmap_font_glyph(codepoint, font_size)
+    if hip_glyph != nil:
+        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + hip_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "hip-bitmap-font-glyph-pixels-returned"
+        return hip_glyph
+    val opencl_glyph = _try_opencl_bitmap_font_glyph(codepoint, font_size)
+    if opencl_glyph != nil:
+        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + opencl_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "opencl-bitmap-font-glyph-pixels-returned"
+        return opencl_glyph
+    val vulkan_glyph = _try_vulkan_bitmap_font_glyph(codepoint, font_size)
+    if vulkan_glyph != nil:
+        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + vulkan_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "vulkan-bitmap-font-glyph-pixels-returned"
+        return vulkan_glyph
+    _bitmap_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"
+    _bitmap_font_cpu_fallback_hits = _bitmap_font_cpu_fallback_hits + 1
+    rasterize_bitmap(codepoint, font_size)
+
+# ============================================================================
+# Glyph Blitting (alpha-blend into ARGB buffer)
+# ============================================================================
+
+fn blit_glyph(buffer: [u32], buf_w: i32, buf_h: i32,
+              x: i32, y: i32, glyph: CachedGlyph, color: u32) -> [u32]:
+    """Alpha-blend a rasterized glyph into an ARGB pixel buffer."""
+    var out = buffer
+    val fg_r = (color >> 16) & 0xFF
+    val fg_g = (color >> 8) & 0xFF
+    val fg_b = color & 0xFF
+
+    var row = 0
+    while row < glyph.height:
+        val py = y + row
+        if py >= 0 and py < buf_h:
+            var col = 0
+            while col < glyph.width:
+                val px = x + col
+                if px >= 0 and px < buf_w:
+                    val glyph_idx = row * glyph.width + col
+                    if glyph_idx < glyph.pixels.len():
+                        val alpha = glyph.pixels[glyph_idx].to_i32()
+                        if alpha > 0:
+                            val buf_idx = py * buf_w + px
+                            if buf_idx >= 0 and buf_idx < out.len():
+                                if alpha >= 255:
+                                    out[buf_idx] = 0xFF000000 | (fg_r << 16) | (fg_g << 8) | fg_b
+                                else:
+                                    # Alpha blend
+                                    val dst = out[buf_idx]
+                                    val dst_r = (dst >> 16) & 0xFF
+                                    val dst_g = (dst >> 8) & 0xFF
+                                    val dst_b = dst & 0xFF
+                                    val inv = 255 - alpha
+                                    val out_r = (fg_r * alpha + dst_r * inv) / 255
+                                    val out_g = (fg_g * alpha + dst_g * inv) / 255
+                                    val out_b = (fg_b * alpha + dst_b * inv) / 255
+                                    out[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
+                col = col + 1
+        row = row + 1
+    out

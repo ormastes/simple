@@ -1,0 +1,27 @@
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+describe "parser source path cache alignment":
+    it "uses the supplied source when a real path contains different text":
+        val path = "/tmp/simple_parser_source_path_desync_spec.spl"
+        val disk_source = "fn disk_fn() -> i64:\n    1\n"
+        val supplied_source = "fn supplied_fn() -> i64:\n    2\n"
+
+        expect(rt_file_write_text(path, disk_source)).to_equal(true)
+        val module = parse_and_build_module(supplied_source, path)
+
+        expect(module.functions.contains("supplied_fn")).to_equal(true)
+        expect(module.functions.contains("disk_fn")).to_equal(false)
+
+    it "restores parser source environment after flat bridge parsing":
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "sentinel source")
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", "sentinel/path.spl")
+
+        val module = parse_and_build_module("fn env_guard() -> i64:\n    3\n", "env_guard.spl")
+
+        expect(module.functions.contains("env_guard")).to_equal(true)
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE")).to_equal("sentinel source")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH")).to_equal("sentinel/path.spl")

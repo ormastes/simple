@@ -1,0 +1,205 @@
+# Privilege Store — in-memory registry of minted authority tokens.
+#
+# Provides: PrivilegeStore — mints authority tokens for principals, looks them
+# up by (principal, id_path), revokes them by issuer signature, and expands
+# group declarations to their member id_paths. Supports SDN-style round-trip
+# via `privilege_store_encode` / `privilege_store_decode`.
+
+use std.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource, Scope, authority_level_name, authority_level_from_name}
+use std.common.privilege.id_path.{IdPath, id_path_intern}
+use std.common.privilege.principal.{Principal, PrincipalKind}
+use std.common.privilege.group.{GroupDecl, group_expand_nested}
+
+# --------------------------------------------------------------------------
+# Result shims (match spec field access: .ok / .value, .present)
+# --------------------------------------------------------------------------
+
+class MintResult:
+    ok: bool
+    value: AuthorityToken
+    error: text
+
+class LookupResult:
+    present: bool
+    value: AuthorityToken
+
+# --------------------------------------------------------------------------
+# Byte helpers
+# --------------------------------------------------------------------------
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _hex_digit(v: i64) -> text:
+    val digits = "0123456789abcdef"
+    digits[v:v + 1]
+
+fn _bytes_to_hex(bs: [u8]) -> text:
+    var out = ""
+    var i = 0
+    while i < bs.len():
+        val b = bs[i] as i64
+        out = out + _hex_digit(b / 16) + _hex_digit(b % 16)
+        i = i + 1
+    out
+
+fn _hex_val(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a": return 10
+    if c == "b": return 11
+    if c == "c": return 12
+    if c == "d": return 13
+    if c == "e": return 14
+    if c == "f": return 15
+    0
+
+fn _hex_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i + 1 < s.len() + 1 and i + 2 <= s.len():
+        val hi = _hex_val(s[i:i + 1])
+        val lo = _hex_val(s[i + 1:i + 2])
+        out = out.push(((hi * 16) + lo) as u8)
+        i = i + 2
+    out
+
+fn _principal_kind_name(kind: PrincipalKind) -> text:
+    match kind:
+        PrincipalKind.Anonymous: "anonymous"
+        PrincipalKind.Local:     "local"
+        PrincipalKind.Remote:    "remote"
+        PrincipalKind.User:      "user"
+        PrincipalKind.Service:   "service"
+        PrincipalKind.System:    "system"
+
+fn _principal_kind_from_name(name: text) -> PrincipalKind:
+    if name == "local":   return PrincipalKind.Local
+    if name == "remote":  return PrincipalKind.Remote
+    if name == "user":    return PrincipalKind.User
+    if name == "service": return PrincipalKind.Service
+    if name == "system":  return PrincipalKind.System
+    PrincipalKind.Anonymous
+
+# --------------------------------------------------------------------------
+# PrivilegeStore
+# --------------------------------------------------------------------------
+
+class PrivilegeStore:
+    tokens: [AuthorityToken]
+    groups: [GroupDecl]
+
+impl PrivilegeStore:
+    static fn new() -> PrivilegeStore:
+        PrivilegeStore(tokens: [], groups: [])
+
+    # Mint a child authority token under `parent` for `child_path` at `level`.
+    # The token is bound to the parent's principal and stored. Returns the
+    # minted token so callers can later revoke it via its issuer_sig.
+    me mint(parent: AuthorityToken, child_path: IdPath, level: AuthorityLevel) -> MintResult:
+        val sig = ("mint:" + parent.principal.id + ":" + child_path.path + ":" + authority_level_name(level) + ":" + self.tokens.len().to_string()).bytes()
+        val token = AuthorityToken(
+            id_path: child_path,
+            level: level,
+            principal: parent.principal,
+            trust_source: TrustSource.SystemTrusted,
+            scope: Scope.persistent(),
+            issuer_sig: sig)
+        self.tokens = self.tokens.push(token)
+        MintResult(ok: true, value: token, error: "")
+
+    # Find an active (non-revoked) token bound to `principal` for `path`.
+    fn lookup(self, principal: Principal, path: IdPath) -> LookupResult:
+        var i = 0
+        while i < self.tokens.len():
+            val t = self.tokens[i]
+            if t.principal.id == principal.id and t.id_path.path == path.path:
+                return LookupResult(present: true, value: t)
+            i = i + 1
+        LookupResult(present: false, value: AuthorityToken.public())
+
+    # Revoke the token whose issuer_sig matches `sig` by removing it.
+    me revoke(sig: [u8]) -> bool:
+        var kept: [AuthorityToken] = []
+        var removed = false
+        var i = 0
+        while i < self.tokens.len():
+            val t = self.tokens[i]
+            if _bytes_equal(t.issuer_sig, sig):
+                removed = true
+            else:
+                kept = kept.push(t)
+            i = i + 1
+        self.tokens = kept
+        removed
+
+    # Register a group declaration for later expansion.
+    me add_group(decl: GroupDecl) -> PrivilegeStore:
+        self.groups = self.groups.push(decl)
+        self
+
+    # Expand the group named by `id_path` to its (transitive) member id_paths.
+    fn expand_groups(self, id_path: IdPath) -> [IdPath]:
+        var i = 0
+        while i < self.groups.len():
+            if self.groups[i].id_path.path == id_path.path:
+                return group_expand_nested(self.groups[i], self.groups)
+            i = i + 1
+        []
+
+class DecodeResult:
+    ok: bool
+    value: PrivilegeStore
+    error: text
+
+# --------------------------------------------------------------------------
+# SDN-style round-trip (token registry only; groups are rebuilt at runtime)
+# --------------------------------------------------------------------------
+
+fn privilege_store_encode(store: PrivilegeStore) -> text:
+    var lines: [text] = []
+    var i = 0
+    while i < store.tokens.len():
+        val t = store.tokens[i]
+        val parts = "token\t" + t.id_path.path + "\t" + authority_level_name(t.level) + "\t" + _principal_kind_name(t.principal.kind) + "\t" + t.principal.id + "\t" + _bytes_to_hex(t.issuer_sig)
+        lines = lines.push(parts)
+        i = i + 1
+    lines.join("\n")
+
+fn privilege_store_decode(data: text) -> DecodeResult:
+    val lines = data.split("\n")
+    var tokens: [AuthorityToken] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with("token\t"):
+            val fields = line.split("\t")
+            if fields.len() >= 6:
+                val token = AuthorityToken(
+                    id_path: id_path_intern(fields[1]),
+                    level: authority_level_from_name(fields[2]),
+                    principal: Principal(kind: _principal_kind_from_name(fields[3]), id: fields[4]),
+                    trust_source: TrustSource.SystemTrusted,
+                    scope: Scope.persistent(),
+                    issuer_sig: _hex_to_bytes(fields[5]))
+                tokens = tokens.push(token)
+        i = i + 1
+    DecodeResult(ok: true, value: PrivilegeStore(tokens: tokens, groups: []), error: "")
+
+export PrivilegeStore, MintResult, LookupResult, DecodeResult
+export privilege_store_encode, privilege_store_decode

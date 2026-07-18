@@ -1,0 +1,261 @@
+# ============================================================================
+# common/search/inverted_index.spl — inverted index + positional postings
+# (Phase 2: index + rank). Built on the generic PostingList<Id> set algebra
+# from common/search/types.spl.
+#
+# An inverted index maps each term to the sorted set of document ids that
+# contain it (a PostingList<i64>), plus positional postings (term -> doc ->
+# token positions) that power phrase / proximity queries. Doc-id set algebra
+# (AND / OR / NOT) reuses PostingList<i64>.intersect / .union and a
+# sorted-merge difference defined here (types.spl exposes no difference).
+#
+# Plan: doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md
+#
+# KNOWN BUGS designed around:
+#   * No for-in over custom structs
+#     (for_in_custom_struct_no_iterator_protocol_2026-06-15.md) — index loops
+#     over the term/doc lists; for-in only over [text] token lists.
+#   * `[[i64]]`-typed var + a following method-call statement fails to parse
+#     (nested_i64_list_var_method_call_parse_2026-06-15.md) — positions are
+#     therefore stored as THREE flat parallel [i64] arrays (term_idx / doc_id /
+#     position), never as a nested [[i64]].
+#   * `text + i64` yields garbage in the interpreter — numeric values are
+#     rendered with `.to_text()` before concatenation; ids stay numeric.
+#   * Option/no-match sentinels are avoided — missing terms return an explicit
+#     empty PostingList<i64>, never a null.
+# ============================================================================
+
+use std.common.search.types.{PostingList}
+
+# ----------------------------------------------------------------------------
+# IndexedDoc — a document: a stable id plus its ordered token stream.
+# ----------------------------------------------------------------------------
+struct IndexedDoc:
+    """A document fed to the index: an i64 `id` and its `tokens` in reading
+    order. Token order is the source of truth for positional postings, so the
+    list must be the actual sequence of terms (position == list index)."""
+    id: i64
+    tokens: [text]
+
+impl IndexedDoc:
+    static fn new(id: i64, tokens: [text]) -> IndexedDoc:
+        IndexedDoc(id: id, tokens: tokens)
+
+    fn doc_id() -> i64:
+        self.id
+
+    fn token_count() -> i64:
+        self.tokens.len()
+
+    fn token_at(i: i64) -> text:
+        if i < 0:
+            return ""
+        if i >= self.tokens.len():
+            return ""
+        self.tokens[i]
+
+# ----------------------------------------------------------------------------
+# InvertedIndex — term -> PostingList<i64> + flat positional postings.
+# ----------------------------------------------------------------------------
+# Storage (all parallel, all index-keyed to dodge the known bugs):
+#   terms[t]        : the t-th distinct term string
+#   postings[t]     : PostingList<i64> of doc ids containing terms[t] (sorted,
+#                     strictly ascending, deduped — one entry per (term,doc))
+#   all_docs        : PostingList<i64> universe of every added doc id (for NOT)
+#   pos_term[k]/pos_doc[k]/pos_index[k] : the k-th positional posting, i.e.
+#                     "terms[pos_term[k]] occurs at token index pos_index[k] in
+#                     doc pos_doc[k]". Flat triples instead of [[i64]].
+struct InvertedIndex:
+    """Inverted index over a document set. term -> sorted doc-id PostingList,
+    plus flat positional postings for phrase / proximity queries."""
+    terms: [text]
+    postings: [PostingList<i64>]
+    all_docs: PostingList<i64>
+    pos_term: [i64]
+    pos_doc: [i64]
+    pos_index: [i64]
+
+impl InvertedIndex:
+    static fn new() -> InvertedIndex:
+        var empty_universe: PostingList<i64> = PostingList.new()
+        InvertedIndex(
+            terms: [],
+            postings: [],
+            all_docs: empty_universe,
+            pos_term: [],
+            pos_doc: [],
+            pos_index: [],
+        )
+
+    # --- internal helpers -------------------------------------------------
+
+    fn term_slot(term: text) -> i64:
+        """Index of `term` in the term table, or -1 if absent."""
+        var t = 0
+        while t < self.terms.len():
+            if self.terms[t] == term:
+                return t
+            t = t + 1
+        0 - 1
+
+    # --- build ------------------------------------------------------------
+
+    me add_doc(doc: IndexedDoc):
+        """Index one document. Doc ids must be added in strictly-increasing
+        order so every PostingList stays ascending (the set-merge invariant).
+
+        A term repeated within the doc pushes the doc id onto its posting list
+        ONCE (dedup), while every occurrence still records a position."""
+        val did = doc.doc_id()
+        self.all_docs.push(did)
+
+        # Track which term slots already saw this doc (dedup the posting push).
+        var seen_this_doc: [text] = []
+
+        var i = 0
+        while i < doc.token_count():
+            val tok = doc.token_at(i)
+            var slot = self.term_slot(tok)
+            if slot < 0:
+                # New term: append a fresh posting list.
+                self.terms.push(tok)
+                var fresh: PostingList<i64> = PostingList.new()
+                self.postings.push(fresh)
+                slot = self.terms.len() - 1
+
+            # Record the position (every occurrence).
+            self.pos_term.push(slot)
+            self.pos_doc.push(did)
+            self.pos_index.push(i)
+
+            # Push the doc id onto the term's posting list only once per doc.
+            var already = false
+            var s = 0
+            while s < seen_this_doc.len():
+                if seen_this_doc[s] == tok:
+                    already = true
+                s = s + 1
+            if not already:
+                var pl = self.postings[slot]
+                pl.push(did)
+                self.postings[slot] = pl
+                seen_this_doc.push(tok)
+            i = i + 1
+
+    # --- counts -----------------------------------------------------------
+
+    fn doc_count() -> i64:
+        self.all_docs.len()
+
+    fn term_count() -> i64:
+        self.terms.len()
+
+    # --- term lookup ------------------------------------------------------
+
+    fn postings_for(term: text) -> PostingList<i64>:
+        """The sorted doc-id PostingList for `term`. Missing term -> an explicit
+        empty list (never a null / sentinel)."""
+        val slot = self.term_slot(term)
+        if slot < 0:
+            var empty: PostingList<i64> = PostingList.new()
+            return empty
+        self.postings[slot]
+
+    fn positions_in(term: text, doc_id: i64) -> PostingList<i64>:
+        """Sorted token positions of `term` within `doc_id` as a
+        PostingList<i64> (so phrase adjacency can reuse advance_to). Built by
+        scanning the flat positional triples in insertion (ascending) order."""
+        var out: PostingList<i64> = PostingList.new()
+        val slot = self.term_slot(term)
+        if slot < 0:
+            return out
+        var k = 0
+        while k < self.pos_term.len():
+            if self.pos_term[k] == slot:
+                if self.pos_doc[k] == doc_id:
+                    out.push(self.pos_index[k])
+            k = k + 1
+        out
+
+    # --- Boolean queries --------------------------------------------------
+
+    fn and_query(term_a: text, term_b: text) -> PostingList<i64>:
+        """Docs containing BOTH terms (posting-list intersection)."""
+        val a = self.postings_for(term_a)
+        val b = self.postings_for(term_b)
+        a.intersect(b)
+
+    fn or_query(term_a: text, term_b: text) -> PostingList<i64>:
+        """Docs containing EITHER term (posting-list union, deduped)."""
+        val a = self.postings_for(term_a)
+        val b = self.postings_for(term_b)
+        a.union(b)
+
+    fn not_query(term: text) -> PostingList<i64>:
+        """Docs NOT containing `term`: difference(all_docs, postings(term)).
+        Difference is defined here because types.spl exposes no difference op.
+        The universe is the tracked `all_docs`, never an assumed 0..N range."""
+        val present = self.postings_for(term)
+        self.difference(self.all_docs, present)
+
+    fn difference(universe: PostingList<i64>, remove: PostingList<i64>) -> PostingList<i64>:
+        """Sorted-merge set difference: ids in `universe` not in `remove`.
+        Both lists must be ascending (they are, by construction)."""
+        var out: [i64] = []
+        var i = 0
+        var j = 0
+        val na = universe.len()
+        val nb = remove.len()
+        while i < na and j < nb:
+            val a = universe.at(i)
+            val b = remove.at(j)
+            if a < b:
+                out.push(a)
+                i = i + 1
+            else:
+                if b < a:
+                    j = j + 1
+                else:
+                    # equal -> drop from both
+                    i = i + 1
+                    j = j + 1
+        while i < na:
+            out.push(universe.at(i))
+            i = i + 1
+        PostingList.of(out)
+
+    # --- phrase query -----------------------------------------------------
+
+    fn phrase_query(term_a: text, term_b: text) -> PostingList<i64>:
+        """Docs where `term_a` is immediately followed by `term_b` (adjacent,
+        in order). Positional merge: intersect the two doc sets, then for each
+        common doc require a position p of term_a with (p+1) a position of
+        term_b. Returns the sorted set of matching doc ids.
+
+        This is what separates a real positional index from a plain AND: docs
+        where both words appear but are NOT adjacent are excluded."""
+        val candidates = self.and_query(term_a, term_b)
+        var out: [i64] = []
+        var c = 0
+        while c < candidates.len():
+            val did = candidates.at(c)
+            val pa = self.positions_in(term_a, did)
+            val pb = self.positions_in(term_b, did)
+            if self.has_adjacency(pa, pb):
+                out.push(did)
+            c = c + 1
+        PostingList.of(out)
+
+    fn has_adjacency(pa: PostingList<i64>, pb: PostingList<i64>) -> bool:
+        """True if some position p in `pa` has (p+1) present in `pb`. Membership
+        of (p+1) uses PostingList<i64>.advance_to (the skip-cursor), exercising
+        the generic on the proximity path."""
+        var i = 0
+        while i < pa.len():
+            val want = pa.at(i) + 1
+            val idx = pb.advance_to(0, want)
+            if idx < pb.len():
+                if pb.at(idx) == want:
+                    return true
+            i = i + 1
+        false
