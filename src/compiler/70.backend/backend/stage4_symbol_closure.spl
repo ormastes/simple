@@ -162,6 +162,10 @@ pub fn stage4_dynload_provider_archive_file(target_os_name: text, msvc_linker: b
     """Return the target/linker-specific archive name without building or selecting it."""
     stage4_hosted_provider_archive_file("dynload", target_os_name, msvc_linker)
 
+pub fn stage4_runtime_native_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the target/linker-specific runtime-native archive name."""
+    stage4_hosted_provider_archive_file("runtime_native", target_os_name, msvc_linker)
+
 pub fn stage4_font_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the target/linker-specific font archive name without selecting it."""
     stage4_hosted_provider_archive_file("font", target_os_name, msvc_linker)
@@ -302,6 +306,52 @@ pub fn stage4_validate_compiler_backfill_symbol_envelope(nm_output: text, object
 pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a hosted dynamic-loader provider."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_runtime_native_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for the runtime-native archive."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format: text) -> Result<[text], text>:
+    """Return the raw legacy dynload definitions to localize in runtime_native."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 runtime-native object format '" + object_format + "'")
+    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlsym"]
+    val required = ["rt_interp_cstr", "rt_string_data", "rt_string_new", "rt_time_now_nanos", "rt_time_now_unix_micros"]
+    var counts: Dict<text, i64> = {}
+    var raw_by_symbol: Dict<text, text> = {}
+    val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
+    for raw_symbol in raw_definitions:
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        counts[symbol] = (counts[symbol] ?? 0) + 1
+        raw_by_symbol[symbol] = raw_symbol
+    for symbol in legacy:
+        if (counts[symbol] ?? 0) != 1:
+            return Err("Stage4 runtime-native legacy definition '" + symbol + "' must exist exactly once")
+    for symbol in required:
+        if (counts[symbol] ?? 0) != 1:
+            return Err("Stage4 runtime-native required definition '" + symbol + "' must exist exactly once")
+    var localize: [text] = []
+    for symbol in legacy:
+        localize = localize.push(raw_by_symbol[symbol])
+    Ok(stage4_sorted_text(localize))
+
+pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Require the core dependencies and forbid exported legacy dynload owners."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 runtime-native object format '" + object_format + "'")
+    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlsym"]
+    val required = ["rt_interp_cstr", "rt_string_data", "rt_string_new", "rt_time_now_nanos", "rt_time_now_unix_micros"]
+    var definitions: Dict<text, bool> = {}
+    val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
+    for raw_symbol in raw_definitions:
+        definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
+    for symbol in legacy:
+        if definitions.has(symbol):
+            return Err("Stage4 runtime-native retained legacy provider definition '" + symbol + "'")
+    for symbol in required:
+        if not definitions.has(symbol):
+            return Err("Stage4 runtime-native is missing required core definition '" + symbol + "'")
+    Ok(())
 
 pub fn stage4_font_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a hosted font provider."""

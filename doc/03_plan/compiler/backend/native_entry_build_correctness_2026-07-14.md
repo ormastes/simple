@@ -178,7 +178,8 @@ the shared binary — deploys require explicit user go-ahead).
   the strict dual-backend typed-output/filter control in the full gate; macOS
   arm64/x64, Windows x64, and FreeBSD x86_64 select it explicitly. First staged
   platform-matrix execution is pending.
-- The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
-  seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
-  count) — **not** part of this correctness campaign; see
+- The whole-compiler redeploy (#99 / Stage4) remains separate from this
+  correctness campaign. Its current source blocker is the fail-closed exact
+  archive-projection/link step after runtime-native inventory and transitive
+  requested-owner resolution, not the retired seed enum/mcall diagnoses. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
