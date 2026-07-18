@@ -605,6 +605,12 @@ release-blocking correctness defects. Stage 2 now links and answers
   modules successfully and rebuilt/linked Stage 3 with 656 compiled, zero
   failed. Canonical bootstrap now keeps forced whole-archive diagnostic mode
   disabled and preserves constructors for selective native-all links.
+- The subsequent isolated Stage 4 build did not crash or deadlock, but its
+  `--low-memory` process exceeded ten minutes and reached 24,916,288 KiB RSS
+  without producing an artifact. It was stopped once with exit 130 under the
+  session budget guard and was not retried. The resource regression is tracked
+  in `doc/08_tracking/bug/stage4_low_memory_rss_growth_2026-07-18.md`; the
+  canonical test/lint/duplication executable gate remains pending on Stage 4.
 - A fresh current-seed Stage 2 admission compiled every source module and
   reached the final linker. It produced no earlier LLVM verifier,
   undeclared-global, imported-enum, `String.smf`, or call-arity failure. Object
