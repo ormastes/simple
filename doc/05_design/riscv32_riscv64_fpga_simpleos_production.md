@@ -172,6 +172,18 @@ SIE/SPIE/SPP/SUM/MXR alias; machine CSR reads/writes and trap transitions merge
 that view into `mstatus`. SXL/UXL are fixed RV64 fields, MPP=2 coerces to U, and
 the current direct-only trap owner clears unsupported vector modes.
 
+Supervisor interrupt state is canonical in the machine CSR file. `sie` exposes
+only delegated supervisor enable bits; `sip` permits supervisor software to
+write delegated `SSIP`, while machine firmware can inject `SSIP`, `STIP`, and a
+software `SEIP` latch. The software `SEIP` latch is ORed with the independent
+PLIC S-context line; CSR read/modify/write operates on the hidden software
+latch while returning the combined architectural bit. The PLIC provides the
+standard context-1 enable, threshold, and claim/complete windows and excludes
+an in-service source from both contexts until its owning context completes it.
+Delivery checks all machine-target causes before all supervisor-target causes,
+orders S causes as external/software/timer, suppresses
+delegated interrupts in M-mode, and treats global SIE as implicit below S-mode.
+
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,
 then performs RV64 PMP before bus issue. Fault cause/address and RVFI trap fields

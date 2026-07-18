@@ -37,12 +37,14 @@ use std.hardware.rv64gc_rtl.pkg.{AMO_AND, AMO_OR, AMO_MIN, AMO_MAX, AMO_MINU, AM
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
 use std.hardware.rv64gc_rtl.csr.misa_rv64imacsu
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
+use std.hardware.rv64gc_rtl.csr.{MIP_SEIP_MASK, MIP_SSIP_MASK, MIP_STIP_MASK, MIP_SUPERVISOR_MASK}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_MPP_MASK, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
 use std.hardware.rv64gc_rtl.csr_s.csr_s64_merge_mstatus
 use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
 use std.hardware.rv64gc_rtl.trap.{InterruptCheckResult64, trap64_enter, trap64_state_init}
 use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_mei, cause_msi, cause_mti}
+use std.hardware.rv64gc_rtl.trap.{cause_sei, cause_ssi, cause_sti}
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
 use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
 use std.hardware.rv64gc_rtl.memory_access.MemoryAccessState64
@@ -320,6 +322,28 @@ fn core64_csr_next_value(old_value: i64, source: i64, funct3: u32) -> i64:
     old_value
 
 @hardware
+fn core64_machine_csr_next_value(state: CoreState64, addr: u32,
+                                 old_value: i64, source: i64,
+                                 funct3: u32) -> i64:
+    """Apply Zicsr to the writable CSR state, not externally ORed SEIP."""
+    if addr != 0x344:
+        return core64_csr_next_value(old_value, source, funct3)
+    var software_value = old_value & (MIP_SEIP_MASK ^ -1)
+    if state.csr_m.seip_software:
+        software_value = software_value | MIP_SEIP_MASK
+    core64_csr_next_value(software_value, source, funct3)
+
+@hardware
+fn core64_sync_interrupt_aliases(csr_m: CsrFile64,
+                                 csr_s: CsrSMode64) -> CsrSMode64:
+    var out = csr_s
+    out.sie = csr_m.mie & csr_m.mideleg & MIP_SUPERVISOR_MASK
+    out.sip = csr_m.mip & csr_m.mideleg & MIP_SUPERVISOR_MASK
+    out.medeleg = csr_m.medeleg
+    out.mideleg = csr_m.mideleg
+    out
+
+@hardware
 fn core64_invalid_csr_access(state: CoreState64) -> CoreCsrAccess64:
     CoreCsrAccess64(valid: false, old_value: 0, csr_m: state.csr_m,
         csr_s: state.csr_s, mmu: state.mmu, pmp: state.pmp)
@@ -355,22 +379,47 @@ fn core64_csr_access(state: CoreState64, addr: u32, source: i64, funct3: u32) ->
             old_value = csr_s64_merge_mstatus(old_value, state.csr_s.sstatus)
         if write_requested:
             new_csr_m = csr64_write(state.csr_m, addr,
-                core64_csr_next_value(old_value, source, funct3))
+                core64_machine_csr_next_value(state, addr, old_value,
+                    source, funct3))
             if addr == 0x300:
                 new_csr_s = csr_s64_write(state.csr_s, 0x100,
                     new_csr_m.mstatus)
                 new_csr_m.mstatus = csr_s64_merge_mstatus(new_csr_m.mstatus,
                     new_csr_s.sstatus)
+            if (addr == 0x302 or addr == 0x303 or addr == 0x304 or
+                addr == 0x344):
+                new_csr_s = core64_sync_interrupt_aliases(new_csr_m,
+                    new_csr_s)
         return CoreCsrAccess64(valid: true, old_value: old_value,
             csr_m: new_csr_m, csr_s: new_csr_s, mmu: state.mmu, pmp: state.pmp)
 
     if core64_supervisor_csr_known(addr):
-        val old_value = csr_s64_read(state.csr_s, addr)
+        var old_value = csr_s64_read(state.csr_s, addr)
+        if addr == 0x104:
+            old_value = state.csr_m.mie & state.csr_m.mideleg &
+                MIP_SUPERVISOR_MASK
+        else if addr == 0x144:
+            old_value = state.csr_m.mip & state.csr_m.mideleg &
+                MIP_SUPERVISOR_MASK
         var new_csr_m = state.csr_m
         var new_csr_s = state.csr_s
         var new_mmu = state.mmu
         if write_requested:
-            new_csr_s = csr_s64_write(state.csr_s, addr, core64_csr_next_value(old_value, source, funct3))
+            val next_value = core64_csr_next_value(old_value, source, funct3)
+            if addr == 0x104:
+                val writable = state.csr_m.mideleg & MIP_SUPERVISOR_MASK
+                new_csr_m.mie = (state.csr_m.mie & (writable ^ -1)) |
+                    (next_value & writable)
+                new_csr_s = core64_sync_interrupt_aliases(new_csr_m,
+                    new_csr_s)
+            else if addr == 0x144:
+                val writable = state.csr_m.mideleg & MIP_SSIP_MASK
+                new_csr_m.mip = (state.csr_m.mip & (writable ^ -1)) |
+                    (next_value & writable)
+                new_csr_s = core64_sync_interrupt_aliases(new_csr_m,
+                    new_csr_s)
+            else:
+                new_csr_s = csr_s64_write(state.csr_s, addr, next_value)
             if addr == 0x100:
                 new_csr_m.mstatus = csr_s64_merge_mstatus(
                     new_csr_m.mstatus, new_csr_s.sstatus)
@@ -609,6 +658,7 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
 
     new_csr_m.mstatus = csr_s64_merge_mstatus(new_csr_m.mstatus,
         new_csr_s.sstatus)
+    new_csr_s = core64_sync_interrupt_aliases(new_csr_m, new_csr_s)
 
     CoreState64(
         pc: new_pc,
@@ -801,6 +851,7 @@ fn core64_raise_exception(state: CoreState64, cause: i64, tval: i64) -> CoreStat
     out.csr_s = trap.csr_s
     out.csr_m.mstatus = csr_s64_merge_mstatus(out.csr_m.mstatus,
         out.csr_s.sstatus)
+    out.csr_s = core64_sync_interrupt_aliases(out.csr_m, out.csr_s)
     out.atomics = atomics_create()
     out.atomic_old = 0
     out.semi_phase = 0
@@ -813,7 +864,7 @@ fn core64_interrupt_enabled(state: CoreState64, bit: i64) -> bool:
         return false
     val delegated = (state.csr_m.mideleg & bit) != 0
     if delegated:
-        if state.priv_mode == 3 or (state.csr_s.sie & bit) == 0:
+        if state.priv_mode == 3 or (state.csr_m.mie & bit) == 0:
             return false
         return state.priv_mode == 0 or (state.priv_mode == 1 and
             (state.csr_s.sstatus & SSTATUS_SIE_MASK_64) != 0)
@@ -826,12 +877,35 @@ fn core64_interrupt_enabled(state: CoreState64, bit: i64) -> bool:
 @hardware
 fn core64_pending_interrupt(state: CoreState64) -> InterruptCheckResult64:
     val pending = state.csr_m.mip
-    if (pending & MIP_MEIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MEIP_MASK):
+    # Every M-target interrupt outranks every S-target interrupt.  Preserve
+    # architectural cause priority within each target privilege.
+    if (state.csr_m.mideleg & MIP_MEIP_MASK) == 0 and
+        (pending & MIP_MEIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MEIP_MASK):
         return InterruptCheckResult64(pending: true, cause: cause_mei())
-    if (pending & MIP_MSIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MSIP_MASK):
+    if (state.csr_m.mideleg & MIP_MSIP_MASK) == 0 and
+        (pending & MIP_MSIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MSIP_MASK):
         return InterruptCheckResult64(pending: true, cause: cause_msi())
-    if (pending & MIP_MTIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MTIP_MASK):
+    if (state.csr_m.mideleg & MIP_MTIP_MASK) == 0 and
+        (pending & MIP_MTIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_MTIP_MASK):
         return InterruptCheckResult64(pending: true, cause: cause_mti())
+    if (state.csr_m.mideleg & MIP_SEIP_MASK) == 0 and
+        (pending & MIP_SEIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_SEIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_sei())
+    if (state.csr_m.mideleg & MIP_SSIP_MASK) == 0 and
+        (pending & MIP_SSIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_SSIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_ssi())
+    if (state.csr_m.mideleg & MIP_STIP_MASK) == 0 and
+        (pending & MIP_STIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_STIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_sti())
+    if (state.csr_m.mideleg & MIP_SEIP_MASK) != 0 and
+        (pending & MIP_SEIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_SEIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_sei())
+    if (state.csr_m.mideleg & MIP_SSIP_MASK) != 0 and
+        (pending & MIP_SSIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_SSIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_ssi())
+    if (state.csr_m.mideleg & MIP_STIP_MASK) != 0 and
+        (pending & MIP_STIP_MASK) != 0 and core64_interrupt_enabled(state, MIP_STIP_MASK):
+        return InterruptCheckResult64(pending: true, cause: cause_sti())
     InterruptCheckResult64(pending: false, cause: 0)
 
 @hardware

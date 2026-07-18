@@ -99,6 +99,10 @@ Within the RV64 capsule, the S-CSR module owns the restricted status fields and
 exports one merge operation to the machine CSR/trap/core owners. Effective data
 privilege is derived once at the core-to-memory boundary; the MMU/PMP layers
 consume the latched value and never inspect current privilege independently.
+The machine CSR file is the canonical owner of `mie`, `mip`, and `mideleg`;
+supervisor `sie`/`sip` are masked views rather than independent interrupt state.
+PLIC M/S contexts produce distinct `MEIP`/`SEIP` signals, while software and
+external `SEIP` latches are ORed so either owner can hold the architectural bit.
 
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real
