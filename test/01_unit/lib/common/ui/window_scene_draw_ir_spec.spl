@@ -127,6 +127,38 @@ describe "window scene Draw IR projection":
         expect(titlebar.hit_rect.height).to_equal(28)
         expect(titlebar.computed_style[1].value).to_equal("titlebar")
 
+    it "keeps the window shadow's offset bounds inside the expanded embedding surface":
+        # Regression for doc/08_tracking/bug/draw_ir_window_shadow_clipped_2026-07-13.md:
+        # the shadow rect sits at local (5,6) sized window.width x window.height,
+        # so it must overhang the opaque body (0,0,window.width,window.height) on
+        # the right/bottom edges. That overhang only survives the embedded-surface
+        # clip/offscreen bounds (src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl
+        # sizes the offscreen/clip rect from `embedding.width`/`embedding.height`,
+        # not from a per-command clip_rect) if the batch's own embedding surface
+        # was expanded to include the shadow offset -- exactly what
+        # _wm_draw_ir_window_batch does. If a future edit shrinks the embedding
+        # back to window.width x window.height, this fails because the shadow's
+        # far edge would equal the body's far edge (no visible overhang).
+        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val window_batch = composition.batches[2]
+        val shadow = window_batch.commands[0]
+        val body = window_batch.commands[1]
+
+        expect(shadow.computed_style[1].value).to_equal("shadow")
+        expect(shadow.x).to_equal(5)
+        expect(shadow.y).to_equal(6)
+        expect(shadow.width).to_equal(300)
+        expect(shadow.height).to_equal(200)
+        expect(window_batch.embedding.width).to_equal(305)
+        expect(window_batch.embedding.height).to_equal(206)
+        # Shadow's far edge must reach the embedding surface's own bounds...
+        expect(shadow.x + shadow.width).to_equal(window_batch.embedding.width)
+        expect(shadow.y + shadow.height).to_equal(window_batch.embedding.height)
+        # ...while the body stays smaller, leaving a real overhang strip that
+        # the body/titlebar never paint over.
+        expect(body.width).to_be_less_than(window_batch.embedding.width)
+        expect(body.height).to_be_less_than(window_batch.embedding.height)
+
     it "lets Simple 2D plan a GPU-targeted WM composition with CPU fallback":
         val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, false)
