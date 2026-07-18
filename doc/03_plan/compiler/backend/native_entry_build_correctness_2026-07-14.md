@@ -238,8 +238,12 @@ the shared binary — deploys require explicit user go-ahead).
   source-implemented after inventory and transitive requested-owner resolution.
   SQLite now enters that path as a separate exact provider with conditional
   system-library input; its native result ABI was aligned with the public
-  Simple/interpreter `1`/`0` contract. Hosted execution and Windows DLL staging
-  remain pending.
+  Simple/interpreter `1`/`0` contract. FreeBSD now reuses the existing `.a` /
+  ELF compiler-backfill policy and GNU selected-archive projection instead of
+  falling into Mach-O flags, and direct strict linking reuses the established
+  base-system `/usr/lib` CRT directory. Its full Stage4 QEMU execution remains
+  pending.
+  Windows COFF projection and DLL staging remain a separate source-open lane.
   The remaining blocker is execution evidence plus any concrete missing owner
   reported by the complete compiler request closure, not the retired seed
   enum/mcall diagnoses. See

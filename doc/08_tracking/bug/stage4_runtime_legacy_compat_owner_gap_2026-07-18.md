@@ -48,10 +48,12 @@ restriction. Exact selected-archive projection and strict final-link routing
 are now source-implemented; complete requested-owner and executable evidence
 remain pending.
 
-Full strict Stage4 production is currently Linux/macOS native-host only because
-the compiler-backfill producer still rejects FreeBSD and Windows. FreeBSD ELF,
-COFF-MSVC, and COFF-MinGW coverage here is source-level symbol-contract
-coverage, not an execution claim; MSVC-form objects require LLVM/GNU companion
+Full strict Stage4 production is source-enabled for Linux/macOS/FreeBSD native
+hosts; FreeBSD reuses the existing ELF capsule/projection path and `/usr/lib`
+CRT policy, but its first full QEMU execution remains pending. Windows remains
+rejected until COFF projection and DLL staging are implemented. COFF-MSVC and
+COFF-MinGW coverage here is source-level symbol-contract coverage, not an
+execution claim; MSVC-form objects require LLVM/GNU companion
 archive and object tools rather than `lib.exe`. The broader hosted architecture
 surface is Linux x86_64/AArch64/RISC-V64, macOS x86_64/AArch64, FreeBSD
 x86_64/AArch64, and Windows x86_64; x86, ARM32, and RISC-V32 are not claimed

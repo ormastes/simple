@@ -265,7 +265,7 @@ closure, validates the exact raw and localized envelopes for every hosted
 object-format contract, and admits only those exact names for direct or
 transitive ownership.
 Exact selected-archive projection/linking is now source-implemented for native
-Linux/macOS: selected one-member archives are partial-linked cycle-safely, all
+Linux/macOS/FreeBSD: selected one-member archives are partial-linked cycle-safely, all
 non-root globals are localized, the deterministic capsule is rescanned, and
 strict final linking disables duplicate forgiveness and cc fallback. Execution
 and complete requested-owner evidence remain pending. Strict execution therefore
@@ -280,7 +280,7 @@ native Windows artifact receipts remain pending.
 Strict Stage4 now bypasses raw `native_all` and treats the Cargo backfill as a
 read-only input. Pure-Simple derives its manifest without a hardcoded count,
 uses the portable `objcopy` resolver, and builds a transaction-owned localized
-Linux ELF or macOS Mach-O one-member capsule. Final inventory checks exact
+Linux/FreeBSD ELF or macOS Mach-O one-member capsule. Final inventory checks exact
 localized-object/archive global symbol-table equality and canonical disjointness
 from every staged exact C provider and the localized runtime-native dependency
 owner. The process provider uses one exact platform-specific ABI archive while
