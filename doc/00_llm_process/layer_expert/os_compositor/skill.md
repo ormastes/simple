@@ -72,6 +72,20 @@ open for investigation).
 storm reduced 81→1 after NVMe/font fixes; last fault = nil indirect call in 
 render_commands (debugging in progress).
 
+### Recent (2026-07-18) Knowledge Links
+
+**OVMF boot resolution (2026-07-18):** pre-spl_start stall was not 
+reproducible; boot reaches spl_start identically under OVMF pflash and 
+-kernel modes. SimpleOS desktop kernel verified boots under real OVMF pflash 
+(not just QEMU `-kernel` pass-through) fulfilling board-runnable rule 
+enforcement. See 
+`doc/08_tracking/bug/desktop_kernel_ovmf_grub_boot_stall_pre_spl_start_2026-07-18.md`.
+
+**Frame-render path logging:** compositor backends that produce pixel buffers 
+should log frame provenance (CPU software paint vs GPU device readback) using 
+level-gated probes. See log-retention policy 
+[doc/07_guide/infra/logging/log_retention_policy.md](../../../../doc/07_guide/infra/logging/log_retention_policy.md).
+
 ## Historical Handoff Notes (2026-07-03)
 
 - At that point both WM lanes routed through the shared CSS/GUI-web renderer

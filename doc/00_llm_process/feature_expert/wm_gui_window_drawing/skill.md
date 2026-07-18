@@ -500,6 +500,24 @@ capture achieved (12.64% non-background pixels), fault storm reduced from 81
 faults to 1 after NVMe/interpreter fixes; remaining fault = nil indirect call 
 in render_commands (C8 lane debugging in progress).
 
+### Recent (2026-07-18) Knowledge Links
+
+**Heap exhaustion root cause:** `render_baremetal_first_frame` first-frame 
+allocates repeated 8MB offscreen surfaces via `rt_array_repeat`; immediate 
+fix = reuse one embedded software surface across frames to keep heap footprint 
+constant.
+
+**Probe-gate convention (baremetal kernel code):** per-file 
+`fn _probe_debug() -> bool: false` in freestanding kernel code modules; 
+module-global `val` initializers unreliable on baremetal lanes, so use 
+function-scoped probes with compile-time false defaults.
+
+**Log-retention policy for render traces:** 
+[doc/07_guide/infra/logging/log_retention_policy.md](../../../../doc/07_guide/infra/logging/log_retention_policy.md) 
+converts probe/perf logs to level-gated output; never delete historical logs, 
+only gate verbosity. This applies to render-performance tracing and fault 
+diagnostics.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

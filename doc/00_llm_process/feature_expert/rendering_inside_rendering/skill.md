@@ -59,3 +59,16 @@ parallel one-off mechanisms.
   UI spec errors on a variant that plainly exists, grep for same-named types
   in src/compiler/ first. See
   doc/08_tracking/bug/app_ui_render_widgets_html_reexport_gap_2026-07-11.md.
+
+## Session update 2026-07-18
+
+**Glass desktop screendump first-frame heap exhaustion root:** 
+`render_baremetal_first_frame` in the SimpleOS desktop-kernel entry creates 
+repeated 8MB offscreen render surfaces via `rt_array_repeat` on every frame, 
+exhausting heap quickly. The immediate fix is to allocate one embedded software 
+surface once and reuse it; this keeps the render surface lifetime consistent 
+with the compositor session instead of allocating per-frame.
+
+**Nested WmContentFrame compositing** remains stable; the heap pressure is 
+upstream in the first-frame initialization path, not in the embedding/nesting 
+machinery itself. See glass-render debugging notes under the rendering layer expert.
