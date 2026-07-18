@@ -22,6 +22,27 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 
+# --- Step-1 routing diagnostic (KEPT, gated). Confirms whether the cross-module
+# DrawIrEmbeddingConfig field reads (width/height/opacity_milli/clip/surface_id)
+# resolve to the correct fields at this read site, or land on a shifted offset
+# (the documented cross-module struct field-offset bug). serial_println is the
+# runtime serial facility already used across the OS layer; it reaches the QEMU
+# serial log on the baremetal target. Budget-capped so the continuous WM event
+# loop does not flood serial. Default OFF (log-retention policy: keep the probe,
+# gate it off) — flip ENGINE2D_DRAW_IR_ROUTE_DBG to true to re-enable. Confirmed
+# 2026-07-18: this probe caught target_width/target_height reading garbage
+# (158239601 / 3840 vs the real 3840 / 2160) — a cross-module field-offset misread
+# that defeats fills_target_exactly (harmless today: baremetal_direct overrides
+# routing). See doc/08_tracking/bug for the DrawIrEmbeddingConfig target-dims bug.
+extern fn serial_println(msg: text)
+val ENGINE2D_DRAW_IR_ROUTE_DBG: bool = false
+var _engine2d_route_dbg_budget: i32 = 40
+
+fn _engine2d_route_dbg(msg: text):
+    if ENGINE2D_DRAW_IR_ROUTE_DBG and _engine2d_route_dbg_budget > 0:
+        _engine2d_route_dbg_budget = _engine2d_route_dbg_budget - 1
+        serial_println(msg)
+
 struct Engine2dDrawIrAdvResult:
     schema: text
     unit_id: text
@@ -656,6 +677,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # allocation per desktop/chrome/taskbar batch on the bump-only OS heap.
     val baremetal_direct = eng.backend_name() == "baremetal" and embedding.opacity_milli >= 1000
     val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
+    _engine2d_route_dbg("[route-dbg] sid={embedding.surface_id} ew={embedding_width} eh={embedding_height} tw={target_width} th={target_height} op={embedding_opacity} clip={embedding.clip} bd={baremetal_direct} fte={fills_target_exactly} ues={use_embedded_surface}")
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
