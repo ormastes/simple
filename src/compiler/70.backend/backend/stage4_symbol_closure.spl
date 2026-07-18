@@ -166,6 +166,10 @@ pub fn stage4_runtime_native_archive_file(target_os_name: text, msvc_linker: boo
     """Return the target/linker-specific runtime-native archive name."""
     stage4_hosted_provider_archive_file("runtime_native", target_os_name, msvc_linker)
 
+pub fn stage4_process_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the target/linker-specific process provider archive name."""
+    stage4_hosted_provider_archive_file("process", target_os_name, msvc_linker)
+
 pub fn stage4_font_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the target/linker-specific font archive name without selecting it."""
     stage4_hosted_provider_archive_file("font", target_os_name, msvc_linker)
@@ -311,6 +315,10 @@ pub fn stage4_runtime_native_object_format(target_os_name: text, msvc_objects: b
     """Return the portable-nm contract for the runtime-native archive."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
+pub fn stage4_process_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for the process provider."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
 pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format: text) -> Result<[text], text>:
     """Return the raw legacy dynload definitions to localize in runtime_native."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
@@ -407,7 +415,7 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
     Ok(())
 
-fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text], required_runtime_dependencies: [text]) -> Result<(), text>:
+fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text], required_runtime_dependencies: [text], allow_other_runtime_dependencies: bool = false) -> Result<(), text>:
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 " + provider + " object format '" + object_format + "'")
     var definitions: Dict<text, bool> = {}
@@ -429,6 +437,8 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
         if is_undefined:
             if symbol.starts_with("rt_") or symbol.starts_with("spl_") or symbol == "g_memtrack_enabled":
                 if not required.has(symbol):
+                    if allow_other_runtime_dependencies:
+                        continue
                     return Err("Stage4 " + provider + " provider has unexpected runtime dependency '" + symbol + "'")
                 if dependencies.has(symbol):
                     return Err("Stage4 " + provider + " provider repeats runtime dependency '" + symbol + "'")
@@ -447,6 +457,21 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
         if not dependencies.has(symbol):
             return Err("Stage4 " + provider + " provider is missing required runtime dependency '" + symbol + "'")
     Ok(())
+
+pub fn stage4_validate_process_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the exact process ABI; transitive resolution owns its runtime dependencies."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 process object format '" + object_format + "'")
+    var expected = [
+        "rt_process_is_alive", "rt_process_read_stdout", "rt_process_run_timeout",
+        "rt_process_spawn_piped", "rt_process_write_stdin"
+    ]
+    if object_format == "elf" or object_format == "macho":
+        expected = expected + [
+            "rt_editor_poll_simple_dap_stopped", "rt_editor_spawn_simple_dap",
+            "rt_editor_start_simple_dap", "rt_editor_wait_simple_dap_stopped"
+        ]
+    stage4_validate_runtime_provider_symbol_contract(nm_output, object_format, "process", expected, [], true)
 
 pub fn stage4_validate_font_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
     """Validate the exact public font ABI and forbid hidden runtime dependencies."""

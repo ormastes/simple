@@ -1,0 +1,74 @@
+use compiler.backend.backend.stage4_symbol_closure.{stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_resolve_requested_archive_owners}
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Stage4 process provider":
+    it "names and validates the exact hosted process ABI":
+        expect(stage4_process_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_process.a")
+        expect(stage4_process_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_process.lib")
+        expect(stage4_process_provider_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_process_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_process_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_process_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+
+        val windows = "0001 T rt_process_is_alive\n0002 T rt_process_read_stdout\n0003 T rt_process_run_timeout\n0004 T rt_process_spawn_piped\n0005 T rt_process_write_stdin\n"
+        val posix = windows + "0006 T rt_editor_poll_simple_dap_stopped\n0007 T rt_editor_spawn_simple_dap\n0008 T rt_editor_start_simple_dap\n0009 T rt_editor_wait_simple_dap_stopped\n"
+        val macho = posix.replace(" T rt_", " T _rt_")
+        expect(stage4_validate_process_provider_symbol_contract(posix, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(windows, "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(windows + "0000 A @feat.00\n", "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(posix.replace("0009 T rt_editor_wait_simple_dap_stopped\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(posix + "0010 T rt_process_run_timeout\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(windows + "0010 T rt_extra\n", "coff-mingw").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(windows, "wasm").is_err()).to_be(true)
+
+    it "fails closed when the POSIX process dependency needs the missing core owner":
+        val error = stage4_resolve_requested_archive_owners(
+            ["rt_process_run_timeout"],
+            ["runtime_native", "runtime_process", "runtime_fork"],
+            [
+                "0001 T rt_array_new",
+                "0001 T rt_process_run_timeout\n                 U rt_array_new\n                 U rt_fork_child_setup\n                 U spl_array_len",
+                "0001 T rt_fork_child_setup"
+            ],
+            false
+        ).unwrap_err()
+        expect(error).to_contain("archive 'runtime_process' runtime dependency 'spl_array_len' has no archive owner")
+
+    it "fails closed when the Windows process dependency has no owner":
+        val error = stage4_resolve_requested_archive_owners(
+            ["rt_process_run_timeout"],
+            ["runtime_native", "runtime_process"],
+            [
+                "0001 T rt_array_new",
+                "0001 T rt_process_run_timeout\n                 U rt_array_new\n                 U rt_windows_build_command_line"
+            ],
+            false
+        ).unwrap_err()
+        expect(error).to_contain("archive 'runtime_process' runtime dependency 'rt_windows_build_command_line' has no archive owner")
+
+    it "builds inventories and cleans the process provider before the barrier":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val build_start: i64 = source.find("fn llvm_stage4_build_process_provider_archive(") ?? -1
+        val build_end: i64 = source.find("fn llvm_stage4_build_dynload_provider_archive(") ?? -1
+        val build_source = if build_start >= 0 and build_end > build_start: source.substring(build_start, build_end) else: ""
+        expect(build_source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_process\"")
+        val provider_inventory_pos: i64 = build_source.find("llvm_stage4_candidate_archive_inventory([\"runtime_process\"], [archive_path])") ?? -1
+        val provider_validate_pos: i64 = build_source.find("stage4_validate_process_provider_symbol_contract(scans[0], object_format)") ?? -1
+        expect(provider_inventory_pos).to_be_greater_than(-1)
+        expect(provider_validate_pos).to_be_greater_than(provider_inventory_pos)
+        expect(build_source.split("file_delete(archive_path)").len() - 1).to_equal(2)
+
+        val strict_start: i64 = source.find("if stage4_requested:") ?? -1
+        val strict_end: i64 = source.find("# Step 3: Combine all objects and link") ?? -1
+        val strict_source = if strict_start >= 0 and strict_end > strict_start: source.substring(strict_start, strict_end) else: ""
+        val process_pos: i64 = strict_source.find("llvm_stage4_build_process_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val labels_pos: i64 = strict_source.find("\"runtime_native\", \"runtime_process\", \"runtime_dynload\"") ?? -1
+        val inventory_pos: i64 = strict_source.find("llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths)") ?? -1
+        expect(process_pos).to_be_greater_than(-1)
+        expect(labels_pos).to_be_greater_than(process_pos)
+        expect(inventory_pos).to_be_greater_than(labels_pos)
+        expect(strict_source).to_contain("process_provider_archive")
+        expect(strict_source.split("file_delete(process_provider_archive)").len() - 1).to_equal(10)
