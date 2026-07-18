@@ -2263,18 +2263,19 @@ int main(void) {
     __simple_runtime_init();
     int64_t connection = rt_sqlite_open_memory();
     if (connection == rt_value_nil()) return 1;
-    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != rt_value_int(0)) return 2;
-    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != rt_value_int(0)) return 3;
+    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != rt_value_int(1)) return 2;
+    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != rt_value_int(1)) return 3;
     int64_t statement = rt_sqlite_query(connection, text("SELECT label AS item_name FROM item"));
     if (statement == rt_value_nil()) return 4;
-    if (rt_sqlite_query_next(statement) != rt_value_bool(1)) return 5;
+    if (rt_sqlite_query_next(statement) != rt_value_int(1)) return 5;
     int64_t index = rt_value_int(0);
     if (!text_equals(rt_sqlite_column_name(statement, index), "item_name")) return 6;
     if (!text_equals(rt_sqlite_column_text(statement, index), "hello")) return 7;
+    if (rt_sqlite_query_next(statement) != rt_value_int(0)) return 8;
     rt_sqlite_query_done(statement);
-    if (rt_sqlite_execute(connection, text("invalid sql")) != rt_value_int(-1)) return 8;
-    if (!text_contains(rt_sqlite_error_message(connection), "syntax")) return 9;
-    if (rt_sqlite_close(connection) != rt_value_int(0)) return 10;
+    if (rt_sqlite_execute(connection, text("invalid sql")) != rt_value_int(0)) return 9;
+    if (!text_contains(rt_sqlite_error_message(connection), "syntax")) return 10;
+    if (rt_sqlite_close(connection) != rt_value_int(1)) return 11;
     __simple_runtime_shutdown();
     return 0;
 }

@@ -207,6 +207,10 @@ pub fn stage4_time_provider_archive_file(target_os_name: text, msvc_linker: bool
     """Return the target/linker-specific time/progress archive name without selecting it."""
     stage4_hosted_provider_archive_file("time", target_os_name, msvc_linker)
 
+pub fn stage4_sqlite_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the target/linker-specific SQLite provider archive name."""
+    stage4_hosted_provider_archive_file("sqlite", target_os_name, msvc_linker)
+
 pub fn stage4_fork_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the POSIX fork-isolation archive name without selecting Windows stubs."""
     if target_os_name == "windows":
@@ -487,6 +491,10 @@ pub fn stage4_time_provider_object_format(target_os_name: text, msvc_objects: bo
     """Return the portable-nm contract for a hosted time/progress provider."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
+pub fn stage4_sqlite_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for a hosted SQLite provider."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
 pub fn stage4_fork_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a POSIX fork-isolation provider."""
     if target_os_name == "windows":
@@ -529,14 +537,18 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
     Ok(())
 
-fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text], required_runtime_dependencies: [text], allow_other_runtime_dependencies: bool = false) -> Result<(), text>:
+fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_format: text, provider: text, expected: [text], required_runtime_dependencies: [text], allow_other_runtime_dependencies: bool = false, expected_external_dependencies: [text] = []) -> Result<(), text>:
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 " + provider + " object format '" + object_format + "'")
     var definitions: Dict<text, bool> = {}
     var required: Dict<text, bool> = {}
     var dependencies: Dict<text, bool> = {}
+    var required_external: Dict<text, bool> = {}
+    var external_dependencies: Dict<text, bool> = {}
     for symbol in required_runtime_dependencies:
         required[symbol] = true
+    for symbol in expected_external_dependencies:
+        required_external[symbol] = true
     for line in nm_output.split("\n"):
         val parts = stage4_split_whitespace(line)
         if parts.len() < 2:
@@ -557,6 +569,12 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
                 if dependencies.has(symbol):
                     return Err("Stage4 " + provider + " provider repeats runtime dependency '" + symbol + "'")
                 dependencies[symbol] = true
+            elif expected_external_dependencies.len() > 0:
+                if not required_external.has(symbol):
+                    return Err("Stage4 " + provider + " provider has unexpected external dependency '" + symbol + "'")
+                if external_dependencies.has(symbol):
+                    return Err("Stage4 " + provider + " provider repeats external dependency '" + symbol + "'")
+                external_dependencies[symbol] = true
         elif stage4_nm_has_address(parts, type_index):
             if definitions.has(symbol):
                 return Err("Stage4 " + provider + " provider repeats global definition '" + symbol + "'")
@@ -570,6 +588,9 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
     for symbol in required_runtime_dependencies:
         if not dependencies.has(symbol):
             return Err("Stage4 " + provider + " provider is missing required runtime dependency '" + symbol + "'")
+    for symbol in expected_external_dependencies:
+        if not external_dependencies.has(symbol):
+            return Err("Stage4 " + provider + " provider is missing required external dependency '" + symbol + "'")
     Ok(())
 
 pub fn stage4_validate_process_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
@@ -620,6 +641,27 @@ pub fn stage4_validate_time_provider_symbol_contract(nm_output: text, object_for
         "rt_timestamp_get_microsecond", "rt_timestamp_get_minute", "rt_timestamp_get_month",
         "rt_timestamp_get_second", "rt_timestamp_get_year"
     ], clock_dependencies)
+
+pub fn stage4_validate_sqlite_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the exact SQLite wrapper ABI and its audited external closure."""
+    var external = [
+        "sqlite3_bind_double", "sqlite3_bind_int64", "sqlite3_bind_null", "sqlite3_bind_text",
+        "sqlite3_changes", "sqlite3_close", "sqlite3_column_count", "sqlite3_column_double",
+        "sqlite3_column_int64", "sqlite3_column_name", "sqlite3_column_text", "sqlite3_column_type",
+        "sqlite3_errmsg", "sqlite3_exec", "sqlite3_finalize", "sqlite3_free",
+        "sqlite3_last_insert_rowid", "sqlite3_open", "sqlite3_prepare_v2", "sqlite3_reset", "sqlite3_step"
+    ]
+    if object_format == "coff-msvc":
+        external = external.push("fltused")
+    stage4_validate_runtime_provider_symbol_contract(nm_output, object_format, "sqlite", [
+        "rt_sqlite_begin", "rt_sqlite_bind_float", "rt_sqlite_bind_int", "rt_sqlite_bind_null",
+        "rt_sqlite_bind_text", "rt_sqlite_changes", "rt_sqlite_close", "rt_sqlite_column_count",
+        "rt_sqlite_column_float", "rt_sqlite_column_int", "rt_sqlite_column_name", "rt_sqlite_column_text",
+        "rt_sqlite_column_type", "rt_sqlite_commit", "rt_sqlite_error_message", "rt_sqlite_execute",
+        "rt_sqlite_execute_batch", "rt_sqlite_finalize", "rt_sqlite_last_insert_rowid", "rt_sqlite_open",
+        "rt_sqlite_open_memory", "rt_sqlite_prepare", "rt_sqlite_query", "rt_sqlite_query_done",
+        "rt_sqlite_query_next", "rt_sqlite_reset", "rt_sqlite_rollback"
+    ], ["rt_string_data", "rt_string_new"], false, external)
 
 pub fn stage4_validate_fork_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
     """Validate the exact fork-isolation ABI and its POSIX memtrack dependencies."""

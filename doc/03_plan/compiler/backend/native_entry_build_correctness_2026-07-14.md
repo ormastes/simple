@@ -228,6 +228,10 @@ the shared binary — deploys require explicit user go-ahead).
   now source-implemented as an exact localized compatibility provider. The
   exact archive projection and strict final-link routing are now
   source-implemented after inventory and transitive requested-owner resolution.
+  SQLite now enters that path as a separate exact provider with conditional
+  system-library input; its native result ABI was aligned with the public
+  Simple/interpreter `1`/`0` contract. Hosted execution and Windows DLL staging
+  remain pending.
   The remaining blocker is execution evidence plus any concrete missing owner
   reported by the complete compiler request closure, not the retired seed
   enum/mcall diagnoses. See

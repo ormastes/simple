@@ -241,7 +241,11 @@ path now stages, inventories, and exact-ABI validates the dedicated font archive
 with vendored STB exports held translation-unit-local and the dedicated
 memtrack archive with its 15-global ABI. It also compiles and stages the
 dedicated 14-export time/progress archive with target-specific core clock
-dependencies; execution proof remains pending. GPU, window,
+dependencies. The strict owner path also has a separate exact 27-export SQLite
+provider with audited runtime/external dependencies and conditional `sqlite3`
+link input; its C result encoding now matches the public Simple/interpreter
+integer `1`/`0` ABI. Hosted execution and Windows DLL staging remain pending.
+GPU, window,
 remaining HTTP helper/server, thread, SMF/CUDA, and other CLI owners remain. The remaining
 core-C split has 31 runtime/runtime-native overlaps plus the thread-sleep weak
 fallback and cannot use raw aggregate linking. Raw
