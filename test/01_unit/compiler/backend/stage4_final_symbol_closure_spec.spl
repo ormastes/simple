@@ -81,23 +81,31 @@ describe "Stage4 aggregate final symbol closure":
         expect(source).to_contain("fn stage4_sorted_text")
         expect(source.contains(".sort()")).to_be(false)
 
-    it "names compiler backfill capsules only on supported native hosts":
-        expect(stage4_compiler_backfill_archive_file("linux").unwrap()).to_equal("libsimple_compiler_backfill.a")
-        expect(stage4_compiler_backfill_archive_file("macos").unwrap()).to_equal("libsimple_compiler_backfill.a")
-        expect(stage4_compiler_backfill_archive_file("freebsd").unwrap()).to_equal("libsimple_compiler_backfill.a")
-        expect(stage4_compiler_backfill_object_format("linux").unwrap()).to_equal("elf")
-        expect(stage4_compiler_backfill_object_format("macos").unwrap()).to_equal("macho")
-        expect(stage4_compiler_backfill_object_format("freebsd").unwrap()).to_equal("elf")
-        expect(stage4_compiler_backfill_archive_file("windows").is_err()).to_be(true)
-        expect(stage4_compiler_backfill_archive_file("plan9").is_err()).to_be(true)
-        expect(stage4_compiler_backfill_object_format("windows").is_err()).to_be(true)
-        expect(stage4_compiler_backfill_object_format("plan9").is_err()).to_be(true)
+    it "names compiler backfill capsules for each hosted object ABI":
+        expect(stage4_compiler_backfill_archive_file("linux", false).unwrap()).to_equal("libsimple_compiler_backfill.a")
+        expect(stage4_compiler_backfill_archive_file("macos", false).unwrap()).to_equal("libsimple_compiler_backfill.a")
+        expect(stage4_compiler_backfill_archive_file("freebsd", false).unwrap()).to_equal("libsimple_compiler_backfill.a")
+        expect(stage4_compiler_backfill_archive_file("windows", false).unwrap()).to_equal("libsimple_compiler_backfill.a")
+        expect(stage4_compiler_backfill_archive_file("windows", true).unwrap()).to_equal("simple_compiler_backfill.lib")
+        expect(stage4_compiler_backfill_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_compiler_backfill_archive_file("plan9", false).is_err()).to_be(true)
+        expect(stage4_compiler_backfill_object_format("linux", false).unwrap()).to_equal("elf")
+        expect(stage4_compiler_backfill_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_compiler_backfill_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_compiler_backfill_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_compiler_backfill_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+        expect(stage4_compiler_backfill_object_format("linux", true).is_err()).to_be(true)
+        expect(stage4_compiler_backfill_object_format("plan9", false).is_err()).to_be(true)
 
-    it "accepts compiler backfill symbol envelopes for ELF and Mach-O":
+    it "accepts compiler backfill symbol envelopes for ELF Mach-O and COFF":
         val elf = "0000000000000000 T rt_cranelift_new_module\n0000000000000010 T rt_cranelift_emit_object_raw\n                 U malloc\n"
         val macho = "0000000000000000 T _rt_cranelift_new_module\n0000000000000010 T _rt_cranelift_emit_object_raw\n                 U _malloc\n"
+        val msvc = "00000000 T rt_cranelift_new_module\n00000010 T rt_cranelift_emit_object_raw\n00000000 A @feat.00\n         U __imp_malloc\n"
+        val mingw = "00000000 T _rt_cranelift_new_module\n00000010 T _rt_cranelift_emit_object_raw\n00000000 A @feat.00\n         U __imp__malloc\n"
         expect(stage4_validate_compiler_backfill_symbol_envelope(elf, "elf").is_ok()).to_be(true)
         expect(stage4_validate_compiler_backfill_symbol_envelope(macho, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(msvc, "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(mingw, "coff-mingw").is_ok()).to_be(true)
 
     it "derives sorted compiler backfill manifests and preserves raw localization names":
         val elf = "T rt_cranelift_zeta\n00000010 T helper_z\n00000020 T rt_cranelift_alpha\n00000030 T helper_a\n"
@@ -107,6 +115,9 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_derive_compiler_backfill_manifest(macho, "macho").unwrap()).to_equal(expected)
         expect(stage4_compiler_backfill_localization_symbols(elf, "elf", expected).unwrap()).to_equal(["helper_a", "helper_z"])
         expect(stage4_compiler_backfill_localization_symbols(macho, "macho", expected).unwrap()).to_equal(["_helper_a", "_helper_z"])
+        val coff = "00000000 T rt_cranelift_zeta\n00000010 T helper_z\n00000020 T rt_cranelift_alpha\n00000030 T helper_a\n00000000 A @feat.00\n00000000 A @feat.00\n"
+        expect(stage4_derive_compiler_backfill_manifest(coff, "coff-msvc").unwrap()).to_equal(expected)
+        expect(stage4_compiler_backfill_localization_symbols(coff, "coff-msvc", expected).unwrap()).to_equal(["helper_a", "helper_z"])
 
     it "rejects empty repeated and foreign runtime compiler manifests":
         val export = "00000000 T rt_cranelift_compile\n"
@@ -115,6 +126,8 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_derive_compiler_backfill_manifest(export + export, "elf").unwrap_err()).to_contain("exactly once")
         expect(stage4_derive_compiler_backfill_manifest(export + "00000010 T rt_hidden\n00000020 T spl_hidden\n", "elf").unwrap_err()).to_contain("outside the manifest")
         expect(stage4_derive_compiler_backfill_manifest(export + "U rt_hidden\nU spl_hidden\n", "elf").unwrap_err()).to_contain("outside the manifest")
+        expect(stage4_derive_compiler_backfill_manifest(export + "U __imp_rt_hidden\n", "coff-msvc").unwrap_err()).to_contain("outside the manifest")
+        expect(stage4_derive_compiler_backfill_manifest(export + "00000010 T __imp_rt_hidden\n", "coff-msvc").is_ok()).to_be(true)
         expect(stage4_derive_compiler_backfill_manifest("00000000 T rt_cranelift_noise extra\n", "elf").unwrap_err()).to_contain("defines no rt_cranelift")
 
     it "requires each localization manifest export exactly once":
@@ -140,7 +153,7 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 U spl_hidden_dependency\n", "elf").is_err()).to_be(true)
         expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 w rt_weak_dependency\n", "elf").is_err()).to_be(true)
         expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 v spl_weak_dependency\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_compiler_backfill_symbol_envelope(exact, "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_symbol_envelope(exact + "                 U __imp_rt_hidden_dependency\n", "coff-msvc").is_err()).to_be(true)
 
     it "fingerprints the exact raw compiler backfill symbol table deterministically":
         val rows = "         v _malloc\n00000030 T _rt_cranelift_zeta\n00000010 T _rt_cranelift_alpha\n         U _malloc\n00000020 T _rt_cranelift_zeta\n         w _malloc\n00000040 T ignored extra\n"
@@ -158,6 +171,8 @@ describe "Stage4 aggregate final symbol closure":
         val elf_providers = ["00000000 T rt_font_load\n", "00000000 T spl_memtrack_enable\n"]
         val macho_capsule = "00000000 T _rt_cranelift_compile\n         U _malloc\n"
         val macho_providers = ["00000000 T _rt_font_load\n", "00000000 T _spl_memtrack_enable\n"]
+        val coff_capsule = "00000000 T rt_cranelift_compile\n00000000 A @feat.00\n         U __imp_malloc\n"
+        val coff_provider = "00000000 T rt_font_load\n00000000 A @feat.00\n"
         expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, ["font", "memtrack"], elf_providers, "elf").is_ok()).to_be(true)
         expect(stage4_validate_compiler_backfill_provider_disjoint(macho_capsule, ["font", "memtrack"], macho_providers, "macho").is_ok()).to_be(true)
         expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, [], [], "elf").is_err()).to_be(true)
@@ -166,10 +181,13 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, ["font", "font"], elf_providers, "elf").unwrap_err()).to_contain("provider label 'font' is repeated")
         expect(stage4_validate_compiler_backfill_provider_disjoint("         U malloc\n", ["font"], [elf_providers[0]], "elf").unwrap_err()).to_contain("capsule defines no global symbols")
         expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, ["font"], ["         U malloc\n"], "elf").unwrap_err()).to_contain("provider 'font' defines no global symbols")
+        expect(stage4_validate_compiler_backfill_provider_disjoint("00000000 A @feat.00\n", ["font"], [coff_provider], "coff-msvc").unwrap_err()).to_contain("capsule defines no global symbols")
+        expect(stage4_validate_compiler_backfill_provider_disjoint(coff_capsule, ["font"], ["00000000 A @feat.00\n"], "coff-msvc").unwrap_err()).to_contain("provider 'font' defines no global symbols")
         expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, ["font"], ["00000000 T rt_cranelift_compile\n"], "elf").unwrap_err()).to_contain("overlaps provider 'font': rt_cranelift_compile")
         expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, ["font", "compiler"], [elf_providers[0], "00000000 T rt_cranelift_compile\n"], "elf").unwrap_err()).to_contain("overlaps provider 'compiler': rt_cranelift_compile")
         expect(stage4_validate_compiler_backfill_provider_disjoint(macho_capsule, ["font"], ["00000000 T rt_cranelift_compile\n"], "macho").unwrap_err()).to_contain("overlaps provider 'font': rt_cranelift_compile")
-        expect(stage4_validate_compiler_backfill_provider_disjoint(elf_capsule, ["font"], [elf_providers[0]], "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_compiler_backfill_provider_disjoint(coff_capsule, ["font"], [coff_provider], "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_compiler_backfill_provider_disjoint(coff_capsule, ["compiler"], ["00000000 T rt_cranelift_compile\n"], "coff-mingw").unwrap_err()).to_contain("overlaps provider 'compiler': rt_cranelift_compile")
 
     it "defines target-explicit dynamic-loader archive identities without building them":
         expect(stage4_dynload_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
@@ -899,7 +917,7 @@ not-an-address W rt_malformed
     it "owns and cleans the compiler capsule only inside the strict Stage4 transaction":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         val final_symbols_pos = source.find("match llvm_stage4_final_requested_symbols(final_simple_objects)") ?? -1
-        val capsule_pos = source.last_index_of("llvm_stage4_build_compiler_backfill_capsule(runtime_path, hosted_os, hosted_cc, pid, output)") ?? -1
+        val capsule_pos = source.last_index_of("llvm_stage4_build_compiler_backfill_capsule(runtime_path, hosted_os, hosted_cc, stage4_msvc_objects, stage4_msvc_linker, pid, output)") ?? -1
         val provider_pos = source.last_index_of("llvm_stage4_build_dynload_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
         val projection_pos = source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols") ?? -1
         expect(capsule_pos).to_be_greater_than(final_symbols_pos)

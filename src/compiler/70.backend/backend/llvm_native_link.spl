@@ -117,7 +117,7 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
     val archiver = find_archive_portable()
     if nm == "" or objcopy == "" or section_reader == "" or archiver == "":
         return Err("Stage4 selected-archive projection requires nm, objcopy, section-reader, and archive tools")
-    val object_format = match stage4_compiler_backfill_object_format(target_os_name):
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name, false):
         case Ok(format): format
         case Err(err): return Err(err)
     val stage_dir = "{_get_temp_dir()}/simple_stage4_selected_projection_{pid}_{output_path.hash()}"
@@ -236,15 +236,17 @@ fn llvm_stage4_compiler_backfill_failure(stage_dir: text, output_path: text, mes
         return Err(message + "; compiler backfill cleanup also failed")
     Err(message)
 
-fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_name: text, hosted_cc: text, pid: i64, output_path: text) -> Result<text, text>:
+fn llvm_stage4_build_compiler_backfill_capsule(runtime_path: text, target_os_name: text, hosted_cc: text, msvc_objects: bool, msvc_linker: bool, pid: i64, output_path: text) -> Result<text, text>:
     if runtime_path.trim() == "":
         return Err("Stage4 compiler backfill capsule requires SIMPLE_RUNTIME_PATH")
     if output_path.trim() == "":
         return Err("Stage4 compiler backfill capsule requires a final output path")
-    val archive_file = match stage4_compiler_backfill_archive_file(target_os_name):
+    if target_os_name == "windows":
+        return Err("Stage4 compiler backfill capsule requires Windows projection support")
+    val archive_file = match stage4_compiler_backfill_archive_file(target_os_name, msvc_linker):
         case Ok(file): file
         case Err(err): return Err(err)
-    val object_format = match stage4_compiler_backfill_object_format(target_os_name):
+    val object_format = match stage4_compiler_backfill_object_format(target_os_name, msvc_objects):
         case Ok(format): format
         case Err(err): return Err(err)
     val raw_archive = runtime_path + "/" + archive_file
@@ -1139,7 +1141,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 return Err(err)
         if trace:
             print "[LLVM-LINK] Stage4 requested runtime symbols: {stage4_requested_symbols.len()}"
-        val compiler_backfill_capsule = match llvm_stage4_build_compiler_backfill_capsule(runtime_path, hosted_os, hosted_cc, pid, output):
+        val compiler_backfill_capsule = match llvm_stage4_build_compiler_backfill_capsule(runtime_path, hosted_os, hosted_cc, stage4_msvc_objects, stage4_msvc_linker, pid, output):
             case Ok(path): path
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
@@ -1282,7 +1284,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 combined candidate inventory failed: " + err)
-        val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os):
+        val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os, stage4_msvc_objects):
             case Ok(format): format
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)

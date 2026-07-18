@@ -59,6 +59,29 @@ if grep -q 'bootstrap-freebsd-seed.sh' scripts/bootstrap/bootstrap-from-scratch.
 fi
 
 multiplatform=.github/workflows/rust-bootstrap-multiplatform.yml
+stage4_symbols=src/compiler/70.backend/backend/stage4_symbol_closure.spl
+stage4_final_spec=test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl
+stage4_projection_spec=test/01_unit/compiler/backend/stage4_selected_archive_projection_spec.spl
+
+[ "$(grep -Fc "test/01_unit/compiler/backend/stage4_*_spec.spl" "${multiplatform}")" -eq 2 ] || fail "Stage4 unit contracts do not trigger push and pull-request portability CI"
+for required in \
+  'fn stage4_provider_symbol(name: text, object_format: text, import_reference: bool)' \
+  'if import_reference and symbol.starts_with("__imp_")' \
+  'stage4_is_coff_feature_symbol(raw_symbol, object_format)' \
+  'return Ok(if msvc_linker: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a")' \
+  'stage4_hosted_provider_object_format(target_os_name, msvc_objects)'; do
+  grep -Fq -- "${required}" "${stage4_symbols}" || fail "Stage4 COFF compiler contract missing: ${required}"
+done
+for required in \
+  'stage4_compiler_backfill_archive_file("windows", false)' \
+  'stage4_compiler_backfill_archive_file("windows", true)' \
+  'stage4_compiler_backfill_object_format("windows", false)' \
+  'stage4_compiler_backfill_object_format("windows", true)' \
+  'U __imp_rt_hidden'; do
+  grep -Fq -- "${required}" "${stage4_final_spec}" || fail "Stage4 COFF final-symbol regression missing: ${required}"
+done
+grep -Fq '"coff-msvc", ["rt_root"]' "${stage4_projection_spec}" || fail "Stage4 MSVC projection contract missing"
+grep -Fq '"coff-mingw", ["rt_root"]' "${stage4_projection_spec}" || fail "Stage4 MinGW projection contract missing"
 freebsd_workflow=.github/workflows/freebsd-build.yml
 runtime_compiler=src/compiler/70.backend/backend/runtime_compiler.spl
 native_linker=src/compiler/70.backend/backend/llvm_native_link.spl
