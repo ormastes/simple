@@ -863,6 +863,16 @@ string-header magic before hashing. Rust-hosted Stage3 strings use a different
 header, so every key hashes to zero and all 8192 logical buckets collapse into
 bucket zero. Each membership probe then calls `bucket.split("\n")` over the
 entire growing set, producing the observed quadratic retained allocations. The
-next bounded cycle must use a runtime-compatible text hash, prove multi-bucket
-distribution with the actual Stage3 executable, and make at most one final
-profiled Stage4 attempt.
+driver now reuses the existing seed-safe pure-Simple `hm_hash_text` function
+instead of the representation-sensitive `rt_hash_text` ABI. The focused bucket
+regression inserts distinct keys into 16 buckets and requires multiple buckets
+to be populated, while retaining exact collision checks.
+
+One final pre-fix Stage4 profile was capped at 12 GiB and stopped at
+`phase1:load_sources:start`, matching the diagnosed collapse without crashing
+the host. Post-fix execution evidence is still pending: the workspace release
+test runner segfaulted before reporting the focused spec, and the retained pure
+Stage3 executable was concurrently removed before a three-source native probe
+could start. Do not use the Rust seed as a substitute. The next fresh cycle may
+run the focused spec once with a verified pure self-hosted binary, then make at
+most one capped profiled Stage4 attempt.
