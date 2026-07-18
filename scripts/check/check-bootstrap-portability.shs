@@ -535,6 +535,8 @@ grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native 
 grep -q 'chmod +x "$compiler"' "${multiplatform}" || fail "downloaded pure-Simple compiler executable mode is not restored"
 grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "native architecture gate permits stub fallback"
 grep -Fq 'binutils-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 object inspection toolchain missing"
+grep -Fq 'gcc-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 cross C compiler missing"
+grep -Fq 'libc6-dev-armhf-cross' "${multiplatform}" || fail "ARM32 cross sysroot missing"
 grep -Fq 'check_unsupported_arm32' scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection gate missing"
 grep -Fq "Backend cranelift does not support target arm" scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection diagnostic is not checked"
 grep -Fq 'if [ "$NATIVE_SMOKE_BACKEND" = cranelift ]; then' scripts/check/native-smoke-matrix.shs || fail "native smoke lacks explicit Cranelift branch"
@@ -707,6 +709,7 @@ fi
 arch_gate=scripts/check/check-llvm-simd-row-native-arch.shs
 for invocation in \
   'build_object_arch arm32 armv7-unknown-linux-gnueabihf' \
+  'build_crossmodule_arch arm32 armv7-unknown-linux-gnueabihf' \
   'build_arch x86_64 x86_64-unknown-linux-gnu' \
   'build_arch aarch64 aarch64-unknown-linux-gnu' \
   'build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu' \
@@ -722,6 +725,13 @@ llvm_crossmodule_body=$(sed -n '/^build_crossmodule_arch() {$/,/^}$/p' "${arch_g
 if printf '%s\n' "${llvm_crossmodule_body}" | grep -Fq -- '--backend'; then
   fail "LLVM crossmodule execution gate does not exercise the default backend"
 fi
+grep -Fq 'arm-linux-gnueabihf-gcc qemu-arm' "${arch_gate}" || fail "ARM32 execution tools missing"
+for required in \
+  'arm32)' \
+  'timeout 30 qemu-arm -cpu max -L /usr/arm-linux-gnueabihf "$out"' \
+  '[ "$actual" = "result-u8-ok" ]'; do
+  printf '%s\n' "${llvm_crossmodule_body}" | grep -Fq -- "${required}" || fail "ARM32 execution gate missing: ${required}"
+done
 grep -qx 'check_unsupported_riscv32_hosted' "${arch_gate}" || fail "hosted RV32 rejection invocation missing"
 grep -qx 'build_riscv32_baremetal_object' "${arch_gate}" || fail "bare-metal RV32 recovery invocation missing"
 grep -qx 'build_riscv32_crossmodule_object' "${arch_gate}" || fail "RV32 crossmodule correctness invocation missing"
