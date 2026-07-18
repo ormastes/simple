@@ -1,7 +1,7 @@
 # native-build parent hangs forever when its worker dies early (zombie, empty log)
 
 Date: 2026-07-03
-Status: fixed-pending-verification
+Status: REOPENED — parent interruption still leaks the nested timeout/worker
 Severity: P1 (blocks bootstrap stage 4 / --deploy on this host; silent 2h timeout burns)
 Found by: fable orchestrator during bootstrap redeploy
 
@@ -86,3 +86,21 @@ gates).
   progress elsewhere per instructions) — final confidence still requires the
   next full stage4 bootstrap pass to exercise the actual worker-spawn chain
   end-to-end through a freshly rebuilt self-hosted binary.
+
+## Reopened evidence (2026-07-18)
+
+Two incorrectly routed bootstrap probes were stopped by an outer 900-second
+GNU `timeout`, but each interpreted `native_build_main` parent left its nested
+`timeout --kill-after=5s 7200s` and worker alive. The two workers were adopted
+by PID 1 and retained approximately 1.6 GiB RSS each while their native-build
+caches remained empty. All four owned processes required explicit termination.
+
+This does not indicate a native-project cache stall—the probes omitted the
+canonical `SIMPLE_NATIVE_BUILD_RUST=1` seed override—but it proves the current
+timeout regression covers normal child exit while missing parent interruption.
+
+Required prevention evidence: start `process_run_timeout` with a long-lived
+descendant, terminate the Simple parent, and assert within a short deadline that
+neither wrapper nor descendant remains. The shared Unix process owner must
+propagate parent death or perform equivalent process-group cleanup; extending
+timeouts is not a fix.

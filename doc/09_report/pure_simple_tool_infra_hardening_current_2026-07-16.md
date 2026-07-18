@@ -35,7 +35,7 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | The last compiling Stage 2 admitted the imported-enum, `String.smf`, and function-arity repairs before final-link failures. Dotted method normalization and per-function LLVM sections are now focused-test PASS, but the current fresh seed stalls before its first cache/object write for both supported runtime bundles; no fresh CLI exists | Diagnose the pre-build native-build stall, then run one bounded admission and atomically deploy | P0 |
+| Production runtime | BLOCKED | Corrected Stage 2 reaches the final link with function-level GC and only 10 unique unresolved names (25 relocations), down from the prior broad module-section frontier. Focused fixes now cover eight names; pointer `offset` lowering and HIR lambda capture ownership remain | Finish the two shared semantic roots, rebuild the seed, reuse the Stage 2 cache, then atomically deploy | P0 |
 | Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The fresh-seed Stage 2 now reaches a later LLVM import/linkage frontier | Fix the remaining bootstrap frontier, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending an aggregate scanner owner; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Run the retained directory-walk spec, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
@@ -99,10 +99,21 @@ so executable qualification is still blocked.
    `treesitter_match_token`, and LLVM emitted all functions in a module into one
    `.text` section, preventing `--gc-sections` from discarding unreachable
    functions with obsolete runtime references. Both roots are fixed and have
-   focused regressions. Current admission is instead blocked earlier: the fresh
-   seed emits only runtime-provider fallback and memory-guard notices, then
-   creates no cache entry or object before the 900-second deadline with either
-   `simple-core` or canonical `core-c-bootstrap`.
+   focused regressions. Two post-fix commands then incorrectly combined the
+   temporary Rust seed with `SIMPLE_BOOTSTRAP=1`, which deliberately routes
+   native-build through the interpreted pure-Simple worker. A tiny isolated
+   build with the existing `SIMPLE_NATIVE_BUILD_RUST=1` repair override reached
+   the native-project path immediately, wrote its cache, produced a 14,288-byte
+   binary, printed `5`, and exited 0. The silent timeouts were invalid admission
+   invocations, not a new native-project hang. They did expose that killing the
+   outer parent left two nested 7200-second timeout/worker pairs alive at about
+   1.6 GiB RSS each; those four owned processes were explicitly terminated.
+   The corrected canonical Stage 2 then reached the final link normally. Its
+   surviving names are `str.bytes`, `substring`, `split_whitespace`, `offset`,
+   `str.ord`, `str.chars`, `rt_string_contains`, `Ok`,
+   `MirLowering.lower_inline_lambda_with_locals`, and
+   `HirExpr.free_variables` (10 unique names,
+   25 relocations total).
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -615,10 +626,15 @@ so executable qualification is still blocked.
   these with fallback stubs: its one generated object was a resolved-symbol
   compatibility jump, and its diagnostic now names that accurately.
 - After the method and function-section fixes, the current seed was rebuilt
-  successfully. Two bounded admission commands then timed out before native
-  project compilation: both `simple-core` and canonical `core-c-bootstrap`
-  produced the same two-line log, left the dedicated cache at zero bytes, and
-  created no output binary. The commands were stopped by `timeout 900`; no
-  retry or third bundle variation was run. This is now tracked as a distinct
-  pre-build startup/progress bug, so the function-section fix remains
-  unit-qualified but not Stage-2-admitted.
+  successfully. Two bounded commands timed out before native-project
+  compilation because `SIMPLE_BOOTSTRAP=1` intentionally forced the
+  interpreted worker; changing runtime bundles could not alter that dispatch.
+  The existing `SIMPLE_NATIVE_BUILD_RUST=1` override was then verified with an
+  isolated `p2_add.spl` mini-build: native build, cache write, executable output
+  `5`, and exit 0 all passed. The false startup-stall classification was
+  retracted. Corrected full Stage 2 then compiled and reached the final linker;
+  per-function sections reduced the live frontier to 25 relocations across 10
+  unique names. Retained-object review grouped them into direct-call primitive
+  normalization (`substring`, bytes/chars/ord, contains), a real missing
+  whitespace tokenizer, two stale semantic helper calls, one `Ok()` source
+  typo, pointer `offset` lowering, and missing HIR lambda capture ownership.
