@@ -15,9 +15,8 @@
 use std.hardware.rv64gc_rtl.csr.{CsrFile64}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP_MASK}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
-use std.hardware.rv64gc_rtl.csr.{MPP_M_MODE}
 use std.hardware.rv64gc_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
-use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create}
 use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SPP_MASK_64, SSTATUS_SPP_BIT_64}
 use std.hardware.rv64gc_rtl.csr_s.{csr_s64_is_exception_delegated, csr_s64_is_interrupt_delegated}
 
@@ -75,6 +74,7 @@ struct TrapState64:
 struct TrapEnterResult64:
     """Result of entering a trap."""
     csr: CsrFile64    # Updated CSR file (mepc, mcause, mtval, mstatus saved)
+    csr_s: CsrSMode64 # Updated supervisor CSR state when delegated
     trap_pc: i64       # Target PC (from mtvec, direct mode)
     target_mode: i64   # Target privilege mode: M=3, S=1
 
@@ -124,7 +124,7 @@ fn trap64_check_interrupt(csr: CsrFile64) -> InterruptCheckResult64:
 # Trap Entry
 # ============================================================================
 
-fn trap64_enter_m_only(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEnterResult64:
+fn trap64_enter_m_only_from_priv(csr: CsrFile64, pc: i64, cause: i64, tval: i64, priv_mode: i64) -> TrapEnterResult64:
     """Enter a trap: save context to CSRs, compute handler address."""
 
     var new_csr = csr
@@ -143,16 +143,20 @@ fn trap64_enter_m_only(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEn
     new_mstatus = new_mstatus & (MSTATUS_MPIE_MASK ^ -1)
     new_mstatus = new_mstatus & (MSTATUS_MPP_MASK ^ -1)
 
-    # Set MPIE = old MIE, MIE = 0, MPP = M-mode
+    # Set MPIE = old MIE, MIE = 0, MPP = interrupted privilege.
     new_mstatus = new_mstatus | (old_mie << MSTATUS_MPIE_BIT)
-    new_mstatus = new_mstatus | MPP_M_MODE
+    new_mstatus = new_mstatus | ((priv_mode & 0x3) << MSTATUS_MPP_LO_BIT)
 
     new_csr.mstatus = new_mstatus
 
     # Compute trap handler PC from mtvec (direct mode)
     val trap_pc = csr.mtvec & 0xFFFFFFFFFFFFFFFC
 
-    TrapEnterResult64(csr: new_csr, trap_pc: trap_pc, target_mode: 3)
+    TrapEnterResult64(csr: new_csr, csr_s: csr_s64_create(), trap_pc: trap_pc, target_mode: 3)
+
+fn trap64_enter_m_only(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEnterResult64:
+    """Compatibility entry point for traps already executing in M-mode."""
+    trap64_enter_m_only_from_priv(csr, pc, cause, tval, 3)
 
 # ============================================================================
 # Trap Exit (mret)
@@ -204,13 +208,14 @@ fn trap64_enter(ts: TrapState64, cause: i64, tval: i64, pc: i64, priv_mode: i64,
     val is_interrupt = (cause & int_bit) != 0
 
     var delegated: bool = false
-    if is_interrupt:
-        val irq_num = cause & (int_bit ^ -1)
-        val deleg_bit = (csr_m.mideleg >> irq_num) & 1
-        delegated = deleg_bit == 1
-    else:
-        val deleg_bit = (csr_m.medeleg >> cause) & 1
-        delegated = deleg_bit == 1
+    if priv_mode != 3:
+        if is_interrupt:
+            val irq_num = cause & (int_bit ^ -1)
+            val deleg_bit = (csr_m.mideleg >> irq_num) & 1
+            delegated = deleg_bit == 1
+        else:
+            val deleg_bit = (csr_m.medeleg >> cause) & 1
+            delegated = deleg_bit == 1
 
     if delegated:
         # Route to S-mode: write sepc, scause, stval
@@ -232,10 +237,12 @@ fn trap64_enter(ts: TrapState64, cause: i64, tval: i64, pc: i64, priv_mode: i64,
         new_csr_s.sstatus = new_sstatus
 
         val trap_pc = csr_s.stvec & 0xFFFFFFFFFFFFFFFC
-        TrapEnterResult64(csr: csr_m, trap_pc: trap_pc, target_mode: 1)
+        TrapEnterResult64(csr: csr_m, csr_s: new_csr_s, trap_pc: trap_pc, target_mode: 1)
     else:
         # Route to M-mode via existing logic
-        trap64_enter_m_only(csr_m, pc, cause, tval)
+        val machine = trap64_enter_m_only_from_priv(csr_m, pc, cause, tval, priv_mode)
+        TrapEnterResult64(csr: machine.csr, csr_s: csr_s,
+            trap_pc: machine.trap_pc, target_mode: machine.target_mode)
 
 # ============================================================================
 # Trap Exit Aliases

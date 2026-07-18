@@ -110,7 +110,7 @@ Do not invent a second RISC-V core, bootloader, or FPGA framework. Reuse the exi
 - Unchosen options were deleted rather than archived.
 
 ## Phase
-implementation-milestone-0-in-progress
+implementation-milestone-2-in-progress
 
 ## Log
 - dev: Created production-readiness lane and fixed existing smoke wrappers to expose both RV32/RV64 missing smoke artifacts.
@@ -201,3 +201,19 @@ implementation-milestone-0-in-progress
   CPU-bound with no output until a 120-second timeout. The three-cycle cap is
   reached. Recorded the repair and closure criteria in
   `doc/08_tracking/bug/pure_simple_full_cli_process_run_inherit_spipe_docgen_crash_2026-07-18.md`.
+- impl milestone 2 2026-07-18: Added synthesizable RV32/RV64 PMP priority,
+  access-gate, and CSR owners with explicit module exports. RV64 `CoreState64`
+  now owns `PmpEntries64`; all six Zicsr forms route legal M/S/PMP accesses,
+  SATP changes synchronize and globally flush the Sv39 MMU, and illegal CSR,
+  ECALL, and EBREAK paths enter precise delegated traps without register
+  writeback. The production request/response page walker and bus gating remain
+  active work; the RAM-backed translator is not being promoted as RTL proof.
+- review 2026-07-18: The bounded RV64 sidecar audit was merged. The primary
+  review corrected reserved funct3 decoding, legality-qualified writeback,
+  interrupted privilege in MPP, delegated supervisor CSR return state, writable
+  machine counters, and Sv48 rejection in the Sv39-only core.
+- verification blocker 2026-07-18: One bounded focused check of
+  `src/lib/hardware/rv64gc_rtl` with the freshly built pure-Simple CLI exited
+  139 before diagnostics. Log:
+  `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. No Rust seed or
+  repeated check was substituted.

@@ -2,12 +2,14 @@
 
 ## Status
 
-STATUS: PRODUCTION READY FOR ILA-VERIFIED KV260 SIMPLEOS BOOT MARKERS.
+STATUS: HISTORICAL ILA MARKER EVIDENCE ONLY — NOT PRODUCTION READY.
 
-The repo has RV32/RV64 RTL, SimpleOS QEMU, Kria/K26 FPGA preflight scripts, and
-existing reports. Current local evidence now proves the RV64 SimpleOS marker
-through KV260 Vivado ILA. Current local evidence also proves the RV32
-`FPGA-RV32` marker through KV260 Vivado ILA.
+The retained runs prove early RV32/RV64 marker bytes on KV260, not a complete
+Simple-generated CPU, Linux boot, terminal login, or `ls`. The 2026-07-18 F1/N3
+audit supersedes the old production-ready label: generated CPU bundles are
+`contract-not-ready` until compiler-emitted semantic cores execute MMU/PMP,
+pass architecture/formal gates, boot pinned Linux, and retain bidirectional
+board-origin login evidence.
 
 ## Fresh Evidence
 

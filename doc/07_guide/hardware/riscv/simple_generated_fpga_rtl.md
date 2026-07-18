@@ -117,6 +117,21 @@ faults, A/D policy, TOR/NA4/NAPOT, R/W/X, priority, and locked PMP entries.
 Current standalone MMU modules and bare-metal PMP write plans are not CPU
 integration evidence.
 
+Current source status (2026-07-18): both XLEN lanes have explicit 16-entry PMP
+match/access-gate and `pmpcfg`/`pmpaddr` CSR owners. RV64 additionally stores
+PMP in `CoreState64`, executes the six Zicsr forms through the M/S/PMP owners,
+synchronizes accepted SATP writes with Sv39 state, suppresses illegal CSR
+writeback, and enters delegated illegal-instruction traps. This is a real core
+state integration slice, but not yet memory-path acceptance: RV64
+`lsu64_access()` is still an identity stub, RV32 core privilege/PMP wiring is
+not complete, and neither production core has the required request/response
+page-walker-to-PMP-to-bus path. The RAM-backed `mmu*_translate()` functions
+remain unit adapters until that bus FSM calls the same permission semantics.
+
+The focused pure-Simple source check currently exits 139 before diagnostics;
+see `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. Do not rerun
+the Rust seed or treat the unexecuted VHDL/GHDL scenario as PASS.
+
 ### 3. Boot Linux to an interactive login on generated RTL
 
 Build and hash OpenSBI/firmware, Linux, DT, and rootfs separately for RV32 and
