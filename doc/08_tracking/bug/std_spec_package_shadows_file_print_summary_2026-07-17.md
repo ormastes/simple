@@ -1,13 +1,132 @@
 # Bug: `use std.spec.{print_summary, get_exit_code, get_executed_test_count}` — cannot be root-fixed in pure Simple (interpreter mode)
 
-- **Date:** 2026-07-17
-- **Status:** open — investigated and root-caused at **three independent,
-  stacked layers**, all requiring a Rust change. NOT fixed in this pass
-  (assigned scope was pure-Simple only: no `src/compiler_rust` edits, no new
-  `rt_*` externs — see "Why no fix was applied" below).
-- **Area:** `src/compiler_rust` interpreter module resolution + native BDD
-  intrinsics (`src/compiler_rust/compiler/src/interpreter_module/`,
-  `src/compiler_rust/compiler/src/interpreter_call/bdd.rs`).
+- **Date:** 2026-07-17 (module-resolution layer fixed 2026-07-18 — see
+  "2026-07-18 update" below; the native-BDD-intrinsic layer, root causes 2/3,
+  remains open and is a separate, deliberately out-of-scope lane)
+- **Status:** RESOLUTION LAYER FIXED (root cause 1, in Rust,
+  `src/compiler_rust/compiler/src/interpreter_module/{path_resolution.rs,
+  module_loader.rs,export_handler.rs}`) — confirmed on 10 real spec files
+  with the rebuilt seed. Root causes 2/3 (native BDD intrinsics vs `.spl`
+  module vars) are UNCHANGED/still open; they only matter for specs whose
+  `print_summary()` needs to report real pass/fail *counts* from inside the
+  same wrapped-harness process, which is a different, deferred lane — see
+  that section below, untouched from the original 2026-07-17 investigation.
+- **Area:** `src/compiler_rust` interpreter module resolution
+  (`src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`,
+  `module_loader.rs`, `export_handler.rs`) — fixed. Native BDD intrinsics
+  (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`) — untouched,
+  still open.
+
+## 2026-07-18 update: resolution layer (root cause 1) fixed
+
+Root cause 1 below was actually **three separate resolution-precedence bugs
+stacked in the same call chain**, not one. All three had to be fixed together
+for `use std.spec.{print_summary, ...}` to resolve at all; fixing any two of
+the three still reproduced the original `function 'print_summary' not found`
+error one hop deeper in the chain.
+
+1. **`path_resolution.rs` stdlib search order** (~line 677,
+   `resolve_module_path_uncached`): the `stdlib_subpath` candidate list
+   checked the stale, vendored `src/compiler_rust/lib/std/src` snapshot
+   *before* the project's own current tiered stdlib (`src/std`/`src/lib` —
+   `src/std` is a symlink to `src/lib`). That vendored tree's own
+   `spec/__init__.spl` has no `print_summary` and won every time. Its own
+   `README.md` documents it as superseded ("Previous location: `lib/std/`.
+   New location: `simple/std_lib/src/`."). **Fix:** reordered the list so
+   `src/std`/`src/lib` are tried first, vendored path kept as a final
+   fallback.
+
+2. **`module_loader.rs` `prefer_package_init_for_member_import`** (~line
+   402): for a `Group`/`Glob` import, this unconditionally redirects a
+   resolved FILE (e.g. `spec.spl`) to a same-named sibling PACKAGE
+   `spec/__init__.spl` whenever the package directory exists — even though
+   `src/lib/nogc_sync_mut/spec/__init__.spl` and `spec.spl` are two
+   genuinely different, both-real modules (package = decorators/env_detect/
+   condition helpers; file = the BDD DSL, including `print_summary`).
+   **Fix:** added a new helper `file_plausibly_provides_names(path, names)`
+   (tokenizes a candidate file's source into a `HashSet` of identifiers, once
+   per file, not once per name) and changed the redirect decision to be
+   **per-name**: keep the file iff at least one requested name is found on
+   the file but *not* on the package, regardless of how many other requested
+   names the package also legitimately provides. An early version of this
+   fix used a coarser "package matches ANY requested name → always redirect"
+   test, which still failed — see point 3.
+
+3. **`export_handler.rs` `load_export_source`** (~line 40): when loading the
+   source module for a re-export statement (`export use X.{a, b, c}`), this
+   always built a synthetic `UseStmt` with `target: ImportTarget::Glob`,
+   discarding the specific requested names from the original `export use`
+   statement before they ever reached fix 2's precision check. This mattered
+   because `use std.spec.{print_summary, ...}` does not resolve directly to
+   `src/lib/nogc_sync_mut/spec.spl` — it first resolves to
+   `src/lib/nogc_async_mut/spec.spl`, a thin shim
+   (`export use std.nogc_sync_mut.spec.{describe, ..., print_summary, ...}`,
+   54 names), and *that* re-export is what needed to resolve `std.nogc_sync_mut.spec`
+   correctly. **Fix:** preserve the `Group` target when `export_stmt.target`
+   is `Group` (every other target kind — `Single`/`Aliased`/`Glob` — is left
+   exactly as before, since `load_and_merge_module` already loads the full
+   module regardless of target per its own "Selective filtering... too
+   aggressive... keep the full module" comment, so this is safe: it only
+   changes which names fix 2 sees for its redirect decision, not what gets
+   loaded).
+
+   **Why fix 2 alone still failed even with fix 3 landed:** the shim's
+   re-export list mixes 54 names — most (`is_windows`, `skip_it`, `check`,
+   `step`, decorator/env-detect helpers, ...) are *genuinely* also provided
+   by the sibling package `spec/__init__.spl` (legitimate overlap, by
+   design), while only `print_summary`/`get_exit_code`/`get_test_count`/
+   `get_executed_test_count` are file-only. A coarse "does the package
+   provide ANY requested name" check said yes (because of the 50 overlapping
+   names) and still redirected to the package, re-losing exactly the 3–4
+   names that mattered. The per-name check in fix 2 (as landed) is what
+   actually resolves this: it redirects only when *no* requested name is
+   file-unique, so the mostly-overlapping-but-not-quite list correctly keeps
+   the file.
+
+### Verification
+
+Built via `cd src/compiler_rust && cargo build --profile bootstrap -p
+simple-driver`; binary at `src/compiler_rust/target/bootstrap/simple`.
+
+Isolated probe (harness-shaped: `use std.spec.{print_summary, get_exit_code,
+get_executed_test_count}` + one `describe`/`it` + the trailing
+`print_summary()`/guard calls, matching `build_interpreter_result_wrapper`
+verbatim) went from `error[E1002]: function 'print_summary' not found`
+(before) to a clean `Test Summary` print + exit 0 (after).
+
+Real specs, run as `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple
+test --no-session-daemon <file>` (the `--no-session-daemon` flag is required
+for single-file evidence to actually reflect the rebuilt seed — the default
+daemon-mediated `test` path dispatches through `bin/simple`, a *separate*,
+independently-versioned binary; see "Binary identity caveat" in
+`.claude/rules/testing.md`. A daemon started against the old `bin/simple`
+before a fix lands will keep reporting the pre-fix failure indefinitely even
+after the seed is rebuilt, which is exactly what happened once during this
+verification and cost real time to diagnose — not a regression in the fix
+itself):
+
+| Spec | Result |
+|---|---|
+| `test/feature/usage/cmm_lsp/bulk_validate_spec.spl` | PASS 80/0 |
+| `test/feature/usage/cmm_lsp/cmm_lexer_spec.spl` | PASS 95/0 |
+| `test/feature/usage/cmm_lsp/cmm_parser_expr_spec.spl` | PASS 80/0 |
+| `test/feature/usage/cmm_lsp/cmm_parser_spec.spl` | PASS 82/0 |
+| `test/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl` | PASS 19/0 |
+| `test/feature/usage/cmm_lsp/string_efficiency_spec.spl` | PASS 58/0 |
+| `test/feature/usage/cmm_lsp/cmm_v2025_spec.spl` | FAIL — "no examples executed"; unrelated pre-existing content issue (3 `describe` blocks with zero `it` inside), NOT a `print_summary`-not-found error |
+| `test/feature/usage/arithmetic_spec.spl` | PASS 83/0 |
+| `test/perf/std_benchmark_spec.spl` | PASS 10/0 |
+| `test/00_formal_verification/compiler/lean_codegen_spec.spl` | FAIL 3/1 — `LeanCodegenOptions`/`ContractExpr::Forall` resolution CONFIRMED fixed (zero "unknown class"/"unknown variant" anywhere in output); the 1 remaining failure is a genuine, unrelated assertion failure ("emits proof-clean Lean for explicit proofs" → "expected call result to be truthy, got false") |
+
+Zero occurrences of `function 'print_summary' not found` or `unknown class
+LeanCodegenOptions` across all 10 files. `native_project/` (an unrelated,
+concurrently-in-flight `enum_defs` refactor from another lane) was restored
+from `origin/main` mid-session to unblock the build; the 3 resolution files
+above are the only intentional changes in this lane.
+
+Deploying this fix to `bin/simple` (the self-hosted production binary) and
+restarting any stale `light_daemon.spl` test-daemon processes is a separate
+follow-up, not done as part of this investigation.
 
 ## Note on an earlier version of this doc
 
