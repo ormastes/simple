@@ -15,6 +15,7 @@
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
+use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{time_now_unix_micros}
 use std.io.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}
@@ -64,30 +65,15 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     # interpreter `run` path; rewrite them to method form first (sibling temp).
     val infix_path = preprocess_infix_matchers_only(file_path)
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(infix_path, options)
-    # NOTE: deliberately does NOT use
-    # std.test_runner.test_result_wrapper.build_interpreter_result_wrapper
-    # (the `use std.spec.{print_summary, get_exit_code,
-    # get_executed_test_count}` + panic-on-zero-executed harness). That
-    # harness hits a Rust-intrinsic-vs-.spl-module-var disconnect:
-    # `describe`/`it`/`expect` are native interpreter intrinsics tracking
-    # pass/fail counts in a Rust thread-local, while `print_summary`/
-    # `get_executed_test_count` are plain imported .spl functions reading
-    # module-level vars those intrinsics never write to (dead code in
-    # interpreter mode). Every wrapped run — including genuinely green ones —
-    # fails with `variable test_passed not found` or a false "no examples
-    # executed" panic. `test_runner_single.spl` (the --no-session-daemon
-    # path) already avoids this wrapper for the identical reason (see its own
-    # file-header note); mirror that here for the daemon-invoked interpreter
-    # mode so the two paths agree. `parse_test_output` below already
-    # accumulates real counts directly from each `describe` block's own
-    # native "N examples, M failures" summary line (see its `bdd_summary_pos`
-    # handling), so the wrapper was never actually required for correct
-    # counting — only for a (broken) redundant zero-executed guard, and
-    # `make_result_from_output`'s "no parseable pass/fail summary; refusing
-    # synthetic pass" fallback already fails closed for genuinely
-    # zero-executed specs without it. See
-    # doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md.
-    val child_args = build_child_args(wrapped_path, options)
+    val (result_path, result_cleanup_path) = build_interpreter_result_wrapper(wrapped_path)
+    if result_path == "":
+        if cleanup_path != "" and not options.keep_artifacts and file_exists(cleanup_path):
+            file_delete(cleanup_path)
+        if infix_path != file_path and not options.keep_artifacts and file_exists(infix_path):
+            file_delete(infix_path)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: "failed to build interpreter result wrapper", timed_out: false, cached: false)
+    val child_args = build_child_args(result_path, options)
     val timeout_ms = options.timeout * 1000
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
@@ -109,6 +95,9 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
             if cleanup_path != "" and not options.keep_artifacts:
                 if file_exists(cleanup_path):
                     file_delete(cleanup_path)
+            if result_cleanup_path != "" and not options.keep_artifacts:
+                if file_exists(result_cleanup_path):
+                    file_delete(result_cleanup_path)
             if infix_path != file_path and not options.keep_artifacts:
                 if file_exists(infix_path):
                     file_delete(infix_path)
@@ -132,6 +121,9 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     if cleanup_path != "" and not options.keep_artifacts:
         if file_exists(cleanup_path):
             file_delete(cleanup_path)
+    if result_cleanup_path != "" and not options.keep_artifacts:
+        if file_exists(result_cleanup_path):
+            file_delete(result_cleanup_path)
     if infix_path != file_path and not options.keep_artifacts:
         if file_exists(infix_path):
             file_delete(infix_path)
