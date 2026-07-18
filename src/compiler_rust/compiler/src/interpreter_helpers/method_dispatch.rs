@@ -65,6 +65,15 @@ pub(crate) fn call_method_on_value(
                 let new = _args.get(1).map(Value::to_key_string).unwrap_or_default();
                 return Ok(Value::text(s.replacen(&old, &new, 1)));
             }
+            "split" => {
+                let sep = _args
+                    .first()
+                    .map(Value::to_key_string)
+                    .unwrap_or_else(|| " ".to_string());
+                return Ok(Value::array(
+                    s.split(&sep).map(|part| Value::text(part.to_string())).collect(),
+                ));
+            }
             "index_of" => {
                 if let Some(Value::Str(needle)) = _args.first() {
                     if let Some(idx) = s.find(needle.as_str()) {
