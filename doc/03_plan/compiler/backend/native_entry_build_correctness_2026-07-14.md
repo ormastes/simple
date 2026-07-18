@@ -141,8 +141,9 @@ the shared binary — deploys require explicit user go-ahead).
     paths through `?`. Flagless default-LLVM and explicit-Cranelift gates
     schedule it on FreeBSD x86_64 and AArch64/RISC-V QEMU. ARM32 default LLVM
     and RV32 bare-metal LLVM plus Windows ARM64 LLVM/Cranelift require nonempty
-    target-correct relocatable objects from the same fixture; execution remains
-    pending.
+    target-correct relocatable objects from the same fixture. The ARM32 object
+    check requires the target's hard-float ABI and rejects soft-float output;
+    execution remains pending.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` is resolved at
     origin tip 8932fcb3a148: its exact flat-nullable text repro builds and
     prints `opt`. A dedicated strict-dual case schedules that exact repro on
