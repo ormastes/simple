@@ -71,7 +71,12 @@ Two MIR fixes preserve the bool type through the complete failing path:
 `flags[0]`/`flags[1]`, bare and interpolated output after `val`/`var` bindings,
 and primitive array fields on a struct and class, with fixed output on LLVM and
 Cranelift. Linux runs it in the full gate; macOS arm64/x64, Windows x64, and
-FreeBSD select it explicitly. First staged platform-matrix execution is pending.
+FreeBSD select it explicitly. The shared cross-target fixture now checks direct
+and unannotated-bound interpolation through a plain bool array, a struct bool
+array field, and a class text array field while retaining its exact
+`result-u8-ok` success output. That fixture runs on AArch64/RISC-V64 and
+produces ARM32/RV32/Windows ARM64 target objects.
+First staged platform-matrix execution is pending.
 
 ## Cross-reference
 

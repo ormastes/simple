@@ -159,7 +159,11 @@ the shared binary — deploys require explicit user go-ahead).
     direct/bound interpolation, bare bound-value printing, and primitive array
     fields on structs/classes. Linux runs it in the full gate; macOS arm64/x64,
     Windows x64, and FreeBSD select it explicitly. First staged platform-matrix
-    execution is pending.
+    execution is pending. The shared cross-target fixture repeats direct and
+    unannotated-bound interpolation through a plain bool array, a struct bool
+    array field, and a class text array field for AArch64/RISC-V64 execution
+    plus ARM32/RV32/Windows ARM64 target objects without changing its
+    success-output protocol.
   - `native_class_array_field_mutation_segfault_2026-07-17.md` is source-fixed
     by registering declared class-field aggregate metadata and mirroring normal
     field projection provenance in mutating-receiver prelowering. A strict
