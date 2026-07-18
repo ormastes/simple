@@ -18,7 +18,7 @@ Date: 2026-07-18
 | `rv64_mmu_audit` | SPipe/manual structure | Existing app/hardware feature lane, five-step visible flow, folded negative matrices, typed captures, and explicit failing helpers identified | accepted; helper names and spec path frozen by primary |
 | `linux_fpga_audit` | smallest false-green removal | Keep bundle contract names but make CPU/testbench/formal execution fail with `GENERATED_RTL_NOT_IMPLEMENTED`; mark sidecars non-ready | accepted and implemented in Milestone 0 |
 | `rv64_mmu_audit` | supervisor interrupt ownership and priority | Canonical `mie`/`mip`/`mideleg`, masked S aliases, independent PLIC M/S contexts, and strict software/external `SEIP` OR semantics | accepted; primary implemented and owns final review |
-| `rv32_pmp_review` | canonical RV32 PMP clock boundary | Move existing CSR/PMP owners into `CoreState`; gate Bare fetch/load/store once in `soc_tick`; preserve Sv32 as the next production walker slice | reviewed during implementation; primary owns merge and final review |
+| `rv32_pmp_review` | canonical RV32 protection/privilege boundary | Move existing CSR/PMP owners into `CoreState`; gate Bare fetch/load/store once in `soc_tick`; add M/S/U stacks and delegated synchronous traps; keep interrupt/Sv32 controls WARL-zero until connected | reviewed during implementation; primary owns merge and final review |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

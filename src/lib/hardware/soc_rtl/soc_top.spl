@@ -38,8 +38,10 @@ use std.hardware.rv32i_rtl.csr.{csr_is_known, csr_next_value, csr_write_requeste
 use std.hardware.rv32i_rtl.csr.{csr_rw, csr_tick, csr_update_mip}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
-use std.hardware.rv32i_rtl.trap.{trap_check_interrupt_from_priv, trap_enter_from_priv}
-use std.hardware.rv32i_rtl.trap.trap_exit_mret
+use std.hardware.rv32i_rtl.csr_s.{csr_s_is_known, csr_s_read, csr_s_write}
+use std.hardware.rv32i_rtl.csr_s.{csr_s_merge_mstatus, SSTATUS_WRITABLE}
+use std.hardware.rv32i_rtl.trap.{trap_check_interrupt_from_priv, trap_route}
+use std.hardware.rv32i_rtl.trap.{trap_exit_mret, trap_exit_sret}
 use std.hardware.rv32i_rtl.trap.{CAUSE_ECALL_U, CAUSE_ECALL_S, CAUSE_ECALL_M}
 use std.hardware.rv32i_rtl.trap.{CAUSE_BREAKPOINT, CAUSE_ILLEGAL_INSN}
 use std.hardware.rv32i_rtl.pmp.{pmp32_gate_access, PMP32_ACCESS_FETCH}
@@ -237,7 +239,13 @@ fn is_mret(dec: DecodeResult) -> bool:
     """Return true if the decoded instruction is MRET.
     MRET encoding: funct7=0x18 (0011000), rs2=00010, funct3=0, opcode=SYSTEM.
     The full imm field (bits [31:20]) = 0x302."""
-    dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0x18 and dec.rs2 == 2
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
+     dec.funct7 == 0x18 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
+
+fn is_sret(dec: DecodeResult) -> bool:
+    """Return true for the architectural SRET encoding 0x10200073."""
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
+     dec.funct7 == 0x08 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
 
 # ============================================================================
 # Helper — is this ECALL?
@@ -246,7 +254,8 @@ fn is_mret(dec: DecodeResult) -> bool:
 fn is_ecall(dec: DecodeResult) -> bool:
     """Return true if the decoded instruction is ECALL.
     ECALL encoding: imm=0, funct3=0, opcode=SYSTEM."""
-    dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and dec.rs2 == 0
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and
+     dec.rs2 == 0 and dec.rs1 == 0 and dec.rd == 0)
 
 # ============================================================================
 # Helper — is this EBREAK?
@@ -255,7 +264,8 @@ fn is_ecall(dec: DecodeResult) -> bool:
 fn is_ebreak(dec: DecodeResult) -> bool:
     """Return true if the decoded instruction is EBREAK.
     EBREAK encoding: imm=1 (rs2=1), funct3=0, opcode=SYSTEM."""
-    dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and dec.rs2 == 1
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and
+     dec.rs2 == 1 and dec.rs1 == 0 and dec.rd == 0)
 
 # ============================================================================
 # SoC Tick — THE main simulation function
@@ -271,6 +281,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
 
     val pc = state.core.pc
     var cur_csr = state.core.csr_m
+    var cur_csr_s = state.core.csr_s
     var cur_pmp = state.core.pmp
     var next_priv_mode = state.core.priv_mode
     var cur_rf = state.regfile
@@ -365,11 +376,12 @@ fn soc_tick(state: SocState) -> SocTickResult:
 
     # ── Step 6: Synchronous access fault or CSR operation ───────────────
     if access_fault:
-        val enter_result = trap_enter_from_priv(cur_csr, pc, fault_cause,
+        val enter_result = trap_route(cur_csr, cur_csr_s, pc, fault_cause,
             fault_tval, state.core.priv_mode)
         cur_csr = enter_result.csr
+        cur_csr_s = enter_result.csr_s
         next_pc = enter_result.trap_pc
-        next_priv_mode = 3
+        next_priv_mode = enter_result.target_mode
         do_rd_write = false
 
     else if dec.opcode == OP_SYSTEM and is_csr_funct3(dec.funct3):
@@ -381,15 +393,18 @@ fn soc_tick(state: SocState) -> SocTickResult:
         val pmp_read = pmp32_csr_read(cur_pmp, csr_addr)
         val required_priv = (csr_addr >> 8) & 0x3
         val read_only = ((csr_addr >> 10) & 0x3) == 0x3
+        val known = (pmp_read.handled or csr_is_known(csr_addr) or
+            csr_s_is_known(csr_addr))
         val illegal_access = (state.core.priv_mode < required_priv or
-            (pmp_read.handled == false and csr_is_known(csr_addr) == false) or
+            known == false or
             (read_only and csr_write_requested(csr_src, dec.funct3)))
         if illegal_access:
-            val illegal = trap_enter_from_priv(cur_csr, pc,
+            val illegal = trap_route(cur_csr, cur_csr_s, pc,
                 CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
             cur_csr = illegal.csr
+            cur_csr_s = illegal.csr_s
             next_pc = illegal.trap_pc
-            next_priv_mode = 3
+            next_priv_mode = illegal.target_mode
             synchronous_trap = true
             do_rd_write = false
         else:
@@ -398,11 +413,24 @@ fn soc_tick(state: SocState) -> SocTickResult:
                     csr_next_value(pmp_read.value, csr_src, dec.funct3))
                 cur_pmp = pmp_write.entries
                 rd_data = pmp_read.value
-            else:
+            else if csr_is_known(csr_addr):
                 val csr_result = csr_rw(cur_csr, csr_addr, csr_src,
                     dec.funct3)
                 cur_csr = csr_result.csr
                 rd_data = csr_result.old_value
+            else:
+                val old_value = if csr_addr == 0x100:
+                    cur_csr.mstatus & SSTATUS_WRITABLE
+                else:
+                    csr_s_read(cur_csr_s, csr_addr)
+                val next_value = csr_next_value(old_value, csr_src,
+                    dec.funct3)
+                if csr_addr == 0x100:
+                    cur_csr.mstatus = csr_s_merge_mstatus(cur_csr.mstatus,
+                        next_value)
+                else:
+                    cur_csr_s = csr_s_write(cur_csr_s, csr_addr, next_value)
+                rd_data = old_value
             do_rd_write = true
             next_pc = pc + 4
 
@@ -416,11 +444,30 @@ fn soc_tick(state: SocState) -> SocTickResult:
                 next_priv_mode = mret_result.target_mode
                 do_rd_write = false
             else:
-                val illegal = trap_enter_from_priv(cur_csr, pc,
+                val illegal = trap_route(cur_csr, cur_csr_s, pc,
                     CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
                 cur_csr = illegal.csr
+                cur_csr_s = illegal.csr_s
                 next_pc = illegal.trap_pc
-                next_priv_mode = 3
+                next_priv_mode = illegal.target_mode
+                synchronous_trap = true
+                do_rd_write = false
+
+        else if is_sret(dec):
+            if state.core.priv_mode >= 1:
+                val sret_result = trap_exit_sret(cur_csr, cur_csr_s)
+                cur_csr = sret_result.csr
+                cur_csr_s = sret_result.csr_s
+                next_pc = sret_result.return_pc
+                next_priv_mode = sret_result.target_mode
+                do_rd_write = false
+            else:
+                val illegal = trap_route(cur_csr, cur_csr_s, pc,
+                    CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
+                cur_csr = illegal.csr
+                cur_csr_s = illegal.csr_s
+                next_pc = illegal.trap_pc
+                next_priv_mode = illegal.target_mode
                 synchronous_trap = true
                 do_rd_write = false
 
@@ -430,23 +477,37 @@ fn soc_tick(state: SocState) -> SocTickResult:
                 ecall_cause = CAUSE_ECALL_U
             else if state.core.priv_mode == 1:
                 ecall_cause = CAUSE_ECALL_S
-            val enter_result = trap_enter_from_priv(cur_csr, pc,
+            val enter_result = trap_route(cur_csr, cur_csr_s, pc,
                 ecall_cause, 0, state.core.priv_mode)
             cur_csr = enter_result.csr
+            cur_csr_s = enter_result.csr_s
             next_pc = enter_result.trap_pc
-            next_priv_mode = 3
+            next_priv_mode = enter_result.target_mode
             synchronous_trap = true
             do_rd_write = false
 
-        else if is_ebreak(dec) and state.core.semi_phase == 0:
-            # EBREAK outside semihosting sequence — enter trap
-            # When semi_phase != 0, the EBREAK is part of the semihosting
-            # magic sequence and core_update handles it via the semi_phase FSM
-            val enter_result = trap_enter_from_priv(cur_csr, pc,
-                CAUSE_BREAKPOINT, pc, state.core.priv_mode)
-            cur_csr = enter_result.csr
-            next_pc = enter_result.trap_pc
-            next_priv_mode = 3
+        else if is_ebreak(dec):
+            # EBREAK outside semihosting sequence — enter trap.  During the
+            # magic sequence core_update consumes the exact EBREAK encoding.
+            if state.core.semi_phase == 0:
+                val enter_result = trap_route(cur_csr, cur_csr_s, pc,
+                    CAUSE_BREAKPOINT, pc, state.core.priv_mode)
+                cur_csr = enter_result.csr
+                cur_csr_s = enter_result.csr_s
+                next_pc = enter_result.trap_pc
+                next_priv_mode = enter_result.target_mode
+                synchronous_trap = true
+                do_rd_write = false
+
+        else:
+            # Unsupported or non-canonical SYSTEM/funct3=0 encodings are
+            # illegal instructions, not retired no-ops.
+            val illegal = trap_route(cur_csr, cur_csr_s, pc,
+                CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
+            cur_csr = illegal.csr
+            cur_csr_s = illegal.csr_s
+            next_pc = illegal.trap_pc
+            next_priv_mode = illegal.target_mode
             synchronous_trap = true
             do_rd_write = false
 
@@ -454,11 +515,12 @@ fn soc_tick(state: SocState) -> SocTickResult:
     # Check for pending interrupts AFTER instruction execution
     val int_check = trap_check_interrupt_from_priv(cur_csr, next_priv_mode)
     if synchronous_trap == false and int_check.pending:
-        val int_enter = trap_enter_from_priv(cur_csr, next_pc,
+        val int_enter = trap_route(cur_csr, cur_csr_s, next_pc,
             int_check.cause, 0, next_priv_mode)
         cur_csr = int_enter.csr
+        cur_csr_s = int_enter.csr_s
         next_pc = int_enter.trap_pc
-        next_priv_mode = 3
+        next_priv_mode = int_enter.target_mode
 
     # ── Step 9: Write-back to register file ──────────────────────────────
     cur_rf = regfile_write(cur_rf, dec.rd, rd_data,
@@ -492,6 +554,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
         new_core.halt = true
 
     new_core.csr_m = cur_csr
+    new_core.csr_s = cur_csr_s
     new_core.pmp = cur_pmp
     new_core.priv_mode = next_priv_mode
     cur_state.core = new_core

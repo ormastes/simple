@@ -18,6 +18,9 @@ use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv32i_rtl.csr.MSTATUS_MPRV_MASK
 use std.hardware.rv32i_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
+use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_merge_mstatus}
+use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SIE_MASK, SSTATUS_SPIE_MASK}
+use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SPP_MASK, SSTATUS_SPP_BIT}
 
 # ============================================================================
 # Trap phase constants
@@ -74,6 +77,18 @@ struct TrapExitResult:
     csr: CsrFile      # Updated CSR file (mstatus restored)
     return_pc: u32     # Return PC (from mepc)
     target_mode: u32   # Restored privilege mode
+
+struct TrapRouteResult:
+    csr: CsrFile
+    csr_s: CsrSMode
+    trap_pc: u32
+    target_mode: u32
+
+struct SupervisorTrapExitResult:
+    csr: CsrFile
+    csr_s: CsrSMode
+    return_pc: u32
+    target_mode: u32
 
 # ============================================================================
 # Interrupt Check Result
@@ -172,6 +187,40 @@ fn trap_enter(csr: CsrFile, pc: u32, cause: u32, tval: u32) -> TrapEnterResult:
     """Compatibility trap entry for callers currently executing in M-mode."""
     trap_enter_from_priv(csr, pc, cause, tval, 3)
 
+fn trap_route(csr: CsrFile, csr_s: CsrSMode, pc: u32, cause: u32,
+              tval: u32, priv_mode: u32) -> TrapRouteResult:
+    """Route one trap to S when delegated from U/S, otherwise to M."""
+    val is_interrupt = (cause & 0x80000000) != 0
+    val cause_number = cause & 0x7FFFFFFF
+    var delegated = false
+    if priv_mode != 3 and cause_number < 32:
+        if is_interrupt:
+            delegated = ((csr.mideleg >> cause_number) & 1) != 0
+        else:
+            delegated = ((csr.medeleg >> cause_number) & 1) != 0
+
+    if delegated:
+        var next_s = csr_s
+        next_s.sepc = pc & 0xFFFFFFFC
+        next_s.scause = cause
+        next_s.stval = tval
+        val old_sie = (csr.mstatus & SSTATUS_SIE_MASK) != 0
+        var next_status = (csr.mstatus &
+            ((SSTATUS_SIE_MASK | SSTATUS_SPIE_MASK | SSTATUS_SPP_MASK) ^
+             0xFFFFFFFF))
+        if old_sie:
+            next_status = next_status | SSTATUS_SPIE_MASK
+        if priv_mode == 1:
+            next_status = next_status | SSTATUS_SPP_MASK
+        var next_m = csr
+        next_m.mstatus = csr_s_merge_mstatus(next_m.mstatus, next_status)
+        return TrapRouteResult(csr: next_m, csr_s: next_s,
+            trap_pc: csr_s.stvec & 0xFFFFFFFC, target_mode: 1)
+
+    val machine = trap_enter_from_priv(csr, pc, cause, tval, priv_mode)
+    TrapRouteResult(csr: machine.csr, csr_s: csr_s,
+        trap_pc: machine.trap_pc, target_mode: 3)
+
 # ============================================================================
 # Trap Exit (mret)
 # ============================================================================
@@ -212,6 +261,23 @@ fn trap_exit_mret(csr: CsrFile) -> TrapExitResult:
 
     TrapExitResult(csr: new_csr, return_pc: return_pc,
         target_mode: target_mode)
+
+fn trap_exit_sret(csr: CsrFile,
+                  csr_s: CsrSMode) -> SupervisorTrapExitResult:
+    """Restore SIE/SPIE/SPP and return to the privilege recorded in SPP."""
+    val target_mode = (csr.mstatus & SSTATUS_SPP_MASK) >> SSTATUS_SPP_BIT
+    val old_spie = (csr.mstatus & SSTATUS_SPIE_MASK) != 0
+    var next_status = (csr.mstatus &
+        ((SSTATUS_SIE_MASK | SSTATUS_SPIE_MASK | SSTATUS_SPP_MASK) ^
+         0xFFFFFFFF))
+    if old_spie:
+        next_status = next_status | SSTATUS_SIE_MASK
+    next_status = next_status | SSTATUS_SPIE_MASK
+    var next_m = csr
+    next_m.mstatus = csr_s_merge_mstatus(next_m.mstatus, next_status)
+    next_m.mstatus = next_m.mstatus & (MSTATUS_MPRV_MASK ^ 0xFFFFFFFF)
+    SupervisorTrapExitResult(csr: next_m, csr_s: csr_s,
+        return_pc: csr_s.sepc, target_mode: target_mode)
 
 export CAUSE_ECALL_M
 export CAUSE_MISALIGNED_FETCH

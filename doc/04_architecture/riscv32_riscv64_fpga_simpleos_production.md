@@ -111,7 +111,11 @@ routes PMP CSRs through that owner and gates instruction and data bus calls at
 the bus helper. Trap entry/MRET own M/S/U current-mode transitions, while the
 core derives MPRV/MPP only for explicit data access; fetch retains current
 privilege. The same gate remains after the pending Sv32 walker supplies a
-translated physical address.
+translated physical address. Machine state also canonically owns the sstatus
+alias and delegation masks; the supervisor owner stores only trap-vector and
+trap-context CSRs. S interrupt delegation and SATP remain WARL-zero until their
+delivery and walker owners are connected, so Bare execution cannot masquerade
+as protected Sv32.
 
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real

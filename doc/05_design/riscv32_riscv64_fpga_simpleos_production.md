@@ -130,9 +130,12 @@ faulting address in `mtval` and suppress read/write side effects. S/U privilege
 transitions now preserve current privilege through MPP on machine trap entry
 and restore it with MRET; MPRV selects MPP for data but never fetch. CSR access
 checks privilege, implemented addresses, and read-only write intent before
-retirement. Supervisor CSR/delegation and the request/response Sv32 walker
-remain the next connected slice; the RAM-backed translation adapter is not
-used as production RTL.
+retirement. `mstatus` is the sole sstatus storage; `medeleg` routes implemented
+U/S synchronous exceptions into `sepc/scause/stval` and the S status stack, and
+SRET restores U/S state while clearing MPRV. `mideleg`, `sie`, and `sip` remain
+WARL-zero until supervisor interrupt delivery is connected. SATP likewise
+reads Bare and ignores Sv32 writes until the request/response walker lands; the
+RAM-backed translation adapter is not used as production RTL.
 
 ### Translation algorithm
 
