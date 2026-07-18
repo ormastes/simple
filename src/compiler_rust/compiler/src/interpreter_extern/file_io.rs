@@ -403,15 +403,33 @@ pub fn rt_file_append_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Read file as bytes
+/// Read file as bytes.
+///
+/// Returns a bare `Value::Array` on success and `Value::Nil` on failure --
+/// NOT an `Option::Some`/`None`-wrapped enum. Most `.spl` callers declare
+/// this extern as returning a plain (non-optional) `[u8]` and consume the
+/// result directly (e.g. `src/compiler/70.backend/backend/
+/// llvm_backend_tools.spl`, `src/app/office/pptx_export.spl`) -- an
+/// `Option`-wrapped return left those call sites holding a boxed enum where
+/// a raw array was expected (see bug doc
+/// native_build_fresh_seed_optionwrap_landmine_2026-07-18.md). This mirrors
+/// the fix already applied to the sibling `rt_string_bytes_fn` (bug
+/// seed_flat_registry_len_i64_2026-07-17): a handful of `.spl` files declare
+/// this as `[u8]?` and consume it via `match ...: Some(value): ... nil: ...`
+/// (e.g. `src/lib/nogc_sync_mut/sfm/container.spl`) -- those call sites will
+/// no longer match the `Some(value)` arm against a bare array; `nil:` still
+/// matches `Value::Nil` correctly (`Value::is_nil_like`). Not touched by
+/// native (non-interpreted) compilation: natively compiled code calls the
+/// C runtime symbol directly (`src/runtime/runtime_native.c`), never this
+/// interpreter-only extern binding.
 pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read(&path) {
         Ok(bytes) => {
             let arr: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(make_some(Value::array(arr)))
+            Ok(Value::array(arr))
         }
-        Err(_) => Ok(make_none()),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -1119,18 +1137,15 @@ mod tests {
         let bytes = rt_file_mmap_read_bytes(&[Value::text(path)]).expect("mmap bytes");
 
         assert_eq!(text, Value::text("simple mmap".to_string()));
+        // rt_file_read_bytes (and its mmap-named alias) returns a bare
+        // Value::Array on success, not an Option::Some-wrapped enum -- see
+        // bug native_build_fresh_seed_optionwrap_landmine_2026-07-18.md.
+        // Most `.spl` callers declare this extern as returning a plain
+        // (non-optional) `[u8]` and use the result directly; an
+        // Option-wrapped return left those call sites holding a boxed enum
+        // where a raw array was expected.
         match bytes {
-            Value::Enum {
-                variant,
-                payload: Some(payload),
-                ..
-            } => {
-                assert_eq!(variant, "Some");
-                match *payload {
-                    Value::Array(values) => assert_eq!(values.len(), 11),
-                    other => panic!("unexpected payload: {other:?}"),
-                }
-            }
+            Value::Array(values) => assert_eq!(values.len(), 11),
             other => panic!("unexpected bytes value: {other:?}"),
         }
     }
