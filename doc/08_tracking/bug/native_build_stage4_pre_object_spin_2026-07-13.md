@@ -870,9 +870,20 @@ to be populated, while retaining exact collision checks.
 
 One final pre-fix Stage4 profile was capped at 12 GiB and stopped at
 `phase1:load_sources:start`, matching the diagnosed collapse without crashing
-the host. Post-fix execution evidence is still pending: the workspace release
-test runner segfaulted before reporting the focused spec, and the retained pure
-Stage3 executable was concurrently removed before a three-source native probe
-could start. Do not use the Rust seed as a substitute. The next fresh cycle may
-run the focused spec once with a verified pure self-hosted binary, then make at
-most one capped profiled Stage4 attempt.
+the host. A cache-preserving self-hosted Stage2 rebuild then embedded the hash
+fix into Stage3 (60 compiled, 597 cached), and the candidate passed the existing
+self-pinned `p2_add` frontend admission without a seed fallback.
+
+The first post-fix Stage4 profile failed quickly and cleanly on a missing pure
+source owner for `std.alloc.sffi`; the compiler had been resolving that module
+only from the Rust-seed library tree. `src/lib/alloc/sffi.spl` now owns the four
+dictionary views used by compiler code, and the owner-contract regression reads
+that pure-Simple path instead of the seed mirror.
+
+The next capped profile completed phase one in 6.325 seconds over 1,763 sources,
+then began parsing 1,279 unique closure sources. This closes the all-zero bucket
+runaway. The 4 GiB cgroup later stopped phase two at about 84 seconds while it
+was still parsing, after a measured 3.65 GiB RSS. That is a separate phase-two
+retention/performance blocker; do not raise the cap or reopen the phase-one hash
+diagnosis. The next fresh cycle should profile retained parse state and source
+alias duplication before making one bounded retry.

@@ -257,7 +257,11 @@ the shared binary — deploys require explicit user go-ahead).
   once into an exact-export DLL/import library and hash-verifies the Stage4 and
   SQLite DLL neighbors beside the final executable. The Windows LLVM/Cranelift
   full-CLI matrix now schedules nonempty artifact receipts. The remaining
-  blocker is first execution evidence plus any concrete missing owner
-  reported by the complete compiler request closure, not the retired seed
-  enum/mcall diagnoses. See
+  Linux recovery profile now completes phase-one loading in 6.325 seconds for
+  1,763 sources with the pure-Simple bucket hash; `std.alloc.sffi` is also owned
+  in the pure library tree instead of the Rust-seed mirror. The next blocker is
+  phase-two parse retention exceeding the 4 GiB safety cap, followed by first
+  full execution evidence and any concrete missing owner reported by the
+  complete compiler request closure, not the retired seed enum/mcall
+  diagnoses. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
