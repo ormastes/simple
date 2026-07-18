@@ -133,10 +133,10 @@ the shared binary — deploys require explicit user go-ahead).
     parser-hint flood and was terminated before native lowering rather than
     risking a runaway or crash.
   - The cross-module `Result<[u8], E>` control now routes both its Ok and Err
-    paths through `?`. Existing LLVM and Cranelift gates schedule it on FreeBSD
-    x86_64 and AArch64/RISC-V QEMU. ARM32 default LLVM and RV32 bare-metal LLVM
-    require nonempty target-correct relocatable objects from the same fixture;
-    execution remains pending.
+    paths through `?`. Flagless default-LLVM and explicit-Cranelift gates
+    schedule it on FreeBSD x86_64 and AArch64/RISC-V QEMU. ARM32 default LLVM
+    and RV32 bare-metal LLVM require nonempty target-correct relocatable objects
+    from the same fixture; execution remains pending.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` is resolved at
     origin tip 8932fcb3a148: its exact flat-nullable text repro builds and
     prints `opt`. Explicit enum Option remains the separate tagged-ABI item.
