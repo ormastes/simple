@@ -227,7 +227,9 @@ the shared binary — deploys require explicit user go-ahead).
   identity calls. One strict LLVM/Cranelift fixture covers all six collisions,
   `Err(text).unwrap_err()`, and single receiver evaluation in Linux's full gate
   plus the selected macOS, Windows, and FreeBSD gates. First staged execution
-  is pending.
+  is pending. The shared cross-target fixture also routes a custom non-Option
+  `unwrap` through its declared receiver on AArch64/RISC-V64 execution and
+  ARM32/RV32/Windows ARM64 object gates.
 - The Engine2D host-runtime queue symbol bug now has one incremental
   gate that builds the existing no-GPU probe with the host-GPU bundle under
   flagless LLVM or explicit Cranelift, compares native output byte-for-byte
