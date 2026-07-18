@@ -2163,6 +2163,7 @@ impl LlvmBackend {
                     "get" => Some("rt_index_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
+                    "remove" => Some("rt_dict_remove"),
                     "filter" => Some("rt_array_filter"),
                     "sort" => Some("rt_array_sort"),
                     "reverse" => Some("rt_array_reverse"),
@@ -2950,6 +2951,35 @@ mod tests {
         for raw in ["@substring(", "str.bytes", "str.chars", "str.ord", "rt_string_contains"] {
             assert!(!ir.contains(raw), "raw call {raw} leaked:\n{ir}");
         }
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn static_dict_remove_uses_runtime_symbol() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("static_builtin_runtime_redirects").unwrap();
+
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for (dest, value) in [(VReg(0), 3), (VReg(1), 11)] {
+            func.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(2)),
+            receiver: VReg(0),
+            func_name: "Dict.remove".to_string(),
+            args: vec![VReg(1)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("@rt_dict_remove"), "missing runtime remove:\n{ir}");
+        assert!(!ir.contains("Dict.remove"), "raw Dict.remove leaked:\n{ir}");
         backend.verify().unwrap();
     }
 

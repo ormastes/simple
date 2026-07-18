@@ -22,6 +22,30 @@ fn method_call_static_dispatch() {
 }
 
 #[test]
+fn string_ord_and_hash_lower_to_shared_runtime_calls() {
+    let mir = compile_to_mir(
+        "fn ord_probe(value: str) -> i64:\n    return value.ord()\n\nfn hash_probe(value: str) -> i64:\n    return value.hash()\n",
+    )
+    .unwrap();
+
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_string_char_code_at") && args.len() == 2
+    )));
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::ConstInt { value: 0, .. })));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_str_hash") && args.len() == 1
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.ord" || func_name == "str.hash"
+    )));
+}
+
+#[test]
 fn dict_field_keys_uses_builtin_dict_dispatch() {
     let mir = compile_to_mir(
         "struct Module:\n    functions: Dict<text, i64>\n\nfn test(module: Module) -> [text]:\n    return module.functions.keys()\n",

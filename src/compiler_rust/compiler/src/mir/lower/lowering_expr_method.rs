@@ -110,6 +110,17 @@ impl<'a> MirLowerer<'a> {
         if args.is_empty() {
             let effective_ty = receiver_local_ty.unwrap_or(receiver.ty);
             match method {
+                "ord" | "codepoint" | "code_point" if effective_ty == TypeId::STRING => {
+                    let zero = HirExpr {
+                        kind: crate::hir::HirExprKind::Integer(0),
+                        ty: TypeId::I64,
+                    };
+                    let args = [receiver.clone(), zero];
+                    return self.lower_builtin_call_expr("rt_string_char_code_at", &args, TypeId::I64);
+                }
+                "hash" if effective_ty == TypeId::STRING => {
+                    return self.lower_builtin_call_expr("rt_str_hash", std::slice::from_ref(receiver), TypeId::I64);
+                }
                 "unwrap" => {
                     if let Some(payload_ty) = self
                         .enum_payload_type_for_method_receiver(receiver.ty)

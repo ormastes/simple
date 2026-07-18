@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Severity:** critical (the redeploy wall — blocks self-hosted bootstrap stage 2)
-**Status:** FIX IN REVIEW (lane S63, wt_s58) — stage-2 relink evidence pending
+**Status:** FIX IN REVIEW — final stage-2 relink evidence pending
 
 ## Symptom
 
@@ -35,9 +35,19 @@ aliases (`split_whitespace→rt_string_split` — arity mismatch;
 mappings convert loud link errors into silent miscompiles and were rejected in
 review. Methods with no correct runtime target stay **unmapped (loud)**:
 `str.lines`, `str.parse_int_radix`, `str.push_str`, `str.to_hex`, `str.byte_at`,
-`str.ord`, `str.split_whitespace`, `str.to_lowercase` — their long-term route is
+`str.split_whitespace`, `str.to_lowercase` — their long-term route is
 a stdlib-compiled symbol (the existing `repeat → lib__common__string_core__str_repeat`
 pattern) or earlier lowering.
+
+The 2026-07-18 residual relink exposed three proven cases. `str.ord` and
+`str.hash` now lower once in backend-neutral MIR to
+`rt_string_char_code_at(receiver, 0)` and `rt_str_hash(receiver)` respectively;
+focused MIR tests prevent either qualified name from reaching a backend.
+`Dict.remove` maps in LLVM to the existing, arity-compatible
+`rt_dict_remove` provider and has a focused IR-symbol regression. The same
+relink also exposed an independent missing `impl MethodResolver:` owner in the
+pure-Simple resolver; its instance methods had been parsed as nested functions,
+leaving `MethodResolver.resolve_module` undefined at link.
 
 ## Verification protocol
 
