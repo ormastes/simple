@@ -292,9 +292,11 @@ runtime-native capsule from silently reopening it.
   Do NOT implement an orchestration fix against this premise.
 - `native_project_cache_hit_miss_mix_link_input_loss` — status **NOT REPRODUCED**;
   needs a reliable repro before any fix. Park until reproduced.
-- `native_sspec_expect_step_stub_host_gpu_lane` — self-reports **fixed** (native
-  preprocessed specs link without `expect`/`SIMPLE_DUMP_STUBS` empty). Verify and
-  mark Resolved, or reopen with a fresh repro.
+- `native_sspec_expect_step_stub_host_gpu_lane` — **source-fixed; execution
+  pending**. A prevention audit found and fixed an expect-only helper false-green
+  gap in both pure-Simple and seed preprocessors. Run
+  `scripts/check/check-native-sspec-expect-helper.shs` with a rebuilt
+  pure-Simple compiler before marking Resolved.
 
 ---
 

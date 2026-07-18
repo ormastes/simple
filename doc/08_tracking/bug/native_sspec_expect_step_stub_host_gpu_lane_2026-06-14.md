@@ -2,10 +2,18 @@
 
 ## Status
 
-Fixed locally. The native SSpec `expect`/`step` unresolved-symbol blocker is
-fixed: native preprocessed specs now link without generating `expect` or
-`step` stubs, and minimal native specs for `step()` plus helper-function
-`expect(...)` pass.
+Source-fixed; strict execution proof pending. The original `step()` path was
+fixed, but a 2026-07-18 prevention audit found that an expect-only top-level
+helper was rewritten from `expect(...)` to `expect ...` after helper detection
+had been limited to the parenthesized spelling. Hosted weak-stub fallback could
+therefore false-green that case.
+
+Both the pure-Simple runner and bootstrap-seed runner now recognize the
+rewritten spelling and inject the real `rt_bdd_expect_truthy` helper. Stub-dump
+output is refreshed even when no unresolved symbols remain. The focused
+`scripts/check/check-native-sspec-expect-helper.shs` gate uses strict no-stub
+mode and requires the deliberately false helper assertion to report one
+failure with an empty stub dump.
 
 The native `rt_process_run` crash is fixed in the current checkout by aligning
 the Cranelift/native C-runtime ABI for process, file-write, and directory
@@ -52,6 +60,6 @@ host-GPU runtime queue emission plan.
 
 ## Next Step
 
-Add a tracked, canonical rebuild path for `src/runtime/libsimple_runtime.a` or
-move native test linking to a generated archive from `src/runtime/runtime_native.c`
-so fresh checkouts cannot accidentally use a stale untracked C runtime archive.
+Run `sh scripts/check/check-native-sspec-expect-helper.shs` with the rebuilt
+pure-Simple compiler. Then record per-platform execution separately; the
+historical evidence above is Linux x86_64 only.

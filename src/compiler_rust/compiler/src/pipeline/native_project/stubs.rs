@@ -656,6 +656,14 @@ pub(crate) fn generate_stub_object(
         needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
     }
 
+    if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
+        let mut all: Vec<String> = needs_stub.to_vec();
+        all.sort();
+        let contents = if all.is_empty() { String::new() } else { all.join("\n") + "\n" };
+        std::fs::write(&dump_path, contents).map_err(|e| format!("write stub dump {dump_path}: {e}"))?;
+        eprintln!("Wrote {} unresolved symbols to {}", all.len(), dump_path);
+    }
+
     if needs_stub.is_empty() {
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
@@ -698,13 +706,6 @@ pub(crate) fn generate_stub_object(
         preview,
         if needs_stub.len() > 80 { " ..." } else { "" }
     );
-    if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
-        let mut all: Vec<String> = needs_stub.to_vec();
-        all.sort();
-        let _ = std::fs::write(&dump_path, all.join("\n") + "\n");
-        eprintln!("Wrote {} unresolved symbols to {}", all.len(), dump_path);
-    }
-
     let forbidden_enum_ctors: Vec<&str> = needs_stub
         .iter()
         .map(|s| s.as_str())

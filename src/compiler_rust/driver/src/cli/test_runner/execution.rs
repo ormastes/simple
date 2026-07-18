@@ -1438,12 +1438,16 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         "assert_not_nil",
         "pending_on",
         "pending_skip",
+        "expect",
     ];
     let body_joined = body_parts.join("\n");
     let top_joined = top_level_parts.join("\n");
     let helpers_used = SPIPE_HELPER_NAMES.iter().any(|name| {
         let needle = format!("{}(", name);
-        body_joined.contains(&needle) || top_joined.contains(&needle)
+        body_joined.contains(&needle)
+            || top_joined.contains(&needle)
+            || (*name == "expect"
+                && top_joined.contains("expect "))
     });
     let helpers_section = if helpers_used { SPIPE_INLINE_HELPERS } else { "" };
 
@@ -2280,6 +2284,34 @@ describe "infix":
 
         assert!(wrapped_source.contains("expect value == 1"));
         assert!(wrapped_source.contains("expect (output).contains(\"ok\")"));
+    }
+
+    #[test]
+    fn test_preprocess_spipe_inlines_expect_for_expect_only_helper() {
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("expect_only_helper_spec.spl");
+        fs::write(
+            &spec_path,
+            r#"use std.spec.*
+
+fn helper():
+    expect(false).to_equal(true)
+
+describe "expect helper":
+    it "fails through the real matcher":
+        helper()
+"#,
+        )
+        .expect("write spec");
+
+        let wrapped = preprocess_spipe_for_smf(&spec_path).expect("preprocess");
+        let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
+
+        assert!(wrapped_source.contains("fn expect(value):"));
+        assert!(wrapped_source.contains("rt_bdd_expect_truthy(value)"));
+        assert!(wrapped_source.contains("expect false == true"));
+        assert!(!wrapped_source.contains(".to_equal("));
+        assert!(!wrapped_source.contains("use std.spec"));
     }
 
     #[test]

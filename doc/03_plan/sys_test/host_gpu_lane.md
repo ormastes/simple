@@ -24,6 +24,7 @@ Run:
 
 ```bash
 bin/simple test test/03_system/feature/language/host_gpu_lane_spec.spl
+sh scripts/check/check-native-sspec-expect-helper.shs
 ```
 
 Generated/manual mirror:
@@ -39,6 +40,8 @@ Generated/manual mirror:
   design-contract diagnostic.
 - The spec must use `use std.spec.*`, `step("...")`, built-in matchers only, and
   no placeholder passes.
+- The strict native expect-helper gate must observe one real failing assertion
+  and an empty `SIMPLE_DUMP_STUBS` file; a compile/link failure is not a pass.
 
 ## Traceability
 

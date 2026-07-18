@@ -1,0 +1,26 @@
+use std.spec.*
+use std.env.platform.{get_temp_dir}
+use std.io.{file_delete, file_read, file_write, time_now_unix_micros}
+use std.test_runner.test_runner_execute.{preprocess_spipe_file}
+
+describe "native SSpec helper preprocessing":
+    it "inlines the real expect helper after method matcher rewriting":
+        val source_path = get_temp_dir() + "/simple_expect_only_helper_{time_now_unix_micros()}_spec.spl"
+        val source = "use std.spec.*\n\n" +
+            "fn helper():\n" +
+            "    expect(false).to_equal(true)\n\n" +
+            "describe \"expect helper\":\n" +
+            "    it \"fails through the real matcher\":\n" +
+            "        helper()\n"
+        expect(file_write(source_path, source)).to_equal(true)
+
+        val wrapped_path = preprocess_spipe_file(source_path)
+        val wrapped = file_read(wrapped_path)
+
+        expect(wrapped).to_contain("fn expect(value):")
+        expect(wrapped).to_contain("rt_bdd_expect_truthy(value)")
+        expect(wrapped).to_contain("expect false == true")
+        expect(wrapped.contains(".to_equal(")).to_equal(false)
+        expect(wrapped.contains("use std.spec")).to_equal(false)
+        expect(file_delete(wrapped_path)).to_equal(true)
+        expect(file_delete(source_path)).to_equal(true)
