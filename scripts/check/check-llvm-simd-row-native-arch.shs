@@ -26,6 +26,17 @@ for tool in "$SIMPLE_BIN" file objdump arm-linux-gnueabihf-readelf \
     fi
 done
 
+check_arm32_object() {
+    checked_out="$1"
+    status_name="$2"
+    test -s "$checked_out"
+    header="$(LC_ALL=C arm-linux-gnueabihf-readelf -h "$checked_out")"
+    printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF32'
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
+    printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+ARM([[:space:]]|$)'
+    echo "llvm_simd_row_native_arch_${status_name}_status=pass" >>"$ENV_FILE"
+}
+
 build_object_arch() {
     arch="$1"
     target="$2"
@@ -40,11 +51,24 @@ build_object_arch() {
         --entry-closure --entry "$PROBE" --cache-dir "$cache" --output "$out" \
         >"$BUILD_DIR/$arch/build.log" 2>&1
 
-    header="$(LC_ALL=C arm-linux-gnueabihf-readelf -h "$out")"
-    printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF32'
-    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
-    printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+ARM([[:space:]]|$)'
-    echo "llvm_simd_row_native_arch_${arch}_object_status=pass" >>"$ENV_FILE"
+    check_arm32_object "$out" "${arch}_object"
+}
+
+build_arm32_crossmodule_object() {
+    target=armv7-unknown-linux-gnueabihf
+    out="$BUILD_DIR/arm32-crossmodule/result-u8.o"
+    cache="$BUILD_DIR/arm32-crossmodule/cache"
+    mkdir -p "$BUILD_DIR/arm32-crossmodule"
+    rm -rf "$cache" "$out"
+
+    # Keep LLVM flagless: this target also guards the default backend.
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --emit-object --target "$target" --source test/fixtures \
+        --entry-closure --entry "$CROSSMODULE_PROBE" \
+        --cache-dir "$cache" --output "$out" \
+        >"$BUILD_DIR/arm32-crossmodule/build.log" 2>&1
+
+    check_arm32_object "$out" arm32_crossmodule_object
 }
 
 build_arch() {
@@ -193,6 +217,7 @@ check_unsupported_riscv32_hosted
 build_riscv32_baremetal_object
 build_riscv32_crossmodule_object
 build_object_arch arm32 armv7-unknown-linux-gnueabihf
+build_arm32_crossmodule_object
 SIMPLE_BIN="$SIMPLE_BIN" BUILD_DIR="$BUILD_DIR/arm32-option-try" \
     sh scripts/check/check-native-option-try-target-fail.shs \
     armv7-unknown-linux-gnueabihf llvm
@@ -203,5 +228,5 @@ build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu
 build_arch riscv64_rvv riscv64-unknown-linux-gnu
 build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu
 echo "llvm_simd_row_native_arch_status=pass" >>"$ENV_FILE"
-echo "llvm_simd_row_native_arch_reason=hosted-riscv32-rejected-plus-riscv32-baremetal-and-crossmodule-objects-plus-arm32-object-option-compile-plus-all-binaries-exact-vectorized-and-crossmodule-result-try" >>"$ENV_FILE"
+echo "llvm_simd_row_native_arch_reason=hosted-riscv32-rejected-plus-riscv32-baremetal-and-crossmodule-objects-plus-arm32-simd-result-option-objects-plus-all-binaries-exact-vectorized-and-crossmodule-result-try" >>"$ENV_FILE"
 cat "$ENV_FILE"
