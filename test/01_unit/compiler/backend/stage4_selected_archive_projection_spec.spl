@@ -25,6 +25,20 @@ describe "Stage4 selected archive projection":
         val symbols = stage4_projection_localization_symbols(nm, "macho", ["spl_root"]).unwrap()
         expect(symbols).to_equal(["_helper_private", "_rt_dependency"])
 
+    it "accepts MSVC and MinGW COFF symbol projection contracts":
+        val msvc = "00000000 T rt_root\n00000010 T helper_private\n00000020 T __imp_rt_shadow\n00000000 A @feat.00\n00000000 A @feat.00\n         U __imp_malloc\n"
+        val mingw = "00000000 T _rt_root\n00000010 T _helper_private\n00000000 A @feat.00\n         U __imp__malloc\n"
+        expect(stage4_projection_localization_symbols(msvc, "coff-msvc", ["rt_root"]).unwrap()).to_equal(["__imp_rt_shadow", "helper_private"])
+        expect(stage4_projection_localization_symbols(mingw, "coff-mingw", ["rt_root"]).unwrap()).to_equal(["_helper_private"])
+        expect(stage4_validate_projection_symbol_contract(msvc.replace("00000010 T helper_private\n", "").replace("00000020 T __imp_rt_shadow\n", ""), "coff-msvc", ["rt_root"]).is_ok()).to_be(true)
+        expect(stage4_validate_projection_symbol_contract(mingw.replace("00000010 T _helper_private\n", ""), "coff-mingw", ["rt_root"]).is_ok()).to_be(true)
+        expect(stage4_projection_localization_symbols("00000000 T rt_root\n         U __imp_rt_missing\n", "coff-msvc", ["rt_root"]).is_err()).to_be(true)
+        expect(stage4_projection_localization_symbols("00000000 T __imp_rt_root\n", "coff-msvc", ["rt_root"]).is_err()).to_be(true)
+
+    it "keeps executable Windows projection fail-closed until the linker path is implemented":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        expect(source).to_contain("Stage4 compiler backfill capsule requires Windows projection support")
+
     it "accepts an exact projected global ABI with system dependencies only":
         val nm = "00000000 T rt_root\n00000010 T spl_other_root\n         U malloc\n"
         expect(stage4_validate_projection_symbol_contract(nm, "elf", ["rt_root", "spl_other_root"]).is_ok()).to_be(true)
@@ -41,7 +55,7 @@ describe "Stage4 selected archive projection":
 
     it "rejects unresolved runtime dependencies and unsupported object formats":
         val unresolved = stage4_projection_localization_symbols("00000000 T rt_root\n         U spl_missing\n", "elf", ["rt_root"])
-        val unsupported = stage4_projection_localization_symbols("00000000 T rt_root\n", "coff-msvc", ["rt_root"])
+        val unsupported = stage4_projection_localization_symbols("00000000 T rt_root\n", "wasm", ["rt_root"])
         val empty = stage4_projection_localization_symbols("00000000 T rt_root\n", "elf", [])
         expect(unresolved.is_err()).to_be(true)
         expect(unsupported.is_err()).to_be(true)

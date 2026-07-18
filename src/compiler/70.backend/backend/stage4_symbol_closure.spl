@@ -44,16 +44,22 @@ fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
             return unprefixed
     name
 
-fn stage4_provider_symbol(name: text, object_format: text) -> text:
+fn stage4_is_coff_feature_symbol(name: text, object_format: text) -> bool:
+    (object_format == "coff-msvc" or object_format == "coff-mingw") and name == "@feat.00"
+
+fn stage4_is_compiler_object_format(object_format: text) -> bool:
+    object_format == "elf" or object_format == "macho" or object_format == "coff-msvc" or object_format == "coff-mingw"
+
+fn stage4_provider_symbol(name: text, object_format: text, import_reference: bool) -> text:
     var symbol = name
     if object_format == "macho" and symbol.starts_with("_"):
         symbol = symbol.substring(1)
     elif object_format == "coff-msvc" or object_format == "coff-mingw":
         var imported = false
-        if symbol.starts_with("__imp_"):
+        if import_reference and symbol.starts_with("__imp_"):
             imported = true
             symbol = symbol.substring(6)
-        if symbol.starts_with("_"):
+        if not symbol.starts_with("__imp_") and symbol.starts_with("_"):
             symbol = symbol.substring(1)
         val decoration = symbol.last_index_of("@") ?? -1
         val known_stdcall_import = symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4"
@@ -98,7 +104,7 @@ pub fn stage4_compiler_backfill_symbol_table_fingerprint(nm_output: text) -> Res
 
 pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, provider_labels: [text], provider_nms: [text], object_format: text) -> Result<(), text>:
     """Reject canonical global definitions shared by the compiler capsule and a provider."""
-    if object_format != "elf" and object_format != "macho":
+    if not stage4_is_compiler_object_format(object_format):
         return Err("Unsupported Stage4 compiler backfill provider object format '" + object_format + "'")
     if provider_labels.len() == 0 or provider_labels.len() != provider_nms.len():
         return Err("Stage4 compiler backfill provider labels and symbol scans must be non-empty and have equal length")
@@ -116,7 +122,11 @@ pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, pro
         return Err("Stage4 compiler backfill capsule defines no global symbols")
     var capsule_definitions: Dict<text, bool> = {}
     for raw_symbol in capsule_raw_definitions:
-        capsule_definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        capsule_definitions[stage4_provider_symbol(raw_symbol, object_format, false)] = true
+    if capsule_definitions.len() == 0:
+        return Err("Stage4 compiler backfill capsule defines no global symbols")
 
     var provider_i = 0
     while provider_i < provider_labels.len():
@@ -126,7 +136,11 @@ pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, pro
             return Err("Stage4 compiler backfill provider '" + label + "' defines no global symbols")
         var provider_definitions: Dict<text, bool> = {}
         for raw_symbol in provider_raw_definitions:
-            provider_definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
+            if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+                continue
+            provider_definitions[stage4_provider_symbol(raw_symbol, object_format, false)] = true
+        if provider_definitions.len() == 0:
+            return Err("Stage4 compiler backfill provider '" + label + "' defines no global symbols")
         for symbol in stage4_sorted_text(provider_definitions.keys()):
             if capsule_definitions.has(symbol):
                 return Err("Stage4 compiler backfill overlaps provider '" + label + "': " + symbol)
@@ -157,9 +171,13 @@ fn stage4_hosted_provider_archive_file(provider: text, target_os_name: text, msv
         return Ok("libsimple_stage4_" + provider + ".a")
     Err("Stage4 provider has no archive policy for target OS '" + target_os_name + "'")
 
-pub fn stage4_compiler_backfill_archive_file(target_os_name: text) -> Result<text, text>:
+pub fn stage4_compiler_backfill_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the dedicated compiler capsule name on supported producer hosts."""
-    if target_os_name == "linux" or target_os_name == "macos":
+    if target_os_name == "windows":
+        return Ok(if msvc_linker: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a")
+    if msvc_linker:
+        return Err("Stage4 MSVC compiler backfill requires a Windows target")
+    if target_os_name == "linux" or target_os_name == "macos" or target_os_name == "freebsd":
         return Ok("libsimple_compiler_backfill.a")
     Err("Stage4 compiler backfill has no capsule producer for target OS '" + target_os_name + "'")
 
@@ -235,30 +253,28 @@ fn stage4_hosted_provider_object_format(target_os_name: text, msvc_objects: bool
         return Ok("elf")
     Err("Stage4 provider has no object-format policy for target OS '" + target_os_name + "'")
 
-pub fn stage4_compiler_backfill_object_format(target_os_name: text) -> Result<text, text>:
+pub fn stage4_compiler_backfill_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a supported compiler capsule."""
-    if target_os_name == "linux":
-        return Ok("elf")
-    if target_os_name == "macos":
-        return Ok("macho")
-    Err("Stage4 compiler backfill has no object-format policy for target OS '" + target_os_name + "'")
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
 pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: text) -> Result<[text], text>:
     """Derive the exact compiler-capsule export manifest from a portable nm scan."""
-    if object_format != "elf" and object_format != "macho":
+    if not stage4_is_compiler_object_format(object_format):
         return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
 
     var definition_counts: Dict<text, i64> = {}
     var runtime_symbols: Dict<text, bool> = {}
     val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_symbols[symbol] = true
         if symbol.starts_with("rt_cranelift_"):
             definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_symbols[symbol] = true
 
@@ -275,7 +291,7 @@ pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: 
 
 pub fn stage4_compiler_backfill_localization_symbols(nm_output: text, object_format: text, manifest: [text]) -> Result<[text], text>:
     """Return raw closure-object definitions that must be localized."""
-    if object_format != "elf" and object_format != "macho":
+    if not stage4_is_compiler_object_format(object_format):
         return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
     if manifest.len() == 0:
         return Err("Stage4 compiler backfill manifest is empty")
@@ -290,11 +306,13 @@ pub fn stage4_compiler_backfill_localization_symbols(nm_output: text, object_for
 
     val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             return Err("Stage4 compiler backfill closure has forbidden runtime dependency '" + symbol + "'")
     for raw_symbol in raw_definitions:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         if manifest_symbols.has(symbol):
             definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
         else:
@@ -357,7 +375,7 @@ pub fn stage4_runtime_legacy_compat_localization_symbols(nm_output: text, object
     for raw_symbol in raw_definitions:
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
         if (definition_counts[symbol] ?? 0) != 1:
             return Err("Stage4 runtime legacy compatibility source repeats global definition '" + symbol + "'")
@@ -369,7 +387,7 @@ pub fn stage4_runtime_legacy_compat_localization_symbols(nm_output: text, object
 
     var runtime_undefined: Dict<text, bool> = {}
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_undefined[symbol] = true
     if runtime_undefined.len() != 1 or not runtime_undefined.has("rt_value_bool"):
@@ -390,7 +408,7 @@ pub fn stage4_validate_runtime_legacy_compat_symbol_contract(nm_output: text, ob
     for raw_symbol in raw_definitions:
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         if not expected.has(symbol):
             return Err("Stage4 runtime legacy compatibility retained forbidden global definition '" + symbol + "'")
         definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
@@ -400,7 +418,7 @@ pub fn stage4_validate_runtime_legacy_compat_symbol_contract(nm_output: text, ob
 
     var runtime_undefined: Dict<text, bool> = {}
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
             runtime_undefined[symbol] = true
     if runtime_undefined.len() != 1 or not runtime_undefined.has("rt_value_bool"):
@@ -424,7 +442,9 @@ pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format
     var raw_by_symbol: Dict<text, text> = {}
     val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         counts[symbol] = (counts[symbol] ?? 0) + 1
         raw_by_symbol[symbol] = raw_symbol
     for symbol in legacy:
@@ -450,7 +470,9 @@ pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, obje
     var definitions: Dict<text, bool> = {}
     val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        definitions[stage4_provider_symbol(raw_symbol, object_format, false)] = true
     for symbol in legacy:
         if definitions.has(symbol):
             return Err("Stage4 runtime-native retained legacy provider definition '" + symbol + "'")
@@ -497,8 +519,8 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         val raw_symbol = parts[parts.len() - 1]
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, is_undefined)
         if is_undefined:
             if undefined.has(symbol):
                 return Err("Stage4 dynamic-loader provider repeats undefined symbol '" + symbol + "'")
@@ -538,8 +560,8 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
         val raw_symbol = parts[parts.len() - 1]
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
         val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, is_undefined)
         if is_undefined:
             if symbol.starts_with("rt_") or symbol.starts_with("spl_") or symbol == "g_memtrack_enabled":
                 if not required.has(symbol):
@@ -852,7 +874,7 @@ pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels
 
 pub fn stage4_projection_localization_symbols(nm_output: text, object_format: text, requested: [text]) -> Result<[text], text>:
     """Return raw globals to localize so a Stage4 capsule exports only its requested roots."""
-    if object_format != "elf" and object_format != "macho":
+    if not stage4_is_compiler_object_format(object_format):
         return Err("Unsupported Stage4 projection object format '" + object_format + "'")
     if requested.len() == 0:
         return Err("Stage4 projection requested symbol set is empty")
@@ -868,7 +890,9 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
     var localize: [text] = []
     val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
     for raw_symbol in raw_definitions:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if stage4_is_coff_feature_symbol(raw_symbol, object_format):
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, false)
         counts[symbol] = (counts[symbol] ?? 0) + 1
         if (counts[symbol] ?? 0) != 1:
             return Err("Stage4 projection closure repeats global definition '" + symbol + "'")
@@ -878,7 +902,7 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
         if (counts[symbol] ?? 0) != 1:
             return Err("Stage4 projection root '" + symbol + "' must exist exactly once")
     for raw_symbol in raw_undefined:
-        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val symbol = stage4_provider_symbol(raw_symbol, object_format, true)
         if stage4_is_runtime_abi_symbol(symbol):
             return Err("Stage4 projection closure retains unresolved runtime symbol '" + symbol + "'")
     Ok(stage4_sorted_text(localize))
