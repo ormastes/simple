@@ -1,0 +1,48 @@
+use std.nogc_sync_mut.io.process_ops.{shell}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+
+# Regression spec for S61 (doc/08_tracking/bug/S61_interpreter_stack_overflow_app_io_mod_2026-07-17.md).
+#
+# S61 theorized that `use app.io.mod` recurses infinitely through the module
+# loader (missing "currently loading" cycle detection) and stack-overflows.
+# That theory was independently re-verified as NOT reproducing (see the S61
+# doc's own 2026-07-17 refutation section, and this repo's separate resolved
+# doc doc/08_tracking/bug/interp_app_io_mod_import_stack_overflow_2026-07-17.md,
+# whose real root causes — a fs_helpers.spl self-shadowing import and
+# stack-overflow-detection being off by default in release — are both fixed).
+#
+# This spec locks in the exact repro from the S61 doc as a permanent
+# regression guard: importing `app.io.mod` directly must complete cleanly,
+# never abort with a stack overflow.
+#
+# NOTE: run this spec directly via `bin/simple run <this file>` rather than
+# `bin/simple test <this file>` — at the time this spec was added, `bin/simple
+# test` hangs during test-runner initialization for EVERY spec (a separate,
+# pre-existing, already-documented regression unrelated to app.io.mod; see the
+# S61 doc's refutation section, point 2). `bin/simple run` on a describe/it
+# file executes the BDD body directly and is unaffected by that hang.
+
+fn simple_binary() -> text:
+    val result = shell("test -x src/compiler_rust/target/debug/simple && echo src/compiler_rust/target/debug/simple || echo bin/simple")
+    result.stdout.trim()
+
+describe "app.io.mod direct import (S61 regression)":
+    it "does not stack-overflow on a bare `use app.io.mod`":
+        val simple = simple_binary()
+        val fixture = "use app.io.mod\n\nprint(\"S61 regression: loaded ok\")\n"
+        expect(file_write("/tmp/s61_app_io_mod_direct_import_fixture.spl", fixture)).to_equal(true)
+
+        val result = shell(simple + " run /tmp/s61_app_io_mod_direct_import_fixture.spl")
+        expect(result.stdout).to_contain("S61 regression: loaded ok")
+        expect(result.stdout.contains("stack overflow")).to_equal(false)
+        expect(result.stderr.contains("stack overflow")).to_equal(false)
+
+    it "does not stack-overflow when app.io.mod is imported inside a describe/it BDD spec":
+        val simple = simple_binary()
+        val fixture = "use app.io.mod\n\ndescribe \"direct import\":\n    it \"loads app.io.mod\":\n        expect(true).to_equal(true)\n"
+        expect(file_write("/tmp/s61_app_io_mod_direct_import_bdd_fixture.spl", fixture)).to_equal(true)
+
+        val result = shell(simple + " run /tmp/s61_app_io_mod_direct_import_bdd_fixture.spl")
+        expect(result.stdout).to_contain("1 example, 0 failures")
+        expect(result.stdout.contains("stack overflow")).to_equal(false)
+        expect(result.stderr.contains("stack overflow")).to_equal(false)
