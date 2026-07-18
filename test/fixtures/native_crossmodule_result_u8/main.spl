@@ -10,6 +10,71 @@ fn cross_target_option_map_once_ok() -> bool:
     val mapped = next_cross_target_option().map(\x: x + 1).unwrap_or(99)
     mapped == 6 and option_receiver_calls == 1
 
+struct CrossInnerCopy:
+    n: i64
+
+class CrossSharedRef:
+    n: i64
+
+struct CrossOuterCopy:
+    inner: CrossInnerCopy
+    shared: CrossSharedRef
+
+fn mutate_cross_copy(value: CrossOuterCopy):
+    value.inner.n = 9
+    value.shared.n = 5
+
+fn cross_target_nested_copy_ok() -> bool:
+    var original = CrossOuterCopy(inner: CrossInnerCopy(n: 1), shared: CrossSharedRef(n: 3))
+    var local_copy = original
+    local_copy.inner.n = 2
+    local_copy.shared.n = 4
+    if original.inner.n != 1 or original.shared.n != 4:
+        return false
+    mutate_cross_copy(original)
+    original.inner.n == 1 and original.shared.n == 5
+
+class CrossArrayContainer:
+    var marker: i64
+    var items: [i64]
+
+fn mutate_cross_array(c: CrossArrayContainer):
+    c.items.push(42)
+    c.items[0] = 7
+
+fn cross_target_class_array_ok() -> bool:
+    var container = CrossArrayContainer(marker: 99, items: [11])
+    val alias = container.items
+    mutate_cross_array(container)
+    if container.items.len() != 2 or alias.len() != 2:
+        return false
+    if container.items[0] != 7 or container.items[1] != 42:
+        return false
+    alias[0] == 7 and alias[1] == 42 and container.marker == 99
+
+struct CrossFlagBox:
+    bits: [bool]
+
+class CrossNameBox:
+    var marker: i64
+    var values: [text]
+
+fn cross_target_bool_array_interp_ok() -> bool:
+    val flags: [bool] = [true, false]
+    val val_true = flags[0]
+    var var_false = flags[1]
+    val box = CrossFlagBox(bits: [false, true])
+    val field_bool = box.bits[1]
+    val names = CrossNameBox(marker: 99, values: ["left", "right"])
+    val field_text = names.values[1]
+    val actual = "{flags[0]}/{flags[1]};{val_true}/{var_false};{box.bits[0]}/{field_bool};{names.values[0]}/{field_text}/{names.marker}"
+    actual == "true/false;true/false;false/true;left/right/99"
+
+fn cross_target_text_option_unwrap_ok() -> bool:
+    val value: text? = "opt"
+    val rendered = "{value.unwrap()}"
+    rendered == "opt"
+
 fn forward_load_bytes() -> Result<[u8], BytesError>:
     val data = load_bytes()?
     Ok(data)
@@ -61,6 +126,14 @@ fn main() -> i64:
         return 5
     if not cross_target_option_map_once_ok():
         return 6
+    if not cross_target_nested_copy_ok():
+        return 7
+    if not cross_target_class_array_ok():
+        return 8
+    if not cross_target_bool_array_interp_ok():
+        return 9
+    if not cross_target_text_option_unwrap_ok():
+        return 10
 
     match forward_fail_bytes():
         Ok(_):

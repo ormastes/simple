@@ -50,3 +50,13 @@ those controls execute after the runner is repaired.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe02_text_option_unwrap_a.spl` (doc's exact repro: `val value: text? = "opt"; print(value.unwrap())`). Native: `native-build --entry --clean` exit 0, binary built, run → `opt` (correct, matches intended expectation). Note: oracle itself has an unrelated flat-nullable `.unwrap()` landmine for both text and i64; filed separately as `seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md`.
+
+## Cross-platform regression coverage
+
+The exact present-value repro now has a strict LLVM/Cranelift case in the full
+Linux gate and the selected macOS, Windows, and FreeBSD gates. The shared
+cross-target fixture renders `value.unwrap()` before comparing with `opt`, so
+the historical wrong i64 MIR type still exposes a decimal pointer instead of
+being normalized by text equality. That fixture executes on AArch64/RISC-V64
+and emits ARM32/RV32/Windows ARM64 target objects. It preserves the existing
+`result-u8-ok` success protocol. First staged platform execution is pending.
