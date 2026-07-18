@@ -138,11 +138,12 @@ reads Bare and ignores Sv32 writes until the request/response walker is wired
 into the clock path; the RAM-backed translation adapter is not used as
 production RTL.
 
-The request/response `sv32_walker` is now implemented by porting the proven
-RV64 walker ownership pattern. It preserves 34-bit physical addresses, tags
-TLB entries with ASID/leaf level, honors global mappings, applies SUM/MXR and
-Svade fault-on-clear A/D behavior, and subjects each physical PTE read to
-S-effective PMP. Its final fetch/data memory frontend and SATP/SFENCE plumbing
+The request/response `sv32_walker` and `memory_access` frontend now port the
+proven RV64 ownership pattern. They preserve 34-bit physical addresses, tag TLB
+entries with ASID/leaf level, honor global mappings, apply SUM/MXR and Svade
+fault-on-clear A/D behavior, subject each physical PTE read to S-effective PMP,
+then apply final PMP before exposing one physical request. `CoreState` owns the
+MMU and in-flight memory transaction. `soc_tick`, SATP, and SFENCE plumbing
 remain the next integration slice.
 
 ### Translation algorithm

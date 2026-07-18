@@ -113,8 +113,10 @@ core derives MPRV/MPP only for explicit data access; fetch retains current
 privilege. The clocked `sv32_walker` now supplies a 34-bit translated physical
 address, refills ASID/global/superpage-aware TLB entries, applies SUM/MXR and
 Svade A/D rules, and protects every PTE read with S-mode PMP. The existing
-final-access gate remains after translation when the pending RV32 memory
-frontend connects the walker to `soc_tick`. Machine state also canonically owns
+`memory_access` now sequences that walker, the final PMP gate, and exactly one
+physical request while preserving precise virtual fault values and 34-bit
+physical addresses. The pending `soc_tick` change connects those physical
+requests to the interconnect. Machine state also canonically owns
 the sstatus alias and delegation masks; the supervisor owner stores only
 trap-vector and trap-context CSRs. S interrupt delegation and SATP remain
 WARL-zero until their delivery and the memory frontend are connected, so Bare

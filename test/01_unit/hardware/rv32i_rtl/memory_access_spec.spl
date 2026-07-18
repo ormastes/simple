@@ -1,0 +1,135 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.mmu_sv32.{mmu_create, mmu_set_satp}
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.mmu_sv32.{PRIV_S, PRIV_M}
+use std.hardware.rv32i_rtl.memory_access.{memory32_start, memory32_cycle}
+use std.hardware.rv32i_rtl.memory_access.memory32_start_atomic_store
+use std.hardware.rv32i_rtl.memory_access.memory32_start_conditional_store
+use std.hardware.rv32i_rtl.pmp.PmpEntries32
+use std.hardware.rv32i_rtl.pmp_csr.{pmp32_entries_reset, pmp32_csr_write}
+
+val PTE_V: u32 = 1
+val PTE_R: u32 = 2
+val PTE_A: u32 = 64
+
+fn satp_sv32(root_ppn: u32) -> u32:
+    0x80000000 | root_ppn
+
+fn superpage_pte(ppn1: u32, flags: u32) -> u32:
+    (ppn1 << 20) | flags | PTE_V
+
+fn pmp_allow_all() -> PmpEntries32:
+    var entries = pmp32_entries_reset()
+    entries = pmp32_csr_write(entries, 0x3B0, 0xFFFFFFFF).entries
+    pmp32_csr_write(entries, 0x3A0, 0x1F).entries
+
+fn pmp_allow_root_page_only() -> PmpEntries32:
+    var entries = pmp32_entries_reset()
+    entries = pmp32_csr_write(entries, 0x3B0, 0x401FF).entries
+    pmp32_csr_write(entries, 0x3A0, 0x19).entries
+
+describe "RV32 translated and protected memory frontend":
+    it "issues and completes a Bare M-mode instruction word":
+        val mmu = mmu_create()
+        val pmp = pmp32_entries_reset()
+        val state = memory32_start(mmu, pmp, 0x1000, ACCESS_FETCH, 4,
+            PRIV_M, false, false, 0)
+        val request = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(request.bus_valid).to_be(true)
+        expect(request.bus_addr).to_equal(0x1000)
+        expect(request.bus_size).to_equal(4)
+        expect(request.bus_is_pte).to_be(false)
+        val done = memory32_cycle(request.state, request.mmu, pmp, true, true,
+            false, 0x12345678)
+        expect(done.done).to_be(true)
+        expect(done.fault).to_be(false)
+        expect(done.read_data).to_equal(0x12345678)
+
+    it "suppresses a Bare S-mode load denied by final PMP":
+        val mmu = mmu_create()
+        val pmp = pmp32_entries_reset()
+        val state = memory32_start(mmu, pmp, 0x2000, ACCESS_LOAD, 4,
+            PRIV_S, false, false, 0)
+        val denied = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(denied.bus_valid).to_be(false)
+        expect(denied.fault).to_be(true)
+        expect(denied.fault_cause).to_equal(5)
+        expect(denied.fault_tval).to_equal(0x2000)
+
+    it "walks Sv32 before issuing the translated physical load":
+        val vaddr: u32 = 0x40001000
+        val mmu = mmu_set_satp(mmu_create(), satp_sv32(0x100))
+        val pmp = pmp_allow_all()
+        val state = memory32_start(mmu, pmp, vaddr, ACCESS_LOAD, 4,
+            PRIV_S, false, false, 0)
+        val pte_request = memory32_cycle(state, mmu, pmp, true, false,
+            false, 0)
+        expect(pte_request.bus_valid).to_be(true)
+        expect(pte_request.bus_is_pte).to_be(true)
+        expect(pte_request.bus_addr).to_equal(0x100400)
+        val translated = memory32_cycle(pte_request.state, pte_request.mmu,
+            pmp, false, true, false,
+            superpage_pte(0xC00, PTE_R | PTE_A))
+        expect(translated.bus_valid).to_be(false)
+        val load_request = memory32_cycle(translated.state, translated.mmu,
+            pmp, false, false, false, 0)
+        expect(load_request.bus_valid).to_be(true)
+        expect(load_request.bus_is_pte).to_be(false)
+        expect(load_request.bus_addr).to_equal(0x300001000)
+
+    it "allows the PTE read but suppresses a denied translated target":
+        val vaddr: u32 = 0x40001000
+        val mmu = mmu_set_satp(mmu_create(), satp_sv32(0x100))
+        val pmp = pmp_allow_root_page_only()
+        val state = memory32_start(mmu, pmp, vaddr, ACCESS_LOAD, 4,
+            PRIV_S, false, false, 0)
+        val pte_request = memory32_cycle(state, mmu, pmp, true, false,
+            false, 0)
+        expect(pte_request.bus_valid).to_be(true)
+        val denied = memory32_cycle(pte_request.state, pte_request.mmu, pmp,
+            false, true, false, superpage_pte(0x200, PTE_R | PTE_A))
+        expect(denied.done).to_be(true)
+        expect(denied.fault).to_be(true)
+        expect(denied.fault_cause).to_equal(5)
+        expect(denied.bus_valid).to_be(false)
+
+    it "raises a precise misaligned store before translation or bus issue":
+        val mmu = mmu_create()
+        val pmp = pmp_allow_all()
+        val state = memory32_start(mmu, pmp, 0x1003, ACCESS_STORE, 4,
+            PRIV_M, false, false, 0x55)
+        val fault = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(fault.bus_valid).to_be(false)
+        expect(fault.fault).to_be(true)
+        expect(fault.fault_cause).to_equal(6)
+        expect(fault.fault_tval).to_equal(0x1003)
+
+    it "rejects a halfword fetch while the core remains IALIGN32":
+        val mmu = mmu_create()
+        val pmp = pmp_allow_all()
+        val state = memory32_start(mmu, pmp, 0x1002, ACCESS_FETCH, 2,
+            PRIV_M, false, false, 0)
+        val fault = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(fault.bus_valid).to_be(false)
+        expect(fault.fault).to_be(true)
+        expect(fault.fault_cause).to_equal(0)
+        expect(fault.fault_tval).to_equal(0x1002)
+
+    it "tags atomic writes and suppresses a failed conditional store":
+        val mmu = mmu_create()
+        val pmp = pmp32_entries_reset()
+        val atomic = memory32_start_atomic_store(mmu, pmp, 0x2000, 4,
+            PRIV_M, false, false, 0xAA)
+        val atomic_request = memory32_cycle(atomic, mmu, pmp, false, false,
+            false, 0)
+        expect(atomic_request.bus_valid).to_be(true)
+        expect(atomic_request.bus_write).to_be(true)
+        expect(atomic_request.bus_atomic).to_be(true)
+
+        val failed_sc = memory32_start_conditional_store(mmu, pmp, 0x2000, 4,
+            PRIV_M, false, false, 0xBB, true, 0x3000, 4)
+        val suppressed = memory32_cycle(failed_sc, mmu, pmp, false, false,
+            false, 0)
+        expect(suppressed.done).to_be(true)
+        expect(suppressed.bus_valid).to_be(false)
+        expect(suppressed.state.conditional_failed).to_be(true)
