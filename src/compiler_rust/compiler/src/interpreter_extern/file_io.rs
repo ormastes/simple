@@ -958,6 +958,16 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
 
+    // Regression coverage for the P2 interpreter-over-count bug
+    // (doc/08_tracking/bug/dir_walk_native_runtime_parity_2026-07-16.md,
+    // "## Interpreter over-count (P2)"): this and the symlink test below both
+    // pin down that `rt_dir_walk` pushes only non-directory entries and
+    // recurses into directories WITHOUT also pushing the directory itself.
+    // Pre-fix (before a6822a52dee), the loop unconditionally pushed every
+    // `read_dir` entry (files AND directories) and then separately recursed
+    // into directories, double-counting every directory in the tree — for a
+    // real tree with N subdirectories that inflates the count by exactly N
+    // (observed: `src/app/cli`, 76 files + 4 subdirs = the reported 80).
     #[cfg(unix)]
     #[test]
     fn dir_walk_emits_links_once_without_following_directory_cycles() {
@@ -997,6 +1007,30 @@ mod tests {
                 "regular.spl".to_string(),
             ]
         );
+    }
+
+    /// Symlink-free variant of the fixture above: N nested subdirectories with
+    /// files inside must yield exactly the file count, never file_count + N.
+    /// This is the literal shape of the `src/app/cli` ground-truth repro (0
+    /// symlinks, 4 subdirectories, 76 files) that exposed the pre-fix bug.
+    #[test]
+    fn dir_walk_counts_files_only_not_directories_themselves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("top.spl"), "").expect("top-level file");
+        for name in ["a", "b", "c", "d"] {
+            let sub = root.join(name);
+            std::fs::create_dir(&sub).expect("subdir");
+            std::fs::write(sub.join("child.spl"), "").expect("nested file");
+        }
+
+        let result = rt_dir_walk(&[Value::text(root.to_string_lossy().to_string())]).expect("walk");
+        let Value::Array(paths) = result else {
+            panic!("dir walk did not return an array");
+        };
+        // 1 top-level file + 4 subdirs * 1 file each = 5 files total; the 4
+        // subdirectory paths themselves must NOT appear in the result.
+        assert_eq!(paths.len(), 5, "directories must be recursed-into, not counted as entries");
     }
 
     #[test]
