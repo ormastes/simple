@@ -42,6 +42,14 @@ fn read_disturb_counter_next(v: i64) -> i64:
 fn ftl_new() -> Ftl:
     Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
 
+# Opt-in: the full FTL stack running on the Vt-physics NeChip emulator (via
+# fil_new_emu) instead of the behavioural NAND. Host-level FTL traffic then hits
+# real threshold-voltage retention/disturb drift, so an aged/worn page can surface
+# a genuine (unmasked) ECC failure through read_status. Default ftl_new() is
+# unchanged. See fil_nand_emu_e2e_check.spl.
+fn ftl_new_emu() -> Ftl:
+    Ftl(fil: fil_new_emu(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
+
 fn ftl_host_lba_valid(lba: i64) -> bool:
     lba >= 0 and lba < LBA_COUNT
 
@@ -152,6 +160,26 @@ impl Ftl:
             me.band.mark_invalid(ppn)
             me.map.update(lba, UNMAP)
         SC_SUCCESS
+
+    # ── Emu-backend test API (Vt retention / wear injection). No-op unless the
+    #    stack was built via ftl_new_emu; forwards down to the NeChip media so a
+    #    test can age/wear a block and watch the drift surface through read /
+    #    read_status. `blk` is a firmware block index. ──────────────────────────
+    me emu_advance_time_s(seconds: f64):
+        me.fil.emu_advance_time_s(seconds)
+
+    me emu_set_block_wear(blk: i64, pe_cycles: i64):
+        me.fil.emu_set_block_wear(blk, pe_cycles)
+
+    me emu_set_vref_offset(offset: i64):
+        me.fil.emu_set_vref_offset(offset)
+
+    # Physical page currently backing a host LBA (UNMAP if unmapped) — lets a test
+    # locate the block a write landed on so it can wear/age exactly that block.
+    me lba_ppn(lba: i64) -> i64:
+        if not ftl_host_lba_valid(lba):
+            return UNMAP
+        me.map.lookup(lba)
 
     # Persist a checkpoint: flush the dirty map cache to the flash-resident L2P,
     # advance the journal checkpoint, and truncate the now-durable WAL prefix. After
@@ -366,6 +394,25 @@ impl Ftl:
     # the sealed parity, erase the failed block, then reprogram its live pages in place.
     # The L2P ppns are unchanged, so the normal read path returns the original data.
     # Returns the number of pages rebuilt.
+    #
+    # DURABILITY PRECONDITION — NOT power-cycle safe in v1 (tracked in
+    # doc/08_tracking/bug/rain_parity_volatile_channel_recovery_dataloss_2026-07-18.md):
+    # The failed block is disposable — its recovered contents come only from
+    # `sealed parity XOR surviving channels`, never from the block itself. So the erase is
+    # destructive but the *reconstruction source* is separate, and the erase→reprogram is
+    # idempotently re-drivable AS LONG AS that source is available: survivors are
+    # flash-resident (durable), but `me.rain_parity` is an in-DRAM table maintained live on
+    # the write path — it is NOT persisted to media, and recover() does NOT rebuild it
+    # (rain_seal cannot re-derive a stripe once its channel has failed, since it would read
+    # that channel's own garbage/erased data). Therefore the rebuild is only safely
+    # re-drivable WITHIN the same power session that sealed the parity while all channels
+    # were healthy. On real hardware a power loss after a channel failure and before this
+    # rebuild completes loses the failed channel's live pages: the DRAM parity is gone and
+    # cannot be recomputed from the failed/erased channel. In v1 this is a test-only
+    # capability (not wired into the host/admin flow — the production write path only
+    # maintains parity incrementally); the root fix is on-media parity persistence (persist
+    # on checkpoint, restore in recover), a filed feature — do not re-flag this as
+    # copy-atomicity, and do not paper over it with a "safe" note.
     me rain_recover_channel(failed: i64) -> i64:
         if not rain_channel_valid(failed):
             return 0

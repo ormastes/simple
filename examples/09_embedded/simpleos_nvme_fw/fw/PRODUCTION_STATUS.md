@@ -60,6 +60,11 @@ silicon. The simulation boundary is deliberate and unchanged:
         live-maintained XOR parity with no logical data loss (`rain_recover_channel`; `rain_seal` is
         the scrub/repair path;
         `rain_ftl_check.spl` → "RAIN-FTL OK"; `ftl_rain_selftest`; `fw/proofs/Rain.lean`).
+        **Caveat (2026-07-18):** the no-data-loss claim holds only within one power session —
+        `rain_parity` is DRAM-only (never persisted, not rebuilt by `recover()`), so a power loss
+        after a channel failure and before rebuild completes loses the failed channel's pages.
+        Recovery paths are test-only (not production-wired). Tracked:
+        `doc/08_tracking/bug/rain_parity_volatile_channel_recovery_dataloss_2026-07-18.md`.
 - [x] **Health.** SMART reflects real activity (data units r/w, host cmd counts, power cycles,
   unsafe shutdowns, media errors, percent-used from erase counts, available spare from bad
   blocks, critical warning); an error log records failed commands (`nvme_controller_selftest`).

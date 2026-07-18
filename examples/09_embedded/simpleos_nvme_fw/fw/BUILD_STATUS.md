@@ -124,9 +124,12 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   FTL GC victim selection, which only asks the hook to **score** its own CLOSED candidates (the
   hook never names a block). Tested by `policy_hooks_check.spl` + `hooks_selftest`/`sandbox_selftest`
   and proven by `proofs/Hooks.lean`.
-- **RAIN (req 8) — DONE**: `rain_parity` field + `rain_recover_channel()` wired into the live
+- **RAIN (req 8) — DONE (single-power-session scope)**: `rain_parity` field +
+  `rain_recover_channel()` wired into the live
   `Ftl`. Writes and GC relocations add new page payloads to parity; successful erases from GC/Format
-  remove old page payloads; `rain_seal` remains the scrub/repair pass. `rain_recover_channel`
+  remove old page payloads; `rain_seal` remains the scrub/repair pass. Parity is DRAM-only — not
+  persisted and not rebuilt by `recover()` — so channel recovery is not power-cycle-safe (see
+  `doc/08_tracking/bug/rain_parity_volatile_channel_recovery_dataloss_2026-07-18.md`). `rain_recover_channel`
   rebuilds a corrupted/failed channel in place (recovered = parity XOR survivors; erase the failed
   block; reprogram its live pages; L2P unchanged). Proven by `rain_ftl_check.spl` (256 LBAs survive
   a whole-channel uncorrectable failure without a pre-rebuild seal, gated `RAIN-FTL OK`), the

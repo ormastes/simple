@@ -84,13 +84,20 @@ impl ChannelSched:
     # Drain all channels in parallel steps: each step, every channel with pending work
     # dispatches exactly ONE op (per-channel serialization = mutual exclusion); independent
     # channels advance together. Returns the parallel step count = the deepest channel queue.
+    #
+    # The loop-termination guard must never be tighter than the deepest channel a legal
+    # `pending` value can reach, or a saturated queue (see SCHED_COUNTER_MAX, which `submit`
+    # itself lets `pending[ch]` grow to) would silently stop draining mid-batch: `run` would
+    # return as if finished while ops sat un-dispatched (fail-open). Bound the guard by the
+    # same named ceiling `pending` counters saturate at, so it can never under-cap a workload
+    # the type itself calls legal.
     me run() -> i64:
         if me.done < 0:
             me.done = 0
         if me.steps < 0:
             me.steps = 0
         var guard: i64 = 0
-        while me.total_pending() > 0 and guard < 100000:
+        while me.total_pending() > 0 and guard < SCHED_COUNTER_MAX:
             var dispatched: i64 = 0
             var ch: i64 = 0
             while ch < NUM_CHANNELS:

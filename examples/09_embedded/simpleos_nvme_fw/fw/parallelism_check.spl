@@ -39,6 +39,17 @@ fn main():
     fail = fail + expect_eq(usteps, 10, "unbalanced batch is bounded by the deepest channel")
     fail = fail + expect_eq(u.completed(), 11, "all 11 ops completed")
 
+    # A single-channel queue deeper than the old fixed 100000-iteration drain guard must still
+    # drain completely (guard is derived from SCHED_COUNTER_MAX, not a magic constant) — this is
+    # the regression case for the fail-open where `run` used to return early with ops still
+    # un-dispatched once one channel's pending count passed the guard's old hardcoded cap.
+    var deep: ChannelSched = channel_sched_new()
+    deep.pending[0] = 100005
+    val deep_steps: i64 = deep.run()
+    fail = fail + expect_eq(deep.total_pending(), 0, "deep single-channel queue drains fully (no fail-open)")
+    fail = fail + expect_eq(deep.completed(), 100005, "deep single-channel queue: all ops completed")
+    fail = fail + expect_eq(deep_steps, 100005, "deep single-channel queue: fully serialized step count")
+
     if fail == 0:
         print "PARALLELISM OK"
     else:
