@@ -36,15 +36,28 @@
 
 ---
 
-### Bucket 3 (9 specs): `Replace 'function' with 'fn'`
+### Bucket 3 (9 specs): `Replace 'function' with 'fn'` — **FIXED**
 **Files Affected:**
 - test/feature/lib/mcp/bootstrap_e2e_test.spl
 - test/feature/usage/llvm_backend_*.spl (6 variants: aarch64, arm32, i686, riscv32, riscv64, base)
 - test/feature/usage/arch_check_error_cases_spec.spl
+- test/feature/usage/gpu_ptx_gen_spec.spl
+- test/feature/usage/wasm_compile_spec.spl
 
-**Root Cause:** Deprecated `function` keyword in code (Simple uses `fn`). Likely source: generated test files or mcp bootstrap specs.
+**Root Cause:** **Case (a) — Source code variable naming conflict.** Parameter/loop variable named `function` in compiler modules conflicted with deprecated `function` keyword. Not generated code or fixtures, but actual Simple source using the deprecated keyword name.
 
-**Status:** Requires direct inspection of generated code paths; marked for next pass.
+**Root Cause (Details):**
+- File: `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl` 
+  - Lines 67, 72: function parameters named `function: HirFunction`
+  - Lines 87, 254, 341: for-loop variables `for function in ...`
+- File: `src/compiler/50.mir/_MirLowering/module_lowering.spl`
+  - Line 405: for-loop variable `for function in module.functions.values():`
+
+**Fix Applied:** Renamed all occurrences of parameter/variable `function` to `func` to avoid keyword collision. Total renames: 17 locations across 2 files.
+
+**Verification:** `bin/simple lint` on all 9 specs shows zero "Replace 'function'" errors after fix.
+
+**Status:** COMPLETE — all 9 specs now parse cleanly.
 
 ---
 
