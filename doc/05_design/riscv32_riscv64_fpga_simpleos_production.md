@@ -143,8 +143,8 @@ to the virtual address. PMP denial produces the matching access fault.
 Extend `CoreState64` with RV64-local PMP state. Connect decoded CSR operations,
 SATP writes, `core64_update`, `mmu64_set_satp`, `sv39_walker64_start/cycle`,
 `mmu64_flush`, trap delegation, and SRET/MRET to the emitted state machine.
-Replace `core64_step` PC-only behavior and `lsu64_access` identity behavior in
-the product path.
+Replace `core64_step` PC-only behavior by clocking the canonical memory frontend
+into the core. The permissive `lsu64_access` identity product path is deleted.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

@@ -91,8 +91,9 @@ Any temporary setup/check helper named by a spec must call `fail(...)` or
 ### RV64 Work
 
 - Connect existing `CoreState64` CSR and privilege state to decoded CSR ops.
-- Replace identity `lsu64_access()` with real Sv39 translation.
-- Unify the page-table walker with the RV64 memory/bus owner.
+- Clock the canonical Sv39/PMP memory frontend into the core after deleting the
+  permissive identity `lsu64_access()` product path.
+- Keep the page-table walker unified with the RV64 memory/bus owner.
 - Route instruction fetch and LSU faults through trap entry.
 
 ### Shared PMP Work

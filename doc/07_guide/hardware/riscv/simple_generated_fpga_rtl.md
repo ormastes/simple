@@ -129,9 +129,9 @@ SUM/MXR, fault-on-clear A/D, aligned leaves, reserved PTE rules, and S-effective
 PMP before page-table requests. `memory64_start/cycle` now composes that walker
 with final physical PMP and a one-outstanding-request fetch/load/store frontend,
 including no-bus-on-fault and precise alignment/access causes. This is still not
-core memory-path acceptance: `lsu64_access()` is an identity compatibility
-stub, the frontend is not clocked into core fetch/data arbitration, and RV32
-core privilege/PMP wiring is incomplete. RAM-backed
+core memory-path acceptance: the old permissive `lsu64_access()` identity path
+has been deleted, but the protected frontend is not clocked into core
+fetch/data arbitration, and RV32 core privilege/PMP wiring is incomplete. RAM-backed
 `mmu*_translate*_test_adapter()` functions remain unit adapters, not RTL
 evidence.
 
