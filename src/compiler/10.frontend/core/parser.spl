@@ -48,6 +48,7 @@ use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
+use compiler.core.types.{array_generic_type_register}
 use compiler.core.types.{result_type_register}
 use std.string_core.{char_code}
 
@@ -650,6 +651,34 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             arr_type = TYPE_ARRAY_TEXT
         elif elem_type == TYPE_BOOL:
             arr_type = TYPE_ARRAY_BOOL
+        elif elem_type == TYPE_I64 or elem_type == TYPE_VOID:
+            # TYPE_VOID here means parser_parse_type_impl's ident branch could
+            # not resolve the element name at all (e.g. bare `Any`, which has
+            # no dedicated primitive check and no matching named type) --
+            # keep this pre-existing fallback byte-identical to before.
+            arr_type = TYPE_ARRAY_I64
+        elif elem_type >= TYPE_NAMED_BASE:
+            # bug: array-class-param-sigsegv -- a named class/struct/enum
+            # element (e.g. `[Counter]`) previously fell through to the
+            # default below and silently became bare TYPE_ARRAY_I64, so a
+            # `[Counter]` param mis-resolved to a plain i64 array by the time
+            # it reached the AST bridge/HIR -- MIR then integer-decoded (>>3)
+            # class handles read from such arrays into garbage pointers,
+            # SIGSEGVing on field access. Register the real element tag
+            # (mirrors the Dict<K,V>/Result<T,E>/Tuple(...) registries above)
+            # so convert_flat_type can rebuild the true element Type.
+            # Scoped to TYPE_NAMED_BASE+ only (real struct/class/enum/dyn
+            # handles, per the named-type lookups above returning
+            # TYPE_NAMED_BASE + sid): fixed-width ints, Dict/Result/Tuple/
+            # Option-as-element, and other non-handle element types keep the
+            # pre-existing TYPE_ARRAY_I64 default untouched -- they are value
+            # types, not the class-handle SIGSEGV this bug is about, and
+            # narrowing the change here keeps their encoding byte-identical.
+            val arr_generic_tag = array_generic_type_register(elem_type)
+            if arr_generic_tag < 0:
+                arr_type = TYPE_ARRAY_I64
+            else:
+                arr_type = arr_generic_tag
         # absorb optional suffix: [T]? -> Option
         return parser_absorb_optional_suffix(arr_type)
     # Function type: fn(T, T) -> T

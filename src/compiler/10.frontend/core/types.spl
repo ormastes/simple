@@ -271,6 +271,25 @@ val TYPE_RESULT_LIMIT = 3000
 # registries directly above.
 val TYPE_TUPLE_BASE = 3000
 val TYPE_TUPLE_LIMIT = 4000
+# Array element-type specializations for element types without their own
+# dedicated flat tag (bug: array-class-param-sigsegv). The array-type parser
+# (parser.spl's `[T]` branch) only had dedicated flat tags for
+# i64/text/bool/Any element types (TYPE_ARRAY_I64/TEXT/BOOL/ANY); a named
+# class/struct/enum element (e.g. `[Counter]`) fell through to the default
+# and silently became bare TYPE_ARRAY_I64 -- MIR then integer-decoded (>>3)
+# class handles read from such arrays into garbage pointers, SIGSEGVing on
+# field access. Register the real element tag here (mirrors the
+# Dict/Result/Tuple registries above) and encode TYPE_ARRAY_GENERIC_BASE + id
+# so the AST bridge can rebuild the true element Type instead of losing it.
+# parser.spl currently only routes TYPE_NAMED_BASE+ element tags (real
+# struct/class/enum/dyn handles) through this registry -- fixed-width ints
+# and Dict/Result/Tuple/Option-as-element are value types, not part of this
+# bug, and intentionally keep the pre-existing TYPE_ARRAY_I64 default so
+# their encoding stays byte-identical. The registry/predicate functions below
+# are general (any i64 tag), so a future writer site could reuse them for a
+# different element kind without changing this encoding.
+val TYPE_ARRAY_GENERIC_BASE = 4000
+val TYPE_ARRAY_GENERIC_LIMIT = 5000
 val TYPE_NAMED_BASE = 10000
 
 # Helper predicates for encoded type tags
@@ -309,6 +328,12 @@ fn is_tuple_type_tag(tag: i64) -> bool:
 
 fn tuple_type_tag_to_id(tag: i64) -> i64:
     tag - TYPE_TUPLE_BASE
+
+fn is_array_generic_tag(tag: i64) -> bool:
+    tag >= TYPE_ARRAY_GENERIC_BASE and tag < TYPE_ARRAY_GENERIC_LIMIT
+
+fn array_generic_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_ARRAY_GENERIC_BASE
 
 fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
@@ -916,6 +941,24 @@ fn result_type_get_err(result_id: i64) -> i64:
         return result_type_err[result_id]
     TYPE_ANY
 
+# ===== Array Element-Type Specialization Registry =====
+# Tracks array element types with no dedicated flat tag (bug:
+# array-class-param-sigsegv) -- see TYPE_ARRAY_GENERIC_BASE.
+
+var array_generic_elem_tags: [i64] = []
+
+fn array_generic_type_register(elem_tag: i64) -> i64:
+    val idx = array_generic_elem_tags.len()
+    if idx >= TYPE_ARRAY_GENERIC_LIMIT - TYPE_ARRAY_GENERIC_BASE:
+        return -1
+    array_generic_elem_tags.push(elem_tag)
+    TYPE_ARRAY_GENERIC_BASE + idx
+
+fn array_generic_type_get_elem(arr_id: i64) -> i64:
+    if arr_id < array_generic_elem_tags.len():
+        return array_generic_elem_tags[arr_id]
+    TYPE_ANY
+
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
@@ -956,6 +999,7 @@ fn reset_all_pools():
     dict_type_values = []
     result_type_ok = []
     result_type_err = []
+    array_generic_elem_tags = []
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -969,5 +1013,7 @@ export TYPE_DICT_BASE, is_dict_tag, dict_tag_to_id
 export dict_type_register, dict_type_get_key, dict_type_get_value
 export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
 export result_type_register, result_type_get_ok, result_type_get_err
+export TYPE_ARRAY_GENERIC_BASE, is_array_generic_tag, array_generic_tag_to_id
+export array_generic_type_register, array_generic_type_get_elem
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth

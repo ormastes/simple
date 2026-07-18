@@ -1794,19 +1794,41 @@ impl MirLowering:
                     val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
                     self.builder = bg
                     if val getter_local = getter_result:
-                        val decoded_elem = self.decode_runtime_value(getter_local, result_type)
+                        # Bug s54/s54c/s54d: array_element_struct_syms is
+                        # registered (lower_array_lit for local literals,
+                        # function_lowering.spl's param-array Named-element
+                        # case for typed params -- root-fixed in s54d, see
+                        # 10.frontend/_FlatAstBridge/convert_nodes.spl's
+                        # array-generic-tag decode) with the REAL element
+                        # struct name whenever the element is a named
+                        # class/struct, and with "" / "__runtime_array__" (or
+                        # absent) for plain value-typed arrays (int/text/
+                        # bool/etc). Gate the Opaque decode strictly on a
+                        # real name so this stays a no-op for int arrays --
+                        # an earlier attempt that unconditionally marked
+                        # every runtime-array element as runtime_value
+                        # (regardless of element kind) corrupted int-array
+                        # reads (8x-too-large values from the un-skipped >>3
+                        # untag); see the revert commit for the falsified
+                        # unconditional version.
+                        val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
+                        val esn = elem_struct_name ?? ""
+                        val has_real_struct_name = esn != "" and esn != "__runtime_array__"
+                        val decode_type = if has_real_struct_name:
+                            MirType(kind: MirTypeKind.Opaque(esn))
+                        else:
+                            result_type
+                        if has_real_struct_name:
+                            self.runtime_value_locals[getter_local.id] = true
+                        val decoded_elem = self.decode_runtime_value(getter_local, decode_type)
                         # Bug (array-of-structs field misread): propagate the
-                        # array's known element struct name (registered by
-                        # lower_array_lit in array_element_struct_syms) onto
-                        # THIS decoded element so a further `.field` access
+                        # array's known element struct name onto THIS decoded
+                        # element so a further `.field` access
                         # (resolve_field_index's struct_value_syms fallback)
                         # can find the real field order instead of silently
                         # defaulting to field index 0 for every field name.
-                        val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
-                        if elem_struct_name != nil:
-                            val esn = elem_struct_name ?? ""
-                            if esn != "":
-                                self.struct_value_syms[decoded_elem.id] = esn
+                        if has_real_struct_name:
+                            self.struct_value_syms[decoded_elem.id] = esn
                         decoded_elem
                     else:
                         base_local

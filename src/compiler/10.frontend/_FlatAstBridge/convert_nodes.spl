@@ -32,6 +32,7 @@ use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NA
 use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
 use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
+use compiler.core.types.{is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
@@ -284,6 +285,17 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
             tuple_elem_types.push(convert_flat_type(tuple_elem_type_tags[tt_i]))
             tt_i = tt_i + 1
         return Type(kind: TypeKind.Tuple(tuple_elem_types), span: make_span())
+    # Array element-type specialization (bug: array-class-param-sigsegv): the
+    # array-type parser (parser.spl's `[T]` branch) only has dedicated flat
+    # tags for i64/text/bool/Any element types; a named class/struct/enum
+    # element (e.g. `[Counter]`) registers its element tag here instead of
+    # silently collapsing to bare TYPE_ARRAY_I64 -- see
+    # TYPE_ARRAY_GENERIC_BASE. Must precede the generic `>= TYPE_UNION_BASE`
+    # catch-all below, same as the dict/result/tuple checks.
+    if is_array_generic_tag(type_expr_idx):
+        val arr_generic_id = array_generic_tag_to_id(type_expr_idx)
+        val arr_elem_tag = array_generic_type_get_elem(arr_generic_id)
+        return Type(kind: TypeKind.Array(convert_flat_type(arr_elem_tag), nil), span: make_span())
     if type_expr_idx == TYPE_FUTURE:
         return Type(kind: TypeKind.Named("Future", []), span: make_span())
     if type_expr_idx == TYPE_POLL:

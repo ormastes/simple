@@ -1673,7 +1673,29 @@ impl MirLowering:
         # against untagged literals are wrong (e.g. `x == 3` never matches a
         # tagged element, and `total + x` accumulates value<<3). Regression
         # introduced when array elements began carrying tagged runtime values.
-        val decoded_elem = self.decode_runtime_value(elem_local, element_type)
+        #
+        # Bug s54/s54c/s54d: when array_element_struct_syms has a REAL
+        # registered element struct name (not "" / not the
+        # "__runtime_array__" placeholder used for plain value-typed
+        # arrays), decode via an Opaque placeholder instead of trusting
+        # element_type -- same gated fix as expr_dispatch.spl's Index case,
+        # now safe because s54d's frontend fix (parser.spl's `[T]`
+        # array-type branch + convert_flat_type's array-generic-tag decode)
+        # makes function_lowering.spl's param-array Named-element case
+        # populate this map for class/struct-typed PARAMS too, not just
+        # local array literals. Gating strictly on a real name keeps this a
+        # no-op for int/text/bool arrays (an earlier unconditional version
+        # corrupted int-array for-in sums by leaving them tagged <<3).
+        val for_elem_struct_name = self.array_element_struct_syms.get(collection_local.id)
+        val fesn = for_elem_struct_name ?? ""
+        val for_has_real_struct_name = fesn != "" and fesn != "__runtime_array__"
+        val decode_elem_type = if for_has_real_struct_name:
+            MirType(kind: MirTypeKind.Opaque(fesn))
+        else:
+            element_type
+        if for_has_real_struct_name:
+            self.runtime_value_locals[elem_local.id] = true
+        val decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
 
         # Bind loop variable to the (decoded) element
         var b_bind = self.builder
@@ -1695,11 +1717,9 @@ impl MirLowering:
             # the loop body silently defaulted to field index 0 (reading
             # `.x`'s slot) exactly like the standalone `pts[i].y` bug this
             # lane fixed, just reached via the for-loop desugaring instead.
-            val for_elem_struct_name = self.array_element_struct_syms.get(collection_local.id)
-            if for_elem_struct_name != nil:
-                val fesn = for_elem_struct_name ?? ""
-                if fesn != "":
-                    self.struct_value_syms[loop_var.id] = fesn
+            # Reuses for_elem_struct_name/fesn computed above the decode.
+            if for_has_real_struct_name:
+                self.struct_value_syms[loop_var.id] = fesn
 
         # Lower the loop body
         self.lower_block(body)

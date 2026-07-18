@@ -198,7 +198,29 @@ impl MirLowering:
                             val element = self.symbols.get_symbol(element_symbol)
                             if element.?:
                                 self.array_element_struct_syms[local.id] = element.name
-                        case _: ()
+                        case _:
+                            # Non-named element type (i64/text/bool/fixed-int/
+                            # etc.) -- no struct name to register. Bug s54/
+                            # s54c/s54d: a param array type like `[Counter]`
+                            # used to mis-resolve to a bare primitive element
+                            # type (HirTypeKind.Int(64,true)) here, because
+                            # the flat-AST bridge (10.frontend/_FlatAstBridge/
+                            # convert_nodes.spl's convert_flat_type) had
+                            # dedicated flat tags only for
+                            # `[i64]`/`[text]`/`[bool]`/`[Any]` array params
+                            # (TYPE_ARRAY_I64/TEXT/BOOL/ANY) -- any named
+                            # class/struct/enum element fell through that
+                            # dispatch and lost its name before reaching this
+                            # HirType. Root-fixed in s54d: parser.spl's `[T]`
+                            # array-type branch now registers a
+                            # TYPE_NAMED_BASE+ element tag via
+                            # array_generic_type_register (TYPE_ARRAY_GENERIC_
+                            # BASE), and convert_flat_type rebuilds the real
+                            # element Type from it -- so `[Counter]` now
+                            # arrives here as `Named(element_symbol, _)`
+                            # (the case above) and this arm only sees
+                            # genuinely non-named element types.
+                            ()
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol(type_symbol)
                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
