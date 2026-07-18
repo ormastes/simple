@@ -17,6 +17,144 @@ use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
 use crate::value::{OptionVariant, ResultVariant};
 
+#[cfg(test)]
+mod module_global_array_push_tests {
+    use super::*;
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    /// Parse `src` (must define `fn probe(): ...` with a single expression
+    /// statement in its body) and return that statement's `Expr` — mirrors
+    /// `interpreter_call::block_execution`'s `parse_probe_body` test helper,
+    /// but returns the bare `Expr` since `handle_method_call_with_self_update`
+    /// (this file, `pub(crate)`) takes one directly.
+    fn parse_probe_expr(src: &str) -> Expr {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse probe");
+        module
+            .items
+            .iter()
+            .find_map(|node| match node {
+                Node::Function(function) if function.name == "probe" => {
+                    function.body.statements.iter().find_map(|stmt| match stmt {
+                        Node::Expression(expr) => Some(expr.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("probe function with an expression statement")
+    }
+
+    fn reset_module_globals() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    fn get_global(name: &str) -> Value {
+        MODULE_GLOBALS
+            .with(|cell| cell.borrow().get(name).cloned())
+            .unwrap_or_else(|| panic!("MODULE_GLOBALS['{name}'] missing"))
+    }
+
+    fn push_via_method_call(receiver_and_call: &str) {
+        let expr = parse_probe_expr(&format!("fn probe():\n    {receiver_and_call}\n"));
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        handle_method_call_with_self_update(&expr, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+            .unwrap_or_else(|e| panic!("{receiver_and_call}: {e:?}"));
+    }
+
+    /// Coordinator-requested aliasing regression test for the MODULE_GLOBALS
+    /// fast path added above: `var a = [1]` then `var b = a` (both module-level
+    /// `var`s aliasing the same backing Arc, simulated directly here) — pushing
+    /// through `b` must grow `b` without mutating `a`. Before this fix, both
+    /// directions were already correct (the old code always cloned), but the
+    /// FAST path introduced here must preserve the same never-mutate-the-alias
+    /// guarantee, only faster when unaliased.
+    #[test]
+    fn push_through_b_does_not_mutate_aliased_a() {
+        reset_module_globals();
+        let shared = Value::array(vec![Value::Int(1)]);
+        MODULE_GLOBALS.with(|cell| {
+            let mut g = cell.borrow_mut();
+            g.insert("a".to_string(), shared.clone());
+            g.insert("b".to_string(), shared);
+        });
+
+        push_via_method_call("b.push(2)");
+
+        assert_eq!(
+            get_global("a").to_display_string(),
+            "[1]",
+            "a must be unaffected by a push through the aliased binding b"
+        );
+        assert_eq!(get_global("b").to_display_string(), "[1, 2]", "b must reflect its own push");
+    }
+
+    /// Reverse direction: push through `a` this time, `b` must stay untouched.
+    #[test]
+    fn push_through_a_does_not_mutate_aliased_b() {
+        reset_module_globals();
+        let shared = Value::array(vec![Value::Int(1)]);
+        MODULE_GLOBALS.with(|cell| {
+            let mut g = cell.borrow_mut();
+            g.insert("a".to_string(), shared.clone());
+            g.insert("b".to_string(), shared);
+        });
+
+        push_via_method_call("a.push(2)");
+
+        assert_eq!(
+            get_global("b").to_display_string(),
+            "[1]",
+            "b must be unaffected by a push through the aliased binding a"
+        );
+        assert_eq!(get_global("a").to_display_string(), "[1, 2]", "a must reflect its own push");
+    }
+
+    /// Uniquely-owned module global (no other binding aliases it) — this is
+    /// the fast path's target case. Correctness check (the perf win itself is
+    /// measured separately via src/app/test/parse_perf_probe.spl, not a Rust
+    /// timing assertion, which would be flaky under shared-machine load).
+    #[test]
+    fn push_on_unaliased_global_is_correct() {
+        reset_module_globals();
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut().insert("solo".to_string(), Value::array(vec![Value::Int(1)]));
+        });
+
+        push_via_method_call("solo.push(2)");
+        push_via_method_call("solo.push(3)");
+
+        assert_eq!(get_global("solo").to_display_string(), "[1, 2, 3]");
+    }
+
+    /// A local-env array (the pre-existing fast path, commit 632bdca45e8) must
+    /// still work exactly as before -- this new MODULE_GLOBALS arm is additive
+    /// and gated on `env.get(obj_name).is_none()`, so it must never shadow or
+    /// interfere with the local case.
+    #[test]
+    fn local_env_array_push_unaffected_by_new_global_arm() {
+        reset_module_globals();
+        let expr = parse_probe_expr("fn probe():\n    local.push(2)\n");
+        let mut env = Env::new();
+        env.insert("local".to_string(), Value::array(vec![Value::Int(1)]));
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        handle_method_call_with_self_update(&expr, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+            .expect("local.push(2)");
+        assert_eq!(
+            env.get("local").expect("local").to_display_string(),
+            "[1, 2]"
+        );
+    }
+}
+
 pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     match pattern {
         Pattern::Wildcard => true,
@@ -650,6 +788,128 @@ pub(crate) fn handle_method_call_with_self_update(
                         // Hand the (already-mutated) Arc back as both the binding update and, for
                         // non-`pop` methods, the expression result — an O(1) refcount bump, not a copy.
                         let new_array_val = Value::Array(Arc::clone(arc));
+                        let result_val = popped.unwrap_or_else(|| new_array_val.clone());
+                        return Ok((result_val, Some((obj_name.clone(), new_array_val))));
+                    }
+                }
+            }
+            // Handle Array mutations for MODULE_GLOBALS variables (not in local env).
+            // Mirrors the local-env fast path above verbatim (ownership-gated
+            // `Arc::make_mut`, commit 632bdca45e8, "retires the O(N^2)
+            // whole-array-clone class") — that fix only ever checked local `env`,
+            // so a module-level `var arr: [T] = []` still fell through to the
+            // generic MethodCall path (`interpreter_method/collections.rs`
+            // `handle_array_methods`'s `arr.to_vec()` clone-per-call, O(N) per
+            // push) every single time, same as before the perf fix landed. This
+            // is not a rare case: the pure-Simple frontend's flat-AST arena
+            // (`expr_tag`/`expr_span`/... in
+            // src/compiler/10.frontend/core/_AstExpr/nodes.spl`, appended 8x per
+            // AST node by `expr_alloc`) is exactly this shape, and `expr_alloc`
+            // is itself classified non-compilable by `compilability.rs`
+            // (`TryOperator`, `StringOps`) — i.e. it runs via `InterpCall` even
+            // in an otherwise natively-compiled binary, so this gap was live on
+            // the real stage-3/4 parse hot path, not just the tree-walking
+            // interpreter harness. See doc/08_tracking/bug/
+            // parse_time_outlier_interp_push_quadratic_2026-07-18.md.
+            //
+            // Take-then-put-back instead of the Object arm's clone-in-place
+            // (lines above): `MODULE_GLOBALS.borrow().get(..).cloned()` would
+            // Arc::clone the array, bumping strong_count to 2 (map's copy + our
+            // local copy) and making `Arc::make_mut` take the deep-clone branch
+            // on EVERY call, silently defeating the optimization. Removing the
+            // entry first makes our local binding the sole owner whenever
+            // nothing else aliases it, so `Arc::make_mut` can genuinely mutate
+            // in place.
+            if env.get(obj_name).is_none() {
+                let is_global_array = MODULE_GLOBALS
+                    .with(|cell| matches!(cell.borrow().get(obj_name), Some(Value::Array(_))));
+                if is_global_array && ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
+                    if is_const {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help(format!("consider using '{obj_name}_' for a mutable variable"));
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "cannot call mutating method '{}' on immutable array '{}'",
+                                method, obj_name
+                            ),
+                            ctx,
+                        ));
+                    }
+                    let m = method.as_str();
+                    let item = match m {
+                        "push" | "append" => Some(eval_arg(
+                            args,
+                            0,
+                            Value::Nil,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?),
+                        "extend" => Some(eval_arg(
+                            args,
+                            0,
+                            Value::array(vec![]),
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?),
+                        _ => None,
+                    };
+                    let (idx, second) = match m {
+                        "insert" => (
+                            Some(eval_arg_usize(
+                                args,
+                                0,
+                                0,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
+                        "remove" => (
+                            Some(eval_arg_usize(
+                                args,
+                                0,
+                                0,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                            None,
+                        ),
+                        _ => (None, None),
+                    };
+                    let taken = MODULE_GLOBALS.with(|cell| cell.borrow_mut().remove(obj_name));
+                    if let Some(Value::Array(mut arc)) = taken {
+                        let popped = {
+                            let vec = Arc::make_mut(&mut arc);
+                            apply_array_mutation_in_place(m, vec, item, idx, second)?
+                        };
+                        let new_array_val = Value::Array(arc);
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut()
+                                .insert(obj_name.clone(), new_array_val.clone());
+                        });
                         let result_val = popped.unwrap_or_else(|| new_array_val.clone());
                         return Ok((result_val, Some((obj_name.clone(), new_array_val))));
                     }

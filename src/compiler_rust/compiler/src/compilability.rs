@@ -1206,4 +1206,66 @@ fn run_one() -> i64:
         assert!(is_actor_builtin("send"));
         assert!(!is_actor_builtin("print"));
     }
+
+    // TEMP DIAGNOSTIC (lane S86, doc/08_tracking/bug/
+    // parse_time_outlier_interp_push_quadratic_2026-07-18.md): checks whether
+    // the parser/lexer hot-path functions that append to the flat-AST arena
+    // (expr_alloc's 8 `.push()`s, parse_block's stmts.push) are classified
+    // compilable (native path, fast rt_array_push_grow) or non-compilable
+    // (InterpCall fallback, slow clone-per-push). Not a regression test by
+    // itself (would need `#[ignore]`d removal or a real assertion); left here
+    // only long enough to run once with --nocapture, then reverted.
+    #[test]
+    fn s86_report_hot_path_fallback_reasons() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let files = [
+            "src/compiler/10.frontend/core/_AstExpr/nodes.spl",
+            "src/compiler/10.frontend/core/lexer_struct.spl",
+            "src/compiler/10.frontend/core/parser_stmts.spl",
+        ];
+        for rel in files {
+            let path = repo_root.join(rel);
+            let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!("read {}: {}", path.display(), e);
+            });
+            let mut parser = Parser::new(&source);
+            let module = match parser.parse() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("S86-REPORT {rel}: PARSE FAILED: {e:?}");
+                    continue;
+                }
+            };
+            let statuses = analyze_module(&module.items);
+            let interesting = [
+                "expr_alloc",
+                "parse_block",
+                "next_token",
+                "scan_ident",
+                "scan_string",
+                "scan_number",
+                "advance",
+                "peek",
+                "char_slice",
+            ];
+            for name in interesting {
+                if let Some(status) = statuses.get(name) {
+                    eprintln!(
+                        "S86-REPORT {rel} :: {name} :: compilable={} reasons={:?}",
+                        status.is_compilable(),
+                        status.reasons()
+                    );
+                }
+            }
+            let non_compilable_count = statuses.values().filter(|s| !s.is_compilable()).count();
+            eprintln!(
+                "S86-REPORT {rel} :: TOTAL fns={} non_compilable={}",
+                statuses.len(),
+                non_compilable_count
+            );
+        }
+    }
 }
