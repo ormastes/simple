@@ -378,15 +378,28 @@ pub fn rt_file_rename(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Read file as lines
+/// Read file as lines.
+///
+/// Returns a bare `Value::Array` on success and `Value::Nil` on failure --
+/// NOT an `Option::Some`/`None`-wrapped enum. Every real `.spl` call site
+/// (`src/compiler_rust/lib/std/src/infra/file_io.spl`,
+/// `src/lib/nogc_sync_mut/ffi/io.spl`, `src/lib/nogc_sync_mut/sffi/io.spl`)
+/// declares this extern as returning a plain `[text]`/`List<text>` and
+/// consumes the result directly, with no caller pattern-matching
+/// `Some(...)`/`None` on it. This is the identical make_some/make_none
+/// latent bug already fixed for the sibling `rt_file_read_bytes`
+/// (commit fec74762272 / doc
+/// native_build_fresh_seed_optionwrap_landmine_2026-07-18.md, which flagged
+/// this exact function as "worth the same audit if it ever surfaces") -- see
+/// doc/08_tracking/bug/rt_file_read_lines_current_dir_optionwrap_2026-07-18.md.
 pub fn rt_file_read_lines(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
         Ok(content) => {
             let lines: Vec<Value> = content.lines().map(|l| Value::text(l.to_string())).collect();
-            Ok(make_some(Value::array(lines)))
+            Ok(Value::array(lines))
         }
-        Err(_) => Ok(make_none()),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -1149,6 +1162,60 @@ mod tests {
             other => panic!("unexpected bytes value: {other:?}"),
         }
     }
+
+    // Regression coverage for the make_some/make_none latent bug flagged in
+    // doc/08_tracking/bug/native_build_fresh_seed_optionwrap_landmine_2026-07-18.md
+    // ("Not changed, flagged for awareness: rt_file_read_lines ... still
+    // returns make_some(...)/make_none() -- the same Option-wrapping this fix
+    // removed from its sibling") and fixed here alongside the identical
+    // pattern on rt_current_dir. Every real .spl call site declares these
+    // externs as returning a plain (non-optional) value and consumes the
+    // result directly, so the interpreter must return a bare Value, never an
+    // Option::Some/None-wrapped enum.
+    #[test]
+    fn read_lines_returns_bare_array_not_option_wrapped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lines.txt");
+        std::fs::write(&path, "one\ntwo\nthree").expect("write");
+        let path = path.to_string_lossy().to_string();
+
+        let result = rt_file_read_lines(&[Value::text(path)]).expect("read lines");
+        match result {
+            Value::Array(lines) => {
+                let text: Vec<String> = lines
+                    .iter()
+                    .map(|v| match v {
+                        Value::Str(s) => s.as_ref().clone(),
+                        other => panic!("non-text line: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(text, vec!["one".to_string(), "two".to_string(), "three".to_string()]);
+            }
+            other => panic!("rt_file_read_lines must return a bare Value::Array, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_lines_returns_nil_not_option_none_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.txt").to_string_lossy().to_string();
+
+        let result = rt_file_read_lines(&[Value::text(missing)]).expect("read lines on missing file");
+        assert_eq!(
+            result,
+            Value::Nil,
+            "rt_file_read_lines must return bare Value::Nil on failure, not Option::None"
+        );
+    }
+
+    #[test]
+    fn current_dir_returns_bare_text_not_option_wrapped() {
+        let result = rt_current_dir(&[]).expect("current dir");
+        match result {
+            Value::Str(s) => assert!(!s.is_empty(), "current dir should not be empty in a real process"),
+            other => panic!("rt_current_dir must return a bare Value::Str, not {other:?}"),
+        }
+    }
 }
 
 // ============================================================================
@@ -1286,11 +1353,22 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(results))
 }
 
-/// Get current directory (returns Option<text>)
+/// Get current directory.
+///
+/// Returns a bare `Value::Str` on success and an empty string on failure --
+/// NOT an `Option::Some`/`None`-wrapped enum. The sole real `.spl` call site
+/// (`src/compiler_rust/lib/std/src/infra/file_io.spl`, `current_dir()`)
+/// declares this extern as returning a plain `text` and consumes the result
+/// directly with no `Some(...)`/`None` unwrap; the sibling `rt_get_cwd`
+/// below was added as a same-behavior workaround rather than fixing this
+/// function at its root (see doc
+/// rt_file_read_lines_current_dir_optionwrap_2026-07-18.md). Same
+/// make_some/make_none latent bug already fixed for `rt_file_read_bytes`
+/// (commit fec74762272) and `rt_file_read_lines` above.
 pub fn rt_current_dir(_args: &[Value]) -> Result<Value, CompileError> {
     match std::env::current_dir() {
-        Ok(cwd) => Ok(make_some(Value::text(cwd.to_string_lossy().to_string()))),
-        Err(_) => Ok(make_none()),
+        Ok(cwd) => Ok(Value::text(cwd.to_string_lossy().to_string())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
