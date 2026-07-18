@@ -10,8 +10,8 @@ evidence bundle. Nothing fabricated; TIMEOUT/FAIL reported as such.
 
 | App | Standalone | Host-WM | SimpleOS WM |
 |---|---|---|---|
-| 2D graphics (`graphics_2d_showcase`) | GREEN @320x240 (76789/76800 nonzero px, semantic gate 4/4, 217s interpret; 720p blocked by JIT SIGSEGV + interp perf) | pending re-run (bridge-first + scale + param-detach client fixes landed ea98c69c) | C8-gated (see below) |
-| Web standards (`web_standards_showcase`) | TIMEOUT >280s all sizes (layout interpreter-bound; unblocking dep = JIT fix) | pending re-run (bridge-first + scale client fix landed 2e392adf) | C8-gated |
+| 2D graphics (`graphics_2d_showcase`) | GREEN @320x240 (76789/76800 nonzero px, semantic gate 4/4, 217s interpret; 720p blocked by JIT SIGSEGV + interp perf) | **GREEN** @240x135 (1080p rung / scale 8): bridge `create_window` 248x167 posted, P6 PPM 97215B **186 distinct bytes** (10:24). Scale-8 4K rung (480x270) also completes but needs ~13min child time — 227 distinct bytes. Host GUI loop then holds until the run budget's watchdog teardown (by design) | C8-gated (see below) |
+| Web standards (`web_standards_showcase`) | TIMEOUT >280s all sizes (layout interpreter-bound; unblocking dep = JIT fix) | PARTIAL: bridge `create_window` 248x167 posts fine (bridge-first fix works), window opens; the 240x135 HTML layout+render is still interpreter-bound — frame did not land within a 900s run (child kept rendering past teardown; same JIT-fix dependency as standalone) | C8-gated |
 | GUI widget (`gui_widget_showcase`) | GREEN @320x240 (P6 PPM 230415B, 31 distinct bytes, 70s after param-detach sweep; 720p >900s, needs JIT) | **GREEN** @480x270 (4K design / scale 8): bridge `create_window` 488x302 posted 09:47, frame_seq=1, P6 PPM 388815B **37 distinct bytes** 09:52 — after (a) bridge-first client reorder + direct scaled render (c2ad0a81), (b) adapters ported off dead `rt_winit_*` externs onto the GuiRenderer dlopen facade (48b10efe) | C8-gated |
 
 **SimpleOS WM surface status:** the WM itself passes its full fullscreen
@@ -64,6 +64,11 @@ guest→WM protocol, no SimpleOS adapter) — full assessment in
 - Standalone: `SIMPLE_GUI=0 SHOWCASE_RESOLUTION=1280x720 SHOWCASE_PPM=<p>
   SIMPLE_TIMEOUT_SECONDS=280 bin/simple run examples/06_io/ui/<app>_gui.spl`
 - Host-WM: `SIMPLE_GUI=1 SIMPLE_EXECUTION_MODE=interpret
-  SIMPLE_TIMEOUT_SECONDS=280 bin/simple run examples/06_io/ui/wm_<app>_gui.spl`
+  SHOWCASE_RESOLUTION=1920x1080 SIMPLE_TIMEOUT_SECONDS=900
+  bin/simple run examples/06_io/ui/wm_<app>_gui.spl` — the interpreter lane
+  needs the 1080p rung (child renders rung/8 = 240x135); the 4K default rung
+  at scale 8 (480x270) takes ~13min of child render and outlives a 600s
+  watchdog. Detached children survive host teardown and finish frames late —
+  check `build/tmp/wm_*_showcase_*.ppm` before rerunning.
 - SimpleOS WM: `SIMPLE_BIN=build/bootstrap/stage3/aarch64-apple-darwin/simple
   sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
