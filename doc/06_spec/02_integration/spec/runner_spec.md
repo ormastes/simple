@@ -65,7 +65,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_test_runner_source("src/app/test_runner_new/test_runner_execute.spl")
+val source = read_test_runner_source("src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl")
 
 expect(source).to_contain("fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult")
 expect(source).to_contain("fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult")
