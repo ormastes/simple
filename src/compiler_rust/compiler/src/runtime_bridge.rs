@@ -5,7 +5,7 @@
 
 use simple_runtime::RuntimeValue;
 
-use crate::value::Value;
+use crate::value::{enum_names, Value};
 use crate::value_bridge::{bridge_tags, BridgeValue};
 
 // ============================================================================
@@ -106,6 +106,77 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         // dict is a fresh, uniquely-owned object with no other alias, so a
         // deep copy loses no shared-mutation semantics.
         Value::Dict(map) | Value::FrozenDict(map) => values_to_runtime_dict(map.iter()),
+        // A user-defined Enum (including the built-in Option/Result specials)
+        // must marshal to a real native `RuntimeEnum` heap object (via
+        // `rt_enum_new`) instead of collapsing to NIL, for exactly the same
+        // "composite value forced through InterpCall" reason as Dict above
+        // (S68/S71/S78 -> S82 follow-up). Native pattern-matching
+        // (`MirPattern::Variant` in `compile_pattern_test`,
+        // codegen/src/codegen/instr/pattern.rs:70-85) and `rt_is_none`/
+        // `rt_is_some` (runtime/src/value/objects.rs:322,342) dispatch ONLY
+        // on `rt_enum_discriminant` -- a hash of the *variant name* alone
+        // (`hash_variant_discriminant`, runtime/src/value/objects.rs:251-257,
+        // byte-identical to `calculate_variant_discriminant` in
+        // codegen/instr/pattern.rs:118-124 and `variant_disc` in
+        // codegen/instr/result.rs:12-19) -- never on `enum_id`. Confirmed
+        // empirically: `compile_enum_unit`/`compile_enum_with`
+        // (codegen/instr/pattern.rs:126-154, the path used for ALL
+        // non-Option/Result enum construction) hardcode `enum_id = 0`
+        // unconditionally, and `rt_option_map` (runtime/src/value/objects.rs:372)
+        // hardcodes `enum_id = 0` when re-wrapping a fresh `Some`, even
+        // though `create_enum_value` (codegen/instr/result.rs:80) uses
+        // `enum_id = 1` for Option specifically -- i.e. `enum_id` is already
+        // inconsistent/unused for correctness in the pre-existing native
+        // codegen, so this marshal is safe reusing discriminant-only
+        // identity. `enum_id` below matches the native convention (1 for
+        // Option, 0 otherwise) purely for parity, not because anything reads
+        // it downstream.
+        Value::Enum {
+            enum_name, variant, payload,
+        } => {
+            let discriminant = simple_runtime::value::hash_variant_discriminant(variant);
+            let enum_id: u32 = if enum_name == enum_names::OPTION { 1 } else { 0 };
+            let payload_rv = match payload {
+                Some(inner) => value_to_runtime(inner),
+                None => RuntimeValue::NIL,
+            };
+            simple_runtime::value::rt_enum_new(enum_id, discriminant, payload_rv)
+        }
+        // A class/struct instance (`Value::Object`) has NO sound marshaling
+        // path at this bridge layer -- this is the registry gap S78 flagged
+        // ("no class-id registry lookup exists"), now root-caused precisely:
+        // native `compile_struct_init` (codegen/instr/closures_structs.rs:
+        // 206-248) does NOT use the `RuntimeObject`/`rt_object_new`
+        // heap-header representation (runtime/src/value/objects.rs:90-114)
+        // for class instances AT ALL. It `rt_alloc`s a raw block and writes
+        // fields at compile-time-baked-in byte offsets (`field_offsets`),
+        // tagging the pointer with the bare `TAG_HEAP` bit (heap_tag = 1,
+        // closures_structs.rs:245-246) and NO `HeapHeader`/`HeapObjectType`
+        // prefix whatsoever. There is no runtime-queryable "class name/id ->
+        // field layout" registry anywhere in this codebase -- the layout is
+        // a compiler-internal fact baked directly into each call site's MIR
+        // (`MirInst::StructInit { field_offsets, field_types, .. }`) and
+        // never round-trips through a table this bridge could consult. Even
+        // producing a `RuntimeObject` via `rt_object_new` would be actively
+        // unsound: downstream native code for this class expects the bare
+        // offset-based layout, not the `RuntimeObject` header+class_id+
+        // field_count preamble, so a real conversion would misalign every
+        // field read on the native side. Per the S82 mandate: converting the
+        // previous SILENT `_ => RuntimeValue::NIL` collapse into a LOUD
+        // failure here (rather than leaving the corruption undetected). See
+        // the registry-gap writeup in
+        // doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md.
+        Value::Object { class, .. } => {
+            panic!(
+                "runtime_bridge::value_to_runtime: cannot marshal interpreter Value::Object of class `{class}` \
+                 to a native RuntimeValue -- no class-id -> native field-layout registry exists at the \
+                 interpreter/native bridge boundary (native compile_struct_init bakes field offsets into \
+                 codegen call sites at compile time; there is no runtime-queryable class layout table). \
+                 Silently returning NIL would corrupt downstream native field access; failing loudly instead. \
+                 See doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md \
+                 for the registry-gap writeup."
+            );
+        }
         _ => RuntimeValue::NIL,
     }
 }
@@ -258,6 +329,91 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
                         }
 
                         Value::Dict(std::sync::Arc::new(map))
+                    }
+                    HeapObjectType::Enum => {
+                        // Symmetric decode for the `Value::Enum` marshal in
+                        // `value_to_runtime` above. The discriminant is a
+                        // one-way hash of the variant name alone
+                        // (`hash_variant_discriminant`,
+                        // runtime/src/value/objects.rs:251), so only the
+                        // well-known built-in Option/Result discriminants can
+                        // be reversed back to a concrete (enum_name, variant)
+                        // pair -- there is no reverse discriminant -> name
+                        // registry for arbitrary user-defined enums (the same
+                        // registry gap noted for Object below; discriminant
+                        // hash collisions with a user enum variant literally
+                        // named "Some"/"None"/"Ok"/"Err" are a pre-existing
+                        // ambiguity of the whole discriminant-hash scheme,
+                        // not something introduced here).
+                        use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_payload};
+
+                        let discriminant = rt_enum_discriminant(rv) as u32;
+                        let some_d = hash_variant_discriminant(enum_names::SOME);
+                        let none_d = hash_variant_discriminant(enum_names::NONE);
+                        let ok_d = hash_variant_discriminant(enum_names::OK);
+                        let err_d = hash_variant_discriminant(enum_names::ERR);
+
+                        if discriminant == some_d {
+                            Value::Enum {
+                                enum_name: enum_names::OPTION.to_string(),
+                                variant: enum_names::SOME.to_string(),
+                                payload: Some(Box::new(runtime_to_value(rt_enum_payload(rv)))),
+                            }
+                        } else if discriminant == none_d {
+                            Value::Enum {
+                                enum_name: enum_names::OPTION.to_string(),
+                                variant: enum_names::NONE.to_string(),
+                                payload: None,
+                            }
+                        } else if discriminant == ok_d {
+                            Value::Enum {
+                                enum_name: enum_names::RESULT.to_string(),
+                                variant: enum_names::OK.to_string(),
+                                payload: Some(Box::new(runtime_to_value(rt_enum_payload(rv)))),
+                            }
+                        } else if discriminant == err_d {
+                            Value::Enum {
+                                enum_name: enum_names::RESULT.to_string(),
+                                variant: enum_names::ERR.to_string(),
+                                payload: Some(Box::new(runtime_to_value(rt_enum_payload(rv)))),
+                            }
+                        } else {
+                            panic!(
+                                "runtime_bridge::runtime_to_value: cannot decode native RuntimeEnum with \
+                                 discriminant {discriminant:#x} back to an interpreter Value::Enum -- the \
+                                 discriminant is a one-way hash of the variant name and there is no reverse \
+                                 discriminant -> (enum_name, variant) registry for user-defined enums beyond \
+                                 the well-known Option/Result cases. Silently returning Nil would corrupt \
+                                 downstream interpreter logic; failing loudly instead. See \
+                                 doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md."
+                            );
+                        }
+                    }
+                    HeapObjectType::Object => {
+                        // See the `Value::Object` loud-failure note in
+                        // `value_to_runtime` above -- same registry gap,
+                        // opposite direction. `compile_struct_init`
+                        // (codegen/instr/closures_structs.rs:206-248) never
+                        // produces a real `HeapObjectType::Object`/
+                        // `RuntimeObject` value on the native cranelift path
+                        // (it uses a bare `TAG_HEAP`-tagged offset struct with
+                        // no header at all), so reaching this arm at runtime
+                        // means either (a) a genuine `rt_object_new`-
+                        // constructed RuntimeObject from a non-codegen
+                        // producer, or (b) a native tagged-struct pointer
+                        // whose first bytes coincidentally decode as
+                        // `HeapObjectType::Object` -- in neither case can
+                        // this bridge recover the class-id -> field-name
+                        // mapping needed to build a faithful
+                        // `Value::Object { class, fields }`.
+                        let class_id = simple_runtime::value::rt_object_class_id(rv);
+                        panic!(
+                            "runtime_bridge::runtime_to_value: cannot decode native RuntimeObject \
+                             (class_id={class_id}) back to an interpreter Value::Object -- no class-id -> \
+                             field-name registry exists at the interpreter/native bridge boundary. Silently \
+                             returning Nil would corrupt downstream interpreter logic; failing loudly instead. \
+                             See doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md."
+                        );
                     }
                     _ => {
                         // Other heap types not yet supported
@@ -431,5 +587,191 @@ mod tests {
         let runtime = value_to_runtime(&value);
         assert_ne!(runtime, RuntimeValue::NIL);
         assert_eq!(simple_runtime::value::rt_dict_len(runtime), 1);
+    }
+
+    // ========================================================================
+    // S82: Enum/Option marshaling (S68/S71/S78 follow-up) regression tests
+    //
+    // Root cause (same shape as the Dict gap S78 fixed): `value_to_runtime`
+    // had no arm for `Value::Enum`, so any Option/Result/user-enum-returning
+    // function routed through the interpreter bridge had its result silently
+    // collapsed to `RuntimeValue::NIL`. Downstream native `rt_is_none`/
+    // `rt_enum_discriminant`/pattern-matching on NIL all read garbage.
+    // ========================================================================
+
+    #[test]
+    fn value_to_runtime_option_some_is_a_real_native_enum_not_nil() {
+        let value = Value::Enum {
+            enum_name: enum_names::OPTION.to_string(),
+            variant: enum_names::SOME.to_string(),
+            payload: Some(Box::new(Value::Int(42))),
+        };
+
+        let runtime = value_to_runtime(&value);
+
+        // Before the fix this was RuntimeValue::NIL (rt_is_none == true, wrongly).
+        assert_ne!(runtime, RuntimeValue::NIL, "Some(42) must not collapse to NIL");
+        assert!(simple_runtime::value::rt_is_some(runtime));
+        assert_eq!(simple_runtime::value::rt_enum_payload(runtime).as_int(), 42);
+    }
+
+    #[test]
+    fn value_to_runtime_option_none_is_recognized_as_none_discriminant() {
+        let value = Value::Enum {
+            enum_name: enum_names::OPTION.to_string(),
+            variant: enum_names::NONE.to_string(),
+            payload: None,
+        };
+
+        let runtime = value_to_runtime(&value);
+
+        // None must be a real tagged enum whose discriminant native pattern
+        // matching / `rt_is_some` recognizes as the "None" variant -- not a
+        // bare untagged NIL and not a silently-wrong Some.
+        assert!(!simple_runtime::value::rt_is_some(runtime));
+        let none_disc = simple_runtime::value::hash_variant_discriminant(enum_names::NONE) as i64;
+        assert_eq!(simple_runtime::value::rt_enum_discriminant(runtime), none_disc);
+    }
+
+    #[test]
+    fn value_to_runtime_result_ok_and_err_round_trip_discriminant() {
+        let ok = Value::Enum {
+            enum_name: enum_names::RESULT.to_string(),
+            variant: enum_names::OK.to_string(),
+            payload: Some(Box::new(Value::text("done"))),
+        };
+        let err = Value::Enum {
+            enum_name: enum_names::RESULT.to_string(),
+            variant: enum_names::ERR.to_string(),
+            payload: Some(Box::new(Value::text("boom"))),
+        };
+
+        let ok_rv = value_to_runtime(&ok);
+        let err_rv = value_to_runtime(&err);
+
+        assert_ne!(
+            simple_runtime::value::rt_enum_discriminant(ok_rv),
+            simple_runtime::value::rt_enum_discriminant(err_rv)
+        );
+        assert_ne!(ok_rv, RuntimeValue::NIL);
+        assert_ne!(err_rv, RuntimeValue::NIL);
+    }
+
+    #[test]
+    fn option_some_runtime_to_value_roundtrip() {
+        let value = Value::Enum {
+            enum_name: enum_names::OPTION.to_string(),
+            variant: enum_names::SOME.to_string(),
+            payload: Some(Box::new(Value::Int(7))),
+        };
+
+        let runtime = value_to_runtime(&value);
+        let back = runtime_to_value(runtime);
+
+        assert_eq!(value, back);
+    }
+
+    #[test]
+    fn option_none_runtime_to_value_roundtrip() {
+        let value = Value::Enum {
+            enum_name: enum_names::OPTION.to_string(),
+            variant: enum_names::NONE.to_string(),
+            payload: None,
+        };
+
+        let runtime = value_to_runtime(&value);
+        let back = runtime_to_value(runtime);
+
+        assert_eq!(value, back);
+    }
+
+    #[test]
+    fn result_ok_err_runtime_to_value_roundtrip() {
+        let ok = Value::Enum {
+            enum_name: enum_names::RESULT.to_string(),
+            variant: enum_names::OK.to_string(),
+            payload: Some(Box::new(Value::Int(1))),
+        };
+        let err = Value::Enum {
+            enum_name: enum_names::RESULT.to_string(),
+            variant: enum_names::ERR.to_string(),
+            payload: Some(Box::new(Value::text("nope"))),
+        };
+
+        assert_eq!(runtime_to_value(value_to_runtime(&ok)), ok);
+        assert_eq!(runtime_to_value(value_to_runtime(&err)), err);
+    }
+
+    #[test]
+    fn value_to_runtime_dict_with_nested_option_round_trips() {
+        // The bootstrap-critical case flagged in the S71 audit:
+        // Dict<text, SomeEnum> values (e.g. process_async()'s
+        // Dict<text, AsyncStateMachine>-shaped payloads) must not collapse
+        // their Enum-typed values to NIL merely because they are nested
+        // inside an already-fixed Dict.
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "maybe".to_string(),
+            Value::Enum {
+                enum_name: enum_names::OPTION.to_string(),
+                variant: enum_names::SOME.to_string(),
+                payload: Some(Box::new(Value::Int(99))),
+            },
+        );
+        let value = Value::dict(map);
+
+        let runtime = value_to_runtime(&value);
+        assert_eq!(simple_runtime::value::rt_dict_len(runtime), 1);
+
+        let key = "maybe";
+        let key_rv = simple_runtime::value::rt_string_new(key.as_ptr(), key.len() as u64);
+        let nested = simple_runtime::value::rt_dict_get(runtime, key_rv);
+
+        assert_ne!(nested, RuntimeValue::NIL, "nested Option must not collapse to NIL");
+        assert!(simple_runtime::value::rt_is_some(nested));
+        assert_eq!(simple_runtime::value::rt_enum_payload(nested).as_int(), 99);
+    }
+
+    // ========================================================================
+    // S82: Value::Object -- no sound native layout lookup exists at this
+    // bridge boundary (see the in-code writeup on the `Value::Object` arm in
+    // `value_to_runtime`). Assert the silent-NIL collapse is now a LOUD
+    // failure instead, per the S82 mandate.
+    // ========================================================================
+
+    #[test]
+    #[should_panic(expected = "cannot marshal interpreter Value::Object")]
+    fn value_to_runtime_object_panics_loudly_instead_of_silently_nil() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let value = Value::Object {
+            class: "Point".to_string(),
+            fields: Arc::new(HashMap::new()),
+        };
+
+        let _ = value_to_runtime(&value);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot decode native RuntimeObject")]
+    fn runtime_to_value_object_panics_loudly_instead_of_silently_nil() {
+        let object_rv = simple_runtime::value::rt_object_new(7, 0);
+        let _ = runtime_to_value(object_rv);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot decode native RuntimeEnum")]
+    fn runtime_to_value_unknown_enum_discriminant_panics_loudly_instead_of_silently_nil() {
+        // A user-defined enum variant whose name is not Some/None/Ok/Err --
+        // the discriminant->name direction genuinely cannot be recovered
+        // (see the in-code writeup on the `HeapObjectType::Enum` arm in
+        // `runtime_to_value`), so this must fail loudly rather than return a
+        // silently-wrong Nil.
+        let disc = simple_runtime::value::hash_variant_discriminant("Red");
+        let enum_rv = simple_runtime::value::rt_enum_new(0, disc, RuntimeValue::NIL);
+        let _ = runtime_to_value(enum_rv);
     }
 }
