@@ -1,6 +1,6 @@
 # Pure-Simple tool and infrastructure hardening status
 
-Date: 2026-07-17
+Date: 2026-07-18
 
 ## Executive status
 
@@ -28,14 +28,14 @@ remaining-tool audit additionally activated the shared process governor,
 removed cosine candidate truncation, made tool writes atomic and checked,
 bounded remaining runner subprocesses, and quoted MCP CLI inputs. It also
 invalidated earlier optimistic daemon and formatter status: both retain
-release-blocking correctness defects. The deployed runtime remains unavailable,
-so executable qualification is still blocked.
+release-blocking correctness defects. Stage 2 now links and answers
+`--version`; Stage 4 and production essential-tool qualification remain pending.
 
 ## Tool matrix
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | Corrected Stage 2 reached the final link with 10 unique unresolved names (25 relocations). Nine names are now source-fixed, including typed pointer `offset`; HIR lambda capture ownership remains and the link frontier has not been rerun | Finish HIR capture ownership, rebuild the seed, reuse the Stage 2 cache, then atomically deploy | P0 |
+| Production runtime | STAGE 2 PASS / STAGE 4 PENDING | Stage 2 processed 656 modules (4 compiled, 652 cached) with 0 failures, linked, and returned the expected version within 10 seconds; no fresh Stage 4 exists yet | Continue the canonical cached bootstrap to Stage 4, then run admission and essential-tool gates | P0 |
 | Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | Green/red/empty contracts pass under the seed runner; timeout launch now `exec`s its GNU wrapper instead of retaining an extra shell. Parent interruption can still orphan the wrapper and worker, and fresh pure-Simple qualification remains blocked | Add narrowly owned process-tree cleanup without changing generic async-child lifetime, then qualify on the fresh CLI | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending an aggregate scanner owner; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Run the retained directory-walk spec, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
@@ -45,7 +45,7 @@ so executable qualification is still blocked.
 | Check | PARTIAL | Driver API Check stops after fatal HIR analysis; production parse/policy workers now apply SSpec guidance equally in human and JSON modes. CLI can still false-green HIR-invalid code and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
-| SPipe/docgen | SOURCE BUG / DEPLOY BLOCKED | Focused specs pass, then automatic docgen fails with `method 'split' not found on value of type str in nested call context`; the runner also hardcodes `bin/simple` for docgen | Fix shared nested builtin-method resolution, add one `text.split` regression, and pass the selected runtime explicitly before requiring zero-stub manuals | P1 |
+| SPipe/docgen | SOURCE FIXED / DEPLOY BLOCKED | Nested temporary-string `split` lowering and its reproducing spec pass; the generated manual is present. Fresh Stage-4 qualification remains | Run docgen with the admitted Stage-4 runtime and require zero stubs | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
 | MCP CLI passthrough | SOURCE FIXED | Binary and every JSON-derived argument are shell quoted; structured argv is still preferable when response capture supports it | Run hostile apostrophe/metacharacter protocol fixtures after runtime admission | P0 |
@@ -91,31 +91,11 @@ so executable qualification is still blocked.
 
 ## Current blockers
 
-1. A clean admitted full-CLI runtime is unavailable. The correctly selected
-   fresh seed now compiles every Stage 2 module and reaches the final linker,
-   admitting the imported-enum, `String.smf`, and function-arity repairs. The
-   retained objects expose two independent roots: dotted semantic method names
-   such as `TreeSitter.match_token` did not try the discovered desugared export
-   `treesitter_match_token`, and LLVM emitted all functions in a module into one
-   `.text` section, preventing `--gc-sections` from discarding unreachable
-   functions with obsolete runtime references. Both roots are fixed and have
-   focused regressions. Two post-fix commands then incorrectly combined the
-   temporary Rust seed with `SIMPLE_BOOTSTRAP=1`, which deliberately routes
-   native-build through the interpreted pure-Simple worker. A tiny isolated
-   build with the existing `SIMPLE_NATIVE_BUILD_RUST=1` repair override reached
-   the native-project path immediately, wrote its cache, produced a 14,288-byte
-   binary, printed `5`, and exited 0. The silent timeouts were invalid admission
-   invocations, not a new native-project hang. They did expose that killing the
-   outer parent left two nested 7200-second timeout/worker pairs alive at about
-   1.6 GiB RSS each; those four owned processes were explicitly terminated.
-   The corrected canonical Stage 2 then reached the final link normally. Its
-   surviving names are `str.bytes`, `substring`, `split_whitespace`, `offset`,
-   `str.ord`, `str.chars`, `rt_string_contains`, `Ok`,
-   `MirLowering.lower_inline_lambda_with_locals`, and
-   `HirExpr.free_variables` (10 unique names,
-   25 relocations total). The subsequent typed pointer-offset fix removes
-   `offset` from the source frontier; HIR capture remains before the cached
-   Stage 2 link can be rerun.
+1. A clean admitted full-CLI runtime is unavailable. The cached Stage-2 build
+   now processes 656 modules with 0 failures, links, and returns the expected
+   version. Its prior startup hang was a one-instruction self-loop in shared
+   `str_len`; direct delegation to `rt_string_len` fixes every caller. The next
+   runtime step is Stage 3/4, not another Stage-2 rebuild.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,

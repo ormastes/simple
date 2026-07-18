@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Severity:** critical (the redeploy wall — blocks self-hosted bootstrap stage 2)
-**Status:** FIX IN REVIEW — final stage-2 relink evidence pending
+**Status:** FIXED — Stage 2 links and starts
 
 ## Symptom
 
@@ -49,14 +49,22 @@ relink also exposed an independent missing `impl MethodResolver:` owner in the
 pure-Simple resolver; its instance methods had been parsed as nested functions,
 leaving `MethodResolver.resolve_module` undefined at link.
 
+The first linked Stage-2 binary then hung on `--version`. Native backtraces and
+disassembly reduced the hang to `frontend__core__types__str_len`, whose body was
+a jump to itself. `src/compiler/10.frontend/core/types.spl` violated its own
+direct-runtime rule by implementing `str_len` as `s.len()`. It now delegates to
+the existing `rt_string_len` provider, with a focused source regression.
+
+Final evidence (`build/bootstrap/string-len-stage2-v4.log`): 4 modules compiled,
+652 reused from cache, 0 failed, link succeeded; the resulting binary printed
+`simple-bootstrap 1.0.0-beta` for `--version` and exited 0.
+
 ## Verification protocol
 
 1. Targeted cargo codegen tests (regression tests assert `bytes`/`chars` lower
    to `rt_string_bytes`/`rt_string_chars`, which exist at runtime.h:292-293).
-2. Rebuild seed from fixed source; re-run ONLY the stage-2 native-build/link
-   command from the log; report the actual residual undefined-symbol set.
-   Expected: the 40 method-name symbols that have legitimate mappings drop;
-   a residual set remains and is tracked here.
+2. Rebuild seed from fixed source and run the cache-backed Stage-2 build once.
+3. Require the linked Stage-2 binary to answer `--version` within 10 seconds.
 
 ## Related
 
