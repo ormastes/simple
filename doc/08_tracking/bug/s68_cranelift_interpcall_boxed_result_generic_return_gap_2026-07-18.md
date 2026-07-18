@@ -269,6 +269,15 @@ instance, that value still collapses to NIL. `Dict<text, i64>` /
 dicts) round-trip correctly; `Dict<text, SomeClass>` does not yet.
 
 **Verification:**
+- **Load-bearing proof — unit A/B directly on the bridge conversion
+  function:** with the `Value::Dict(map) | Value::FrozenDict(map) => ...` arm
+  in `value_to_runtime` temporarily disabled (falling back to the pristine
+  `_ => RuntimeValue::NIL`), the new `runtime_bridge.rs` tests fail exactly as
+  predicted — `rt_dict_len(runtime) == -1` (the exact reported symptom) and
+  `rt_dict_contains`/`rt_dict_get` on the "dict" also fail, because the value
+  is really `NIL`, not a dict. Restoring the arm makes all three pass. This
+  is the direct, empirical before/after proof of the fix, on the exact code
+  path the interpreter bridge uses.
 - New unit tests in `compiler/src/runtime_bridge.rs` (`value_to_runtime_dict_*`,
   `dict_runtime_to_value_roundtrip`, `frozen_dict_also_marshals_to_native_dict`)
   and `compiler/src/mir/hybrid.rs`
@@ -277,14 +286,30 @@ dicts) round-trip correctly; `Dict<text, SomeClass>` does not yet.
   mir::hybrid, compilability, codegen) all green except pre-existing,
   unrelated failures verified via file-swap A/B against pristine HEAD
   (identical failing-test-name sets before/after, byte-for-byte, for the
-  `codegen` family: 143/143).
-- End-to-end: seed release binary rebuilt incrementally; a repro `.spl`
-  (Dict-returning function using `.?` inside to force
+  `codegen` family: 143/143). A full `--lib` run on the fixed tree (3110
+  passed, 249 failed) vs. a full `--lib` run on pristine HEAD (3104 passed,
+  249 failed) has an **empty failing-test-NAME diff in both directions** —
+  zero regressions introduced by the `runtime_to_value` Dict-decode addition,
+  and (expectedly) zero pre-existing failures incidentally fixed.
+- **End-to-end (inconclusive, documented honestly):** attempted a repro
+  `.spl` (Dict-returning function using `.?` inside to force
   `FallbackReason::TryOperator`, called from a native `main`) via
   `native-build --backend cranelift` (`SIMPLE_NATIVE_BUILD_RUST=1` to use the
-  Rust seed handler directly). Before the fix: `main` returns/exits with the
-  corrupted `len()` (`-1`, truncated to exit code `255`). After the fix:
-  `main` exits `2` (correct `len()` for a 2-entry dict).
+  Rust seed handler directly). Both the pre-fix and post-fix binaries exited
+  `2` (the correct `len()`) — the e2e did **not** reproduce a 255→2
+  transition. Instrumenting `interp_call_handler` with a trace `eprintln!`
+  confirmed why: it never fired for this build, meaning `native-build`'s
+  AOT/`--entry-closure` path compiled the whole `.?`-containing function
+  natively and never routed the call through `InterpCall`/`rt_interp_call` at
+  all, so the interpreter bridge (and this fix) was never exercised by that
+  vehicle. The bridge is live on the JIT/`SIMPLE_BOOTSTRAP` hybrid-execution
+  paths (the three `apply_hybrid_transform` call sites in
+  `compiler/src/pipeline/execution.rs`) — not on a leaf `native-build` of a
+  two-function file — which is where the 24 audited functions and
+  `process_async()` actually take this path during a real bootstrap. The
+  unit A/B above, on the exact conversion function the bridge calls, is the
+  proof of record for this fix; the e2e attempt is reported for
+  transparency, not as supporting evidence.
 
 ## Related
 
