@@ -23,6 +23,7 @@ CUDA_ARCH="${CUDA_ARCH:-}"
 HIP_ARCH="${HIP_ARCH:-gfx1100}"
 PORTABLE_COMPUTE_TARGETS="${PORTABLE_COMPUTE_TARGETS:-cuda,hip,opencl,metal,vulkan}"
 PORTABLE_COMPUTE_EXPECTED_SEMANTICS="${PORTABLE_COMPUTE_EXPECTED_SEMANTICS:-2}"
+PORTABLE_COMPUTE_REQUIRE_VERIFIED="${PORTABLE_COMPUTE_REQUIRE_VERIFIED:-0}"
 TIMEOUT_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_SECS:-180}"
 KILL_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_KILL_SECS:-10}"
 PINNED_VULKAN_FONT_SOURCE_SHA256="c94b13736bdf7022835c008c09d714507da4cd0b6ef4607a5eadc9a23549cd2c"
@@ -30,6 +31,35 @@ PINNED_VULKAN_FONT_ARTIFACT_SHA256="e25d25b8157fc2554822637603471a442f678eb58e20
 PINNED_CUDA_FONT_SOURCE_SHA256="bf34912f7e1bad76e9178d5ac39640a60f1075d7b017708688aa8efa2dad8291"
 PINNED_CUDA_FONT_VERSION_SHA256="e1f58dd9ee7237bc5cc556dda8563f596ccc2e1a1f61ffdd824b90d90ccec68a"
 PINNED_CUDA_FONT_ARTIFACT_SHA256="40afab945e6c40c239a6859d63723e76599758ea50e120e0edf7a058aa6922b4"
+
+portable_compute_tuple_verified() {
+    [ "$1" = true ] && [ "$2" = true ]
+}
+
+portable_compute_strict_result() {
+    [ "$1" != 1 ] || portable_compute_tuple_verified "$2" "$3"
+}
+
+if [ "${1:-}" = "--strict-result-self-test" ]; then
+    portable_compute_strict_result 0 false false
+    portable_compute_strict_result 1 true true
+    if portable_compute_strict_result 1 false true ||
+       portable_compute_strict_result 1 true false ||
+       portable_compute_strict_result 1 false false; then
+        echo "portable compute strict-result self-test failed" >&2
+        exit 1
+    fi
+    echo "portable compute strict-result self-test passed"
+    exit 0
+fi
+
+case "$PORTABLE_COMPUTE_REQUIRE_VERIFIED" in
+    0|1) ;;
+    *)
+        echo "PORTABLE_COMPUTE_REQUIRE_VERIFIED must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
 
 case "$PORTABLE_COMPUTE_EXPECTED_SEMANTICS" in
     ''|*[!0-9]*)
@@ -975,3 +1005,7 @@ echo "all_portable_compute_pins_verified=$all_portable_compute_pins_verified"
 echo "all_portable_compute_toolchains_verified=$all_portable_compute_pins_verified"
 echo "report_path=$REPORT_PATH"
 cat "$BUILD_DIR/evidence.env"
+if ! portable_compute_strict_result "$PORTABLE_COMPUTE_REQUIRE_VERIFIED" "$all_portable_compute_candidates_validated" "$all_portable_compute_pins_verified"; then
+    echo "portable compute strict admission failed; inspect $BUILD_DIR/evidence.env" >&2
+    exit 1
+fi

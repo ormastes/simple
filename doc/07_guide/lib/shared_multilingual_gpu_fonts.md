@@ -441,14 +441,13 @@ not copy them into a package, pass their adjacent self-reported hash as trust,
 or configure a production process to load them directly. A future external
 package route must authenticate its own manifest and bytes before calling the
 same installer.
-On the current promotion host, a fresh semantics-revision-2 CUDA/Vulkan
-candidate generation attempt is bounded to one invocation:
+On the current promotion host, a fresh semantics-revision-2 Vulkan candidate
+generation attempt is bounded to one invocation:
 
 ```sh
-CUDA_ARCH=compute_75 \
-  SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
+SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
   VULKAN_GLSLC_TOOL="$PINNED_GLSLC" \
-  PORTABLE_COMPUTE_TARGETS=cuda,vulkan \
+  PORTABLE_COMPUTE_TARGETS=vulkan \
   PORTABLE_COMPUTE_EXPECTED_SEMANTICS=2 \
   BUILD_DIR=build/portable_compute_toolchains-semantics2 \
   REPORT_PATH=build/portable_compute_toolchains-semantics2/report.md \
@@ -459,8 +458,8 @@ Both variable paths must be defined by the operator and name current, admitted
 binaries; this host does not currently provide a `PINNED_GLSLC` value. The
 authoritative result is
 `build/portable_compute_toolchains-semantics2/evidence.env`, not the checker
-exit alone. CUDA and Vulkan compilers plus `spirv-val` run through bounded
-timeouts, and the requested-target aggregate ignores unrequested toolchains.
+exit alone. The Vulkan compiler and `spirv-val` run through bounded timeouts,
+and the requested-target aggregate ignores unrequested toolchains.
 
 Admission has two explicit phases. Candidate generation requires semantics
 revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
@@ -468,8 +467,21 @@ revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
 the retained revision-1 pins, the expected result is
 `pinned_verified=false`; that is a reviewable candidate, not promotion. After
 independent review updates the tracked source/artifact pins and embedded
-companions, a fresh run must reproduce the same tuple and set
+companion, a fresh run must reproduce the same tuple and set
 `pinned_verified=true`. Never update pins merely to make the first run green.
+After the reviewed Vulkan pins and embedded companion are updated, rerun with
+both `PORTABLE_COMPUTE_TARGETS=vulkan` and
+`PORTABLE_COMPUTE_REQUIRE_VERIFIED=1`. Strict mode still writes the
+report and `evidence.env`, then exits nonzero unless both candidate validation
+and pin verification are true. Its zero-tool predicate check is:
+
+```sh
+sh scripts/check/check-portable-compute-toolchains.shs --strict-result-self-test
+```
+
+If `PORTABLE_COMPUTE_TARGETS=cuda,vulkan` is requested instead, strict mode
+requires validated, pinned companions for both targets.
+
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
