@@ -63,7 +63,7 @@ pub(super) fn eval_control_expr(
             // b` has the same "0 is falsy" landmine as the statement form
             // (`exec_if`/`exec_if_core`) if `.?`'s presence decision is
             // re-derived from the payload's truthiness instead of trusted.
-            let branch_result = if crate::interpreter_control::is_condition_present(condition, &cond_val) {
+            let branch_result = if crate::interpreter::interpreter_control::is_condition_present(condition, &cond_val) {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
             } else if let Some(else_b) = else_branch {
                 evaluate_expr(else_b, env, functions, classes, enums, impl_methods)?
@@ -163,7 +163,7 @@ pub(super) fn eval_control_expr(
                         }
                         let guard_result =
                             evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
-                        if !crate::interpreter_control::is_condition_present(guard, &guard_result) {
+                        if !crate::interpreter::interpreter_control::is_condition_present(guard, &guard_result) {
                             continue;
                         }
                     }
