@@ -1845,7 +1845,37 @@ impl MirLowering:
                         if self.local_is_runtime_array(contains_recv_probe):
                             contains_recv_is_array = true
                     case _: ()
-        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains") and resolution_is_unresolved and not contains_recv_is_array:
+        # to_upper / parse_f64 (native_string_methods_unresolved_in_mir lane,
+        # 2026-07-18): same erased-receiver-fallback family as
+        # trim/lower/to_lower above. to_upper's runtime (rt_string_to_upper)
+        # and LLVM declaration already existed (mirrors rt_string_to_lower
+        # exactly) -- only this dispatch arm was missing. parse_f64 needed a
+        # brand-new runtime function too (rt_string_parse_f64, added
+        # alongside rt_string_to_upper in runtime_native.c): no native
+        # string->f64 parse existed at all before this lane. Both fit the
+        # existing 0-arg shape (ts_arity_ok's default case) with no
+        # array-receiver ambiguity (no array method shares either name, so no
+        # `contains`-style guard is needed here).
+        #
+        # Backend-scope note: this dispatch arm is shared by every backend
+        # (the MIR is backend-agnostic), but the runtime symbol it emits must
+        # be independently declared per backend. to_upper is safe on BOTH:
+        # rt_string_to_upper already exists with a matching tagged-handle
+        # ABI in runtime_native.c (LLVM/default) AND in
+        # src/runtime/simple_core/core_string.spl (cranelift). parse_f64 is
+        # LLVM-only for now: rt_string_parse_f64 was added to
+        # runtime_native.c (this lane) but has no cranelift-path counterpart
+        # (core_string.spl's existing rt_string_to_float is not a drop-in --
+        # it returns a boxed/tagged ANY value via rt_value_float, not a raw
+        # f64 register, so it can't satisfy this arm's MirType.f64() dest
+        # without its own adapter work). Under `--backend=cranelift`,
+        # `.parse_f64()` will now resolve past the MIR Unresolved check but
+        # then hit cranelift_codegen_adapter.spl's own missing-declaration
+        # panic ("Cranelift function address missing declaration:
+        # rt_string_parse_f64") -- still a LOUD failure, not silent-wrong,
+        # just one layer later than before. Out of scope for this lane (the
+        # bug doc only reproduces/covers the default LLVM native-build path).
+        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and resolution_is_unresolved and not contains_recv_is_array:
             val ts_arity_ok = match method:
                 case "split": args.len() == 1
                 case "rfind": args.len() == 1
@@ -1891,6 +1921,8 @@ impl MirLowering:
                     case "rfind": "rt_string_rfind"
                     case "find": "rt_string_find"
                     case "contains": "rt_string_contains"
+                    case "to_upper": "rt_string_to_upper"
+                    case "parse_f64": "rt_string_parse_f64"
                     case _: "rt_string_to_lower"
                 # Bug fix (task #178 text3 lane): trim/lower/to_lower/replace
                 # return TAGGED STRING HANDLES, not integers (rfind returns an
@@ -1906,8 +1938,10 @@ impl MirLowering:
                 # of "a-b" (silent wrong, no error at all; verified via
                 # SIMPLE_KEEP_LLVM_IR).
                 val ts_dest_ty = match method:
-                    case "replace" | "trim" | "strip" | "lower" | "to_lower":
+                    case "replace" | "trim" | "strip" | "lower" | "to_lower" | "to_upper":
                         MirType(kind: MirTypeKind.Opaque("str"))
+                    case "parse_f64":
+                        MirType.f64()
                     case _: MirType.i64()
                 val ts_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(ts_sym),
