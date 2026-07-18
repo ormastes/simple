@@ -264,12 +264,30 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! command -v grub-mkstandalone >/dev/null 2>&1; then
+# grub-mkstandalone: bare name on Linux; homebrew's x86_64-elf-grub formula
+# prefixes it on macOS. Same tool, same x86_64-efi output.
+GRUB_MKSTANDALONE="${GRUB_MKSTANDALONE:-}"
+if [ -z "$GRUB_MKSTANDALONE" ]; then
+    if command -v grub-mkstandalone >/dev/null 2>&1; then
+        GRUB_MKSTANDALONE=grub-mkstandalone
+    elif command -v x86_64-elf-grub-mkstandalone >/dev/null 2>&1; then
+        GRUB_MKSTANDALONE=x86_64-elf-grub-mkstandalone
+    fi
+fi
+if [ -z "$GRUB_MKSTANDALONE" ]; then
     emit_failure "grub-mkstandalone-not-found"
     exit 1
 fi
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+# macOS/homebrew fallback: qemu ships edk2 firmware images instead of the
+# Linux OVMF package paths (vars image is the shared edk2-i386-vars.fd).
+if [ ! -f "$OVMF_CODE" ] && [ -f /opt/homebrew/share/qemu/edk2-x86_64-code.fd ]; then
+    OVMF_CODE=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+fi
+if [ ! -f "$OVMF_VARS_SRC" ] && [ -f /opt/homebrew/share/qemu/edk2-i386-vars.fd ]; then
+    OVMF_VARS_SRC=/opt/homebrew/share/qemu/edk2-i386-vars.fd
+fi
 if [ ! -f "$OVMF_CODE" ]; then
     emit_failure "ovmf-code-not-found:$OVMF_CODE"
     exit 1
@@ -404,7 +422,7 @@ menuentry "SimpleOS WM fullscreen (UEFI/multiboot)" {
 }
 CFG
 set +e
-grub-mkstandalone \
+"$GRUB_MKSTANDALONE" \
     --format=x86_64-efi \
     --output="$EFIAPP" \
     --modules="multiboot normal echo part_gpt fat" \
