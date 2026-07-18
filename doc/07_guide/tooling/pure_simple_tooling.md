@@ -88,6 +88,8 @@ fork capture apply the same bound. Timeout handling must kill the process group
 where supported and must never block indefinitely waiting for a descendant that
 kept a pipe open. A plain `-1` exit is not sufficient timeout evidence; require
 the timeout marker so spawn/internal failures remain ordinary failures.
+Pure-Simple callers use the `std.io` facade; hosted C owns the OS capture and
+cleanup boundary, and native LLVM calls cross the dedicated tuple ABI facade.
 
 For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
 Stage 2 and Stage 3 compiler sanity, then run the matching stage sanity SSpec

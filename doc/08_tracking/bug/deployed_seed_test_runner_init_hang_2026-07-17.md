@@ -4,6 +4,15 @@
 **Severity:** high (blocks single-file spec runs repo-wide on the deployed binary)
 **Status:** OPEN — hypothesis pending fresh-seed confirmation
 
+## 2026-07-18 native-owner update
+
+The separate self-hosted native gap is now fixed in source: hosted C owns
+`rt_process_run_bounded` on POSIX and Windows, the pure-Simple LLVM backend
+routes it through `rt_process_run_bounded_tuple`, and strict Stage4 admits the
+exact process-provider symbol. This does not refresh the deployed Rust seed;
+the artifact-skew symptom in this report remains open until a current
+pure-Simple tool is deployed.
+
 ## Symptoms
 
 At origin tip 99f0294dbda, using the deployed release binary

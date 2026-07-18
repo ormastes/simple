@@ -64,7 +64,107 @@ struct WinCapture {
     char* data;
     size_t len;
     size_t cap;
+    uint64_t total;
+    size_t limit;
+    size_t head_len;
+    size_t tail_len;
+    size_t tail_start;
 };
+
+#define WIN_CAPTURE_MARKER_MAX 96U
+
+static void win_reverse_bytes(char* data, size_t len) {
+    for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
+        char byte = data[left];
+        data[left] = data[right];
+        data[right] = byte;
+    }
+}
+
+static int win_capture_append(struct WinCapture* capture, const char* bytes, size_t len) {
+    if (capture->limit == SIZE_MAX) {
+        if (capture->len > SIZE_MAX - len - 1) return 0;
+        size_t needed = capture->len + len + 1;
+        if (needed > capture->cap) {
+            size_t new_cap = capture->cap ? capture->cap : 4096;
+            while (new_cap < needed) {
+                if (new_cap > SIZE_MAX / 2) { new_cap = needed; break; }
+                new_cap *= 2;
+            }
+            char* grown = (char*)realloc(capture->data, new_cap);
+            if (!grown) return 0;
+            capture->data = grown;
+            capture->cap = new_cap;
+        }
+        memcpy(capture->data + capture->len, bytes, len);
+        capture->len += len;
+        capture->data[capture->len] = '\0';
+        return 1;
+    }
+
+    if (UINT64_MAX - capture->total < len) capture->total = UINT64_MAX;
+    else capture->total += (uint64_t)len;
+    if (!capture->data) {
+        if (capture->limit > SIZE_MAX - WIN_CAPTURE_MARKER_MAX - 1U) return 0;
+        capture->cap = capture->limit + WIN_CAPTURE_MARKER_MAX + 1U;
+        capture->data = (char*)malloc(capture->cap);
+        if (!capture->data) return 0;
+    }
+
+    size_t head_limit = capture->limit / 2U + capture->limit % 2U;
+    size_t tail_limit = capture->limit / 2U;
+    size_t head_add = head_limit - capture->head_len;
+    if (head_add > len) head_add = len;
+    memcpy(capture->data + capture->head_len, bytes, head_add);
+    capture->head_len += head_add;
+    bytes += head_add;
+    len -= head_add;
+    if (len == 0 || tail_limit == 0) return 1;
+
+    char* tail = capture->data + head_limit;
+    if (len >= tail_limit) {
+        memcpy(tail, bytes + len - tail_limit, tail_limit);
+        capture->tail_start = 0;
+        capture->tail_len = tail_limit;
+        return 1;
+    }
+    size_t overflow = capture->tail_len + len > tail_limit
+        ? capture->tail_len + len - tail_limit : 0;
+    capture->tail_start = (capture->tail_start + overflow) % tail_limit;
+    capture->tail_len -= overflow;
+    size_t write_at = (capture->tail_start + capture->tail_len) % tail_limit;
+    size_t first = tail_limit - write_at;
+    if (first > len) first = len;
+    memcpy(tail + write_at, bytes, first);
+    memcpy(tail, bytes + first, len - first);
+    capture->tail_len += len;
+    return 1;
+}
+
+static void win_capture_finish(struct WinCapture* capture) {
+    if (capture->limit == SIZE_MAX || !capture->data) return;
+    size_t head_limit = capture->limit / 2U + capture->limit % 2U;
+    char* tail = capture->data + head_limit;
+    if (capture->tail_start != 0 && capture->tail_len != 0) {
+        win_reverse_bytes(tail, capture->tail_start);
+        win_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
+        win_reverse_bytes(tail, capture->tail_len);
+    }
+    size_t marker_len = 0;
+    if (capture->total > capture->head_len + capture->tail_len) {
+        char marker[WIN_CAPTURE_MARKER_MAX];
+        uint64_t omitted = capture->total - capture->head_len - capture->tail_len;
+        int written = snprintf(marker, sizeof(marker), "\n[output truncated: %llu bytes omitted]\n",
+                               (unsigned long long)omitted);
+        if (written > 0) marker_len = (size_t)written;
+        memmove(capture->data + capture->head_len + marker_len, tail, capture->tail_len);
+        memcpy(capture->data + capture->head_len, marker, marker_len);
+    } else {
+        memmove(capture->data + capture->head_len, tail, capture->tail_len);
+    }
+    capture->len = capture->head_len + marker_len + capture->tail_len;
+    capture->data[capture->len] = '\0';
+}
 
 static void win_close_handle(HANDLE* handle) {
     if (*handle && *handle != INVALID_HANDLE_VALUE) CloseHandle(*handle);
@@ -83,30 +183,13 @@ static int win_capture_drain(HANDLE pipe, struct WinCapture* capture, size_t bud
         DWORD chunk = available > 65536 ? 65536 : available;
         size_t remaining = budget - drained;
         if (remaining < chunk) chunk = (DWORD)remaining;
-        if (capture->len > SIZE_MAX - (size_t)chunk - 1) return 0;
-        size_t needed = capture->len + (size_t)chunk + 1;
-        if (needed > capture->cap) {
-            size_t new_cap = capture->cap ? capture->cap : 4096;
-            while (new_cap < needed) {
-                if (new_cap > SIZE_MAX / 2) {
-                    new_cap = needed;
-                    break;
-                }
-                new_cap *= 2;
-            }
-            char* grown = (char*)realloc(capture->data, new_cap);
-            if (!grown) return 0;
-            capture->data = grown;
-            capture->cap = new_cap;
-        }
-
+        char bytes[65536];
         DWORD read_count = 0;
-        if (!ReadFile(pipe, capture->data + capture->len, chunk, &read_count, NULL)) {
+        if (!ReadFile(pipe, bytes, chunk, &read_count, NULL)) {
             return GetLastError() == ERROR_BROKEN_PIPE;
         }
-        capture->len += (size_t)read_count;
         drained += (size_t)read_count;
-        capture->data[capture->len] = '\0';
+        if (!win_capture_append(capture, bytes, (size_t)read_count)) return 0;
         if (read_count == 0) return 1;
     }
 }
@@ -148,7 +231,8 @@ static char* win_filtered_environment(void) {
     return filtered;
 }
 
-SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                         int64_t timeout_ms, int64_t max_output_bytes) {
     const char* failure = NULL;
     const char** child_args = NULL;
     char* cmd_c = NULL;
@@ -173,6 +257,12 @@ SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* ar
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1 || memchr(cmd, '\0', (size_t)cmd_len)) {
         return process_timeout_result("", "missing command", -1, 0, timeout_ms);
     }
+    if (max_output_bytes < -1 ||
+        (max_output_bytes >= 0 && (uint64_t)max_output_bytes > SIZE_MAX - WIN_CAPTURE_MARKER_MAX - 1U)) {
+        return process_timeout_result("", "", -1, 0, timeout_ms);
+    }
+    stdout_capture.limit = max_output_bytes < 0 ? SIZE_MAX : (size_t)max_output_bytes;
+    stderr_capture.limit = stdout_capture.limit;
     cmd_c = (char*)malloc((size_t)cmd_len + 1);
     if (!cmd_c) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
     memcpy(cmd_c, cmd, (size_t)cmd_len);
@@ -338,6 +428,8 @@ finish:
     win_close_handle(&null_input);
     if (stdout_read) (void)win_capture_drain(stdout_read, &stdout_capture, 1048576);
     if (stderr_read) (void)win_capture_drain(stderr_read, &stderr_capture, 1048576);
+    win_capture_finish(&stdout_capture);
+    win_capture_finish(&stderr_capture);
 
     const char* result_error = failure ? failure : stderr_capture.data;
     SplArray* result = process_timeout_result(stdout_capture.data, result_error,
@@ -355,6 +447,15 @@ finish:
     free(stdout_capture.data);
     free(stderr_capture.data);
     return result;
+}
+
+SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+    return win_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
+}
+
+SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                 int64_t timeout_ms, int64_t max_output_bytes) {
+    return win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
 
 int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
@@ -506,7 +607,8 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     return pid;
 }
 
-SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                           int64_t timeout_ms, int64_t max_output_bytes) {
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
         return process_timeout_result("", "missing command", -1, 0, timeout_ms);
     }
@@ -546,13 +648,28 @@ SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* ar
     free(cmd_c);
     if (child_pid < 0) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
 
-    int64_t code = rt_fork_parent_wait(child_pid, timeout_ms > 0 ? timeout_ms : 0);
+    int64_t code = max_output_bytes < 0
+        ? rt_fork_parent_wait(child_pid, timeout_ms > 0 ? timeout_ms : 0)
+        : rt_fork_parent_wait_bounded(child_pid, timeout_ms > 0 ? timeout_ms : 0,
+                                      (uint64_t)max_output_bytes);
     int timed_out = rt_fork_parent_timed_out() ? 1 : 0;
     if (rt_fork_parent_signaled()) code = -1;
     const char* out = rt_fork_parent_stdout();
     const char* err = rt_fork_parent_stderr();
     if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
     return process_timeout_result(out, err, code, timed_out, timeout_ms);
+}
+
+SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+    return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
+}
+
+SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                 int64_t timeout_ms, int64_t max_output_bytes) {
+    if (max_output_bytes < 0 || (uint64_t)max_output_bytes > SIZE_MAX - 97U) {
+        return process_timeout_result("", "", -1, 0, timeout_ms);
+    }
+    return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
 
 int64_t rt_editor_spawn_simple_dap(void) {

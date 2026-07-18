@@ -3,6 +3,36 @@ extern fn rt_file_read_text(path: text) -> text
 use std.spec.{describe, it, expect}
 
 describe "core C process timeout provider":
+    it "owns the bounded-process ABI on Windows and the shared Unix branch":
+        val header = rt_file_read_text("src/runtime/runtime.h") ?? ""
+        val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
+        val native = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
+        val codegen = rt_file_read_text("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs") ?? ""
+        val calls = rt_file_read_text("src/compiler_rust/compiler/src/codegen/instr/calls.rs") ?? ""
+        val owner_abi = "SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,"
+        val owner_limits = "int64_t timeout_ms, int64_t max_output_bytes)"
+        val windows_start = provider.find("/* Windows process timeout/capture owner. */")
+        val unix_start = provider.find("#else /* POSIX */")
+
+        expect(windows_start).to_be_greater_than(-1)
+        expect(unix_start).to_be_greater_than(windows_start)
+        val windows = provider.substring(windows_start, unix_start)
+        val unix = provider.substring(unix_start, provider.len())
+
+        expect(header).to_contain(owner_abi)
+        expect(header).to_contain(owner_limits + ";")
+        expect(windows).to_contain(owner_abi)
+        expect(windows).to_contain(owner_limits)
+        # Linux, macOS, and FreeBSD share this Unix C owner.
+        expect(unix).to_contain(owner_abi)
+        expect(unix).to_contain(owner_limits)
+        expect(native).to_contain("int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,")
+        expect(native).to_contain("int64_t max_output_bytes)")
+        expect(native).to_contain("return rt_process_result_to_tuple(rt_process_run_bounded(")
+        expect(native).to_contain("cmd_c ? cmd_c : \"\", cmd_len, args, timeout_ms, max_output_bytes))")
+        expect(codegen).to_contain("RuntimeFuncSpec::new(\"rt_process_run_bounded\", &[I64, I64, I64, I64, I64], &[I64])")
+        expect(calls).to_contain("| \"rt_process_run_bounded\" => Some((&[0], &[1]))")
+
     it "owns the four-word tagged tuple ABI":
         val header = rt_file_read_text("src/runtime/runtime.h") ?? ""
         val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
@@ -15,7 +45,8 @@ describe "core C process timeout provider":
         expect(provider).to_contain("rt_string_new")
         expect(provider).to_contain("rt_value_int(code)")
         expect(codegen).to_contain("RuntimeFuncSpec::new(\"rt_process_run_timeout\", &[I64, I64, I64, I64], &[I64])")
-        expect(calls).to_contain("\"rt_process_run\" | \"rt_process_spawn\" | \"rt_process_execute\" | \"rt_process_run_timeout\" => Some((&[0], &[1]))")
+        expect(calls).to_contain("| \"rt_process_run_timeout\"")
+        expect(calls).to_contain("| \"rt_process_run_bounded\" => Some((&[0], &[1]))")
 
     it "captures POSIX output and cleans the timed process group":
         val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
@@ -45,7 +76,7 @@ describe "core C process timeout provider":
         expect(windows_start).to_be_greater_than(-1)
         expect(posix_start).to_be_greater_than(windows_start)
         val windows = provider.substring(windows_start, posix_start)
-        val run_start = windows.find("SplArray* rt_process_run_timeout")
+        val run_start = windows.find("static SplArray* win_process_run_capture")
         val run_end = windows.find("int64_t rt_process_spawn_piped")
         expect(run_start).to_be_greater_than(-1)
         expect(run_end).to_be_greater_than(run_start)

@@ -4910,6 +4910,14 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
         rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
 }
 
+int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
+                                      int64_t max_output_bytes) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_result_to_tuple(rt_process_run_bounded(
+        cmd_c ? cmd_c : "", cmd_len, args, timeout_ms, max_output_bytes));
+}
+
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
     char* path = (char*)malloc((size_t)path_len + 1);

@@ -12,17 +12,27 @@ describe "Stage4 process provider":
         expect(stage4_process_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
         expect(stage4_process_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
 
-        val windows = "0001 T rt_process_is_alive\n0002 T rt_process_read_stdout\n0003 T rt_process_run_timeout\n0004 T rt_process_spawn_piped\n0005 T rt_process_write_stdin\n"
-        val posix = windows + "0006 T rt_editor_poll_simple_dap_stopped\n0007 T rt_editor_spawn_simple_dap\n0008 T rt_editor_start_simple_dap\n0009 T rt_editor_wait_simple_dap_stopped\n"
+        val windows = "0001 T rt_process_is_alive\n0002 T rt_process_read_stdout\n0003 T rt_process_run_bounded\n0004 T rt_process_run_timeout\n0005 T rt_process_spawn_piped\n0006 T rt_process_write_stdin\n"
+        val posix = windows + "0007 T rt_editor_poll_simple_dap_stopped\n0008 T rt_editor_spawn_simple_dap\n0009 T rt_editor_start_simple_dap\n0010 T rt_editor_wait_simple_dap_stopped\n"
         val macho = posix.replace(" T rt_", " T _rt_")
         expect(stage4_validate_process_provider_symbol_contract(posix, "elf").is_ok()).to_be(true)
         expect(stage4_validate_process_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
         expect(stage4_validate_process_provider_symbol_contract(windows, "coff-msvc").is_ok()).to_be(true)
         expect(stage4_validate_process_provider_symbol_contract(windows + "0000 A @feat.00\n", "coff-msvc").is_ok()).to_be(true)
-        expect(stage4_validate_process_provider_symbol_contract(posix.replace("0009 T rt_editor_wait_simple_dap_stopped\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_process_provider_symbol_contract(posix + "0010 T rt_process_run_timeout\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_process_provider_symbol_contract(windows + "0010 T rt_extra\n", "coff-mingw").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(windows.replace("0003 T rt_process_run_bounded\n", ""), "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(posix.replace("0010 T rt_editor_wait_simple_dap_stopped\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(posix + "0011 T rt_process_run_bounded\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_process_provider_symbol_contract(windows + "0011 T rt_extra\n", "coff-mingw").is_err()).to_be(true)
         expect(stage4_validate_process_provider_symbol_contract(windows, "wasm").is_err()).to_be(true)
+
+    it "maps bounded process calls through the native tuple ABI facade":
+        val helpers = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl") ?? ""
+        val core = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+        expect(helpers).to_contain("declare ptr @rt_process_run_bounded_tuple(i64, ptr, i64, i64)")
+        expect(helpers).to_contain("self.defined_func_names[\"rt_process_run_bounded_tuple\"] = true")
+        expect(helpers).to_contain("self.remember_function_param_types(\"rt_process_run_bounded_tuple\", [\"i64\", \"ptr\", \"i64\", \"i64\"])")
+        expect(helpers).to_contain("self.remember_function_return_type(\"rt_process_run_bounded_tuple\", \"ptr\")")
+        expect(core).to_contain("bare_name_for_call == \"rt_process_run_bounded\": \"@rt_process_run_bounded_tuple\"")
 
     it "resolves the POSIX process slice through tagged runtime and fork owners":
         val (selected, owner_rows) = stage4_resolve_requested_archive_owners(

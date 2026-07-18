@@ -22,10 +22,16 @@ int64_t rt_fork_child_setup(void) {
     return -1; /* Not supported on Windows */
 }
 
-int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
+int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
+                                    uint64_t max_output_bytes) {
     (void)child_pid;
     (void)timeout_ms;
+    (void)max_output_bytes;
     return -1;
+}
+
+int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
+    return rt_fork_parent_wait_bounded(child_pid, timeout_ms, 0);
 }
 
 bool rt_fork_parent_timed_out(void) { return false; }
@@ -77,7 +83,12 @@ typedef struct {
     size_t head_len;
     size_t tail_len;
     size_t tail_start;
+    size_t head_limit;
+    size_t tail_limit;
 } ForkCapture;
+
+static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
+                              int stderr_fd, ForkCapture* stderr_capture);
 
 static void reverse_bytes(char* data, size_t len) {
     for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
@@ -91,7 +102,7 @@ static void capture_append(ForkCapture* capture, const char* bytes, size_t len) 
     if (UINT64_MAX - capture->total < len) capture->total = UINT64_MAX;
     else capture->total += (uint64_t)len;
 
-    size_t head_add = FORK_CAPTURE_HEAD - capture->head_len;
+    size_t head_add = capture->head_limit - capture->head_len;
     if (head_add > len) head_add = len;
     memcpy(capture->data + capture->head_len, bytes, head_add);
     capture->head_len += head_add;
@@ -99,20 +110,21 @@ static void capture_append(ForkCapture* capture, const char* bytes, size_t len) 
     len -= head_add;
     if (len == 0) return;
 
-    char* tail = capture->data + FORK_CAPTURE_HEAD;
-    if (len >= FORK_CAPTURE_TAIL) {
-        memcpy(tail, bytes + len - FORK_CAPTURE_TAIL, FORK_CAPTURE_TAIL);
+    if (capture->tail_limit == 0) return;
+    char* tail = capture->data + capture->head_limit;
+    if (len >= capture->tail_limit) {
+        memcpy(tail, bytes + len - capture->tail_limit, capture->tail_limit);
         capture->tail_start = 0;
-        capture->tail_len = FORK_CAPTURE_TAIL;
+        capture->tail_len = capture->tail_limit;
         return;
     }
 
-    size_t overflow = capture->tail_len + len > FORK_CAPTURE_TAIL
-        ? capture->tail_len + len - FORK_CAPTURE_TAIL : 0;
-    capture->tail_start = (capture->tail_start + overflow) % FORK_CAPTURE_TAIL;
+    size_t overflow = capture->tail_len + len > capture->tail_limit
+        ? capture->tail_len + len - capture->tail_limit : 0;
+    capture->tail_start = (capture->tail_start + overflow) % capture->tail_limit;
     capture->tail_len -= overflow;
-    size_t write_at = (capture->tail_start + capture->tail_len) % FORK_CAPTURE_TAIL;
-    size_t first = FORK_CAPTURE_TAIL - write_at;
+    size_t write_at = (capture->tail_start + capture->tail_len) % capture->tail_limit;
+    size_t first = capture->tail_limit - write_at;
     if (first > len) first = len;
     memcpy(tail + write_at, bytes, first);
     memcpy(tail, bytes + first, len - first);
@@ -120,7 +132,7 @@ static void capture_append(ForkCapture* capture, const char* bytes, size_t len) 
 }
 
 static size_t capture_finish(ForkCapture* capture) {
-    char* tail = capture->data + FORK_CAPTURE_HEAD;
+    char* tail = capture->data + capture->head_limit;
     if (capture->tail_start != 0 && capture->tail_len != 0) {
         reverse_bytes(tail, capture->tail_start);
         reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
@@ -235,12 +247,14 @@ int64_t rt_fork_child_setup(void) {
     return (int64_t)pid;
 }
 
-int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
+int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
+                                    uint64_t max_output_bytes) {
     /* Reject invalid pids: kill(-1)/waitpid(-1) would signal/reap every
      * process the user owns (e.g. when a failed fork's -1 is passed in). */
     if (child_pid <= 0) {
         return -1;
     }
+    if (max_output_bytes > SIZE_MAX - FORK_CAPTURE_MARKER_MAX - 1U) return -1;
 
     /* Free any previous results */
     free_results();
@@ -252,23 +266,26 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     s_stdout_read_fd = -1;
     s_stderr_read_fd = -1;
 
-    /* Allocate fixed-size bounded captures, plus marker and terminator space. */
-    char* out_buf = (char*)SPL_MALLOC(FORK_CAPTURE_LIMIT + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
-    char* err_buf = (char*)SPL_MALLOC(FORK_CAPTURE_LIMIT + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
+    size_t capture_limit = (size_t)max_output_bytes;
+    /* Allocate bounded captures, plus marker and terminator space. */
+    char* out_buf = (char*)SPL_MALLOC(capture_limit + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
+    char* err_buf = (char*)SPL_MALLOC(capture_limit + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
     if (!out_buf || !err_buf) {
         if (out_buf) SPL_FREE(out_buf);
         if (err_buf) SPL_FREE(err_buf);
-        close(stdout_fd);
-        close(stderr_fd);
         if (kill(-(pid_t)child_pid, SIGKILL) != 0) {
             (void)kill((pid_t)child_pid, SIGKILL);
         }
         int status;
         (void)waitpid_nointr((pid_t)child_pid, &status, 0);
+        close(stdout_fd);
+        close(stderr_fd);
         return -1;
     }
-    ForkCapture out_capture = {out_buf, 0, 0, 0, 0};
-    ForkCapture err_capture = {err_buf, 0, 0, 0, 0};
+    size_t head_limit = capture_limit / 2U + capture_limit % 2U;
+    size_t tail_limit = capture_limit / 2U;
+    ForkCapture out_capture = {out_buf, 0, 0, 0, 0, head_limit, tail_limit};
+    ForkCapture err_capture = {err_buf, 0, 0, 0, 0, head_limit, tail_limit};
 
     /* Set non-blocking for poll */
     set_nonblocking(stdout_fd);
@@ -385,13 +402,20 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
         }
     }
 
-    /* Close pipe read ends */
+    int forced_cleanup = cleanup_descendants || timed_out || wait_failed;
+    if (forced_cleanup) {
+        if (kill(-(pid_t)child_pid, SIGKILL) != 0) {
+            (void)kill((pid_t)child_pid, SIGKILL);
+        }
+        if (!child_exited) {
+            pid_t waited = waitpid_nointr((pid_t)child_pid, &child_status, 0);
+            child_exited = waited == (pid_t)child_pid;
+        }
+        drain_capture_fds(stdout_fd, &out_capture, stderr_fd, &err_capture);
+    }
+
     close(stdout_fd);
     close(stderr_fd);
-
-    if (cleanup_descendants) {
-        (void)kill(-(pid_t)child_pid, SIGKILL);
-    }
 
     /* Linearize retained head/tail data and insert truncation markers. */
     (void)capture_finish(&out_capture);
@@ -401,14 +425,9 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     s_result_stdout = out_buf;
     s_result_stderr = err_buf;
 
-    /* Handle timeout: kill child */
+    /* Timeout/wait failure cleanup completed before the final pipe drain. */
     if (timed_out || wait_failed) {
         s_result_timed_out = timed_out != 0;
-        if (kill(-(pid_t)child_pid, SIGKILL) != 0) {
-            (void)kill((pid_t)child_pid, SIGKILL);
-        }
-        int status;
-        (void)waitpid_nointr((pid_t)child_pid, &status, 0);
         return -1;
     }
 
@@ -425,6 +444,59 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
         return (int64_t)(128 + WTERMSIG(status));
     }
     return -1;
+}
+
+static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
+                              int stderr_fd, ForkCapture* stderr_capture) {
+    struct pollfd fds[2] = {
+        {stdout_fd, POLLIN | POLLHUP, 0},
+        {stderr_fd, POLLIN | POLLHUP, 0},
+    };
+    ForkCapture* captures[2] = {stdout_capture, stderr_capture};
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    int64_t deadline_ms = started.tv_sec * 1000 + started.tv_nsec / 1000000 + 100;
+
+    while (fds[0].fd >= 0 || fds[1].fd >= 0) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t remaining = deadline_ms - (now.tv_sec * 1000 + now.tv_nsec / 1000000);
+        if (remaining <= 0) break;
+        int ready = poll(fds, 2, (int)remaining);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (ready == 0) break;
+
+        for (int index = 0; index < 2; index++) {
+            if (fds[index].fd < 0 || fds[index].revents == 0) continue;
+            if (fds[index].revents & POLLNVAL) {
+                fds[index].fd = -1;
+                continue;
+            }
+            for (;;) {
+                char chunk[PIPE_READ_CHUNK];
+                ssize_t count = read(fds[index].fd, chunk, sizeof(chunk));
+                if (count > 0) {
+                    capture_append(captures[index], chunk, (size_t)count);
+                } else if (count == 0) {
+                    fds[index].fd = -1;
+                    break;
+                } else if (errno == EINTR) {
+                    continue;
+                } else {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) fds[index].fd = -1;
+                    break;
+                }
+            }
+            fds[index].revents = 0;
+        }
+    }
+}
+
+int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
+    return rt_fork_parent_wait_bounded(child_pid, timeout_ms, FORK_CAPTURE_LIMIT);
 }
 
 bool rt_fork_parent_timed_out(void) {

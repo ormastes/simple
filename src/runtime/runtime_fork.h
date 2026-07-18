@@ -53,6 +53,8 @@ int64_t rt_fork_child_setup(void);
  *   -1 on timeout or wait/capture failure
  */
 int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms);
+int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
+                                    uint64_t max_output_bytes);
 
 /* True only when the most recent parent wait reached its deadline. */
 bool rt_fork_parent_timed_out(void);

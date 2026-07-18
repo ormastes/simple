@@ -1,7 +1,71 @@
 use std.spec
 use std.io_runtime.{file_read}
+use app.io.process_ops.{process_run_bounded}
+use app.io.env_ops.{host_os}
+
+fn run_bounded_process_case() -> (text, text, i64):
+    process_run_bounded("__simple_missing_bounded_process_case__.exe", ["--never-used"], 1000, 256)
+
+fn run_bounded_process_case_with_script(posix_script: text, windows_script: text, timeout_ms: i64, cap: i64) -> (text, text, i64):
+    if host_os() == "windows":
+        process_run_bounded("cmd.exe", ["/D", "/C", windows_script], timeout_ms, cap)
+    else:
+        process_run_bounded("/bin/sh", ["-c", posix_script], timeout_ms, cap)
 
 describe "test runner bounded output contract":
+    it "executes the hosted bounded-process ABI instead of a stale missing extern":
+        val (stdout, stderr, code) = run_bounded_process_case()
+
+        expect(stdout).to_equal("")
+        expect(stderr.len()).to_be_less_than(257)
+        expect(code).to_equal(-1)
+
+    it "reports every byte omitted when the capture cap is zero":
+        val (stdout, stderr, code) = run_bounded_process_case_with_script(
+            "printf A", "<nul set /p \"=A\" & exit /b 0", 5000, 0)
+
+        expect(stdout).to_equal("\n[output truncated: 1 bytes omitted]\n")
+        expect(stderr).to_equal("")
+        expect(code).to_equal(0)
+
+    it "uses the single retained byte as head when the capture cap is one":
+        val (stdout, stderr, code) = run_bounded_process_case_with_script(
+            "printf ABC", "<nul set /p \"=ABC\" & exit /b 0", 5000, 1)
+
+        expect(stdout).to_equal("A\n[output truncated: 2 bytes omitted]\n")
+        expect(stderr).to_equal("")
+        expect(code).to_equal(0)
+
+    it "retains an exact head and tail around the omitted-byte marker":
+        val (stdout, stderr, code) = run_bounded_process_case_with_script(
+            "printf ABCDEFGH", "<nul set /p \"=ABCDEFGH\" & exit /b 0", 5000, 4)
+
+        expect(stdout).to_equal("AB\n[output truncated: 4 bytes omitted]\nGH")
+        expect(stderr).to_equal("")
+        expect(code).to_equal(0)
+
+    it "bounds stdout and stderr independently":
+        val (stdout, stderr, code) = run_bounded_process_case_with_script(
+            "printf ABCDEFGHI; printf 123456 >&2",
+            "<nul set /p \"=ABCDEFGHI\" & <nul set /p \"=123456\" 1>&2 & exit /b 0",
+            5000, 4)
+
+        expect(stdout).to_equal("AB\n[output truncated: 5 bytes omitted]\nHI")
+        expect(stderr).to_equal("12\n[output truncated: 2 bytes omitted]\n56")
+        expect(code).to_equal(0)
+
+    it "preserves output received before a bounded-process timeout":
+        val timeout_ms = if host_os() == "windows": 1000 else: 250
+        val (stdout, stderr, code) = run_bounded_process_case_with_script(
+            "printf EARLY_OUT; printf EARLY_ERR >&2; sleep 5",
+            "<nul set /p \"=EARLY_OUT\" & <nul set /p \"=EARLY_ERR\" 1>&2 & ping -n 6 127.0.0.1 >nul",
+            timeout_ms, 64)
+
+        expect(stdout).to_equal("EARLY_OUT")
+        expect(stderr).to_start_with("EARLY_ERR")
+        expect(stderr.contains("TIMEOUT") or stderr.contains("timed out")).to_equal(true)
+        expect(code).to_equal(-1)
+
     it "routes daemon and direct child execution through the 4 MiB facade":
         val single = file_read("src/app/test_runner_new/test_runner_single.spl")
         val daemon = file_read("src/app/test_daemon/light_daemon.spl")

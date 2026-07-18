@@ -327,7 +327,7 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_time_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
 
     it "accepts the exact hosted fork ABI and POSIX memtrack dependencies":
-        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_timed_out\n00000030 T rt_fork_parent_signaled\n00000040 T rt_fork_parent_stdout\n00000050 T rt_fork_parent_stderr\n00000060 T rt_fork_child_exit\n"
+        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_wait_bounded\n00000030 T rt_fork_parent_timed_out\n00000040 T rt_fork_parent_signaled\n00000050 T rt_fork_parent_stdout\n00000060 T rt_fork_parent_stderr\n00000070 T rt_fork_child_exit\n"
         val posix_dependencies = "         U g_memtrack_enabled\n         U spl_memtrack_record\n         U spl_memtrack_unrecord\n"
         val prefixed = exact.replace(" T rt_", " T _rt_")
         val prefixed_dependencies = posix_dependencies.replace(" U g_", " U _g_").replace(" U spl_", " U _spl_")
@@ -337,10 +337,11 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_fork_provider_symbol_contract(prefixed + "         U _exit\n", "coff-mingw").is_err()).to_be(true)
 
     it "rejects fork ABI and platform-specific memtrack dependency drift":
-        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_timed_out\n00000030 T rt_fork_parent_signaled\n00000040 T rt_fork_parent_stdout\n00000050 T rt_fork_parent_stderr\n00000060 T rt_fork_child_exit\n"
+        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_wait_bounded\n00000030 T rt_fork_parent_timed_out\n00000040 T rt_fork_parent_signaled\n00000050 T rt_fork_parent_stdout\n00000060 T rt_fork_parent_stderr\n00000070 T rt_fork_child_exit\n"
         val dependencies = "         U g_memtrack_enabled\n         U spl_memtrack_record\n         U spl_memtrack_unrecord\n"
-        expect(stage4_validate_fork_provider_symbol_contract(exact.replace("00000060 T rt_fork_child_exit\n", "") + dependencies, "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + "00000070 T rt_fork_extra\n" + dependencies, "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact.replace("00000020 T rt_fork_parent_wait_bounded\n", "") + dependencies, "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact.replace("00000070 T rt_fork_child_exit\n", "") + dependencies, "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + "00000080 T rt_fork_extra\n" + dependencies, "elf").is_err()).to_be(true)
         expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U g_memtrack_enabled\n", ""), "elf").is_err()).to_be(true)
         expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U spl_memtrack_record\n", ""), "elf").is_err()).to_be(true)
         expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U spl_memtrack_unrecord\n", ""), "elf").is_err()).to_be(true)
@@ -603,6 +604,19 @@ not-an-address W rt_malformed
         expect(owner_rows.len()).to_equal(2)
         expect(owner_rows[0]).to_equal("rt_core=core-c")
         expect(owner_rows[1]).to_equal("rt_root=provider")
+
+    it "resolves bounded process wait through the fork provider":
+        val labels = ["runtime_fork", "runtime_process"]
+        val scans = [
+            "0000000000000000 T rt_fork_parent_wait_bounded",
+            "0000000000000000 T rt_process_run_bounded\n                 U rt_fork_parent_wait_bounded"
+        ]
+        val (selected, owner_rows) = stage4_resolve_requested_archive_owners(["rt_process_run_bounded"], labels, scans, false).unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(selected[0]).to_equal(0)
+        expect(selected[1]).to_equal(1)
+        expect(owner_rows[0]).to_equal("rt_fork_parent_wait_bounded=runtime_fork")
+        expect(owner_rows[1]).to_equal("rt_process_run_bounded=runtime_process")
 
     it "converges through a cyclic three-archive runtime closure":
         val labels = ["leaf", "middle", "root"]

@@ -273,8 +273,11 @@ transitive resolution validates its actual runtime dependencies. Requested-owner
 resolution now runs over the current
 candidate inventory and reports the first still-missing owner; Windows omits
 the invalid fork-stub candidate. The POSIX process slice now uses the canonical
-tagged array/string API and resolves through runtime-native, fork, and memtrack;
-the Windows process slice now calls the same quoting algorithm through a private
+tagged array/string API and resolves through runtime-native, fork, and memtrack.
+Bounded process execution is owned by hosted C on every supported host, with a
+native tuple facade and an exact Stage4 provider symbol; POSIX reuses the
+parameterized fork capture and Windows reuses the Job Object capture path. The
+Windows process slice now calls the same quoting algorithm through a private
 static helper while preserving the public runtime.c-only wrapper. Broader
 closure is not yet claimed complete. The strict flow now projects the selected
 archives to an exact requested-root capsule and routes that capsule to the

@@ -488,6 +488,8 @@ int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
+SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                 int64_t timeout_ms, int64_t max_output_bytes);
 #ifdef _WIN32
 char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t arg_count);
 #endif
