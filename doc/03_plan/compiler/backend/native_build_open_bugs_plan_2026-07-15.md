@@ -243,7 +243,13 @@ Raw `runtime_legacy_core.o` is also rejected even though it names current
 missing symbols: its legacy array/split ABI and no-op dictionary exports are
 not valid canonical owners. The reachable `rt_bytes_from_raw` and `rt_strsplit`
 bridges now build tagged arrays directly; a future compatibility capsule must
-localize every legacy array/dictionary/split export before admission.
+localize every legacy array/dictionary/split export before admission. That
+exact localized compatibility capsule is now source-implemented: strict Stage4 compiles the
+fresh legacy object, localizes it to the audited 18-symbol runtime-native
+closure, validates the exact raw and localized envelopes for every hosted
+object-format contract, and admits only those exact names for direct or
+transitive ownership.
+Execution is pending; exact selected-archive projection/linking remains open.
 
 Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
 `lib*.a`: explicit linker flavor wins, then canonical `PLATFORM_ABI` preserves

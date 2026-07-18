@@ -404,13 +404,73 @@ int rt_file_create_excl(const char* path, int64_t path_len,
 }
 
 bool rt_is_dir(const char* path) {
+#if defined(_WIN32)
+    DWORD attributes = path ? GetFileAttributesA(path) : INVALID_FILE_ATTRIBUTES;
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
     struct stat st;
     return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
 }
 
+#if defined(_WIN32)
+static bool core_dir_remove_all_impl(const char* path) {
+    DWORD attributes = GetFileAttributesA(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) return DeleteFileA(path) != 0;
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return RemoveDirectoryA(path) != 0;
+
+    char pattern[4096];
+    int pattern_len = snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    if (pattern_len < 0 || (size_t)pattern_len >= sizeof(pattern)) return false;
+    WIN32_FIND_DATAA entry;
+    HANDLE handle = FindFirstFileA(pattern, &entry);
+    if (handle != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
+            char child[4096];
+            int child_len = snprintf(child, sizeof(child), "%s\\%s", path, entry.cFileName);
+            if (child_len < 0 || (size_t)child_len >= sizeof(child) || !core_dir_remove_all_impl(child)) {
+                FindClose(handle);
+                return false;
+            }
+        } while (FindNextFileA(handle, &entry));
+        DWORD find_error = GetLastError();
+        FindClose(handle);
+        if (find_error != ERROR_NO_MORE_FILES) return false;
+    } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+        return false;
+    }
+    return RemoveDirectoryA(path) != 0;
+}
+#else
+static bool core_dir_remove_all_impl(const char* path) {
+    struct stat metadata;
+    if (lstat(path, &metadata) != 0) return errno == ENOENT;
+    if (!S_ISDIR(metadata.st_mode) || S_ISLNK(metadata.st_mode)) return unlink(path) == 0;
+
+    DIR* dir = opendir(path);
+    if (!dir) return false;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char child[4096];
+        int child_len = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (child_len < 0 || (size_t)child_len >= sizeof(child) || !core_dir_remove_all_impl(child)) {
+            closedir(dir);
+            return false;
+        }
+    }
+    if (closedir(dir) != 0) return false;
+    return rmdir(path) == 0;
+}
+#endif
+
 bool rt_dir_remove_all(const char* path) {
-    if (!path || !*path) return false;
-    return remove(path) == 0 || errno == ENOENT;
+    return path && *path && core_dir_remove_all_impl(path);
 }
 
 char* rt_getcwd(void) {

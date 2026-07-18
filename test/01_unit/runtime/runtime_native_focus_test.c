@@ -109,13 +109,8 @@ int main(void) {
     assert(walk_contains(walked, walk_cycle));
     assert(!walk_contains(walked, walk_nested));
     assert(!walk_contains(walked, walk_suffix_dir));
-    assert(unlink(walk_cycle) == 0);
-    assert(unlink(walk_file_link) == 0);
-    assert(unlink(walk_child) == 0);
-    assert(unlink(walk_regular) == 0);
-    assert(rmdir(walk_nested) == 0);
-    assert(rmdir(walk_suffix_dir) == 0);
-    assert(rmdir(walk_root) == 0);
+    assert(rt_dir_remove_all(walk_root));
+    assert(access(walk_root, F_OK) != 0);
 
     int64_t builder = rt_string_builder_new();
     assert(builder != 0);

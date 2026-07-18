@@ -179,7 +179,9 @@ the shared binary — deploys require explicit user go-ahead).
   arm64/x64, Windows x64, and FreeBSD x86_64 select it explicitly. First staged
   platform-matrix execution is pending.
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
-  correctness campaign. Its current source blocker is the fail-closed exact
-  archive-projection/link step after runtime-native inventory and transitive
-  requested-owner resolution, not the retired seed enum/mcall diagnoses. See
+  correctness campaign. Runtime-native's 18-symbol legacy dependency owner is
+  now source-implemented as an exact localized compatibility provider. The
+  current source blocker is the fail-closed exact archive-projection/link step
+  after inventory and transitive requested-owner resolution, not the retired
+  seed enum/mcall diagnoses. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

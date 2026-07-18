@@ -166,6 +166,10 @@ pub fn stage4_runtime_native_archive_file(target_os_name: text, msvc_linker: boo
     """Return the target/linker-specific runtime-native archive name."""
     stage4_hosted_provider_archive_file("runtime_native", target_os_name, msvc_linker)
 
+pub fn stage4_runtime_legacy_compat_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the exact localized legacy compatibility archive name."""
+    stage4_hosted_provider_archive_file("runtime_legacy_compat", target_os_name, msvc_linker)
+
 pub fn stage4_process_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
     """Return the target/linker-specific process provider archive name."""
     stage4_hosted_provider_archive_file("process", target_os_name, msvc_linker)
@@ -314,6 +318,85 @@ pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects:
 pub fn stage4_runtime_native_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for the runtime-native archive."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_runtime_legacy_compat_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for the localized legacy compatibility archive."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_runtime_legacy_compat_exports() -> [text]:
+    """Exact legacy helpers retained for runtime-native and emitted compiler calls."""
+    [
+        "rt_dir_remove_all", "rt_getcwd", "rt_is_dir", "rt_process_spawn_async",
+        "rt_sleep_ms_native", "spl_env_get", "spl_file_read", "spl_panic",
+        "spl_print", "spl_println", "spl_str_cmp", "spl_str_concat",
+        "spl_strdup", "spl_str_index_of", "spl_str_len", "spl_str_new",
+        "spl_str_replace", "spl_str_slice"
+    ]
+
+pub fn stage4_runtime_legacy_compat_localization_symbols(nm_output: text, object_format: text) -> Result<[text], text>:
+    """Localize every raw legacy definition outside the audited 18-symbol ABI."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 runtime legacy compatibility object format '" + object_format + "'")
+    val exports = stage4_runtime_legacy_compat_exports()
+    var export_set: Dict<text, bool> = {}
+    for symbol in exports:
+        export_set[symbol] = true
+
+    var definition_counts: Dict<text, i64> = {}
+    var localize: [text] = []
+    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    for raw_symbol in raw_definitions:
+        if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
+        if (definition_counts[symbol] ?? 0) != 1:
+            return Err("Stage4 runtime legacy compatibility source repeats global definition '" + symbol + "'")
+        if not export_set.has(symbol):
+            localize = localize.push(raw_symbol)
+    for symbol in exports:
+        if (definition_counts[symbol] ?? 0) != 1:
+            return Err("Stage4 runtime legacy compatibility source export '" + symbol + "' must exist exactly once")
+
+    var runtime_undefined: Dict<text, bool> = {}
+    for raw_symbol in raw_undefined:
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
+            runtime_undefined[symbol] = true
+    if runtime_undefined.len() != 1 or not runtime_undefined.has("rt_value_bool"):
+        return Err("Stage4 runtime legacy compatibility source runtime dependencies differ from exact ABI: " + runtime_undefined.keys().join(", "))
+
+    Ok(stage4_sorted_text(localize))
+
+pub fn stage4_validate_runtime_legacy_compat_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Require exactly the 18 safe globals and the sole rt_value_bool dependency."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 runtime legacy compatibility object format '" + object_format + "'")
+    val exports = stage4_runtime_legacy_compat_exports()
+    var expected: Dict<text, bool> = {}
+    for symbol in exports:
+        expected[symbol] = true
+    var definition_counts: Dict<text, i64> = {}
+    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    for raw_symbol in raw_definitions:
+        if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if not expected.has(symbol):
+            return Err("Stage4 runtime legacy compatibility retained forbidden global definition '" + symbol + "'")
+        definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
+    for symbol in exports:
+        if (definition_counts[symbol] ?? 0) != 1:
+            return Err("Stage4 runtime legacy compatibility export '" + symbol + "' must exist exactly once")
+
+    var runtime_undefined: Dict<text, bool> = {}
+    for raw_symbol in raw_undefined:
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
+            runtime_undefined[symbol] = true
+    if runtime_undefined.len() != 1 or not runtime_undefined.has("rt_value_bool"):
+        return Err("Stage4 runtime legacy compatibility dependencies differ from exact ABI: " + runtime_undefined.keys().join(", "))
+    Ok(())
 
 pub fn stage4_process_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for the process provider."""
