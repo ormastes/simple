@@ -460,9 +460,9 @@ mod tests {
         let value = Value::array(vec![Value::Int(7), Value::Bool(true)]);
         let runtime = value_to_runtime(&value);
 
-        assert_eq!(simple_runtime::value::rt_tuple_len(runtime), 2);
-        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 0).as_int(), 7);
-        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 1), RuntimeValue::TRUE);
+        assert_eq!(simple_runtime::value::rt_array_len(runtime), 2);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 0).as_int(), 7);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 1), RuntimeValue::TRUE);
     }
 
     #[test]
