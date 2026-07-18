@@ -1439,13 +1439,37 @@ int64_t rt_file_stat(const char* path) {
     return 0;
 }
 
-typedef struct { struct stat st; } rt_stat_handle;
+typedef struct {
+    struct stat st;
+    int is_symlink;
+    int readonly;
+    int64_t created;
+} rt_stat_handle;
 
 int64_t rt_stat_open(const char* path) {
     if (!path) return 0;
     rt_stat_handle* h = (rt_stat_handle*)malloc(sizeof(rt_stat_handle));
     if (!h) return 0;
     if (stat(path, &h->st) != 0) { free(h); return 0; }
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributesA(path);
+    h->is_symlink = attrs != INVALID_FILE_ATTRIBUTES &&
+                    (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    h->readonly = attrs != INVALID_FILE_ATTRIBUTES &&
+                  (attrs & FILE_ATTRIBUTE_READONLY) != 0;
+    h->created = (int64_t)h->st.st_ctime;
+#else
+    struct stat link_st;
+    h->is_symlink = lstat(path, &link_st) == 0 && S_ISLNK(link_st.st_mode);
+    h->readonly = (h->st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0;
+#if defined(__APPLE__)
+    h->created = (int64_t)h->st.st_birthtimespec.tv_sec;
+#elif defined(__FreeBSD__)
+    h->created = (int64_t)h->st.st_birthtim.tv_sec;
+#else
+    h->created = 0;
+#endif
+#endif
     return (int64_t)(uintptr_t)h;
 }
 int64_t rt_file_stat_size(int64_t handle) {
@@ -1463,6 +1487,18 @@ int rt_file_stat_is_dir(int64_t handle) {
 int rt_file_stat_is_file(int64_t handle) {
     if (!handle) return 0;
     return S_ISREG(((rt_stat_handle*)(uintptr_t)handle)->st.st_mode);
+}
+int rt_file_stat_is_symlink(int64_t handle) {
+    if (!handle) return 0;
+    return ((rt_stat_handle*)(uintptr_t)handle)->is_symlink;
+}
+int rt_file_stat_readonly(int64_t handle) {
+    if (!handle) return 0;
+    return ((rt_stat_handle*)(uintptr_t)handle)->readonly;
+}
+int64_t rt_file_stat_created(int64_t handle) {
+    if (!handle) return 0;
+    return ((rt_stat_handle*)(uintptr_t)handle)->created;
 }
 void rt_file_stat_free(int64_t handle) {
     if (handle) free((void*)(uintptr_t)handle);

@@ -443,9 +443,11 @@ stay in pure Simple.
 They reuse the existing `rt_dir_walk`, shared `std.glob` matcher, and `std.path`
 lexical helpers; no new runtime ABI was added. The core-C `rt_dir_walk` owner now returns the canonical `rt_array_*` /
 `rt_string_*` representation consumed by native Simple iteration instead of the
-legacy `spl_array_*` representation. The remaining live unresolvable entry is
-`file_metadata` (1 total); the three dead path declarations remain separate
-cleanup.
+legacy `spl_array_*` representation. `file_metadata` now constructs the public
+metadata record in pure Simple over one opaque runtime stat handle. The handle
+adds only platform-owned symlink, readonly, and creation-time scalar getters;
+no live unresolvable entries remain in this stub family. The three dead path
+declarations remain separate cleanup.
 
 Focused evidence: both fs/glob profile twins pass incremental source checking; a
 pure Stage2 LLVM matcher probe and a core-C-bootstrap `Glob.matches()` /
@@ -454,4 +456,6 @@ contract and source parity spec now assert canonical directory-walk array access
 A focused source/behavior spec now defines Unix/Windows-form and empty-path
 `Path.stem`, parent, filename, extension, components, and
 extension-replacement coverage;
-staged native execution and the full Stage4 gate remain pending.
+the metadata contract covers missing/file/directory behavior and the platform
+implementation branches. Staged native execution and the full Stage4 gate
+remain pending.

@@ -1,0 +1,44 @@
+use std.fs.{File}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "filesystem metadata ownership":
+    it "constructs metadata in pure Simple and releases the opaque handle":
+        for profile in ["nogc_sync_mut", "nogc_async_mut"]:
+            val source = rt_file_read_text("src/lib/{profile}/fs.spl") ?? ""
+            expect(source.contains("extern fn file_metadata")).to_equal(false)
+            expect(source).to_contain("fn file_metadata(path: text) -> FileMetadata?:")
+            expect(source).to_contain("val handle = rt_stat_open(path)")
+            expect(source).to_contain("val is_symlink = rt_file_stat_is_symlink(handle)")
+            expect(source).to_contain("val readonly = rt_file_stat_readonly(handle)")
+            expect(source).to_contain("val created = rt_file_stat_created(handle)")
+            expect(source).to_contain("rt_file_stat_free(handle)")
+
+    it "keeps platform metadata implementation branches explicit":
+        val runtime = rt_file_read_text("src/runtime/runtime.c") ?? ""
+        val header = rt_file_read_text("src/runtime/runtime.h") ?? ""
+        val interpreter = rt_file_read_text(
+            "src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+        ) ?? ""
+        expect(runtime).to_contain("lstat(path, &link_st)")
+        expect(runtime).to_contain("FILE_ATTRIBUTE_REPARSE_POINT")
+        expect(runtime).to_contain("FILE_ATTRIBUTE_READONLY")
+        expect(runtime).to_contain("st_birthtimespec.tv_sec")
+        expect(runtime).to_contain("st_birthtim.tv_sec")
+        expect(runtime).to_contain("h->created = 0")
+        expect(header).to_contain("rt_file_stat_is_symlink(int64_t handle)")
+        expect(header).to_contain("rt_file_stat_readonly(int64_t handle)")
+        expect(header).to_contain("rt_file_stat_created(int64_t handle)")
+        expect(interpreter).to_contain("insert_simple!(\"rt_file_stat_is_symlink\"")
+        expect(interpreter).to_contain("insert_simple!(\"rt_file_stat_readonly\"")
+        expect(interpreter).to_contain("insert_simple!(\"rt_file_stat_created\"")
+
+    it "reports missing files regular files and directories":
+        expect(File.metadata("")).to_be_nil()
+        val file_meta = File.metadata("src/runtime/runtime.h").unwrap()
+        expect(file_meta.is_file).to_equal(true)
+        expect(file_meta.is_dir).to_equal(false)
+        expect(file_meta.size).to_be_greater_than(0)
+        val dir_meta = File.metadata("src/runtime").unwrap()
+        expect(dir_meta.is_file).to_equal(false)
+        expect(dir_meta.is_dir).to_equal(true)

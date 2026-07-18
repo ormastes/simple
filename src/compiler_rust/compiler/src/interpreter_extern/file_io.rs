@@ -1656,9 +1656,41 @@ struct StatHandle {
     mtime: i64,
     is_dir: bool,
     is_file: bool,
+    is_symlink: bool,
+    readonly: bool,
+    created: i64,
 }
 
 static STAT_HANDLES: std::sync::Mutex<Vec<Option<StatHandle>>> = std::sync::Mutex::new(Vec::new());
+
+fn stat_path_is_symlink(path: &str) -> bool {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return false,
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return meta.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    meta.file_type().is_symlink()
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
+fn stat_created_seconds(meta: &fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    meta.created()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", windows)))]
+fn stat_created_seconds(_meta: &fs::Metadata) -> i64 {
+    0
+}
 
 pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
@@ -1679,6 +1711,9 @@ pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
         mtime,
         is_dir: meta.is_dir(),
         is_file: meta.is_file(),
+        is_symlink: stat_path_is_symlink(&path),
+        readonly: meta.permissions().readonly(),
+        created: stat_created_seconds(&meta),
     };
     let mut handles = STAT_HANDLES.lock().unwrap();
     for (i, slot) in handles.iter_mut().enumerate() {
@@ -1744,6 +1779,50 @@ pub fn rt_file_stat_is_file(args: &[Value]) -> Result<Value, CompileError> {
             .and_then(|s| s.as_ref())
             .map(|s| s.is_file)
             .unwrap_or(false),
+    ))
+}
+
+pub fn rt_file_stat_is_symlink(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Bool(false));
+    };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Bool(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.is_symlink)
+            .unwrap_or(false),
+    ))
+}
+
+pub fn rt_file_stat_readonly(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Bool(false));
+    };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Bool(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.readonly)
+            .unwrap_or(false),
+    ))
+}
+
+pub fn rt_file_stat_created(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Int(
+        handles.get(h).and_then(|s| s.as_ref()).map(|s| s.created).unwrap_or(0),
     ))
 }
 

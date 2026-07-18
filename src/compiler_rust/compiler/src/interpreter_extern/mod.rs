@@ -1201,9 +1201,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_size", file_io::rt_file_size);
     insert_simple!("rt_file_stat", file_io::rt_file_stat);
     insert_simple!("rt_file_stat_free", file_io::rt_file_stat_free);
+    insert_simple!("rt_file_stat_created", file_io::rt_file_stat_created);
     insert_simple!("rt_file_stat_is_dir", file_io::rt_file_stat_is_dir);
     insert_simple!("rt_file_stat_is_file", file_io::rt_file_stat_is_file);
+    insert_simple!("rt_file_stat_is_symlink", file_io::rt_file_stat_is_symlink);
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
+    insert_simple!("rt_file_stat_readonly", file_io::rt_file_stat_readonly);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);

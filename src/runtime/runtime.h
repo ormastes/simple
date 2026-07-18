@@ -616,6 +616,15 @@ int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
 int64_t     rt_file_stat(const char* path);
+int64_t     rt_stat_open(const char* path);
+int64_t     rt_file_stat_size(int64_t handle);
+int64_t     rt_file_stat_mtime(int64_t handle);
+int         rt_file_stat_is_dir(int64_t handle);
+int         rt_file_stat_is_file(int64_t handle);
+int         rt_file_stat_is_symlink(int64_t handle);
+int         rt_file_stat_readonly(int64_t handle);
+int64_t     rt_file_stat_created(int64_t handle);
+void        rt_file_stat_free(int64_t handle);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
 int64_t     rt_cli_arg_count(void);

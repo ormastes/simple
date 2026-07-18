@@ -247,7 +247,9 @@ the shared binary — deploys require explicit user go-ahead).
   The executed Stage4 unresolved preview's bare `path_parent`, `path_filename`,
   `path_extension`, `path_stem`, `path_components`, and `path_with_extension`
   are also removed in both filesystem profiles by reusing `std.path`; no new C
-  provider was added. Only `file_metadata` remains in that stub family.
+  provider was added. `file_metadata` now uses one opaque runtime stat handle,
+  constructs the record in pure Simple, and releases the handle; no live
+  unresolvable entry remains in that stub family.
   Windows COFF projection and DLL staging remain a separate source-open lane.
   The remaining blocker is execution evidence plus any concrete missing owner
   reported by the complete compiler request closure, not the retired seed
