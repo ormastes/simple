@@ -9,7 +9,7 @@ use std.js.types.ast_types.JsExpression
 use std.js.types.ast_types.JsStatement
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_SET_TIMEOUT, NATIVE_CLEAR_TIMEOUT, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
+use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_SET_TIMEOUT, NATIVE_CLEAR_TIMEOUT, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_PROMISE_EXECUTOR_RESOLVE, NATIVE_PROMISE_EXECUTOR_REJECT}
 use std.js.node.buffer_module.{buffer_byteLength}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
@@ -182,6 +182,11 @@ impl JsInterpreter:
 
     # new operator: new Foo(args)
     me eval_new(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
+        # `Promise` resolves to a plain host object (not JsValue.Function), so
+        # it needs its own construction path: a real pending promise whose
+        # executor runs synchronously with bound resolve/reject callbacks.
+        if self.ident_name(callee) == "Promise":
+            return self._eval_new_promise(args, env)
         val callee_val = self.eval_expression(callee, env)?
         var arg_vals: [JsValue] = []
         var i = 0
@@ -1376,6 +1381,9 @@ impl JsInterpreter:
                                     self.call_stack.pop()
                                     self.control_return = compile_saved_return
                                     return Ok(compile_result)
+                            if mapping.second == NATIVE_PROMISE_EXECUTOR_RESOLVE or mapping.second == NATIVE_PROMISE_EXECUTOR_REJECT:
+                                val _ = self._dispatch_promise_executor_native(mapping.second, fn_id, arg_vals)
+                                return Ok(JsValue.Undefined)
                             if mapping.second == NATIVE_WEBASSEMBLY_EXPORT_FUNCTION:
                                 return Ok(self._native_webassembly_export_function(this_val, arg_vals, fn_id))
                             if mapping.second == NATIVE_UINT8_ARRAY_SUBARRAY:

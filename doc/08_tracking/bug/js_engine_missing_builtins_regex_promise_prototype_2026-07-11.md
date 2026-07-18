@@ -48,6 +48,25 @@ Three builtin gaps in the subset JS interpreter, hit by everyday page JS:
    ```
    typeof Promise            // => "undefined"   (expected "function")
    ```
+   **Update:** `Promise.resolve/reject/.then/.catch/.finally` and `typeof
+   Promise` were fixed in an earlier pass (see git history around commit
+   `bac65baa7b1`), but `new Promise((resolve, reject) => {...})` construction
+   still returned `undefined` — `eval_new` only matched a `JsValue.Function`
+   callee, while the `Promise` identifier resolves to a plain host object.
+   Fixed: `new Promise(executor)` now creates a real pending promise, runs the
+   executor synchronously, and settles it via bound `resolve`/`reject`
+   callbacks (see `src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl`
+   `eval_new` and `interpreter_async.spl` `_eval_new_promise`). Regression
+   spec: `test/01_unit/lib/common/js_runtime_new_promise_executor_spec.spl`.
+
+   **Deferred, separate gap found while fixing the above:** the subset parser
+   mis-parses a postfix chain immediately after `new Ctor(...)`, e.g.
+   `new Promise(executor).then(cb)` is parsed as if `.then(cb)` were an
+   argument to the `new` expression itself (`_js_parser_expression`'s `new `
+   handling in `parser.spl` greedily consumes the whole postfix chain via
+   `_js_parser_postfix` and reattributes the trailing call). Workaround:
+   assign to a variable first — `var p = new Promise(executor); p.then(cb);`.
+   Not fixed here; scope was the executor/construction bug only.
 
 3. **Prototype methods are not introspectable via property access** — `typeof`
    on a method property returns `"undefined"` even though the method is callable
