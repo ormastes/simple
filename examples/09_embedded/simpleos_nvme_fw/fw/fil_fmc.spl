@@ -155,6 +155,22 @@ impl Fmc:
         if st == FMC_DONE or st == FMC_ERR:
             me.status = FMC_IDLE
 
+    # Read a page at a shifted read reference (read-retry). Sideband — like the
+    # emu_* test API it forwards to the backend without touching the command FSM.
+    # On the Vt-physics emulator the NandEmu applies the Vref offset for this one
+    # sense and restores the prior reference before returning (atomic set→read→
+    # restore, writeback mandatory: the sense materialises lazy drift + advances the
+    # emulated clock). The behavioural NandDevice has no Vref actuator, so there it
+    # is exactly a plain read — NOT a faked shifted sense.
+    me read_at_vref(ppn: i64, offset: i64) -> FmcResult:
+        if val Some(ev) = me.emu:
+            var e = ev
+            val rd: NandRead = e.read_at_vref(ppn, offset)
+            me.emu = Some(e)
+            return FmcResult(code: NAND_OK, data: rd.data, lba: rd.lba, seq: rd.seq, ecc: rd.ecc, err: rd.err)
+        val dr: NandRead = me.nand.read_page(ppn)
+        FmcResult(code: NAND_OK, data: dr.data, lba: dr.lba, seq: dr.seq, ecc: dr.ecc, err: dr.err)
+
     # ── Sideband device queries (not on the command path) ──
     # Each mirrors the command-path dispatch: forward to the emulator when `emu`
     # is Some (writing the mutated copy back), else to the NandDevice.
@@ -227,6 +243,28 @@ impl Fmc:
             var e = ev
             e.set_vref_offset(offset)
             me.emu = Some(e)
+
+    # Soft-observability re-export (arch doc §3 prereq 3, §5): forward the NeChip
+    # per-page Vt histogram / read margin from the emulator backend. Empty / 0 on
+    # the behavioural NandDevice, which has no threshold-voltage model. Read-only on
+    # the chip, but the unwrapped emu copy is still written back to match the
+    # sideband convention (harmless — the observability calls do not mutate cells).
+    me emu_vt_histogram(ppn: i64) -> [i64]:
+        if val Some(ev) = me.emu:
+            var e = ev
+            val h: [i64] = e.vt_histogram(ppn)
+            me.emu = Some(e)
+            return h
+        var empty: [i64] = []
+        empty
+
+    me emu_read_margin(ppn: i64) -> i64:
+        if val Some(ev) = me.emu:
+            var e = ev
+            val m: i64 = e.read_margin(ppn)
+            me.emu = Some(e)
+            return m
+        0
 
 # A NAND op that failed latches ERR (sticky); otherwise DONE.
 fn fmc_status_for(code: i64) -> i64:

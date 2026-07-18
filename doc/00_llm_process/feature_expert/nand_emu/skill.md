@@ -50,6 +50,25 @@ NVMe firmware's FIL seam.
 - Seed test-runner daemon hangs at init; run specs single-file via
   `timeout 300 bin/simple run <spec>` (guide caveat).
 
+## Recovery / prevention lane (2026-07-19)
+
+- Taxonomy of NAND SSD recovery+prevention algorithms:
+  `doc/01_research/hardware/nand_recovery/nand_ssd_recovery_prevention_taxonomy.md`
+- Local gap analysis (what fw has / lacks, with file:line):
+  `doc/01_research/hardware/nand_recovery/nand_recovery_gap_analysis_local.md`
+  — headline: vref actuator wired end-to-end but no policy calls it;
+  scrub_once / wear_level_once / rain_seal / alloc_spare implemented-but-UNWIRED.
+- Architecture (THE LAW: shared logic layer-neutral, placeable on FTL or FIL
+  unless it needs L2P/hotness/GC state): `rel_*` module family below `fil`
+  (depends only on nvme_types), pure verdict-returning policies + thin
+  RelFilMount/RelFtlMount adapters:
+  `doc/04_architecture/hardware/nand_recovery/reliability_engine_architecture.md`
+- Detail design (v1 SLC-validatable set: ladder, ROR-lite, FCR/DEAR-lite,
+  STRAW-lite, SREA-lite, wiring pass):
+  `doc/05_design/hardware/nand_recovery/recovery_algorithms_design.md`
+- Prerequisite seams before implementing: `FilRead.corrected`,
+  `fil.read_at_vref`, NandEmu wrapper re-export of vt_histogram/read_margin.
+
 ## Related
 
 Layer experts: [backend](../../layer_expert/backend/skill.md) (VHDL subset),

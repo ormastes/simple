@@ -15,11 +15,28 @@ use fil_ecc.*
 use fil_badblock.*
 
 # Result of an ECC-verified read. `code` is NAND_OK / NAND_ECC_FIXED / NAND_ECC_FAIL.
+# `corrected` is an ADDITIVE field: the coarse ECC decode outcome the reliability
+# engine observes to notice correction events — 0 = clean, 1 = a bit error was
+# corrected, 2 = uncorrectable. Existing callers keep checking `code`; `corrected`
+# is derived from `code` via fil_corrected_of, so its 0/1/2 semantic is stable even
+# if the NAND_* constant values change.
 struct FilRead:
     data: i64
     lba:  i64
     seq:  i64
     code: i64
+    corrected: i64
+
+# Map an ECC decode result code to the coarse reliability-observable outcome:
+# clean (0), corrected (1), uncorrectable (2). This is the surface rel_health /
+# rel_ladder read (arch doc §3 prereq 1, §5) — it does not depend on the numeric
+# NAND_* enum values.
+fn fil_corrected_of(code: i64) -> i64:
+    if code == NAND_ECC_FIXED:
+        return 1
+    if code == NAND_ECC_FAIL:
+        return 2
+    0
 
 struct Fil:
     fmc: Fmc
@@ -59,13 +76,28 @@ impl Fil:
     # Read one page and verify against the ECC stored in NAND OOB at program time.
     me read(ppn: i64) -> FilRead:
         if not ppn_in_range(ppn):
-            return FilRead(data: 0, lba: UNMAP, seq: 0, code: NAND_ECC_FAIL)
+            return FilRead(data: 0, lba: UNMAP, seq: 0, code: NAND_ECC_FAIL, corrected: fil_corrected_of(NAND_ECC_FAIL))
         me.fmc.load(fmc_cmd(FMC_OP_READ, ppn, 0, 0, 0))
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
         me.fmc.ack()
         val dec: EccDecode = ecc_decode(res.data, res.lba, res.seq, res.ecc, res.err)
-        FilRead(data: dec.data, lba: res.lba, seq: res.seq, code: dec.code)
+        FilRead(data: dec.data, lba: res.lba, seq: res.seq, code: dec.code, corrected: fil_corrected_of(dec.code))
+
+    # Read one page at a shifted read reference (read-retry primitive for the
+    # reliability retry ladder). The Vref actuator is chip-global (vref = 128 +
+    # offset) and lives only on the Vt-physics emulator backend: there the offset is
+    # applied for this one sense and the PRIOR reference restored before returning
+    # (set→read→restore is atomic, in NandEmu.read_at_vref). On the default
+    # behavioural NandDevice backend there is no threshold-voltage model and hence no
+    # Vref actuator, so this returns exactly the same bytes a plain read() would —
+    # NOT a faked shifted sense. `corrected` is populated identically to read().
+    me read_at_vref(ppn: i64, offset: i64) -> FilRead:
+        if not ppn_in_range(ppn):
+            return FilRead(data: 0, lba: UNMAP, seq: 0, code: NAND_ECC_FAIL, corrected: fil_corrected_of(NAND_ECC_FAIL))
+        val res: FmcResult = me.fmc.read_at_vref(ppn, offset)
+        val dec: EccDecode = ecc_decode(res.data, res.lba, res.seq, res.ecc, res.err)
+        FilRead(data: dec.data, lba: res.lba, seq: res.seq, code: dec.code, corrected: fil_corrected_of(dec.code))
 
     # Erase one block. Retires the block on erase failure.
     me erase(blk: i64) -> i64:
@@ -139,6 +171,17 @@ impl Fil:
 
     me emu_set_vref_offset(offset: i64):
         me.fmc.emu_set_vref_offset(offset)
+
+    # Soft-observability re-export (arch doc §3 prereq 3, §5): surface the NeChip's
+    # per-page stored-Vt histogram and read margin through the FIL seam so a
+    # reliability spec can validate against the Vt oracle. `ppn` is a firmware page
+    # number (folded into the S1 window like read). Empty / 0 on the default
+    # NandDevice backend, which has no threshold-voltage model.
+    me emu_vt_histogram(ppn: i64) -> [i64]:
+        me.fmc.emu_vt_histogram(ppn)
+
+    me emu_read_margin(ppn: i64) -> i64:
+        me.fmc.emu_read_margin(ppn)
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
