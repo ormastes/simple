@@ -768,6 +768,11 @@ fn test_while_val_exists_check_binds_unwrapped_option_value() {
         matches!(else_block.as_deref(), Some([HirStmt::Break])),
         "while-val's non-matching path must `break` the desugared Loop: {else_block:?}"
     );
+
+    // HIR shape validity doesn't prove MIR accepts it -- `Break` nested inside
+    // a synthesized `Loop`'s `If`/else is a novel combination N6's fix never
+    // produced. Confirm MIR lowering actually accepts this shape.
+    crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed for desugared while-val Loop");
 }
 
 /// B10 fix: expression-position if-let (`val r = if val v = expr.?: v else:
@@ -841,4 +846,10 @@ fn test_expr_if_val_exists_check_binds_unwrapped_option_value() {
         binds_v_to_subject,
         "`v` binding did not copy the unwrapped subject (local {subject_idx}): {then_stmts:?}"
     );
+
+    // HIR shape validity doesn't prove MIR accepts it -- a `Block` as a
+    // `Let`'s direct value (and a `Block` as an `If`'s `then_branch`) is a
+    // novel combination N6's fix never produced. Confirm MIR lowering
+    // actually accepts this shape.
+    crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed for desugared expr-if-val Block");
 }
