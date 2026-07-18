@@ -777,3 +777,13 @@ landmine catalog (doc/08_tracking/bug/). Recent fixes shipped: seed
 import-alias resolution, receiver-binding under --entry-closure, NVMe DMA 
 zero-address guard, interpreter stack overflow, i64 print precision. Canonical 
 reference guide (in progress): doc/07_guide/os/baremetal_simple_codegen_landmines.md.
+
+## Verification tiering (build infra)
+
+Pick the cheapest gate that exercises the change; a small pure-Simple lib edit is
+NOT a full bootstrap. Per `.claude/rules/bootstrap.md` § "Verification tiering":
+T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel build via
+`SIMPLE_NATIVE_INCREMENTAL=1` with a stable `--cache-dir` for small lib changes
+(reuses per-module objects — link + entry-closure discovery still run each build);
+T2 full kernel rebuild for structural changes; T3 full bootstrap only when
+`src/compiler_rust`/`src/compiler` changed or as the final pre-goal gate.

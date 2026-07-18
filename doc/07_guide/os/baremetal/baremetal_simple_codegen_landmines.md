@@ -238,6 +238,26 @@ native-build --backend cranelift --cpu x86-64-v1 --opt-level=aggressive \
   --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld \
   --entry examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl
 ```
+
+**Verification tiering (don't full-rebuild for a one-line lib edit).** See
+`.claude/rules/bootstrap.md` § "Verification tiering" for the full T0–T3 policy.
+For this kernel specifically:
+- **Small pure-Simple lib change** → add `SIMPLE_NATIVE_INCREMENTAL=1` and a
+  **stable** `--cache-dir <dir>` (do not wipe it between runs — a fresh dir is a
+  cold build). Only the changed module(s) recompile; the build prints
+  `[native-incremental] N reused / M rebuilt`. This reuses per-module objects
+  only: the **link and entry-closure discovery still run every build**, so it is
+  faster than a full rebuild, not instant. Reuse also requires the **same seed
+  binary** — rebuilding the seed changes `compiler_fingerprint` and invalidates
+  every cached object. The `SIMPLE_NATIVE_INCREMENTAL` key folds in a global
+  build fingerprint (opt-level, entry-closure flag, target, linker-script, and
+  the closure's cross-module struct/enum/signature layout), so any structural or
+  cross-module change auto-falls-back to a full rebuild and prints the reason;
+  a leaf edit can never ship a stale wrong kernel. Default OFF.
+- **Structural change** (new module, struct/enum/trait layout, entry-closure set,
+  linker/flag/target/opt-level) → full rebuild (T1 auto-triggers this too).
+- **Compiler change** (`src/compiler_rust` or `src/compiler`) → full bootstrap.
+
 Boot with `qemu-system-x86_64 -machine q35 -cpu max -m 2G` plus an
 NVMe-backed FAT32 disk if the VFS/disk path is under test
 (`-drive file=...,if=none,id=nvm,format=raw,snapshot=on -device

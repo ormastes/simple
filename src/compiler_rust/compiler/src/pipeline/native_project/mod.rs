@@ -285,6 +285,18 @@ pub struct NativeBuildConfig {
     /// Emit a static archive from compiled Simple objects instead of linking
     /// an executable.
     pub emit_archive: bool,
+    /// Opt-in safe incremental object reuse (SIMPLE_NATIVE_INCREMENTAL=1).
+    ///
+    /// When set, every per-module object cache key additionally folds in a
+    /// `global_build_fingerprint` (opt-level, entry-closure flag, target triple,
+    /// linker-script content, and an order-independent hash of ALL cross-module
+    /// codegen inputs — struct/enum layouts, trait impls, import map, exported
+    /// signatures). This closes the stale-hit hazard where entry-closure /
+    /// global-def population makes one module's object bytes depend on another
+    /// module's type layout: a struct change in module A then invalidates the
+    /// whole per-module cache instead of silently reusing a stale object for
+    /// module B. Default false preserves the legacy content-only key.
+    pub incremental_hardening: bool,
 }
 
 impl Default for NativeBuildConfig {
@@ -311,6 +323,7 @@ impl Default for NativeBuildConfig {
             linker_script: None,
             opt_level: NativeOptimizationLevel::default_for_native_executable(),
             emit_archive: false,
+            incremental_hardening: false,
         }
     }
 }
@@ -599,80 +612,18 @@ impl NativeProjectBuilder {
             Self::deduplicate_for_compilation(&files).into_iter().collect()
         };
 
-        // Determine which files need recompilation via content hash
-        let mut to_compile: Vec<(usize, PathBuf, String)> = Vec::new();
-        let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
-
-        if use_incremental {
-            // Canonicalize entry early so we can force-recompile the entry file
-            let canon_entry_for_cache: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
-            for (i, (path, source)) in file_sources.iter().enumerate() {
-                // Skip symlink aliases -- only compile each physical file once
-                if !compile_indices.contains(&i) {
-                    continue;
-                }
-                // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
-                let is_entry = is_entry_file(path, &canon_entry_for_cache);
-                if !is_entry && !source_may_emit_inline_asm_sidecar(source) {
-                    let per_file_root = self.effective_source_root_for(path);
-                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
-                    let hash = object_cache_key(
-                        source,
-                        is_entry,
-                        &self.config.backend,
-                        self.config.no_mangle,
-                        &module_prefix,
-                    );
-                    let cached_o = objects_dir.join(format!("{:016x}.o", hash));
-                    if cached_o.exists() {
-                        // Cache hit: copy to temp dir
-                        let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
-                        if std::fs::copy(&cached_o, &obj_path).is_ok() {
-                            cached_objects.push((i, obj_path));
-                            continue;
-                        }
-                    }
-                }
-                to_compile.push((i, path.clone(), source.clone()));
-            }
-        } else {
-            for (i, (path, source)) in file_sources.iter().enumerate() {
-                // Skip symlink aliases -- only compile each physical file once
-                if !compile_indices.contains(&i) {
-                    continue;
-                }
-                to_compile.push((i, path.clone(), source.clone()));
-            }
-        }
-
-        let cached_count = cached_objects.len();
-        if rust_trace {
-            eprintln!(
-                "[native-rust-trace] dirty set: cached={} to_compile={} use_incremental={}",
-                cached_count,
-                to_compile.len(),
-                use_incremental
-            );
-            for (idx, path, _) in to_compile.iter().take(12) {
-                eprintln!("  compile[{idx}]={}", path.display());
-            }
-        }
-        if self.config.verbose && use_incremental {
-            eprintln!("Incremental: {cached_count} cached, {} to compile", to_compile.len());
-        }
-
-        // Canonicalize the entry file path for comparison during compilation
-        let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
-        if self.config.verbose {
-            match &canonical_entry {
-                Some(p) => eprintln!("Canonical entry: {entry_display}", entry_display = p.display()),
-                None => eprintln!("Canonical entry: <none>"),
-            }
-        }
-
-        // 4b. Discovery phase: build import map for cross-module function resolution.
+        // 4b. Discovery phase (hoisted above the dirty-set determination so the
+        // opt-in safe-incremental object cache key can fold in every cross-module
+        // codegen input): build the import map for cross-module function
+        // resolution, and, when the safe-incremental path is active, fingerprint
+        // the closure's global type layout / signatures from the same result.
+        let incr_hardening = incremental_hardening_requested(self.config.incremental_hardening);
+        let mut layout_fp: u64 = 0;
         let imports = if !self.config.no_mangle {
             let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
+            if incr_hardening {
+                layout_fp = cross_module_layout_fingerprint(&result);
+            }
             if self.config.verbose {
                 eprintln!(
                     "Import map: {} unique, {} ambiguous function entries, {} modules with re-exports",
@@ -723,6 +674,117 @@ impl NativeProjectBuilder {
                 populate_global_enum_defs: false,
             }
         };
+
+        // Global build fingerprint: folded into every per-module object cache key
+        // when the safe-incremental path is active. Any change to opt-level, the
+        // entry-closure flag, the target, the linker script, or the closure's
+        // cross-module type layout / signatures invalidates the ENTIRE per-module
+        // cache. Correctness strictly beats speed: this coarse over-invalidation
+        // can only ever cause more rebuilds, never a stale (wrong-binary) reuse.
+        let global_fp: Option<GlobalBuildFingerprint> = if incr_hardening && use_incremental {
+            let ls_hash = self
+                .config
+                .linker_script
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .map(|bytes| hash_one(&bytes))
+                .unwrap_or(0);
+            let triple = effective_target().triple_str().to_string();
+            Some(GlobalBuildFingerprint {
+                opt_level: hash_one(&self.config.opt_level.as_str()),
+                entry_closure: hash_one(&self.config.entry_closure),
+                target: hash_one(&triple),
+                linker_script: ls_hash,
+                layout: layout_fp,
+            })
+        } else {
+            None
+        };
+        let global_fp_combined: u64 = global_fp.as_ref().map(GlobalBuildFingerprint::combined).unwrap_or(0);
+
+        // Determine which files need recompilation via content hash
+        let mut to_compile: Vec<(usize, PathBuf, String)> = Vec::new();
+        let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
+
+        if use_incremental {
+            // Canonicalize entry early so we can force-recompile the entry file
+            let canon_entry_for_cache: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
+            for (i, (path, source)) in file_sources.iter().enumerate() {
+                // Skip symlink aliases -- only compile each physical file once
+                if !compile_indices.contains(&i) {
+                    continue;
+                }
+                // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
+                let is_entry = is_entry_file(path, &canon_entry_for_cache);
+                if !is_entry && !source_may_emit_inline_asm_sidecar(source) {
+                    let per_file_root = self.effective_source_root_for(path);
+                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
+                    let base_hash = object_cache_key(
+                        source,
+                        is_entry,
+                        &self.config.backend,
+                        self.config.no_mangle,
+                        &module_prefix,
+                    );
+                    // Safe-incremental path folds in the global build fingerprint so
+                    // any cross-module structural change misses the cache; legacy
+                    // path leaves the content-only key byte-for-byte unchanged.
+                    let hash = if incr_hardening {
+                        hash_one(&(base_hash, global_fp_combined))
+                    } else {
+                        base_hash
+                    };
+                    let cached_o = objects_dir.join(format!("{:016x}.o", hash));
+                    if cached_o.exists() {
+                        // Cache hit: copy to temp dir
+                        let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
+                        if std::fs::copy(&cached_o, &obj_path).is_ok() {
+                            cached_objects.push((i, obj_path));
+                            continue;
+                        }
+                    }
+                }
+                to_compile.push((i, path.clone(), source.clone()));
+            }
+        } else {
+            for (i, (path, source)) in file_sources.iter().enumerate() {
+                // Skip symlink aliases -- only compile each physical file once
+                if !compile_indices.contains(&i) {
+                    continue;
+                }
+                to_compile.push((i, path.clone(), source.clone()));
+            }
+        }
+
+        let cached_count = cached_objects.len();
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] dirty set: cached={} to_compile={} use_incremental={}",
+                cached_count,
+                to_compile.len(),
+                use_incremental
+            );
+            for (idx, path, _) in to_compile.iter().take(12) {
+                eprintln!("  compile[{idx}]={}", path.display());
+            }
+        }
+        if self.config.verbose && use_incremental {
+            eprintln!("Incremental: {cached_count} cached, {} to compile", to_compile.len());
+        }
+
+        // Canonicalize the entry file path for comparison during compilation
+        let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
+        if self.config.verbose {
+            match &canonical_entry {
+                Some(p) => eprintln!("Canonical entry: {entry_display}", entry_display = p.display()),
+                None => eprintln!("Canonical entry: <none>"),
+            }
+        }
+
+        // (Import map + global build fingerprint are hoisted above the dirty-set
+        //  determination -- see section 4b -- so the incremental object cache key
+        //  can fold in the closure's cross-module codegen inputs before deciding
+        //  which modules are dirty.)
 
         // 5. Compile dirty files
         let results = if self.config.parallel {
@@ -797,17 +859,43 @@ impl NativeProjectBuilder {
                     let is_entry = is_entry_file(path, &canonical_entry);
                     let per_file_root = self.effective_source_root_for(path);
                     let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
-                    let hash = object_cache_key(
+                    let base_hash = object_cache_key(
                         source,
                         is_entry,
                         &self.config.backend,
                         self.config.no_mangle,
                         &module_prefix,
                     );
+                    // Must mirror the read-loop key exactly (see above) or a fresh
+                    // object would be cached under a key the next build never looks up.
+                    let hash = if incr_hardening {
+                        hash_one(&(base_hash, global_fp_combined))
+                    } else {
+                        base_hash
+                    };
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     let _copy_result = std::fs::copy(obj_path, cached_o);
                 }
             }
+        }
+
+        // 6b. Safe-incremental cache summary + manifest (one line per build).
+        // Names the changed component when a global input forced a full rebuild,
+        // so a wide rebuild is never mistaken for a broken cache.
+        if let Some(ref gfp) = global_fp {
+            let manifest_path = cache_dir.join("incremental_manifest.txt");
+            let reason: Option<&'static str> = std::fs::read_to_string(&manifest_path)
+                .ok()
+                .and_then(|line| GlobalBuildFingerprint::from_manifest_line(&line))
+                .and_then(|prev| gfp.changed_reason(&prev));
+            let rebuilt = freshly_compiled.len();
+            match reason {
+                Some(why) => eprintln!(
+                    "[native-incremental] {cached_count} reused / {rebuilt} rebuilt (full rebuild: {why})"
+                ),
+                None => eprintln!("[native-incremental] {cached_count} reused / {rebuilt} rebuilt"),
+            }
+            let _ = std::fs::write(&manifest_path, gfp.to_manifest_line());
         }
 
         // 7. Link or archive
@@ -1129,6 +1217,171 @@ pub(crate) fn object_cache_key(
     active_simd_tier_name().hash(&mut hasher);
     compiler_fingerprint().hash(&mut hasher);
     hasher.finish()
+}
+
+/// True when the opt-in safe incremental object-reuse path is active.
+///
+/// Gated by `SIMPLE_NATIVE_INCREMENTAL=1` (default off) OR the equivalent
+/// `NativeBuildConfig::incremental_hardening` flag (used by tests to avoid
+/// racing the process-global env var). Default off leaves the legacy
+/// content-only cache key untouched so existing bootstrap/CI flows are
+/// byte-for-byte unchanged until this path has soaked.
+pub(crate) fn incremental_hardening_requested(config_flag: bool) -> bool {
+    config_flag || std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1")
+}
+
+/// Hash a single hashable value to a `u64`.
+fn hash_one<T: std::hash::Hash>(value: &T) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Commutatively fold a per-entry hash into an accumulator so the (unordered)
+/// iteration order of `HashMap`/`HashSet` does not affect the final digest.
+fn fold_unordered(acc: u64, item: u64) -> u64 {
+    // wrapping add of a mixed item -> order-independent (addition is commutative)
+    acc.wrapping_add(item.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(31))
+}
+
+/// Fingerprint of EVERY cross-module input the compiler feeds into a module's
+/// HIR lowering + codegen when name mangling / global-def population is active.
+///
+/// Under `--entry-closure` (and any `!no_mangle` build), each module is lowered
+/// with the whole closure's `struct_defs`/`enum_defs` injected into its type
+/// registry and its cross-module calls resolved through the shared import map.
+/// That means a module's object *bytes* depend on OTHER modules' declarations
+/// (field offsets, enum tags, mangled call targets). The legacy per-module key
+/// hashes only that module's own source, so a struct change in module A leaves
+/// module B's source hash unchanged and B silently reuses an object built
+/// against A's OLD layout — a stale, wrong binary.
+///
+/// This digest folds in all such inputs. Any change to it invalidates the whole
+/// per-module cache (coarse but strictly conservative: it can only ever cause
+/// MORE rebuilds, never a wrong reuse). It is intentionally order-independent so
+/// nondeterministic map iteration order does not spuriously bust the cache.
+pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult) -> u64 {
+    let mut fp: u64 = 0;
+    for (k, v) in result.map.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, v)));
+    }
+    for k in result.ambiguous.iter() {
+        fp = fold_unordered(fp, hash_one(&("amb", k)));
+    }
+    for (k, v) in result.all_mangled.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, v)));
+    }
+    for (k, inner) in result.re_exports.iter() {
+        let mut inner_fp: u64 = 0;
+        for (ik, iv) in inner.iter() {
+            inner_fp = fold_unordered(inner_fp, hash_one(&(ik, iv)));
+        }
+        fp = fold_unordered(fp, hash_one(&(k, inner_fp)));
+    }
+    for (k, v) in result.trait_impls.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, v)));
+    }
+    for (k, v) in result.struct_defs.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));
+    }
+    for (k, v) in result.duplicate_struct_defs.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));
+    }
+    for (k, v) in result.enum_defs.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));
+    }
+    for k in result.data_exports.iter() {
+        fp = fold_unordered(fp, hash_one(&("data", k)));
+    }
+    for (k, v) in result.fn_arities.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, v)));
+    }
+    for (k, v) in result.fn_return_types.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));
+    }
+    fp
+}
+
+/// The five component hashes of the global build fingerprint. Stored in the
+/// per-build manifest so a full-rebuild reason can name WHICH input changed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct GlobalBuildFingerprint {
+    pub opt_level: u64,
+    pub entry_closure: u64,
+    pub target: u64,
+    pub linker_script: u64,
+    pub layout: u64,
+}
+
+impl GlobalBuildFingerprint {
+    /// Collapse the components into a single digest folded into each object key.
+    pub(crate) fn combined(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.opt_level.hash(&mut hasher);
+        self.entry_closure.hash(&mut hasher);
+        self.target.hash(&mut hasher);
+        self.linker_script.hash(&mut hasher);
+        self.layout.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Human-readable name of the first component that differs from `prev`
+    /// (used to explain a full rebuild). Returns None when unchanged.
+    pub(crate) fn changed_reason(&self, prev: &GlobalBuildFingerprint) -> Option<&'static str> {
+        if self.opt_level != prev.opt_level {
+            Some("opt-level changed")
+        } else if self.entry_closure != prev.entry_closure {
+            Some("entry-closure flag changed")
+        } else if self.target != prev.target {
+            Some("target changed")
+        } else if self.linker_script != prev.linker_script {
+            Some("linker script changed")
+        } else if self.layout != prev.layout {
+            Some("cross-module type layout / signatures changed")
+        } else {
+            None
+        }
+    }
+
+    /// Serialize to the manifest line format `opt=..;ec=..;t=..;ls=..;layout=..`.
+    pub(crate) fn to_manifest_line(&self) -> String {
+        format!(
+            "opt={:016x};ec={:016x};t={:016x};ls={:016x};layout={:016x}",
+            self.opt_level, self.entry_closure, self.target, self.linker_script, self.layout
+        )
+    }
+
+    /// Parse a manifest line produced by `to_manifest_line`.
+    pub(crate) fn from_manifest_line(line: &str) -> Option<GlobalBuildFingerprint> {
+        let mut fp = GlobalBuildFingerprint {
+            opt_level: 0,
+            entry_closure: 0,
+            target: 0,
+            linker_script: 0,
+            layout: 0,
+        };
+        let mut seen = 0;
+        for part in line.trim().split(';') {
+            let (key, val) = part.split_once('=')?;
+            let n = u64::from_str_radix(val.trim(), 16).ok()?;
+            match key.trim() {
+                "opt" => fp.opt_level = n,
+                "ec" => fp.entry_closure = n,
+                "t" => fp.target = n,
+                "ls" => fp.linker_script = n,
+                "layout" => fp.layout = n,
+                _ => continue,
+            }
+            seen += 1;
+        }
+        if seen == 5 {
+            Some(fp)
+        } else {
+            None
+        }
+    }
 }
 
 /// Recursively collect .spl files from a directory.

@@ -76,6 +76,48 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
 
+## Verification tiering — match the gate to the change
+
+Pick the cheapest tier that actually exercises what changed. Escalating to a full
+bootstrap for a one-line lib edit wastes ~2 minutes+ per iteration; skipping the
+right gate ships a stale binary. **A small change is NOT a full bootstrap.**
+
+- **T0 — hosted seed probe (seconds).** Pure logic changes with no target/ABI
+  dependence: run the affected `.spl` through the seed hosted (or `bin/simple`) and
+  assert behavior. No kernel build. Cheapest; use it first whenever it can decide.
+- **T1 — incremental kernel build (fast path).** Small pure-Simple **lib** change
+  (a leaf function body, a string constant) that feeds the freestanding kernel.
+  Build with `SIMPLE_NATIVE_INCREMENTAL=1` and a **stable** `--cache-dir` (do NOT
+  wipe it between runs; a fresh/wiped cache dir is a cold build). Only the changed
+  module(s) recompile; the build prints `[native-incremental] N reused / M rebuilt`.
+  Honest scope: this reuses per-module **objects only** — it skips the compile
+  phase for unchanged modules, but the **link and entry-closure discovery still run
+  every build**, so T1 is *substantially faster than a full rebuild, not instant*.
+  Reuse also requires the **same seed binary**: rebuilding the seed changes
+  `compiler_fingerprint` and invalidates every cached object (by design). Safety:
+  the `SIMPLE_NATIVE_INCREMENTAL` key folds in a global build fingerprint
+  (opt-level, entry-closure flag, target, linker-script, and the closure's
+  cross-module struct/enum/signature layout), so ANY cross-module structural change
+  auto-falls-back to a full rebuild and prints the reason — a leaf edit never
+  ships a stale wrong binary. Default is OFF; legacy content-only keying is
+  unchanged until this path has soaked.
+- **T2 — full kernel rebuild.** Any big/structural change: new modules, trait/type
+  layout changes, entry-closure set changes, linker-script or flag/target/opt-level
+  changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when
+  you know the change is structural.)
+- **T3 — full bootstrap.** ONLY when the compiler itself changed
+  (`src/compiler_rust` seed or `src/compiler` pure-Simple), or as the final
+  pre-goal-complete gate. A seed change invalidates T1's cache, so T3 subsumes it.
+
+**Follow-up (not yet done):** `SIMPLE_NATIVE_INCREMENTAL` safe per-module reuse is
+implemented only in the Rust seed's native-build pipeline
+(`src/compiler_rust/compiler/src/pipeline/native_project`). The pure-Simple
+self-hosted native-build path (`src/compiler/70.backend`, `src/compiler/80.driver`)
+should gain the same hardened-key incremental reuse for parity once the seed path
+has soaked. Reaching the <20s kernel-rebuild goal additionally needs incremental
+**link** and cached entry-closure **discovery/import-map** — the two phases the
+object cache does not touch (they dominate kernel build wall time).
+
 ## Bootstrap Commands
 ```bash
 # Normal pure-Simple bootstrap:

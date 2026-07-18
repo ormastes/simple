@@ -492,6 +492,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         linker_script,
         opt_level,
         emit_archive,
+        // Opt-in safe incremental object reuse (default off): SIMPLE_NATIVE_INCREMENTAL=1.
+        incremental_hardening: std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1"),
         ..Default::default()
     };
     // cranelift has no rv32 codegen backend; default rv32 targets to LLVM when the

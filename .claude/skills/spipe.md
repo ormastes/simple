@@ -1285,3 +1285,14 @@ landmine catalog (doc/08_tracking/bug/). Canonical reference:
 doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent 
 fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure, 
 NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
+
+## Verification tiering (build infra)
+
+Match the verification gate to the size of the change — a small pure-Simple lib
+edit is NOT a full bootstrap. See `.claude/rules/bootstrap.md` § "Verification
+tiering": T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel
+build with `SIMPLE_NATIVE_INCREMENTAL=1` + a stable `--cache-dir` for small lib
+changes (reuses per-module objects; link + discovery still run); T2 full kernel
+rebuild for structural changes (new modules, type/trait layout, entry-closure set,
+linker/flag changes); T3 full bootstrap ONLY when the compiler itself
+(`src/compiler_rust` or `src/compiler`) changed or as the final pre-goal gate.

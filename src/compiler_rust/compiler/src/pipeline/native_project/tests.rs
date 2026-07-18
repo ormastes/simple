@@ -5813,3 +5813,179 @@ fn test_discover_files_full_scan_keeps_declaration_cfg_files() {
         names
     );
 }
+
+// ---------------------------------------------------------------------------
+// Safe-incremental object reuse (SIMPLE_NATIVE_INCREMENTAL=1) — INCR-BUILD lane
+// ---------------------------------------------------------------------------
+
+/// Build an all-empty `ImportMapResult` for fingerprint unit tests.
+fn empty_import_map_result() -> imports::ImportMapResult {
+    imports::ImportMapResult {
+        map: std::collections::HashMap::new(),
+        ambiguous: std::collections::HashSet::new(),
+        all_mangled: std::collections::HashMap::new(),
+        re_exports: std::collections::HashMap::new(),
+        trait_impls: std::collections::HashMap::new(),
+        struct_defs: std::collections::HashMap::new(),
+        duplicate_struct_defs: std::collections::HashMap::new(),
+        enum_defs: std::collections::HashMap::new(),
+        data_exports: std::collections::HashSet::new(),
+        fn_arities: std::collections::HashMap::new(),
+        fn_return_types: std::collections::HashMap::new(),
+    }
+}
+
+/// The cross-module layout fingerprint must (a) be stable for identical inputs
+/// regardless of map iteration order, and (b) change when any cross-module
+/// signature/layout input changes. This is the invalidation core that stops a
+/// stale wrong-binary reuse under entry-closure.
+#[test]
+fn test_cross_module_layout_fingerprint_sensitivity_and_stability() {
+    // Two independently-built identical maps -> identical fingerprint (the fold
+    // is order-independent, so nondeterministic HashMap order cannot bust it).
+    let mut a = empty_import_map_result();
+    a.fn_arities.insert("alpha".to_string(), 2);
+    a.fn_arities.insert("beta".to_string(), 0);
+    a.data_exports.insert("SOME_CONST".to_string());
+
+    let mut b = empty_import_map_result();
+    // Insert in a different order.
+    b.data_exports.insert("SOME_CONST".to_string());
+    b.fn_arities.insert("beta".to_string(), 0);
+    b.fn_arities.insert("alpha".to_string(), 2);
+
+    assert_eq!(
+        cross_module_layout_fingerprint(&a),
+        cross_module_layout_fingerprint(&b),
+        "identical cross-module inputs must fingerprint identically regardless of insertion order"
+    );
+
+    // Changing a signature must change the fingerprint (else a dependent module
+    // could stale-reuse an object built against the old signature).
+    let mut c = a;
+    c.fn_arities.insert("alpha".to_string(), 3);
+    assert_ne!(
+        cross_module_layout_fingerprint(&b),
+        cross_module_layout_fingerprint(&c),
+        "an arity change must change the cross-module layout fingerprint"
+    );
+}
+
+/// The per-build manifest round-trips and names the changed component so a full
+/// rebuild is reported with a concrete reason, not a mystery.
+#[test]
+fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
+    let base = GlobalBuildFingerprint {
+        opt_level: 0x1111_1111_1111_1111,
+        entry_closure: 0x2222_2222_2222_2222,
+        target: 0x3333_3333_3333_3333,
+        linker_script: 0x4444_4444_4444_4444,
+        layout: 0x5555_5555_5555_5555,
+    };
+    let line = base.to_manifest_line();
+    let parsed = GlobalBuildFingerprint::from_manifest_line(&line).expect("manifest line must parse");
+    assert_eq!(parsed, base, "manifest round-trip must preserve all five components");
+    assert_eq!(base.changed_reason(&parsed), None, "identical fingerprints report no change");
+
+    let mut layout_changed = base;
+    layout_changed.layout = 0x9999_9999_9999_9999;
+    assert_eq!(
+        layout_changed.changed_reason(&base),
+        Some("cross-module type layout / signatures changed")
+    );
+
+    let mut ls_changed = base;
+    ls_changed.linker_script = 0xABCD_ABCD_ABCD_ABCD;
+    assert_eq!(ls_changed.changed_reason(&base), Some("linker script changed"));
+}
+
+/// STALENESS REGRESSION GUARD (the critical test): with the safe-incremental
+/// path on, a leaf body change reuses untouched modules (incrementality works),
+/// but a CROSS-MODULE struct-layout change in module A invalidates the entire
+/// per-module cache so module B — whose object bytes depend on A's field
+/// offsets via `populate_global_struct_defs` — is never stale-reused.
+///
+/// Red/green: with the legacy content-only key (`incremental_hardening=false`)
+/// the struct-change build would leave module B cached (`cached >= 1`) and ship a
+/// stale wrong binary. The hardened key drives `cached == 0`. Verified manually
+/// that flipping the flag off makes the final assertion fail.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let module_a = source_dir.join("layout_a.spl");
+    let module_b = source_dir.join("reader_b.spl");
+    // Module A owns the shared struct; module B reads a field of it, so B's
+    // codegen depends on A's field offsets (cross-module layout dependency).
+    let write_a = |extra: bool| {
+        let fields = if extra {
+            "    pad: i64\n    extra: i64\n    tag: i64\n"
+        } else {
+            "    pad: i64\n    tag: i64\n"
+        };
+        std::fs::write(
+            &module_a,
+            format!("struct SharedLayout:\n{fields}\nfn shared_layout_origin() -> i64:\n    return 111\n"),
+        )
+        .unwrap();
+    };
+    write_a(false);
+    std::fs::write(
+        &module_b,
+        "fn shared_layout_reader(p: SharedLayout) -> i64:\n    return p.tag\n",
+    )
+    .unwrap();
+
+    let cache_dir = temp.path().join(".native_cache_incr");
+    let archive = temp.path().join("libincr_probe.a");
+    let make_config = || NativeBuildConfig {
+        emit_archive: true,
+        incremental: true,
+        incremental_hardening: true,
+        clean: false,
+        no_mangle: false,
+        cache_dir: Some(cache_dir.clone()),
+        ..NativeBuildConfig::default()
+    };
+    let build = || {
+        NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+            .config(make_config())
+            .source_dir(source_dir.clone())
+            .build()
+            .expect("native build failed")
+    };
+
+    // Build 1: cold cache -> both modules compile fresh.
+    let r1 = build();
+    assert_eq!(r1.cached, 0, "cold build must not report cache hits");
+    assert!(r1.compiled >= 2, "cold build must compile both modules, got {}", r1.compiled);
+
+    // Build 2: leaf body-only change in A (constant), B untouched. B stays cached
+    // -> incrementality is real (not a full rebuild on every edit).
+    std::fs::write(
+        &module_a,
+        "struct SharedLayout:\n    pad: i64\n    tag: i64\n\nfn shared_layout_origin() -> i64:\n    return 222\n",
+    )
+    .unwrap();
+    let r2 = build();
+    assert!(
+        r2.cached >= 1,
+        "a leaf body change must still reuse the untouched module (incrementality lost): cached={}",
+        r2.cached
+    );
+
+    // Build 3: CROSS-MODULE struct-layout change in A (insert a field before
+    // `tag`, shifting B's read offset). The global build fingerprint changes, so
+    // the entire per-module cache is invalidated and B is rebuilt -- never a
+    // stale reuse. This is the assertion the legacy content-only key fails.
+    write_a(true);
+    let r3 = build();
+    assert_eq!(
+        r3.cached, 0,
+        "a cross-module struct-layout change must invalidate the whole cache (no stale reuse); got cached={}",
+        r3.cached
+    );
+}
