@@ -98,3 +98,33 @@ Build `build/os/_wkheap/desktop.elf` (current source), then:
 - Board-runnable rule: this MUST be fixed (or explicitly scoped out by the user) before the desktop
   render can be called board-runnable. The `-kernel` 99.83% screendump is real but is NOT board-runnable
   evidence on its own.
+
+## CORRECTION 2026-07-18 (NVME-OVMF investigation lane) — the fault is in C, not the Simple driver
+
+An investigation lane re-decoded the faulting RIP and corrected the attribution above:
+
+- `_nvme_init_controller` (RIP 0x0800a1bb) is a **`static` C function in
+  `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:1606`**, NOT the pure-Simple
+  `src/os/drivers/nvme/` driver. The earlier "guard the Simple driver" direction is therefore WRONG.
+- The pure-Simple path (`NvmeDriver.init_from_grant`, `_NvmeDriver/driver_operations.spl`) runs
+  FIRST, maps BAR0, reads CAP **without faulting**, and cleanly soft-fails
+  (`"nvme-missing-nvm-command-set"`). The page fault comes ~50 lines LATER from a SECOND, independent
+  NVMe init inside the C bridge: `[nvme-c] BAR0=0xffffc00000004000` → immediate page fault (cr2 matches).
+- Plausible (NOT pinned) entry mechanism: a **syscall-number collision** — C dispatcher case 85 =
+  `NvmeReadSector` (`baremetal_stubs.c:5502`), but Simple's `os/userlib/device.spl` uses syscall 85 =
+  `FreeDma`/`FreeDmaForDevice`. There is NO canonical syscall-number registry (grep confirms). A
+  `free_dma_for_device(virt, size, owner_device)` with nonzero owner would land in C as
+  `_nvme_read_sector(a0,a1,a2)`, pass the `buf!=0` check, and trigger the lazy `_nvme_init_controller()`.
+
+### Corrected fix direction (NOT pure-Simple)
+
+The fix lives in C/asm, not `.spl`:
+1. Guard the C `_nvme_init_controller` (baremetal_stubs.c) to check the BAR is mapped / low before
+   dereferencing, and soft-fail otherwise (NVMe not needed for render); OR
+2. Map the OVMF-relocated high-half NVMe BAR into the kernel page tables (crt0.s / page-table setup)
+   before that init; OR
+3. Resolve the syscall-85 `NvmeReadSector`-vs-`FreeDma` collision (needs BOTH the Simple call sites
+   AND the C dispatcher to agree on a non-colliding number) — establish a canonical syscall registry.
+
+A pure-`.spl` guard in the Simple NVMe driver (attempted) is INERT — it soft-fails a path that already
+soft-fails; it does not touch the C second-init that actually faults.
