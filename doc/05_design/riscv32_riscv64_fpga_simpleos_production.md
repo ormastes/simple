@@ -127,8 +127,12 @@ PMP owners into `CoreState`, routes CPU `pmpcfg*`/`pmpaddr*` operations through
 the fixed CSR helper, and calls `pmp32_gate_access` before every Bare-mode
 fetch/load/store bus helper. Locked M-mode denials raise causes 1/5/7 with the
 faulting address in `mtval` and suppress read/write side effects. S/U privilege
-transitions and the request/response Sv32 walker remain the next connected
-slice; the RAM-backed translation adapter is not used as production RTL.
+transitions now preserve current privilege through MPP on machine trap entry
+and restore it with MRET; MPRV selects MPP for data but never fetch. CSR access
+checks privilege, implemented addresses, and read-only write intent before
+retirement. Supervisor CSR/delegation and the request/response Sv32 walker
+remain the next connected slice; the RAM-backed translation adapter is not
+used as production RTL.
 
 ### Translation algorithm
 

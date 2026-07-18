@@ -108,7 +108,9 @@ Within the RV32 capsule, `CoreState` is now the canonical owner of current
 privilege, machine CSRs, and fixed-field PMP state. The current Bare clock path
 routes PMP CSRs through that owner and gates instruction and data bus calls at
 `soc_tick`; denied requests enter the precise machine trap path without calling
-the bus helper. The same gate remains after the pending Sv32 walker supplies a
+the bus helper. Trap entry/MRET own M/S/U current-mode transitions, while the
+core derives MPRV/MPP only for explicit data access; fetch retains current
+privilege. The same gate remains after the pending Sv32 walker supplies a
 translated physical address.
 
 The two capsules deliberately retain `MmuState`/`mmu_*` and
