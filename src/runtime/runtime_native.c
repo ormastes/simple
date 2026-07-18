@@ -1732,6 +1732,43 @@ int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
     return p->len == 0 || memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
 }
 
+/* Bug (native_chr_builtin_no_lowering, 2026-07-18): `.chr()`/`.to_char()`
+ * routed here by 50.mir/_MirLoweringExpr/method_calls_literals.spl's
+ * Unresolved-resolution fallback (same FuncPtr-const emit_call mechanism as
+ * rt_string_starts_with above), but this symbol was never defined for the
+ * hosted native-build runtime -- the only rt_char_from_code definitions
+ * existed in SimpleOS baremetal C files this lane never links, so the
+ * hosted lane linked nothing at all. Semantics match the interpreter
+ * reference (eval_int_method's "chr" case in
+ * 10.frontend/core/interpreter/_EvalOps/call_method_eval.spl): valid Unicode
+ * code point 0..0x10FFFF, encoded as UTF-8 (NOT the ASCII-only-with-'?'
+ * fallback the SimpleOS baremetal workarounds use -- SFNT name-table text
+ * and general text processing need real non-ASCII code points). Out of
+ * range collapses to the empty string; there is no exception mechanism at
+ * this layer to surface eval_set_error's diagnostic. */
+int64_t rt_char_from_code(int64_t code) {
+    if (code < 0 || code > 0x10FFFF) return rt_string_new(NULL, 0);
+    uint32_t cp = (uint32_t)code;
+    uint8_t buf[4];
+    uint64_t len = 0;
+    if (cp < 0x80) {
+        buf[len++] = (uint8_t)cp;
+    } else if (cp < 0x800) {
+        buf[len++] = (uint8_t)(0xC0 | (cp >> 6));
+        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf[len++] = (uint8_t)(0xE0 | (cp >> 12));
+        buf[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else {
+        buf[len++] = (uint8_t)(0xF0 | (cp >> 18));
+        buf[len++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+        buf[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    return rt_string_new(buf, len);
+}
+
 int64_t rt_string_find(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);

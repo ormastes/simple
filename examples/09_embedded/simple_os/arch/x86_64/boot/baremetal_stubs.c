@@ -838,6 +838,55 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     return ENCODE_PTR(s);
 }
 
+/* Bug (native_chr_builtin_no_lowering, 2026-07-18): x86_64 was the only
+ * SimpleOS arch with no working rt_char_from_code -- the real strong
+ * definition lives in this directory's rt_extras.c, but llvm_native_link.spl
+ * never compiles/links rt_extras.c for the x86_64 target (only
+ * baremetal_stubs.c + auto_stubs.c), so every call silently resolved to
+ * auto_stubs.c's `__attribute__((weak))` 8-argument NIL_VALUE catch-all stub
+ * (wrong arity for a 1-arg call, and unconditionally NIL besides) --
+ * matching the observed `chr='' cat='' len=0` in-guest symptom exactly.
+ * Defining a correct, non-weak, 1-arg version here (mirroring arm32/arm64's
+ * rt_char_from_code below) makes the linker prefer this strong symbol over
+ * the weak stub. Unlike the arm32/arm64/rt_extras.c siblings (ASCII only,
+ * '?' fallback above 127), this encodes full UTF-8 for any valid Unicode
+ * code point 0..0x10FFFF -- required for SFNT name-table text, which is the
+ * actual reported symptom (font names have non-ASCII bytes).
+ *
+ * Deliberately NOT adding the bare `char_from_code` alias arm32/arm64 ship
+ * alongside this (used only by the Rust seed's LLVM codegen, out of scope --
+ * seed is bootstrap-only per repo rules): this x86_64 kernel's
+ * gui_entry_desktop.spl imports `std.common.string_core.char_from_code` as a
+ * real Simple function, and it is unconfirmed whether the self-hosted
+ * compiler emits that as an unmangled `char_from_code` global -- adding the
+ * alias here risked a duplicate-symbol link error the arm siblings never
+ * exercised (their gui_entry_desktop.spl doesn't import that name). Only
+ * `rt_char_from_code` is needed: it's the sole symbol the self-hosted
+ * compiler's 50.mir lowering emits for `.chr()`/`.to_char()`. */
+RuntimeValue rt_char_from_code(RuntimeValue code)
+{
+    int64_t cp = IS_INT(code) ? DECODE_INT(code) : (int64_t)code;
+    if (cp < 0 || cp > 0x10FFFF) return rt_string_new(0, 0);
+    uint8_t buf[4];
+    uint64_t len = 0;
+    if (cp < 0x80) {
+        buf[len++] = (uint8_t)cp;
+    } else if (cp < 0x800) {
+        buf[len++] = (uint8_t)(0xC0 | (cp >> 6));
+        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf[len++] = (uint8_t)(0xE0 | (cp >> 12));
+        buf[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else {
+        buf[len++] = (uint8_t)(0xF0 | (cp >> 18));
+        buf[len++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+        buf[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)len);
+}
+
 RuntimeValue rt_string_len(RuntimeValue str)
 {
     /* Return RAW (untagged) — Cranelift backend does not unbox len results */

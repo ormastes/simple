@@ -438,6 +438,7 @@ int64_t  rt_text_find(int64_t value, int64_t needle, int64_t start);
 int64_t  rt_string_rfind(int64_t value, int64_t needle);
 int64_t  rt_string_to_lower(int64_t value);
 int64_t  rt_string_to_upper(int64_t value);
+int64_t  rt_char_from_code(int64_t code);
 int64_t  rt_string_split(int64_t value, int64_t delimiter);
 int64_t  rt_string_join(int64_t array, int64_t separator);
 int8_t   rt_contains(int64_t collection, int64_t value);
