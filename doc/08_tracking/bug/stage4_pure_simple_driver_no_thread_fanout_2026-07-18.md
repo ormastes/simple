@@ -2,10 +2,16 @@
 # it (pure-Simple frontend driver has no fanout concept; AOT codegen's
 # "ParallelBuilder" computes a worker count and then runs sequentially anyway)
 
-**Date:** 2026-07-18 · **Lane:** S79 · **Status:** OPEN — root-plumbing traced
-end to end with code citations at both layers, confirmed empirically (A/B
-thread-count probe below); no source fix landed this lane (see "Why no fix"
-below)
+**Date:** 2026-07-18 · **Lane:** S79 (root-plumbing trace) + S80 (fix +
+follow-up) · **Status:** PARTIALLY FIXED — S79 traced both layers end to end
+with code citations, confirmed empirically (A/B thread-count probe below); no
+source fix landed in S79 (see "Why no fix" below). **S80 update:** fixed the
+`bootstrap_main.spl` Stage4 `--threads`-discard gap (item independent of the
+codegen `ParallelBuilder`); investigated wiring `build_parallel()` and
+determined it is not safely landable without new MIR-serialization
+infrastructure that does not yet exist (see "S80 update" section below for
+the empirical case) — that part remains OPEN, deferred with evidence rather
+than fixed.
 
 ## Summary
 
@@ -325,6 +331,207 @@ patches.
    the phase2/phase3 finding (every file may be parsed twice); fixing it
    independently reduces total serial work even before any parallelism fix
    lands.
+
+## S80 update (2026-07-18): threads env-var gap fixed; build_parallel wiring
+## confirmed infeasible without new MIR-IPC infra — deferred with evidence
+
+**Status change:** the `--threads` silent-discard in the Stage4 bootstrap path
+(follow-up item, distinct from the codegen-parallel-builder finding above) is
+now FIXED. The `build()`-vs-`build_parallel()` codegen finding remains OPEN,
+now with direct empirical confirmation (below) instead of only a code trace,
+plus a concrete reason the "obvious" fix (wire `build_parallel`) cannot be
+landed safely in a bounded, no-full-bootstrap lane.
+
+### Fix #1 landed: `--threads` was silently dropped in bootstrap_main.spl,
+### independent of the codegen-builder bug above
+
+`src/app/cli/bootstrap_main.spl`'s `run_native_build_bootstrap` (Stage4
+branch, lines ~171-237) called `aot_native_project_with_backend_fixed(...)`
+without ever reading `--threads` out of `args` or setting
+`SIMPLE_NATIVE_BUILD_THREADS`. `driver_native_build_threads()`
+(`driver_aot_output.spl:68-75`) already reads that env var directly (no
+`CompileOptions` field involved) — the missing piece was purely in
+`bootstrap_main.spl` never setting it, unlike the sibling CLI path in
+`src/app/io/_CliCompile/compile_targets.spl:667-685,822-845` which parses
+`--threads`/`--jobs`/`-j` and does the exact save/set/restore this lane
+added. **Note:** the real `bootstrap-from-scratch.sh` wrapper (line 472)
+already exports `SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}"` itself before
+invoking the compiler, so this gap was masked for that one caller; it was
+live for any direct `simple native-build --entry ... --threads N` invocation
+that doesn't pre-set the env var (e.g. this lane's own probes).
+
+Added `native_build_threads_from_args` (mirrors the existing
+`native_build_backend_from_args` recursion pattern) and wired
+save/set/restore of `SIMPLE_NATIVE_BUILD_THREADS` around the
+`aot_native_project_with_backend_fixed` call, plus a
+`SIMPLE_COMPILER_TRACE`-gated `[S80-THREADS]` print for diagnosis.
+
+**Verification (testability question resolved):** the prebuilt Stage-3
+binary at `wt_s58/build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple`
+(sha256 `daf91ae650...`, same one S79 used) does **not** interpret
+current-source `.spl` — it is a natively-compiled, frozen artifact. Proof:
+running it with `SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_COMPILER_TRACE=1` against
+the real Stage4 CLI shape reached `phase1:load_sources`/`phase2:parse`
+(confirmed via existing trace markers) but never printed the new
+`[S80-THREADS]` marker, which sits *before* those phases in the edited
+source. Getting a natively-recompiled test binary that reflects this edit
+requires recompiling the whole `bootstrap_main.spl` closure (it transitively
+imports the entire compiler driver/backend to call
+`compiler_driver_create`/`run_compile`), which is the same-order cost as a
+real Stage4 build (parse alone runs 20+ minutes per S66/S77/S79) — not
+achievable as "incremental" in this lane. Fell back to the Rust **seed**
+binary (`wt_s58/src/compiler_rust/target/bootstrap/simple`, sha256
+`bbddb617e6...`, copied read-only into this worktree's own scratch) running
+`bootstrap_main.spl` as an interpreted script
+(`simple_seed src/app/cli/bootstrap_main.spl native-build --entry
+src/app/cli/main.spl --mode one-binary --threads 8 ...` with
+`SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_COMPILER_TRACE=1`): this **does** read
+current source, and printed `[S80-THREADS] requested_threads=8 old_env=nil`,
+confirming the parse/env-set logic is correct. (Interpreting the full
+compiler this way is far too slow to run to completion — killed after the
+marker was captured.)
+
+**Honest caveat on impact:** on the 32-core box these probes ran on,
+`ParallelBuildConfig.effective_threads()` auto-detects and caps at 8
+regardless of whether `SIMPLE_NATIVE_BUILD_THREADS` is set (same value
+`selfhost_jobs` already resolves to in practice) — so this fix changes
+*correctness* (the value is no longer silently discarded) but is not
+expected to change observable `nlwp`/wall-time on this hardware. It matters
+on machines/values where the explicit request differs from the auto-detected
+cap, and for direct CLI use outside the wrapper script.
+
+### Fix #2 (`build()` vs `build_parallel()`): investigated, NOT wired —
+### here is the empirical case for why not
+
+Read both implementations in full
+(`src/compiler/80.driver/driver_build/parallel.spl`) plus `git log -p` for
+the file: it was authored whole in one commit
+(`7c30ce49d04`, "wip: working-copy snapshot", 2026-07-04) with **both**
+`build()` and `build_parallel()` already present — `build_parallel()` was
+never wired to any call site at any point in history and never reverted; it
+is not a parked/known-broken feature, just an unfinished one. The only two
+subsequent touches to the file (`050209d9b3`, `2043f801145`) are unrelated
+bugfixes (ready-queue dedup, tuple-field-name removal), not builder-wiring
+changes.
+
+`build_parallel(spawn_fn, collect_fn)` calls `spawn_fn(build_unit.path)` to
+launch **a separate OS process** per module via `rt_process_spawn_async`
+(declared line 9), polls with `rt_process_is_running`/`rt_process_wait`
+(bounded backoff polling in `wait_for_finished_process`, 10ms→25ms→100ms),
+and on completion calls `collect_fn(exit_code, path)` to read the result.
+Failure modes it already handles: spawn failure (`pid < 0` →
+`mark_failed`), a dependency failing upstream (skips descendants), and early
+exit (drains + `rt_process_kill`s any still in-flight processes). It is a
+complete, self-consistent process-pool implementation — the missing piece is
+entirely on the **caller** side: nothing has ever defined what `spawn_fn`
+should exec or what `collect_fn` should read, because doing so requires a
+module to be independently compilable in a fresh process.
+
+**Why that's not a safe scoped fix here, checked concretely (not just
+theorized):**
+
+1. **No MIR IPC exists.** `_compile_one_module`
+   (`driver_aot_output.spl:796`) takes the full in-process `ctx: any` (every
+   already-lowered `MirModule` for the whole compile) and calls
+   `compile_module_with_backend` in the same process. A subprocess doing
+   real per-module codegen needs that one module's `MirModule` handed across
+   the process boundary. Checked for existing infra:
+   `src/compiler/50.mir/mir_serialization.spl` re-exports
+   `serialize_mir_module` from `mir_json.spl`, but (a) it is dead code —
+   `grep -rl serialize_mir_module src/compiler` finds only its own
+   definition and the `__init__.spl` re-export, no caller anywhere — and (b)
+   its own comment says "functions-only compatibility shape", i.e.
+   incomplete even as a write path. **There is no deserializer at all** (no
+   `parse_mir_module`/`from_json` function exists anywhere in
+   `src/compiler/50.mir/`). Building one that faithfully round-trips MIR's
+   instruction/type/operand/terminator system is a genuine, sizable,
+   error-prone task — not a wiring change — and an imperfect deserializer
+   would risk silently mis-codegenning an edge-case instruction into a
+   corrupt binary, exactly the failure class this campaign forbids.
+2. **The alternative (re-invoke the whole pipeline per subprocess instead of
+   serializing MIR) is a likely net perf loss, not just extra engineering.**
+   `compile_to_native`'s `BuildCache` only caches **post-codegen object
+   files**, keyed under a `cache_scope_root` suffixed by
+   `driver_native_sources_fingerprint(ctx.sources)` — an aggregate hash over
+   *all* loaded sources (`driver_aot_output.spl:113-124`, "any loaded source
+   change gets a new object-cache scope"). Phase2/phase3 (parse + HIR/MIR
+   lowering) have no persistent cache at all per the finding above. So a
+   subprocess that re-ran the driver from scratch to reach codegen for one
+   module would re-parse and re-lower the **entire entry closure** every
+   time — for Stage4 specifically, that's the 20+ minute phase already
+   established as the dominant serial cost. Spawning N such subprocesses
+   concurrently does not avoid this; it duplicates that cost N times across
+   cores that could otherwise be idle or doing useful work, on top of the
+   parse work the *parent* process already did once to reach codegen. This
+   would very plausibly make Stage4 slower, not faster.
+3. **The backend has the same global-mutable-state hazard the parser has**,
+   independently confirmed (not assumed): `grep -n "^var "` across
+   `src/compiler/70.backend/` finds module-level globals including
+   `_llvm_bootstrap_ir_text`/`_llvm_simpleos_header`
+   (`backend/llvm_ir_builder.spl:15-16`),
+   `_llvm_bootstrap_string_global_text`
+   (`backend/_MirToLlvm/asm_constraints_helpers.spl:20`), and a
+   `llvm_bootstrap_last_object_path()` side-channel that
+   `_compile_selected_module` reads when `SIMPLE_BOOTSTRAP=1`
+   (`driver_aot_output.spl:841-844`) — and `SIMPLE_BOOTSTRAP=1` **is** set
+   for the real Stage4 build (`bootstrap-from-scratch.sh:468`,
+   `bootstrap_native_build_main`). This confirms the file's own header
+   comment (process-based parallelism "to avoid thread-safety issues with
+   global compiler state") is correct and that a real in-process
+   thread-based fan-out (sidestepping the MIR-IPC problem by staying in one
+   process) is **not** a safer shortcut either — it would hit this exact
+   hazard. Process-based IPC is the only safe design; it just isn't wired
+   yet, and wiring it needs (1) solved first.
+4. **Cannot be empirically verified in this lane even if built.** Per the
+   probe below, a small/fast test *does* enter `build()`'s parallel-chunk
+   branch, but the real Stage4 shape does not reach codegen at all inside a
+   bounded probe window (parse-bound, matching every prior lane's
+   observation) — so a build_parallel change could not be validated
+   end-to-end against the actual target scenario without a full bootstrap,
+   which is out of scope for this lane. An unverified subprocess/IPC change
+   to the codegen path is exactly the kind of "loud failure converted to
+   silent wrong answer" risk this campaign must not take.
+5. **The smoke-matrix gate would not exercise this branch either.**
+   `build()`'s parallel-chunk branch only activates when
+   `uncached_names.len() >= parallel_threshold` (4) with a cold cache
+   (`driver_aot_output.spl:365`, `parallel.spl:293`); small smoke-test
+   programs typically compile through the `len() == 1` direct
+   `_compile_one_module` path instead (confirmed: the matrix run for this
+   lane, below, shows no `[PARALLEL]`-branch signature). So a
+   build_parallel change would not even be regression-covered by the
+   standard gate — another reason not to land it speculatively.
+
+### New empirical confirmation of the `build()` bug itself (this lane)
+
+Rather than leave this as a pure code-reading claim, reproduced it directly
+and cheaply — **without** touching `parallel.spl`/`driver_aot_output.spl` (so
+this reflects the exact same, unmodified behavior as before this lane) —
+using the **deployed self-hosted binary**
+(`/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`,
+sha256 `561767c6615b...`, read-only copied into this worktree's scratch,
+never modified) against a small synthetic 7-file closure (1 entry + 6
+independent modules, no cross-deps, in
+`build/s80_probe/parallel_probe/` — gitignored scratch, not committed):
+
+```
+$ simple native-build --source parallel_probe --entry parallel_probe/entry.spl \
+    --entry-closure --mode one-binary --threads 4 --verbose --cache-dir ... -o ...
+```
+
+With `SIMPLE_COMPILER_TRACE=1`, the log shows `[NATIVE] compiling 7
+modules...`, compiling in this exact order: `entry, mod_2, mod_3, mod_4` |
+`mod_1, mod_6, mod_5` — i.e. two groups of **4 then 3**, precisely matching
+`build()`'s parallel-branch chunking (`chunk_end = batch_idx + max_workers`,
+`max_workers=4` from `--threads 4`) rather than `topological_order()`'s
+would-be insertion/dependency order. This is strong circumstantial
+confirmation the parallel-chunk branch (not the deterministic/sequential
+branch) was entered. Without trace (same command, `ps -o pid,nlwp,etimes,rss`
+sampled every 1s for the full ~36s run): **`nlwp` stayed at exactly `1` for
+every sample from t=0s to t=35s** — no additional OS thread or process ever
+appeared, confirming the chunk boundary has zero effect on execution, exactly
+as the original code-reading finding said. (The synthetic test binary itself
+segfaults at runtime — an artifact of the minimal/incomplete test program,
+unrelated to the compiler; only the *compile-time* behavior was under test.)
 
 ## Related
 
