@@ -258,9 +258,16 @@ The pin protocol is untouched: the host still drives 2 column + 3 row cycles and
 still sees ID `EC D3 10 A6 64`. Only decoding is shrunk.
 
 ```
-col_eff = col & COL_MASK                       (COL_MASK = page_bytes − 1, page-shaped)
+col_eff = col mod page_bytes                   (page-shaped; identity for in-range cols)
 row_eff = (row & ROW_MASK) | ROW_BASE          (or aliased / trapped)
 ```
+
+> **Amended 2026-07-18 (implementation finding):** the original draft wrote
+> `col_eff = col & COL_MASK` with `COL_MASK = page_bytes − 1`. Because
+> page_bytes (528/4224) is not a power of two, that mask is non-contiguous and
+> `&` corrupts even in-range columns (291 & 527 = 3; 2048 & 4223 = 0). Column
+> folding must be modulo. Rows are unaffected: all row-window sizes are powers
+> of two, so `ROW_MASK` behaves as true modulo.
 
 `OOB_POLICY` register selects what happens when `row & ~ROW_MASK != ROW_BASE`:
 
@@ -853,3 +860,11 @@ With these, a block at 30 K P/E held for one emulated year shows roughly a
 across `vref = 128` and produce a handful of correctable errors per 528 B sector.
 That is the intended calibration target: **failures should appear at a rate that
 exercises ECC and refresh, not at a rate that makes every read fail.**
+
+> **Calibration note 2026-07-18 (v1 implementation):** with the implemented
+> log10 retention model and these defaults, a 30 K P/E block held one emulated
+> year saturates (total charge loss) rather than showing the ~15-code shift
+> this paragraph predicts. The v1 scenario suite therefore pins its retention
+> scenario at 5 K P/E, where the correctable-then-retry-recoverable signature
+> appears as intended. Re-fit `ret_coef`/the pe multiplier before quoting the
+> 30 K headline; coefficients are registers, so no code change is needed.

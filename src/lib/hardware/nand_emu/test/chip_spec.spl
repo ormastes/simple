@@ -17,6 +17,7 @@ use std.nogc_sync_mut.spec.{describe, it, expect}
 use hardware.nand_emu.nand_types.{NeProfile, NeFault, NeOpKind}
 use hardware.nand_emu.chip.{NeChip, ne_chip_new}
 use hardware.nand_emu.fault.ne_fault_spo
+use hardware.nand_emu.cmd_fsm.ne_violation_kind_text
 
 # ----------------------------------------------------------------------------
 # Pin-sequence drivers (host-controller style; absolute cycle maps, doc §1.2).
@@ -421,3 +422,38 @@ fn main():
             c = c.cmd(0x10)
             val st7b = status_of(c, 0x7B)
             expect(st7b & 0x04).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Page-order gate at the chip level (doc §7.2: LSB -> MSB within a block)
+    # ------------------------------------------------------------------
+    describe("NeChip page-order gate"):
+        it("flags a random-page-program violation on a regress, and erase clears the gate for a clean re-program"):
+            """doc §7.2: within a block, pages must be programmed LSB -> MSB. The
+            command FSM layer (cmd_fsm.ne_check_page_order) has always enforced this
+            as a pure legality check, but NeChip's program (10h) path did not consult
+            it, so a pin-level user driving page 0 then page 2 then page 1 of one
+            block got no violation from the chip. Programming page 0 then page 2 are
+            both legal forward steps (no violation); page 1 after page 2 is a regress
+            and must surface on the chip's violation surface as RandomPageProgram.
+            Erasing the block resets the per-block last-programmed-page tracking, so
+            a fresh program of page 0 afterwards is clean (violation_count does not
+            grow further) and reads back correctly."""
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            expect(chip.violation_count).to_equal(0)
+
+            chip = program_page(chip, 0, 0, [0xA0])
+            expect(chip.violation_count).to_equal(0)
+
+            chip = program_page(chip, 2, 0, [0xA2])
+            expect(chip.violation_count).to_equal(0)
+
+            chip = program_page(chip, 1, 0, [0xA1])
+            expect(chip.violation_count).to_equal(1)
+            expect(ne_violation_kind_text(chip.last_violation.kind)).to_equal("random_page_program")
+
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0xB0])
+            expect(chip.violation_count).to_equal(1)
+            val bytes = read_page_bytes(chip, 0, 0, 1)
+            expect(bytes[0]).to_equal(0xB0)
