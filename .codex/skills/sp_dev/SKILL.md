@@ -787,3 +787,28 @@ T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel build vi
 (reuses per-module objects — link + entry-closure discovery still run each build);
 T2 full kernel rebuild for structural changes; T3 full bootstrap only when
 `src/compiler_rust`/`src/compiler` changed or as the final pre-goal gate.
+
+## Log-retention convention (debug/perf instrumentation)
+
+General policy (canonical statement: `doc/07_guide/infra/logging/`): when
+cleaning up instrumentation/debug/perf logs, do not delete the insert —
+convert it to a level-gated log (debug level, or another appropriate level;
+perf/timing instrumentation becomes a perf-level log disabled by default) so
+it stays reusable for the next investigation. Deletion is reserved for
+overly-specific one-off logs with no reuse value. Prefer one shared
+gate/flag or an existing log facility over ad-hoc per-file booleans.
+
+Worked example — baremetal/kernel entry files: debug probes are debug-gated,
+not stripped. Prefer wiring into the existing
+`src/os/baremetal/profile/log_policy.spl` `BaremetalLogPolicy` facility when
+a target already threads it through; the minimal fallback for a target that
+doesn't yet is a per-file `fn _probe_debug() -> bool: false` (flip the
+literal to re-enable) — a **function**, not a module-level `val`, since
+module-global initializers are unreliable on the freestanding lane
+(module-init gap) and would make a bool `val`'s flip-to-`true` re-enable
+silently no-op — with an early `if not _probe_debug(): return` guard in the
+probe body so call sites stay untouched. Silent in production boots, still
+there for the next investigation. Never gate a probe whose output an
+evidence/gate script asserts on. See
+`doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
+caveats".

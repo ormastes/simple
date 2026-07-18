@@ -621,6 +621,45 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Run a foreground command with inherited stdin/stdout/stderr.
+pub fn rt_process_run_inherit(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_process_run_inherit requires 2 arguments (cmd, args)",
+        ));
+    }
+    let cmd = match &args[0] {
+        Value::Str(value) => value.as_ref().clone(),
+        _ => return Err(CompileError::runtime("rt_process_run_inherit: cmd must be a string")),
+    };
+    let cmd_args = match &args[1] {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|value| match value {
+                Value::Str(text) => Some(text.as_ref().clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run_inherit: args must be an array of strings",
+            ))
+        }
+    };
+    let mut command = std::process::Command::new(&*cmd);
+    clear_simple_child_stack_env(&mut command);
+    let code = command
+        .args(cmd_args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .ok()
+        .and_then(|status| status.code())
+        .unwrap_or(-1) as i64;
+    Ok(Value::Int(code))
+}
+
 /// Run a command synchronously and return only the exit code.
 ///
 /// Callable from Simple as: `rt_process_execute(cmd, args)`

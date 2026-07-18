@@ -889,7 +889,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_queue_emit", &[I64, I64, I64, I64], &[I64]),
     // Native Draw IR queue packets carry their serialized payload across the
     // runtime boundary as a text pointer (the C facade owns the storage).
-    RuntimeFuncSpec::new("rt_host_gpu_queue_emit_payload_text", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_host_gpu_queue_emit_payload_text",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     RuntimeFuncSpec::new("rt_host_gpu_queue_drain", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_submit", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_complete", &[I64], &[I64]),
@@ -1268,6 +1272,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // site drops cmd_len and shifts args into the wrong register (see bug: exit_group(-8)
     // crash on `simple -c` when the driver self-exec-guard shells out via rt_process_run).
     RuntimeFuncSpec::new("rt_process_run", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_inherit", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),

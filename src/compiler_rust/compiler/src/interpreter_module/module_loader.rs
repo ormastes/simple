@@ -374,6 +374,31 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
     }
 }
 
+/// Loose text probe: does `path`'s source plausibly provide identifier
+/// `name` at all — either as a definition (`fn name(`, `class name`, ...,
+/// matched by [`sibling_might_define_requested_names`]) or as a member of an
+/// `export`/`use ... {.., name, ..}` re-export list (e.g. a thin shim like
+/// `export use std.nogc_sync_mut.spec.{.., print_summary, ..}`, which has no
+/// `fn print_summary(` of its own)? Tokenizes on non-identifier characters so
+/// `name` must appear as a whole token, not merely as a substring of a
+/// longer identifier. Deliberately loose/best-effort: a false positive here
+/// just falls back to the existing "package wins" default below, not a
+/// wrong resolution.
+fn file_plausibly_provides_name(path: &Path, name: &str) -> bool {
+    let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > max_check_bytes {
+            return false;
+        }
+    }
+    let Ok(source) = fs::read_to_string(path) else {
+        return false;
+    };
+    source
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|token| token == name)
+}
+
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
     match &use_stmt.target {
         ImportTarget::Group(_) | ImportTarget::Glob => {
@@ -382,6 +407,36 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
             {
                 let package_init = module_path.with_extension("").join("__init__.spl");
                 if package_init.exists() && package_init.is_file() {
+                    eprintln!(
+                        "[DEBUG-REDIRECT] module_path={} target_is_group={} requested={:?}",
+                        module_path.display(),
+                        matches!(&use_stmt.target, ImportTarget::Group(_)),
+                        requested_group_import_names(use_stmt)
+                    );
+                    // A `Group` import naming specific symbols must not redirect
+                    // away from a sibling FILE that provides those symbols into a
+                    // same-named PACKAGE that doesn't — that silently loses the
+                    // requested names (see
+                    // doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md:
+                    // `use std.spec.{print_summary, ...}` resolved the FILE
+                    // `spec.spl`, which defines them, then got redirected here to
+                    // the sibling `spec/__init__.spl` PACKAGE, which doesn't).
+                    // Withhold the (otherwise unconditional) package-init
+                    // preference only when we can positively confirm the package
+                    // lacks every requested name AND the file positively has at
+                    // least one; an empty/ambiguous probe on either side falls
+                    // back to the existing "package wins" default (see
+                    // `prefers_package_init_for_group_imports_when_both_exist`).
+                    if let ImportTarget::Group(_) = &use_stmt.target {
+                        if let Some(requested) = requested_group_import_names(use_stmt) {
+                            if !requested.is_empty()
+                                && !requested.iter().any(|name| file_plausibly_provides_name(&package_init, name))
+                                && requested.iter().any(|name| file_plausibly_provides_name(module_path, name))
+                            {
+                                return module_path.to_path_buf();
+                            }
+                        }
+                    }
                     return package_init;
                 }
             }

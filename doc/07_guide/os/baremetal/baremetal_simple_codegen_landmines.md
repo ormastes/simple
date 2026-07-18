@@ -216,6 +216,38 @@ there.
   (isolated `--cache-dir` per lane keeps rebuilds from clobbering a
   concurrent lane's cache, and keeps a from-scratch build honest about what
   it actually compiled).
+- **Debug/perf instrumentation is level-gated, not deleted.** General policy
+  (see `doc/07_guide/infra/logging/` for the canonical statement): when
+  cleaning up instrumentation, debug prints, or perf/timing logs, do not
+  delete the insert — convert it to a level-gated log (debug level, or
+  another appropriate level; perf/timing instrumentation becomes a
+  perf-level log disabled by default) so it stays reusable for the next
+  investigation. Deletion is reserved for overly-specific one-off logs with
+  no reuse value (e.g. a hardcoded address dump for one dead hypothesis).
+  Prefer one shared gate/flag or an existing log facility over ad-hoc
+  per-file booleans, so future logs plug into the same mechanism — this
+  codebase already has one for baremetal code,
+  `src/os/baremetal/profile/log_policy.spl`'s `BaremetalLogPolicy`
+  (compile/runtime level pair, `BAREMETAL_LOG_DEBUG`..`BAREMETAL_LOG_OFF`),
+  prefer wiring into it over inventing a new mechanism when a target is
+  already set up to construct and thread that policy through.
+- **Concrete worked example for these `examples/09_embedded/...` entry
+  files** (`gui_entry_desktop.spl`, `tls_unit_entry.spl`): they are not yet
+  wired to `BaremetalLogPolicy`, and the minimal-footprint fallback used here
+  is a per-file `fn _probe_debug() -> bool: false` (flip the literal to
+  `true` to re-enable) with an early `if not _probe_debug(): return` guard
+  at the top of each probe function, so every call site stays unchanged.
+  Use a **function**, not a module-global `val`: module-global initializers
+  are unreliable at runtime on this freestanding lane (module-init gap — see
+  `taskbar_clock_region_rgb_sha256_pin()` in `gui_entry_desktop.spl` for the
+  same workaround applied to a different global), which would make a bool
+  `val`'s flip-to-`true` re-enable silently no-op even though it looks
+  correct while `false`. Content of the probe must stay intact — gating only
+  controls whether it fires. Never gate a probe whose output is asserted on
+  by a QEMU evidence/gate script; check the relevant
+  `scripts/check/check-simpleos-*-evidence.shs` scripts for the probe's
+  marker string before gating it, and leave that probe ungated if a script
+  depends on it.
 
 ## Other confirmed miscompiles from the same campaign (quick reference)
 

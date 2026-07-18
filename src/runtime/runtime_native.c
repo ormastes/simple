@@ -4872,6 +4872,30 @@ SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return result;
 }
 
+int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    if (!cmd || cmd_len == 0) return -1;
+    char* command = (char*)malloc((size_t)cmd_len + 1);
+    if (!command) return -1;
+    memcpy(command, cmd, (size_t)cmd_len);
+    command[cmd_len] = '\0';
+
+    int64_t argc = rt_array_len(args);
+    const char** argv = (const char**)calloc((size_t)argc, sizeof(char*));
+    if (argc > 0 && !argv) {
+        free(command);
+        return -1;
+    }
+    for (int64_t i = 0; i < argc; i++) {
+        const uint8_t* value = rt_string_data(rt_array_get(args, i));
+        argv[i] = value ? (const char*)value : "";
+    }
+    int64_t pid = rt_process_spawn_async(command, argv, argc);
+    int64_t code = pid <= 0 ? -1 : rt_process_wait(pid, 0);
+    free(argv);
+    free(command);
+    return code;
+}
+
 /* Native-codegen tuple facades for the process externs.
  *
  * The pure-Simple LLVM backend emits extern calls with the .spl-declared
@@ -4895,6 +4919,12 @@ static int64_t* rt_process_result_to_tuple(SplArray* result) {
     /* slot 2 is always pushed via rt_value_int by both C owners: untag. */
     tuple[2] = rt_value_as_int(rt_array_get(result, 2));
     return tuple;
+}
+
+int64_t rt_process_run_inherit_value(int64_t cmd, SplArray* args) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_run_inherit(cmd_c ? cmd_c : "", cmd_len, args);
 }
 
 int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {

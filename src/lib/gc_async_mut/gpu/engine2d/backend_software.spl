@@ -14,7 +14,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
-use std.gpu.engine2d.color.{color_a, blend}
+use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
@@ -488,6 +488,26 @@ impl RenderBackend for SoftwareBackend:
             copy[i] = self.buf[i]
             i = i + 1
         engine2d_readback(copy, readback_source_label(ReadbackSource.CpuMirror))
+
+    me scale_alpha_in_place(opacity_milli: i32):
+        """Scale every pixel's alpha by opacity_milli/1000 IN PLACE.
+
+        Byte-identical to engine2d_scale_pixel_alpha() but mutates this
+        backend's own buffer instead of returning a fresh full-surface array,
+        so compositing a scratch offscreen at partial opacity does not allocate
+        a copy. Only valid on a buffer the caller is about to discard or
+        re-clear (the SimpleOS baremetal heap never reclaims, so every avoided
+        full-surface array matters).
+        """
+        if opacity_milli >= 1000:
+            return
+        val count = self.buf.len()
+        var i = 0
+        while i < count:
+            val p = self.buf[i]
+            val scaled_a = (color_a(p) * opacity_milli) / 1000
+            self.buf[i] = rgba(color_r(p), color_g(p), color_b(p), scaled_a)
+            i = i + 1
 
     fn capability() -> BackendCapability:
         """Honest self-description: pure-CPU software emulation, no device,

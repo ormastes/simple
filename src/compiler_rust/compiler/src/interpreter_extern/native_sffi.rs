@@ -65,11 +65,7 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
         _target_triple
     );
 
-    Ok(Value::Tuple(vec![
-        Value::text(ir),
-        Value::text(""),
-        Value::Int(0),
-    ]))
+    Ok(Value::Tuple(vec![Value::text(ir), Value::text(""), Value::Int(0)]))
 }
 
 /// Compile Simple source to native executable using LLVM backend

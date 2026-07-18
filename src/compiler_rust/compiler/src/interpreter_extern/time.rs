@@ -483,7 +483,12 @@ fn perf_exit(key: &str) {
     let (_, start_ns) = stack.remove(idx);
     drop(stack);
     let elapsed = (perf_clock_ns() - start_ns).max(0);
-    perf_regions().lock().unwrap().entry(key.to_string()).or_default().record(elapsed);
+    perf_regions()
+        .lock()
+        .unwrap()
+        .entry(key.to_string())
+        .or_default()
+        .record(elapsed);
 }
 
 /// Record a function call entry (interpreter mode).
@@ -556,11 +561,19 @@ pub fn rt_perf_rdtsc_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_perf_cycles_to_ns_fn(args: &[Value]) -> Result<Value, CompileError> {
     let cycles = match args.first() {
         Some(Value::Int(v)) => *v,
-        _ => return Err(CompileError::semantic("rt_perf_cycles_to_ns requires i64 cycles argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_perf_cycles_to_ns requires i64 cycles argument",
+            ))
+        }
     };
     let freq_mhz = match args.get(1) {
         Some(Value::Int(v)) if *v != 0 => *v,
-        _ => return Err(CompileError::semantic("rt_perf_cycles_to_ns requires nonzero i64 freq_mhz argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_perf_cycles_to_ns requires nonzero i64 freq_mhz argument",
+            ))
+        }
     };
     let ns = (cycles as i128 * 1000i128 / freq_mhz as i128) as i64;
     Ok(Value::Int(ns))
@@ -573,7 +586,11 @@ pub fn rt_perf_region_enter_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     let region_id = match args.first() {
         Some(Value::Int(v)) => *v,
-        _ => return Err(CompileError::semantic("rt_perf_region_enter requires i64 region_id argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_perf_region_enter requires i64 region_id argument",
+            ))
+        }
     };
     perf_enter(format!("region:{region_id}"));
     Ok(Value::Nil)
@@ -586,7 +603,11 @@ pub fn rt_perf_region_exit_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     let region_id = match args.first() {
         Some(Value::Int(v)) => *v,
-        _ => return Err(CompileError::semantic("rt_perf_region_exit requires i64 region_id argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_perf_region_exit requires i64 region_id argument",
+            ))
+        }
     };
     perf_exit(&format!("region:{region_id}"));
     Ok(Value::Nil)

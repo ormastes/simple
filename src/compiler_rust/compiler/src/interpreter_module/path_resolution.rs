@@ -682,11 +682,26 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     }
                 }
 
-                // Canonical paths first (most likely to hit), then legacy
+                // Canonical paths first (most likely to hit), then legacy.
+                //
+                // The project's own current tiered stdlib (`src/std` / `src/lib` —
+                // `src/std` is a symlink to `src/lib`) must win over
+                // `src/compiler_rust/lib/std/src`, a stale, un-tiered snapshot
+                // vendored alongside the Rust seed (its own README documents it as
+                // superseded: "Previous location: lib/std/. New location:
+                // simple/std_lib/src/."). Checking it first shadowed real, current
+                // modules that share a name with something in that stale tree —
+                // e.g. `use std.spec` resolved to the vendored tree's unrelated
+                // `spec/__init__.spl` (no `print_summary`/`get_exit_code`/
+                // `get_executed_test_count`) instead of the real
+                // `src/lib/<tier>/spec.spl`. See
+                // doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md
+                // (Root cause 1). Keep the vendored path as a final fallback for
+                // anything not (yet) present under the project tree.
                 for stdlib_subpath in &[
-                    "src/compiler_rust/lib/std/src",
                     "src/std",
                     "src/lib",
+                    "src/compiler_rust/lib/std/src",
                     "src/std/src",
                     "src/lib/std/src",
                     "lib/std/src",

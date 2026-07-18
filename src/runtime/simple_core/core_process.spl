@@ -21,6 +21,7 @@ extern fn rt_tuple_new(len: i64) -> i64
 extern fn rt_tuple_set(tuple: i64, idx: i64, value: i64) -> i8
 extern fn rt_value_int(value: i64) -> i64
 extern fn rt_string_data(value: i64) -> i64
+extern fn rt_string_len(value: i64) -> i64
 extern fn rt_string_new(bytes: i64, len: i64) -> i64
 extern fn rt_stderr_write(value: i64) -> i64
 extern fn fork() -> i64
@@ -148,12 +149,12 @@ fn _process_result(exit_code: i64) -> i64:
     rt_tuple_set(result, 2, rt_value_int(exit_code))
     result
 
-pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
+fn _process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     if cmd_ptr < 1 or cmd_len < 1:
-        return _process_result(-1)
+        return -1
     val command = malloc(cmd_len + 1)
     if command < 1:
-        return _process_result(-1)
+        return -1
     var i = 0
     while i < cmd_len:
         spl_store_u8(command, i, spl_load_u8(cmd_ptr, i))
@@ -164,7 +165,7 @@ pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     val argv = calloc(argc + 2, 8)
     if argv < 1:
         free(command)
-        return _process_result(-1)
+        return -1
     spl_store_i64(argv, 0, command)
     i = 0
     while i < argc:
@@ -175,26 +176,35 @@ pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     if status < 1:
         free(argv)
         free(command)
-        return _process_result(-1)
+        return -1
     val pid = fork()
     if pid == 0:
         execvp(command, argv)
         exit(127)
-        return _process_result(127)
+        return 127
     if pid < 1:
         free(status)
         free(argv)
         free(command)
-        return _process_result(-1)
+        return -1
 
     val waited = waitpid(pid, status, 0)
     val exit_code = if waited < 1: -1 else: (spl_load_i64(status, 0) >> 8) & 255
     free(status)
     free(argv)
     free(command)
+    exit_code
+
+pub fn rt_process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
+    _process_run_inherit(cmd_ptr, cmd_len, args)
+
+pub fn rt_process_run_inherit_value(cmd: i64, args: i64) -> i64:
+    _process_run_inherit(rt_string_data(cmd), rt_string_len(cmd), args)
+
+pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     # ponytail: stdout/stderr inherit the guest console; add pipe capture when
     # task-local descriptor inheritance is proven by the live process gate.
-    _process_result(exit_code)
+    _process_result(_process_run_inherit(cmd_ptr, cmd_len, args))
 
 pub fn rt_sleep_ms(ms: i64) -> i64:
     usleep(ms * 1000)

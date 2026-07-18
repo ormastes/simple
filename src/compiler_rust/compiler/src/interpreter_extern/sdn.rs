@@ -234,13 +234,17 @@ mod tests {
         std::fs::write(&json_path, r#"{"message":"é🙂"}"#).expect("write JSON");
 
         let sdn = rt_sdn_from_json(&[Value::text(json_path.to_string_lossy().into_owned())]).expect("JSON to SDN");
-        let Value::Str(sdn) = sdn else { panic!("expected SDN text") };
+        let Value::Str(sdn) = sdn else {
+            panic!("expected SDN text")
+        };
         assert!(sdn.contains("é🙂"));
 
         let sdn_path = dir.path().join("value.sdn");
         std::fs::write(&sdn_path, "message: \"é🙂\"\n").expect("write SDN");
         let json = rt_sdn_to_json(&[Value::text(sdn_path.to_string_lossy().into_owned())]).expect("SDN to JSON");
-        let Value::Str(json) = json else { panic!("expected JSON text") };
+        let Value::Str(json) = json else {
+            panic!("expected JSON text")
+        };
         let parsed: serde_json::Value = serde_json::from_str(json.as_str()).expect("parse JSON output");
         assert_eq!(parsed["message"], "é🙂");
     }

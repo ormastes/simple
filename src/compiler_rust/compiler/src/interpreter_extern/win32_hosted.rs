@@ -54,7 +54,9 @@ pub fn rt_win32_window_close(args: &[Value]) -> Result<Value, CompileError> {
     let hwnd = int_arg(args, 0, "rt_win32_window_close")?;
     #[cfg(target_os = "windows")]
     {
-        Ok(Value::Bool(unsafe { spl_hosted_runtime::win32::rt_win32_window_close(hwnd) }))
+        Ok(Value::Bool(unsafe {
+            spl_hosted_runtime::win32::rt_win32_window_close(hwnd)
+        }))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -106,7 +108,9 @@ pub fn rt_win32_dib_present(args: &[Value]) -> Result<Value, CompileError> {
     let dib = int_arg(args, 1, "rt_win32_dib_present")?;
     #[cfg(target_os = "windows")]
     {
-        Ok(Value::Bool(unsafe { spl_hosted_runtime::win32::rt_win32_dib_present(hwnd, dib) }))
+        Ok(Value::Bool(unsafe {
+            spl_hosted_runtime::win32::rt_win32_dib_present(hwnd, dib)
+        }))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -119,7 +123,9 @@ pub fn rt_win32_dib_free(args: &[Value]) -> Result<Value, CompileError> {
     let dib = int_arg(args, 0, "rt_win32_dib_free")?;
     #[cfg(target_os = "windows")]
     {
-        Ok(Value::Bool(unsafe { spl_hosted_runtime::win32::rt_win32_dib_free(dib) }))
+        Ok(Value::Bool(unsafe {
+            spl_hosted_runtime::win32::rt_win32_dib_free(dib)
+        }))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -149,7 +155,9 @@ pub fn rt_win32_message_pump(args: &[Value]) -> Result<Value, CompileError> {
     let hwnd = int_arg(args, 0, "rt_win32_message_pump")?;
     #[cfg(target_os = "windows")]
     {
-        Ok(Value::Int(unsafe { spl_hosted_runtime::win32::rt_win32_message_pump(hwnd) }))
+        Ok(Value::Int(unsafe {
+            spl_hosted_runtime::win32::rt_win32_message_pump(hwnd)
+        }))
     }
     #[cfg(not(target_os = "windows"))]
     {

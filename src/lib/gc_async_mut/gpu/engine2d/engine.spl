@@ -150,6 +150,12 @@ class Engine2D:
     metal_backend: MetalBackend? = nil
     opencl_backend: OpenClBackend? = nil
     rocm_backend: RocmBackend? = nil
+    # Set explicitly by create_offscreen() (a software-only embedding target).
+    # Declared with an explicit Option type so its slot is real and its type is
+    # inferable at read sites (draw_software_offscreen_opacity_consume); the
+    # constructor already names it, but without this declaration the read fails
+    # HIR field-type inference and the store may not land in a real slot.
+    software_backend: SoftwareBackend? = nil
     w: i32
     h: i32
     pacing: FramePacingCounters
@@ -1301,6 +1307,30 @@ class Engine2D:
             return
         val scaled = engine2d_scale_pixel_alpha(src.read_pixels(), opacity_milli)
         self.draw_image_blend(dst_x, dst_y, src.width(), src.height(), scaled)
+
+    me draw_software_offscreen_opacity_consume(dst_x: i32, dst_y: i32, src: Engine2D, opacity_milli: i32) -> bool:
+        """Composite a SOFTWARE offscreen into self at opacity_milli/1000,
+        CONSUMING src: scale src's own buffer alpha in place and blend it
+        directly, with NO read_pixels() snapshot and NO
+        engine2d_scale_pixel_alpha() copy.
+
+        Returns true when the fast in-place path applied (src is software
+        backed), false otherwise so the caller falls back to
+        draw_engine_opacity(). Only call when src's pixels will not be reused
+        unscaled (e.g. a scratch embedded offscreen cleared before its next
+        use). This keeps translucent-window compositing on the non-reclaiming
+        SimpleOS baremetal bump heap from leaking two full-surface scratch
+        arrays per window.
+        """
+        if opacity_milli <= 0:
+            return true
+        val src_software: SoftwareBackend? = src.software_backend
+        if val Some(sw) = src_software:
+            if opacity_milli < 1000:
+                sw.scale_alpha_in_place(opacity_milli)
+            self.draw_image_blend(dst_x, dst_y, sw.w, sw.h, sw.buf)
+            return true
+        false
 
     me draw_vulkan_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
         """Blend child pixels only through the active checked Vulkan path."""

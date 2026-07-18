@@ -975,6 +975,8 @@ if [ "${build_mcp}" -eq 1 ]; then
       mcp_build_ok=0
       echo "  WARNING: ${mcp_name} produced a zero-byte file"
     else
+      printf '%s\n' "$(hash_file "${full_dir}/${mcp_name}${exe_suffix}")" \
+        >"${full_dir}/${mcp_name}${exe_suffix}.sha256"
       echo "  ${mcp_name}: ${full_dir}/${mcp_name}${exe_suffix}"
     fi
   done
@@ -1048,7 +1050,12 @@ if [ "${deploy}" -eq 1 ]; then
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
     for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
       if [ -x "${full_dir}/${mcp_bin_name}${exe_suffix}" ] && [ -s "${full_dir}/${mcp_bin_name}${exe_suffix}" ]; then
-        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
+        mcp_deploy_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.deploy.$$"
+        mcp_hash_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.sha256.deploy.$$"
+        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${mcp_deploy_tmp}"
+        install -m644 "${full_dir}/${mcp_bin_name}${exe_suffix}.sha256" "${mcp_hash_tmp}"
+        mv "${mcp_deploy_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
+        mv "${mcp_hash_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}.sha256"
         echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}${exe_suffix}"
       fi
     done

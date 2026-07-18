@@ -671,6 +671,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_env_temp",
     "rt_exit",
     "rt_process_run",
+    "rt_process_run_inherit",
     "rt_process_spawn",
     "rt_process_spawn_async",
     "rt_process_spawn_inherit",

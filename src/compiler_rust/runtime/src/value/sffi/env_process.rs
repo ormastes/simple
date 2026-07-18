@@ -612,6 +612,36 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
     }
 }
 
+/// Execute a foreground command with the caller's stdio attached.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_inherit(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64 {
+    use std::process::{Command, Stdio};
+
+    if cmd_ptr.is_null() {
+        return -1;
+    }
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
+    for i in 0..rt_array_len(args) {
+        if let Some(arg) = extract_string(rt_array_get(args, i)) {
+            command.arg(arg);
+        }
+    }
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(-1) as i64,
+        Err(_) => -1,
+    }
+}
+
 /// Spawn a process without waiting
 /// Returns process ID or -1 on error
 #[no_mangle]

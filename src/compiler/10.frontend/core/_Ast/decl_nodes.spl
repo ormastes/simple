@@ -188,6 +188,17 @@ var decl_param_names: [[text]] = []
 var decl_param_types: [[i64]] = []
 var decl_ret_type: [i64] = []
 var decl_body_stmts: [[i64]] = []
+# Flat mirror of decl_body_stmts: joined "a,b,c" text per decl. Same hazard and
+# same fix as arm_body_flat above (see that comment): decl_body_stmts is
+# [[i64]], and the native-build/cranelift-compiled runtime can corrupt/erase
+# the inner list across compilation units (stage3-self-hosted stage4 native-
+# build closure; see doc/08_tracking/bug/
+# stage3_selfhost_parser_case_multielem_pattern_2026-07-17.md), surfacing as
+# stale/OOB stmt-arena indices read back by decl_get_body() in a LATER file's
+# conversion. A flat [text] arena has no nested element to erase and, like
+# arm_body_flat, is index-aligned with decl_tag so it can never leak stale
+# bodies across compilations.
+var decl_body_stmts_flat: [text] = []
 var decl_field_names: [[text]] = []
 var decl_field_types: [[i64]] = []
 var decl_field_defaults: [[i64]] = []
@@ -243,6 +254,7 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_param_types.push([])
     decl_ret_type.push(-1)
     decl_body_stmts.push([])
+    decl_body_stmts_flat.push("")
     decl_field_names.push([])
     decl_field_types.push([])
     decl_field_defaults.push([])
@@ -277,6 +289,7 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_param_types[idx] = []
     decl_ret_type[idx] = -1
     decl_body_stmts[idx] = []
+    decl_body_stmts_flat[idx] = ""
     decl_field_names[idx] = []
     decl_field_types[idx] = []
     decl_field_defaults[idx] = []
@@ -332,6 +345,7 @@ fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, b
     decl_param_types[idx] = param_types
     decl_ret_type[idx] = ret_type
     decl_body_stmts[idx] = body
+    decl_body_stmts_flat[idx] = ast_i64_list_join(body)
     decl_is_async[idx] = is_async
     decl_type_params[idx] = type_params
     idx
@@ -424,6 +438,7 @@ fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> 
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
+    decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     idx
 
 fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
@@ -438,6 +453,7 @@ fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
+    decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     decl_is_lazy[idx] = 1
     idx
 
@@ -452,6 +468,7 @@ fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> 
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
+    decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     idx
 
 fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
@@ -493,6 +510,7 @@ fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i
     ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
     decl_name[idx] = target_name
     decl_body_stmts[idx] = method_decl_ids
+    decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
     idx
 
 # Record the trait NAME for an `impl Trait for Type:` block (#157). Called in a
@@ -524,6 +542,8 @@ fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
     ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
     if idx >= 0 and idx < decl_body_stmts.len():
         decl_body_stmts[idx] = method_decl_ids
+    if idx >= 0 and idx < decl_body_stmts_flat.len():
+        decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
 
 fn decl_get_is_trait(idx: i64) -> i64:
     if ast_decl_prefer_arena() and idx >= 0 and idx < decl_is_trait.len():
@@ -550,6 +570,7 @@ fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defau
     decl_field_types[idx] = field_types
     decl_field_defaults[idx] = field_defaults
     decl_body_stmts[idx] = body_stmts
+    decl_body_stmts_flat[idx] = ast_i64_list_join(body_stmts)
     decl_imports[idx] = imports
     idx
 
@@ -560,6 +581,7 @@ fn decl_ce_block(builder_name: text, body_stmts: [i64], span_id: i64) -> i64:
     ast_decl_direct_set(ast_decl_tag_key(idx), "11")
     decl_name[idx] = builder_name
     decl_body_stmts[idx] = body_stmts
+    decl_body_stmts_flat[idx] = ast_i64_list_join(body_stmts)
     idx
 
 fn decl_aop_advice(pointcut: text, handler: text, form: text, priority_text: text, span_id: i64) -> i64:
@@ -675,8 +697,13 @@ fn decl_get_ret_type(idx: i64) -> i64:
     decl_ret_type[idx]
 
 fn decl_get_body(idx: i64) -> [i64]:
-    if ast_decl_prefer_arena() and idx >= 0 and idx < decl_body_stmts.len():
-        return decl_body_stmts[idx]
+    # Read from the flat [text] mirror (see decl_body_stmts_flat above), same
+    # treatment as arm_get_body: decoding a fresh [i64] from text sidesteps
+    # the native-build/cranelift-compiled runtime's nested-[[i64]] corruption
+    # of decl_body_stmts across compilation units in this exact
+    # (SIMPLE_NATIVE_ARENA_DECLS=1) code path.
+    if ast_decl_prefer_arena() and idx >= 0 and idx < decl_body_stmts_flat.len():
+        return ast_i64_list_split(decl_body_stmts_flat[idx])
     val direct = rt_env_get(ast_decl_body_key(idx)) ?? ""
     if direct != "":
         return ast_i64_list_split(direct)

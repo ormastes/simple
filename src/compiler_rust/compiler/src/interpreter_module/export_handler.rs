@@ -36,12 +36,32 @@ pub fn load_export_source(
         return Ok(HashMap::new());
     }
 
-    // Build a UseStmt to load the source module
+    // Build a UseStmt to load the source module. This always loads the full
+    // module regardless of target (see the `requested_names`/"Keep the full
+    // module" comment in `load_and_merge_module`) — callers here re-filter
+    // the returned dict by `export_stmt.target` themselves. But the target
+    // ALSO feeds the file-vs-same-named-package precedence decision
+    // (`prefer_package_init_for_member_import`), which needs the real
+    // requested names to avoid redirecting a `Group` re-export away from a
+    // sibling FILE that defines them into a same-named PACKAGE that doesn't
+    // (see
+    // doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md:
+    // `export use std.nogc_sync_mut.spec.{.., print_summary, ..}` was
+    // hardcoding `Glob` here, discarding the specific names before that
+    // precedence check ever saw them). Preserve `Group` targets so that
+    // check works; keep every other target forced to `Glob` exactly as
+    // before (`Single`/`Aliased` in particular must stay `Glob` — those
+    // extract a single value rather than a `Dict`, which would break the
+    // `Ok(Value::Dict(dict))` match below).
+    let use_target = match &export_stmt.target {
+        ImportTarget::Group(_) => export_stmt.target.clone(),
+        _ => ImportTarget::Glob,
+    };
     let use_stmt = UseStmt {
         span: export_stmt.span,
         path: export_stmt.path.clone(),
-        target: ImportTarget::Glob, // Load entire module to get all exports
-        is_type_only: false,        // Runtime export loading is never type-only
+        target: use_target,
+        is_type_only: false, // Runtime export loading is never type-only
         is_lazy: false,
     };
 

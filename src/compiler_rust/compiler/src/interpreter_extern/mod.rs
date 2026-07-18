@@ -1434,6 +1434,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_kill", system::rt_process_kill);
     insert_simple!("rt_process_run", system::rt_process_run);
     insert_simple!("rt_process_run_bounded", system::rt_process_run_bounded);
+    insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     insert_simple!("rt_process_wait", system::rt_process_wait);
