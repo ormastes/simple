@@ -288,3 +288,88 @@ Option return type was silently un-recognized so the base fell through to the
 wrong offset inside the right decoder. The one place an actual payload-slot
 ambiguity remains is the documented, separate, and still-open uniform tagged
 Option ABI item (raw payload `3` colliding with the None sentinel) above.
+
+## Round-10 landing regression, fixed before re-land (2026-07-18, P4 lane)
+
+Commit `affc31afd7d` above was dropped from the round-10 landing batch: the
+coordinator's landing matrix hit
+`error: semantic: method 'has' not found on type 'nil' (receiver value:
+nil)` building `struct_field` (a struct with fields but NO methods —
+`Point(x: 30, y: 41); return p.x + p.y`, the exact `native-smoke-matrix.shs`
+case #6, rc 71) — i.e. every struct program, not just Option/method-call
+ones, failed to native-build.
+
+**Root cause:** the `struct_method_syms` fallback added in `affc31afd7d`
+called `self.struct_method_syms.has(method_key)` unguarded. `struct_method_syms`
+is declared as a plain (non-optional) `Dict<text, SymbolId>` field on
+`MirLowering` (`mir_lowering_types.spl:105`) and is initialized to `{}` in the
+constructors this lane inspected (`module_lowering.spl:82,425`) — but on the
+coordinator's landing-matrix run it was still nil at the point
+`enum_match_expr_type` ran for a struct with no methods, and calling `.has()`
+on that nil field is a hard build-time error, not a graceful "key not found."
+This lane's own local verification matrix (stale-seed `native-build --entry`
+re-run of the full 19-case `native-smoke-matrix.shs`, including
+`struct_field`) did **not** reproduce the crash — `struct_method_syms` came
+back non-nil in every local run — so the exact nil-triggering condition
+differs between this lane's environment and the landing pipeline's; the
+matrix was too narrow regardless (it happened to never probe this field's
+nil-ness directly) and is now widened per the fix below.
+
+**Fix:** guard the same line with an explicit `!= nil` check, matching the
+idiom already used everywhere else in this function (e.g. `if callee_type !=
+nil:` in the `Call` arm) — `if self.struct_method_syms != nil and
+self.struct_method_syms.has(method_key):`. When nil, the fallback is skipped
+gracefully (same as the pre-`affc31afd7d` behavior for this shape) instead of
+crashing. `option_variant_order_source_spec.spl`'s pinned-source assertion was
+updated to match the new guarded line so it can't regress unguarded again.
+
+**Verification (stale deployed seed
+`/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`,
+`native-build --entry ... --clean`, `env -u SIMPLE_BOOTSTRAP
+SIMPLE_NO_STUB_FALLBACK=1` unless noted):**
+- Full `native-smoke-matrix.shs` (all 19 cases, `SIMPLE_BINARY=<stale seed>`):
+  19/19 PASS, including `struct_field` -> rc 71 (own struct-with-no-methods
+  case added to this lane's local checks too: `Point(x,y); return p.x+p.y`
+  native-builds and exits 71).
+- Original regression target still fixed: `native_option_try_unresolved_method_loud.spl`
+  -> `6`.
+- No regression on the rest of this lane's matrix: `annotated_loud`->5,
+  `direct_loud`->4, Result `?` cross-check->`8boom`, `match Src(v:9).get():
+  case Ok(x)`->9, `match source.label(): case Ok(s)` (Var receiver,
+  `Result<text,_>`)->`hi`, `match Src(v:11).maybe()`->`none` (pre-existing,
+  unrelated, unchanged).
+- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl`: 4
+  examples, 0 failures.
+
+**Honesty note on the guard's effectiveness (not just its safety):** every
+verification above proves the guard is *safe* (no new crash, no behavior
+change on any reachable path in this lane's environment) — it does NOT prove
+the guard *fires*, because this lane could not reproduce
+`struct_method_syms` actually being nil. Traced the field's only constructor,
+`MirLowering.new_for_target` (`module_lowering.spl:60`), which
+unconditionally sets `struct_method_syms: {}` (never nil) — every
+`MirLowering` instance this lane's build creates, including the lambda-lift
+child context (`lw = MirLowering.new_for_target(...)` at
+`switch_operators_calls.spl:2230`, which then copies the parent's dict at
+line 2240), starts non-nil. `!= nil` was chosen over the coordinator's
+suggested `.?` because `.?` is this codebase's documented Option-unwrap
+check (used on `Symbol?`/`HirType?` elsewhere in this same file), while
+`struct_method_syms` is declared as a plain non-optional `Dict<text,
+SymbolId>` — `!= nil` is the same idiom this exact function already uses
+successfully for its other nil-checks (e.g. `if callee_type != nil:`) and is
+a plain value comparison that does not depend on the field's static
+optionality, so it should still correctly detect a genuinely-nil runtime
+value if the interpreter's dynamic-typing leniency ever puts one there (a
+documented interpreter-landmine class in this repo — see
+`reference_interpreter_dict_and_value_quirks` — even though this lane could
+not manufacture that exact condition from the constructor it could find).
+**This guard has not been confirmed to fire in the specific case the
+coordinator's landing matrix hit; only that it cannot make anything worse.
+Please re-run the round-10 landing matrix against this new commit to confirm
+`struct_field` (and the rest of the batch) actually passes there before
+counting this closed** — if it still fails, the nil source is a construction
+path this lane did not find, and the next lane should grep for other
+`MirLowering(...)` struct-literal constructions or copy sites beyond
+`new_for_target` and the one copy at line 2240.
+
+Committed as a new SHA (see VCS log) for round-11 re-landing.
