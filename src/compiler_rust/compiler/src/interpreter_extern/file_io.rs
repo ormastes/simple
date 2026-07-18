@@ -54,6 +54,9 @@ impl SymbolInterner {
 }
 
 // Helper to create Option::Some(value)
+// ponytail: dead after rt_file_read_bytes/read_lines/current_dir all return bare
+// values (P3+N3+KEY2 landed together); kept for any future optional-returning extern.
+#[allow(dead_code)]
 fn make_some(value: Value) -> Value {
     Value::Enum {
         enum_name: "Option".to_string(),
@@ -63,6 +66,7 @@ fn make_some(value: Value) -> Value {
 }
 
 // Helper to create Option::None
+#[allow(dead_code)]
 fn make_none() -> Value {
     Value::Enum {
         enum_name: "Option".to_string(),
