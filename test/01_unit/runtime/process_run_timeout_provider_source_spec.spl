@@ -97,3 +97,32 @@ describe "core C process timeout provider":
         expect(drain_pos).to_be_greater_than(resume_pos)
         expect(wait_pos).to_be_greater_than(drain_pos)
         expect(terminate_pos).to_be_greater_than(wait_pos)
+
+    it "shares private Windows quoting while preserving the public runtime owner":
+        val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
+        val platform = rt_file_read_text("src/runtime/platform/platform_win.h") ?? ""
+        val quoting = rt_file_read_text("src/runtime/platform/windows_command_line_private.h") ?? ""
+        val seed_tools = rt_file_read_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs") ?? ""
+
+        expect(provider).to_contain("#include \"platform/windows_command_line_private.h\"")
+        expect(provider).to_contain("cmdline = win_cmd_build_line(cmd_c, child_args, argc);")
+        expect(provider.find("rt_windows_build_command_line(cmd_c, child_args, argc)")).to_equal(-1)
+        expect(provider.find("static bool win_cmd_needs_quotes")).to_equal(-1)
+        expect(platform).to_contain("#include \"windows_command_line_private.h\"")
+        expect(platform).to_contain("char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t arg_count)")
+        expect(platform).to_contain("return win_cmd_build_line(cmd, args, arg_count);")
+        expect(platform.find("static bool win_cmd_needs_quotes")).to_equal(-1)
+        expect(quoting).to_contain("static bool win_cmd_needs_quotes(const char* s)")
+        expect(quoting).to_contain("static bool win_cmd_append_char(char* out, size_t cap, size_t* pos, char ch)")
+        expect(quoting).to_contain("static bool win_cmd_append_str(char* out, size_t cap, size_t* pos, const char* s)")
+        expect(quoting).to_contain("static bool win_cmd_append_arg(char* out, size_t cap, size_t* pos, const char* arg)")
+        expect(quoting).to_contain("static char* win_cmd_build_line(const char* cmd, const char** args, int64_t arg_count)")
+        expect(quoting.split("static ").len() - 1).to_equal(5)
+        expect(quoting.find("constructor")).to_equal(-1)
+        expect(quoting.find(".CRT$")).to_equal(-1)
+        expect(quoting).to_contain("if (!s || s[0] == '\\0') return true;")
+        expect(quoting).to_contain("*p == ' ' || *p == '\\t' || *p == '\"'")
+        expect(quoting).to_contain("backslashes * 2 + 1")
+        expect(quoting).to_contain("backslashes * 2")
+        expect(quoting).to_contain("if (total > SIZE_MAX - addition) return NULL;")
+        expect(seed_tools).to_contain("\"platform/windows_command_line_private.h\",")

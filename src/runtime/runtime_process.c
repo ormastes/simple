@@ -58,6 +58,7 @@ static SplArray* process_timeout_result(const char* stdout_text, const char* std
 
 /* Windows process timeout/capture owner. */
 #include <windows.h>
+#include "platform/windows_command_line_private.h"
 
 struct WinCapture {
     char* data;
@@ -193,7 +194,7 @@ SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* ar
             child_args[i] = (const char*)(data ? data : (const uint8_t*)"");
         }
     }
-    cmdline = rt_windows_build_command_line(cmd_c, child_args, argc);
+    cmdline = win_cmd_build_line(cmd_c, child_args, argc);
     environment = win_filtered_environment();
     if (!cmdline || !environment) {
         failure = "process spawn failed";

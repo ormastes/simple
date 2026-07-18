@@ -19,10 +19,19 @@ requesting the duplicate, legacy-layout `spl_*` core API. Its process slice can
 therefore resolve through the existing runtime-native, fork, and memtrack
 owners without admitting a broad core archive.
 
+Windows capture previously requested the public
+`rt_windows_build_command_line` owned by broad `runtime.c`. The quoting
+algorithm now lives once in a platform-private static helper: `runtime_process`
+calls it directly, while `platform_win.h` retains its public one-line wrapper
+for runtime.c-only compiler and standalone lanes. This removes the Stage4
+dependency without adding a global export, compile flag, or provider archive.
+The Rust core-C/Stage4 cache input list fingerprints the private header while
+continuing to derive archive members from `.c` inputs only.
+
 Focused tests pin the hosted archive/object-format matrix, missing/extra ABI
 rejection, canonical tagged POSIX argument access, transitive process-slice
-selection, process staging and cleanup, and the retained projection barrier.
-Broader owner closure is not claimed complete, while Windows still lacks
-`rt_windows_build_command_line`. The staged archive is not yet projected or
-linked. No Simple, C, Rust, Cargo, compiler, or native execution is claimed in
-this static-only session.
+selection on POSIX and Windows, shared Windows quoting ownership, process
+staging and cleanup, and the retained projection barrier. Broader owner closure
+is not claimed complete. The staged archive is not yet projected or linked. No
+Simple, C, Rust, Cargo, compiler, or native execution is claimed in this
+static-only session.

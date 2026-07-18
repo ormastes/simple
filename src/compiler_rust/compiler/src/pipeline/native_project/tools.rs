@@ -303,6 +303,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_simd_dispatch.h",
         "runtime_thread.h",
         "platform/platform.h",
+        "platform/windows_command_line_private.h",
     ];
     if target.os == simple_common::target::TargetOS::Linux {
         // The portable compositor remains in the full CLI closure on Linux.
