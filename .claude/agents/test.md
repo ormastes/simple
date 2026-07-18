@@ -80,9 +80,26 @@ Files: `*_spec.spl` or `*_test.spl`
 ```bash
 bin/simple test                          # All tests
 bin/simple test path/to/spec.spl         # Single file
+bin/simple test doc/path/guide.md        # Markdown doctests
+bin/simple test --spl-doctest src/path/module.spl # Source documentation tests
+bin/simple test --refresh-manifest       # Refresh after bulk moves/edits
 bin/simple test --list                   # List tests
 bin/simple test --only-slow              # Slow tests only
 ```
+
+## Documentation Tests
+
+- Markdown: closed, non-empty `simple`, `spl`, or `sdoctest` fences; configured
+  repository discovery is owned by `config/sdoctest.sdn`.
+- Simple source: closed, non-empty fences in `#`, `##`, or `///` comments,
+  fenced blocks inside triple-quoted docstrings, and docstring `sdoctest:`
+  sections.
+- Use a `text` fence for illustrative code that must not execute. Use `:skip`
+  only for a registered example that is intentionally unavailable.
+- Registration must call the same extractor used by execution. Do not add a
+  separate regex-only counter; it will drift from modifiers and comment forms.
+- Run an edited doctest file explicitly. Whole-release evidence remains
+  `bin/simple test test --whole --mode=interpreter`.
 
 ## Critical Rules
 

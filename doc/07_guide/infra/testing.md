@@ -722,6 +722,30 @@ Available helpers: `skip_on_baremetal`, `only_on_baremetal`, `skip_on_remote`, `
 
 Default pattern: `test/**/*_spec.spl`
 
+Doctest discovery has two executable lanes:
+
+- Markdown fences use ` ```simple `, ` ```spl `, or ` ```sdoctest ` and may
+  carry supported modifiers such as `:skip`, `:should_fail`, `:init=...`, and
+  `:env=...`. The configured repository sweep comes from
+  `config/sdoctest.sdn`; an explicit `.md` target is scanned directly.
+- Simple source documentation uses closed, non-empty `#`, `##`, or `///`
+  fences, fenced blocks inside triple-quoted docstrings, or an indented
+  `sdoctest:` section inside a docstring. Spec/test source files are excluded
+  from this comment lane.
+
+Registration and execution share the same extractors. The test manifest stores
+only files with runnable, closed, non-empty blocks; modifier fences and source
+comments therefore cannot disappear because a separate counter recognizes a
+smaller syntax. Normal Markdown and comment-doctest runs rescan their configured
+or explicit inputs at the run event. Manifest-backed test discovery refreshes
+on its five-minute TTL and reuses unchanged entries by file size and mtime;
+`--refresh-manifest` forces an immediate scan after bulk edits or file moves.
+
+Use a prose fence such as ` ```text ` for illustrative code that must never
+run. Use `:skip` only when the example is intentionally registered but cannot
+run in the current environment. Unclosed or empty executable fences are not
+registered and an explicitly targeted file with no runnable block fails closed.
+
 ### Commands
 
 ```bash
@@ -732,6 +756,9 @@ simple test --seed 12345           # Deterministic order
 simple test --format json          # JSON output
 simple test --format doc           # Documentation format
 simple test --list                 # List tests
+simple test doc/path/guide.md      # Run one Markdown doctest file
+simple test --spl-doctest src/path/module.spl # Run source-comment doctests
+simple test --refresh-manifest     # Force manifest rescan
 simple test --only-slow            # Slow tests only
 simple test --screenshots          # Capture GUI screenshots
 simple test --refresh-screenshots  # Force recapture

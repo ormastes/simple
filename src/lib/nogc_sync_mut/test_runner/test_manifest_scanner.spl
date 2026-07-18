@@ -7,6 +7,8 @@ use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry, SdoctestManifestEntry,
     MANIFEST_VERSION, manifest_new, manifest_find_entry
 }
+use std.test_runner.doctest_runner.{extract_doctests}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
 use std.io.{dir_walk_native}
 use std.io.{path_basename}
 
@@ -147,7 +149,7 @@ fn scan_sdoctest_file(path: text) -> SdoctestManifestEntry:
     val size = rt_file_size(path)
     val mtime = rt_file_stat(path)
     val content = rt_file_read_text(path) ?? ""
-    val blocks = count_sdoctest_blocks(content)
+    val blocks = count_sdoctest_blocks_for_path(path, content)
 
     SdoctestManifestEntry(
         path: path,
@@ -205,14 +207,18 @@ fn extract_platform_tags(content: text) -> text:
     tags.join(",")
 
 fn count_sdoctest_blocks(content: text) -> i64:
-    # Count ```simple or ```spl code blocks in markdown
-    var count = 0
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "```simple" or trimmed == "```spl":
-            count = count + 1
-    count
+    # Registration must use the same closed, non-empty block parser as execution.
+    extract_blocks_from_content(content: content, file_path: "").len()
+
+fn count_sdoctest_blocks_for_path(path: text, content: text) -> i64:
+    if path.ends_with(".md"):
+        return count_sdoctest_blocks(content)
+    if path.ends_with(".spl"):
+        # Avoid a second file read for ordinary source files.
+        if not content.contains("```simple") and not content.contains("```spl") and not content.contains("```sdoctest") and not content.contains("sdoctest:"):
+            return 0
+        return extract_doctests(path).len()
+    0
 
 # ============================================================================
 # Internal Lookup Helper
@@ -227,4 +233,3 @@ fn manifest_find_sdoctest_entry(manifest: TestManifest, path: text) -> SdoctestM
 # ============================================================================
 # Exports
 # ============================================================================
-

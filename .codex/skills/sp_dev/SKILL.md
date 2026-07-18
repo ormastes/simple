@@ -79,6 +79,16 @@ spec/long-test discovery and execute both `.spl` comment doctests and configured
 Markdown code fences; a narrower `--all`, `--only-slow`, or smoke run is not
 release evidence.
 
+When a lane changes Markdown examples, source doc comments, doctest discovery,
+or the test manifest, keep registration and execution aligned through the
+canonical test-runner extractors. Runnable Markdown uses closed, non-empty
+`simple`, `spl`, or `sdoctest` fences; runnable source documentation uses
+closed, non-empty `#`/`##`/`///` fences, fenced docstrings, or docstring
+`sdoctest:` sections. Use
+`text` fences for non-runnable examples. Run the changed file explicitly, and
+use `--refresh-manifest` after bulk moves; the normal manifest refresh is
+TTL-based with size/mtime incremental reuse.
+
 For work spanning multiple host or capability rows, keep every unavailable
 row's acceptance-criterion IDs active. Reuse its authoritative TODO and plan,
 or create them when none exist, and record the missing prerequisite, exact

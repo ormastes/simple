@@ -407,12 +407,6 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
             {
                 let package_init = module_path.with_extension("").join("__init__.spl");
                 if package_init.exists() && package_init.is_file() {
-                    eprintln!(
-                        "[DEBUG-REDIRECT] module_path={} target_is_group={} requested={:?}",
-                        module_path.display(),
-                        matches!(&use_stmt.target, ImportTarget::Group(_)),
-                        requested_group_import_names(use_stmt)
-                    );
                     // A `Group` import naming specific symbols must not redirect
                     // away from a sibling FILE that provides those symbols into a
                     // same-named PACKAGE that doesn't — that silently loses the

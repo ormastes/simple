@@ -141,6 +141,11 @@ Every release-bound SPipe lane must also pass
 `bin/simple test test --whole --mode=interpreter`, which combines all
 spec/long-test discovery with `.spl` comment doctests and configured Markdown
 code-fence tests. `--all` or `--only-slow` alone is not whole-release evidence.
+Registration must use the same canonical extractors as execution: closed,
+non-empty `simple`/`spl`/`sdoctest` Markdown fences and closed, non-empty
+`#`/`##`/`///`, fenced-docstring, or docstring `sdoctest:` source examples. Use `text` for illustrative
+non-runnable snippets, run changed doctest files explicitly, and force
+`--refresh-manifest` after bulk moves; ordinary refresh is TTL plus size/mtime.
 If the hardening matrix reports `reason=stale-static-reports`, refresh the
 named reports until `simpleos_hardening_stale_reports=none` before accepting
 the lane.

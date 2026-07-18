@@ -51,6 +51,7 @@ fn extract_doctests(file_path: text) -> [Doctest]:
     var in_docstring = false
     var in_sdoctest = false
     var sdoctest_indent = 0
+    var doc_fence_indent = 0
     var code_lines: [text] = []
     var start_line = 0
     var should_fail = false
@@ -75,13 +76,37 @@ fn extract_doctests(file_path: text) -> [Doctest]:
                 ))
             in_docstring = not in_docstring
             in_sdoctest = false
+            in_code_block = false
             code_lines = []
             i = i + 1
             continue
 
         if in_docstring:
             val indent = line.len() - line.trim_start().len()
-            if trimmed == "sdoctest:":
+            if in_code_block:
+                if trimmed == "```":
+                    in_code_block = false
+                    if code_lines.len() > 0:
+                        doctests.push(Doctest(
+                            source_file: file_path,
+                            line_number: start_line,
+                            code: code_lines.join("\n"),
+                            expected_output: "",
+                            should_fail: should_fail
+                        ))
+                    code_lines = []
+                else:
+                    var code_start = doc_fence_indent
+                    if code_start > line.len():
+                        code_start = indent
+                    code_lines.push(line[code_start:])
+            elif trimmed.starts_with("```simple") or trimmed.starts_with("```spl") or trimmed.starts_with("```sdoctest"):
+                in_code_block = true
+                doc_fence_indent = indent
+                start_line = i + 1
+                should_fail = trimmed.contains("should_fail")
+                code_lines = []
+            elif trimmed == "sdoctest:":
                 in_sdoctest = true
                 sdoctest_indent = indent
                 start_line = i + 2
@@ -106,13 +131,15 @@ fn extract_doctests(file_path: text) -> [Doctest]:
             continue
 
         # Detect doc comments
-        if trimmed.starts_with("///") or trimmed.starts_with("##"):
+        if trimmed.starts_with("///") or trimmed.starts_with("#"):
             val doc_content = if trimmed.starts_with("///"):
                 trimmed[3:].trim()
-            else:
+            elif trimmed.starts_with("##"):
                 trimmed[2:].trim()
+            else:
+                trimmed[1:].trim()
 
-            if doc_content.starts_with("```simple") or doc_content.starts_with("```spl"):
+            if doc_content.starts_with("```simple") or doc_content.starts_with("```spl") or doc_content.starts_with("```sdoctest"):
                 in_code_block = true
                 code_lines = []
                 start_line = i + 1
@@ -438,11 +465,11 @@ fn discover_spl_doctest_files(dirs: [text]) -> [text]:
             # Skip spec and test files
             if file_path.ends_with("_spec.spl") or file_path.ends_with("_test.spl"):
                 continue
-            # Fast pre-check for either supported source-comment form.
+            # Fast pre-check for supported source-comment and docstring forms.
             val content = file_read(file_path) ?? ""
             if content == "":
                 continue
-            if not content.contains("///") and not content.contains("##") and not content.contains("sdoctest:"):
+            if not content.contains("```simple") and not content.contains("```spl") and not content.contains("```sdoctest") and not content.contains("sdoctest:"):
                 continue
             # Check for @doctest_skip marker
             if content.contains("# @doctest_skip"):
