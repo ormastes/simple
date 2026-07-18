@@ -134,10 +134,12 @@ Linux acceptance: the old permissive `lsu64_access()` and PC-only
 register file, two-parcel instruction fetch, data stalls, Sv39/PMP faults, and
 commit; `soc_top_64_tick()` routes its single outstanding physical request to
 the RV64 reset ROM, DRAM, CLINT, PLIC, or UART with a one-cycle response latch.
-Compressed decode, M/A execution, supervisor interrupt contexts, and RV32
-parity remain incomplete. Until M/A/C are connected, reset `misa` advertises only the
-implemented RV64I/S/U subset; reserved encodings trap before any data request.
-CLINT and qualified PLIC signals now feed `mip`, and enabled interrupts enter
+Compressed decode, A execution, supervisor interrupt contexts, and RV32 parity
+remain incomplete. The multi-cycle M unit is clocked into commit with exact high
+multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
+reset `misa` now advertises RV64I+M+S+U. A/C remain clear; reserved encodings
+trap before any data request.
+CLINT and qualified PLIC signals feed `mip`, and enabled interrupts enter
 the existing delegated trap path at instruction boundaries. RAM-backed
 `mmu*_translate*_test_adapter()` functions remain unit adapters, not RTL
 evidence.

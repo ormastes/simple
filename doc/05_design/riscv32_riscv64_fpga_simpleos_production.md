@@ -150,7 +150,7 @@ bus response and routes accepted physical requests exactly once.
 The clock path validates encodings before starting data access, samples
 CLINT/PLIC pending state into `mip`, and takes enabled interrupts only after an
 instruction commits. `misa` grows only when the corresponding execution path is
-connected; the current slice does not advertise M, A, or C.
+connected: M is now multi-cycle and architectural, while A and C remain clear.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

@@ -25,7 +25,10 @@ use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64}
 use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
 use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.lsu.lsu64_load
-use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready}
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_start, mul_div_tick}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MUL, MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_DIV, MULDIV_DIVU, MULDIV_REM, MULDIV_REMU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULW, MULDIV_DIVW, MULDIV_DIVUW, MULDIV_REMW, MULDIV_REMUW}
 use std.hardware.rv64gc_rtl.atomics.AtomicsState
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
@@ -44,6 +47,7 @@ use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SST
 val CORE64_FETCH_LOW: u32 = 0
 val CORE64_FETCH_HIGH: u32 = 1
 val CORE64_DATA_ACCESS: u32 = 2
+val CORE64_MULDIV: u32 = 3
 
 # ============================================================================
 # Core sequential state (clocked registers)
@@ -216,7 +220,7 @@ fn core64_instruction_legal(instruction: u32, dec: DecodeResult64) -> bool:
 
     if op == OP_OP_32:
         if f7 == 1:
-            return true
+            return f3 == 0 or f3 == 4 or f3 == 5 or f3 == 6 or f3 == 7
         if f7 == 0:
             return f3 == 0 or f3 == 1 or f3 == 5
         return f7 == 0x20 and (f3 == 0 or f3 == 5)
@@ -652,6 +656,23 @@ fn core64_data_size(funct3: u32) -> u32:
     8
 
 @hardware
+fn core64_muldiv_op(dec: DecodeResult64) -> i64:
+    if dec.opcode == OP_OP_32:
+        if dec.funct3 == 0: return MULDIV_MULW
+        if dec.funct3 == 4: return MULDIV_DIVW
+        if dec.funct3 == 5: return MULDIV_DIVUW
+        if dec.funct3 == 6: return MULDIV_REMW
+        return MULDIV_REMUW
+    if dec.funct3 == 0: return MULDIV_MUL
+    if dec.funct3 == 1: return MULDIV_MULH
+    if dec.funct3 == 2: return MULDIV_MULHSU
+    if dec.funct3 == 3: return MULDIV_MULHU
+    if dec.funct3 == 4: return MULDIV_DIV
+    if dec.funct3 == 5: return MULDIV_DIVU
+    if dec.funct3 == 6: return MULDIV_REM
+    MULDIV_REMU
+
+@hardware
 fn core64_restart_fetch(state: CoreState64) -> CoreState64:
     var out = state
     out.pipeline_phase = CORE64_FETCH_LOW
@@ -731,6 +752,19 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
 
     out.semi_trigger = false
 
+    if state.pipeline_phase == CORE64_MULDIV:
+        val mul_div = mul_div_tick(state.mul_div)
+        out.mul_div = mul_div
+        if not mul_div.busy:
+            var comb = core64_combinational(out, state.instruction, 0, out.rf)
+            comb.rd_data = mul_div.result
+            comb.rd_write = true
+            out = core64_update(out, state.instruction, comb,
+                comb.a0_val, comb.a1_val)
+            out = core64_finish_instruction(out)
+        return Core64CycleResult(state: out, bus_valid: false, bus_addr: 0,
+            bus_size: 1, bus_write: false, bus_wdata: 0, bus_is_pte: false)
+
     val mem = memory64_cycle(state.memory, state.mmu, state.pmp, request_ready,
         response_valid, response_error, response_data)
     out.memory = mem.state
@@ -765,8 +799,12 @@ fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
                 core64_privileged_instruction_legal(out, comb.dec))
             if not legal:
                 out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, insn as i64)
-            else if comb.dec.is_muldiv or comb.dec.is_amo:
+            else if comb.dec.is_amo:
                 out = core64_raise_exception(out, CAUSE_ILLEGAL_INSN, insn as i64)
+            else if comb.dec.is_muldiv:
+                out.pipeline_phase = CORE64_MULDIV
+                out.mul_div = mul_div_start(core64_muldiv_op(comb.dec),
+                    comb.rs1_data, comb.rs2_data)
             else if comb.dec.mem_read or comb.dec.mem_write:
                 val access_type = if comb.dec.mem_write: ACCESS_STORE_64 else: ACCESS_LOAD_64
                 out.pipeline_phase = CORE64_DATA_ACCESS

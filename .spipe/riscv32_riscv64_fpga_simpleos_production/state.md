@@ -249,5 +249,9 @@ implementation-milestone-2-in-progress
 - High-capability review found and fixed three pre-commit blockers: M/A/C are no
   longer falsely advertised, reserved encodings fail closed before memory, and
   CLINT/PLIC pending signals now reach boundary-precise interrupt entry.
+- Connected the existing multi-cycle M unit to the production core stall/commit
+  phase, replaced placeholder high products and fragile unsigned division with
+  exact fixed-width algorithms, and enabled only the M `misa` bit.
 - Checks remain unexecuted because the tracked pure-Simple full-CLI crash exits
-  139 before diagnostics. C, M, A, interrupt entry, and RV32 parity remain open.
+  139 before diagnostics. C, A, supervisor interrupt contexts, and RV32 parity
+  remain open.

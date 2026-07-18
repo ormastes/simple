@@ -1,16 +1,33 @@
 use std.spipe.*
-use std.hardware.rv64gc_rtl.core.{core64_init, core64_cycle, CORE64_FETCH_LOW, CORE64_DATA_ACCESS}
+use std.hardware.rv64gc_rtl.core.{core64_init, core64_cycle, CORE64_FETCH_LOW, CORE64_DATA_ACCESS, CORE64_MULDIV}
 use std.hardware.rv64gc_rtl.regfile.{regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.memory_access.memory64_start
 use std.hardware.rv64gc_rtl.mmu_sv39.ACCESS_FETCH_64
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.trap.cause_mti
+use std.hardware.rv64gc_rtl.mul_div.{mul_div_start, mul_div_tick}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU, MULDIV_DIVU, MULDIV_REMU}
+
+fn completed_muldiv(op: i64, a: i64, b: i64) -> i64:
+    var state = mul_div_start(op, a, b)
+    while state.busy:
+        state = mul_div_tick(state)
+    state.result
 
 describe "RV64 clocked protected-memory core":
     it "advertises only extensions connected to this clock path":
         val misa = core64_init(0x8000_0000).csr_m.misa
-        val unsupported: i64 = (1 << 12) | (1 << 2) | 1
+        val unsupported: i64 = (1 << 2) | 1
         expect(misa & unsupported).to_equal(0)
+        expect(misa & (1 << 12)).to_equal(1 << 12)
+
+    it "computes exact high multiply and unsigned divide edge cases":
+        expect(completed_muldiv(MULDIV_MULH, -1, -1)).to_equal(0)
+        expect(completed_muldiv(MULDIV_MULHSU, -1, 1)).to_equal(-1)
+        expect(completed_muldiv(MULDIV_MULHU, -1, 2)).to_equal(1)
+        expect(completed_muldiv(MULDIV_DIVU, -1, 2)).to_equal(0x7FFF_FFFF_FFFF_FFFF)
+        expect(completed_muldiv(MULDIV_DIVU, -1, 0x8000000000000001)).to_equal(1)
+        expect(completed_muldiv(MULDIV_REMU, -1, 0x8000000000000001)).to_equal(0x7FFF_FFFF_FFFF_FFFE)
 
     it "commits ADDI only after both instruction parcels return":
         val reset_pc: i64 = 0x8000_0000
@@ -25,6 +42,23 @@ describe "RV64 clocked protected-memory core":
         expect(high.bus_addr).to_equal(reset_pc + 2)
         expect(high.state.pc).to_equal(reset_pc + 4)
         expect(regfile64_read(high.state.rf, 1, 0).rs1_data).to_equal(5)
+
+    it "stalls and commits a multi-cycle MUL through the architectural RF":
+        val reset_pc: i64 = 0x8000_0000
+        var state = core64_init(reset_pc)
+        state.rf = regfile64_write(state.rf, 1, 6, true)
+        state.rf = regfile64_write(state.rf, 2, 7, true)
+        val low = core64_cycle(state, true, true, false, 0x81B3)
+        var cycle = core64_cycle(low.state, true, true, false, 0x0220)
+        expect(cycle.state.pipeline_phase).to_equal(CORE64_MULDIV)
+        expect(cycle.state.pc).to_equal(reset_pc)
+        var i = 0
+        while i < 4:
+            cycle = core64_cycle(cycle.state, false, false, false, 0)
+            expect(cycle.bus_valid).to_be(false)
+            i = i + 1
+        expect(cycle.state.pc).to_equal(reset_pc + 4)
+        expect(regfile64_read(cycle.state.rf, 3, 0).rs1_data).to_equal(42)
 
     it "routes a store through the shared data transaction before commit":
         val reset_pc: i64 = 0x8000_0000
