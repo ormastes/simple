@@ -23,34 +23,41 @@
 # describes. This guard exists to stop the syntax from spreading further
 # while that redeploy is pending.
 #
-# CURRENT STATE (lane S74, checkout 188941ed081c): this scan logic finds
-# exactly TWO pre-existing real (non-comment) occurrences that predate this
-# guard and are not this lane's to fix — a sibling, not-yet-merged lane's
-# "31e6de2c6b7-era" normalization pass covers ten files elsewhere but has not
-# landed on this lane's lineage:
-#   - src/app/office/file_formats.spl:49
+# CURRENT STATE (lane S74, checkout 188941ed081c): this scan is a true
+# "assert zero matches" guard. The two pre-existing occurrences found when
+# this guard was first written were normalized in the same lane:
+#   - src/app/office/file_formats.spl:49 (`parse_inline_spans`) -- unlabeled
+#     the tuple return (`[TextSpan]`/`[CommentDef]` are different element
+#     types, so the seed's repeated-field-type ambiguity check, see below,
+#     does not apply here) and updated its 9 call sites from named
+#     `.spans`/`.comments` access to positional `.0`/`.1`.
 #   - src/compiler/70.backend/backend/stage4_symbol_closure.spl:59
-# This guard therefore asserts NO NEW occurrence appears anywhere else, and
-# separately pins the known-violation count so a silent THIRD occurrence (in
-# either of those two files, or elsewhere) is caught. Once those two files
-# are normalized upstream, shrink _known_open_violations() to `[]` below and the
-# first `it` becomes a true "assert zero matches" guard, as originally
-# scoped for this spec.
+#     (`stage4_exact_nm_global_symbols`) -- this one could NOT simply drop
+#     labels: both elements are `[text]`, and an unlabeled
+#     `-> ([text], [text])` unconditionally trips the seed's own "anonymous
+#     multi-return tuple contains repeated field types" check
+#     (src/compiler_rust/type/src/checker_check.rs — fires on the function
+#     DECLARATION itself, independent of how any caller accesses the
+#     result). Converted to a named struct return (`Stage4NmGlobalSymbols`)
+#     instead: not the labeled-tuple grammar form, and not an anonymous
+#     `AstType::Tuple` either, so neither seed check applies. Updated its 7
+#     destructuring call sites to struct-field access.
 #
 # LOGIC VALIDATION: the scan helpers (`_scan_all_source_roots` and its
 # callees) were copied into a scratch probe with a `main()` and run via
 # `env -u SIMPLE_BOOTSTRAP bin/simple run <probe>` (the interpreter path,
-# NOT native-build — see VERIFICATION CAVEAT). That probe run produced
-# EXACTLY the two lines above, matching `_known_open_violations()` verbatim,
-# after fixing two bugs the probe caught: (1) `{`/`}` (dict-type-sugar
-# tuple elements, e.g. `-> ({text: text}, i64)?:`) were not tracked as
-# depth-changing characters, causing a false positive on
+# NOT native-build — see VERIFICATION CAVEAT) both BEFORE and AFTER the two
+# files above were normalized. Before: exactly the two hits above. After:
+# zero hits (rc=0, no lines printed). Two bugs were caught and fixed in the
+# scan logic along the way, before either could ship silently: (1) `{`/`}`
+# (dict-type-sugar tuple elements, e.g. `-> ({text: text}, i64)?:`) were not
+# tracked as depth-changing characters, causing a false positive on
 # src/compiler/40.mono/monomorphize/deferred_deserialize.spl's internal
 # dict-type colons; (2) src/compiler has 17 un-numbered symlink aliases for
 # its numbered layer dirs (src/compiler/backend -> 70.backend, etc.) that
 # dir_walk() follows, double-reporting every hit under src/compiler unless
-# filtered (see `_is_compiler_alias_path`) — src/app has a smaller,
-# similar set (see `_is_app_alias_path`). Both are fixed below.
+# filtered (see `_is_compiler_alias_path`) — src/app has a smaller, similar
+# set (see `_is_app_alias_path`). Both are fixed below.
 #
 # VERIFICATION CAVEAT: the deployed binary currently hangs on all
 # single-file `bin/simple test` runs
@@ -193,30 +200,6 @@ fn _scan_all_source_roots() -> [text]:
         _scan_root_for_labeled_tuple_returns("src/app") +
         _scan_root_for_labeled_tuple_returns("src/compiler")
 
-fn _array_contains(items: [text], target: text) -> bool:
-    for item in items:
-        if item == target:
-            return true
-    false
-
-fn _all_hits_are_known(hits: [text]) -> bool:
-    for hit in hits:
-        if not _array_contains(_known_open_violations(), hit):
-            return false
-    true
-
-# The two documented pre-existing occurrences (see header comment). Shrink
-# to `[]` once file_formats.spl and stage4_symbol_closure.spl are
-# normalized to unlabeled tuple returns by whatever lane owns that cleanup.
-# A function (not a module-level array literal) so native-build --entry
-# initializes it on every call rather than risking a silent zero/nil default
-# module initializer.
-fn _known_open_violations() -> [text]:
-    [
-        "src/app/office/file_formats.spl:49",
-        "src/compiler/70.backend/backend/stage4_symbol_closure.spl:59",
-    ]
-
 describe "seed-parseable syntax guard (labeled-tuple returns)":
     """
     ## Seed-parseable syntax guard (labeled-tuple returns)
@@ -225,15 +208,10 @@ describe "seed-parseable syntax guard (labeled-tuple returns)":
     language syntax but are confirmed unparseable by the deployed
     self-hosted binary (a Stage-1 bootstrap blocker, worked around at
     aee3289936b). This scans src/lib, src/app, and src/compiler for the
-    pattern so no new occurrence spreads while the parser fix behind it
-    is pending a redeploy.
+    pattern so no occurrence is (re)introduced while the parser fix behind
+    it is pending a redeploy.
     """
-    it "does not introduce labeled-tuple-return syntax beyond the two known-open exceptions":
+    it "contains zero labeled-tuple-return signatures across src/lib, src/app, src/compiler":
         step("Scan src/lib, src/app, src/compiler *.spl for '-> (name: type' signatures")
         val hits = _scan_all_source_roots()
-        expect(_all_hits_are_known(hits)).to_equal(true)
-
-    it "keeps the known-open violation count from silently growing":
-        step("Confirm no third occurrence has crept into the two cited files (or elsewhere)")
-        val hits = _scan_all_source_roots()
-        expect(hits.len()).to_equal(_known_open_violations().len())
+        expect(hits.len()).to_equal(0)
