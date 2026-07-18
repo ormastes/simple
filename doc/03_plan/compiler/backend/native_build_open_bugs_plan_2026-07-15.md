@@ -107,7 +107,9 @@ FreeBSD QEMU `--full` now runs the complete registered default-LLVM native-entry
 matrix after the focused explicit-Cranelift probe and requires zero codegen
 fallback hits. Its cross-module Result control now covers Ok payload extraction
 and Err propagation through `?` under both backends. The same fixture is wired
-for AArch64/RISC-V QEMU; execution is pending.
+for AArch64/RISC-V QEMU and also asserts that an Option `.map` receiver mutates
+exactly once. ARM32/RV32 and Windows ARM64 compile that same control to target
+objects; execution is pending.
 
 The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
 which builds both pure-Simple MCP servers and runs their fresh-artifact

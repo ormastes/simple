@@ -191,7 +191,10 @@ the shared binary — deploys require explicit user go-ahead).
   control now also observes the receiver's mutation count so duplicate
   evaluation cannot pass. macOS
   arm64/x64, Windows x64, and FreeBSD x86_64 select it explicitly. First staged
-  platform-matrix execution is pending.
+  platform-matrix execution is pending. The shared cross-target fixture now
+  repeats that exact value-and-count oracle for default LLVM and explicit
+  Cranelift on FreeBSD/AArch64/RISC-V64; ARM32/RV32 and Windows ARM64 require
+  nonempty target objects from the same source.
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
   correctness campaign. Runtime-native's 18-symbol legacy dependency owner is
   now source-implemented as an exact localized compatibility provider. The
