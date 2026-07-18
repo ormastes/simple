@@ -64,7 +64,8 @@ fn extract_md_doctests(file_path: text) -> [Doctest]:
                         line_number: start_line,
                         code: code_lines.join("\n"),
                         expected_output: "",
-                        should_fail: should_fail
+                        should_fail: should_fail,
+                        is_docstring_example: false
                     ))
             else:
                 code_lines.push(lines[i])
@@ -223,7 +224,15 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
             total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0
         )
 
-    val doctests = extract_doctests(file_path)
+    val all_doctests = extract_doctests(file_path)
+    # Illustrative "Example:" blocks (bare fences inside a plain docstring,
+    # no `///`/`#` comment or explicit `sdoctest:` marker) are not opted-in
+    # test intent — see is_docstring_example on the Doctest struct. Never run
+    # them as real tests, only genuinely test-authored blocks.
+    var doctests: [Doctest] = []
+    for dt in all_doctests:
+        if not dt.is_docstring_example:
+            doctests.push(dt)
     if doctests.len() == 0:
         return SdoctestFileResult(
             source_file: file_path,
@@ -337,8 +346,18 @@ fn discover_spl_doctest_files(dirs: [text]) -> [text]:
             # Check for @doctest_skip marker
             if content.contains("# @doctest_skip"):
                 continue
-            # Verify file has actual code blocks in doc comments
+            # Verify file has actual runnable doctests. Bare fenced blocks
+            # found inside a plain `"""..."""` docstring (is_docstring_example)
+            # are illustrative "Example:" documentation prose, not opted-in
+            # test intent (unlike the `///`/`#` comment convention or an
+            # explicit `sdoctest:` keyword block) — excluded from candidacy
+            # so the repo-wide sweep doesn't treat every API doc example
+            # across src/lib+src/compiler+src/app as a real test.
             val doctests = extract_doctests(file_path)
-            if doctests.len() > 0:
+            var runnable_count = 0
+            for dt in doctests:
+                if not dt.is_docstring_example:
+                    runnable_count = runnable_count + 1
+            if runnable_count > 0:
                 result.push(file_path)
     result

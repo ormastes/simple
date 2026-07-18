@@ -1,5 +1,6 @@
 use std.test_runner.source_doctest_extractor.{extract_doctests}
-use std.io.{file_delete, file_write, time_now_unix_micros}
+use std.test_runner.doctest_runner.{discover_spl_doctest_files}
+use std.io.{file_delete, file_write, time_now_unix_micros, dir_create_all, dir_remove_all}
 
 describe "source doctest extraction":
     it "extracts ordinary comments and fenced docstrings but ignores malformed blocks":
@@ -13,3 +14,53 @@ describe "source doctest extraction":
         expect(blocks[1].code).to_contain("from_docstring")
 
         expect(file_delete(path)).to_be(true)
+
+    it "marks bare docstring fences as illustrative but comment fences as real test intent":
+        # Regression guard for the whole-tree doctest-candidate scan widening
+        # (doc/08_tracking/bug/whole_test_runner_doctest_import_comment_guard_2026-07-18.md):
+        # discover_spl_doctest_files(["src/lib/", "src/compiler/", "src/app/"])
+        # went from ~39 to 154 real candidates because bare ```simple/```spl
+        # fences inside plain `"""..."""` docstrings (illustrative "Example:"
+        # API doc blocks, not opted-in tests) started counting as real
+        # doctests. extract_doctests must keep returning both (doc-gen and
+        # the spec above still need the docstring block extracted), but each
+        # returned block must be tagged so callers can exclude the
+        # illustrative ones from test candidacy.
+        val path = "/tmp/simple_source_doctest_tag_{time_now_unix_micros()}.spl"
+        val source = "# ```simple\n# val from_comment = 1\n# ```\n\nfn documented():\n    \"\"\"Example.\n    ```spl\n    val from_docstring = 2\n    ```\n    \"\"\"\n    nil\n"
+        expect(file_write(path, source)).to_be(true)
+
+        val blocks = extract_doctests(path)
+        expect(blocks.len()).to_equal(2)
+        expect(blocks[0].is_docstring_example).to_be(false)
+        expect(blocks[1].is_docstring_example).to_be(true)
+
+        expect(file_delete(path)).to_be(true)
+
+    it "excludes illustrative-only docstring examples from the doctest-candidate sweep but keeps comment-embedded ones":
+        val dir = "/tmp/simple_source_doctest_sweep_{time_now_unix_micros()}"
+        dir_create_all(dir)
+
+        val illustrative_path = "{dir}/illustrative_only.spl"
+        val illustrative_source = "struct Widget:\n    \"\"\"A widget.\n\n    Example:\n    ```simple\n    val w = Widget(\"x\").build()\n    ```\n    \"\"\"\n    name: text\n"
+        expect(file_write(illustrative_path, illustrative_source)).to_be(true)
+
+        val real_path = "{dir}/real_doctest.spl"
+        val real_source = "# ```simple\n# expect(1 + 1).to_equal(2)\n# ```\n\nfn helper():\n    nil\n"
+        expect(file_write(real_path, real_source)).to_be(true)
+
+        val candidates = discover_spl_doctest_files([dir])
+        var has_illustrative = false
+        var has_real = false
+        for c in candidates:
+            if c == illustrative_path:
+                has_illustrative = true
+            if c == real_path:
+                has_real = true
+        expect(has_illustrative).to_be(false)
+        expect(has_real).to_be(true)
+        # Bound the candidate count for this fixture directly — a docstring-
+        # only "Example:" file must never inflate the sweep.
+        expect(candidates.len()).to_equal(1)
+
+        dir_remove_all(dir)
