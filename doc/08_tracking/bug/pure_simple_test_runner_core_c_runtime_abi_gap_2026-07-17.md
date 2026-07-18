@@ -41,9 +41,12 @@ Representative missing groups include process/file/fd operations
   falls back to the existing bounded driver resolver, with a
   directory-sensitive cache preventing reuse across source directories.
 - Added focused source and behavior regressions for that resolver path.
-- A native runner link rerun is still pending. The core-C fd ABI trio
-  (`rt_fd_close`, `rt_fd_read_until`, and `rt_fd_write`) and fresh link/runtime
-  evidence remain open.
+- Added one shared Unix/core-C provider for `rt_unix_socket_connect`,
+  `rt_fd_close`, `rt_fd_read_until`, and `rt_fd_write`, with archive and pipe
+  behavior regressions. Its C syntax and exact pipe-behavior probe pass; the
+  one-worker focused Rust test compile reached the 300-second host-contention
+  cap (exit 124) before test execution.
+- A native runner link rerun and fresh runtime evidence remain open.
 
 ## Acceptance
 

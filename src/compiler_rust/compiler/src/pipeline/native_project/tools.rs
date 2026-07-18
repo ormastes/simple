@@ -290,6 +290,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        "runtime_fd_core.c",
         "runtime_font.c",
         "runtime_pool.c",
         "runtime_simd_utf8.c",
@@ -303,6 +304,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_simd_dispatch.h",
         "runtime_thread.h",
         "platform/platform.h",
+        "platform/unix_fd.h",
     ];
     if target.os == simple_common::target::TargetOS::Linux {
         // The portable compositor remains in the full CLI closure on Linux.

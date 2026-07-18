@@ -63,6 +63,22 @@ fn archive_members(path: &Path) -> Option<Vec<String>> {
     )
 }
 
+fn archive_defined_symbol_count(path: &Path, symbol: &str) -> Option<usize> {
+    let output = nm_command().arg("-g").arg("--defined-only").arg(path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .filter(|token| !token.ends_with(':'))
+            .map(|token| token.trim_start_matches('_'))
+            .filter(|token| *token == symbol)
+            .count(),
+    )
+}
+
 fn command_args(command: &std::process::Command) -> Vec<String> {
     command
         .get_args()
@@ -1376,6 +1392,24 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     for symbol in ["rt_fork_child_setup", "rt_fork_parent_wait", "rt_fork_parent_stdout"] {
         assert!(core_c_symbols.contains(symbol), "core-c runtime must own `{symbol}`");
     }
+    let fd_object = format!("runtime_fd_core.{}", test_host_object_extension());
+    assert_eq!(
+        core_c_members.iter().filter(|member| *member == &fd_object).count(),
+        1,
+        "core-c runtime archive must include exactly one {fd_object}"
+    );
+    for symbol in [
+        "rt_unix_socket_connect",
+        "rt_fd_write",
+        "rt_fd_read_until",
+        "rt_fd_close",
+    ] {
+        assert_eq!(
+            archive_defined_symbol_count(&core_c, symbol),
+            Some(1),
+            "core-c runtime archive must contain exactly one definition of `{symbol}`"
+        );
+    }
     let https_object = format!("runtime_https_openssl_core.{}", test_host_object_extension());
     assert!(
         !core_c_members.contains(&https_object),
@@ -1631,6 +1665,70 @@ fn test_core_lane_runtime_required_abi_stdout_stderr_and_values() {
     if let Some(simple_core) = find_abi_complete_simple_core_runtime_library() {
         run_required_abi_probe(&repo_root, temp.path(), &simple_core, "simple_core");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_core_c_runtime_fd_abi_behavior() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let core_c =
+        build_core_c_runtime_library(&temp.path().join("core_c")).expect("core-c runtime archive should build");
+    let source = temp.path().join("core_c_fd_probe.c");
+    let exe = temp.path().join("core_c_fd_probe");
+
+    std::fs::write(
+        &source,
+        r#"
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include "runtime.h"
+
+int main(void) {
+    if (rt_unix_socket_connect("/dev/null/simple-qmp.sock") != -1) return 1;
+    if (rt_fd_write(-1, "x", 1) != -1) return 2;
+    if (strcmp(rt_fd_read_until(-1, '\n', 4), "") != 0) return 3;
+    if (rt_fd_close(-1)) return 4;
+
+    int fds[2];
+    if (pipe(fds) != 0) return 5;
+    if (rt_fd_write(fds[1], "x", 0) != -1) return 6;
+    if (strcmp(rt_fd_read_until(fds[0], '\n', 0), "") != 0) return 7;
+    if (rt_fd_write(fds[1], "abc\nrest", 8) != 8) return 8;
+    if (!rt_fd_close(fds[1])) return 9;
+    const char* line = rt_fd_read_until(fds[0], '\n', 16);
+    if (strcmp(line, "abc\n") != 0) return 10;
+    if (!rt_fd_close(fds[0])) return 11;
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let status = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root.join("src/runtime"))
+        .arg(&source)
+        .arg(&core_c)
+        .args(["-lpthread", "-ldl", "-lm"])
+        .arg("-o")
+        .arg(&exe)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to compile core-C fd ABI probe");
+
+    let status = std::process::Command::new(&exe).status().unwrap();
+    assert!(status.success(), "core-C fd ABI probe failed: {status}");
 }
 
 #[test]
