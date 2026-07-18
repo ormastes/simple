@@ -867,6 +867,85 @@ impl MirLowering:
                     match found_callee_type.kind:
                         case HirTypeKind.Function(_, ret, _): return Some(ret)
                         case _: ()
+            case MethodCall(receiver, method, _, resolution):
+                # ROOT-FIX (native_try_op_on_option_silent_wrong_2026-07-14):
+                # the `resolution.get_symbol_id()` arm below was landed by
+                # 8b332df02b9 ("reject resolved Option method try") but was
+                # accidentally dropped by an unrelated struct-init hunk in
+                # ae57d190640 ("mirror seed struct-init order/nil-fill... into
+                # self-hosted compiler") -- confirmed via `git log -S` on this
+                # exact case arm. Restored, but empirically (native-build
+                # --entry rebuild of
+                # test/fixtures/compiler/native_option_try_unresolved_method_loud.spl,
+                # expected "6") it alone was NOT sufficient: HIR lowering
+                # always constructs MethodCall with `MethodResolution.
+                # Unresolved` (20.hir/hir_lowering/expressions.spl); the
+                # `resolution` field is only ever populated by the type-
+                # inference pass (30.types), which native-build's --entry
+                # fast path does not run (confirmed by method_calls_literals.
+                # spl's own docstring: "native-build's --entry path never runs
+                # the HIR type-inference pass"). So `get_symbol_id()` always
+                # returned nil here and this arm was dead in that path.
+                #
+                # method_calls_literals.spl resolves the SAME calls a
+                # different way in that path: a name-keyed
+                # `self.struct_method_syms["StructName::method"]` map built at
+                # HIR-lowering time (trait_impl_lowering.spl). Mirror that
+                # here so `?` on a struct method's Option return recovers the
+                # SAME return type method_calls_literals.spl would use to
+                # lower the call itself, without depending on the
+                # inference-only `resolution` field.
+                if val method_id = resolution.get_symbol_id():
+                    return self.resolved_call_hir_return_type(method_id)
+                val receiver_type = self.receiver_declared_type(receiver)
+                if receiver_type != nil:
+                    val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                    val struct_name = match found_receiver_type.kind:
+                        case Named(symbol, _):
+                            val s = self.symbols.get_symbol(symbol)
+                            if s.?: s.name else: ""
+                        case _: ""
+                    if struct_name != "":
+                        val method_key = "{struct_name}::{method}"
+                        if self.struct_method_syms.has(method_key):
+                            return self.resolved_call_hir_return_type(self.struct_method_syms[method_key])
+            case _: ()
+        nil
+
+    me receiver_declared_type(receiver: HirExpr) -> HirType?:
+        """Narrow receiver-type lookup for enum_match_expr_type's MethodCall
+        arm: only a bare Var/NamedVar receiver (the shape struct-method `?`
+        provenance actually needs -- e.g. `source.maybe()?` where `source` is
+        a typed parameter). Returns via `return Some(...)`/falls through to
+        the trailing `nil`, deliberately NOT a `var`-mutated local re-narrowed
+        by `if val x = <var>:` -- that pattern was empirically observed to
+        misbehave here (a `match Src(v: 9).get(): case Ok(x): ...` build
+        crashed with "semantic: undefined field 'kind': cannot access field
+        on value of type 'nil'" purely from that shape existing in the source,
+        even on inputs where the mutable var provably stayed nil). Mirrors the
+        already-proven-safe `Var`/`NamedVar` cases directly above in
+        enum_match_expr_type."""
+        if receiver == nil:
+            return nil
+        match receiver.kind:
+            case Var(rsym):
+                val rs = self.symbols.get_symbol(rsym)
+                if val found_rs = rs:
+                    if found_rs.type_ != nil:
+                        return found_rs.type_
+                if self.local_map.has(rsym.id):
+                    val rlocal = self.local_map[rsym.id]
+                    if self.local_hir_types.has(rlocal.id):
+                        return Some(self.local_hir_types[rlocal.id])
+            case NamedVar(rsym, _):
+                val rs = self.symbols.get_symbol(rsym)
+                if val found_rs = rs:
+                    if found_rs.type_ != nil:
+                        return found_rs.type_
+                if self.local_map.has(rsym.id):
+                    val rlocal = self.local_map[rsym.id]
+                    if self.local_hir_types.has(rlocal.id):
+                        return Some(self.local_hir_types[rlocal.id])
             case _: ()
         nil
 

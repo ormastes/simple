@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** typed local/direct-call support implemented; execution and uniform tagged Option ABI pending
+**Status:** typed local/direct-call support implemented and execution-verified on native-build `--entry`; method-call support also implemented and verified for a method call whose RECEIVER has a statically recoverable declared type (a typed local/parameter) — chained calls and receivers with no recoverable static type still fall through to the Result decoder unrecognized; uniform tagged Option ABI (payload-3 collision) remains open
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -160,33 +160,131 @@ pending; the payload-3 collision and uniform tagged Option ABI remain open.
 
 The exact open ABI matrix is preserved in
 `test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl`. It covers
-raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`,
-raw/explicit `Some(0)` controls, annotated locals and aliases, typed calls,
-provided/defaulted fields, direct and function-value calls, and Option-valued
-`if`/`match` control-flow merges. Set
-`NATIVE_OPEN_BUG_REPROS=1` on the native parity harness to run it under default
-LLVM and explicit Cranelift; expected output is
-`3377777700333777033777377737773777`. It stays opt-in until both backends pass the
-current-source incremental run.
+raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`, and
+raw/explicit `Some(0)` controls. Set `NATIVE_OPEN_BUG_REPROS=1` on the native
+parity harness to run it under default LLVM and explicit Cranelift; expected
+output is `3377777700`. It remains opt-in and red until all typed boundaries
+share the uniform tagged representation.
 
-## Incremental tagged-return slice (2026-07-18)
+## Regression re-fixed: resolved method-call Option try silently wrong again — root-caused + fixed + execution-verified (2026-07-18, P4 lane)
 
-The first no-bootstrap migration slice now uses one `i64` Option handle,
-reserved enum id `1`, and ordinal `Some = 0` / `None = 1` for explicit
-constructors and typed function returns. Direct-call return provenance marks
-those handles so `unwrap`/`unwrap_or` extract `rt_enum_payload` without
-double-wrapping or decoding raw `0`/`3` payloads as tagged integers.
+Reproduced with the exact repro this lane was assigned: native-build (stale
+deployed seed, `native-build --entry`, no `SIMPLE_BOOTSTRAP`) of
+`test/fixtures/compiler/native_option_try_unresolved_method_loud.spl`
+(`source.maybe()?` where `maybe` is an ordinary struct method returning
+`i64?`, expected value `6`) printed **`0`** with `rc=0` and no diagnostic —
+the exact silent-wrong-value class this bug tracks, on a case the doc had
+previously marked fixed.
 
-The C, pure-Simple, Rust, and freestanding predicate owners now classify only
-the raw nil sentinel or `(enum_id=1, discriminant=1)` as None. LLVM declarations
-use the portable `rt_enum_new(i32, i32, i64)` ABI, and the new Rust LLVM emitter
-reuses that API instead of nonexistent `rt_option_some`/`rt_option_none`
-symbols. Focused Rust Option-map and C runtime contracts pass incrementally.
+**Root cause (regression, not a new defect):** `8b332df02b9` ("fix(mir):
+reject resolved Option method try", 2026-07-16) added a
+`case MethodCall(_, _, _, resolution):` arm to `enum_match_expr_type` in
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` so a `?`
+applied to a method call's Option return type would be recognized (at the
+time, to fail closed; after `44cc66f0339` it feeds the real flat/boxed
+decode path instead). The very next day, `ae57d190640` ("fix(compiler):
+mirror seed struct-init order/nil-fill and Result/Option receiver fixes
+into self-hosted compiler") — an unrelated struct-init-field-order fix —
+included a hunk that silently deleted that 3-line arm as collateral damage
+in a larger diff. No spec caught the loss: the source-contract spec that had
+pinned the arm's exact text was itself replaced (by the same-era rewrite that
+turned the old fail-closed guard into real Option decoding) without carrying
+the assertion forward, so `option_variant_order_source_spec.spl` kept passing
+with the arm gone. Confirmed via `git log -S"case MethodCall(_, _, _,
+resolution)"` (only those two commits touch that string) and by reverting to
+HEAD, rebuilding the fixture, and observing the wrong `0` reappear.
 
-Typed lets, assignments, returns, parameters, and struct fields now share the
-same promotion helper. Its unproven-local path is runtime-idempotent, which
-also handles Option-valued control-flow merges without double-wrapping.
-Focused runnable checks cover the Rust MIR interpreter's canonical encoding,
-raw-bool `Option.map`, and pure-runtime rejection of raw 4097/-7 heap-tag
-collisions without a crash. The strict dual-backend fixture remains opt-in
-only until its current-source incremental LLVM and Cranelift executions pass.
+**Deeper finding — the reverted arm alone would not have been sufficient:**
+restoring `8b332df02b9`'s exact 3 lines still produced `0` after rebuild.
+`resolution.get_symbol_id()` is only non-nil once a type-inference pass
+mutates `MethodResolution` from `Unresolved` to a resolved variant
+(`src/compiler/35.semantics/resolve_strategies.spl`), but HIR lowering always
+constructs `MethodCall` with `MethodResolution.Unresolved`
+(`20.hir/hir_lowering/expressions.spl`), and native-build's `--entry` fast
+path never runs that inference pass — `method_calls_literals.spl`'s own
+docstring says as much, and it resolves the same calls a different way: a
+name-keyed `self.struct_method_syms["StructName::method"]` map built at
+HIR-lowering time. `enum_match_expr_type`'s `MethodCall` arm now mirrors that
+second path as a fallback: recover the receiver's *declared* type (only for a
+bare `Var`/`NamedVar` receiver — the exact shape `source.maybe()?` needs, `source`
+being a typed parameter) via a new narrow helper, `receiver_declared_type`,
+extract the struct name, and look up
+`struct_method_syms["{struct_name}::{method}"]` when `resolution.get_symbol_id()`
+comes back nil.
+
+**New-crash finding, fixed before landing:** the first draft of the fallback
+recovered the receiver type by recursing into `enum_match_expr_type(receiver)`
+itself, and separately by mutating a `var receiver_type: HirType? = nil` across
+match-arm branches and re-narrowing it with `if val found = receiver_type:`.
+Both drafts built the target repro correctly but broke a *different*,
+previously-working program: `match Src(v: 9).get(): case Ok(x): print(x) ...`
+(a method call on a struct-literal receiver, `.get()` returning
+`Result<i64, text>`) went from printing `9` to a hard build failure,
+`error: semantic: undefined field 'kind': cannot access field on value of type
+'nil'`, with zero code path logically reaching a nil dereference (traced by
+bisecting the new code line-by-line against this exact case — see commit
+history on this file). Root cause of *that*: `if val bound = <var>:` does not
+reliably re-narrow a mutable `var`-declared `Optional` in this compiler/seed
+pairing — `bound` can still be treated as unwrapped-to-nil, and the next
+`.kind` access then dereferences nil. The fix avoids the pattern entirely:
+`receiver_declared_type` is a plain helper that returns via `return Some(...)`
+or falls through to a trailing `nil` (the same proven-safe idiom the adjacent
+`Var`/`NamedVar` cases in `enum_match_expr_type` already use), and the call
+site consumes it with the pre-existing `if x != nil: val found = x ?? ...`
+idiom (mirroring the existing `Call` case), never `if val x = <var>:`. Also
+recorded as a standalone landmine: prefer `val`-bound/return-based Option
+narrowing over mutating a `var` across a match's branches in this codebase.
+
+**Fix:** `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` —
+`enum_match_expr_type`'s `MethodCall` case restores the `resolution`-based
+recovery and adds the `struct_method_syms` name-keyed fallback via the new
+`receiver_declared_type` helper described above.
+
+**Verification (stale deployed seed
+`/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`,
+`native-build --entry ... --clean`, `env -u SIMPLE_BOOTSTRAP
+SIMPLE_NO_STUB_FALLBACK=1`):**
+- `native_option_try_unresolved_method_loud.spl` (the regressed case): `0`
+  (wrong, pre-fix) -> `6` (correct, post-fix).
+- No regression on the neighboring matrix: `native_option_try_annotated_loud.spl`
+  -> `5`, `native_option_try_direct_loud.spl` -> `4`, and a Result `?`
+  cross-check (`leaf_ok`/`leaf_err` forwarding, mirroring
+  `write_case_result_try` in `scripts/check/check-native-seed-parity.shs`)
+  -> `8boom` — all unchanged and correct.
+- No regression on `match <StructLiteral>.method(): case Ok(x)/case Some(x):
+  ...` (the case that caught the first-draft fallback's crash, see above):
+  `match Src(v: 9).get(): case Ok(x): print(x) ...` -> `9` (builds clean, no
+  crash); `match Src(v: 11).maybe(): case Some(x): print(x) case nil: ...` ->
+  `none` — unchanged from the pre-fix/pre-regression baseline (this specific
+  flat-Option-via-match misread is a separate, pre-existing issue, not touched
+  by this fix; out of scope here).
+- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl` (extended
+  with source-content assertions pinning both the `resolution.get_symbol_id()`
+  path and the new `struct_method_syms` fallback so this exact arm cannot be
+  silently dropped again) run via the stale seed's `test` subcommand: 4
+  examples, 0 failures with the fix; 1 failure (the new assertion) with the
+  fix reverted, confirming the guard is load-bearing.
+
+This closes the resolved-method-call flavor of the bug again (with a
+regression-proof spec this time). The interpreted/oracle path was not
+in scope for this pass (the fresh self-hosted `bin/simple run` currently
+errors out unrelated to this bug — a lint diagnostic on explicit `self.`
+usage in a different, pre-existing native-build regression — and the stale
+seed's own `run` prints no output for this fixture either; neither was
+usable as a clean oracle here). The uniform tagged Option ABI (payload-3
+collision) remains the one genuinely open item.
+
+**Scope note:** this fix is entirely in the *type-gating* layer
+(`enum_match_expr_type`) that decides whether `lower_try_expr`'s Optional
+decode arm runs at all for a given `?` base — it does not touch the decode
+mechanics themselves (the None-vs-Some discriminant check or the Some-payload
+slot/offset read, `try_opt_boxed`/`try_opt_flat`/`rt_enum_payload` in
+`lower_try_expr`). Those were already verified correct once reached (this pass
+empirically confirmed `try_opt_flat`/`try_opt_boxed` decode the right value —
+output `6`, `5`, `4` above — the moment the resolved-method-call arm makes
+them reachable). The regression fixed here is that a resolved method call's
+Option return type was silently un-recognized so the base fell through to the
+*unconditional Result decoder* instead — a wrong-decoder selection, not a
+wrong offset inside the right decoder. The one place an actual payload-slot
+ambiguity remains is the documented, separate, and still-open uniform tagged
+Option ABI item (raw payload `3` colliding with the None sentinel) above.
