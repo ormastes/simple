@@ -1,9 +1,11 @@
-# Stage-4 ignores `--threads` entirely — the code path it actually runs has
-# no thread-fanout concept at all (pure-Simple driver, not the Rust rayon pipeline)
+# Stage-4 ignores `--threads` entirely — two independent layers both discard
+# it (pure-Simple frontend driver has no fanout concept; AOT codegen's
+# "ParallelBuilder" computes a worker count and then runs sequentially anyway)
 
 **Date:** 2026-07-18 · **Lane:** S79 · **Status:** OPEN — root-plumbing traced
-end to end with code citations, confirmed empirically (A/B thread-count probe
-below); no source fix landed this lane (see "Why no fix" below)
+end to end with code citations at both layers, confirmed empirically (A/B
+thread-count probe below); no source fix landed this lane (see "Why no fix"
+below)
 
 ## Summary
 
@@ -135,8 +137,79 @@ Phase 3 (HIR lowering) is **not** a safer fallback target either:
   design even setting aside the global-state problem — parallelizing it
   would need a two-pass scheme (collect all trait impls serially first, then
   lower bodies in parallel), not a plain fan-out.
-- AOT codegen (`aot_compile()` and beyond, phase5+) was **not traced** in this
-  lane — flagged honestly as "not assessed," not "no opportunity found."
+- AOT codegen (`aot_compile()` and beyond, phase5+) **was traced** (see next
+  section) — a second, independent, more narrowly-scoped bug was found there.
+
+## Second finding: AOT codegen has its own fake-parallel builder (checked per
+## task item 3's "or the later codegen jobs" fallback)
+
+`aot_compile()` (`driver.spl:1049`) reaches `compile_to_native()`
+(`src/compiler/80.driver/driver_aot_output.spl:260`) for Stage 4's default
+native-executable output. That function's per-module object-compile step
+(lines 355-378) **does** organize codegen as independent, cacheable,
+per-module units — each module gets its own object file
+(`{object_base}.{name}.o`, line 390) via `_compile_one_module` — and
+explicitly builds a `ParallelBuildConfig` with `num_threads:
+driver_native_build_threads()` (line 367), which reads
+`SIMPLE_NATIVE_BUILD_THREADS` (`driver_aot_output.spl:68-75`) — an env var
+the real bootstrap script **does** set
+(`SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}"`,
+`bootstrap-from-scratch.sh:472`). So far this looks like real, correctly-wired
+parallelism for codegen, unlike phase2/phase3.
+
+**It is not.** `src/compiler/80.driver/driver_build/parallel.spl` contains
+**two** build methods:
+
+- `build_parallel(spawn_fn, collect_fn)` (line 394) — genuinely parallel: it
+  calls `spawn_fn(build_unit.path)` which is meant to call
+  `rt_process_spawn_async` (declared at line 9) to launch each module's
+  compile as a **separate OS process**. The file's own header comment (lines
+  5-6) explains why: *"Uses process-based parallelism ... to avoid
+  thread-safety issues with global compiler state"* — independent
+  confirmation, from the codebase's own prior author, of the exact same
+  global-mutable-compiler-state hazard this lane found in the parser.
+- `build(compile_fn)` (line 281) — **this is the one actually called**
+  (`driver_aot_output.spl:377`, `builder.build(_compile_one_module(...))`).
+  Its "parallel" branch (lines 336-389, taken whenever `uncached_names.len()
+  >= parallel_threshold`) computes `max_workers =
+  self.config.effective_threads()`, prints `"[PARALLEL] batch-concurrent
+  mode, {max_workers} workers"` (line 340), and organizes units into chunks
+  of size `max_workers` (lines 353-389) — **but the chunk-execution loop
+  (lines 366-387) calls `compile_fn(build_unit.path)` synchronously, one unit
+  at a time, in-process, with no thread or process spawned anywhere in this
+  method.** The chunk boundary has zero effect on execution — it is
+  computed and then ignored. `build_parallel` (the real implementation,
+  right below it in the same file) is never invoked by any AOT codegen call
+  site: it is dead code from `compile_to_native`'s perspective.
+
+**Net effect:** even in the (currently unreached, per the A/B probe below)
+event that a Stage 4 run gets far enough to start compiling object files, it
+would still compile them **one at a time**, despite `--threads 8` /
+`SIMPLE_NATIVE_BUILD_THREADS=8` being correctly parsed, correctly forwarded,
+and used to print a worker count that is never acted on. This is a second,
+independently-diagnosable instance of the same class of bug as the top-level
+finding (`--threads` computed and displayed but not applied) — but far more
+narrowly scoped: the fix is "call `build_parallel` instead of `build`" plus
+adapting `_compile_one_module`'s contract to a spawnable subprocess shape.
+That adaptation is **not trivial**: `_compile_one_module` (line 796) takes
+the full shared in-process `ctx: any` (all already-lowered MIR modules held
+in one `CompileContext`) and calls straight into the codegen backend
+in-process; making it subprocess-spawnable would mean either re-deriving each
+module's MIR inside a freshly-invoked subprocess (expensive, needs its own
+serialization contract) or serializing/passing the relevant MIR module across
+the process boundary. Concretely scoped, but genuinely a build-out task, not
+a one-line change — **not attempted in this bounded lane** (no full
+bootstrap available to verify a codegen-path change end-to-end; a wrong
+subprocess-argument or object-collection contract here would silently
+produce a corrupt or incomplete binary, exactly the failure mode this
+campaign must avoid).
+
+Whether this codegen-level bug or the phase2/phase3 frontend bug dominates
+Stage 4's actual multi-hour wall time was not measured in this lane (the A/B
+probe below shows Stage 4 still deep in phase2:parse after 91-116s elapsed
+and prior lanes report 11-20+ min still short of finishing that phase on the
+real command) — both are real, both are cited with exact fix locations, and
+both are left for the next lane to prioritize with fresh wall-clock data.
 
 ## Empirical A/B confirmation (this lane, current worktree)
 
@@ -197,14 +270,26 @@ via checksum before and no writes after).
 
 ## Why no source fix in this lane
 
+Two independent fixes are named, both real work, neither safely landable
+blind in a bounded no-full-bootstrap lane:
+
+1. **Frontend (phase2/phase3):** requires converting a wide swath of
+   `core/parser.spl` + lexer + AST-arena module-level globals into
+   thread-local or explicit per-call session state — a genuine cross-cutting
+   refactor, not a "safe, scoped" addition a single lane should land
+   speculatively.
+2. **Codegen (`ParallelBuilder.build`):** requires either adapting
+   `_compile_one_module` to a subprocess-spawnable contract (matching the
+   already-written but unused `build_parallel`), or replacing `.build`'s
+   in-process chunk loop with a real in-process thread fan-out — the latter
+   only safe once (1) is confirmed not to also apply to the codegen backend's
+   own global state (not verified in this lane).
+
 Per the standing incremental/scoped-only order and the hard rule against
-reordering diagnostics into nondeterministic/silently-wrong output: the only
-correct fix is inside the pure-Simple driver's parse phase, and that fix
-requires converting a wide swath of `core/parser.spl` + lexer + AST-arena
-module-level globals into thread-local or explicit per-call session state —
-a genuine cross-cutting refactor, not a "safe, scoped" addition a single
-lane should land speculatively. Filing this as a precisely named, cited,
-empirically-confirmed gap instead of a guessed patch.
+reordering diagnostics into nondeterministic/silently-wrong output, and given
+this lane has no full-bootstrap verification available, both are filed as
+precisely named, cited, empirically-confirmed gaps instead of guessed
+patches.
 
 ## Follow-ups for the next lane
 
@@ -224,11 +309,22 @@ empirically-confirmed gap instead of a guessed patch.
 4. Phase 3's `shared_lowered_traits` (driver.spl:857) needs a two-pass design
    (serial trait-collection pass, then parallel lowering pass) before it can
    be fanned out — do not naively parallelize the existing single-pass loop.
-5. Trace AOT codegen (`aot_compile()`, phase5+) — not assessed in this lane;
-   it may or may not share the same global-state coupling.
+5. **Likely cheaper/higher-value than (1)-(4):** wire
+   `compile_to_native`'s call site (`driver_aot_output.spl:377`) to
+   `ParallelBuilder.build_parallel(spawn_fn, collect_fn)`
+   (`driver_build/parallel.spl:394`, process-based, already thread-safety-aware
+   by construction) instead of the current `.build(compile_fn)`
+   (`parallel.spl:281`), which computes and logs a worker count but executes
+   every unit sequentially in-process (lines 336-389). Requires designing a
+   subprocess contract for `_compile_one_module`
+   (`driver_aot_output.spl:796`) — it currently needs the full in-process
+   `ctx` (all MIR modules) and cannot be spawned as-is. First measure how much
+   of Stage 4's total wall time is actually spent in codegen vs. phase2/3
+   parse/HIR on a real run to know which of (1) or (5) pays off first.
 6. The `stage4_entry_closure_duplicate_parse_2026-07-17.md` bug compounds
-   this one (every file may be parsed twice); fixing it independently
-   reduces total serial work even before any parallelism fix lands.
+   the phase2/phase3 finding (every file may be parsed twice); fixing it
+   independently reduces total serial work even before any parallelism fix
+   lands.
 
 ## Related
 
