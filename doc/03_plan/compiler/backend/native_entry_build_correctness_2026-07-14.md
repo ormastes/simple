@@ -183,7 +183,9 @@ the shared binary — deploys require explicit user go-ahead).
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
   Array `map`/`filter`/`fold` retain their existing lifted i64 ABI. Linux runs
-  the strict dual-backend typed-output/filter control in the full gate; macOS
+  the strict dual-backend typed-output/filter control in the full gate; that
+  control now also observes the receiver's mutation count so duplicate
+  evaluation cannot pass. macOS
   arm64/x64, Windows x64, and FreeBSD x86_64 select it explicitly. First staged
   platform-matrix execution is pending.
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
