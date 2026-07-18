@@ -122,6 +122,14 @@ owners, privilege, `MmuState`, and an RV32-local `PmpState`. `PmpState` stores
 the supported `pmpcfg` bytes and `pmpaddr` values in fixed synthesizable fields.
 `PmpCheckResult` returns allowed/denied plus matched entry for evidence.
 
+The first connected RV32 protection slice moves the existing machine CSR and
+PMP owners into `CoreState`, routes CPU `pmpcfg*`/`pmpaddr*` operations through
+the fixed CSR helper, and calls `pmp32_gate_access` before every Bare-mode
+fetch/load/store bus helper. Locked M-mode denials raise causes 1/5/7 with the
+faulting address in `mtval` and suppress read/write side effects. S/U privilege
+transitions and the request/response Sv32 walker remain the next connected
+slice; the RAM-backed translation adapter is not used as production RTL.
+
 ### Translation algorithm
 
 - Preserve Sv32's 34-bit physical address at walker and bus boundaries.

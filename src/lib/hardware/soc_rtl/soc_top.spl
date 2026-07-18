@@ -33,11 +33,14 @@ use std.hardware.rv32i_rtl.lsu.lsu_load
 use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational, core_update}
 
 # -- CSR / Trap
-use std.hardware.rv32i_rtl.csr.{CsrFile, CsrRwResult, csr_create, csr_read, csr_rw, csr_tick, csr_update_mip}
+use std.hardware.rv32i_rtl.csr.{csr_next_value, csr_rw, csr_tick, csr_update_mip}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
 use std.hardware.rv32i_rtl.trap.{trap_check_interrupt, trap_enter, trap_exit_mret}
 use std.hardware.rv32i_rtl.trap.{CAUSE_ECALL_M, CAUSE_BREAKPOINT}
+use std.hardware.rv32i_rtl.pmp.{pmp32_gate_access, PMP32_ACCESS_FETCH}
+use std.hardware.rv32i_rtl.pmp.{PMP32_ACCESS_LOAD, PMP32_ACCESS_STORE}
+use std.hardware.rv32i_rtl.pmp_csr.{pmp32_csr_read, pmp32_csr_write}
 
 # -- Peripherals
 use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
@@ -59,7 +62,6 @@ use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BA
 struct SocState:
     """Full SoC sequential state."""
     core: CoreState
-    csr: CsrFile
     regfile: RegFile
     uart: Uart16550State
     clint: ClintState
@@ -94,7 +96,6 @@ fn soc_create(ram_size_words: u32) -> SocState:
     """Create and initialize the full SoC.  PC starts at boot ROM (0x1000)."""
     SocState(
         core: core_reset(BOOTROM_BASE),
-        csr: csr_create(0),
         regfile: regfile_create(),
         uart: uart_create(),
         clint: clint_create(),
@@ -217,6 +218,13 @@ fn is_csr_funct3(funct3: u32) -> bool:
     (funct3 == FUNCT3_CSRRW or funct3 == FUNCT3_CSRRS or funct3 == FUNCT3_CSRRC or
      funct3 == FUNCT3_CSRRWI or funct3 == FUNCT3_CSRRSI or funct3 == FUNCT3_CSRRCI)
 
+fn soc_access_size(width: u32) -> u32:
+    if width == 0:
+        return 1
+    if width == 1:
+        return 2
+    4
+
 # ============================================================================
 # Helper — is this an MRET instruction?
 # ============================================================================
@@ -258,7 +266,8 @@ fn soc_tick(state: SocState) -> SocTickResult:
     Returns the updated SoC state and external port values."""
 
     val pc = state.core.pc
-    var cur_csr = state.csr
+    var cur_csr = state.core.csr_m
+    var cur_pmp = state.core.pmp
     var cur_rf = state.regfile
     var cur_state = state
     var halted = state.core.halt
@@ -284,8 +293,17 @@ fn soc_tick(state: SocState) -> SocTickResult:
         )
         return SocTickResult(state: cur_state, ports: ports)
 
-    # ── Step 1: Fetch instruction ────────────────────────────────────────
-    val insn = soc_fetch_instruction(cur_state, pc)
+    # ── Step 1: Protect and fetch instruction ────────────────────────────
+    # ponytail: Bare mode uses vaddr==paddr; feed the Sv32 walker result
+    # here when its request/response FSM is clocked into this owner.
+    val fetch_gate = pmp32_gate_access(cur_pmp, pc as i64, 4,
+        PMP32_ACCESS_FETCH, state.core.priv_mode, false, 0)
+    var access_fault = fetch_gate.fault
+    var fault_cause = fetch_gate.fault_cause
+    var fault_tval = pc
+    var insn: u32 = 0x00000013
+    if fetch_gate.bus_valid:
+        insn = soc_fetch_instruction(cur_state, pc)
 
     # ── Step 2: Decode ───────────────────────────────────────────────────
     val dec = decode_instruction(insn)
@@ -296,11 +314,27 @@ fn soc_tick(state: SocState) -> SocTickResult:
     val rs2_data = rr.rs2_data
 
     # ── Step 4: Core combinational datapath (ALU, branch, next-PC) ──────
-    # First, compute dmem_rdata for the combinational path (needed for loads)
+    # First, compute the address, then protect it before any bus read.
     val comb_prelim = core_combinational(state.core, insn, 0, cur_rf)
 
-    # Read data memory at the computed address
-    val dmem_rdata = soc_mem_read(cur_state, comb_prelim.dmem_addr)
+    var dmem_rdata: u32 = 0
+    var data_bus_valid: bool = true
+    if access_fault == false and (comb_prelim.dmem_re or comb_prelim.dmem_we):
+        val access_kind = if comb_prelim.dmem_we:
+            PMP32_ACCESS_STORE
+        else:
+            PMP32_ACCESS_LOAD
+        val data_gate = pmp32_gate_access(cur_pmp,
+            comb_prelim.dmem_addr as i64,
+            soc_access_size(comb_prelim.dmem_width), access_kind,
+            state.core.priv_mode, false, 0)
+        data_bus_valid = data_gate.bus_valid
+        if data_gate.fault:
+            access_fault = true
+            fault_cause = data_gate.fault_cause
+            fault_tval = comb_prelim.dmem_addr
+        else if comb_prelim.dmem_re:
+            dmem_rdata = soc_mem_read(cur_state, comb_prelim.dmem_addr)
 
     # Re-run combinational with actual memory read data
     val comb = core_combinational(state.core, insn, dmem_rdata, cur_rf)
@@ -310,7 +344,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
     var do_rd_write = dec.reg_write
     var rd_data = comb.rd_data
 
-    if comb.dmem_we:
+    if access_fault == false and data_bus_valid and comb.dmem_we:
         val wr = soc_mem_write(cur_state, comb.dmem_addr, comb.dmem_wdata, comb.dmem_width)
         cur_state = wr.state
         if wr.char_valid:
@@ -320,11 +354,17 @@ fn soc_tick(state: SocState) -> SocTickResult:
             halted = true
 
     # Apply read side-effects (UART RX pop on load)
-    if comb.dmem_re:
+    if access_fault == false and data_bus_valid and comb.dmem_re:
         cur_state = soc_mem_read_update(cur_state, comb.dmem_addr)
 
-    # ── Step 6: CSR operations (SYSTEM + funct3 != 0) ───────────────────
-    if dec.opcode == OP_SYSTEM and is_csr_funct3(dec.funct3):
+    # ── Step 6: Synchronous access fault or CSR operation ───────────────
+    if access_fault:
+        val enter_result = trap_enter(cur_csr, pc, fault_cause, fault_tval)
+        cur_csr = enter_result.csr
+        next_pc = enter_result.trap_pc
+        do_rd_write = false
+
+    else if dec.opcode == OP_SYSTEM and is_csr_funct3(dec.funct3):
         # CSR address is in the immediate field bits [31:20] = dec.imm upper 12
         val csr_addr = (insn >> 20) & 0xFFF
 
@@ -333,11 +373,17 @@ fn soc_tick(state: SocState) -> SocTickResult:
         if dec.funct3 >= FUNCT3_CSRRWI:
             csr_src = dec.rs1   # rs1 field used as zimm[4:0]
 
-        val csr_result = csr_rw(cur_csr, csr_addr, csr_src, dec.funct3)
-        cur_csr = csr_result.csr
+        val pmp_read = pmp32_csr_read(cur_pmp, csr_addr)
+        if pmp_read.handled:
+            val pmp_write = pmp32_csr_write(cur_pmp, csr_addr,
+                csr_next_value(pmp_read.value, csr_src, dec.funct3))
+            cur_pmp = pmp_write.entries
+            rd_data = pmp_read.value
+        else:
+            val csr_result = csr_rw(cur_csr, csr_addr, csr_src, dec.funct3)
+            cur_csr = csr_result.csr
+            rd_data = csr_result.old_value
 
-        # CSR read value goes to rd
-        rd_data = csr_result.old_value
         do_rd_write = true
         next_pc = pc + 4
 
@@ -369,13 +415,14 @@ fn soc_tick(state: SocState) -> SocTickResult:
     # ── Step 8: Interrupt check ──────────────────────────────────────────
     # Check for pending interrupts AFTER instruction execution
     val int_check = trap_check_interrupt(cur_csr)
-    if int_check.pending:
+    if access_fault == false and int_check.pending:
         val int_enter = trap_enter(cur_csr, next_pc, int_check.cause, 0)
         cur_csr = int_enter.csr
         next_pc = int_enter.trap_pc
 
     # ── Step 9: Write-back to register file ──────────────────────────────
-    cur_rf = regfile_write(cur_rf, dec.rd, rd_data, do_rd_write)
+    cur_rf = regfile_write(cur_rf, dec.rd, rd_data,
+        do_rd_write and access_fault == false)
 
     # ── Step 10: Update core state (PC, semihosting detection) ───────────
     # core_update handles the semihosting magic sequence FSM (semi_phase).
@@ -385,7 +432,10 @@ fn soc_tick(state: SocState) -> SocTickResult:
     #     because the EBREAK in the semihosting sequence is OP_SYSTEM
     var new_core = state.core
     val need_core_update = (dec.opcode != OP_SYSTEM or state.core.semi_phase != 0)
-    if need_core_update:
+    if access_fault:
+        new_core.pc = next_pc
+        new_core.semi_trigger = false
+    else if need_core_update:
         new_core = core_update(state.core, insn, comb, rr.a0_val, rr.a1_val)
         # core_update computes its own pc_next; override with our trap-aware pc
         # unless semihosting consumed it (semi_phase advanced)
@@ -401,8 +451,9 @@ fn soc_tick(state: SocState) -> SocTickResult:
     if halted:
         new_core.halt = true
 
+    new_core.csr_m = cur_csr
+    new_core.pmp = cur_pmp
     cur_state.core = new_core
-    cur_state.csr = cur_csr
     cur_state.regfile = cur_rf
 
     # ── Step 11: Tick peripherals ────────────────────────────────────────
@@ -414,10 +465,11 @@ fn soc_tick(state: SocState) -> SocTickResult:
     uart_tx_bit = ut.tx_out
 
     # ── Step 12: Update CSR mip from peripheral interrupts ───────────────
-    cur_state.csr = csr_update_mip(cur_state.csr, ct.mtip, ct.msip_out, false)
+    cur_state.core.csr_m = csr_update_mip(cur_state.core.csr_m,
+        ct.mtip, ct.msip_out, false)
 
     # Tick CSR counters (mcycle, minstret)
-    cur_state.csr = csr_tick(cur_state.csr)
+    cur_state.core.csr_m = csr_tick(cur_state.core.csr_m)
 
     # ── Build output ─────────────────────────────────────────────────────
     val ports = SocPorts(

@@ -104,6 +104,13 @@ supervisor `sie`/`sip` are masked views rather than independent interrupt state.
 PLIC M/S contexts produce distinct `MEIP`/`SEIP` signals, while software and
 external `SEIP` latches are ORed so either owner can hold the architectural bit.
 
+Within the RV32 capsule, `CoreState` is now the canonical owner of current
+privilege, machine CSRs, and fixed-field PMP state. The current Bare clock path
+routes PMP CSRs through that owner and gates instruction and data bus calls at
+`soc_tick`; denied requests enter the precise machine trap path without calling
+the bus helper. The same gate remains after the pending Sv32 walker supplies a
+translated physical address.
+
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real
 compiled call sites reveal a smaller common interface.

@@ -231,6 +231,17 @@ fn csr_write(csr: CsrFile, addr: u32, value: u32) -> CsrFile:
 # CSR Read-Modify-Write — CSRRW, CSRRS, CSRRC
 # ============================================================================
 
+fn csr_next_value(old_value: u32, source: u32, funct3: u32) -> u32:
+    """Apply the shared Zicsr read/modify/write operation."""
+    val op = funct3 & 0x3
+    if op == 1:
+        return source
+    if op == 2 and source != 0:
+        return old_value | source
+    if op == 3 and source != 0:
+        return old_value & (source ^ 0xFFFFFFFF)
+    old_value
+
 fn csr_rw(csr: CsrFile, addr: u32, rs1_val: u32, funct3: u32) -> CsrRwResult:
     """Perform a CSR read-modify-write operation.
     Returns the old value (for rd writeback) and the updated CsrFile.
@@ -244,22 +255,7 @@ fn csr_rw(csr: CsrFile, addr: u32, rs1_val: u32, funct3: u32) -> CsrRwResult:
       CSRRCI (0x7): clear bits with immediate
     """
     val old_value = csr_read(csr, addr)
-    var new_value = old_value
-
-    # Determine the operation based on funct3[1:0]
-    val op = funct3 & 0x3
-    if op == 1:
-        # CSRRW / CSRRWI — replace entirely
-        new_value = rs1_val
-    else if op == 2:
-        # CSRRS / CSRRSI — set bits
-        if rs1_val != 0:
-            new_value = old_value | rs1_val
-    else if op == 3:
-        # CSRRC / CSRRCI — clear bits
-        if rs1_val != 0:
-            new_value = old_value & (rs1_val ^ 0xFFFFFFFF)
-
+    val new_value = csr_next_value(old_value, rs1_val, funct3)
     val new_csr = csr_write(csr, addr, new_value)
     CsrRwResult(csr: new_csr, old_value: old_value)
 

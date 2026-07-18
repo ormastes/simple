@@ -1,0 +1,69 @@
+use std.spipe.*
+use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
+use std.hardware.soc_rtl.ram.{ram_read, ram_write}
+use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
+use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_csr_write
+
+val PMPADDR0: u32 = 0x3B0
+val PMPCFG0: u32 = 0x3A0
+val RAM_4K_NAPOT: u32 = 0x200001FF
+val PMP_LOCKED_X: u32 = 0x9C
+val PMP_LOCKED_RW: u32 = 0x9B
+
+fn csr_instruction(addr: u32, rs1: u32, funct3: u32, rd: u32) -> u32:
+    (addr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
+
+fn protect_ram(state: SocState, cfg: u32) -> SocState:
+    var out = state
+    out.core.pmp = pmp32_csr_write(out.core.pmp, PMPADDR0,
+        RAM_4K_NAPOT).entries
+    out.core.pmp = pmp32_csr_write(out.core.pmp, PMPCFG0, cfg).entries
+    out
+
+describe "RV32 SoC PMP clock-path integration":
+    it "routes CPU CSR writes into canonical PMP state":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.ram = ram_write(state.ram, 0,
+            csr_instruction(PMPADDR0, 1, 1, 2), 2)
+        state.regfile = regfile_write(state.regfile, 1, RAM_4K_NAPOT, true)
+        state = soc_tick(state).state
+        expect(state.core.pmp.addr_0).to_equal(RAM_4K_NAPOT as i64)
+        expect(regfile_read(state.regfile, 2, 0).rs1_data).to_equal(0)
+
+    it "traps a locked M-mode fetch denial before instruction memory":
+        var state = protect_ram(soc_create(64), PMP_LOCKED_RW)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state = soc_tick(state).state
+        expect(state.core.csr_m.mcause).to_equal(1)
+        expect(state.core.csr_m.mtval).to_equal(RAM_BASE)
+        expect(state.core.pc).to_equal(0x1000)
+
+    it "traps a locked M-mode load denial without register writeback":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x0000A183, 2)
+        state.ram = ram_write(state.ram, 4, 0xA5A5A5A5, 2)
+        state.regfile = regfile_write(state.regfile, 1, RAM_BASE + 4, true)
+        state.regfile = regfile_write(state.regfile, 3, 0x12345678, true)
+        state = protect_ram(state, PMP_LOCKED_X)
+        state = soc_tick(state).state
+        expect(state.core.csr_m.mcause).to_equal(5)
+        expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 4)
+        expect(regfile_read(state.regfile, 3, 0).rs1_data).to_equal(0x12345678)
+
+    it "traps a locked M-mode store denial before the RAM side effect":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x0020A023, 2)
+        state.regfile = regfile_write(state.regfile, 1, RAM_BASE + 4, true)
+        state.regfile = regfile_write(state.regfile, 2, 0xDEADBEEF, true)
+        state = protect_ram(state, PMP_LOCKED_X)
+        state = soc_tick(state).state
+        expect(state.core.csr_m.mcause).to_equal(7)
+        expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 4)
+        expect(ram_read(state.ram, 4)).to_equal(0)
