@@ -124,8 +124,13 @@ the shared binary — deploys require explicit user go-ahead).
     LLVM and Windows ARM64 LLVM/Cranelift require successful, nonempty target
     objects without the retired fail-closed diagnostic. Commit `cd68cb9af439`
     removes the flat payload-3 collision in source by using one enum-id-1
-    handle (`Some=0`, `None=1`) at typed producers, returns, direct/indirect
-    calls, lets/assignments, struct fields, and `if`/`match` merges. Focused
+    handle (`Some=0`, `None=1`) at typed producers, returns, calls,
+    lets/assignments, struct fields, and `if`/`match` merges. The follow-up
+    closes the actual function-valued `f(3)` argument boundary and canonicalizes
+    the early-`?` absent return that bypasses normal return promotion. Coverage
+    reads that return's `rt_enum_id` directly so legacy raw nil cannot
+    false-green through the migration-compatible `unwrap_or` consumer.
+    Focused
     runnable tests cover the Rust MIR interpreter, raw-bool `Option.map`, the C
     runtime contract, and pure-runtime rejection of raw heap-tag collisions.
     The exact LLVM/Cranelift fixture remains opt-in pending current-source

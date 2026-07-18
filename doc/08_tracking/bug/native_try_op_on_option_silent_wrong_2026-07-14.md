@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** typed local/direct-call support implemented and execution-verified on native-build `--entry`; method-call support also implemented and verified for a method call whose RECEIVER has a statically recoverable declared type (a typed local/parameter) — chained calls and receivers with no recoverable static type still fall through to the Result decoder unrecognized; uniform tagged Option ABI (payload-3 collision) remains open
+**Status:** typed local/direct/method-call `?` support is source-implemented; the enum-id-1 Option migration now covers typed boundaries, true function-valued calls, and early `?` absence. The strict LLVM/Cranelift ABI matrix remains opt-in pending current-source execution; the separate `.?` consumer and legacy Cranelift generic-call shortcut remain follow-ups.
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -156,15 +156,20 @@ native-authoritative cases under flagless LLVM and explicit Cranelift. ARM32
 default LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target
 objects and reject the retired fail-closed diagnostic. Static portability
 coverage pins backend selection and the target-object contract. Execution is
-pending; the payload-3 collision and uniform tagged Option ABI remain open.
+pending. The payload-3 producer collision is source-fixed by the enum-id-1
+migration, but the full strict-dual ABI matrix remains opt-in until executed.
 
 The exact open ABI matrix is preserved in
 `test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl`. It covers
-raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`, and
-raw/explicit `Some(0)` controls. Set `NATIVE_OPEN_BUG_REPROS=1` on the native
-parity harness to run it under default LLVM and explicit Cranelift; expected
-output is `3377777700`. It remains opt-in and red until all typed boundaries
-share the uniform tagged representation.
+raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`,
+raw/explicit `Some(0)` controls, annotated locals/aliases, true function-valued
+calls, parameters, returns, fields, `if`/`match` merges, and present/absent `?`
+propagation. Set `NATIVE_OPEN_BUG_REPROS=1` on the native parity harness to run
+it under default LLVM and explicit Cranelift; expected output is
+`337777770033377703377737773777377737771`; the final `1` is the direct
+`rt_enum_id(through_try(nil))` representation oracle, which distinguishes the
+canonical None handle from legacy raw nil (`-1`). It remains opt-in until both backends
+pass the current-source incremental run.
 
 ## Regression re-fixed: resolved method-call Option try silently wrong again — root-caused + fixed + execution-verified (2026-07-18, P4 lane)
 
@@ -271,8 +276,8 @@ in scope for this pass (the fresh self-hosted `bin/simple run` currently
 errors out unrelated to this bug — a lint diagnostic on explicit `self.`
 usage in a different, pre-existing native-build regression — and the stale
 seed's own `run` prints no output for this fixture either; neither was
-usable as a clean oracle here). The uniform tagged Option ABI (payload-3
-collision) remains the one genuinely open item.
+usable as a clean oracle here). The uniform tagged Option ABI was subsequently
+source-migrated; its current-source strict-dual execution remains pending.
 
 **Scope note:** this fix is entirely in the *type-gating* layer
 (`enum_match_expr_type`) that decides whether `lower_try_expr`'s Optional
@@ -286,8 +291,9 @@ them reachable). The regression fixed here is that a resolved method call's
 Option return type was silently un-recognized so the base fell through to the
 *unconditional Result decoder* instead — a wrong-decoder selection, not a
 wrong offset inside the right decoder. The one place an actual payload-slot
-ambiguity remains is the documented, separate, and still-open uniform tagged
-Option ABI item (raw payload `3` colliding with the None sentinel) above.
+ambiguity was the documented uniform tagged Option ABI item above; the later
+enum-id-1 migration removes that producer collision in source, pending its
+strict-dual execution gate.
 
 ## Round-10 landing regression, fixed before re-land (2026-07-18, P4 lane)
 
@@ -373,3 +379,25 @@ path this lane did not find, and the next lane should grep for other
 `new_for_target` and the one copy at line 2240.
 
 Committed as a new SHA (see VCS log) for round-11 re-landing.
+
+## Uniform ABI boundary follow-up (2026-07-18)
+
+The expanded fixture exposed that its claimed function-value coverage was not
+actually indirect: `through_function_value(f, value)` first promoted `value`
+at that function's direct typed boundary, so the later `f(value)` never tested
+a raw payload crossing a local function value. `lower_call` also discarded the
+retained callee symbol's parameter types after classifying a local callee as
+non-direct, so a real `f(3)` passed raw `3` and the callee mistook it for nil.
+Parameter-type recovery now uses the retained symbol for direct and local
+function-value calls, with the expression type as fallback.
+
+The Optional `?` none block also emitted an early raw-sentinel return, bypassing
+the normal function-return promotion. It now passes that nil local through
+`ensure_option_handle` before terminating. The fixture uses genuine `f(3)` /
+`f(nil)` calls and adds present/absent `?` propagation; the source contract
+pins both lowering paths and the exact expanded output. A direct `rt_enum_id`
+check makes the absent-`?` row representation-sensitive instead of relying on
+`unwrap_or`, which intentionally accepts both canonical and migration nil. The matrix stays opt-in
+until focused LLVM and Cranelift executions pass. A separate `.?` payload
+consumer defect and the Cranelift adapter's legacy generic
+`unwrap`/`unwrap_err`/`unwrap_or` identity shortcut are not claimed fixed here.

@@ -59,7 +59,7 @@ source fixes from executable proof.
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
 | 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with flagless default-LLVM and explicit-Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V64 QEMU, flagless-LLVM ARM32/RV32 objects, and Windows ARM64 LLVM/Cranelift objects. Execution is pending. |
-| 8 | Open/partial; typed local/direct-call Option `?` support, resolved/unresolved-method provenance, and additive `rt_enum_id` surfaces are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method native-authoritative checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target objects without the retired diagnostic. Execution is pending and genuinely unknown late dispatch remains unguessed. The flat payload-3 collision and uniform tagged Option ABI remain open; flat text unwrap is implemented but unexecuted. |
+| 8 | Open for execution proof; typed local/direct/method Option `?`, enum-id-1 producer boundaries, true function-value `f(3)`/`f(nil)` arguments, and early-`?` canonical None returns are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require target objects. The full uniform ABI matrix remains opt-in pending current-source LLVM/Cranelift execution; genuinely unknown late dispatch, nested/float payload proof, the separate `.?` consumer, and the legacy Cranelift generic-call shortcut remain unproved. Flat text unwrap is source-implemented with staged execution pending. |
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
@@ -178,12 +178,12 @@ A wrong-but-silent result is the worst failure class; these go first.
 | 5 | `native_const_pattern_lowers_irrefutably` | `case CONST:` match arm lowers as irrefutable (always taken), skipping the equality test. Emit the `rt_native_eq`/`icmp` guard for const patterns. | `expressions.spl` (build_match) | S |
 | 6 | `native_any_param_forwarding_corruption` (High) | Forwarding an `Any` parameter corrupts the pointer (tag/box mismatch on pass-through). Preserve the tagged handle across the call boundary; no re-box. | `core_codegen.spl` call lowering | M |
 | 7 | `native_codegen_crossmodule_generic_result_u8_erasure` | Imported function signatures already retain concrete `Result<[u8],E>` through HIR and the no-op monomorphization pass; MIR `rt_enum_payload` binding dropped the existing runtime-array marker. Recover the selected Result payload type in `lower_enum_match` and preserve array provenance. | `switch_operators_calls.spl` (`lower_enum_match`) | S |
-| 8 | Option ABI pair: `native_try_op_on_option_silent_wrong` + `native_text_option_unwrap_pointer_value` | Flat `i64?` payload `3` collides with the nil sentinel; `?`/unwrap on Option mis-dispatch. Needs a uniform tagged Option handle (`OPTION_ENUM_ID=1`, `Some=0/None=1`), `rt_enum_id` in both runtimes, and declared-type provenance for locals/calls. Design already recorded in the two bug docs. | HIR Optional canon + MIR + runtime | L |
+| 8 | Option ABI pair: `native_try_op_on_option_silent_wrong` + `native_text_option_unwrap_pointer_value` | The enum-id-1 source migration removes the flat payload-3 producer collision across typed boundaries; the focused strict-dual matrix, nested/float payloads, and ARM32 constructor ABI still require execution proof. | HIR Optional canon + MIR + runtime | L |
 
-**Note on #8:** blocked on a runnable pure-Simple `native-build` verification gate
-(source-only landing cannot prove absence of double-wrapping / payload-3 collision
-/ Result regressions). Do this last in Wave 1, with the ABI acceptance matrix from
-the bug docs as the gate. That matrix must also prove level-aware nested Option
+**Note on #8:** source-implemented and blocked on a runnable pure-Simple
+`native-build` verification gate (source-only checks cannot prove absence of
+double-wrapping, payload-3 collisions, or Result regressions). Run the ABI
+acceptance matrix from the bug docs before promotion. It must also prove level-aware nested Option
 wrapping, bit-preserving float payloads, and the ARM32 constructor ABI; a runtime
 ID check alone cannot distinguish `Option<T>` from `Option<Option<T>>`.
 
@@ -335,9 +335,9 @@ their implementation order.
 1. Run each row's recorded focused/native/parity gate for execution-proof-only
    rows #2–#7, #9–#10, #12–#18, and #20–#21. Native/parity gates wait for a
    valid pure-Simple executable; do not reimplement landed source fixes.
-2. Implement #8 as one atomic uniform tagged Option ABI change, including every
-   producer/consumer boundary and the full Result-preservation matrix. Do not
-   land another partial representation change.
+2. Run #8's opt-in strict LLVM/Cranelift matrix. If it fails, repair the
+   producer/consumer boundary atomically with the full Result-preservation
+   matrix; do not start a second representation migration.
 3. Finish #19's provider inventory, production archive selection/link wiring,
    and canonical-input digest/cache namespace with invalidation proof before
    its strict execution gate.
