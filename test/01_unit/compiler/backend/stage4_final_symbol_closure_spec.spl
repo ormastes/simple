@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_validate_compiler_backfill_symbol_envelope, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -47,6 +47,36 @@ describe "Stage4 aggregate final symbol closure":
         val macho = "0000000000000000 T _rt_cranelift_new_module\n0000000000000010 T _rt_cranelift_emit_object_raw\n                 U _malloc\n"
         expect(stage4_validate_compiler_backfill_symbol_envelope(elf, "elf").is_ok()).to_be(true)
         expect(stage4_validate_compiler_backfill_symbol_envelope(macho, "macho").is_ok()).to_be(true)
+
+    it "derives sorted compiler backfill manifests and preserves raw localization names":
+        val elf = "T rt_cranelift_zeta\n00000010 T helper_z\n00000020 T rt_cranelift_alpha\n00000030 T helper_a\n"
+        val macho = "T _rt_cranelift_zeta\n00000010 T _helper_z\n00000020 T _rt_cranelift_alpha\n00000030 T _helper_a\n"
+        val expected = ["rt_cranelift_alpha", "rt_cranelift_zeta"]
+        expect(stage4_derive_compiler_backfill_manifest(elf, "elf").unwrap()).to_equal(expected)
+        expect(stage4_derive_compiler_backfill_manifest(macho, "macho").unwrap()).to_equal(expected)
+        expect(stage4_compiler_backfill_localization_symbols(elf, "elf", expected).unwrap()).to_equal(["helper_a", "helper_z"])
+        expect(stage4_compiler_backfill_localization_symbols(macho, "macho", expected).unwrap()).to_equal(["_helper_a", "_helper_z"])
+
+    it "rejects empty repeated and foreign runtime compiler manifests":
+        val export = "00000000 T rt_cranelift_compile\n"
+        expect(stage4_derive_compiler_backfill_manifest("", "elf").unwrap_err()).to_contain("defines no rt_cranelift")
+        expect(stage4_derive_compiler_backfill_manifest("00000000 T helper\n", "elf").unwrap_err()).to_contain("defines no rt_cranelift")
+        expect(stage4_derive_compiler_backfill_manifest(export + export, "elf").unwrap_err()).to_contain("exactly once")
+        expect(stage4_derive_compiler_backfill_manifest(export + "00000010 T rt_hidden\n00000020 T spl_hidden\n", "elf").unwrap_err()).to_contain("outside the manifest")
+        expect(stage4_derive_compiler_backfill_manifest(export + "U rt_hidden\nU spl_hidden\n", "elf").unwrap_err()).to_contain("outside the manifest")
+        expect(stage4_derive_compiler_backfill_manifest("00000000 T rt_cranelift_noise extra\n", "elf").unwrap_err()).to_contain("defines no rt_cranelift")
+
+    it "requires each localization manifest export exactly once":
+        val exact = "00000000 T rt_cranelift_compile\n00000010 T helper\n"
+        expect(stage4_compiler_backfill_localization_symbols(exact, "elf", []).unwrap_err()).to_contain("manifest is empty")
+        expect(stage4_compiler_backfill_localization_symbols(exact, "elf", ["rt_cranelift_compile", "rt_cranelift_compile"]).unwrap_err()).to_contain("repeats export")
+        expect(stage4_compiler_backfill_localization_symbols("00000010 T helper\n", "elf", ["rt_cranelift_compile"]).unwrap_err()).to_contain("exactly once")
+        expect(stage4_compiler_backfill_localization_symbols(exact + "00000020 T rt_cranelift_compile\n", "elf", ["rt_cranelift_compile"]).unwrap_err()).to_contain("exactly once")
+
+    it "rejects strong and weak runtime dependencies before localization":
+        val exact = "00000000 T rt_cranelift_compile\n"
+        expect(stage4_compiler_backfill_localization_symbols(exact + "U rt_hidden\n", "elf", ["rt_cranelift_compile"]).unwrap_err()).to_contain("forbidden runtime dependency")
+        expect(stage4_compiler_backfill_localization_symbols(exact + "00000010 w spl_weak\n", "elf", ["rt_cranelift_compile"]).unwrap_err()).to_contain("forbidden runtime dependency")
 
     it "rejects invalid compiler backfill symbol envelopes":
         val exact = "0000000000000000 T rt_cranelift_new_module\n0000000000000010 T rt_cranelift_emit_object_raw\n"

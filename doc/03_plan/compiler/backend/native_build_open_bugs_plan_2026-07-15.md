@@ -248,6 +248,9 @@ fail-closes unless a Linux ELF or macOS Mach-O archive has the localized
 `rt_cranelift_*` symbol envelope. The external archive is not selected, linked,
 copied, cached, or deleted. Current Cargo output is still the raw staticlib, so
 localized one-member capsule production and executable proof remain pending.
+Pure-Simple manifest and localization-list derivation now mirror the Rust
+producer without a hardcoded symbol count; filesystem/tool orchestration is the
+remaining localization step.
 
 ---
 

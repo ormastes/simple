@@ -132,36 +132,96 @@ pub fn stage4_compiler_backfill_object_format(target_os_name: text) -> Result<te
         return Ok("macho")
     Err("Stage4 compiler backfill has no object-format policy for target OS '" + target_os_name + "'")
 
-pub fn stage4_validate_compiler_backfill_symbol_envelope(nm_output: text, object_format: text) -> Result<(), text>:
-    """Validate the derived compiler-capsule symbol envelope without a manual manifest."""
+pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: text) -> Result<[text], text>:
+    """Derive the exact compiler-capsule export manifest from a portable nm scan."""
     if object_format != "elf" and object_format != "macho":
         return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
 
-    var definitions: Dict<text, bool> = {}
-    var definition_count = 0
+    var definition_counts: Dict<text, i64> = {}
+    var runtime_symbols: Dict<text, bool> = {}
     for line in nm_output.split("\n"):
         val parts = line.split_whitespace()
-        if parts.len() < 2:
+        if parts.len() != 2 and parts.len() != 3:
             continue
-        val type_index = parts.len() - 2
+        var type_index = 0
+        if parts.len() == 3:
+            type_index = 1
         val type_code = parts[type_index]
+        if type_code.len() != 1:
+            continue
         val symbol = stage4_provider_symbol(parts[parts.len() - 1], object_format)
-        val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
+        val is_undefined = type_code == "U" or type_code == "w" or type_code == "v"
+        if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
+            runtime_symbols[symbol] = true
+        if not is_undefined and symbol.starts_with("rt_cranelift_"):
+            definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
+
+    if definition_counts.len() == 0:
+        return Err("Stage4 compiler backfill defines no rt_cranelift_* symbols")
+    for symbol in definition_counts.keys():
+        val count = definition_counts[symbol]
+        if count != 1:
+            return Err("Stage4 compiler backfill export '" + symbol + "' must be defined exactly once")
+    for symbol in runtime_symbols.keys():
+        if not definition_counts.has(symbol):
+            return Err("Stage4 compiler backfill source contains runtime/provider ownership outside the manifest: " + symbol)
+    Ok(stage4_sorted_text(definition_counts.keys()))
+
+pub fn stage4_compiler_backfill_localization_symbols(nm_output: text, object_format: text, manifest: [text]) -> Result<[text], text>:
+    """Return raw closure-object definitions that must be localized."""
+    if object_format != "elf" and object_format != "macho":
+        return Err("Unsupported Stage4 compiler backfill object format '" + object_format + "'")
+    if manifest.len() == 0:
+        return Err("Stage4 compiler backfill manifest is empty")
+
+    var manifest_symbols: Dict<text, bool> = {}
+    var definition_counts: Dict<text, i64> = {}
+    var localize: Dict<text, bool> = {}
+    for symbol in manifest:
+        if manifest_symbols.has(symbol):
+            return Err("Stage4 compiler backfill manifest repeats export '" + symbol + "'")
+        manifest_symbols[symbol] = true
+
+    for line in nm_output.split("\n"):
+        val parts = line.split_whitespace()
+        if parts.len() != 2 and parts.len() != 3:
+            continue
+        var type_index = 0
+        if parts.len() == 3:
+            type_index = 1
+        val type_code = parts[type_index]
+        if type_code.len() != 1:
+            continue
+        val raw_symbol = parts[parts.len() - 1]
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        val is_undefined = type_code == "U" or type_code == "w" or type_code == "v"
         if is_undefined:
             if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
-                return Err("Stage4 compiler backfill has forbidden runtime dependency '" + symbol + "'")
-        elif stage4_nm_has_address(parts, type_index):
-            if definitions.has(symbol):
-                return Err("Stage4 compiler backfill repeats global definition '" + symbol + "'")
-            if not symbol.starts_with("rt_cranelift_"):
-                return Err("Stage4 compiler backfill retains unexpected global definition '" + symbol + "'")
-            if symbol == "rt_cranelift_module_new" or symbol == "rt_cranelift_emit_object":
-                return Err("Stage4 compiler backfill retains excluded compatibility wrapper '" + symbol + "'")
-            definitions[symbol] = true
-            definition_count = definition_count + 1
+                return Err("Stage4 compiler backfill closure has forbidden runtime dependency '" + symbol + "'")
+        else:
+            if manifest_symbols.has(symbol):
+                definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
+            else:
+                localize[raw_symbol] = true
 
-    if definition_count == 0:
-        return Err("Stage4 compiler backfill defines no rt_cranelift_* symbols")
+    for symbol in manifest:
+        val count = definition_counts[symbol] ?? 0
+        if count != 1:
+            return Err("Stage4 compiler backfill closure export '" + symbol + "' must be defined exactly once")
+    Ok(stage4_sorted_text(localize.keys()))
+
+pub fn stage4_validate_compiler_backfill_symbol_envelope(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the derived compiler-capsule symbol envelope without a manual manifest."""
+    val manifest = match stage4_derive_compiler_backfill_manifest(nm_output, object_format):
+        case Ok(symbols): symbols
+        case Err(err): return Err(err)
+    if manifest.contains("rt_cranelift_module_new") or manifest.contains("rt_cranelift_emit_object"):
+        return Err("Stage4 compiler backfill retains an excluded compatibility wrapper")
+    val localize = match stage4_compiler_backfill_localization_symbols(nm_output, object_format, manifest):
+        case Ok(symbols): symbols
+        case Err(err): return Err(err)
+    if localize.len() != 0:
+        return Err("Stage4 compiler backfill retains unexpected global definitions: " + localize.join(", "))
     Ok(())
 
 pub fn stage4_dynload_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:

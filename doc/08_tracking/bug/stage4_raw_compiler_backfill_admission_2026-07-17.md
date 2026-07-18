@@ -21,3 +21,9 @@ archive. The Cargo artifact is still an unlocalized source staticlib and is
 expected to fail closed; deterministic one-member localization remains open.
 No compiler, native, runtime, C, Cargo, or Simple execution is claimed under
 this session's static-only restriction.
+
+The next pure-Simple slice now derives the sorted compiler export manifest and
+the raw symbols to localize directly from portable `nm` text. It mirrors the
+Rust producer's exact two/three-field row parser and rejects duplicate exports
+or runtime ownership outside the manifest. Tool orchestration and executable
+proof remain pending.
