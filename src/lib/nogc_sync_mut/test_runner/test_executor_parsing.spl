@@ -111,16 +111,15 @@ fn _is_test_error_line(clean: text) -> bool:
 
 fn extract_error_message(output: text) -> text:
     # Extract first meaningful error message from test output.
-    # ponytail: scan lines directly to avoid leaking a full split array in the
-    # no-GC parent runner; move to a reusable iterator only when another caller needs it.
+    # NOTE: iterates via .split("\n") rather than a manual pos/index_of(needle,
+    # start) scan — the seed/bootstrap interpreter's two-argument text.index_of
+    # ignores the start offset and always returns the first match, which made
+    # the old `pos = next + 1` loop never advance (infinite spin). See
+    # doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md.
     var result = ""
     var count = 0
-    var pos = 0
-    val output_len = output.len()
-    while pos <= output_len:
-        val next = output.index_of("\n", pos) ?? -1
-        val line = if next >= 0: output[pos:next] else: output[pos:]
-        val clean = strip_ansi(line).trim()
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
         if _is_test_error_line(clean):
             if result != "":
                 result = result + "; "
@@ -128,9 +127,6 @@ fn extract_error_message(output: text) -> text:
             count = count + 1
             if count >= 3:
                 break
-        if next < 0:
-            break
-        pos = next + 1
     result
 
 fn parse_test_output(output: text) -> (i64, i64, i64, i64):
@@ -152,12 +148,18 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var results_failed = 0
     var results_skipped = 0
     var results_pending = 0
-    var pos = 0
-    val output_len = output.len()
-    while pos <= output_len:
-        val next = output.index_of("\n", pos) ?? -1
-        val line = if next >= 0: output[pos:next] else: output[pos:]
-        val clean = strip_ansi(line)
+    # NOTE: line_idx replaces a byte-offset `pos` that used to come from a
+    # manual index_of(needle, start)-based scan. The seed/bootstrap
+    # interpreter's two-argument text.index_of ignores the start offset and
+    # always returns the first match, so `pos = next + 1` never advanced and
+    # the loop spun forever. Iterating via .split("\n") sidesteps the buggy
+    # primitive entirely; line_idx only needs to preserve *relative* ordering
+    # between the tracked positions, which an incrementing per-line counter
+    # does identically to the old byte offsets. See
+    # doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md.
+    var line_idx = 0
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line)
         val trimmed = clean.trim()
         val canonical_results = trimmed.starts_with("Results:") and trimmed.contains(" total") and trimmed.contains(" passed") and trimmed.contains(" failed")
         if canonical_results:
@@ -176,7 +178,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             bdd_summary_pos = -1
             results_seen = true
             results_valid = false
-            results_pos = pos
+            results_pos = line_idx
             val result_total = extract_number_before(s: trimmed, keyword: "total")
             val result_passed = extract_number_before(s: trimmed, keyword: "passed")
             val result_failed = extract_number_before(s: trimmed, keyword: "failed")
@@ -190,10 +192,10 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
                 results_pending = if parsed_pending >= 0: parsed_pending else: 0
         elif trimmed.starts_with("Passed:"):
             summary_passed = extract_number_after_colon(s: trimmed, prefix: "Passed:")
-            summary_passed_pos = pos
+            summary_passed_pos = line_idx
         elif trimmed.starts_with("Failed:"):
             summary_failed = extract_number_after_colon(s: trimmed, prefix: "Failed:")
-            summary_failed_pos = pos
+            summary_failed_pos = line_idx
         elif clean.contains("example") and clean.contains("failure"):
             # Accept both plural ("2 examples, 0 failures") and singular
             # ("1 example, 1 failure") summary lines. The interpreter's BDD
@@ -205,7 +207,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             val examples_count = extract_number_before(s: clean, keyword: "example")
             val failures_count = extract_number_before(s: clean, keyword: "failure")
             if examples_count >= 0 and failures_count >= 0:
-                bdd_summary_pos = pos
+                bdd_summary_pos = line_idx
                 val passed = examples_count - failures_count
                 if passed > 0:
                     total_passed = total_passed + passed
@@ -223,9 +225,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
-        if next < 0:
-            break
-        pos = next + 1
+        line_idx = line_idx + 1
     # The last complete summary family is authoritative: the outer runner emits
     # Results last, while direct specs emit Passed/Failed after authored output.
     val direct_summary_pos = if summary_passed_pos > summary_failed_pos: summary_passed_pos else: summary_failed_pos
@@ -249,19 +249,12 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
 fn output_has_zero_pass_summary(output: text) -> bool:
     var saw_passed_zero = false
     var saw_failed_zero = false
-    var pos = 0
-    val output_len = output.len()
-    while pos <= output_len:
-        val next = output.index_of("\n", pos) ?? -1
-        val line = if next >= 0: output[pos:next] else: output[pos:]
-        val clean = strip_ansi(line).trim()
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
         if clean == "Passed: 0":
             saw_passed_zero = true
         elif clean == "Failed: 0":
             saw_failed_zero = true
-        if next < 0:
-            break
-        pos = next + 1
     saw_passed_zero and saw_failed_zero
 
 fn extract_number_after_colon(s: text, prefix: text) -> i64:
@@ -326,12 +319,11 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
     args
 
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
-    val combined = stdout + "\n" + stderr
-    # -1 also represents spawn/internal failures; only the runtime's marker
-    # proves that the configured deadline expired.
-    if exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
+    # Check for timeout
+    if exit_code == -1:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true, cached: false)
 
+    val combined = stdout + "\n" + stderr
     val (passed, failed, skipped, pending) = parse_test_output(combined)
 
     if passed == 0 and failed == 0:
@@ -417,12 +409,8 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
 fn extract_coverage_sdn(output: text) -> text:
     var in_block = false
     var result = ""
-    var pos = 0
-    val output_len = output.len()
-    while pos <= output_len:
-        val next = output.index_of("\n", pos) ?? -1
-        val line = if next >= 0: output[pos:next] else: output[pos:]
-        val clean = strip_ansi(line).trim()
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
         if clean == COVERAGE_BEGIN:
             in_block = true
         elif clean == COVERAGE_END:
@@ -430,21 +418,14 @@ fn extract_coverage_sdn(output: text) -> text:
         elif in_block:
             if result != "":
                 result = result + "\n"
-            result = result + line
-        if next < 0:
-            break
-        pos = next + 1
+            result = result + raw_line
     result
 
 fn strip_coverage_blocks(output: text) -> text:
     var in_block = false
     var result = ""
-    var pos = 0
-    val output_len = output.len()
-    while pos <= output_len:
-        val next = output.index_of("\n", pos) ?? -1
-        val line = if next >= 0: output[pos:next] else: output[pos:]
-        val clean = strip_ansi(line).trim()
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
         if clean == COVERAGE_BEGIN:
             in_block = true
         elif clean == COVERAGE_END:
@@ -452,10 +433,7 @@ fn strip_coverage_blocks(output: text) -> text:
         elif not in_block:
             if result != "":
                 result = result + "\n"
-            result = result + line
-        if next < 0:
-            break
-        pos = next + 1
+            result = result + raw_line
     result
 
 # =========================================================================
