@@ -292,6 +292,15 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me result_err_hir_type(receiver: HirExpr) -> HirType?:
+        val receiver_type = self.enum_match_expr_type(receiver)
+        if receiver_type != nil:
+            val found_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+            match found_type.kind:
+                case HirTypeKind.Result(_, err_type): return Some(err_type)
+                case _: ()
+        nil
+
     me option_inner_hir_type(receiver: HirExpr) -> HirType?:
         val receiver_type = self.enum_match_expr_type(receiver)
         if receiver_type != nil:
@@ -311,6 +320,11 @@ impl MirLowering:
                 case HirTypeKind.Optional(inner_type): return Some(inner_type)
                 case _: ()
         nil
+
+    me method_receiver_is_option(receiver: HirExpr, local: LocalId) -> bool:
+        if self.option_inner_hir_type_for_local(receiver, local) != nil:
+            return true
+        self.option_value_locals.has(local.id) or self.nil_locals.has(local.id)
 
     me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
         """Recover the primitive type needed to decode an Option.map result."""
@@ -403,12 +417,12 @@ impl MirLowering:
         self.builder = b_narrow
         narrowed
 
-    me lower_result_unwrap(receiver: HirExpr, ok_type: HirType, default_expr: HirExpr?) -> LocalId:
+    me lower_result_unwrap(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool) -> LocalId:
         var result_type = MirType.i64()
         var is_text = false
         var supported = false
         var result_struct_name = ""
-        match ok_type.kind:
+        match payload_type.kind:
             case HirTypeKind.Int(bits, signed):
                 if bits == 64 and signed:
                     supported = true
@@ -427,7 +441,8 @@ impl MirLowering:
                             case _: ()
             case _: ()
         if not supported:
-            self.error("unsupported Result unwrap payload type", Some(receiver.span))
+            val operation = if unwrap_err: "unwrap_err" else: "unwrap"
+            self.error("unsupported Result {operation} payload type", Some(receiver.span))
             var b_bad = self.builder
             val bad = b_bad.emit_const_int(0)
             self.builder = b_bad
@@ -443,43 +458,43 @@ impl MirLowering:
         var disc_local = LocalId(id: 0)
         if val found_disc = disc_res:
             disc_local = found_disc
-        val ok_key = b_disc.emit_const_int(0)
-        val is_ok = b_disc.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(ok_key), MirType.bool())
-        val ok_block = b_disc.new_block(Some("result_unwrap_ok"))
-        val err_block = b_disc.new_block(Some("result_unwrap_err"))
+        val payload_key = b_disc.emit_const_int(if unwrap_err: 1 else: 0)
+        val has_payload = b_disc.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(payload_key), MirType.bool())
+        val payload_block = b_disc.new_block(Some("result_unwrap_payload"))
+        val mismatch_block = b_disc.new_block(Some("result_unwrap_mismatch"))
         val merge_block = b_disc.new_block(Some("result_unwrap_merge"))
         val result_local = b_disc.new_temp(result_type)
-        b_disc.terminate_if(mir_operand_copy(is_ok), ok_block, err_block)
+        b_disc.terminate_if(mir_operand_copy(has_payload), payload_block, mismatch_block)
         self.builder = b_disc
 
         var b_ok = self.builder
-        b_ok.switch_to_block(ok_block)
+        b_ok.switch_to_block(payload_block)
         val payload_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_payload"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val payload_res = b_ok.emit_call(payload_op, [mir_operand_copy(receiver_local)], MirType.i64())
         self.builder = b_ok
-        var ok_value = receiver_local
+        var payload_value = receiver_local
         if val payload_local = payload_res:
-            ok_value = payload_local
+            payload_value = payload_local
         if is_text:
             var b_text = self.builder
             val text_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_interp_cstr"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: result_type, is_variadic: false)))
             ))
-            val text_res = b_text.emit_call(text_op, [mir_operand_copy(ok_value)], result_type)
+            val text_res = b_text.emit_call(text_op, [mir_operand_copy(payload_value)], result_type)
             self.builder = b_text
             if val text_local = text_res:
-                ok_value = text_local
+                payload_value = text_local
         b_ok = self.builder
-        b_ok.emit_copy(result_local, ok_value)
+        b_ok.emit_copy(result_local, payload_value)
         b_ok.terminate_goto(merge_block)
         self.builder = b_ok
 
         var b_err = self.builder
-        b_err.switch_to_block(err_block)
+        b_err.switch_to_block(mismatch_block)
         self.builder = b_err
         if default_expr != nil:
             val fallback_expr = default_expr ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: receiver.span)
@@ -489,7 +504,8 @@ impl MirLowering:
             b_err = self.builder
             b_err.emit_copy(result_local, fallback)
         else:
-            val panic_msg = b_err.emit_const_str("called `.unwrap()` on an Err Result")
+            val panic_text = if unwrap_err: "called `.unwrap_err()` on an Ok Result" else: "called `.unwrap()` on an Err Result"
+            val panic_msg = b_err.emit_const_str(panic_text)
             val panic_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_panic"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
@@ -504,7 +520,7 @@ impl MirLowering:
         self.builder = b_merge
         if result_struct_name != "":
             self.struct_value_syms[result_local.id] = result_struct_name
-            self.local_hir_types[result_local.id] = ok_type
+            self.local_hir_types[result_local.id] = payload_type
         result_local
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
@@ -521,8 +537,38 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
-        if method == "is_some" and args.len() == 0:
-            val receiver_local = self.lower_expr(receiver)
+        val resolution_is_unresolved = match resolution:
+            case Unresolved: true
+            case _: false
+        var result_ok_type: HirType? = nil
+        var result_err_type: HirType? = nil
+        if method == "unwrap" or method == "unwrap_or":
+            result_ok_type = self.result_ok_hir_type(receiver)
+        if method == "unwrap_err":
+            result_err_type = self.result_err_hir_type(receiver)
+
+        # Native entry lowering commonly has no MethodResolution, so probe
+        # Option-like receivers once and reuse that local in the Unresolved
+        # owner fallback. This keeps builtin names type-directed and prevents
+        # custom methods with the same leaf name from being stolen.
+        var prelowered_method_receiver: LocalId = 0
+        var has_prelowered_method_receiver = false
+        var option_method_receiver = false
+        val declared_option_receiver = self.option_inner_hir_type(receiver) != nil
+        val option_method_shape =
+            (method == "is_some" and args.len() == 0) or
+            (method == "is_none" and args.len() == 0) or
+            (method == "map" and args.len() == 1) or
+            (method == "unwrap" and args.len() == 0 and result_ok_type == nil) or
+            (method == "unwrap_or" and args.len() == 1 and result_ok_type == nil)
+        val probe_option_receiver = option_method_shape and (resolution_is_unresolved or declared_option_receiver)
+        if probe_option_receiver:
+            prelowered_method_receiver = self.lower_expr(receiver)
+            has_prelowered_method_receiver = true
+            option_method_receiver = self.method_receiver_is_option(receiver, prelowered_method_receiver)
+
+        if method == "is_some" and args.len() == 0 and option_method_receiver:
+            val receiver_local = prelowered_method_receiver
             val is_some = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_is_some"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -534,8 +580,8 @@ impl MirLowering:
         # `.is_none()` -- mirror of `.is_some()` immediately above, same
         # rt_is_none runtime helper the ExistsCheck/NullCoalesce (`.?`/`??`)
         # lowering already relies on for its is-nil branch test.
-        if method == "is_none" and args.len() == 0:
-            val receiver_local = self.lower_expr(receiver)
+        if method == "is_none" and args.len() == 0 and option_method_receiver:
+            val receiver_local = prelowered_method_receiver
             val is_none = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_is_none"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -549,10 +595,19 @@ impl MirLowering:
         # panics. Branch on rt_is_some(receiver), never truthiness, so a
         # present numeric zero is preserved.
         if method == "unwrap" and args.len() == 0:
-            val result_ok_type = self.result_ok_hir_type(receiver)
             if result_ok_type != nil:
-                return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), nil)
-            val receiver_local = self.lower_expr(receiver)
+                return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), nil, false)
+
+        # `.unwrap_err()` is Result-owned, never a backend leaf-name alias.
+        if method == "unwrap_err" and args.len() == 0 and result_err_type != nil:
+            return self.lower_result_unwrap(receiver, result_err_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), nil, true)
+
+        # `.unwrap()` accepts the canonical enum-id-1 Option handle plus the
+        # raw migration form. A present value yields its payload and nil/None
+        # panics. Branch on rt_is_some(receiver), never truthiness, so a
+        # present numeric zero is preserved.
+        if method == "unwrap" and args.len() == 0 and option_method_receiver:
+            val receiver_local = prelowered_method_receiver
             var unwrap_result_type = MirType.i64()
             var unwrap_is_text = false
             var unwrap_is_bool = false
@@ -640,10 +695,11 @@ impl MirLowering:
         # "PHI nodes not grouped at top of basic block" hazard documented
         # there).
         if method == "unwrap_or" and args.len() == 1:
-            val result_ok_type = self.result_ok_hir_type(receiver)
             if result_ok_type != nil:
-                return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), Some(args[0].value))
-            val receiver_local = self.lower_expr(receiver)
+                return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), Some(args[0].value), false)
+
+        if method == "unwrap_or" and args.len() == 1 and option_method_receiver:
+            val receiver_local = prelowered_method_receiver
             var uo_result_type = MirType.i64()
             var uo_is_text = false
             val inner_type_uo = self.option_inner_hir_type_for_local(receiver, receiver_local)
@@ -728,30 +784,13 @@ impl MirLowering:
             self.builder = b_merge_uo
             return result_local_uo
 
-        # `.map(fn)` on an Option -- Some(v) yields Some(transform(v)), nil
-        # stays nil. `.map` is ALSO a valid array method (see the
-        # array-receiver `.map` handling further below in this file, gated on
-        # `local_is_runtime_array`), so this must not steal a real array
-        # `.map(fn)` call. The receiver's static HIR type (`receiver.type_`)
-        # is NOT usable to disambiguate here: bug #138 notes native-build's
-        # `--entry` path never runs HIR type inference, so `receiver.type_`
-        # is nil for ordinary locals on exactly the path this sweep targets
-        # (confirmed empirically -- gating on `Optional(_)` there left
-        # `.map` permanently unresolved). Instead, mirror how the array/dict
-        # branches already disambiguate a same-named method on an
-        # Unresolved-typed receiver: lower the receiver once and check
-        # `local_is_runtime_array`/`local_is_runtime_dict` on the resulting
-        # LocalId -- neither Array/Slice nor Dict responds true here, so a
-        # genuine array or dict receiver safely falls through untouched to
-        # its own existing `.map` handling below. Cache this probe for that
-        # dispatch so a side-effecting receiver expression runs exactly once.
-        var prelowered_method_receiver: LocalId = 0
-        var has_prelowered_method_receiver = false
-        if method == "map" and args.len() == 1:
-            val recv_probe_local_map = self.lower_expr(receiver)
-            prelowered_method_receiver = recv_probe_local_map
-            has_prelowered_method_receiver = true
-            if not self.local_is_runtime_array(recv_probe_local_map) and not self.local_is_runtime_dict(recv_probe_local_map):
+        # `.map(fn)` on a proven Option -- Some(v) yields Some(transform(v)),
+        # nil stays nil. Arrays and custom owners may expose the same name, so
+        # unknown receivers fall through to normal owner dispatch. Reuse the
+        # probe above so a side-effecting receiver expression runs once.
+        if method == "map" and args.len() == 1 and option_method_receiver:
+            val recv_probe_local_map = prelowered_method_receiver
+            if option_method_receiver:
                 match args[0].value.kind:
                     case Lambda(map_params, map_body, _):
                         val receiver_local = recv_probe_local_map
@@ -915,10 +954,6 @@ impl MirLowering:
         # reason. Representation is identical on both paths too: argv
         # elements always come from `rt_get_args` -> `rt_cli_get_args`, which
         # tags them via `rt_string_new` regardless of SIMPLE_BOOTSTRAP.
-        val resolution_is_unresolved = match resolution:
-            case Unresolved: true
-            case _: false
-
         # Raw-pointer `.offset(index)` is element-based, while MirBinOp.Offset
         # is the backend-neutral byte-offset operation. Scale once here from
         # the receiver's pointee type so every backend and the interpreter see

@@ -15,9 +15,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **92 logical cases / 125 recorded checks** because strict-dual cases
+  defines **93 logical cases / 127 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **94 logical cases / 128 recorded checks**; execution is opt-in because
+  to **95 logical cases / 130 recorded checks**; execution is opt-in because
   those two reproductions remain known-red. Execution of the expanded matrix
   is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -213,6 +213,14 @@ the shared binary — deploys require explicit user go-ahead).
   repeats that exact value-and-count oracle for default LLVM and explicit
   Cranelift on FreeBSD/AArch64/RISC-V64; ARM32/RV32 and Windows ARM64 require
   nonempty target objects from the same source.
+- Option/Result method lowering now proves the receiver type before claiming
+  `is_some`, `is_none`, `unwrap`, `unwrap_or`, `unwrap_err`, or lambda `map`.
+  Unresolved custom owners with those names reuse one pre-lowered receiver and
+  dispatch normally; Cranelift no longer treats `unwrap*` leaf names as
+  identity calls. One strict LLVM/Cranelift fixture covers all six collisions,
+  `Err(text).unwrap_err()`, and single receiver evaluation in Linux's full gate
+  plus the selected macOS, Windows, and FreeBSD gates. First staged execution
+  is pending.
 - The Engine2D host-runtime queue symbol bug now has one incremental
   gate that builds the existing no-GPU probe with the host-GPU bundle under
   flagless LLVM or explicit Cranelift, compares native output byte-for-byte
