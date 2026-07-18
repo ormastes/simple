@@ -217,3 +217,22 @@ implementation-milestone-2-in-progress
   139 before diagnostics. Log:
   `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. No Rust seed or
   repeated check was substituted.
+- impl milestone 2 walker 2026-07-18: Added the RV64 request/response Sv39
+  walker and upgraded the fixed TLB with ASID, global-map, and superpage state.
+  The walker checks canonical addresses, reserved/leaf PTE rules, SUM/MXR,
+  fault-on-clear A/D, superpage alignment, and S-effective PMP before issuing
+  each PTE read; PMP/bus failures map to the originating access-fault cause.
+  Focused production-owner and pure-Simple-to-VHDL/GHDL scenarios were added
+  but remain unexecuted because the one permitted pure-Simple check already
+  hit the recorded exit-139 blocker. Core fetch/data arbitration is next.
+- review 2026-07-18 walker: The read-only sidecar found a zero-latency response
+  loss and reserved-privilege Bare-mode fail-open. The primary fixed both,
+  made the aligned 8-byte PTE read contract explicit, replaced modulo with a
+  fixed mask, added backpressure/zero-latency/reserved-privilege cases, and
+  removed the weaker direct-RAM translator from production package exports.
+- impl milestone 2 memory frontend 2026-07-18: Added
+  `memory64_start/cycle`, the canonical RV64 translation-to-final-PMP physical
+  request owner for 2-byte instruction parcels and naturally aligned data.
+  Focused cases cover Bare M allow, Bare S deny, translated request ordering,
+  walker-allowed/final-PMP-denied suppression, and precise misaligned stores.
+  Core state/commit arbitration has not yet consumed this frontend.

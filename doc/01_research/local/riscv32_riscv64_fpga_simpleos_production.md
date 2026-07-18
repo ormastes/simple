@@ -116,6 +116,11 @@ instruction and ALU addresses. Searches found no production calls to
 `lsu64_access()` returns the virtual address unchanged for both Bare and
 non-Bare SATP modes. `core64_step()` only increments PC by four.
 
+Implementation note (2026-07-18): this paragraph records the initial audit.
+The production API is now `sv39_walker64_start/cycle`; the weaker direct-RAM
+function was renamed `mmu64_translate_ram_test_adapter` and removed from the
+package production exports. Core fetch/data arbitration remains incomplete.
+
 The walker uses the 32-bit-addressed `RamState`, while the RV64 SoC uses
 `Ram64State`; the types cannot form a real RV64 page-table bus without an owner
 boundary change.
