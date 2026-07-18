@@ -1,6 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.nogc_sync_mut.text_layout.font_types.{
-    FontExecutionPolicy, FontGlyphRun, FontRenderConfig, font_execution_plan
+    FontExecutionPolicy, FontGlyphRun, FontRenderConfig, font_execution_plan,
+    font_render_config_identity, font_render_config_valid
 }
 use std.nogc_sync_mut.text_layout.font_renderer.{
     FontRenderer, _resolved_font_metric_language_config_key,
@@ -18,26 +19,26 @@ fn _config(target: text, policy: FontExecutionPolicy) -> FontRenderConfig:
 describe "shared font runtime configuration":
     it "builds one length-delimited identity from every configured field":
         val config = _config("CUDA", FontExecutionPolicy.Suggested)
-        expect(config.valid()).to_be(true)
+        expect(font_render_config_valid(config)).to_be(true)
         expect(font_render_config_selection_supported(config)).to_be(true)
-        expect(config.identity()).to_contain("family=20:noto sans devanagari")
-        expect(config.identity()).to_contain("language=2:hi")
-        expect(config.identity()).to_contain("script=4:deva")
-        expect(config.identity()).to_contain("target=4:cuda|policy=suggested")
+        expect(font_render_config_identity(config)).to_contain("family=20:noto sans devanagari")
+        expect(font_render_config_identity(config)).to_contain("language=2:hi")
+        expect(font_render_config_identity(config)).to_contain("script=4:deva")
+        expect(font_render_config_identity(config)).to_contain("target=4:cuda|policy=suggested")
         val pixel = FontRenderConfig(
             family: "auto", category: "pixel/bitmap", language: "en", script: "latn", size: 16,
             weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
             atlas_policy: "shared-alpha-1024", execution_target: "cpu",
             execution_policy: FontExecutionPolicy.Required
         )
-        expect(pixel.valid()).to_be(true)
+        expect(font_render_config_valid(pixel)).to_be(true)
         expect(font_render_config_selection_supported(pixel)).to_be(true)
-        expect(pixel.identity()).to_contain("category=5:pixel")
+        expect(font_render_config_identity(pixel)).to_contain("category=5:pixel")
         val cpu = _config("cpu", FontExecutionPolicy.Required)
         expect(_resolved_font_metric_language_config_key(
-            "Noto Sans Devanagari", "A", 24, "sha256=test", "hi", config.identity()
+            "Noto Sans Devanagari", "A", 24, "sha256=test", "hi", font_render_config_identity(config)
         ) == _resolved_font_metric_language_config_key(
-            "Noto Sans Devanagari", "A", 24, "sha256=test", "hi", cpu.identity()
+            "Noto Sans Devanagari", "A", 24, "sha256=test", "hi", font_render_config_identity(cpu)
         )).to_be(false)
 
     it "orders suggested preferred and required attempts exactly":
@@ -58,10 +59,10 @@ describe "shared font runtime configuration":
     it "canonicalizes the HIP alias to the ROCm execution identity":
         val rocm = _config("rocm", FontExecutionPolicy.Required)
         val hip = _config("HIP", FontExecutionPolicy.Required)
-        expect(rocm.valid()).to_be(true)
-        expect(hip.valid()).to_be(true)
-        expect(hip.identity()).to_equal(rocm.identity())
-        expect(hip.identity()).to_contain("target=4:rocm|policy=required")
+        expect(font_render_config_valid(rocm)).to_be(true)
+        expect(font_render_config_valid(hip)).to_be(true)
+        expect(font_render_config_identity(hip)).to_equal(font_render_config_identity(rocm))
+        expect(font_render_config_identity(hip)).to_contain("target=4:rocm|policy=required")
 
     it "rejects invalid policy targets and rendering modes":
         val order = ["vulkan", "cpu"]
@@ -74,7 +75,7 @@ describe "shared font runtime configuration":
             atlas_policy: "shared-alpha-1024", execution_target: "cpu",
             execution_policy: FontExecutionPolicy.Required
         )
-        expect(unsupported.valid()).to_be(false)
+        expect(font_render_config_valid(unsupported)).to_be(false)
         expect(font_execution_plan(unsupported, order).len()).to_equal(0)
 
     it "stamps all configured material paths and keeps invalid calls immutable":
@@ -82,19 +83,19 @@ describe "shared font runtime configuration":
         val config = _config("cpu", FontExecutionPolicy.Required)
         val text_batch = renderer.prepare_text_configured("A", 0xffffffffu32, config)
         expect(text_batch.valid).to_be(true)
-        expect(text_batch.render_config_identity).to_equal(config.identity())
+        expect(text_batch.render_config_identity).to_equal(font_render_config_identity(config))
         expect(text_batch.execution_target).to_equal("cpu")
         expect(text_batch.execution_policy).to_equal(FontExecutionPolicy.Required)
         val advanced = renderer.prepare_text_with_advances_configured("A", [12], 0xffffffffu32, config)
-        expect(advanced.render_config_identity).to_equal(config.identity())
+        expect(advanced.render_config_identity).to_equal(font_render_config_identity(config))
         val selected = renderer.prepare_selected_glyph_run_configured(
             draw_ir_empty_glyph_run_payload(), 0xffffffffu32, config
         )
-        expect(selected.render_config_identity).to_equal(config.identity())
+        expect(selected.render_config_identity).to_equal(font_render_config_identity(config))
         val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 0,
             glyph_ids: [], xs: [], ys: [], clusters: [])
         val shaped = renderer.prepare_glyph_run_configured(run, 0xffffffffu32, config)
-        expect(shaped.render_config_identity).to_equal(config.identity())
+        expect(shaped.render_config_identity).to_equal(font_render_config_identity(config))
         val before = renderer.cache_stats()
         val invalid = _config("auto", FontExecutionPolicy.Required)
         expect(renderer.prepare_text_configured("B", 0xffffffffu32, invalid).valid).to_be(false)

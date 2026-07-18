@@ -112,3 +112,95 @@ current blocker for a non-black QMP screendump of the glass desktop.
    `_wm_draw_ir_text`'s `else: draw_ir_text(...)` bitmap fallback already
    soft-fails font unavailability) if the real fix requires compiler-level
    changes out of this lane's scope.
+
+## ROOT-CAUSED (2026-07-18, ENGINE2D-FAULT lane) — it is a class-method
+## receiver-binding miscompile in the FONT path, NOT the engine2d offscreen path
+
+**The offscreen/embedded-batch/`cr2=0x0`/C4-struct-passing framing above is
+superseded.** Re-run of `gui_entry_desktop.spl` with the current seed
+(`src/compiler_rust/target/bootstrap/simple`, 07-17 14:25) into `build/os/_wke2d/`
+(vfs skip kept `if true:`, NVMe attached) reproduces the storm and it was chased to
+the exact faulting instruction with `nm`+`objdump`.
+
+### The storm is one first-frame fault, mis-recovered into ~71-81 cascades
+- The `build/os/_wk` evidence ELF was built with an OLDER seed; its serial has **no
+  `cr2=0x0` anywhere** — every `cr2` is code-bytes (`0x244c8d4c7500c6xx`, +8/iter) or
+  small-negative. Those are pure `+2`-RIP-recovery derailment (C8-CLOSE only hardened
+  `#UD`; this is a `#PF`, still recovered → cascade). Fault COUNT (81 vs 71 vs 66) is
+  cascade noise and must not be used as a fix signal — use the FIRST fault + screendump.
+- Fresh build (current seed): first fault `decode_string+0x3b <- rt_string_trim+0x15`
+  during first-frame text (after `[dbg-vbe] pre-first-frame`, before any
+  `first-frame-rendered`); screendump 3840x1092 non-black 25.01% (the doc's 12.64% was
+  the old build). ud2-halt never fires ⇒ `#PF`, not a literal `ud2`.
+- The bug-doc `rip=0x88a97bc` actually resolves to `_engine2d_draw_ir_style_value+0x3c2`;
+  `render_commands+0x3a0` is a `ud2` after `call rt_eprintln_str` = the compiler's
+  "field access on nil receiver" panic (a derailment landing spot, not the primary).
+
+### CONFIRMED root cause (disassembly, `build/os/_wke2d/desktop.elf`)
+In `resolve_font_metrics_with_language` (`font_renderer.spl:1453`):
+```
+  call *rcx        ; rcx=&font_render_config_default_for_size ; config returned in RAX  (OK)
+  movabs $0x8a74f30,%rdi   ; rdi = &FontRenderConfig.identity   <-- callee address
+  call *%rdi        ; config.identity()   -- RAX (the config) is NEVER moved into RDI
+```
+`FontRenderConfig.identity`'s prologue reads `self` from `rdi` (`mov %rdi,%rax; and $-8`).
+So `self` = the method's OWN code address; `self.family` loads the prologue bytes
+(`sub rsp,0x3a0` = `48 81 ec a0 03 …`) as a string data pointer → `.trim()` →
+`decode_string` dereferences a code address → fault (`cr2` = those code bytes, hence it
+CHANGES with code layout). **A class-instance method call (`config.identity()`,
+`config.valid()`) under `--entry-closure --target x86_64-unknown-none` binds `self` to the
+callee's constant address instead of the receiver — the receiver value in RAX is dropped.**
+It is an INDIRECT/duck-dispatch call (`movabs addr,%rdi; call *%rdi`) that conflates the
+`self` register with the call-target register. Reached from BOTH the render path
+(`engine.draw_text_with_advances` → `font_execution_plan(config)` → `config.valid()`) and
+the metric path (`resolve_font_metrics_with_language` → `config.identity()`). Free-function
+calls are unaffected — `font_render_config_default_for_size(font_size)` gets its arg in RDI
+correctly (target goes in a separate reg). Hosted builds render fine.
+
+### Disproven fixes (do NOT re-try — verified inert against the first fault + screendump)
+- **static→free** for `FontRenderConfig.default_for_size(...)` at `engine2d/engine.spl`
+  (font_types.spl:162 documents the static path call as miscompiled): first fault and
+  25.01% UNCHANGED. `default_for_size` returns the config fine either way; the bug is the
+  downstream `config.identity()/valid()` method dispatch.
+- **typed intermediate `val`** for the chained `.identity()` at `_resolved_font_metric_language_key`:
+  inert — `resolve_font_metrics_with_language:1454-1455` ALREADY uses `val config = …;
+  config.identity()` and faults identically. Receiver shape (temporary vs typed val) is not
+  the axis; the method-dispatch is.
+
+### Fix direction (seed codegen defect; pure-Simple workaround = free functions)
+Convert `FontRenderConfig.identity()` / `.valid()` from instance methods to free functions
+`font_render_config_identity(config)` / `font_render_config_valid(config)` and pass `config`
+as an explicit typed argument at every call site (no receiver dispatch). A minimal seed fix
+would correct the method-call lowering that loads the callee address into the `self`
+register. Defensive floor for degraded-no-disk (task option 3): guard the text/metric entry
+points (`draw_text_with_advances`/`draw_shaped_text` lack `draw_text`'s `has_sffi_ttf()`
+fail-close) so no config method is invoked when no face is loadable.
+
+### Fix APPLIED + VERIFIED (2026-07-18)
+`src/lib/nogc_sync_mut/text_layout/font_types.spl`: `FontRenderConfig.identity()`/`.valid()`
+converted from instance methods to free functions `font_render_config_identity(config)` /
+`font_render_config_valid(config)`; all 8 call sites in `font_types.spl`/`font_renderer.spl`
+updated to pass `config` as a typed argument (no receiver dispatch). `engine2d/engine.spl`
+NOT changed (the static→free attempt was inert and reverted).
+
+Clean rebuild (666 compiled, 0 cached) + QEMU boot (`gui_entry_desktop.spl`, vfs skip kept,
+NVMe attached), `build/os/_wke2d/`:
+- **Font-config method-dispatch storm ELIMINATED: 81 recovered faults → 1.** Serial 951 → 151
+  lines; the render now progresses further (per-embedding 8 MB offscreen surfaces allocate) and
+  the boot no longer hits `[PANIC] heap exhausted` — the storm's heap-eating `rt_string_concat`
+  cascade is gone.
+- **Frame completion NOT yet reached**, however: there is still no `first-frame-rendered` /
+  `[WM] Glass desktop rendered!` marker. The serial ends with ONE remaining fault then goes
+  silent: `render_commands+0x3a0` = the compiler's "field access on nil receiver" `ud2` panic
+  (`call rt_eprintln_str; ud2`), `cr2=0x0` — a genuine null-field deref. Disasm: an indirect
+  `call *rax` inside `render_commands` returns nil, the result (`r12`) is untagged and its
+  offset-0 field is read (`mov (%r12),%r14`) → fault. This is a SEPARATE, pre-existing defect
+  (the C4-addendum "nil command field / nil-returning call reaching render"), NOT the
+  method-dispatch storm — left as a distinct follow-up.
+- Screendump 3840x1092 non-black 25.01% is a PRE-COMPLETION capture (the frame never reached
+  its completion marker), so it is not a reliable "fully-composited desktop" figure; it is
+  unchanged from the pre-fix current-source boot. NOTE: 12.64%→25.01% is old-build-vs-current-
+  source, NOT this fix's effect — the fix's win is storm/heap-PANIC elimination, not pixels.
+
+Evidence: `build/os/_wke2d/serial.log` + `screendump.ppm`; nm/objdump traces in the lane
+scratchpad (`nm_fix4.txt`, disasm of `resolve_font_metrics_with_language` / `identity`).
