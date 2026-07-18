@@ -204,3 +204,77 @@ NVMe attached), `build/os/_wke2d/`:
 
 Evidence: `build/os/_wke2d/serial.log` + `screendump.ppm`; nm/objdump traces in the lane
 scratchpad (`nm_fix4.txt`, disasm of `resolve_font_metrics_with_language` / `identity`).
+
+## LAST-FAULT lane (2026-07-18) — render_commands+0x3a0 nil-command fault ROOT-CAUSED + FIXED
+
+**The remaining `render_commands+0x3a0` fault is FIXED. Zero faults now.** It was NOT
+the receiver-binding miscompile again and NOT a backend Option-None; it was a genuine
+null `DrawIrCommand` array element produced by *unannotated command-producer functions*
+whose erased returns corrupt a mixed `[DrawIrCommand]` array literal under `--entry-closure`.
+
+### Disassembly (evidence ELF `build/os/_wke2d/desktop.elf`, md5 96d20f2c)
+`_engine2d_draw_ir_render_commands` (`draw_ir_adv.spl:482`, `for command in commands:`):
+```
+  88b1846: call *rax        ; rax=rt_index_get(commands, i)  -> element -> [rsp+0x7f0]
+  88b185a: call *rcx        ; rt_pool_safepoint()  (GC, irrelevant)
+  88b1871: call *rax        ; rax=rt_native_neq(element, r14=3)  = `command.? == false` -> `element == 3`?
+  88b1873: test rax,rax ; je ...(skip)   ; sentinel-3 nil is skipped; a raw-null 0 is NOT
+  88b187c: mov [rsp+0x7f0],rax ; mov rax,r12 ; and $-8,r12   ; untag element
+  88b188b: test r12,r12 ; jne 88b1a11    ; if non-null read field...
+           ...build "field access on nil receiver"; call rt_eprintln_str...
+  88b1a0f: ud2                            ; <-- FAULT RIP (render_commands+0x3a0), the compiler
+  88b1a11: mov (%r12),%r14                ; nil-field-guard: element untags to 0, `command.kind` read
+```
+`command.?` lowers to `rt_native_neq(command, 3)` (boxed-nil **sentinel 3**), but the actual
+element value is **0** (raw null). `0 != 3` ⇒ `.?` reports "present" ⇒ the `if command.? == false`
+skip at `draw_ir_adv.spl:491` is bypassed ⇒ `val command_kind = command.kind` (offset-0 read) on a
+null ⇒ nil-field-guard `ud2`. (Same 0-vs-3 split the interpreter already has: interp treats 0 as
+absent; freestanding `.?` only tests sentinel 3.)
+
+### Where the null comes from (producer-side, Simple-level)
+`src/lib/common/ui/window_scene_draw_ir.spl` builds the **embedded window batch** (`_wm_draw_ir_window_batch`,
+lines 660-676) as a `[DrawIrCommand]` array literal that MIXES annotated `draw_ir_rect(...)`
+(`-> DrawIrCommand`) with THREE producers that had **no return-type annotation**:
+`_wm_draw_ir_window_box` (450), `_wm_draw_ir_text` (470), and their helper `_wm_draw_ir_window_style`
+(442). Per this file's own documented failure mode ("native inference has historically treated an
+unannotated field/return projection as a generic runtime value", draw_ir_adv.spl:570-572), under
+`--entry-closure --target x86_64-unknown-none --opt aggressive` the erased returns are (best
+explanation) boxed/erased and stored into the typed `[DrawIrCommand]` slots as values that untag to 0.
+PROVEN from disasm: the element untags to 0 and `.?` tests only sentinel 3. INFERRED: the ANY-erasure
+byte path (raw element value was not printed) — but the mechanism is confirmed *load-bearing* by the
+annotate/de-annotate delta (adding the 3 return types is the sole change that makes the fault vanish).
+**Element[0] of that batch is `_wm_draw_ir_window_box(...,"shadow",...)`** — the first-accessed command
+— which is exactly where the fault fires. This batch is the one that triggers the 8 MB offscreen surface (surface_id set),
+matching the fault landing right after the `[heap] alloc sz=0x800020` bursts.
+
+### Fix (pure-Simple, root, matches this codebase's documented remedy)
+`window_scene_draw_ir.spl`: added explicit return types to the three producers:
+`_wm_draw_ir_window_style(...) -> [DrawIrStyleProp]`, `_wm_draw_ir_window_box(...) -> DrawIrCommand`,
+`_wm_draw_ir_text(...) -> DrawIrCommand`. This gives each producer a concrete typed return so the
+array literal has homogeneous `DrawIrCommand` elements (no ANY-erasure). No guard band-aid, no
+compiler change — the source of the nil is removed. (Seed defect worth filing separately: `.?`
+lowering should treat untagged==0 as absent, not only sentinel 3.)
+
+### Boot result (fresh clean build, md5 13b267a8, `build/os/_wklast/`, current seed, NVMe, vfs skip kept)
+- **render_commands+0x3a0 nil-command fault ELIMINATED — ZERO faults, zero `EXCEPTION FRAME`s.**
+  (The two `[fault]` serial lines are handler *setup* logs `_fault_handler patched`, not faults.)
+- The render now progresses PAST the previously-faulting batch: 12 × 8 MB offscreen allocs vs the
+  baseline's 9 (baseline faulted at the 1st embedded batch's element[0]; the wall was masked).
+- **NEW, DISTINCT downstream blocker: `[PANIC] heap exhausted`** (`heap_off=0xbfffff0 req=0x20
+  limit=0xc000000` = 192 MB). Repeated per-embedded-batch 8 MB `Engine2D.create_offscreen`
+  (`draw_ir_adv.spl:647`, caller 0x8010776) on a heap whose `[heap] alloc off_before/off_after`
+  advance monotonically (INFERRED bump allocator: `offscreen.shutdown()` at line 666 evidently does
+  not reclaim — offsets never decrease), so ~24×8 MB exhausts 192 MB before first-frame completes.
+  This is a SEPARATE pre-existing defect the nil-fault was masking; my 3 return annotations cannot
+  change offscreen-allocation logic. `first-frame-rendered` NOT reached; screendump 3840x1092 still
+  25.01% non-black (1048576 px, a pre-completion capture identical to baseline).
+- **Verdict: assigned "last fault" FIXED (zero faults). Zero-fault-first-frame now blocked by the
+  offscreen-surface-vs-192MB-bump-heap exhaustion — recommend that as the next lane** (options:
+  reclaim/pool offscreen surfaces on baremetal, or prefer the direct translate+clip path — lines
+  618-620 `use_embedded_surface` gate — for the software/baremetal backend so no 8 MB surface is
+  allocated; both need their own boot validation).
+
+Changed file: `src/lib/common/ui/window_scene_draw_ir.spl` (3 return-type annotations; backed up
+`scratchpad/lastfault_backup/window_scene_draw_ir.spl.{PREFIX,FIX}`). Evidence:
+`build/os/_wklast/{serial.log,screendump.ppm,build.log}` (also copied to `scratchpad/lastfault_backup/`),
+disasm `scratchpad/rc_disasm64.txt`, symbols `scratchpad/nm_all.txt`.
