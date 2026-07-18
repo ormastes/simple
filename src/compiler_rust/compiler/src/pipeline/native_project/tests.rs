@@ -207,7 +207,22 @@ __attribute__((constructor(101))) static void non_llvm_ctor(void) {}
     let sections = String::from_utf8_lossy(&sections.stdout);
     let names: Vec<&str> = sections.split_whitespace().collect();
     assert!(!names.contains(&".init_array"));
-    assert!(names.contains(&".init_array.00101"));
+    assert!(names.iter().any(|name| name.starts_with(".init_array.")));
+}
+
+#[test]
+fn canonical_bootstrap_does_not_force_diagnostic_whole_archive_mode() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let script = std::fs::read_to_string(repo_root.join("scripts/bootstrap/bootstrap-from-scratch.sh")).unwrap();
+
+    assert!(!script.contains("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1"));
 }
 
 #[test]

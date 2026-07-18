@@ -599,8 +599,12 @@ release-blocking correctness defects. Stage 2 now links and answers
   decoding them, corrupting every positive foreign pointer/integer argument.
   It now matches the Rust provider by decoding each element before dispatch;
   the existing native-C focus harness includes a real two-argument regression.
-  This repairs the pure-Simple LLVM wrapper path, while the direct packaged
-  Rust/inkwell module-creation crash remains a separate Stage 3 blocker.
+  This repairs the pure-Simple LLVM wrapper path. The separate packaged
+  Rust/inkwell crash was caused by stripping required LLVM constructors from
+  the Stage 2 parent. A constructor-preserving selective relink created LLVM
+  modules successfully and rebuilt/linked Stage 3 with 656 compiled, zero
+  failed. Canonical bootstrap now keeps forced whole-archive diagnostic mode
+  disabled and preserves constructors for selective native-all links.
 - A fresh current-seed Stage 2 admission compiled every source module and
   reached the final linker. It produced no earlier LLVM verifier,
   undeclared-global, imported-enum, `String.smf`, or call-arity failure. Object

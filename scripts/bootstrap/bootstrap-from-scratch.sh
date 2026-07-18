@@ -472,7 +472,6 @@ bootstrap_native_build_main() {
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
     SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
-    SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
@@ -669,7 +668,6 @@ else
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
-    SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
@@ -721,7 +719,6 @@ else
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
-    SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
@@ -776,7 +773,6 @@ else
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     set +e
     env SIMPLE_BOOTSTRAP=1 \
-      SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       "${stage2_bin}" native-build \
       --target "${PLATFORM}" \

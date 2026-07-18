@@ -243,9 +243,17 @@ raw sum.
 
 This explains the pure-Simple `_lc2 -> LLVMSetDataLayout` invalid-handle crash,
 but not the direct Rust/inkwell `LLVMModuleCreateWithNameInContext` crash above,
-which does not traverse WFFI. The stripped/whole-archive LLVM packaging path
-therefore remains independently open and must pass a one-module child-process
-probe before Stage 3 is accepted.
+which does not traverse WFFI.
+
+The second crash was isolated with cached relinks. Merely disabling forced
+whole-archive still crashed, as did bypassing stripping only for the child: the
+already-linked Stage 2 parent remained corrupt. Relinking Stage 2 with LLVM
+constructors preserved and selective archive extraction passed `--version`,
+created an LLVM module, and reached ordinary bundle validation. That binary
+then rebuilt all 656 Stage 3 modules with zero failures and linked Stage 3.
+Canonical bootstrap no longer enables the diagnostics-only whole-archive
+override, and selective native-all links no longer strip constructors. Legacy
+forced whole-archive mode retains its historical stripping behavior.
 
 ### Binary inventory — what can native-build src/app right now?
 

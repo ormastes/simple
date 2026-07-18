@@ -999,7 +999,13 @@ int main(int argc, char** argv) {
         };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let selected_runtime = match selected_runtime {
-            Some((runtime_lib, true)) => {
+            // Constructor removal exists only for the diagnostic legacy mode
+            // that force-loads every native-all member.  Selective archive
+            // extraction must retain LLVM's non-registration constructors;
+            // removing them corrupts module creation in the packaged compiler.
+            Some((runtime_lib, true))
+                if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") =>
+            {
                 let filtered = strip_llvm_constructors(&runtime_lib, temp_dir).map_err(|err| {
                     format!(
                         "failed to strip LLVM constructors from {}: {:?}",
