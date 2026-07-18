@@ -980,6 +980,28 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: nil
         val range_inclusive = expr_get_int(idx) != 0
         return Expr(kind: ExprKind.Range(range_start, range_end, range_inclusive, nil), span: span)
+    elif tag == EXPR_SPREAD:
+        # Struct-update/construct spread (`Ctor(..base, field: val)`) parses
+        # to a dedicated flat EXPR_SPREAD node (core/_AstExpr/nodes.spl's
+        # expr_spread, tag 46) via parser_expr.spl's parse_call_arg_raw --
+        # but this bridge had NO case for it, so every spread argument fell
+        # through to the `else:` catch-all below and became `ExprKind.NilLit`
+        # (same silent-drop pattern as the EXPR_RANGE fix just above). The
+        # rest of the pipeline (lower_struct_construct in
+        # 50.mir/_MirLoweringExpr/switch_operators_calls.spl, mirroring the
+        # interpreter-side fix in interpreter_call/core/class_instantiation.rs)
+        # already expects the established "unlabeled Range{start: None, end:
+        # Some(base)}" encoding for a paren-form spread argument -- emit that
+        # exact shape here instead of NilLit. Before this fix, `Point(..base,
+        # y: 99)` silently miscompiled: the NilLit argument consumed the
+        # first positional field slot (evaluating to the ABI's raw
+        # nil-sentinel payload, 3) and every other unclaimed field was
+        # zero-filled, instead of inheriting from `base` (see bug doc
+        # native_build_fresh_seed_optionwrap_landmine_2026-07-18.md, "SCOPE
+        # CORRECTION" section).
+        val spread_inner_idx = expr_get_left(idx)
+        val spread_inner: Expr? = if spread_inner_idx >= 0: convert_flat_expr(spread_inner_idx) else: nil
+        return Expr(kind: ExprKind.Range(nil, spread_inner, false, nil), span: span)
     elif tag == EXPR_DICT_COMP:
         val dc_args = expr_get_args(idx)
         if dc_args.len() < 2:

@@ -109,6 +109,26 @@ fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
                 ()
     out
 
+fn struct_construct_spread_base(e: HirExpr) -> HirExpr:
+    """Paren-form struct-construct spread (`Ctor(..base, field: x)`) has no
+    dedicated spread token in the parser (parser/src/expressions/helpers.rs::
+    parse_arguments) -- `..base` parses as an ordinary unlabeled open-start
+    range literal: HirExprKind.Range(start, end, ...) with start == nil,
+    end == base. Detect that exact shape here so lower_struct_construct can
+    merge base's fields into the constructed aggregate instead of routing
+    the bogus Range through lower_range (which used to emit a nonsense
+    rt_range(0, <base's pointer bits>) call -- see bug doc
+    native_build_fresh_seed_optionwrap_landmine_2026-07-18.md, "SCOPE
+    CORRECTION" section). Mirrors the interpreter-side fix in
+    interpreter_call/core/class_instantiation.rs (instantiate_class)."""
+    match e.kind:
+        case HirExprKind.Range(start, end, _, _):
+            if start == nil and end != nil:
+                return end
+            return nil
+        case _:
+            return nil
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -1638,11 +1658,36 @@ impl MirLowering:
         # claims gets a zero/nil fill below instead.
         var named_args: Dict<text, HirExpr> = {}
         var positional_args: [HirExpr] = []
+        # Struct-spread fix (mirrors the interpreter-side fix in
+        # interpreter_call/core/class_instantiation.rs, instantiate_class --
+        # see bug doc native_build_fresh_seed_optionwrap_landmine_2026-07-18.md,
+        # "SCOPE CORRECTION"): pull a paren-form `..base` spread argument out
+        # of positional_args entirely -- it must NOT consume a positional
+        # field slot -- and remember `base` so the fill loop below can copy
+        # its fields into every slot neither named nor positioned.
+        var spread_base: HirExpr = nil
         for a in args:
             if a.has_name:
                 named_args[a.name] = a.value
             else:
-                positional_args.push(a.value)
+                val maybe_spread = struct_construct_spread_base(a.value)
+                if maybe_spread == nil:
+                    positional_args.push(a.value)
+                else:
+                    spread_base = maybe_spread
+        # Lower the spread base exactly once up front (not per unclaimed
+        # field) so a side-effecting base expression (e.g. `Ctor(..make_base(),
+        # ...)`) is only evaluated a single time, matching normal call
+        # semantics.
+        var spread_local = LocalId(id: 0)
+        var has_spread = false
+        if spread_base != nil:
+            val lowered_spread = self.lower_expr(spread_base)
+            if lowered_spread == nil:
+                self.error("unsupported struct spread base (cannot lower to a value)", nil)
+            else:
+                spread_local = lowered_spread
+                has_spread = true
         var ops: [MirOperand] = []
         # Bug #166: learn this struct's per-field TYPE names from the argument
         # values. Struct field types are `Infer` in the native/bootstrap path
@@ -1661,6 +1706,27 @@ impl MirLowering:
             val want = field_names[fi]
             val has_named = named_args.has(want)
             if not has_named and pos_i >= positional_args.len():
+                if has_spread:
+                    # Fill this field from the spread base's own field
+                    # (mirrors copy_struct_value_recursive's field-type
+                    # lookup: default i64, refine to Struct(sym) only when a
+                    # prior construction already learned this field is a
+                    # nested value-struct).
+                    var spread_field_type = MirType.i64()
+                    if self.struct_field_type_name.has(struct_name):
+                        val known_names = self.struct_field_type_name[struct_name]
+                        if fi < known_names.len() and known_names[fi] != "" and not self.class_type_names.has(known_names[fi]) and self.struct_field_order.has(known_names[fi]):
+                            val nested_symbol = self.symbols.lookup_or_invalid(known_names[fi])
+                            if nested_symbol.is_valid():
+                                spread_field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
+                    var spread_b = self.builder
+                    val spread_field_val = spread_b.emit_get_field(mir_operand_copy(spread_local), fi, spread_field_type)
+                    self.builder = spread_b
+                    ops = ops.push(mir_operand_copy(spread_field_val))
+                    val spread_nested_name = self.struct_value_syms.get(spread_field_val.id)
+                    field_type_names.push(spread_nested_name ?? "")
+                    fi = fi + 1
+                    continue
                 # Declared field omitted at the call site (no named arg, no
                 # positional arg left to consume). If the field has a declared
                 # default (`field: T = <expr>`), lower and store THAT default
