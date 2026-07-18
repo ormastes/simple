@@ -769,3 +769,76 @@ fn test_while_val_exists_check_binds_unwrapped_option_value() {
         "while-val's non-matching path must `break` the desugared Loop: {else_block:?}"
     );
 }
+
+/// B10 fix: expression-position if-let (`val r = if val v = expr.?: v else:
+/// 0`) previously discarded `let_pattern` in the `mod.rs` dispatcher (`..`)
+/// and `lower_if` lowered the raw condition as a bare bool -- so `v` was
+/// never bound. This is the expression-position sibling of N6's
+/// statement-position fix. Fixed by desugaring to a `Block` carrying the
+/// subject store and an `If` expression whose then-branch is itself a
+/// `Block` carrying the pattern bindings ahead of the original then-branch
+/// expression, mirroring the same one-layer ExistsCheck unwrap.
+#[test]
+fn test_expr_if_val_exists_check_binds_unwrapped_option_value() {
+    let source = "fn present(x: i64?) -> i64:\n    val r = if val v = x.?: v else: 0\n    return r\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::Let {
+        value:
+            Some(HirExpr {
+                kind: HirExprKind::Block(block_stmts),
+                ..
+            }),
+        ..
+    } = &func.body[0]
+    else {
+        panic!(
+            "expected `val r = if val ...` to lower to a Let binding a Block expression: {:?}",
+            func.body
+        )
+    };
+
+    let HirStmt::Let {
+        local_index: subject_idx,
+        ty: subject_ty,
+        ..
+    } = &block_stmts[0]
+    else {
+        panic!("expected subject store as first Block statement: {:?}", block_stmts)
+    };
+    assert_ne!(
+        *subject_ty,
+        TypeId::BOOL,
+        "expr-if-val subject kept the ExistsCheck's bool type instead of unwrapping to the Option's own type: {:?}",
+        block_stmts
+    );
+
+    let Some(HirStmt::Expr(HirExpr {
+        kind: HirExprKind::If { then_branch, .. },
+        ..
+    })) = block_stmts.get(1)
+    else {
+        panic!("expected lowered If expression as second Block statement: {:?}", block_stmts)
+    };
+
+    let HirExprKind::Block(then_stmts) = &then_branch.kind else {
+        panic!("expected then-branch to be a Block carrying the pattern binding: {:?}", then_branch)
+    };
+    let binds_v_to_subject = then_stmts.iter().any(|stmt| {
+        matches!(
+            stmt,
+            HirStmt::Let {
+                value: Some(HirExpr {
+                    kind: HirExprKind::Local(idx),
+                    ..
+                }),
+                ..
+            } if idx == subject_idx
+        )
+    });
+    assert!(
+        binds_v_to_subject,
+        "`v` binding did not copy the unwrapped subject (local {subject_idx}): {then_stmts:?}"
+    );
+}

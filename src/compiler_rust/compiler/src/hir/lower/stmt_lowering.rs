@@ -1376,7 +1376,11 @@ impl Lowerer {
     /// `if val x = none_option:` always take the then-branch and bind nil).
     /// Constructor patterns (`Some(x)`, `Ok(v)`, …) still go through the shared
     /// pattern-condition logic (rt_is_some / discriminant checks).
-    fn if_let_pattern_condition(
+    // B10: pub(crate) (was private) so expression-position if-let
+    // (`hir/lower/expr/control.rs::lower_if`) can reuse the exact same
+    // Identifier-vs-constructor-pattern condition logic instead of
+    // duplicating it — see that call site for the sibling bug this closes.
+    pub(crate) fn if_let_pattern_condition(
         &mut self,
         subject_idx: usize,
         subject_ty: TypeId,

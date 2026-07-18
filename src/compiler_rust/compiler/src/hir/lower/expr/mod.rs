@@ -144,11 +144,11 @@ impl Lowerer {
             Expr::ArrayRepeat { value, count } => self.lower_array_repeat(value, count, ctx),
             Expr::VecLiteral(exprs) => self.lower_vec_literal(exprs, ctx),
             Expr::If {
+                let_pattern,
                 condition,
                 then_branch,
                 else_branch,
-                ..
-            } => self.lower_if(condition, then_branch, else_branch.as_deref(), ctx),
+            } => self.lower_if(let_pattern.as_ref(), condition, then_branch, else_branch.as_deref(), ctx),
             Expr::Lambda {
                 params,
                 body,

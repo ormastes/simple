@@ -43,11 +43,92 @@ impl Lowerer {
     /// Else branch is optional.
     pub(super) fn lower_if(
         &mut self,
+        let_pattern: Option<&Pattern>,
         condition: &Expr,
         then_branch: &Expr,
         else_branch: Option<&Expr>,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        if let Some(pattern) = let_pattern {
+            // B10: expression-position if-let, e.g. `val r = if val v = expr.?: v else: 0`.
+            // The AST (`Expr::If.let_pattern`) has always carried this, but the
+            // dispatcher in `mod.rs` discarded it via `..` and this function lowered
+            // the raw condition as a bare bool — so `v` in `then_branch`/`else_branch`
+            // was never bound (UnknownVariable at HIR-lowering time). This is the
+            // expression-position sibling of the statement-position `Node::If`
+            // let-pattern bug N6 fixed (b1ee7fbaad1) and the `while val` bug fixed
+            // above in `stmt_lowering.rs` — same one-layer `Expr::ExistsCheck` unwrap
+            // (`expr.?` must unwrap to the Option/Result-typed subject, not lower as
+            // a bool), same subject/condition/binding machinery. Unlike the
+            // statement form, `HirExprKind::If`'s branches are plain expressions with
+            // no room for prelude `Let`s, so the subject store and the pattern
+            // bindings are each carried by a `HirExprKind::Block`:
+            //   Block [ $if_let_subject_expr = <unwrapped expr>
+            //           If <pattern-match($if_let_subject_expr)>
+            //               then: Block [ v = $if_let_subject_expr, ...; then_branch ]
+            //               else: else_branch ]
+            let condition_expr = match condition {
+                Expr::ExistsCheck(inner) => inner.as_ref(),
+                other => other,
+            };
+            let subject_hir = self.lower_expr(condition_expr, ctx)?;
+            let subject_ty = subject_hir.ty;
+            let subject_idx = ctx.locals.len();
+            ctx.add_local("$if_let_subject_expr".to_string(), subject_ty, Mutability::Immutable);
+            let store_stmt = crate::hir::HirStmt::Let {
+                local_index: subject_idx,
+                ty: subject_ty,
+                value: Some(subject_hir),
+            };
+
+            let cond_hir = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
+
+            let bindings = self.extract_pattern_bindings(pattern, subject_ty);
+            let mutability = if matches!(pattern, Pattern::MutIdentifier(_)) {
+                Mutability::Mutable
+            } else {
+                Mutability::Immutable
+            };
+            for (name, ty) in &bindings {
+                ctx.add_local(name.clone(), *ty, mutability);
+            }
+            let binding_stmts = self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+
+            let then_inner = self.lower_expr(then_branch, ctx)?;
+            for (name, _) in &bindings {
+                ctx.local_map.remove(name);
+            }
+
+            let then_ty = then_inner.ty;
+            let mut then_stmts = binding_stmts;
+            then_stmts.push(crate::hir::HirStmt::Expr(then_inner));
+            let then_hir = Box::new(HirExpr {
+                kind: HirExprKind::Block(then_stmts),
+                ty: then_ty,
+            });
+
+            let else_hir = if let Some(eb) = else_branch {
+                Some(Box::new(self.lower_expr(eb, ctx)?))
+            } else {
+                None
+            };
+
+            let ty = then_ty;
+            let if_expr = HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(cond_hir),
+                    then_branch: then_hir,
+                    else_branch: else_hir,
+                },
+                ty,
+            };
+
+            return Ok(HirExpr {
+                kind: HirExprKind::Block(vec![store_stmt, crate::hir::HirStmt::Expr(if_expr)]),
+                ty,
+            });
+        }
+
         let cond_hir = Box::new(self.lower_expr(condition, ctx)?);
         let then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
         let else_hir = if let Some(eb) = else_branch {
