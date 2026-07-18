@@ -244,12 +244,35 @@ the shared binary — deploys require explicit user go-ahead).
   falling into Mach-O flags, and direct strict linking reuses the established
   base-system `/usr/lib` CRT directory. Its full Stage4 QEMU execution remains
   pending.
-  The executed Stage4 unresolved preview's bare `path_filename`,
-  `path_extension`, and `path_stem` are also removed in both filesystem
-  profiles by reusing `std.path`; no new C provider was added. Three live path
-  helpers plus `file_metadata` remain in that stub family.
-  Windows COFF projection and DLL staging remain a separate source-open lane.
-  The remaining blocker is execution evidence plus any concrete missing owner
-  reported by the complete compiler request closure, not the retired seed
-  enum/mcall diagnoses. See
+  The executed Stage4 unresolved preview's bare `path_parent`, `path_filename`,
+  `path_extension`, `path_stem`, `path_components`, and `path_with_extension`
+  are also removed in both filesystem profiles by reusing `std.path`; no new C
+  provider was added. `file_metadata` now uses one opaque runtime stat handle,
+  constructs the record in pure Simple, and releases the handle; no live
+  unresolvable entry remains in that stub family.
+  Windows COFF projection is now source-implemented for both linker families:
+  MinGW keeps the exact static capsule, while MSVC links the selected owners
+  once into an exact-export DLL/import library and hash-verifies the Stage4 and
+  SQLite DLL neighbors beside the final executable. The Windows LLVM/Cranelift
+  full-CLI matrix now schedules nonempty artifact receipts. The remaining
+  Linux recovery profile now completes phase-one loading in 6.325 seconds for
+  1,763 sources with the pure-Simple bucket hash; `std.alloc.sffi` is also owned
+  in the pure library tree instead of the Rust-seed mirror. The next blocker is
+  phase-two parse retention exceeding the 4 GiB safety cap, followed by first
+  full execution evidence and any concrete missing owner reported by the
+  complete compiler request closure, not the retired seed enum/mcall
+  diagnoses. The first 160 phase-two parses covered 1,570,048 source bytes and
+  contained no conditional directive or domain-block marker, yet retained
+  about 3.65 GiB. Pure Simple now returns directive-free input directly from
+  the conditional preprocessor and skips both domain-block line scans when no
+  exact domain marker can occur. The focused specs pin byte-identical ordinary
+  source plus both fast and existing slow branches. Three independent
+  read-only audits agreed that the 484 logical aliases reuse 1,279 physical
+  modules and are not duplicate ASTs; alias lookup remains unchanged.
+  Higher-level review accepted the fast paths. Execution proof remains pending:
+  the broad parser fixture stopped on existing phase-three lowering errors, a
+  narrow current-source probe reached the known `HirExpr.is_some` bootstrap
+  crash, and the cache-preserving Stage2-to-Stage3 rebuild was OOM-killed at
+  the 4 GiB safety cap before producing a candidate. Per the bounded retry
+  policy, those failing commands were not repeated. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
