@@ -438,12 +438,12 @@ missing from runtime.h declarations (rt_file_read_bytes/write_bytes/move, rt_dir
 ## Follow-up status (2026-07-18): walk/glob/lexical-path stubs reduced
 
 `walk_dir`, `glob_find`, `glob_matches`, `path_parent`, `path_filename`,
-`path_extension`, and `path_stem` now stay in pure Simple. They reuse the
-existing `rt_dir_walk`, shared `std.glob` matcher, and `std.path` lexical
-helpers; no new runtime ABI was added. The core-C `rt_dir_walk` owner now returns the canonical `rt_array_*` /
+`path_extension`, `path_stem`, and `path_components` now stay in pure Simple.
+They reuse the existing `rt_dir_walk`, shared `std.glob` matcher, and `std.path`
+lexical helpers; no new runtime ABI was added. The core-C `rt_dir_walk` owner now returns the canonical `rt_array_*` /
 `rt_string_*` representation consumed by native Simple iteration instead of the
 legacy `spl_array_*` representation. The remaining live unresolvable entries are
-two path helpers and `file_metadata` (3 total); the three dead path declarations
+one path helper and `file_metadata` (2 total); the three dead path declarations
 remain separate cleanup.
 
 Focused evidence: both fs/glob profile twins pass incremental source checking; a
@@ -451,5 +451,5 @@ pure Stage2 LLVM matcher probe and a core-C-bootstrap `Glob.matches()` /
 `matches_path()` facade probe compile and run successfully. The C runtime focus
 contract and source parity spec now assert canonical directory-walk array access.
 A focused source/behavior spec now defines Unix/Windows-form and empty-path
-`Path.stem`, parent, filename, and extension coverage;
+`Path.stem`, parent, filename, extension, and components coverage;
 staged native execution and the full Stage4 gate remain pending.
