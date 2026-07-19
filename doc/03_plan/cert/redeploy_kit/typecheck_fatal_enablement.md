@@ -7,6 +7,13 @@ bad program* (TOR-FM-02): `arity_too_many`, `arity_too_few`, `arg_type_mismatch`
 
 Status: **Phase A wiring implemented (redeploy-pending). Phases B/C designed only.**
 
+> **2026-07-19 current-tree correction:** the Phase A implementation described
+> below is absent from the authoritative source. `src/compiler` has no
+> `SIMPLE_TYPECHECK_FATAL` or `run_typecheck_fatal_pass`; only warn-only
+> `SIMPLE_TYPECHECK_WARN` remains. Treat the implementation and verification
+> claims below as historical design evidence until the fatal pass is restored,
+> source-reviewed, and rebuilt.
+
 Parent plan: `doc/03_plan/compiler/type_system/typecheck_burndown.md`
 (this is the concrete "P5 — flip to fatal", staged and gated).
 
