@@ -3,10 +3,10 @@
 
 ## Interfaces and flow
 
-- The implemented interpreter `simple test --assert-ran` paths use a private
+- The implemented sequential interpreter `simple test --assert-ran` paths use a private
   result file containing canonical `simple-bdd-v1` counts. Missing, malformed,
-  empty, pending-only, or stdout-forged evidence fails closed. Authenticity for
-  other execution modes remains unresolved and cannot qualify a release.
+  empty, pending-only, or stdout-forged evidence fails closed. Other execution
+  modes fail closed under `--assert-ran` until they supply the same evidence.
 - `simple lint` calls `run_lint_file` directly. Human and JSONL output share
   the same findings and exit status. `--fix-dry-run` is an independent mode;
   fixes use `file_atomic_write`, report structured success/failure in JSON, and
@@ -20,8 +20,8 @@
 
 Every qualification child call is deadline-bound. Child exit is preserved before parsing
 presentation text. Missing files count as failed lint inputs. Unsupported JSON
-repository modes return usage error; unauthenticated assert-ran modes cannot
-qualify a release.
+repository modes return usage error; unauthenticated assert-ran modes fail
+closed and cannot qualify a release.
 Incremental object-cache publication accepts a racing destination only when
 the completed bytes match. Lint atomic replacement reports failure and never
 claims a mutation succeeded when it did not.

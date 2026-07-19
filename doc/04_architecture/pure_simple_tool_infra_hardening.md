@@ -11,7 +11,7 @@ than adding another framework:
 2. The pure-Simple CLI dispatches directly to the test, lint, format, fix, and
    duplication owners. Wrappers execute admitted compiled artifacts only.
 3. Child exits and versioned structured evidence are authoritative on the
-   implemented interpreter `--assert-ran` paths. Human text cannot turn their
+   implemented sequential interpreter `--assert-ran` paths. Human text cannot turn their
    failure or zero execution green; other modes remain unqualified.
 4. Mutating tools write through the canonical atomic-file facade and propagate
    failure. JSON modes emit JSON Lines only.

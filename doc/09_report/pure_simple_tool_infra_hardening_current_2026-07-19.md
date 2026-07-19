@@ -5,7 +5,7 @@ evidence. Rust-seed or stale deployed output is bootstrap/debug evidence only.
 
 | Tool | Current status | Known bug or risk | Root solution / proving evidence |
 |---|---|---|---|
-| Test runner | Structured-evidence source fixed; deployment blocked | stdout could forge success; zero/pending execution could look green; hangs need a hard wall | canonical `simple-bdd-v1` private evidence, fail-closed parser, bounded pass/fail/zero/forged smoke; other modes still need authentication |
+| Test runner | Structured-evidence source fixed; deployment blocked | stdout could forge success; temporary Rust recovery passed examples then remained alive | canonical private evidence; stdout-only modes fail closed; pure-Simple Stage4 smoke must exit inside its hard wall |
 | Lint | JSON/fix source fixed; runtime pending | mixed human/JSON output, coupled dry-run, missing-file and atomic-write failures could look green | JSONL-only mode, independent `--fix-dry-run`, canonical atomic write, public CLI contract |
 | Formatter/fix | Core-C tagged-ABI baseline passed; final collision regression and Stage 4 pending | delete-before-rename could lose the original; missing provider and stale temp names could block writes | bounded exclusive-temp retry, exact binary replacement/cleanup regression, then native-all and Stage 4 integration |
 | Duplicate checker | trailing-newline/count source fixed; runtime pending | terminal split artifact inflated windows; cosine refinement repeated exact groups; clean smoke was below threshold | canonical `lines()`, occurrence-set deduplication, above-threshold clean and exact-clone public CLI probes |

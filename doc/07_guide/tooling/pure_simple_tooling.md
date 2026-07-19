@@ -65,11 +65,12 @@ The client must detect stale or dead daemon state, replace the stale lock/PID,
 and keep `test-daemon start/status/stop` available through pure Simple
 entrypoints. A stale daemon lock must not force users to clean files manually.
 
-For the implemented interpreter paths, `--assert-ran` requires an exact private
+For the implemented sequential interpreter paths, `--assert-ran` requires an exact private
 `SIMPLE_TEST_RESULT_FILE` payload: `simple-bdd-v1`, passed count, failed count,
 and one final newline. Counts are canonical nonnegative integers; missing,
 malformed, or zero-executed evidence fails. Stdout is presentation, never test
-evidence. Other execution modes are not yet authenticated release evidence.
+evidence. Other execution modes are not yet authenticated release evidence and
+fail closed when `--assert-ran` is requested instead of trusting stdout.
 
 ## Mutation and cache safety
 

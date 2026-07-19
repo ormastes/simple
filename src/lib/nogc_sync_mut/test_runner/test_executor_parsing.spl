@@ -320,8 +320,16 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
 
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Check for timeout
-    if exit_code == -1:
+    if exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true, cached: false)
+
+    # Stdout summaries are presentation, not authenticated execution evidence.
+    # Every mode that still reaches this legacy mapper must fail closed under
+    # --assert-ran until it supplies the structured evidence path.
+    if env_get("SIMPLE_TEST_ASSERT_RAN") == "1":
+        if exit_code != 0:
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "Process exited with code {exit_code}", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: structured BDD evidence is unavailable for this execution mode", timed_out: false, cached: false)
 
     val combined = stdout + "\n" + stderr
     val (passed, failed, skipped, pending) = parse_test_output(combined)
@@ -333,8 +341,6 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
                 return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
             if output_has_zero_pass_summary(combined):
                 return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
-            if env_get("SIMPLE_TEST_ASSERT_RAN") == "1":
-                return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no executed BDD examples were observed; refusing synthetic pass", timed_out: false, cached: false)
             # No parseable pass/fail summary and no explicit zero-result signal
             # (filter / "Passed: 0 + Failed: 0") was found. Silently defaulting
             # to a synthetic PASS here would false-green any spec whose output

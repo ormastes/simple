@@ -25,10 +25,10 @@ Test child failure is authoritative. Parsed summaries can explain a failure but
 cannot erase it. Multiple sibling test groups must all execute, nested daemon
 runs bypass the owning serial daemon, and CLI outcomes distinguish assertion,
 usage, internal, empty-discovery, and timeout/resource failures.
-The implemented interpreter paths exchange exact `simple-bdd-v1` passed/failed
+The implemented sequential interpreter paths exchange exact `simple-bdd-v1` passed/failed
 counts through `SIMPLE_TEST_RESULT_FILE`. Missing, malformed, zero-executed,
-pending-only, or stdout-forged evidence fails; other modes are not yet
-authenticated release evidence.
+pending-only, or stdout-forged evidence fails. Other modes are not yet
+authenticated and therefore fail closed under `--assert-ran`.
 The interpreter wrapper compares authored and reported example counts when no
 filter is active. Checker global flags and the pure-Simple `gen-lean` worker are
 deadline-bound; `gen-lean` never dispatches back into itself.
