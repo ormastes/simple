@@ -519,3 +519,23 @@ every backend; default to option 1 and only escalate on a proven need. Rollback 
 Recommended order: A → C (independent) → E(option 1) → B (after region-dirty) ; D runs in
 parallel on the seed owner's track and gates only the SimpleOS visual-proof column, not host-lane
 delivery of A/B/C.
+
+## 2026-07-19 — MILESTONE: glass desktop renders 99.83% under real firmware WITH NVMe (board-runnable)
+
+The x86_64 glass desktop (`gui_entry_desktop.spl`) now renders a full non-black frame under BOTH
+QEMU `-kernel` AND OVMF pflash real firmware with an NVMe device attached:
+`COVERAGE 3840x2160 nonblack=8280330/8294400 (99.83%) colors=13`, reaching `first-frame-rendered`
++ `desktop-ready` + `production-readiness wm=live renderer=engine2d`, faults=2 (benign, no cascade).
+
+Fix chain that closed it (all landed on origin):
+- First-frame heap exhaustion FIXED (software_backend offscreen opacity-consume wiring, 77acb3e4b8b) —
+  also lifted coverage 12.64% → 99.83% (the leaky offscreen path was truncating the blit).
+- NVMe BAR-high map in the desktop entry (ceb43107412) — `vmm_map_nvme_bar_high()` after vmm_activate();
+  the C `_nvme_init_controller` now succeeds under OVMF (admin queues configured, NS1 detected) instead
+  of page-faulting on the unmapped higher-half BAR VA.
+- OVMF GRUB video fix (136ea66f518) — embed efi_gop/all_video etc. so GRUB stops #UD-crashing at
+  video-mode setup before the kernel runs (this was the real OVMF blocker, not machine load).
+
+Bug docs RESOLVED: `desktop_kernel_ovmf_render_pagefault_vs_kernel_clean_2026-07-18.md`. Remaining:
+real glyph TEXT (font still bitmap-fallback, 13 colors) and physical-board hardware evidence
+(hardware-gated). Board-runnability of the render WITH NVMe under real firmware is CONFIRMED.
