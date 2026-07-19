@@ -144,7 +144,7 @@ fn _wiki_view(args: [text]) -> i64:
 
 
 fn _wiki_edit(args: [text]) -> i64:
-    """Edit a wiki page. Usage: itf wiki edit <page-id> [--mode markdown|storage] [--message MSG]"""
+    """Edit a wiki page. Usage: itf wiki edit <page-id> [--from-file PATH] [--message MSG]"""
     val (ok, config) = _require_confluence_auth()
     if not ok:
         return 4
@@ -166,22 +166,23 @@ fn _wiki_edit(args: [text]) -> i64:
     val version = content.ref.version
     val title = content.ref.title
 
-    # Write to temp file
+    # Read a supplied body file for non-interactive/agent use, or open the
+    # configured editor for the existing interactive CLI behavior.
     use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_read_text}
     use std.nogc_sync_mut.io.process_ops.{process_run}
-
-    val tmp_path = "/tmp/itf_edit_{page_id}.html"
-    file_write_text(tmp_path, content.body_storage)
-
-    # Open editor
-    val editor = _resolve_editor(config)
-    val (_, _, editor_code) = process_run(editor, [tmp_path])
-    if editor_code != 0:
-        print_error("editor exited with code {editor_code}")
-        return 2
-
-    # Read edited content
-    val edited = file_read_text(tmp_path)
+    val from_file = _extract_flag(args, "--from-file", "")
+    var edited = content.body_storage
+    if from_file != "":
+        edited = file_read_text(from_file)
+    else:
+        val tmp_path = "/tmp/itf_edit_{page_id}.html"
+        file_write_text(tmp_path, content.body_storage)
+        val editor = _resolve_editor(config)
+        val (_, _, editor_code) = process_run(editor, [tmp_path])
+        if editor_code != 0:
+            print_error("editor exited with code {editor_code}")
+            return 2
+        edited = file_read_text(tmp_path)
     if edited == nil:
         print_error("could not read edited file")
         return 1
@@ -339,7 +340,7 @@ fn _print_wiki_help():
     print "Commands:"
     print "  list, ls     List pages in a space"
     print "  view         View a page"
-    print "  edit         Edit a page in \$EDITOR"
+    print "  edit         Edit a page from --from-file or in \$EDITOR"
     print "  create       Create a new page"
     print "  delete, rm   Delete a page"
     print "  search       Search pages by title"

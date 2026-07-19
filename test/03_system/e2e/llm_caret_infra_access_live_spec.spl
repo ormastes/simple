@@ -1,0 +1,87 @@
+# Opt-in read-only live smoke matrix for the exact Caret production routes.
+# Each row is disabled unless its LCSI_LIVE_<PROVIDER>=1 flag is set. Provider
+# authentication remains in the provider CLI credential store/environment;
+# tool JSON contains no secret field.
+
+use std.spec
+use std.io_runtime.{env_get, time_now_unix_micros}
+use app.llm_caret.infra_access.{plan_infra_call, execute_infra_plan}
+
+val ROOT = "."
+
+fn _lb() -> text: (123 as char).to_text()
+fn _rb() -> text: (125 as char).to_text()
+
+fn _esc(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+fn _input(provider: text, operation: text, args: text, extra: text) -> text:
+    var body = "\"provider\":\"" + _esc(provider) + "\",\"operation\":\"" + _esc(operation) + "\",\"format\":\"json\""
+    if args != "": body = body + ",\"args\":\"" + _esc(args) + "\""
+    if extra != "": body = body + "," + extra
+    _lb() + body + _rb()
+
+fn _enabled(name: text) -> bool:
+    (env_get("LCSI_LIVE_" + name) ?? "") == "1"
+
+fn _args(name: text) -> text:
+    env_get("LCSI_LIVE_" + name + "_ARGS") ?? ""
+
+fn _expect_live(family: text, provider: text, operation: text, args: text, extra: text, adapter: text, transport: text):
+    val plan = plan_infra_call(family, _input(provider, operation, args, extra), ROOT)
+    expect(plan.supported).to_equal(true)
+    expect(plan.safety).to_equal("read")
+    expect(plan.adapter).to_equal(adapter)
+    expect(plan.transport).to_equal(transport)
+    val started = time_now_unix_micros()
+    val result = execute_infra_plan(plan)
+    val elapsed_us = time_now_unix_micros() - started
+    expect(result.success).to_equal(true)
+    expect(result.plan.provider).to_equal(provider)
+    expect(result.plan.safety).to_equal("read")
+    expect(elapsed_us).to_be_greater_than(-1)
+    print "provider={provider} adapter={adapter} transport={transport} safety=read status=ok elapsed_us={elapsed_us} destructive_grant_required=false"
+
+describe "LLM Caret opt-in read-only provider routes":
+    if not (_enabled("GITHUB") or _enabled("BITBUCKET") or _enabled("JIRA") or _enabled("S3") or _enabled("MINIO") or _enabled("GMAIL") or _enabled("OUTLOOK") or _enabled("CONFLUENCE") or _enabled("GITHUB_WIKI")):
+        it "stays offline when no live provider row is enabled":
+            val offline = plan_infra_call("repo", _input("", "capabilities", "", ""), ROOT)
+            expect(offline.supported).to_equal(true)
+            expect(offline.program).to_equal("")
+
+    if _enabled("GITHUB"):
+        it "runs the GitHub gh route":
+            _expect_live("repo", "github", "repo.view", _args("GITHUB"), "", "github_cli", "gh")
+
+    if _enabled("BITBUCKET"):
+        it "runs the Bitbucket ITF route":
+            _expect_live("repo", "bitbucket", "pr.view", _args("BITBUCKET"), "", "itf_bitbucket", "simple_itf")
+
+    if _enabled("JIRA"):
+        it "runs the Jira acli route":
+            _expect_live("task", "jira", "workitem.view", _args("JIRA"), "", "jira_acli", "acli")
+
+    if _enabled("S3"):
+        it "runs the AWS S3 route":
+            _expect_live("storage", "s3", "s3.ls", _args("S3"), "", "aws_s3_cli", "aws_cli")
+
+    if _enabled("MINIO"):
+        it "runs the MinIO S3-compatible route":
+            val endpoint = env_get("LCSI_LIVE_MINIO_ENDPOINT") ?? ""
+            _expect_live("storage", "minio", "s3.ls", _args("MINIO"), "\"endpoint\":\"" + _esc(endpoint) + "\"", "aws_s3_cli", "aws_cli")
+
+    if _enabled("GMAIL"):
+        it "runs the Gmail provisional gws route":
+            _expect_live("mail", "gmail", "messages.list", _args("GMAIL"), "", "gmail_gws", "gws_cli_provisional")
+
+    if _enabled("OUTLOOK"):
+        it "runs the Outlook ITF route":
+            _expect_live("mail", "outlook", "folders.list", _args("OUTLOOK"), "", "itf_outlook", "simple_itf")
+
+    if _enabled("CONFLUENCE"):
+        it "runs the Confluence ITF route":
+            _expect_live("wiki", "confluence", "page.list", _args("CONFLUENCE"), "", "itf_confluence", "simple_itf")
+
+    if _enabled("GITHUB_WIKI"):
+        it "runs the git-backed GitHub Wiki ITF route":
+            _expect_live("wiki", "github", "page.list", _args("GITHUB_WIKI"), "", "itf_github_wiki", "git")

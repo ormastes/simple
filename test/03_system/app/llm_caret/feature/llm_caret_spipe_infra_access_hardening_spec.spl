@@ -1,0 +1,179 @@
+# @cover src/app/llm_caret/infra_access.spl 80%
+"""
+# LLM Caret + SPipe infrastructure access hardening
+
+**Requirements:** `doc/02_requirements/feature/llm_caret_spipe_infra_access_hardening.md`
+**NFRs:** `doc/02_requirements/nfr/llm_caret_spipe_infra_access_hardening.md`
+**Architecture:** `doc/04_architecture/llm_caret_spipe_infra_access_hardening.md`
+**Design:** `doc/05_design/llm_caret_spipe_infra_access_hardening.md`
+
+This executable manual proves the offline Caret trust boundary and the exact
+provider route plan. It does not claim live credentials or full Claude CLI
+parity.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, time_now_unix_micros}
+use app.llm_caret.infra_access.{
+    InfraPlan, plan_infra_call, execute_infra_plan_with,
+    render_infra_execution
+}
+use app.llm_caret.tools.{
+    ToolResult, new_tool_call, run_tool, default_policy, policy_with_allow,
+    permission_decision_for_call
+}
+
+val ROOT = "build/tmp/llm_caret_infra_system"
+
+fn _lb() -> text: (123 as char).to_text()
+fn _rb() -> text: (125 as char).to_text()
+
+fn _esc(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+fn input(provider: text, operation: text, args: text, format: text) -> text:
+    var body = "\"provider\":\"" + _esc(provider) + "\",\"operation\":\"" + _esc(operation) + "\""
+    if args != "": body = body + ",\"args\":\"" + _esc(args) + "\""
+    if format != "": body = body + ",\"format\":\"" + _esc(format) + "\""
+    _lb() + body + _rb()
+
+fn _input_extra(provider: text, operation: text, args: text, format: text, extra: text) -> text:
+    val base = input(provider, operation, args, format)
+    base.substring(0, base.len() - 1) + "," + extra + _rb()
+
+fn expect_supported_plan(plan: InfraPlan, program: text, safety: text):
+    expect(plan.supported).to_equal(true)
+    expect(plan.program).to_equal(program)
+    expect(plan.safety).to_equal(safety)
+
+fn expect_capability_error(plan: InfraPlan, marker: text):
+    expect(plan.supported).to_equal(false)
+    expect(plan.error).to_contain(marker)
+
+fn expect_permission_denied(result: ToolResult):
+    expect(result.is_error).to_equal(true)
+    expect(result.content).to_contain("permission denied")
+
+fn recording_runner(program: text, args: [text]) -> (text, text, i64):
+    ("{\"provider_id\":\"remote-42\",\"cursor\":\"next-opaque\",\"request_id\":\"req-7\"}", "", 0)
+
+describe "LLM Caret typed infrastructure boundary":
+    it "REQ-LCSI-001 and REQ-LCSI-010 register gated typed families":
+        step("Discover infrastructure tool capabilities without provider access")
+        val policy = default_policy(ROOT)
+        val families = ["infra_repo", "infra_task", "infra_storage", "infra_mail", "infra_wiki"]
+        for family in families:
+            val result = run_tool(policy, new_tool_call(family, family, input("", "capabilities", "", "json")))
+            expect(result.is_error).to_equal(false)
+            expect(result.content).to_contain("\"status\":\"ok\"")
+
+    it "REQ-LCSI-002 and REQ-LCSI-011 delegate with direct argv and no shell interpolation":
+        step("Plan canonical provider argv without shell interpolation")
+        val plan = plan_infra_call("repo", input("github", "pr.view", "42\n--repo\norg/project", "json"), ROOT)
+        expect_supported_plan(plan, "gh", "read")
+        expect(plan.args[0:5].join("|")).to_equal("pr|view|42|--repo|org/project")
+        expect(plan.program).to_equal("gh")
+        expect(plan.args.contains("-c")).to_equal(false)
+
+    it "REQ-LCSI-003 maps GitHub and Bitbucket repository contracts":
+        step("Plan canonical provider argv without shell interpolation")
+        val github = plan_infra_call("repo", input("github", "workflow.list", "", "json"), ROOT)
+        val bitbucket = plan_infra_call("repo", input("bitbucket", "pr.status", "8", "json"), ROOT)
+        expect_supported_plan(github, "gh", "read")
+        expect(bitbucket.args[0:4].join(" ")).to_equal("itf bb status 8")
+        val unsupported = plan_infra_call("repo", input("bitbucket", "workflow.list", "", "json"), ROOT)
+        expect_capability_error(unsupported, "unsupported repository capability")
+
+    it "REQ-LCSI-004 maps Jira work items and the GitHub issue subset":
+        step("Plan canonical provider argv without shell interpolation")
+        val jira = plan_infra_call("task", input("jira", "workitem.search", "--jql\nproject = APP", "json"), ROOT)
+        val github = plan_infra_call("task", input("github", "issue.view", "17", "json"), ROOT)
+        expect(jira.args[0:3].join(" ")).to_equal("jira workitem search")
+        expect(github.args[0:3].join(" ")).to_equal("issue view 17")
+
+    it "REQ-LCSI-005 routes S3 and MinIO through streaming-safe AWS CLI argv":
+        step("Plan canonical provider argv without shell interpolation")
+        val minio = plan_infra_call("storage", _input_extra("minio", "s3.cp", "s3://bucket/key\nbuild/tmp/llm_caret_infra_system/key.bin", "human", "\"endpoint\":\"https://minio.example\""), ROOT)
+        expect_supported_plan(minio, "aws", "write")
+        expect(minio.args[0:4].join(" ")).to_equal("--endpoint-url https://minio.example s3 cp")
+        expect(minio.args).to_contain("s3://bucket/key")
+
+    it "REQ-LCSI-006 maps Gmail resources and the explicit Outlook subset":
+        step("Plan canonical provider argv without shell interpolation")
+        val gmail = plan_infra_call("mail", input("gmail", "messages.get", "--params\n{\"userId\":\"me\"}", "json"), ROOT)
+        val outlook = plan_infra_call("mail", input("outlook", "messages.get", "opaque-id", "json"), ROOT)
+        expect(gmail.args[0:4].join(" ")).to_equal("gmail users messages get")
+        expect(gmail.transport).to_equal("gws_cli_provisional")
+        expect(outlook.args[0:4].join(" ")).to_equal("itf outlook get opaque-id")
+
+    it "REQ-LCSI-007 maps neutral Confluence and GitHub Wiki page operations":
+        step("Plan canonical provider argv without shell interpolation")
+        val confluence = plan_infra_call("wiki", input("confluence", "page.create", "--space\nENG\n--title\nRunbook\n--from-file\nbuild/tmp/llm_caret_infra_system/runbook.html", "json"), ROOT)
+        val github = plan_infra_call("wiki", input("github", "page.get", "--repo-path\nbuild/tmp/llm_caret_infra_system/wiki\n--page\nHome.md", "json"), ROOT)
+        expect(confluence.args[0:3].join(" ")).to_equal("itf wiki create")
+        expect(github.args[0:3].join(" ")).to_equal("itf github-wiki view")
+
+    it "REQ-LCSI-008 reports provider capabilities and unsupported mappings explicitly":
+        step("Reject unsupported lossy or workspace-escaping requests explicitly")
+        val caps = plan_infra_call("mail", input("outlook", "capabilities", "", "json"), ROOT)
+        expect(caps.capability_json).to_contain("labels/drafts/send are unsupported")
+        expect_capability_error(plan_infra_call("mail", input("outlook", "drafts.create", "", "json"), ROOT), "unsupported mail capability")
+
+    it "REQ-LCSI-009 preserves provider IDs cursors and request IDs in stable output":
+        step("Preserve route identity and provider output in stable JSON")
+        val plan = plan_infra_call("repo", input("github", "pr.view", "42", "json"), ROOT)
+        val rendered = render_infra_execution(execute_infra_plan_with(plan, recording_runner))
+        expect(rendered).to_contain("remote-42")
+        expect(rendered).to_contain("next-opaque")
+        expect(rendered).to_contain("req-7")
+        expect(rendered).to_contain("\"transport\":\"gh\"")
+
+    it "REQ-LCSI-010 denies an ungranted mutation before provider execution":
+        step("Deny ungranted mutation before provider execution")
+        val call = new_tool_call("create", "infra_task", input("github", "issue.create", "--title\nhello", "json"))
+        expect_permission_denied(run_tool(default_policy(ROOT), call))
+
+    it "REQ-LCSI-010 requires a distinct destructive-operation grant":
+        step("Require a distinct destructive-operation grant")
+        val call = new_tool_call("delete", "infra_wiki", input("github", "page.delete", "--repo-path\nbuild/tmp/llm_caret_infra_system/wiki\n--page\nOld.md\n--yes", "json"))
+        expect(permission_decision_for_call(policy_with_allow(ROOT, ["infra_wiki"]), call)).to_equal("ask")
+        expect(permission_decision_for_call(policy_with_allow(ROOT, ["infra_wiki:destructive"]), call)).to_equal("allow")
+
+    it "REQ-LCSI-011 rejects secret fields and workspace traversal":
+        step("Reject unsupported lossy or workspace-escaping requests explicitly")
+        val secret = plan_infra_call("repo", _input_extra("github", "pr.view", "1", "json", "\"token\":\"do-not-log\""), ROOT)
+        val traversal = plan_infra_call("wiki", input("github", "page.create", "--repo-path\n../../outside\n--page\nHome.md", "json"), ROOT)
+        expect_capability_error(secret, "credential store")
+        expect_capability_error(traversal, "traversal")
+
+    it "REQ-LCSI-012 executes the planned production route through one tested seam":
+        step("Execute the planned production route through the injected runner seam")
+        val plan = plan_infra_call("repo", input("github", "pr.view", "42", "json"), ROOT)
+        val result = execute_infra_plan_with(plan, recording_runner)
+        expect(result.success).to_equal(true)
+        expect(result.plan.program).to_equal("gh")
+        expect(result.plan.adapter).to_equal("github_cli")
+
+    it "REQ-LCSI-013 and REQ-LCSI-014 keep executable evidence and reviewed guide provenance":
+        step("Preserve route identity and provider output in stable JSON")
+        val guide = file_read("doc/07_guide/app/llm/llm_caret_spipe_infra_access_hardening.md")
+        val requirements = file_read("doc/02_requirements/feature/llm_caret_spipe_infra_access_hardening.md")
+        expect(guide).to_contain("gpt-5.4-mini")
+        expect(guide).to_contain("primary high-capability")
+        expect(guide).to_contain("does not claim full Claude CLI parity")
+        expect(requirements).to_contain("REQ-LCSI-013")
+
+    it "NFR-LCSI-008 keeps warm local planning p95 below 200 milliseconds":
+        step("Plan canonical provider argv without shell interpolation")
+        var samples: [i64] = []
+        var i: i64 = 0
+        while i < 50:
+            val started = time_now_unix_micros()
+            val plan = plan_infra_call("repo", input("github", "pr.view", "42", "json"), ROOT)
+            val elapsed_us = time_now_unix_micros() - started
+            expect(plan.supported).to_equal(true)
+            samples.push(elapsed_us)
+            i = i + 1
+        samples.sort()
+        val p95_us = samples[47]
+        expect(p95_us).to_be_less_than(200000)

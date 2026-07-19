@@ -1,0 +1,188 @@
+# ITF CLI — git-backed GitHub Wiki page operations.
+#
+# The caller supplies a local clone of <repo>.wiki.git via --repo-path. All git
+# calls use direct argv; page paths reject absolute/traversal forms.
+
+use app.io.mod.{process_run, file_exists, file_read, file_write}
+use app.itf.flags.{_extract_flag, _has_flag}
+use app.itf.output.{print_error, print_success, wants_json}
+
+fn _wiki_json_escape(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+fn _page_safe(page: text) -> bool:
+    page != "" and not page.starts_with("/") and not page.contains("\\") and not page.contains("../") and not page.contains("/..") and page != ".." and page.ends_with(".md")
+
+fn _repo(args: [text]) -> text:
+    _extract_flag(args, "--repo-path", "")
+
+fn _page(args: [text]) -> text:
+    _extract_flag(args, "--page", "")
+
+fn _git(repo: text, args: [text]) -> (text, text, i64):
+    process_run("git", ["-C", repo] + args)
+
+fn _print_result(args: [text], operation: text, page: text, stdout: text):
+    if wants_json(args):
+        print "{\"provider\":\"github\",\"operation\":\"" + operation + "\",\"page\":\"" + _wiki_json_escape(page) + "\",\"stdout\":\"" + _wiki_json_escape(stdout) + "\"}"
+    elif stdout != "":
+        print stdout
+
+fn _require_repo(args: [text]) -> (bool, text):
+    val repo = _repo(args)
+    if repo == "":
+        print_error("--repo-path is required")
+        return (false, "")
+    val (_, stderr, code) = _git(repo, ["rev-parse", "--git-dir"])
+    if code != 0:
+        print_error("not a git wiki repository: " + stderr)
+        return (false, "")
+    (true, repo)
+
+fn _github_wiki_list(args: [text]) -> i64:
+    val (ok, repo) = _require_repo(args)
+    if not ok: return 1
+    val (stdout, stderr, code) = _git(repo, ["ls-files", "--", "*.md"])
+    if code != 0:
+        print_error(stderr)
+        return code
+    _print_result(args, "page.list", "", stdout)
+    0
+
+fn _github_wiki_view(args: [text]) -> i64:
+    val (ok, repo) = _require_repo(args)
+    if not ok: return 1
+    val page = _page(args)
+    if not _page_safe(page):
+        print_error("--page must be a safe relative .md path")
+        return 2
+    val (stdout, stderr, code) = _git(repo, ["show", "HEAD:" + page])
+    if code != 0:
+        print_error(stderr)
+        return code
+    _print_result(args, "page.get", page, stdout)
+    0
+
+fn _github_wiki_write(args: [text], create_only: bool) -> i64:
+    val (ok, repo) = _require_repo(args)
+    if not ok: return 1
+    val page = _page(args)
+    val from_file = _extract_flag(args, "--from-file", "")
+    if not _page_safe(page):
+        print_error("--page must be a safe relative .md path")
+        return 2
+    if from_file == "" or not file_exists(from_file):
+        print_error("--from-file must name a readable workspace file")
+        return 2
+    val target = repo + "/" + page
+    if create_only and file_exists(target):
+        print_error("page already exists: " + page)
+        return 2
+    if not create_only and not file_exists(target):
+        print_error("page does not exist: " + page)
+        return 2
+    val content = file_read(from_file)
+    if not file_write(target, content):
+        print_error("failed to write page: " + page)
+        return 1
+    val (_, add_err, add_code) = _git(repo, ["add", "--", page])
+    if add_code != 0:
+        print_error(add_err)
+        return add_code
+    var message = _extract_flag(args, "--message", "")
+    if message == "":
+        message = if create_only: "Create " + page else: "Update " + page
+    val (stdout, commit_err, commit_code) = _git(repo, ["commit", "-m", message, "--", page])
+    if commit_code != 0:
+        print_error(commit_err)
+        return commit_code
+    val operation = if create_only: "page.create" else: "page.update"
+    _print_result(args, operation, page, stdout)
+    if not wants_json(args):
+        print_success(operation + ": " + page)
+    0
+
+fn _github_wiki_delete(args: [text]) -> i64:
+    val (ok, repo) = _require_repo(args)
+    if not ok: return 1
+    val page = _page(args)
+    if not _page_safe(page):
+        print_error("--page must be a safe relative .md path")
+        return 2
+    if not _has_flag(args, "--yes"):
+        print_error("--yes is required for page deletion")
+        return 2
+    val (_, rm_err, rm_code) = _git(repo, ["rm", "--", page])
+    if rm_code != 0:
+        print_error(rm_err)
+        return rm_code
+    var message = _extract_flag(args, "--message", "")
+    if message == "": message = "Delete " + page
+    val (stdout, commit_err, commit_code) = _git(repo, ["commit", "-m", message, "--", page])
+    if commit_code != 0:
+        print_error(commit_err)
+        return commit_code
+    _print_result(args, "page.delete", page, stdout)
+    0
+
+fn _github_wiki_search(args: [text]) -> i64:
+    val (ok, repo) = _require_repo(args)
+    if not ok: return 1
+    val query = _extract_flag(args, "--query", "")
+    if query == "":
+        print_error("--query is required")
+        return 2
+    val (stdout, stderr, code) = _git(repo, ["grep", "-n", "--", query, "--", "*.md"])
+    if code != 0 and code != 1:
+        print_error(stderr)
+        return code
+    _print_result(args, "page.search", "", stdout)
+    0
+
+fn _github_wiki_raw(args: [text]) -> i64:
+    val (ok, repo) = _require_repo(args)
+    if not ok: return 1
+    var git_args: [text] = []
+    var i: i64 = 0
+    while i < args.len():
+        if args[i] == "--repo-path" and i + 1 < args.len():
+            i = i + 2
+        elif args[i] == "--json":
+            i = i + 1
+        else:
+            git_args.push(args[i])
+            i = i + 1
+    if git_args.len() == 0:
+        print_error("raw requires git argv after --repo-path")
+        return 2
+    val (stdout, stderr, code) = _git(repo, git_args)
+    if code != 0:
+        print_error(stderr)
+        return code
+    _print_result(args, "raw", "", stdout)
+    0
+
+fn handle_github_wiki(args: [text]) -> i64:
+    if args.len() == 0:
+        _print_github_wiki_help()
+        return 0
+    val action = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+    match action:
+        "list": _github_wiki_list(rest)
+        "view": _github_wiki_view(rest)
+        "create": _github_wiki_write(rest, true)
+        "edit": _github_wiki_write(rest, false)
+        "delete": _github_wiki_delete(rest)
+        "search": _github_wiki_search(rest)
+        "raw": _github_wiki_raw(rest)
+        "help" | "--help" | "-h":
+            _print_github_wiki_help()
+            0
+        _:
+            print_error("unknown github-wiki command: " + action)
+            1
+
+fn _print_github_wiki_help():
+    print "Usage: itf github-wiki <list|view|create|edit|delete|search|raw> --repo-path PATH [flags]"
+    print "Page operations use --page NAME.md; create/edit use --from-file PATH."

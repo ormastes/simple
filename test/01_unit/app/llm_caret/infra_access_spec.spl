@@ -1,0 +1,160 @@
+use std.spec
+use app.llm_caret.infra_access.{
+    InfraPlan, plan_infra_call, infra_safety_class,
+    execute_infra_plan_with, render_infra_execution
+}
+use app.llm_caret.tools.{
+    ToolCall, run_tool, new_tool_call, default_policy, policy_with_allow,
+    permission_decision_for_call
+}
+
+val ROOT = "build/tmp/llm_caret_infra_access"
+
+fn _lb() -> text: (123 as char).to_text()
+fn _rb() -> text: (125 as char).to_text()
+
+fn _esc(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+fn _input(provider: text, operation: text, args: text, format: text, extra: text) -> text:
+    var fields = "\"provider\":\"" + _esc(provider) + "\",\"operation\":\"" + _esc(operation) + "\""
+    if args != "": fields = fields + ",\"args\":\"" + _esc(args) + "\""
+    if format != "": fields = fields + ",\"format\":\"" + _esc(format) + "\""
+    if extra != "": fields = fields + "," + extra
+    _lb() + fields + _rb()
+
+fn _runner(program: text, args: [text]) -> (text, text, i64):
+    ("{\"id\":\"provider-17\",\"next\":\"opaque-cursor\"}", "", 0)
+
+fn _failing_runner(program: text, args: [text]) -> (text, text, i64):
+    ("", "request_id=req-9 retry_after=2", 29)
+
+describe "infrastructure capability planning":
+    it "discovers every repository provider offline":
+        val plan = plan_infra_call("repo", _input("", "capabilities", "", "json", ""), ROOT)
+        expect(plan.supported).to_equal(true)
+        expect(plan.program).to_equal("")
+        expect(plan.capability_json).to_contain("github")
+        expect(plan.capability_json).to_contain("bitbucket")
+
+    it "returns an explicit capability error for unknown providers":
+        val plan = plan_infra_call("mail", _input("imap", "messages.list", "", "json", ""), ROOT)
+        expect(plan.supported).to_equal(false)
+        expect(plan.error).to_contain("unsupported mail capability")
+
+describe "repository and task route conversion":
+    it "maps GitHub pull requests to exact gh argv":
+        val plan = plan_infra_call("repo", _input("github", "pr.view", "42\n--repo\norg/project", "json", ""), ROOT)
+        expect(plan.program).to_equal("gh")
+        expect(plan.args[0]).to_equal("pr")
+        expect(plan.args[1]).to_equal("view")
+        expect(plan.args[2]).to_equal("42")
+        expect(plan.safety).to_equal("read")
+
+    it "maps the supported Bitbucket PR subset through ITF":
+        val plan = plan_infra_call("repo", _input("bitbucket", "pr.comment.create", "7\n--content\nlooks good", "json", ""), ROOT)
+        expect(plan.program).to_equal("bin/simple")
+        expect(plan.args[0:4].join(" ")).to_equal("itf bb comment post")
+        expect(plan.safety).to_equal("write")
+
+    it "maps Jira work-item search to acli and preserves JQL as one argument":
+        val plan = plan_infra_call("task", _input("jira", "workitem.search", "--jql\nproject = DEMO ORDER BY created DESC", "json", ""), ROOT)
+        expect(plan.program).to_equal("acli")
+        expect(plan.args[0:3].join(" ")).to_equal("jira workitem search")
+        expect(plan.args[4]).to_equal("project = DEMO ORDER BY created DESC")
+
+    it "maps the GitHub issue subset and classifies close as destructive":
+        val plan = plan_infra_call("task", _input("github", "issue.close", "19", "json", ""), ROOT)
+        expect(plan.program).to_equal("gh")
+        expect(plan.args[0:3].join(" ")).to_equal("issue close 19")
+        expect(plan.safety).to_equal("destructive")
+
+    it "classifies repository sync run and watch operations safely":
+        expect(infra_safety_class("repo", _input("github", "repo.sync", "", "", ""))).to_equal("write")
+        expect(infra_safety_class("repo", _input("github", "workflow.run", "", "", ""))).to_equal("write")
+        expect(infra_safety_class("repo", _input("github", "run.watch", "", "", ""))).to_equal("read")
+
+describe "storage mail and wiki conversion":
+    it "maps MinIO to AWS CLI endpoint semantics without buffering object content":
+        val plan = plan_infra_call("storage", _input("minio", "s3.cp", "s3://bucket/key\nbuild/tmp/llm_caret_infra_access/key.bin", "human", "\"endpoint\":\"https://minio.example\""), ROOT)
+        expect(plan.program).to_equal("aws")
+        expect(plan.args[0:4].join(" ")).to_equal("--endpoint-url https://minio.example s3 cp")
+        expect(plan.args).to_contain("s3://bucket/key")
+        expect(plan.safety).to_equal("write")
+
+    it "classifies low-level S3 reads and deletes independently":
+        expect(infra_safety_class("storage", _input("s3", "s3api.head-object", "", "", ""))).to_equal("read")
+        expect(infra_safety_class("storage", _input("s3", "s3api.delete-object", "", "", ""))).to_equal("destructive")
+
+    it "maps Gmail resources through the provisional gws transport":
+        val plan = plan_infra_call("mail", _input("gmail", "messages.list", "--params\n{\"userId\":\"me\"}", "json", ""), ROOT)
+        expect(plan.program).to_equal("gws")
+        expect(plan.args[0:4].join(" ")).to_equal("gmail users messages list")
+        expect(plan.transport).to_equal("gws_cli_provisional")
+
+    it "maps Outlook messages through the existing ITF command":
+        val plan = plan_infra_call("mail", _input("outlook", "messages.get", "opaque-message-id", "json", ""), ROOT)
+        expect(plan.program).to_equal("bin/simple")
+        expect(plan.args[0:4].join(" ")).to_equal("itf outlook get opaque-message-id")
+
+    it "maps Confluence and GitHub Wiki through distinct ITF adapters":
+        val confluence = plan_infra_call("wiki", _input("confluence", "page.get", "123", "json", ""), ROOT)
+        val github = plan_infra_call("wiki", _input("github", "page.update", "--repo-path\nbuild/tmp/llm_caret_infra_access/wiki\n--page\nHome.md\n--from-file\nbuild/tmp/llm_caret_infra_access/Home.md", "json", ""), ROOT)
+        expect(confluence.args[0:3].join(" ")).to_equal("itf wiki view")
+        expect(github.args[0:3].join(" ")).to_equal("itf github-wiki edit")
+        expect(github.safety).to_equal("write")
+
+describe "validation and permission boundary":
+    it "rejects credentials in model-provided tool input":
+        val plan = plan_infra_call("repo", _input("github", "pr.view", "1", "json", "\"token\":\"secret-value\""), ROOT)
+        expect(plan.supported).to_equal(false)
+        expect(plan.error).to_contain("credential store")
+
+    it "rejects credential flags using equals syntax":
+        val plan = plan_infra_call("repo", _input("github", "pr.view", "1\n--token=secret-value", "json", ""), ROOT)
+        expect(plan.supported).to_equal(false)
+        expect(plan.error).to_contain("credential store")
+
+    it "rejects workspace traversal before process execution":
+        val plan = plan_infra_call("wiki", _input("github", "page.create", "--repo-path\n../../outside\n--page\nHome.md\n--from-file\n../../secret", "json", ""), ROOT)
+        expect(plan.supported).to_equal(false)
+        expect(plan.error).to_contain("traversal")
+
+    it "requires explicit safety for provider-native raw argv":
+        val missing = plan_infra_call("repo", _input("github", "raw", "api\nrepos/o/r", "json", ""), ROOT)
+        val present = plan_infra_call("repo", _input("github", "raw", "api\nrepos/o/r", "json", "\"raw_safety\":\"read\""), ROOT)
+        expect(missing.supported).to_equal(false)
+        expect(present.supported).to_equal(true)
+        expect(present.safety).to_equal("read")
+
+    it "allows capability reads but denies ungranted writes":
+        val policy = default_policy(ROOT)
+        val cap = run_tool(policy, new_tool_call("cap", "infra_repo", _input("", "capabilities", "", "json", "")))
+        val write_call = new_tool_call("write", "infra_task", _input("github", "issue.create", "--title\nhello", "json", ""))
+        expect(cap.is_error).to_equal(false)
+        expect(permission_decision_for_call(policy, write_call)).to_equal("ask")
+        expect(run_tool(policy, write_call).content).to_contain("permission denied")
+
+    it "requires a distinct destructive class grant":
+        val call = new_tool_call("merge", "infra_repo", _input("github", "pr.merge", "42", "json", ""))
+        val generic = policy_with_allow(ROOT, ["infra_repo"])
+        val explicit = policy_with_allow(ROOT, ["infra_repo:destructive"])
+        expect(permission_decision_for_call(generic, call)).to_equal("ask")
+        expect(permission_decision_for_call(explicit, call)).to_equal("allow")
+
+describe "execution evidence":
+    it "executes the exact production plan through the injectable runner seam":
+        val plan = plan_infra_call("repo", _input("github", "pr.view", "42", "json", ""), ROOT)
+        val result = execute_infra_plan_with(plan, _runner)
+        val rendered = render_infra_execution(result)
+        expect(result.success).to_equal(true)
+        expect(rendered).to_contain("provider-17")
+        expect(rendered).to_contain("opaque-cursor")
+        expect(rendered).to_contain("\"adapter\":\"github_cli\"")
+
+    it "preserves provider failure and retry metadata":
+        val plan = plan_infra_call("repo", _input("github", "pr.view", "42", "json", ""), ROOT)
+        val rendered = render_infra_execution(execute_infra_plan_with(plan, _failing_runner))
+        expect(rendered).to_contain("\"exit_code\":29")
+        expect(rendered).to_contain("request_id=req-9")
+        expect(rendered).to_contain("retry_after=2")

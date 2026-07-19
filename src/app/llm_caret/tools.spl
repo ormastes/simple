@@ -11,6 +11,8 @@
 #   write_file  - real FS write, refused outside workspace root
 #   list_dir    - real directory listing
 #   glob        - simple `*` glob within the workspace
+#   infra_repo / infra_task / infra_storage / infra_mail / infra_wiki
+#               - typed infrastructure calls delegated through direct argv
 #
 # Permission model:
 #   read-only tools (read_file / list_dir / glob) are auto-allowed
@@ -27,6 +29,7 @@
 # ============================================================================
 
 use app.io.mod.{process_run}
+use app.llm_caret.infra_access.{infra_safety_class, execute_infra_call}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -224,8 +227,11 @@ fn _list_contains(items: [text], target: text) -> bool:
 fn is_read_only_tool(name: text) -> bool:
     name == "read_file" or name == "list_dir" or name == "glob"
 
+fn is_infra_tool(name: text) -> bool:
+    name == "infra_repo" or name == "infra_task" or name == "infra_storage" or name == "infra_mail" or name == "infra_wiki"
+
 fn is_known_tool(name: text) -> bool:
-    is_read_only_tool(name) or name == "bash" or name == "write_file"
+    is_read_only_tool(name) or is_infra_tool(name) or name == "bash" or name == "write_file"
 
 # Returns "allow" | "deny" | "ask".
 fn permission_decision(policy: PermissionPolicy, name: text) -> text:
@@ -234,6 +240,36 @@ fn permission_decision(policy: PermissionPolicy, name: text) -> text:
     if policy.allow_all:
         return "allow"
     if _list_contains(policy.allow_list, name):
+        return "allow"
+    policy.default_mode
+
+fn _infra_family(name: text) -> text:
+    if name == "infra_repo": return "repo"
+    if name == "infra_task": return "task"
+    if name == "infra_storage": return "storage"
+    if name == "infra_mail": return "mail"
+    if name == "infra_wiki": return "wiki"
+    ""
+
+# Returns "allow" | "deny" | "ask" for one concrete call. Infrastructure
+# operations need this call-aware form because one typed family contains read,
+# write, destructive, and authentication operations.
+fn permission_decision_for_call(policy: PermissionPolicy, call: ToolCall) -> text:
+    if not is_infra_tool(call.name):
+        return permission_decision(policy, call.name)
+    val safety = infra_safety_class(_infra_family(call.name), call.input)
+    # Invalid/unsupported plans are allowed only as far as the pure validator;
+    # no executor route exists for them.
+    if safety == "read" or safety == "invalid":
+        return "allow"
+    if policy.allow_all:
+        return "allow"
+    val class_key = call.name + ":" + safety
+    if _list_contains(policy.allow_list, class_key):
+        return "allow"
+    # A generic family grant may authorize ordinary writes/auth, but never a
+    # destructive operation: destructive always needs its distinct class key.
+    if safety != "destructive" and _list_contains(policy.allow_list, call.name):
         return "allow"
     policy.default_mode
 
@@ -403,6 +439,12 @@ fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
             matches = matches + [e]
     new_tool_result("", matches.join("\n"))
 
+fn exec_infra(policy: PermissionPolicy, name: text, input: text) -> ToolResult:
+    val (ok, content) = execute_infra_call(_infra_family(name), input, policy.workspace_root)
+    if not ok:
+        return new_tool_error("", content)
+    new_tool_result("", content)
+
 # ============================================================================
 # The gate - every tool call MUST traverse this function
 # ============================================================================
@@ -410,7 +452,7 @@ fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
 fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
     if not is_known_tool(call.name):
         return new_tool_error(call.id, "unknown tool: " + call.name)
-    val decision = permission_decision(policy, call.name)
+    val decision = permission_decision_for_call(policy, call)
     if decision == "deny":
         return new_tool_error(call.id, "permission denied: tool '" + call.name + "' is denied by policy")
     if decision == "ask":
@@ -430,6 +472,8 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
         res = exec_list_dir(policy, call.input)
     elif call.name == "glob":
         res = exec_glob(policy, call.input)
+    elif is_infra_tool(call.name):
+        res = exec_infra(policy, call.name, call.input)
     ToolResult(tool_use_id: call.id, content: res.content, is_error: res.is_error)
 
 # ============================================================================

@@ -1,0 +1,59 @@
+use std.spec
+use std.io_runtime.{process_run, dir_create_all, file_write, file_exists, file_read}
+use app.itf.cmd_github_wiki.{handle_github_wiki}
+
+val ROOT = "build/tmp/itf_github_wiki_spec"
+val REPO = "build/tmp/itf_github_wiki_spec/wiki"
+
+fn _git(args: [text]) -> (text, text, i64):
+    process_run("git", ["-C", REPO] + args)
+
+fn _setup_repo():
+    dir_create_all(REPO)
+    process_run("git", ["init", REPO])
+    _git(["config", "user.email", "spec@example.invalid"])
+    _git(["config", "user.name", "ITF Spec"])
+    file_write(REPO + "/Home.md", "# Home\n")
+    _git(["add", "Home.md"])
+    val (_, _, code) = _git(["commit", "-m", "Initial wiki"])
+    if code != 0:
+        # A previous deterministic run may already contain the same commit.
+        _git(["reset", "--hard", "HEAD"])
+
+describe "git-backed GitHub Wiki adapter":
+    it "lists and views committed Markdown pages":
+        _setup_repo()
+        expect(handle_github_wiki(["list", "--repo-path", REPO, "--json"])).to_equal(0)
+        expect(handle_github_wiki(["view", "--repo-path", REPO, "--page", "Home.md", "--json"])).to_equal(0)
+
+    it "creates and updates pages from workspace files with git revisions":
+        _setup_repo()
+        val source = ROOT + "/Runbook.source.md"
+        file_write(source, "# Runbook\nfirst\n")
+        expect(handle_github_wiki(["create", "--repo-path", REPO, "--page", "Runbook.md", "--from-file", source, "--message", "Create runbook"])).to_equal(0)
+        expect(file_exists(REPO + "/Runbook.md")).to_equal(true)
+        file_write(source, "# Runbook\nsecond\n")
+        expect(handle_github_wiki(["edit", "--repo-path", REPO, "--page", "Runbook.md", "--from-file", source, "--message", "Update runbook"])).to_equal(0)
+        expect(file_read(REPO + "/Runbook.md")).to_contain("second")
+        val (log, _, code) = _git(["log", "--format=%s", "-2"])
+        expect(code).to_equal(0)
+        expect(log).to_contain("Update runbook")
+
+    it "requires explicit confirmation and commits deletion":
+        _setup_repo()
+        val page = REPO + "/DeleteMe.md"
+        file_write(page, "delete me\n")
+        _git(["add", "DeleteMe.md"])
+        _git(["commit", "-m", "Add delete fixture"])
+        expect(handle_github_wiki(["delete", "--repo-path", REPO, "--page", "DeleteMe.md"])).to_equal(2)
+        expect(file_exists(page)).to_equal(true)
+        expect(handle_github_wiki(["delete", "--repo-path", REPO, "--page", "DeleteMe.md", "--yes"])).to_equal(0)
+        expect(file_exists(page)).to_equal(false)
+
+    it "rejects page traversal before invoking git mutation":
+        _setup_repo()
+        val source = ROOT + "/bad.source.md"
+        file_write(source, "bad")
+        expect(handle_github_wiki(["create", "--repo-path", REPO, "--page", "../Outside.md", "--from-file", source])).to_equal(2)
+        expect(handle_github_wiki(["create", "--repo-path", REPO, "--page", "..\\Outside.md", "--from-file", source])).to_equal(2)
+        expect(file_exists(ROOT + "/Outside.md")).to_equal(false)
