@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use simple_common::target::TargetOS;
+
 use super::{effective_target, ModuleImports};
 use super::tools::{
     find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command,
@@ -76,6 +78,22 @@ fn is_compiler_provided_runtime_symbol(sym: &str) -> bool {
 
 fn is_runtime_owned_symbol(sym: &str) -> bool {
     sym.trim_start_matches('_').starts_with("rt_")
+}
+
+fn alias_gc_prelude(os: TargetOS) -> &'static str {
+    if os == TargetOS::MacOS {
+        ".subsections_via_symbols\n"
+    } else {
+        ""
+    }
+}
+
+fn alias_gc_section(os: TargetOS, index: usize) -> String {
+    match os {
+        TargetOS::MacOS => String::new(),
+        TargetOS::Windows => format!(".section .text$stub_{index},\"xr\"\n"),
+        _ => format!(".section .text.stub_{index},\"ax\",@progbits\n"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -791,13 +809,15 @@ pub(crate) fn generate_stub_object(
         asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
 
         let target = effective_target();
+        asm_code.push_str(alias_gc_prelude(target.os));
         let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&target);
         let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&target);
 
-        for sym in &needs_stub {
+        for (index, sym) in needs_stub.iter().enumerate() {
             if !plat_config.is_valid_asm_label(sym) {
                 continue;
             }
+            asm_code.push_str(&alias_gc_section(target.os, index));
 
             if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
                 let real_fn = format!("_{}", &sym["___builtin_".len()..]);
@@ -879,6 +899,53 @@ pub(crate) fn generate_stub_object(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn compatibility_aliases_use_gc_boundaries_and_elf_discards_siblings() {
+        assert_ne!(
+            alias_gc_section(TargetOS::Linux, 0),
+            alias_gc_section(TargetOS::Linux, 1)
+        );
+        assert!(alias_gc_section(TargetOS::Windows, 0).contains(".text$stub_0"));
+        assert_eq!(alias_gc_prelude(TargetOS::MacOS), ".subsections_via_symbols\n");
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            use std::fs;
+            use std::process::Command;
+
+            let dir = tempfile::tempdir().unwrap();
+            let aliases = dir.path().join("aliases.s");
+            let main = dir.path().join("main.c");
+            let binary = dir.path().join("probe");
+            fs::write(
+                &aliases,
+                format!(
+                    "{} .weak used_alias\nused_alias:\n  jmp used_target\n\n{} .weak unused_alias\nunused_alias:\n  jmp missing_sibling_target\n\n.section .note.GNU-stack,\"\",@progbits\n",
+                    alias_gc_section(TargetOS::Linux, 0),
+                    alias_gc_section(TargetOS::Linux, 1),
+                ),
+            )
+            .unwrap();
+            fs::write(
+                &main,
+                "extern long used_alias(void); long used_target(void) { return 7; } int main(void) { return used_alias() != 7; }\n",
+            )
+            .unwrap();
+
+            let link = Command::new("cc")
+                .arg("-ffunction-sections")
+                .arg("-Wl,--gc-sections")
+                .arg(&main)
+                .arg(&aliases)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+            assert!(Command::new(&binary).status().unwrap().success());
+        }
+    }
 
     #[test]
     fn runtime_owned_symbols_are_not_suffix_aliased() {
