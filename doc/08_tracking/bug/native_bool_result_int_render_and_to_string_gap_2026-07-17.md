@@ -126,6 +126,8 @@ custom receivers retain the loud unresolved path. The focused MIR regression
 has no `SIMPLE_BOOTSTRAP` dependency and requires each bool/f64/u64/i64
 renderer once per conversion alias. Cranelift routes the f64 renderer through
 an explicit f64-to-i64 runtime import instead of its generic all-i64 fallback.
+Strict dual-backend scenarios cover a side-effecting custom-owner collision and
+bool/f64/i64/u64/text `.to_string()` output.
 Native execution remains pending because the
 available pure-Simple test artifacts either crash before scenario output or
 lack the `test` command.

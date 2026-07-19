@@ -15,9 +15,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **94 logical cases / 130 recorded checks** because strict-dual cases
+  defines **94 logical cases / 131 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **95 logical cases / 131 recorded checks**; execution is opt-in because
+  to **95 logical cases / 132 recorded checks**; execution is opt-in because
   the exact brace-literal reproduction remains known-red. Execution of the
   expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -408,6 +408,8 @@ the shared binary — deploys require explicit user go-ahead).
   supported bool/numeric MIR types, and reuses the existing renderer.
   Cranelift now gives `rt_raw_f64_to_string` its required f64 argument ABI
   instead of the generic all-i64 import signature. Focused MIR/source
-  regressions pin both aliases and the typed import. The
+  regressions pin both aliases and the typed import. Strict dual-backend
+  scenarios also cover a side-effecting custom-owner `.to_string()` collision
+  plus bool/f64/i64/u64/text primitive output. The
   available pure-Simple test artifacts either crash before scenario output or
   lack the `test` command, so native execution remains pending.
