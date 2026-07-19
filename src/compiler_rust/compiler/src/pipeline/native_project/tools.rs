@@ -283,6 +283,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_signal.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",

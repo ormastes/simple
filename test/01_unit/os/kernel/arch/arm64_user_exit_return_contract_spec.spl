@@ -1,0 +1,100 @@
+use std.io_runtime.{file_read}
+
+describe "ARM64 blocking EL0 exit return contract":
+    it "01 preserves the AAPCS kernel frame and translation state around EL0":
+        val crt = file_read("examples/09_embedded/simple_os/arch/arm64/boot/crt0.S")
+
+        expect(crt).to_contain("arm64_enter_user_virtual:")
+        expect(crt).to_contain("sub     sp, sp, #128")
+        expect(crt).to_contain("stp     x19, x20, [sp, #0]")
+        expect(crt).to_contain("stp     x21, x22, [sp, #16]")
+        expect(crt).to_contain("stp     x23, x24, [sp, #32]")
+        expect(crt).to_contain("stp     x25, x26, [sp, #48]")
+        expect(crt).to_contain("stp     x27, x28, [sp, #64]")
+        expect(crt).to_contain("stp     x29, x30, [sp, #80]")
+        expect(crt).to_contain("mrs     x9, ttbr0_el1")
+        expect(crt).to_contain("mrs     x10, sctlr_el1")
+        expect(crt).to_contain("mrs     x9, tcr_el1")
+        expect(crt).to_contain("mrs     x10, mair_el1")
+        expect(crt).to_contain("bic     x9, x9, #1")
+        expect(crt).to_contain("msr     sctlr_el1, x9")
+        expect(crt).to_contain("arm64_user_exit_resume:")
+        expect(crt).to_contain("bic     x13, x13, #1")
+        expect(crt).to_contain("msr     sctlr_el1, x13")
+        expect(crt).to_contain("msr     sctlr_el1, x10")
+        expect(crt).to_contain("ldp     x29, x30, [sp, #80]")
+        expect(crt).to_contain("add     sp, sp, #128")
+        expect(crt).to_contain(".size arm64_enter_user_virtual, . - arm64_enter_user_virtual")
+        expect(crt).to_contain(".size arm64_user_exit_resume, . - arm64_user_exit_resume")
+
+    it "02 unwinds only syscall zero and leaves other syscalls on the eret path":
+        val crt = file_read("examples/09_embedded/simple_os/arch/arm64/boot/crt0.S")
+        val handler = crt.split("_lower_el_aarch64_sync_handler:")[1].split("_fault_handler:")[0]
+
+        expect(handler).to_contain("ldr     x9, [sp, #64]")
+        expect(handler).to_contain("cbz     x9, .Llower_el_user_exit")
+        expect(handler).to_contain("str     x0, [sp, #0]")
+        expect(handler).to_contain("eret")
+        expect(handler).to_contain("add     sp, sp, #272")
+        expect(handler).to_contain("b       arm64_user_exit_resume")
+
+    it "03 maps the complete trampoline plus exception-frame stack window":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+
+        expect(runtime).to_contain("#define ARM64_USER_ENTRY_FRAME_BYTES 128ULL")
+        expect(runtime).to_contain("#define ARM64_LOWER_EL_FRAME_BYTES 272ULL")
+        expect(runtime).to_contain("current_sp - return_stack_bytes")
+        expect(runtime).to_contain("while (return_page <= current_sp_page)")
+        expect(runtime).to_contain("if (!arm64_user_as_map_identity_el1(root, return_page, rw_el1_nx)) return 0;")
+        expect(runtime).to_contain("preflight entry trampoline failed")
+        expect(runtime).to_contain("preflight exit resume failed")
+
+    it "04 returns raw exit status without terminating QEMU in the syscall owner":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val svc = runtime.split("uint64_t rt_arm64_handle_user_svc(")[2].split("RuntimeValue rt_arm64_enter_recorded_user_live")[0]
+
+        expect(svc).to_contain("if (id == 0)")
+        expect(svc).to_contain("user-svc-exit:ok code=")
+        expect(svc).to_contain("return a0;")
+        expect(svc.contains("rt_qemu_exit_success")).to_equal(false)
+        expect(runtime).to_contain("return (RuntimeValue)-14")
+        expect(runtime).to_contain("return (RuntimeValue)-22")
+        expect(runtime).to_contain("return (RuntimeValue)arm64_enter_user_virtual(")
+
+    it "05 keeps the blocking bridge single-lane and returns zero as a valid exit code":
+        val bridge = file_read("src/os/kernel/arch/arm64/user_entry.spl")
+
+        expect(bridge).to_contain("one active EL0 handoff per CPU")
+        expect(bridge).to_contain("PID-keyed recorded handoffs")
+        expect(bridge).to_contain("nested kernel resume frames")
+        expect(bridge).to_contain("blocking live return exit={live_rc}")
+        expect(bridge.contains("if live_rc == 0:")).to_equal(false)
+        expect(bridge.contains("return -16")).to_equal(false)
+
+    it "06 terminates the dedicated QEMU gate only after kernel resume":
+        val entry = file_read("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
+        val contract = file_read("src/os/qemu_systest_contract.spl")
+
+        expect(entry).to_contain("if handoff_rc == 0:")
+        expect(entry).to_contain("[arm64-user] kernel-resumed exit=0")
+        expect(entry).to_contain("rt_qemu_exit_success()")
+        expect(contract).to_contain("[arm64-user] kernel-resumed exit=0")
+
+    it "07 enters the mounted Simple compiler and checks its returned exit code":
+        val entry = file_read("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
+
+        expect(entry).to_contain("arm64_fs_exec_spawn_ring3(\"/usr/bin/simple\"")
+        expect(entry).to_contain("if sim_rc == 0:")
+        expect(entry).to_contain("[simple-gate] execution:ok app=/usr/bin/simple argv=/hello.spl exit=0")
+        expect(entry.contains("val sim_pid = arm64_fs_exec_spawn(")).to_be(false)
+
+    it "08 bounds executable images and keeps fallback stack frames outside every image arena":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val memory = file_read("src/os/kernel/memory/user_address_space.spl")
+
+        expect(runtime).to_contain("#define ARM64_UAS_REGION_SIZE 0x00800000ULL")
+        expect(runtime).to_contain("#define ARM64_UAS_IMAGE_BYTES (ARM64_UAS_REGION_SIZE - ARM64_UAS_TABLE_BYTES - 4096ULL)")
+        expect(runtime).to_contain("end_vaddr - min_vaddr > ARM64_UAS_IMAGE_BYTES")
+        expect(runtime).to_contain("padded > ARM64_UAS_IMAGE_BYTES")
+        expect(memory).to_contain("ARM64_FS_EXEC_FRAME_BASE: u64 = 0x52000000")
+        expect(memory).to_contain("ARM64_FS_EXEC_FRAME_END: u64 = 0x57000000")

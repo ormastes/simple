@@ -19,6 +19,7 @@ on:
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
       - 'scripts/check/check-native-option-try-target-fail.shs'
       - 'scripts/check/check-native-seed-parity.shs'
+      - 'scripts/check/check-native-runtime-queue.shs'
       - 'scripts/check/check-stage4-hosted-dynload-provider-archive.shs'
       - 'scripts/check/validate_stage4_hosted_dynload_provider_archive.spl'
       - 'scripts/check/native-smoke-matrix.shs'
@@ -28,6 +29,7 @@ on:
       - 'test/fixtures/compiler/native_option_try_*_loud.spl'
       - 'test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl'
       - 'test/fixtures/compiler/native_class_array_param_field_mutation.spl'
+      - 'test/fixtures/compiler/native_method_builtin_name_ownership.spl'
       - 'test/fixtures/browser/event_loop_set_timeout_standalone.spl'
       - 'test/fixtures/native_nested_struct_array_text_projection/**'
       - 'test/fixtures/native_draw_ir_command_text_projection/**'
@@ -35,6 +37,8 @@ on:
       - 'test/fixtures/native_web_draw_ir_provenance/**'
       - 'test/fixtures/native_crossmodule_result_u8/**'
       - 'test/01_unit/compiler/backend/hosted_c_target_guard_spec.spl'
+      - 'test/01_unit/compiler/backend/stage4_*_spec.spl'
+      - 'test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl'
       - '.github/workflows/freebsd-build.yml'
       - '.github/workflows/windows-tests.yml'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
@@ -56,6 +60,7 @@ on:
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
       - 'scripts/check/check-native-option-try-target-fail.shs'
       - 'scripts/check/check-native-seed-parity.shs'
+      - 'scripts/check/check-native-runtime-queue.shs'
       - 'scripts/check/check-stage4-hosted-dynload-provider-archive.shs'
       - 'scripts/check/validate_stage4_hosted_dynload_provider_archive.spl'
       - 'scripts/check/native-smoke-matrix.shs'
@@ -65,6 +70,7 @@ on:
       - 'test/fixtures/compiler/native_option_try_*_loud.spl'
       - 'test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl'
       - 'test/fixtures/compiler/native_class_array_param_field_mutation.spl'
+      - 'test/fixtures/compiler/native_method_builtin_name_ownership.spl'
       - 'test/fixtures/browser/event_loop_set_timeout_standalone.spl'
       - 'test/fixtures/native_nested_struct_array_text_projection/**'
       - 'test/fixtures/native_draw_ir_command_text_projection/**'
@@ -72,6 +78,8 @@ on:
       - 'test/fixtures/native_web_draw_ir_provenance/**'
       - 'test/fixtures/native_crossmodule_result_u8/**'
       - 'test/01_unit/compiler/backend/hosted_c_target_guard_spec.spl'
+      - 'test/01_unit/compiler/backend/stage4_*_spec.spl'
+      - 'test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl'
       - '.github/workflows/freebsd-build.yml'
       - '.github/workflows/windows-tests.yml'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
@@ -141,12 +149,12 @@ jobs:
 
       - name: Install FreeType (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev
+        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev libsqlite3-dev
 
       - name: Install FreeType (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install freetype ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
+          brew install freetype coreutils ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
           echo "RUSTFLAGS=-L native=$(brew --prefix freetype)/lib" >> "$GITHUB_ENV"
           if [ "${{ matrix.backend }}" = "llvm" ]; then
             llvm_prefix=$(brew --prefix llvm@18)
@@ -158,14 +166,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          vcpkg install freetype:x64-windows
+          vcpkg install freetype:x64-windows sqlite3:x64-windows
           "RUSTFLAGS=-L native=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib" >> $env:GITHUB_ENV
+          "INCLUDE=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/include;$env:INCLUDE" >> $env:GITHUB_ENV
+          "LIB=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib;$env:LIB" >> $env:GITHUB_ENV
           "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
-          if ("${{ matrix.backend }}" -eq "llvm") {
-            choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade
-            "LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
-            "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-          }
+          choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade
+          "LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
+          "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -185,10 +193,12 @@ jobs:
           if [ "${{ matrix.backend }}" = "llvm" ]; then
             cargo build --profile bootstrap -p simple-driver --features llvm
             cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
-            cargo build --profile bootstrap -p simple-compiler-backfill
           else
             cargo build --profile bootstrap -p simple-driver
             cargo build --profile bootstrap -p simple-native-all --features driver-compat
+          fi
+          if [ "$RUNNER_OS" = "Windows" ] || [ "${{ matrix.backend }}" = "llvm" ]; then
+            cargo build --profile bootstrap -p simple-compiler-backfill
           fi
 
       - name: Test
@@ -203,8 +213,9 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             export SIMPLE_LINKER_FLAVOR=msvc
-          fi
-          if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
+            export SIMPLE_WINDOWS_ABI=msvc
+            mcp_flag=--full-cli
+          elif [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
             mcp_flag=--full-cli
           else
             mcp_flag=--no-mcp
@@ -214,6 +225,14 @@ jobs:
             --mode=dynload \
             "$mcp_flag" \
             --jobs=2
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            full_dir=build/bootstrap/full/x86_64-pc-windows-msvc
+            test -s "$full_dir/simple.exe"
+            set -- "$full_dir"/simple_stage4_*.dll
+            [ "$#" -eq 1 ]
+            test -s "$1"
+            test -s "$full_dir/sqlite3.dll"
+          fi
 
       - name: Validate hosted Stage4 dynload provider archive
         if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'
@@ -281,6 +300,19 @@ jobs:
             NATIVE_SMOKE_WORK_DIR="build/check/native-smoke-${{ matrix.backend }}" \
             sh scripts/check/native-smoke-matrix.shs
 
+      - name: Run native host/GPU runtime queue ABI gate
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
+          test -n "$stage3"
+          chmod +x "$stage3"
+          SIMPLE_BIN="$stage3" \
+            SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
+            NATIVE_RUNTIME_QUEUE_BACKEND=${{ matrix.backend }} \
+            NATIVE_RUNTIME_QUEUE_WORK_DIR="build/check/native-runtime-queue-${{ matrix.backend }}" \
+            sh scripts/check/check-native-runtime-queue.shs
+
       - name: Run strict Option native-authoritative parity
         shell: bash
         run: |
@@ -327,7 +359,7 @@ jobs:
           test -n "$stage3"
           chmod +x "$stage3"
           SIMPLE_BINARY="$stage3" \
-            NATIVE_PARITY_CASES="class_array_field_mutation nested_struct_value_copy text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch option_is_none_map" \
+            NATIVE_PARITY_CASES="class_array_field_mutation nested_struct_value_copy text_option_unwrap_present text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch method_builtin_name_ownership module_global_static_init option_is_none_map" \
             NATIVE_PARITY_FAIL_ON_XFAIL=1 \
             PARITY_WORK_DIR="build/check/native-selected-parity" \
             sh scripts/check/check-native-seed-parity.shs
@@ -406,8 +438,8 @@ jobs:
       - name: Install LLVM cross-execution toolchains
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev \
-            binutils-arm-linux-gnueabihf \
+          sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev libsqlite3-dev \
+            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf libc6-dev-armhf-cross \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
             gcc-mingw-w64-x86-64 qemu-user
@@ -504,7 +536,7 @@ jobs:
         with:
           usesh: true
           prepare: |
-            pkg install -y curl bash freetype2
+            pkg install -y curl bash freetype2 sqlite3
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
           run: |
             . "$HOME/.cargo/env"

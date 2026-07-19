@@ -1,0 +1,102 @@
+#!/bin/sh
+# Build the one-shot mounted-ELF ARM64 fs-exec acceptance payload.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SRC="examples/09_embedded/simple_os/arch/arm64/user_fsexec_src/mounted_elf.S"
+OUT_DIR="build/os/arm64_fsexec"
+OBJ="$OUT_DIR/mounted_elf.o"
+OUT="$OUT_DIR/mounted_elf.elf"
+CLANG="${CLANG:-clang}"
+LD_LLD="${LD_LLD:-ld.lld}"
+READELF="${READELF:-readelf}"
+
+for tool in "$CLANG" "$LD_LLD" "$READELF"; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "error: required host tool not found: $tool" >&2
+        exit 1
+    }
+done
+
+mkdir -p "$OUT_DIR"
+"$CLANG" --target=aarch64-unknown-none-elf -c -ffreestanding -nostdlib \
+    -o "$OBJ" "$SRC"
+"$LD_LLD" -m aarch64elf -static --build-id=none -z max-page-size=4096 \
+    -e _start -Ttext=0x201000 -o "$OUT" "$OBJ"
+
+header="$($READELF -h "$OUT")"
+printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF64' || {
+    echo "error: mounted payload is not ELF64" >&2
+    exit 1
+}
+printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+EXEC' || {
+    echo "error: mounted payload is not ET_EXEC" >&2
+    exit 1
+}
+printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+AArch64' || {
+    echo "error: mounted payload is not AArch64" >&2
+    exit 1
+}
+
+entry="$(printf '%s\n' "$header" | awk '/Entry point address:/ { print $4 }')"
+case "$entry" in
+    ''|0|0x0) echo "error: mounted payload has no entry point" >&2; exit 1 ;;
+esac
+
+# Require the entry point to fall inside an executable PT_LOAD segment.
+"$READELF" -W -l "$OUT" | awk -v entry="$entry" '
+function hex(value,    i, digit, result) {
+    sub(/^0x/, "", value)
+    value = tolower(value)
+    result = 0
+    for (i = 1; i <= length(value); i++) {
+        digit = index("0123456789abcdef", substr(value, i, 1)) - 1
+        if (digit < 0) return -1
+        result = (result * 16) + digit
+    }
+    return result
+}
+$1 == "LOAD" && $0 ~ / E / {
+    start = hex($3)
+    size = hex($6)
+    target = hex(entry)
+    if (size > 0 && target >= start && target < start + size) found = 1
+}
+END { exit found ? 0 : 1 }
+' || {
+    echo "error: mounted payload entry is not in an executable PT_LOAD" >&2
+    exit 1
+}
+
+# The ARM64 early-user address space reserves 1 MiB after its page-table
+# arena for direct-loaded PT_LOAD bytes. Reject layouts that escape it.
+"$READELF" -W -l "$OUT" | awk '
+function hex(value,    i, digit, result) {
+    sub(/^0x/, "", value)
+    value = tolower(value)
+    result = 0
+    for (i = 1; i <= length(value); i++) {
+        digit = index("0123456789abcdef", substr(value, i, 1)) - 1
+        if (digit < 0) return -1
+        result = (result * 16) + digit
+    }
+    return result
+}
+$1 == "LOAD" {
+    start = hex($3)
+    size = hex($6)
+    page_start = start - (start % 4096)
+    end = start + size
+    if (!seen || page_start < min_start) min_start = page_start
+    if (!seen || end > max_end) max_end = end
+    seen = 1
+}
+END { exit seen && max_end - min_start <= 1048576 ? 0 : 1 }
+' || {
+    echo "error: mounted payload PT_LOAD span exceeds 1 MiB direct-load arena" >&2
+    exit 1
+}
+
+echo "built: $OUT"

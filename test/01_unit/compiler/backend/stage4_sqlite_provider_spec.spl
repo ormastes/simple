@@ -1,0 +1,124 @@
+use compiler.backend.backend.stage4_symbol_closure.{stage4_sqlite_provider_archive_file, stage4_sqlite_provider_object_format, stage4_validate_sqlite_provider_symbol_contract, stage4_resolve_requested_archive_owners}
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn sqlite_provider_nm() -> text:
+    """0001 T rt_sqlite_begin
+0002 T rt_sqlite_bind_float
+0003 T rt_sqlite_bind_int
+0004 T rt_sqlite_bind_null
+0005 T rt_sqlite_bind_text
+0006 T rt_sqlite_changes
+0007 T rt_sqlite_close
+0008 T rt_sqlite_column_count
+0009 T rt_sqlite_column_float
+0010 T rt_sqlite_column_int
+0011 T rt_sqlite_column_name
+0012 T rt_sqlite_column_text
+0013 T rt_sqlite_column_type
+0014 T rt_sqlite_commit
+0015 T rt_sqlite_error_message
+0016 T rt_sqlite_execute
+0017 T rt_sqlite_execute_batch
+0018 T rt_sqlite_finalize
+0019 T rt_sqlite_last_insert_rowid
+0020 T rt_sqlite_open
+0021 T rt_sqlite_open_memory
+0022 T rt_sqlite_prepare
+0023 T rt_sqlite_query
+0024 T rt_sqlite_query_done
+0025 T rt_sqlite_query_next
+0026 T rt_sqlite_reset
+0027 T rt_sqlite_rollback
+U rt_string_data
+U rt_string_new
+U sqlite3_bind_double
+U sqlite3_bind_int64
+U sqlite3_bind_null
+U sqlite3_bind_text
+U sqlite3_changes
+U sqlite3_close
+U sqlite3_column_count
+U sqlite3_column_double
+U sqlite3_column_int64
+U sqlite3_column_name
+U sqlite3_column_text
+U sqlite3_column_type
+U sqlite3_errmsg
+U sqlite3_exec
+U sqlite3_finalize
+U sqlite3_free
+U sqlite3_last_insert_rowid
+U sqlite3_open
+U sqlite3_prepare_v2
+U sqlite3_reset
+U sqlite3_step
+"""
+
+describe "Stage4 SQLite provider":
+    it "uses one hosted archive and exact object formats":
+        expect(stage4_sqlite_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_sqlite.a")
+        expect(stage4_sqlite_provider_archive_file("macos", false).unwrap()).to_equal("libsimple_stage4_sqlite.a")
+        expect(stage4_sqlite_provider_archive_file("freebsd", false).unwrap()).to_equal("libsimple_stage4_sqlite.a")
+        expect(stage4_sqlite_provider_archive_file("windows", false).unwrap()).to_equal("libsimple_stage4_sqlite.a")
+        expect(stage4_sqlite_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_sqlite.lib")
+        expect(stage4_sqlite_provider_object_format("linux", false).unwrap()).to_equal("elf")
+        expect(stage4_sqlite_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_sqlite_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_sqlite_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_sqlite_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+        expect(stage4_sqlite_provider_archive_file("plan9", false).is_err()).to_be(true)
+
+    it "accepts only the exact SQLite ABI and audited dependencies":
+        val nm = sqlite_provider_nm()
+        expect(stage4_validate_sqlite_provider_symbol_contract(nm, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_sqlite_provider_symbol_contract(nm.replace("0001 T rt_sqlite_begin\n", ""), "elf").unwrap_err()).to_contain("definitions differ")
+        expect(stage4_validate_sqlite_provider_symbol_contract(nm + "0028 T unexpected\n", "elf").unwrap_err()).to_contain("definitions differ")
+        expect(stage4_validate_sqlite_provider_symbol_contract(nm.replace("U rt_string_new\n", ""), "elf").unwrap_err()).to_contain("missing required runtime dependency")
+        expect(stage4_validate_sqlite_provider_symbol_contract(nm.replace("U sqlite3_step\n", ""), "elf").unwrap_err()).to_contain("missing required external dependency")
+        expect(stage4_validate_sqlite_provider_symbol_contract(nm + "U surprise\n", "elf").unwrap_err()).to_contain("unexpected external dependency")
+
+    it "canonicalizes MinGW and MSVC imports without widening the contract":
+        val mingw = sqlite_provider_nm().replace("U sqlite3_", "U __imp_sqlite3_") + "U @feat.00\n"
+        val msvc = mingw.replace(" T rt_", " T _rt_").replace("U rt_", "U _rt_") + "U _fltused\n"
+        expect(stage4_validate_sqlite_provider_symbol_contract(mingw, "coff-mingw").is_ok()).to_be(true)
+        expect(stage4_validate_sqlite_provider_symbol_contract(msvc, "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_sqlite_provider_symbol_contract(msvc.replace("U _fltused\n", ""), "coff-msvc").unwrap_err()).to_contain("missing required external dependency")
+        expect(stage4_validate_sqlite_provider_symbol_contract(mingw + "U __imp_surprise\n", "coff-mingw").unwrap_err()).to_contain("unexpected external dependency")
+
+    it "selects SQLite and its runtime string dependencies transitively":
+        val core = "0001 T rt_string_data\n0002 T rt_string_new\n"
+        val (selected, owners) = stage4_resolve_requested_archive_owners(["rt_sqlite_open"], ["runtime_native", "runtime_sqlite"], [core, sqlite_provider_nm()], false).unwrap()
+        expect(selected).to_equal([0, 1])
+        expect(owners.len()).to_equal(3)
+
+    it "builds and links SQLite only inside the strict Stage4 owner path":
+        val compiler = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val linker = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val strict_start: i64 = linker.find("if stage4_requested:") ?? -1
+        val strict_end: i64 = linker.find("# Step 3: Combine all objects and link") ?? -1
+        val strict = if strict_start >= 0 and strict_end > strict_start: linker.substring(strict_start, strict_end) else: ""
+        val build_pos: i64 = strict.find("llvm_stage4_build_sqlite_provider_archive") ?? -1
+        val inventory_pos: i64 = strict.find("llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths)") ?? -1
+        val owner_pos: i64 = strict.find("stage4_resolve_requested_archive_owners") ?? -1
+        expect(compiler).to_contain("if include_stage4_legacy_compat:")
+        expect(compiler).to_contain("sources = sources.push(\"runtime_sqlite\")")
+        expect(compiler).to_contain("-fno-stack-protector")
+        expect(compiler).to_contain("-fno-builtin")
+        expect(build_pos).to_be_greater_than(-1)
+        expect(inventory_pos).to_be_greater_than(build_pos)
+        expect(owner_pos).to_be_greater_than(inventory_pos)
+        expect(strict).to_contain("\"runtime_sqlite\"")
+        expect(strict).to_contain("stage4_system_libraries = [\"sqlite3\"]")
+        expect(strict).to_contain("stage4_system_library_paths = [\"/usr/local/lib\"]")
+
+    it "keeps native result values aligned with the public Simple contract":
+        val binding = rt_file_read_text("src/app/io/sqlite_sffi.spl") ?? ""
+        val provider = rt_file_read_text("src/runtime/runtime_sqlite.c") ?? ""
+        expect(binding).to_contain("result == 1")
+        expect(provider).to_contain("return from_int(rc == SQLITE_OK ? 1 : 0);")
+        expect(provider).to_contain("return from_int(rc == SQLITE_ROW ? 1 : 0);")
+        expect(provider).to_contain("if (is_nil(handle)) return from_int(0);")
+        expect(provider.contains("SPECIAL_TRUE")).to_be(false)
+        expect(provider.contains("SPECIAL_FALSE")).to_be(false)

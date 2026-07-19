@@ -65,6 +65,8 @@ val SATP_MODE_SHIFT: u64 = 60
 
 # Identity map range: first 1GB for initial kernel
 val IDENTITY_MAP_END: u64 = 0x40000000      # 1GB
+val RV64_SUPERVISOR_MMIO_VPN2_SLOT: u64 = 0 # 0x00000000..0x3FFFFFFF
+val RV64_KERNEL_VPN2_SLOT: u64 = 2          # 0x80000000..0xBFFFFFFF
 
 # ============================================================================
 # Virtual Memory Manager
@@ -252,7 +254,7 @@ fn _identity_map_1gb():
     # Map RAM region: 0x80000000..0xBFFFFFFF
     # VPN[2]=2 -> 0x80000000..0xBFFFFFFF
     val ram_entry = _phys_to_pte_ppn(0x80000000) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D
-    _write_pte(root, 2, ram_entry)
+    _write_pte(root, RV64_KERNEL_VPN2_SLOT, ram_entry)
 
     log_raw_println("[VMM] Identity-mapped: I/O [0x0..0x40000000] + RAM [0x80000000..0xC0000000]")
 
@@ -260,19 +262,20 @@ fn _identity_map_1gb():
 # Page Mapping (4KB pages)
 # ============================================================================
 
-fn riscv64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
-    """Map a single 4KB virtual page to a physical frame.
+fn riscv64_vmm_map_page_in(root_phys: u64, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a single 4KB virtual page in the supplied Sv39 root.
 
     Walks the 3-level page table, creating intermediate tables as needed.
     Returns true on success, false on failure (e.g., out of memory).
     """
+    if root_phys == 0:
+        return false
+
     val vaddr = virt.addr
     val paddr = phys.addr
 
-    val root = g_vmm.root_phys
-
     # Walk Level 2 (VPN[2]) -> Level 1
-    val l1_phys = _ensure_table_entry(root, _vpn2(vaddr))
+    val l1_phys = _ensure_table_entry(root_phys, _vpn2(vaddr))
     if l1_phys == 0:
         return false
 
@@ -287,6 +290,10 @@ fn riscv64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     _write_pte(l0_phys, _vpn0(vaddr), entry)
 
     true
+
+fn riscv64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a page in the active kernel Sv39 root."""
+    riscv64_vmm_map_page_in(g_vmm.root_phys, virt, phys, flags)
 
 fn riscv64_vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page.
@@ -376,15 +383,34 @@ fn riscv64_vmm_translate(virt: VirtAddr) -> PhysAddr?:
 fn vmm_create_address_space() -> u64:
     """Create a new address space (root page table) for a process.
 
-    Allocates a fresh root page table and copies the kernel mappings
-    (upper entries) from the kernel's root table.
+    Allocates a fresh root page table and copies the supervisor-only kernel
+    RAM identity mapping plus the upper mappings from the kernel root.
     Returns the physical address of the new root table, or 0 on failure.
     """
+    val kernel_root = g_vmm.root_phys
+    if kernel_root == 0:
+        return 0
+
+    val supervisor_mmio_entry = _read_pte(kernel_root, RV64_SUPERVISOR_MMIO_VPN2_SLOT)
+    if not _pte_is_valid(supervisor_mmio_entry) or not _pte_is_leaf(supervisor_mmio_entry):
+        return 0
+    if (supervisor_mmio_entry & PTE_U) != 0:
+        return 0
+
+    val kernel_ram_entry = _read_pte(kernel_root, RV64_KERNEL_VPN2_SLOT)
+    if not _pte_is_valid(kernel_ram_entry) or not _pte_is_leaf(kernel_ram_entry):
+        return 0
+    if (kernel_ram_entry & PTE_U) != 0:
+        return 0
+
     val new_root_phys = _alloc_table_page()
     if new_root_phys == 0:
         return 0
 
-    val kernel_root = g_vmm.root_phys
+    # Trap handling under a user SATP still needs supervisor-only UART/PLIC in
+    # slot 0 and kernel RAM in slot 2. Userspace links in slot 4.
+    _write_pte(new_root_phys, RV64_SUPERVISOR_MMIO_VPN2_SLOT, supervisor_mmio_entry)
+    _write_pte(new_root_phys, RV64_KERNEL_VPN2_SLOT, kernel_ram_entry)
 
     # Copy kernel-space entries (upper half: indices 256..511)
     # This ensures kernel is mapped in every address space

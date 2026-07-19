@@ -1,0 +1,134 @@
+use std.spec.*
+use std.hardware.rv64gc_rtl.sv39_address.sv39_full_vpn
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_set_satp}
+use std.hardware.rv64gc_rtl.mmu_sv39.{mmu64_tlb_insert, mmu64_tlb_lookup}
+use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
+use std.hardware.rv64gc_rtl.mmu_sv39.{PRIV_S_64}
+use std.hardware.rv64gc_rtl.sv39_walker.{sv39_walker64_start, sv39_walker64_cycle}
+use std.hardware.rv64gc_rtl.pmp.PmpEntries64
+use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_entries_reset, pmp64_csr_write}
+
+val PTE_V: i64 = 1
+val PTE_R: i64 = 2
+val PTE_W: i64 = 4
+val PTE_X: i64 = 8
+val PTE_U: i64 = 16
+val PTE_G: i64 = 32
+val PTE_A: i64 = 64
+val PTE_D: i64 = 128
+
+fn satp_sv39(root_ppn: i64, asid: i64) -> i64:
+    ((8 as i64) << 60) | ((asid & 0xFFFF) << 44) | root_ppn
+
+fn pointer_pte(ppn: i64) -> i64:
+    (ppn << 10) | PTE_V
+
+fn leaf_pte(ppn: i64, flags: i64) -> i64:
+    (ppn << 10) | flags | PTE_V
+
+fn allow_all_pmp() -> PmpEntries64:
+    var entries = pmp64_entries_reset()
+    entries = pmp64_csr_write(entries, 0x3B0, 0x003FFFFFFFFFFFFF).entries
+    pmp64_csr_write(entries, 0x3A0, 0x1F).entries
+
+describe "RV64 Sv39 request response walker":
+    it "walks three levels, preserves request handshakes, and refills a 4 KiB TLB entry":
+        val vaddr: i64 = 0x0000000000401234
+        var mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 7))
+        val pmp = allow_all_pmp()
+        var walker = sv39_walker64_start(mmu, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false)
+
+        val held = sv39_walker64_cycle(walker, mmu, pmp, false, false, false, 0)
+        expect(held.bus_valid).to_be(true)
+        expect(held.bus_addr).to_equal(0x100000)
+        val l2_issue = sv39_walker64_cycle(held.walker, held.mmu, pmp, true, false, false, 0)
+        expect(l2_issue.bus_valid).to_be(true)
+        expect(l2_issue.bus_addr).to_equal(0x100000)
+        expect(l2_issue.bus_size).to_equal(8)
+        expect(l2_issue.bus_write).to_be(false)
+        walker = l2_issue.walker
+        val l2_response = sv39_walker64_cycle(walker, mmu, pmp, false, true, false, pointer_pte(0x101))
+
+        val l1_issue = sv39_walker64_cycle(l2_response.walker, l2_response.mmu, pmp, true, false, false, 0)
+        expect(l1_issue.bus_addr).to_equal(0x101010)
+        val l1_response = sv39_walker64_cycle(l1_issue.walker, l1_issue.mmu, pmp, false, true, false, pointer_pte(0x102))
+
+        val l0_issue = sv39_walker64_cycle(l1_response.walker, l1_response.mmu, pmp, true, false, false, 0)
+        expect(l0_issue.bus_addr).to_equal(0x102008)
+        val flags = PTE_R | PTE_W | PTE_A | PTE_D
+        val done = sv39_walker64_cycle(l0_issue.walker, l0_issue.mmu, pmp, false, true, false, leaf_pte(0x80000, flags))
+        expect(done.done).to_be(true)
+        expect(done.fault).to_be(false)
+        expect(done.paddr).to_equal(0x80000234)
+        expect(done.mmu.tlb_count).to_equal(1)
+        val hit = mmu64_tlb_lookup(done.mmu, sv39_full_vpn(vaddr))
+        expect(hit.hit).to_be(true)
+        expect(hit.level).to_equal(0)
+        val other_asid = mmu64_set_satp(done.mmu, satp_sv39(0x100, 8))
+        expect(sv39_walker64_start(other_asid, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false).tlb_hit).to_be(false)
+
+    it "suppresses a page-table bus request when S-effective PMP denies it":
+        val vaddr: i64 = 0x4000
+        val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
+        val walker = sv39_walker64_start(mmu, vaddr, ACCESS_FETCH_64, PRIV_S_64, false, false)
+        val denied = sv39_walker64_cycle(walker, mmu, pmp64_entries_reset(), false, false, false, 0)
+        expect(denied.bus_valid).to_be(false)
+        expect(denied.done).to_be(true)
+        expect(denied.fault).to_be(true)
+        expect(denied.fault_cause).to_equal(1)
+        expect(denied.fault_tval).to_equal(vaddr)
+
+    it "maps a page-table bus error to the originating store access fault":
+        val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
+        val walker = sv39_walker64_start(mmu, 0x8000, ACCESS_STORE_64, PRIV_S_64, false, false)
+        val issued = sv39_walker64_cycle(walker, mmu, allow_all_pmp(), true, false, false, 0)
+        val failed = sv39_walker64_cycle(issued.walker, issued.mmu, allow_all_pmp(), false, true, true, 0)
+        expect(failed.fault).to_be(true)
+        expect(failed.fault_cause).to_equal(7)
+
+    it "applies SUM and MXR on TLB hits without allowing supervisor fetches from user pages":
+        val vaddr: i64 = 0x5000
+        var mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
+        mmu = mmu64_tlb_insert(mmu, sv39_full_vpn(vaddr), 0x90000, PTE_V | PTE_X | PTE_U | PTE_A)
+        val load = sv39_walker64_start(mmu, vaddr, ACCESS_LOAD_64, PRIV_S_64, true, true)
+        expect(load.tlb_hit).to_be(true)
+        expect(load.paddr).to_equal(0x90000000)
+        val fetch = sv39_walker64_start(mmu, vaddr, ACCESS_FETCH_64, PRIV_S_64, true, false)
+        expect(fetch.fault_cause).to_equal(12)
+
+    it "translates and caches an aligned 1 GiB leaf":
+        val vaddr: i64 = 0x0000000040203456
+        var mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
+        val walker = sv39_walker64_start(mmu, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false)
+        val issued = sv39_walker64_cycle(walker, mmu, allow_all_pmp(), true, false, false, 0)
+        val gigapage_ppn = (2 as i64) << 18
+        val done = sv39_walker64_cycle(issued.walker, issued.mmu, allow_all_pmp(), false, true, false, leaf_pte(gigapage_ppn, PTE_R | PTE_G | PTE_A))
+        expect(done.fault).to_be(false)
+        expect(done.paddr).to_equal(0x0000000080203456)
+        val other_asid = mmu64_set_satp(done.mmu, satp_sv39(0x100, 9))
+        val cached = sv39_walker64_start(other_asid, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false)
+        expect(cached.tlb_hit).to_be(true)
+        expect(cached.paddr).to_equal(0x0000000080203456)
+
+    it "accepts a zero-latency PTE response in the request handshake cycle":
+        val vaddr: i64 = 0x0000000040001234
+        val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
+        val walker = sv39_walker64_start(mmu, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false)
+        val gigapage_ppn = (3 as i64) << 18
+        val done = sv39_walker64_cycle(walker, mmu, allow_all_pmp(), true, true, false, leaf_pte(gigapage_ppn, PTE_R | PTE_A))
+        expect(done.bus_valid).to_be(true)
+        expect(done.done).to_be(true)
+        expect(done.paddr).to_equal(0x00000000C0001234)
+
+    it "faults before bus issue on a noncanonical address and on a clear accessed bit":
+        val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
+        val noncanonical = sv39_walker64_start(mmu, 0x0000004000000000, ACCESS_LOAD_64, PRIV_S_64, false, false)
+        expect(noncanonical.fault_cause).to_equal(13)
+        val reserved_privilege = sv39_walker64_start(mmu64_create(), 0x1000, ACCESS_LOAD_64, 2, false, false)
+        expect(reserved_privilege.fault_cause).to_equal(13)
+
+        val walker = sv39_walker64_start(mmu, 0x2000, ACCESS_LOAD_64, PRIV_S_64, false, false)
+        val issued = sv39_walker64_cycle(walker, mmu, allow_all_pmp(), true, false, false, 0)
+        val no_accessed = sv39_walker64_cycle(issued.walker, issued.mmu, allow_all_pmp(), false, true, false, leaf_pte(0x40000, PTE_R))
+        expect(no_accessed.fault).to_be(true)
+        expect(no_accessed.fault_cause).to_equal(13)

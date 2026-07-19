@@ -1,0 +1,98 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+BACKEND=${NATIVE_RUNTIME_QUEUE_BACKEND:-llvm}
+WORK_DIR=${NATIVE_RUNTIME_QUEUE_WORK_DIR:-build/check/native-runtime-queue-$BACKEND}
+RUNTIME_PATH=${SIMPLE_RUNTIME_PATH:-$ROOT_DIR/src/compiler_rust/target/bootstrap}
+SOURCE=test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl
+INTERPRETER_TIMEOUT_S=${NATIVE_RUNTIME_QUEUE_INTERPRETER_TIMEOUT_S:-180}
+BUILD_TIMEOUT_S=${NATIVE_RUNTIME_QUEUE_BUILD_TIMEOUT_S:-600}
+RUN_TIMEOUT_S=${NATIVE_RUNTIME_QUEUE_RUN_TIMEOUT_S:-180}
+
+case "$BACKEND" in
+    llvm|cranelift) ;;
+    *) echo "unsupported backend: $BACKEND" >&2; exit 2 ;;
+esac
+
+if command -v timeout >/dev/null 2>&1 && timeout 1 sh -c ':' >/dev/null 2>&1; then
+    TIMEOUT_CMD=timeout
+elif command -v gtimeout >/dev/null 2>&1 && gtimeout 1 sh -c ':' >/dev/null 2>&1; then
+    TIMEOUT_CMD=gtimeout
+else
+    echo "GNU-compatible timeout or gtimeout is required" >&2
+    exit 2
+fi
+
+run_bounded() {
+    stage=$1
+    seconds=$2
+    shift 2
+    set +e
+    "$TIMEOUT_CMD" "$seconds" "$@"
+    code=$?
+    set -e
+    if [ "$code" -ne 0 ]; then
+        echo "native runtime queue $stage failed (exit $code)" >&2
+        exit "$code"
+    fi
+}
+
+COMPILER_ID=$(cksum "$SIMPLE_BIN" | awk '{print $1 "-" $2}')
+CACHE_DIR="$WORK_DIR/cache/$COMPILER_ID"
+mkdir -p "$CACHE_DIR"
+rm -f "$WORK_DIR/oracle.out" "$WORK_DIR/native.out" "$WORK_DIR/native.err" \
+    "$WORK_DIR/native" "$WORK_DIR/native.exe"
+
+run_bounded interpreter "$INTERPRETER_TIMEOUT_S" env SIMPLE_LIB=src \
+    "$SIMPLE_BIN" run "$SOURCE" --mode=interpreter >"$WORK_DIR/oracle.out"
+
+NATIVE="$WORK_DIR/native"
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) NATIVE="$NATIVE.exe" ;;
+esac
+
+if [ "$BACKEND" = llvm ]; then
+    run_bounded build "$BUILD_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP \
+        SIMPLE_BINARY="$SIMPLE_BIN" SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_LIB=src "$SIMPLE_BIN" native-build \
+        --source src/lib --entry-closure \
+        --runtime-bundle host-gpu --runtime-path "$RUNTIME_PATH" \
+        --entry "$SOURCE" --cache-dir "$CACHE_DIR" \
+        --mode one-binary --output "$NATIVE"
+else
+    run_bounded build "$BUILD_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP \
+        SIMPLE_BINARY="$SIMPLE_BIN" SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_LIB=src "$SIMPLE_BIN" native-build --backend=cranelift \
+        --source src/lib --entry-closure \
+        --runtime-bundle host-gpu --runtime-path "$RUNTIME_PATH" \
+        --entry "$SOURCE" --cache-dir "$CACHE_DIR" \
+        --mode one-binary --output "$NATIVE"
+fi
+
+run_bounded native-run "$RUN_TIMEOUT_S" "$NATIVE" \
+    >"$WORK_DIR/native.out" 2>"$WORK_DIR/native.err"
+cmp "$WORK_DIR/oracle.out" "$WORK_DIR/native.out"
+test ! -s "$WORK_DIR/native.err"
+
+for expected in \
+    'queue_nonzero_backend_last_backend_handle=7' \
+    'queue_nonzero_backend_last_payload_hash=98765' \
+    'queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend' \
+    'queue_overflow_capacity=1024' \
+    'queue_overflow_accepted=1024' \
+    'queue_overflow_packet_id=0' \
+    'queue_overflow_drained=1024' \
+    'queue_draw_ir_dispatched=true' \
+    'queue_draw_ir_backend_handle=7' \
+    'queue_draw_ir_payload_nonempty=true' \
+    'queue_draw_ir_payload_has_schema=true' \
+    'queue_draw_ir_runtime_payload_has_schema=true'
+do
+    grep -Fxq "$expected" "$WORK_DIR/native.out"
+done
+
+echo "native_runtime_queue=true backend=$BACKEND"

@@ -280,6 +280,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     if include_stage4_legacy_compat:
         sources = sources.push("runtime_legacy_core")
         objects = objects.push("{object_prefix}runtime_legacy_core{ext}")
+        sources = sources.push("runtime_sqlite")
+        objects = objects.push("{object_prefix}runtime_sqlite{ext}")
     if include_dynload:
         sources = sources.push("runtime_dynload")
         objects = objects.push("{object_prefix}runtime_dynload{ext}")
@@ -306,6 +308,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # MSVC cl.exe flags (/Gy enables function-level linking for /OPT:REF)
             val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
             comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
+            if name == "runtime_sqlite":
+                # Keep the provider's undefined-symbol envelope deterministic.
+                comp_args.push("/GS-")
+                comp_args.push("/Oi-")
         else:
             # GCC/Clang flags (-fPIC only on Unix, not needed on Windows)
             # -ffunction-sections -fdata-sections: emit each function/data in its own
@@ -318,6 +324,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push("-ffunction-sections")
             comp_args.push("-fdata-sections")
             comp_args.push("-std=gnu11")
+            if name == "runtime_sqlite":
+                # Match the audited provider build: no compiler-added helpers.
+                comp_args.push("-fno-stack-protector")
+                comp_args.push("-fno-builtin")
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")
             # Explicit opt-in: the resulting binary requires an RVV-capable CPU.
@@ -328,6 +338,9 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(rt_dir)
             comp_args.push("-I")
             comp_args.push("{rt_dir}/platform")
+            if name == "runtime_sqlite" and host_os() == "freebsd":
+                comp_args.push("-I")
+                comp_args.push("/usr/local/include")
             comp_args.push("-o")
             comp_args.push(obj_path)
             comp_args.push(src_path)
