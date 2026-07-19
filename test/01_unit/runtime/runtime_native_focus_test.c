@@ -200,6 +200,12 @@ int main(void) {
     assert(builder != 0);
     rt_string_builder_free(builder);
 
+    int64_t registry_before = rt_heap_registry_count();
+    int64_t registered_text = text("heap registry probe");
+    SplArray* registered_array = rt_array_new(0);
+    assert(registered_text != 0 && registered_array != NULL);
+    assert(rt_heap_registry_count() >= registry_before + 2);
+
     SplArray* allocated = rt_bytes_alloc(4);
     assert(allocated != NULL);
     assert(unsafe_addr_of((int64_t)(uintptr_t)allocated) == (uint64_t)(uintptr_t)allocated);

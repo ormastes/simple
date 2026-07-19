@@ -333,3 +333,23 @@ abort at 8,371,548 KiB peak RSS. Compiler generation is therefore ruled out.
 The next focused owner is phase-two parse scratch/runtime allocation lifetime;
 do not patch TLS, raise the cap, or rerun Stage4 before a narrow allocation
 count/RSS regression exists.
+
+## Hosted heap-registry diagnostic — 2026-07-19
+
+A single hosted-only `rt_heap_registry_count()` diagnostic now reports the
+number of registered runtime heap objects. Rust reads its heap registry length;
+Core-C maintains a relaxed atomic total across its five append-only registries.
+The existing phase-profile logger appends the count to every enabled marker, so
+the next bounded Stage4 run can correlate per-file parse progress with object
+growth without adding an unconditional hot-path probe. The symbol is explicitly
+classified hosted-only and is not part of the pure-Simple core-required ABI.
+
+The runtime ABI classification test passes 1/1, and the process-isolated
+Core-C runtime focus probe compiles and passes under a 2 GiB/60-second cap. A
+parallel Rust global-delta unit was rejected because the shared registry makes
+it suite-order dependent; the process-isolated C probe and sequential Simple
+arena spec carry the behavior checks instead. The incremental seed rebuild did
+not complete: rustc exhausted its output filesystem while producing the large
+single-codegen-unit compiler artifact. No Stage4 retry or full bootstrap was
+started. Rebuild the seed/native-all artifacts separately when storage permits,
+then run the updated arena spec once before the next bounded profile.

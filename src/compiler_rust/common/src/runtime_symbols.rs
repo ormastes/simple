@@ -266,6 +266,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_sandbox_")
         || name.starts_with("rt_security_")
         || name.starts_with("rt_coverage_")
+        || name == "rt_heap_registry_count"
         || name.starts_with("rt_decision_probe")
         || name.starts_with("rt_condition_probe")
         || name.starts_with("rt_path_probe")
@@ -364,6 +365,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // AOP runtime operations
     "rt_aop_invoke_around",
     "rt_aop_proceed",
+    "rt_heap_registry_count",
     // Array operations
     "rt_array_new",
     "rt_byte_array_new",
@@ -1999,6 +2001,9 @@ mod tests {
         // Verify the list has a reasonable number of symbols
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_heap_registry_count"));
+        assert_eq!(symbol_tier_of("rt_heap_registry_count"), RuntimeSymbolTier::Sys);
+        assert_eq!(symbol_class_of("rt_heap_registry_count"), RuntimeSymbolClass::HostedOnly);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));

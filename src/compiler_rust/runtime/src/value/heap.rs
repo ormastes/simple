@@ -184,6 +184,18 @@ pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
         .unwrap_or(false)
 }
 
+/// Number of RuntimeValue heap objects known to the hosted runtime.
+///
+/// This is a diagnostic registry count, not a live-byte measurement: most
+/// no-GC compiler temporaries stay registered for the process lifetime.
+#[no_mangle]
+pub extern "C" fn rt_heap_registry_count() -> i64 {
+    heap_allocation_registry()
+        .lock()
+        .map(|registry| registry.len() as i64)
+        .unwrap_or(0)
+}
+
 pub fn clear_heap_allocation_registry() {
     if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
         let _ = registry.lock().map(|mut registry| registry.clear());

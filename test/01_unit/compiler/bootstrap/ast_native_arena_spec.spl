@@ -18,6 +18,7 @@ use std.nogc_sync_mut.io.file_ops.{rt_file_read_text}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_heap_registry_count() -> i64
 
 fn first_body_int(module: Module, name: text) -> i64:
     val fn_ = module.functions[name] ?? panic("missing fn " + name)
@@ -106,15 +107,23 @@ describe "bootstrap native AST arena isolation":
         # Bootstrap mode intentionally bridges only entry-closure modules.
         # Use canonical entry-shaped paths so this test exercises the real
         # flat bridge instead of receiving flat_empty_module().
+        val count_before = rt_heap_registry_count()
         val first = parse_and_build_module("fn first():\n    7\n", "first/bootstrap_main.spl")
+        val count_after_first = rt_heap_registry_count()
         expect_current_native_arena(7)
         expect(first_body_int(first, "first")).to_equal(7)
 
+        val count_before_second = rt_heap_registry_count()
         val second = parse_and_build_module("fn second():\n    9\n", "second/bootstrap_main.spl")
+        val count_after_second = rt_heap_registry_count()
         expect_current_native_arena(9)
         expect(first_body_int(second, "second")).to_equal(9)
         expect(first_body_int(first, "first")).to_equal(7)
         expect(second.functions.contains("first")).to_equal(false)
+        val first_growth = count_after_first - count_before
+        val second_growth = count_after_second - count_before_second
+        expect(first_growth).to_be_greater_than(0)
+        expect(second_growth).to_be_less_than(first_growth + 1)
 
         expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "").to_equal("1706")
         expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "").to_equal("2048")
