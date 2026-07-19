@@ -394,11 +394,21 @@ vulkan_glslc_provenance_result() {
     vulkan_provenance_loaded_sha="$5"
     vulkan_provenance_loader_sha="$6"
     vulkan_provenance_expected_path="$7"
+    vulkan_provenance_mode="${8:-dynamic}"
     if [ "$vulkan_provenance_initial" != pass ]; then
         echo "$vulkan_provenance_initial"
     elif [ "$vulkan_provenance_version" = "" ] || ! sha256_valid "$vulkan_provenance_compiler_sha" ||
-         [ "$vulkan_provenance_loaded_path" = "" ] || ! sha256_valid "$vulkan_provenance_loaded_sha" ||
          ! sha256_valid "$vulkan_provenance_loader_sha"; then
+        echo missing-loaded-library-provenance
+    elif [ "$vulkan_provenance_mode" = embedded ]; then
+        if [ "$vulkan_provenance_expected_path" != "" ]; then
+            echo loaded-library-path-mismatch
+        elif [ "$vulkan_provenance_loaded_path" = "" ] && [ "$vulkan_provenance_loaded_sha" = "" ]; then
+            echo pass
+        else
+            echo unexpected-loaded-library-provenance
+        fi
+    elif [ "$vulkan_provenance_loaded_path" = "" ] || ! sha256_valid "$vulkan_provenance_loaded_sha"; then
         echo missing-loaded-library-provenance
     elif [ "$vulkan_provenance_expected_path" != "" ] &&
          [ "$vulkan_provenance_loaded_path" != "$vulkan_provenance_expected_path" ]; then
@@ -466,6 +476,7 @@ write_vulkan_glslc_provenance_evidence() {
         echo "vulkan_font_compiler_sha256_after_a=$VULKAN_GLSLC_COMPILER_SHA_A"
         echo "vulkan_font_compiler_sha256_after_b=$VULKAN_GLSLC_COMPILER_SHA_B"
         echo "vulkan_font_compiler_format=$VULKAN_GLSLC_COMPILER_FORMAT"
+        echo "vulkan_font_compiler_producer_mode=$VULKAN_GLSLC_PRODUCER_MODE"
         echo "vulkan_font_compiler_loader_host=$(printf '%s' "$VULKAN_GLSLC_HOST_LIBC" | one_line)"
         echo "vulkan_font_compiler_clean_home=$(printf '%s' "$VULKAN_GLSLC_CLEAN_HOME" | one_line)"
         echo "vulkan_font_compiler_library_expected_path=$(printf '%s' "$VULKAN_GLSLC_EXPECTED_PATH" | one_line)"
@@ -486,6 +497,7 @@ record_vulkan_glslc_library_provenance() {
     VULKAN_GLSLC_EXEC_PATH="$(tool_path "$1" || true)"
     VULKAN_GLSLC_EXEC_PATH="$(resolve_symlink_path "$VULKAN_GLSLC_EXEC_PATH" || true)"
     VULKAN_GLSLC_COMPILER_FORMAT="$(native_executable_format "$VULKAN_GLSLC_EXEC_PATH" || true)"
+    VULKAN_GLSLC_PRODUCER_MODE=""
     VULKAN_GLSLC_EXPECTED_PATH=""
     VULKAN_GLSLC_LIBDIR=""
     VULKAN_GLSLC_VERSION=""
@@ -518,6 +530,17 @@ record_vulkan_glslc_library_provenance() {
     rm -f "$vulkan_glslc_version_out" "$VULKAN_GLSLC_LOADER_LOG_A" "$VULKAN_GLSLC_LOADER_LOG_B"
     if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ]; then
         VULKAN_GLSLC_PROVENANCE_STATUS="$(vulkan_glslc_compiler_status "$VULKAN_GLSLC_EXEC_PATH" "$VULKAN_GLSLC_COMPILER_FORMAT")"
+    fi
+    if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ]; then
+        vulkan_glslc_dynamic="$BUILD_DIR/vulkan_font_compiler_dynamic.txt"
+        if ! command -v readelf >/dev/null 2>&1 ||
+           ! readelf -d "$VULKAN_GLSLC_EXEC_PATH" >"$vulkan_glslc_dynamic" 2>/dev/null; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=missing-linkage-provenance
+        elif grep -E 'NEEDED.*libshaderc[^]]*\.so' "$vulkan_glslc_dynamic" >/dev/null 2>&1; then
+            VULKAN_GLSLC_PRODUCER_MODE=dynamic
+        else
+            VULKAN_GLSLC_PRODUCER_MODE=embedded
+        fi
     fi
     if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" != pass ]; then
         :
@@ -557,7 +580,12 @@ capture_vulkan_glslc_compile_provenance() {
     capture_label="$1"
     capture_log="$2"
     capture_path=""
-    if capture_path="$(vulkan_glslc_loaded_library_path "$capture_log")"; then
+    if [ "$VULKAN_GLSLC_PRODUCER_MODE" = embedded ]; then
+        if grep -E 'calling init: .*libshaderc.*\.so' "$capture_log" >/dev/null 2>&1; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=unexpected-loaded-library-provenance
+            return 1
+        fi
+    elif capture_path="$(vulkan_glslc_loaded_library_path "$capture_log")"; then
         :
     else
         capture_status=$?
@@ -569,10 +597,13 @@ capture_vulkan_glslc_compile_provenance() {
         return 1
     fi
     capture_compiler_sha="$(sha256_file "$VULKAN_GLSLC_EXEC_PATH" || true)"
-    capture_library_sha="$(sha256_file "$capture_path" || true)"
+    capture_library_sha="$(sha256_file "$capture_path" 2>/dev/null || true)"
     capture_loader_sha="$(sha256_file "$capture_log" || true)"
-    if ! sha256_valid "$capture_compiler_sha" || ! sha256_valid "$capture_library_sha" ||
-       ! sha256_valid "$capture_loader_sha"; then
+    if ! sha256_valid "$capture_compiler_sha" || ! sha256_valid "$capture_loader_sha"; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=missing-compiler-provenance
+        return 1
+    fi
+    if [ "$VULKAN_GLSLC_PRODUCER_MODE" != embedded ] && ! sha256_valid "$capture_library_sha"; then
         VULKAN_GLSLC_PROVENANCE_STATUS=missing-loaded-library-provenance
         return 1
     fi
@@ -601,7 +632,8 @@ finalize_vulkan_glslc_compile_provenance() {
         VULKAN_GLSLC_PROVENANCE_STATUS="$(vulkan_glslc_provenance_result pass \
             "$VULKAN_GLSLC_VERSION" "$VULKAN_GLSLC_COMPILER_SHA_B" \
             "$VULKAN_GLSLC_LIBRARY_PATH_B" "$VULKAN_GLSLC_LIBRARY_SHA_B" \
-            "$VULKAN_GLSLC_LOADER_SHA_B" "$VULKAN_GLSLC_EXPECTED_PATH")"
+            "$VULKAN_GLSLC_LOADER_SHA_B" "$VULKAN_GLSLC_EXPECTED_PATH" \
+            "$VULKAN_GLSLC_PRODUCER_MODE")"
     fi
     write_vulkan_glslc_provenance_evidence || {
         VULKAN_GLSLC_PROVENANCE_STATUS=evidence-write-failed
@@ -617,6 +649,8 @@ if [ "${1:-}" = "--vulkan-provenance-self-test" ]; then
     [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" "" "" "$vulkan_self_test_sha" "")" = missing-loaded-library-provenance ]
     [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" /actual/libshaderc.so.1 "$vulkan_self_test_sha" "$vulkan_self_test_sha" /expected/libshaderc.so.1)" = loaded-library-path-mismatch ]
     [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" /actual/libshaderc.so.1 "$vulkan_self_test_sha" "$vulkan_self_test_sha" /actual/libshaderc.so.1)" = pass ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" "" "" "$vulkan_self_test_sha" "" embedded)" = pass ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" /actual/libshaderc.so.1 "$vulkan_self_test_sha" "$vulkan_self_test_sha" "" embedded)" = unexpected-loaded-library-provenance ]
     vulkan_self_test_root="${TMPDIR:-/tmp}/simple-vulkan-provenance-self-test-$$"
     rm -rf "$vulkan_self_test_root"
     mkdir -p "$vulkan_self_test_root/real" "$vulkan_self_test_root/clean-home"
@@ -651,6 +685,13 @@ EOF
     run_vulkan_glslc_compile "$vulkan_self_test_root/out.spv" "$vulkan_self_test_root/in.comp" \
         "$vulkan_self_test_root/fake.out" "$vulkan_self_test_root/fake.loader"
     [ "$(cat "$vulkan_self_test_home_out")" = "$VULKAN_GLSLC_CLEAN_HOME" ]
+    VULKAN_GLSLC_PRODUCER_MODE=embedded
+    VULKAN_GLSLC_PROVENANCE_STATUS=pass
+    if capture_vulkan_glslc_compile_provenance a "$vulkan_self_test_root/multiple.log"; then
+        echo "Vulkan provenance self-test accepted embedded shaderc loader records" >&2
+        exit 1
+    fi
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = unexpected-loaded-library-provenance ]
 
     BUILD_DIR="$vulkan_self_test_root/build"
     mkdir -p "$BUILD_DIR"
@@ -660,6 +701,7 @@ EOF
         VULKAN_GLSLC_EXEC_PATH="$vulkan_self_test_root/fake-glslc"
         VULKAN_GLSLC_VERSION=test-version
         VULKAN_GLSLC_COMPILER_FORMAT=elf
+        VULKAN_GLSLC_PRODUCER_MODE=dynamic
         VULKAN_GLSLC_HOST_LIBC="glibc test"
         VULKAN_GLSLC_CLEAN_HOME="$vulkan_self_test_root/clean-home"
         VULKAN_GLSLC_EXPECTED_PATH=""
