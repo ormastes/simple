@@ -1,7 +1,33 @@
 # BUG: `for ch in <text>:` loop-bound element is corrupted — `char_code_at(0)` always 0, `.len()` segfaults the interpreter
 
 ## Status
-Open (2026-07-19, GLYPH-FIX-7 campaign). Root-cause LOCALIZED, not yet fixed.
+WORKAROUND APPLIED (2026-07-19, GLYPH-FIX-8 campaign). The root-cause
+for-loop-over-text codegen/interpreter bug itself is still open (T3-tier,
+not fixed in this session — see "Why not fixed in this session" below,
+unchanged), but the coordinator-approved indexed-loop workaround described
+below IS now applied at all 6 live text-iteration call sites in
+`font_renderer.spl` (`_prepare_text_active`, `render_text_payload`,
+`measure_text_width`, `measure_text_advances`, `render_text`, and the
+character-count loop in the resolved-font-metrics path — the last one
+never read the loop-bound `ch` value so it was collapsed to `content.len()`
+directly rather than an indexed loop). Verified via a temporary
+probe-enabled diagnostic build (`_VEC_ATLAS_PROBE=true`, reverted to
+`false` before final deploy): the fallback loop in
+`_prepare_text_active` now produces CORRECT codepoints (e.g. `cp=83` 'S',
+`cp=121` 'y' — real ASCII, not 0), rasterizes real glyphs (nonzero
+width/height/advance), and produces `FontRenderQuad`s with nonzero atlas
+coverage (`first_cov_nz=8..38`, `color_a=255`) — i.e. the for-loop
+corruption this bug describes is fully worked around for the SimpleOS
+glyph-rendering pipeline.
+
+**This did NOT make glyph text visible on the desktop render.** A SEPARATE,
+newly-discovered downstream defect blocks compositing even with correct
+quads: see `doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md`.
+Final pixel analysis (both `-kernel` diag and OVMF real-firmware boots,
+desktop-ready + 0 exceptions + 99.83% nonblack in both) shows 0 text-color
+pixels and a flat 2-color clock region — consistent with that separate
+defect, not a regression of this fix.
+
 Distinct from, and upstream of, both:
 - `native_char_code_at_tag_shift_2026-07-19.md` (FIXED, c97697506aa) — that bug
   was `text.char_code_at(i)` called DIRECTLY on a multi-char receiver returning
