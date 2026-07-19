@@ -30,7 +30,9 @@ could recover the already-dangling pointer. LLVM already avoided this by
 allocating tuple words with `rt_alloc`.
 
 Cranelift now mirrors that ownership: tuple words are heap allocated and the
-raw base pointer is returned. Unlike structs, tuples are not heap-tagged.
+raw base pointer is returned. Tuple locals are runtime handles, so copies and
+control-flow reloads carry that pointer instead of inline tuple storage.
+Unlike structs, tuples are not heap-tagged.
 
 ## Workaround (landed)
 Snapshot every `parts.N` / `metrics[N]` into locals immediately after the
