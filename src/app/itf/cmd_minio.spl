@@ -1,6 +1,7 @@
 # ITF CLI — `itf minio {ls,get,put,stat,presign,health}` subcommands.
 
 use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
+use std.io_runtime.{time_now_unix_micros}
 use app.itf.adapter_minio.{
     MinioConfig, BucketInfo, ObjectInfo, GetObjectResult, HeadObjectResult,
     load_minio_config, check_minio_auth,
@@ -9,7 +10,7 @@ use app.itf.adapter_minio.{
     minio_download, minio_create_bucket, minio_delete_bucket
 }
 use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
-use app.itf.output.{print_error, print_success, print_info, print_table_dynamic, format_json_output, wants_json, format_size}
+use app.itf.output.{print_error, print_success, print_info, print_dim, print_table_dynamic, format_json_output, wants_json, format_size, format_transfer_summary}
 
 
 fn handle_minio(args: [text]) -> i64:
@@ -141,11 +142,14 @@ fn _minio_get(args: [text]) -> i64:
     val out_path = _extract_flag(args, "--out", "")
     val range_h = _extract_flag(args, "--range", "")
     if out_path != "":
+        val started = time_now_unix_micros()
         val (ok, bytes, err) = minio_download(cfg, bucket, key, out_path, 3600)
+        val elapsed_ms = (time_now_unix_micros() - started) / 1000
         if not ok:
             print_error(err)
             return 1
         print_success("wrote {bytes} bytes to {out_path}")
+        print_dim(format_transfer_summary("downloaded", bytes, elapsed_ms))
         return 0
     val (ok, result, raw) = minio_get_object(cfg, bucket, key, range_h)
     if not ok:
@@ -182,11 +186,14 @@ fn _minio_put(args: [text]) -> i64:
     # Try text path first — works for JSON/XML/plain bodies up to 64 MiB.
     val content = file_read_text(file_path)
     if content != nil:
+        val started = time_now_unix_micros()
         val (ok, _etag, raw) = minio_put_text(cfg, bucket, key, content, ct)
+        val elapsed_ms = (time_now_unix_micros() - started) / 1000
         if not ok:
             print_error(raw)
             return 1
         print_success("uploaded {bucket}/{key} ({content.len()} bytes, text path)")
+        print_dim(format_transfer_summary("uploaded", content.len(), elapsed_ms))
         return 0
     # Fallthrough — binary path (currently surfaces a clear error + workaround;
     # the message names `itf minio presign-put`, the real escape hatch).

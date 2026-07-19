@@ -1,18 +1,18 @@
 # ITF CLI — Raw API command
 #
-# Usage: itf api <GET|POST|PUT|DELETE> <url> [--data JSON] [--header H]
-# Direct REST calls to any Atlassian endpoint
+# Usage: itf api <GET|POST|PUT|DELETE> <url> [--jira] [--data JSON] [--header H]
+# Direct REST calls to Confluence (default) or Jira (--jira) REST endpoints.
 
-use std.nogc_sync_mut.http_client.{http_get, http_post, http_put, http_delete, create_headers, add_header, response_get_status_code, response_get_body, response_get_headers}
+use std.nogc_sync_mut.io.http_sffi.{rt_http_request}
 use std.json.{json_parse, json_pretty}
 use app.itf.config.{load_config}
-use app.itf.auth.{confluence_auth_header, confluence_api_base}
+use app.itf.auth.{confluence_auth_header, confluence_api_base, jira_auth_header, jira_api_base}
 use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
 use app.itf.output.{print_error}
 
 
 fn handle_api(args: [text]) -> i64:
-    """Raw API call. Usage: itf api <METHOD> <url> [--data JSON] [--header H]"""
+    """Raw API call. Usage: itf api <METHOD> <url> [--jira] [--data JSON] [--header H]"""
     if args.len() < 2:
         _print_api_help()
         return 1
@@ -22,57 +22,59 @@ fn handle_api(args: [text]) -> i64:
     val remaining = if args.len() > 2: args[2:] else: []
     val data = _extract_flag(remaining, "--data", "")
     val extra_header = _extract_flag(remaining, "--header", "")
+    val use_jira = _has_flag(remaining, "--jira")
     val verbose = _has_flag(remaining, "--verbose")
     val include = _has_flag(remaining, "--include")
 
+    if method != "GET" and method != "POST" and method != "PUT" and method != "DELETE":
+        print_error("unsupported method: {method}. Use GET, POST, PUT, or DELETE.")
+        return 1
+
     # Resolve full URL if relative path given
     val config = load_config()
+    val base = if use_jira: jira_api_base(config) else: confluence_api_base(config)
     var full_url = url
     if url.starts_with("/"):
-        val base = confluence_api_base(config)
         if base != "":
             full_url = "{base}{url}"
 
-    # Build headers
-    val auth = confluence_auth_header(config)
+    # Build headers — real attachment via rt_http_request's headers: [text]
+    # (the prior std.nogc_sync_mut.http_client-based version only *computed*
+    # `auth` for a verbose-mode print; it never reached the wire because
+    # http_client's http_get/post/put/delete convenience wrappers build a
+    # request tuple and don't send it at all — see http_client/request.spl.
+    # rt_http_request is the real extern-backed transport, already used this
+    # way by adapter_minio.spl).
+    val auth = if use_jira: jira_auth_header(config) else: confluence_auth_header(config)
+    var headers: [text] = ["Accept: application/json"]
+    if auth != "":
+        headers = headers + ["Authorization: {auth}"]
+    if data != "":
+        headers = headers + ["Content-Type: application/json"]
+    if extra_header != "":
+        headers = headers + [extra_header]
 
     if verbose:
         print "> {method} {full_url}"
         if auth != "":
             print "> Authorization: Basic ***"
+        if extra_header != "":
+            print "> {extra_header}"
         if data != "":
             print "> Content-Type: application/json"
             print "> "
             print "> {data}"
         print ""
 
-    # Execute request and extract status + body
-    var status = 0
-    var body = ""
-
-    if method == "GET":
-        val response = http_get(full_url)
-        status = response_get_status_code(response)
-        body = response_get_body(response)
-    else if method == "POST":
-        val response = http_post(full_url, data)
-        status = response_get_status_code(response)
-        body = response_get_body(response)
-    else if method == "PUT":
-        val response = http_put(full_url, data)
-        status = response_get_status_code(response)
-        body = response_get_body(response)
-    else if method == "DELETE":
-        val response = http_delete(full_url)
-        status = response_get_status_code(response)
-        body = response_get_body(response)
-    else:
-        print_error("unsupported method: {method}. Use GET, POST, PUT, or DELETE.")
-        return 1
+    val (status, body, err) = rt_http_request(method, full_url, headers, data)
 
     if include or verbose:
         print "HTTP {status}"
         print ""
+
+    if status == 0:
+        print_error("request failed: {err}")
+        return 1
 
     # Pretty-print JSON if possible
     val parsed = json_parse(body)
@@ -96,6 +98,7 @@ fn _print_api_help():
     print "Methods: GET, POST, PUT, DELETE"
     print ""
     print "Flags:"
+    print "  --jira          Target the Jira REST v3 base instead of Confluence"
     print "  --data JSON     Request body"
     print "  --header H      Extra header (Name: Value)"
     print "  --verbose        Print request/response details"
@@ -104,3 +107,4 @@ fn _print_api_help():
     print "Examples:"
     print "  itf api GET /pages?limit=5"
     print "  itf api POST /pages --data '{\"spaceId\":\"123\",\"title\":\"Test\"}'"
+    print "  itf api GET /issue/PROJ-1 --jira"

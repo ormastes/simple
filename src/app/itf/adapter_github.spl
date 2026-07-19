@@ -8,12 +8,35 @@
 # formatting on top of `gh ... --json ...` output.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.itf.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_retry_wait}
+
+
+fn _gh_rate_limited(stderr: text) -> bool:
+    """True if `stderr` is gh's own rate-limit wording. gh doesn't expose an
+    HTTP status code to us (it's already been mapped to human text by the
+    time we see it), so — unlike the jira_curl/minio paths, which retry on
+    any 429/5xx — this only retries on gh's clear, specific rate-limit
+    phrasing. A generic gh failure (bad args, network down, not found) is
+    never retried since resending it wouldn't change the outcome."""
+    val lower = stderr.lower()
+    lower.contains("rate limit") or lower.contains("api rate limit exceeded")
 
 
 fn gh_run(args: [text]) -> (bool, text, text):
-    """Run `gh <args>`, returning (success, stdout, stderr)."""
-    val (stdout, stderr, code) = process_run("gh", args)
-    (code == 0, stdout, stderr)
+    """Run `gh <args>`, returning (success, stdout, stderr). Retries
+    bounded (see app.itf.retry) only when gh itself reports being
+    rate-limited."""
+    var attempt = 0
+    var result = ("", "", -1)
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        result = process_run("gh", args)
+        val stderr = result.1
+        val code = result.2
+        attempt = attempt + 1
+        if code == 0 or not _gh_rate_limited(stderr) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            return (code == 0, result.0, stderr)
+        itf_retry_wait(attempt - 1, "")
+    (result.2 == 0, result.0, result.1)
 
 
 fn gh_available() -> bool:

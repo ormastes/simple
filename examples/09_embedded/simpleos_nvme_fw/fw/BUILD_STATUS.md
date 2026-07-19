@@ -134,6 +134,13 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   block; reprogram its live pages; L2P unchanged). Proven by `rain_ftl_check.spl` (256 LBAs survive
   a whole-channel uncorrectable failure without a pre-rebuild seal, gated `RAIN-FTL OK`), the
   standalone `rain_check.spl` (`RAIN OK`), `ftl_rain_selftest`, and `proofs/Rain.lean`.
+- **Reliability engine, rel_* v1 + nd_types (2026-07-19) — DONE, run-green**: typed NAND
+  coordinates (`nd_types.spl`) plus the `rel_types`/`rel_health`/`rel_vref`/`rel_ladder`/
+  `rel_refresh`/`rel_disturb`/`rel_wear` module family, wired into `fil.spl`/`ftl.spl`/
+  `nvme_controller.spl`/`firmware.spl` (recovery-ladder reads, one-reclaim-per-tick
+  scrub/WL/refresh, spare substitution on retire). Each module has its own
+  `rel_*_check.spl`/`nd_types_check.spl`; `rel_wiring_check.spl` is the integration gate.
+  See `PRODUCTION_STATUS.md` § "Reliability engine" for the full acceptance detail.
 
 Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration
 status", wired-vs-shelf table): P1 `fil_fmc`, P2 `fil_scheduler`, P7 `power_thermal`, and P8

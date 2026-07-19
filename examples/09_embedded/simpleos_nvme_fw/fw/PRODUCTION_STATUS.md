@@ -103,6 +103,43 @@ silicon. The simulation boundary is deliberate and unchanged:
       `bin/simple test`; `doc/06_spec` regenerated at 0 stubs; this doc + `README`/`BUILD_STATUS`
       state the silicon boundary.
 
+## Reliability engine (rel_* v1, 2026-07-19) — LIVE
+
+A dedicated reliability-engine module family (`fw/rel_types.spl`, `rel_health.spl`,
+`rel_vref.spl`, `rel_ladder.spl`, `rel_refresh.spl`, `rel_disturb.spl`, `rel_wear.spl`,
+plus typed coordinates in `fw/nd_types.spl`) now sits below `fil`/`ftl` (pure policy
+leaves — no NAND/FTL handle) and is wired into the live read/tick/retire paths:
+
+- **Recovery-ladder reads.** `Fil.read_with_ladder` retries a `NAND_ECC_FAIL` page
+  through a 7-entry vref offset table with a per-block ROR-lite calibration cache
+  (`rel_ladder.spl` + `rel_vref.spl`), and is the path production reads actually take
+  (`ftl.spl` `read`/`read_status`/GC relocate).
+- **One-reclaim-class-per-tick maintenance.** `Ftl.rel_tick`/`rel_tick_select` pick at
+  most one of {`gc_once`, refresh reclaim, `scrub_once`, `wear_level_once`} per tick,
+  in that fixed priority, preserving the existing GC-reserve budget invariant; mounted
+  in `nvme_controller.io_process` and `firmware.service_tick`.
+- **FCR/DEAR-lite refresh** (`rel_refresh.spl`): rewrites a block on its first observed
+  ECC 1-bit correction, or once a seq-epoch age proxy (`cur_seq - last_prog_seq`)
+  crosses a threshold — an explicitly workload-relative proxy, not wall-clock retention.
+- **STRAW-lite disturb tracking** (`rel_disturb.spl`): a hottest-page estimate layered
+  on top of the existing block-level `rd_disturb` counter that gates `scrub_once`.
+- **SREA-lite wear leveling** (`rel_wear.spl`): dwell-gates `wear_level_once` so only a
+  block that has rested (by an erase-count proxy) is cycled, avoiding WL thrash.
+- **Spare substitution on retire.** Bad-block retirement now calls `alloc_spare`
+  (`fil.mark_bad` → `band.set_bad` → `alloc_spare`) instead of just dropping the block.
+
+**Validation.** `fw/rel_wiring_check.spl` is the integration oracle set (drift-page
+recovery via `ftl.read`, one-reclaim-per-tick budget invariant, scrub reset, WL dwell
+gating, spare substitution on retire); each `rel_*.spl` also has its own per-module
+`rel_*_check.spl`. All of this is validated against the `nand_emu` Vt-model backend
+(`fil_nand_emu.spl`) — the same simulation-scope caveat as the rest of this document
+applies (no real silicon, no BCH/LDPC, no wall-clock retention).
+
+**Explicitly still open (not part of this wave):** RAIN production wiring (see the
+RAIN caveat above — unchanged), `hooks.classify_hot` (implemented, no production
+caller), and re-exporting `vt_histogram`/`read_margin` for a firmware-side soft read.
+Gap tracking: `doc/01_research/hardware/nand_recovery/nand_recovery_gap_analysis_local.md`.
+
 **Gap-closure vs. acceptance bar.** The acceptance bar above (req 1-7) is **MET** — that is *not* the
 same as "all gap-closure / production work is done." Per
 `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status": **P1** (`fil_fmc`), **P2**
