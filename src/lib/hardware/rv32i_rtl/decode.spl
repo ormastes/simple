@@ -1,16 +1,17 @@
 # ============================================================================
-# RV32I RTL Decoder — Combinational Instruction Decoder
+# RV32IM RTL Decoder — Combinational Instruction Decoder
 # ============================================================================
 #
 # Translates decoder.vhd into Simple.  Pure functions only (combinational).
 # Extracts all fields from a 32-bit instruction, selects ALU op, generates
 # control signals, and sign-extends immediates.
 #
-# Supports all RV32I instruction formats: R, I, S, B, U, J.
+# Supports RV32I instruction formats plus RV32M register-register decode.
 # ============================================================================
 
 use std.hardware.rv32i_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
 use std.hardware.rv32i_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_IMMED, OP_REG, OP_SYSTEM}
+use std.hardware.rv32i_rtl.pkg.OP_AMO
 use std.hardware.rv32i_rtl.pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
 use std.hardware.rv32i_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
 use std.hardware.rv32i_rtl.pkg.ALU_PASS_B
@@ -36,6 +37,8 @@ struct DecodeResult:
     alu_src: bool     # true = ALU op_b from immediate; false = from rs2
     branch: bool      # Conditional branch instruction
     jump: bool        # JAL or JALR
+    is_amo: bool      # LR.W, SC.W, or AMO*.W
+    is_muldiv: bool   # RV32M register-register instruction
 
 # ============================================================================
 # Sign-extension helper (32-bit)
@@ -104,6 +107,10 @@ fn select_alu_op(opcode: u32, funct3: u32, funct7: u32) -> i64:
     Mirrors the VHDL decoder ALU-op process."""
 
     if opcode == OP_REG:
+        # RV32M executes in the separate multicycle unit.
+        if funct7 == 0x01:
+            return ALU_ADD
+
         if funct3 == 0x0:
             # ADD / SUB — funct7 bit 5 disambiguates
             if (funct7 & 0x20) != 0:
@@ -179,7 +186,8 @@ fn decode_instruction(instruction: u32) -> DecodeResult:
 
     # Control signals (matching VHDL concurrent assignments)
     val reg_w = (op == OP_REG or op == OP_IMMED or op == OP_LOAD or
-                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR)
+                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or
+                 op == OP_JALR or op == OP_AMO)
     val m_read = op == OP_LOAD
     val m_write = op == OP_STORE
     val m_to_reg = op == OP_LOAD
@@ -187,6 +195,8 @@ fn decode_instruction(instruction: u32) -> DecodeResult:
                  op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR)
     val br = op == OP_BRANCH
     val jmp = op == OP_JAL or op == OP_JALR
+    val is_amo = op == OP_AMO
+    val is_muldiv = op == OP_REG and f7 == 0x01
 
     DecodeResult(
         opcode: op,
@@ -203,5 +213,7 @@ fn decode_instruction(instruction: u32) -> DecodeResult:
         mem_to_reg: m_to_reg,
         alu_src: a_src,
         branch: br,
-        jump: jmp
+        jump: jmp,
+        is_amo: is_amo,
+        is_muldiv: is_muldiv
     )

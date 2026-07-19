@@ -191,11 +191,68 @@ The canonical media lock is
 `src/lib/hardware/fpga_linux/linux_media.spl`. Each lane must provide exactly
 one manifest with separate firmware, kernel, DTB, and rootfs pins. Every pin
 records the path, byte size, SHA-256, load address, entrypoint, producing tool,
-configuration SHA-256, and DT relationship SHA-256. Product manifests validate
-the files again when rendered and fail closed on a missing or changed file,
-duplicate lane, unknown lane, incomplete role set, or cross-lane reuse. Default
-RV32/RV64 products remain visibly `unpinned`; no Linux media has been accepted
-for either lane yet.
+configuration SHA-256, and DT relationship SHA-256. A zero rootfs load address
+means Buildroot embedded that exact `rootfs.cpio` into the pinned kernel Image;
+all independently loaded roles require nonzero addresses. Product manifests
+validate the files again when rendered and fail closed on a missing or changed
+file, duplicate lane, unknown lane, incomplete role set, or cross-lane reuse.
+
+### Reproduce the IMA-only Buildroot media
+
+Use the pinned Buildroot 2026.05.1 producer at commit
+`cb857ba4c87a93e5265a9e4a3f32071abf39e14a`. The checked-in RV32/RV64
+defconfigs select soft-float IMA, a built-in initramfs, Linux 6.18.7, OpenSBI
+1.6, and reproducible output. Their kernel fragments disable C, V, FPU, EFI,
+and vendor-extension code; RV64 also selects `NONPORTABLE` so the generic
+portable/EFI profile cannot force C back on.
+
+```sh
+git clone --branch 2026.05.1 --depth 1 \
+  https://gitlab.com/buildroot.org/buildroot.git \
+  build/riscv-linux/buildroot-2026.05.1
+git -C build/riscv-linux/buildroot-2026.05.1 rev-parse HEAD
+
+env -u LD_LIBRARY_PATH make -C build/riscv-linux/buildroot-2026.05.1 \
+  O="$PWD/build/riscv-linux/rv32" \
+  BR2_DL_DIR="$PWD/build/riscv-linux/dl" \
+  BR2_DEFCONFIG="$PWD/config/riscv_linux/buildroot_rv32ima_defconfig" \
+  defconfig
+env -u LD_LIBRARY_PATH make -C build/riscv-linux/buildroot-2026.05.1 \
+  O="$PWD/build/riscv-linux/rv32" \
+  BR2_DL_DIR="$PWD/build/riscv-linux/dl" -j"$(nproc)"
+```
+
+Use `buildroot_rv64ima_defconfig` and output directory `rv64` for the sibling
+lane. Do not share an output directory or run two producers concurrently; only
+the download cache is shared. Inspect ELF attributes and flags before booting:
+OpenSBI and BusyBox must declare I/M/A/Zicsr/Zifencei, and ELF flags must not
+advertise RVC.
+
+Dump an explicit QEMU-oracle DTB and boot the embedded initramfs:
+
+```sh
+SIMPLE_RV32_QEMU_CPU='rv32,c=false,f=false,d=false,v=false,h=false,sstc=false,svadu=false,zfa=false,zicbom=false,zicboz=false,zicntr=false,zihintntl=false,zihintpause=false,zihpm=false,zawrs=false,zba=false,zbb=false,zbc=false,zbs=false'
+qemu-system-riscv32 -machine \
+  virt,dumpdtb=build/riscv-linux/rv32/images/qemu-virt-ima.dtb \
+  -m 128M -smp 1 -cpu "$SIMPLE_RV32_QEMU_CPU" \
+  -bios none -display none
+qemu-system-riscv32 -machine virt -m 128M -smp 1 \
+  -cpu "$SIMPLE_RV32_QEMU_CPU" \
+  -bios build/riscv-linux/rv32/images/fw_jump.bin \
+  -kernel build/riscv-linux/rv32/images/Image \
+  -dtb build/riscv-linux/rv32/images/qemu-virt-ima.dtb \
+  -append "console=ttyS0 earlycon=sbi" \
+  -nographic -monitor none -no-reboot
+```
+
+At `buildroot login:` enter `root`, then run `ls /` and `uname -m`. The
+[2026-07-19 RV32 transcript](../../../06_spec/03_system/hardware/riscv_fpga_linux/evidence/rv32_qemu_linux_login_ls_2026-07-19.txt)
+records a live PASS with the DT advertising exactly
+`rv32ima_zicsr_zifencei` and `riscv,sv32`. It pins the firmware, kernel,
+rootfs, and QEMU-oracle DTB, but does not satisfy generated-RTL or FPGA
+evidence. Default product manifests remain `unpinned` until a binding-complete
+Simple SoC DTB replaces the QEMU DTB and both lanes share their exact product
+inputs across QEMU, RTL, and FPGA.
 
 QEMU success is recorded as `qemu-media`; it never satisfies `rtl-sim`.
 

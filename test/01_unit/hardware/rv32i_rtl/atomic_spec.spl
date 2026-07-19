@@ -1,0 +1,471 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core32_init_single_master}
+use std.hardware.rv32i_rtl.core.{core32_cycle, core32_begin_instruction}
+use std.hardware.rv32i_rtl.core.{core_combinational, core_rvfi_trace}
+use std.hardware.rv32i_rtl.core.{CORE32_FETCH, CORE32_ATOMIC_LOAD}
+use std.hardware.rv32i_rtl.core.{CORE32_ATOMIC_STORE, CORE32_ATOMIC_READY}
+use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR}
+use std.hardware.rv32i_rtl.pkg.{AMO_AND, AMO_OR, AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
+use std.hardware.rv32i_rtl.atomics.{atomics32_create, atomics32_lr}
+use std.hardware.rv32i_rtl.atomics.{atomics32_invalidate, amo32_compute}
+use std.hardware.rv32i_rtl.mmu_sv32.{mmu_set_satp, mmu_tlb_insert}
+use std.hardware.rv32i_rtl.sv32_address.sv32_full_vpn
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_csr_write
+use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_MASK, MIP_MTIP_MASK}
+use std.hardware.rv32i_rtl.rvfi.rvfi_enabled_config
+use std.hardware.rv32i_rtl.memory_access.{memory32_start_lr, memory32_start_atomic_store}
+use std.hardware.soc_rtl.soc_top.{soc_create, soc_tick}
+use std.hardware.soc_rtl.wb_interconnect.{CLINT_BASE, UART_BASE}
+
+val RESET_PC: u32 = 0x8000_0000
+val DATA_ADDR: u32 = 0x8000_0100
+
+struct AmoPathResult:
+    rd_data: u32
+    write_data: u32
+    read_atomic: bool
+    write_atomic: bool
+    reservation_valid: bool
+
+fn amo_instruction_raw(funct5: u32, rs2: u32, rs1: u32, funct3: u32,
+                       aq: u32, rl: u32, rd: u32) -> u32:
+    (funct5 << 27) | (aq << 26) | (rl << 25) | (rs2 << 20) |
+        (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x2F
+
+fn amo_instruction(funct5: u32, rs2: u32, rs1: u32,
+                   aq: u32, rl: u32, rd: u32) -> u32:
+    amo_instruction_raw(funct5, rs2, rs1, 2, aq, rl, rd)
+
+fn enter_instruction(state: CoreState, instruction: u32) -> CoreState:
+    core32_cycle(state, true, true, false, instruction).state
+
+fn run_amo(funct5: u32, old_value: u32, rs2_value: u32,
+           aq: u32, rl: u32) -> AmoPathResult:
+    var state = core32_init_single_master(RESET_PC)
+    state.rf = regfile_write(state.rf, 1, DATA_ADDR, true)
+    state.rf = regfile_write(state.rf, 2, rs2_value, true)
+    state.atomics = atomics32_lr(state.atomics, DATA_ADDR as i64, 4)
+    state = enter_instruction(state,
+        amo_instruction(funct5, 2, 1, aq, rl, 5))
+    val read = core32_cycle(state, true, true, false, old_value)
+    val write = core32_cycle(read.state, true, true, false, 0)
+    val committed = core32_cycle(write.state, false, false, false, 0)
+    AmoPathResult(
+        rd_data: regfile_read(committed.state.rf, 5, 0).rs1_data,
+        write_data: write.bus_wdata,
+        read_atomic: read.bus_atomic,
+        write_atomic: write.bus_atomic,
+        reservation_valid: committed.state.atomics.reservation_valid)
+
+fn pmp_allow_all(state: CoreState) -> CoreState:
+    var out = state
+    out.pmp = pmp32_csr_write(out.pmp, 0x3B0, 0xFFFFFFFF).entries
+    out.pmp = pmp32_csr_write(out.pmp, 0x3A0, 0x1F).entries
+    out
+
+fn pmp_allow_root_page_only(state: CoreState) -> CoreState:
+    var out = state
+    out.pmp = pmp32_csr_write(out.pmp, 0x3B0, 0x401FF).entries
+    out.pmp = pmp32_csr_write(out.pmp, 0x3A0, 0x19).entries
+    out
+
+fn immediate_fault(instruction: u32, address: u32,
+                   supervisor: bool) -> CoreState:
+    var state = core32_init_single_master(RESET_PC)
+    if supervisor:
+        state.priv_mode = 1
+    state.rf = regfile_write(state.rf, 1, address, true)
+    state = enter_instruction(state, instruction)
+    core32_cycle(state, false, false, false, 0).state
+
+describe "RV32A clocked production path":
+    it "executes every RV32A word AMO through an atomic read then write":
+        val swap = run_amo(AMO_SWAP, 5, 3, 0, 0)
+        expect(swap.rd_data).to_equal(5)
+        expect(swap.write_data).to_equal(3)
+        expect(swap.read_atomic).to_be(true)
+        expect(swap.write_atomic).to_be(true)
+
+        val add = run_amo(AMO_ADD, 5, 3, 1, 1)
+        expect(add.rd_data).to_equal(5)
+        expect(add.write_data).to_equal(8)
+        expect(add.reservation_valid).to_be(false)
+        expect(amo32_compute(AMO_ADD, 0xFFFFFFFF, 1).new_value).to_equal(0)
+        expect(run_amo(AMO_ADD, 1, 1, 1, 0).write_data).to_equal(2)
+        expect(run_amo(AMO_ADD, 1, 1, 0, 1).write_data).to_equal(2)
+
+        val xor_result = run_amo(AMO_XOR, 5, 3, 0, 0)
+        expect(xor_result.rd_data).to_equal(5)
+        expect(xor_result.write_data).to_equal(6)
+        val and_result = run_amo(AMO_AND, 5, 3, 0, 0)
+        expect(and_result.rd_data).to_equal(5)
+        expect(and_result.write_data).to_equal(1)
+        val or_result = run_amo(AMO_OR, 5, 3, 0, 0)
+        expect(or_result.rd_data).to_equal(5)
+        expect(or_result.write_data).to_equal(7)
+
+        val signed_min = run_amo(AMO_MIN, 0x80000000, 1, 0, 0)
+        expect(signed_min.rd_data).to_equal(0x80000000)
+        expect(signed_min.write_data).to_equal(0x80000000)
+        val signed_max = run_amo(AMO_MAX, 0x80000000, 1, 0, 0)
+        expect(signed_max.rd_data).to_equal(0x80000000)
+        expect(signed_max.write_data).to_equal(1)
+        val unsigned_min = run_amo(AMO_MINU, 0x80000000, 1, 0, 0)
+        expect(unsigned_min.rd_data).to_equal(0x80000000)
+        expect(unsigned_min.write_data).to_equal(1)
+        val unsigned_max = run_amo(AMO_MAXU, 0x80000000, 1, 0, 0)
+        expect(unsigned_max.rd_data).to_equal(0x80000000)
+        expect(unsigned_max.write_data).to_equal(0x80000000)
+
+    it "retires one AMO with registered old/new physical RVFI evidence":
+        var state = core32_init_single_master(RESET_PC)
+        state.rf = regfile_write(state.rf, 1, DATA_ADDR, true)
+        state.rf = regfile_write(state.rf, 2, 3, true)
+        state.rf = regfile_write(state.rf, 5, 0xA5A5A5A5, true)
+        val instruction = amo_instruction(AMO_ADD, 2, 1, 1, 1, 5)
+        val start_pc = state.pc
+        val retired_before = state.csr_m.minstret
+
+        state = enter_instruction(state, instruction)
+        val load_comb = core_combinational(state, 0, 0, state.rf)
+        val load_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            state, 0, 0, load_comb)
+        expect(load_trace.rvfi_valid).to_be(false)
+
+        val read = core32_cycle(state, true, true, false, 5)
+        expect(read.state.pipeline_phase).to_equal(CORE32_ATOMIC_STORE)
+        expect(read.state.pc).to_equal(start_pc)
+        expect(read.state.csr_m.minstret).to_equal(retired_before)
+        val store_comb = core_combinational(read.state, 0, 0,
+            read.state.rf)
+        val store_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            read.state, 0, 0, store_comb)
+        expect(store_trace.rvfi_valid).to_be(false)
+
+        val write = core32_cycle(read.state, true, true, false, 0)
+        expect(write.bus_atomic).to_be(true)
+        expect(write.bus_write).to_be(true)
+        expect(write.bus_wdata).to_equal(8)
+        expect(write.state.pipeline_phase).to_equal(CORE32_ATOMIC_READY)
+        expect(write.state.pc).to_equal(start_pc)
+        expect(write.state.csr_m.minstret).to_equal(retired_before)
+        expect(regfile_read(write.state.rf, 5, 0).rs1_data).to_equal(
+            0xA5A5A5A5)
+
+        val ready_comb = core_combinational(write.state, 0, 0,
+            write.state.rf)
+        val trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            write.state, 0, 0, ready_comb)
+        expect(trace.rvfi_valid).to_be(true)
+        expect(trace.rvfi_insn).to_equal(instruction)
+        expect(trace.rvfi_rd_wdata).to_equal(5)
+        expect(trace.rvfi_pc_rdata).to_equal(start_pc)
+        expect(trace.rvfi_pc_wdata).to_equal(start_pc + 4)
+        expect(trace.rvfi_mem_addr).to_equal(DATA_ADDR)
+        expect(trace.rvfi_mem_rmask).to_equal(0xF)
+        expect(trace.rvfi_mem_wmask).to_equal(0xF)
+        expect(trace.rvfi_mem_rdata).to_equal(5)
+        expect(trace.rvfi_mem_wdata).to_equal(8)
+
+        val committed = core32_cycle(write.state, false, false, false, 0)
+        expect(committed.bus_valid).to_be(false)
+        expect(committed.state.pc).to_equal(start_pc + 4)
+        expect(committed.state.csr_m.minstret).to_equal(retired_before + 1)
+        expect(regfile_read(committed.state.rf, 5, 0).rs1_data).to_equal(5)
+
+    it "advertises A only for the exclusive-bus core and canonical SoC":
+        expect(core_reset(RESET_PC).csr_m.misa & 1).to_equal(0)
+        expect(core32_init_single_master(RESET_PC).csr_m.misa & 1).to_equal(1)
+        val soc = soc_create(16)
+        expect(soc.core.csr_m.misa & 1).to_equal(1)
+        expect(soc.core.atomic_bus_exclusive).to_be(true)
+
+    it "reserves the physical LR.W word and completes one matching SC.W":
+        var state = core32_init_single_master(RESET_PC)
+        state.rf = regfile_write(state.rf, 1, DATA_ADDR, true)
+        state.rf = regfile_write(state.rf, 2, 0x55667788, true)
+        state.rf = regfile_write(state.rf, 4, 0xDEADBEEF, true)
+        val start_pc = state.pc
+        val retired_before = state.csr_m.minstret
+        val lr_insn = amo_instruction(AMO_LR, 0, 1, 0, 0, 3)
+        state = enter_instruction(state, lr_insn)
+        expect(state.pipeline_phase).to_equal(CORE32_ATOMIC_LOAD)
+        val lr_busy_comb = core_combinational(state, 0, 0, state.rf)
+        val lr_busy_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            state, 0, 0, lr_busy_comb)
+        expect(lr_busy_trace.rvfi_valid).to_be(false)
+        val load = core32_cycle(state, true, true, false, 0x11223344)
+        expect(load.bus_atomic).to_be(true)
+        expect(load.state.pipeline_phase).to_equal(CORE32_ATOMIC_READY)
+        expect(load.state.atomics.reservation_paddr).to_equal(DATA_ADDR as i64)
+        expect(load.state.atomics.reservation_size).to_equal(4)
+        expect(load.state.pc).to_equal(start_pc)
+        expect(load.state.csr_m.minstret).to_equal(retired_before)
+        expect(regfile_read(load.state.rf, 3, 0).rs1_data).to_equal(0)
+
+        val lr_ready_comb = core_combinational(load.state, 0, 0,
+            load.state.rf)
+        val lr_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            load.state, 0, 0, lr_ready_comb)
+        expect(lr_trace.rvfi_valid).to_be(true)
+        expect(lr_trace.rvfi_insn).to_equal(lr_insn)
+        expect(lr_trace.rvfi_rd_wdata).to_equal(0x11223344)
+        expect(lr_trace.rvfi_pc_rdata).to_equal(start_pc)
+        expect(lr_trace.rvfi_pc_wdata).to_equal(start_pc + 4)
+        expect(lr_trace.rvfi_mem_addr).to_equal(DATA_ADDR)
+        expect(lr_trace.rvfi_mem_rmask).to_equal(0xF)
+        expect(lr_trace.rvfi_mem_wmask).to_equal(0)
+        expect(lr_trace.rvfi_mem_rdata).to_equal(0x11223344)
+
+        val load_committed = core32_cycle(load.state, false, false, false, 0)
+        expect(load_committed.state.pc).to_equal(start_pc + 4)
+        expect(load_committed.state.csr_m.minstret).to_equal(
+            retired_before + 1)
+        expect(regfile_read(load_committed.state.rf, 3, 0).rs1_data).to_equal(
+            0x11223344)
+
+        val sc_insn = amo_instruction(AMO_SC, 2, 1, 0, 0, 4)
+        state = enter_instruction(load_committed.state, sc_insn)
+        expect(state.pipeline_phase).to_equal(CORE32_ATOMIC_STORE)
+        val sc_busy_comb = core_combinational(state, 0, 0, state.rf)
+        val sc_busy_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            state, 0, 0, sc_busy_comb)
+        expect(sc_busy_trace.rvfi_valid).to_be(false)
+        val store = core32_cycle(state, true, true, false, 0)
+        expect(store.bus_atomic).to_be(true)
+        expect(store.bus_write).to_be(true)
+        expect(store.bus_wdata).to_equal(0x55667788)
+        expect(store.state.pipeline_phase).to_equal(CORE32_ATOMIC_READY)
+        expect(store.state.pc).to_equal(start_pc + 4)
+        expect(store.state.csr_m.minstret).to_equal(retired_before + 1)
+        expect(regfile_read(store.state.rf, 4, 0).rs1_data).to_equal(
+            0xDEADBEEF)
+        expect(store.state.atomics.reservation_valid).to_be(false)
+
+        val sc_ready_comb = core_combinational(store.state, 0, 0,
+            store.state.rf)
+        val sc_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            store.state, 0, 0, sc_ready_comb)
+        expect(sc_trace.rvfi_valid).to_be(true)
+        expect(sc_trace.rvfi_insn).to_equal(sc_insn)
+        expect(sc_trace.rvfi_rd_wdata).to_equal(0)
+        expect(sc_trace.rvfi_pc_rdata).to_equal(start_pc + 4)
+        expect(sc_trace.rvfi_pc_wdata).to_equal(start_pc + 8)
+        expect(sc_trace.rvfi_mem_addr).to_equal(DATA_ADDR)
+        expect(sc_trace.rvfi_mem_rmask).to_equal(0)
+        expect(sc_trace.rvfi_mem_wmask).to_equal(0xF)
+        expect(sc_trace.rvfi_mem_wdata).to_equal(0x55667788)
+
+        val store_committed = core32_cycle(store.state, false, false,
+            false, 0)
+        expect(store_committed.state.pc).to_equal(start_pc + 8)
+        expect(store_committed.state.csr_m.minstret).to_equal(
+            retired_before + 2)
+        expect(regfile_read(store_committed.state.rf, 4, 0).rs1_data).to_equal(
+            0)
+
+    it "fails SC.W without an exact physical reservation and issues no write":
+        var state = core32_init_single_master(RESET_PC)
+        state.rf = regfile_write(state.rf, 1, DATA_ADDR, true)
+        state.rf = regfile_write(state.rf, 2, 9, true)
+        state.rf = regfile_write(state.rf, 4, 7, true)
+        state.atomics = atomics32_lr(state.atomics,
+            (DATA_ADDR as i64) + 4, 4)
+        val start_pc = state.pc
+        val retired_before = state.csr_m.minstret
+        val sc_insn = amo_instruction(AMO_SC, 2, 1, 0, 0, 4)
+        state = enter_instruction(state,
+            sc_insn)
+        val failed = core32_cycle(state, false, false, false, 0)
+        expect(failed.bus_valid).to_be(false)
+        expect(failed.bus_write).to_be(false)
+        expect(failed.state.pipeline_phase).to_equal(CORE32_ATOMIC_READY)
+        expect(failed.state.pc).to_equal(start_pc)
+        expect(failed.state.csr_m.minstret).to_equal(retired_before)
+        expect(regfile_read(failed.state.rf, 4, 0).rs1_data).to_equal(7)
+        expect(failed.state.atomics.reservation_valid).to_be(false)
+
+        val ready_comb = core_combinational(failed.state, 0, 0,
+            failed.state.rf)
+        val trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            failed.state, 0, 0, ready_comb)
+        expect(trace.rvfi_valid).to_be(true)
+        expect(trace.rvfi_insn).to_equal(sc_insn)
+        expect(trace.rvfi_rd_wdata).to_equal(1)
+        expect(trace.rvfi_mem_addr).to_equal(DATA_ADDR)
+        expect(trace.rvfi_mem_rmask).to_equal(0)
+        expect(trace.rvfi_mem_wmask).to_equal(0)
+
+        val committed = core32_cycle(failed.state, false, false, false, 0)
+        expect(committed.state.pc).to_equal(start_pc + 4)
+        expect(committed.state.csr_m.minstret).to_equal(retired_before + 1)
+        expect(regfile_read(committed.state.rf, 4, 0).rs1_data).to_equal(1)
+
+    it "matches translated LR/SC aliases by physical address":
+        val lr_vaddr: u32 = 0x40001100
+        val sc_vaddr: u32 = 0x50002100
+        val physical: u32 = 0x80000100
+        val leaf_flags: u32 = 0xC7  # V | R | W | A | D
+        var state = pmp_allow_all(core32_init_single_master(RESET_PC))
+        state.priv_mode = 1
+        state.mmu = mmu_set_satp(state.mmu, 0x80000100)
+        state.mmu = mmu_tlb_insert(state.mmu, sv32_full_vpn(lr_vaddr),
+            physical >> 12, leaf_flags)
+        state.mmu = mmu_tlb_insert(state.mmu, sv32_full_vpn(sc_vaddr),
+            physical >> 12, leaf_flags)
+        state.rf = regfile_write(state.rf, 1, lr_vaddr, true)
+        state.rf = regfile_write(state.rf, 2, 0xCAFEBABE, true)
+
+        val lr_insn = amo_instruction(AMO_LR, 0, 1, 0, 0, 3)
+        state = core32_begin_instruction(state, lr_insn)
+        val lr_ready = core32_cycle(state, true, true, false, 0x10203040)
+        expect(lr_ready.bus_addr).to_equal(physical as i64)
+        expect(lr_ready.state.pipeline_phase).to_equal(CORE32_ATOMIC_READY)
+        expect(lr_ready.state.atomics.reservation_paddr).to_equal(
+            physical as i64)
+        expect(lr_ready.state.atomics.reservation_paddr !=
+            (lr_vaddr as i64)).to_be(true)
+        val lr_comb = core_combinational(lr_ready.state, 0, 0,
+            lr_ready.state.rf)
+        val lr_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            lr_ready.state, 0, 0, lr_comb)
+        expect(lr_trace.rvfi_mem_addr).to_equal(physical)
+        val lr_committed = core32_cycle(lr_ready.state, false, false,
+            false, 0)
+
+        state = lr_committed.state
+        state.rf = regfile_write(state.rf, 1, sc_vaddr, true)
+        val sc_insn = amo_instruction(AMO_SC, 2, 1, 0, 0, 4)
+        state = core32_begin_instruction(state, sc_insn)
+        val sc_ready = core32_cycle(state, true, true, false, 0)
+        expect(sc_ready.bus_addr).to_equal(physical as i64)
+        expect(sc_ready.bus_write).to_be(true)
+        expect(sc_ready.bus_wdata).to_equal(0xCAFEBABE)
+        expect(sc_ready.state.pipeline_phase).to_equal(CORE32_ATOMIC_READY)
+        val sc_comb = core_combinational(sc_ready.state, 0, 0,
+            sc_ready.state.rf)
+        val sc_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            sc_ready.state, 0, 0, sc_comb)
+        expect(sc_trace.rvfi_rd_wdata).to_equal(0)
+        expect(sc_trace.rvfi_mem_addr).to_equal(physical)
+        expect(sc_trace.rvfi_mem_wmask).to_equal(0xF)
+
+    it "invalidates only overlapping reservations after successful stores":
+        val reserved = atomics32_lr(atomics32_create(), DATA_ADDR as i64, 4)
+        val preserved = atomics32_invalidate(reserved,
+            (DATA_ADDR as i64) + 4, 4)
+        expect(preserved.reservation_valid).to_be(true)
+        val invalidated = atomics32_invalidate(reserved,
+            (DATA_ADDR as i64) + 2, 2)
+        expect(invalidated.reservation_valid).to_be(false)
+
+        var state = core32_init_single_master(RESET_PC)
+        state.rf = regfile_write(state.rf, 1, DATA_ADDR, true)
+        state.rf = regfile_write(state.rf, 2, 7, true)
+        state.atomics = reserved
+        state = enter_instruction(state, 0x0020A023)  # SW x2, 0(x1)
+        val stored = core32_cycle(state, true, true, false, 0)
+        expect(stored.state.atomics.reservation_valid).to_be(false)
+
+    it "rejects malformed AMOs and A on the reusable generic core":
+        val bad_lr = amo_instruction(AMO_LR, 2, 1, 0, 0, 3)
+        expect(enter_instruction(core32_init_single_master(RESET_PC), bad_lr).csr_m.mcause).to_equal(2)
+        val bad_width = amo_instruction_raw(AMO_ADD, 2, 1, 3, 0, 0, 3)
+        expect(enter_instruction(core32_init_single_master(RESET_PC), bad_width).csr_m.mcause).to_equal(2)
+        val reserved = amo_instruction(0x1F, 2, 1, 0, 0, 3)
+        expect(enter_instruction(core32_init_single_master(RESET_PC), reserved).csr_m.mcause).to_equal(2)
+        val generic = enter_instruction(core_reset(RESET_PC),
+            amo_instruction(AMO_ADD, 2, 1, 0, 0, 3))
+        expect(generic.csr_m.mcause).to_equal(2)
+        expect(generic.pipeline_phase).to_equal(CORE32_FETCH)
+
+    it "clears reservations on traps and interrupts":
+        var trapped = core32_init_single_master(RESET_PC)
+        trapped.atomics = atomics32_lr(trapped.atomics, DATA_ADDR as i64, 4)
+        trapped = enter_instruction(trapped, 0)
+        expect(trapped.atomics.reservation_valid).to_be(false)
+
+        var interrupted = core32_init_single_master(RESET_PC)
+        interrupted.atomics = atomics32_lr(interrupted.atomics,
+            DATA_ADDR as i64, 4)
+        interrupted.csr_m.mstatus = MSTATUS_MIE_MASK
+        interrupted.csr_m.mie = MIP_MTIP_MASK
+        interrupted.csr_m.mip = MIP_MTIP_MASK
+        interrupted = enter_instruction(interrupted, 0x00000013)
+        expect(interrupted.atomics.reservation_valid).to_be(false)
+
+    it "reports precise LR and AMO alignment and PMP access causes":
+        val lr = amo_instruction(AMO_LR, 0, 1, 0, 0, 3)
+        val add = amo_instruction(AMO_ADD, 2, 1, 0, 0, 3)
+        expect(immediate_fault(lr, DATA_ADDR + 2, false).csr_m.mcause).to_equal(4)
+        expect(immediate_fault(add, DATA_ADDR + 2, false).csr_m.mcause).to_equal(6)
+        expect(immediate_fault(lr, DATA_ADDR, true).csr_m.mcause).to_equal(5)
+        expect(immediate_fault(add, DATA_ADDR, true).csr_m.mcause).to_equal(7)
+
+    it "uses Sv32 load faults for LR and store faults for AMO before PMP":
+        var lr_state = pmp_allow_all(core32_init_single_master(RESET_PC))
+        lr_state.priv_mode = 1
+        lr_state.mmu = mmu_set_satp(lr_state.mmu, 0x80000100)
+        lr_state.rf = regfile_write(lr_state.rf, 1, 0x40001000, true)
+        lr_state = enter_instruction(lr_state,
+            amo_instruction(AMO_LR, 0, 1, 0, 0, 3))
+        val lr_pte = core32_cycle(lr_state, true, false, false, 0)
+        expect(lr_pte.bus_is_pte).to_be(true)
+        expect(lr_pte.bus_atomic).to_be(false)
+        val lr_fault = core32_cycle(lr_pte.state, false, true, false, 0)
+        expect(lr_fault.state.csr_m.mcause).to_equal(13)
+
+        var amo_state = pmp_allow_all(core32_init_single_master(RESET_PC))
+        amo_state.priv_mode = 1
+        amo_state.mmu = mmu_set_satp(amo_state.mmu, 0x80000100)
+        amo_state.rf = regfile_write(amo_state.rf, 1, 0x40001000, true)
+        amo_state.rf = regfile_write(amo_state.rf, 2, 1, true)
+        amo_state = enter_instruction(amo_state,
+            amo_instruction(AMO_ADD, 2, 1, 0, 0, 3))
+        val amo_pte = core32_cycle(amo_state, true, false, false, 0)
+        expect(amo_pte.bus_is_pte).to_be(true)
+        val amo_fault = core32_cycle(amo_pte.state, false, true, false, 0)
+        expect(amo_fault.state.csr_m.mcause).to_equal(15)
+
+        var denied_state = pmp_allow_root_page_only(
+            core32_init_single_master(RESET_PC))
+        denied_state.priv_mode = 1
+        denied_state.mmu = mmu_set_satp(denied_state.mmu, 0x80000100)
+        denied_state.rf = regfile_write(denied_state.rf, 1,
+            0x40001000, true)
+        denied_state.rf = regfile_write(denied_state.rf, 2, 1, true)
+        denied_state = enter_instruction(denied_state,
+            amo_instruction(AMO_ADD, 2, 1, 0, 0, 3))
+        val denied_pte = core32_cycle(denied_state, true, false, false, 0)
+        expect(denied_pte.bus_is_pte).to_be(true)
+        val writable_superpage: u32 = (0x200 << 20) | 0xC7
+        val denied = core32_cycle(denied_pte.state, false, true, false,
+            writable_superpage)
+        expect(denied.bus_atomic).to_be(false)
+        expect(denied.state.csr_m.mcause).to_equal(7)
+
+    it "rejects atomic UART and CLINT requests before peripheral mutation":
+        var uart = soc_create(16)
+        uart.uart.rx_fifo_0 = 0x41
+        uart.uart.rx_count = 1
+        uart.core.instruction = amo_instruction(AMO_LR, 0, 1, 0, 0, 3)
+        uart.core.pipeline_phase = CORE32_ATOMIC_LOAD
+        uart.core.memory = memory32_start_lr(uart.core.mmu, uart.core.pmp,
+            UART_BASE, 4, 3, false, false)
+        val uart_rejected = soc_tick(uart).state
+        expect(uart_rejected.response_error).to_be(true)
+        expect(uart_rejected.uart.rx_count).to_equal(1)
+        val uart_trapped = soc_tick(uart_rejected).state
+        expect(uart_trapped.core.csr_m.mcause).to_equal(5)
+
+        var clint = soc_create(16)
+        clint.core.instruction = amo_instruction(AMO_SWAP, 2, 1, 0, 0, 3)
+        clint.core.pipeline_phase = CORE32_ATOMIC_STORE
+        clint.core.memory = memory32_start_atomic_store(clint.core.mmu,
+            clint.core.pmp, CLINT_BASE, 4, 3, false, false, 1)
+        val clint_rejected = soc_tick(clint).state
+        expect(clint_rejected.response_error).to_be(true)
+        expect(clint_rejected.clint.msip).to_equal(0)
+        val clint_trapped = soc_tick(clint_rejected).state
+        expect(clint_trapped.core.csr_m.mcause).to_equal(7)

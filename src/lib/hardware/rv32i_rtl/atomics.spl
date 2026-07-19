@@ -1,0 +1,75 @@
+use std.hardware.rv32i_rtl.alu.u32_signed_lt
+use std.hardware.rv32i_rtl.pkg.{AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
+use std.hardware.rv32i_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
+
+struct AtomicsState32:
+    reservation_valid: bool
+    reservation_paddr: i64
+    reservation_size: u32
+
+struct AmoResult32:
+    old_value: u32
+    new_value: u32
+
+@hardware
+fn atomics32_create() -> AtomicsState32:
+    AtomicsState32(reservation_valid: false, reservation_paddr: 0,
+        reservation_size: 0)
+
+@hardware
+fn atomics32_lr(state: AtomicsState32, paddr: i64,
+                size_bytes: u32) -> AtomicsState32:
+    AtomicsState32(reservation_valid: true, reservation_paddr: paddr,
+        reservation_size: size_bytes)
+
+@hardware
+fn atomics32_clear(state: AtomicsState32) -> AtomicsState32:
+    atomics32_create()
+
+@hardware
+fn atomics32_ranges_overlap(first_addr: i64, first_size: u32,
+                            second_addr: i64, second_size: u32) -> bool:
+    if first_size == 0 or second_size == 0:
+        return false
+    val first_last = first_addr + first_size as i64 - 1
+    val second_last = second_addr + second_size as i64 - 1
+    if first_last < first_addr or second_last < second_addr:
+        return true
+    first_addr <= second_last and second_addr <= first_last
+
+@hardware
+fn atomics32_invalidate(state: AtomicsState32, store_paddr: i64,
+                        store_size: u32) -> AtomicsState32:
+    if state.reservation_valid and atomics32_ranges_overlap(
+        state.reservation_paddr, state.reservation_size, store_paddr,
+        store_size):
+        return atomics32_create()
+    state
+
+@hardware
+fn amo32_compute(funct5: u32, old_value: u32,
+                 rs2_value: u32) -> AmoResult32:
+    var new_value = old_value
+    if funct5 == AMO_SWAP:
+        new_value = rs2_value
+    else if funct5 == AMO_ADD:
+        new_value = old_value + rs2_value
+    else if funct5 == AMO_XOR:
+        new_value = old_value ^ rs2_value
+    else if funct5 == AMO_AND:
+        new_value = old_value & rs2_value
+    else if funct5 == AMO_OR:
+        new_value = old_value | rs2_value
+    else if funct5 == AMO_MIN and u32_signed_lt(rs2_value, old_value):
+        new_value = rs2_value
+    else if funct5 == AMO_MAX and u32_signed_lt(old_value, rs2_value):
+        new_value = rs2_value
+    else if funct5 == AMO_MINU and rs2_value < old_value:
+        new_value = rs2_value
+    else if funct5 == AMO_MAXU and rs2_value > old_value:
+        new_value = rs2_value
+    AmoResult32(old_value: old_value, new_value: new_value)
+
+export AtomicsState32, AmoResult32
+export atomics32_create, atomics32_lr, atomics32_clear
+export atomics32_ranges_overlap, atomics32_invalidate, amo32_compute

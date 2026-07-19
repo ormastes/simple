@@ -206,7 +206,9 @@ allow/deny rules from the pinned privileged specification.
 
 Pinned media consists of firmware/OpenSBI, kernel, DT, and rootfs with a serial
 getty and deterministic fixture files. A manifest binds their hashes, load
-addresses, entrypoints, DT values, and tool identities.
+addresses, entrypoints, DT values, and tool identities. A built-in initramfs
+retains its source CPIO hash and uses rootfs load address `0`; firmware, kernel,
+DT, and any combined image remain independently addressed.
 
 QEMU validates only that media and platform contract. RTL and FPGA lanes must
 observe bytes originating at the DUT UART and must send login and `ls /` bytes

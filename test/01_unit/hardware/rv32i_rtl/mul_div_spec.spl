@@ -1,0 +1,154 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core32_cycle}
+use std.hardware.rv32i_rtl.core.{core_combinational, core_rvfi_trace}
+use std.hardware.rv32i_rtl.core.{core32_instruction_legal, CORE32_MULDIV}
+use std.hardware.rv32i_rtl.decode.decode_instruction
+use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.mul_div.mul_div32_ready
+use std.hardware.rv32i_rtl.rvfi.rvfi_enabled_config
+use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_MASK, MIP_MSIP_MASK}
+
+fn m_instruction(funct3: u32, rd: u32, rs1: u32, rs2: u32) -> u32:
+    (1 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) |
+        (rd << 7) | 0x33
+
+fn run_m_instruction(state: CoreState, funct3: u32, rd: u32,
+                     rs1: u32, rs2: u32, a: u32, b: u32,
+                     expected_result: u32) -> CoreState:
+    var prepared = state
+    prepared.rf = regfile_write(prepared.rf, rs1, a, true)
+    prepared.rf = regfile_write(prepared.rf, rs2, b, true)
+    val instruction = m_instruction(funct3, rd, rs1, rs2)
+    val start_pc = prepared.pc
+    val retired_before = prepared.csr_m.minstret
+
+    var cycle = core32_cycle(prepared, true, true, false, instruction)
+    expect(cycle.state.pipeline_phase).to_equal(CORE32_MULDIV)
+    expect(cycle.state.mul_div.busy).to_be(true)
+    expect(cycle.state.pc).to_equal(start_pc)
+    expect(cycle.state.csr_m.minstret).to_equal(retired_before)
+
+    var steps: u32 = 0
+    while cycle.state.mul_div.busy:
+        val stall_comb = core_combinational(cycle.state, 0, 0,
+            cycle.state.rf)
+        val stall_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+            cycle.state, 0, 0, stall_comb)
+        expect(stall_trace.rvfi_valid).to_be(false)
+        cycle = core32_cycle(cycle.state, false, false, false, 0)
+        expect(cycle.bus_valid).to_be(false)
+        expect(cycle.state.csr_m.minstret).to_equal(retired_before)
+        steps = steps + 1
+
+    expect(steps).to_equal(32)
+    expect(cycle.state.pipeline_phase).to_equal(CORE32_MULDIV)
+    expect(mul_div32_ready(cycle.state.mul_div)).to_be(true)
+    expect(cycle.state.pc).to_equal(start_pc)
+    expect(cycle.state.csr_m.minstret).to_equal(retired_before)
+
+    # The caller-supplied instruction/combination is intentionally wrong:
+    # ready-phase RVFI must use the registered M instruction and result.
+    val ready_comb = core_combinational(cycle.state, 0, 0, cycle.state.rf)
+    val ready_trace = core_rvfi_trace(rvfi_enabled_config(0), 0,
+        cycle.state, 0, 0, ready_comb)
+    val architectural_result = if rd == 0: 0 else: expected_result
+    expect(ready_trace.rvfi_valid).to_be(true)
+    expect(ready_trace.rvfi_insn).to_equal(instruction)
+    expect(ready_trace.rvfi_pc_rdata).to_equal(start_pc)
+    expect(ready_trace.rvfi_pc_wdata).to_equal(start_pc + 4)
+    expect(ready_trace.rvfi_rs1_addr).to_equal(rs1)
+    expect(ready_trace.rvfi_rs2_addr).to_equal(rs2)
+    expect(ready_trace.rvfi_rs1_rdata).to_equal(a)
+    expect(ready_trace.rvfi_rs2_rdata).to_equal(b)
+    expect(ready_trace.rvfi_rd_addr).to_equal(rd)
+    expect(ready_trace.rvfi_rd_wdata).to_equal(architectural_result)
+
+    val committed = core32_cycle(cycle.state, false, false, false, 0)
+    expect(committed.bus_valid).to_be(false)
+    expect(committed.state.pc).to_equal(start_pc + 4)
+    expect(committed.state.csr_m.minstret).to_equal(retired_before + 1)
+    expect(regfile_read(committed.state.rf, rd, 0).rs1_data).to_equal(
+        architectural_result)
+    committed.state
+
+describe "RV32M canonical clocked path":
+    it "advertises every privilege and integer extension the core implements":
+        val misa = core_reset(0x80000000).csr_m.misa
+        expect(misa >> 30).to_equal(1)
+        expect(misa & (1 << 8)).to_equal(1 << 8)    # I
+        expect(misa & (1 << 12)).to_equal(1 << 12)  # M
+        expect(misa & (1 << 18)).to_equal(1 << 18)  # S
+        expect(misa & (1 << 20)).to_equal(1 << 20)  # U
+
+    it "decodes and legalizes exactly the eight RV32M funct3 variants":
+        var funct3: u32 = 0
+        while funct3 < 8:
+            val instruction = m_instruction(funct3, 3, 1, 2)
+            val dec = decode_instruction(instruction)
+            expect(dec.is_muldiv).to_be(true)
+            expect(core32_instruction_legal(instruction, dec)).to_be(true)
+            funct3 = funct3 + 1
+        val reserved: u32 = (2 << 25) | 0x33
+        expect(core32_instruction_legal(reserved,
+            decode_instruction(reserved))).to_be(false)
+
+    it "executes all eight operations through the registered core path":
+        var state = core_reset(0x80000000)
+        state = run_m_instruction(state, 0, 3, 1, 2,
+            0xFFFFFFFF, 2, 0xFFFFFFFE)          # MUL
+        state = run_m_instruction(state, 1, 3, 1, 2,
+            0xFFFFFFFE, 3, 0xFFFFFFFF)          # MULH
+        state = run_m_instruction(state, 2, 3, 1, 2,
+            0x80000000, 0xFFFFFFFF, 0x80000000) # MULHSU
+        state = run_m_instruction(state, 3, 3, 1, 2,
+            0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFE) # MULHU
+        state = run_m_instruction(state, 4, 3, 1, 2,
+            0xFFFFFFF9, 3, 0xFFFFFFFE)          # DIV
+        state = run_m_instruction(state, 5, 3, 1, 2,
+            0xFFFFFFFF, 0x80000001, 1)          # DIVU, high-bit divisor
+        state = run_m_instruction(state, 6, 3, 1, 2,
+            0xFFFFFFF9, 3, 0xFFFFFFFF)          # REM
+        state = run_m_instruction(state, 7, 3, 1, 2,
+            0xFFFFFFFF, 0x80000001, 0x7FFFFFFE) # REMU, high-bit divisor
+        expect(state.csr_m.minstret).to_equal(8)
+
+    it "handles divide edges, x0, and source-destination aliasing":
+        var state = core_reset(0x90000000)
+        state = run_m_instruction(state, 1, 3, 1, 2,
+            3, 0xFFFFFFFE, 0xFFFFFFFF) # MULH, negative B correction
+        state = run_m_instruction(state, 4, 3, 1, 2,
+            0x12345678, 0, 0xFFFFFFFF)
+        state = run_m_instruction(state, 6, 3, 1, 2,
+            0x12345678, 0, 0x12345678)
+        state = run_m_instruction(state, 4, 3, 1, 2,
+            0x80000000, 0xFFFFFFFF, 0x80000000)
+        state = run_m_instruction(state, 6, 3, 1, 2,
+            0x80000000, 0xFFFFFFFF, 0)
+        state = run_m_instruction(state, 0, 0, 1, 2, 6, 7, 42)
+        state = run_m_instruction(state, 0, 1, 1, 2, 6, 7, 42)
+        state = run_m_instruction(state, 4, 2, 1, 2, 42, 6, 7)
+        expect(state.csr_m.minstret).to_equal(8)
+
+    it "retires M before taking an interrupt that arrived while busy":
+        val start_pc: u32 = 0xA0000000
+        var state = core_reset(start_pc)
+        state.rf = regfile_write(state.rf, 1, 6, true)
+        state.rf = regfile_write(state.rf, 2, 7, true)
+        state.csr_m.mtvec = 0x1000
+        state.csr_m.mstatus = MSTATUS_MIE_MASK
+        state.csr_m.mie = MIP_MSIP_MASK
+
+        var cycle = core32_cycle(state, true, true, false,
+            m_instruction(0, 3, 1, 2))
+        cycle.state.csr_m.mip = MIP_MSIP_MASK
+        while cycle.state.mul_div.busy:
+            cycle = core32_cycle(cycle.state, false, false, false, 0)
+            expect(cycle.state.csr_m.minstret).to_equal(0)
+
+        val committed = core32_cycle(cycle.state, false, false, false, 0)
+        expect(committed.state.csr_m.minstret).to_equal(1)
+        expect(regfile_read(committed.state.rf, 3, 0).rs1_data).to_equal(42)
+        expect(committed.state.priv_mode).to_equal(3)
+        expect(committed.state.csr_m.mcause).to_equal(0x80000003)
+        expect(committed.state.csr_m.mepc).to_equal(start_pc + 4)
+        expect(committed.state.pc).to_equal(0x1000)

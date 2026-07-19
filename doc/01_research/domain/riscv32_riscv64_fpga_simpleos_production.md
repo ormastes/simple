@@ -277,3 +277,31 @@ and trap boundaries, WARL-coerces reserved MPP and unsupported vector modes,
 and latches effective privilege plus SUM/MXR across atomic phases. Focused
 repository scenarios remain unexecuted under the tracked pure-Simple CLI
 crash.
+
+## 2026-07-19 Reproducible Linux Media Baseline
+
+Buildroot 2026.05.1 is the current stable upstream release and resolves to
+commit `cb857ba4c87a93e5265a9e4a3f32071abf39e14a`. Its maintained
+`qemu_riscv32_virt_defconfig` and `qemu_riscv64_virt_defconfig` pin Linux
+6.18.7 and OpenSBI 1.6 generic. The corresponding upstream run guides define
+the observable oracle: boot QEMU, log in as `root` with no password, and run a
+command at the shell. Sources: [Buildroot releases](https://buildroot.org/downloads/),
+[RV32 defconfig](https://gitlab.com/buildroot.org/buildroot/-/blob/2026.05.1/configs/qemu_riscv32_virt_defconfig),
+[RV64 defconfig](https://gitlab.com/buildroot.org/buildroot/-/blob/2026.05.1/configs/qemu_riscv64_virt_defconfig),
+[RV32 run guide](https://gitlab.com/buildroot.org/buildroot/-/blob/2026.05.1/board/qemu/riscv32-virt/readme.txt),
+[RV64 run guide](https://gitlab.com/buildroot.org/buildroot/-/blob/2026.05.1/board/qemu/riscv64-virt/readme.txt).
+
+The stock configs use hard-float IMAFD and an ext2 root filesystem. Neither is
+an honest first match for the Simple product: the cores must not rely on F/D,
+and the generated SoCs do not yet provide a virtio block device. The product
+therefore derives reproducible soft-float RV32IMA/ILP32 and RV64IMA/LP64
+configs, disables F/D/C/V, and selects Buildroot's built-in initramfs. This
+retains `rootfs.cpio` as a separately hashable producer artifact while embedding
+the same bytes into the kernel `Image`; no independent rootfs RAM address or
+block controller is required.
+
+OpenSBI `fw_jump.bin` remains separate from the kernel so QEMU, RTL simulation,
+and FPGA can consume identical pinned inputs. The platform DTB is also separate:
+QEMU's generated `virt` DTB is suitable only for the software oracle, while the
+final product DTB must describe the actual Simple SoC address map, hart count,
+clock/timebase, PLIC contexts, and UART interrupt route.

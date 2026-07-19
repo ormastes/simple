@@ -259,3 +259,55 @@ The current host exposes `openocd` but no `vivado`, `vitis`, or `xsct` on
 as the ML carrier card, so KV260 remains the best-supported board identity, but
 the programming gate must still record an authoritative device/JTAG scan
 before treating that inference as final hardware identity.
+
+## 2026-07-19 Canonical RV32 Linux Readiness Audit
+
+The compiler-rooted RV32 core has real M/S/U privilege state, Sv32 translation,
+a 16-entry ASID/global/superpage-aware TLB, PMP enforcement, synchronous trap
+delegation, `MRET`/`SRET`, `SATP`, and full `SFENCE.VMA` invalidation. It has no
+instruction or data cache, so its accepted `FENCE.I` no-op remains coherent.
+
+The same canonical path is not yet `rv32ima` or Linux ready:
+
+- `MISA` advertises RV32I. Multiply/divide and atomic opcodes are absent from
+  legal decode and execution; existing atomic bus helpers are disconnected.
+- `mideleg` is fixed to zero, supervisor interrupt CSRs are WARL-zero, and trap
+  polling handles machine causes only.
+- The RV32 SoC has no PLIC, discards the UART interrupt, and drives external
+  interrupt input inactive. `WFI` is illegal.
+- Product metadata claiming `rv32gc`/ILP32D and RV32IMAC tests that execute RV64
+  helper models are aspirational, not evidence from the canonical CPU.
+
+The smallest coherent implementation order is RV32M, RV32A with reservation
+state and single-master atomicity, supervisor interrupt CSR/delivery plus a
+real PLIC route, and then `WFI`/counter CSRs. Only after those gates may an
+OpenSBI/Linux boot advertise `rv32ima`; caches remain deferred until measured
+performance requires them.
+
+The bundle-level DT audit found a separate boundary failure. Both product lanes
+currently call the same RV32-only string emitter, whose CPU body is an explicit
+`GENERATED_RTL_NOT_IMPLEMENTED` placeholder. The RV32 topology has CLINT and
+UART blocks but no PLIC or CPU interrupt routes. A separate RV64 driver has a
+PLIC-shaped address range, but its CLINT, PLIC, and UART are zero-output stubs.
+Therefore a binding-complete product DT must be generated from a lane-aware
+canonical SoC profile and must fail closed until the corresponding interrupt
+hardware exists; a QEMU-generated DTB is an oracle only.
+
+## 2026-07-19 RV32 IMA Implementation Update
+
+The readiness audit above described its inspection point. The canonical RV32
+core now implements all eight RV32M operations with bounded iterative hardware
+and all RV32A word atomics with a physical LR/SC reservation. Both multicycle
+units expose a registered retirement phase so PC, `minstret`, register writeback,
+and RVFI advance exactly once. Focused static review covers divide corner cases,
+AMO old/new values, failed SC no-write behavior, and two Sv32 virtual aliases
+sharing one physical reservation. Independent high-capability review reports
+PASS; executable Simple checks remain deferred because the session's three
+pure-Simple CLI recovery cycles were already exhausted.
+
+The shortest remaining RV32 Linux path reuses the existing shared two-context
+PLIC rather than adding another controller: port the proven RV64 supervisor
+pending/enable aliases into RV32, connect CLINT and UART source 10 through the
+canonical SoC, and emit the product DT from that same fixed topology. The
+separate text-emitted RV64 FPGA driver—not the shared Simple peripheral models—
+still contains non-authoritative stubs and remains fail-closed.

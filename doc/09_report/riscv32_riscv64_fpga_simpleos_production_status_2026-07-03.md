@@ -36,10 +36,22 @@ board-origin login evidence.
   `e66263f73d2a23548f6011a1b6936eb11c2041ce8833cc83051517f047300887`
   and a 2026-05-21 timestamp. It is stale, non-authoritative marker evidence;
   it cannot prove Simple-compiler RTL, Linux boot, login, or `ls`.
-- The repository has no pinned RV32/RV64 OpenSBI, Linux kernel, DTB, and rootfs
-  set. The new canonical media manifest therefore emits `unpinned` for both
-  lanes and rejects missing/changed files, duplicate or unknown lanes, and DT
-  relationship mismatches. No QEMU or generated-RTL Linux boot is claimed.
+- The RV32 Buildroot 2026.05.1 producer now pins soft-float IMA OpenSBI 1.6,
+  Linux 6.18.7, and a built-in initramfs. A live QEMU 8.2.2 terminal reached
+  `buildroot login:`, accepted blank-password `root`, ran `ls /`, reported
+  `riscv32`, and powered off. The retained transcript and hashes are under
+  `doc/06_spec/03_system/hardware/riscv_fpga_linux/evidence/`. Its QEMU `virt`
+  DTB is explicitly oracle-only, so product manifests remain `unpinned`; no
+  generated-RTL or FPGA Linux boot is claimed.
+- The equivalent RV64 IMA media builds successfully and its ELF payloads are
+  RV64 I/M/A without RVC, but three strict QEMU diagnostics all fail inside
+  early Linux with memory corruption/page faults before login. The retained
+  failure transcript records all three attempts; the iteration cap is exhausted
+  for this session, so RV64 has no terminal oracle and no PASS claim.
+- The canonical RV32 core now contains reviewed RV32M and RV32A execution with
+  registered one-shot retirement/RVFI evidence. This is source-level progress,
+  not generated-VHDL evidence: supervisor interrupts, PLIC wiring, WFI, product
+  DT, compiler emission, synthesis, and physical Linux boot remain outstanding.
 
 Physical F1/N3 execution remains **BLOCKED**, not passed. Restore the FTDI
 interface before touching JTAG, then produce new compiler-provenance-bound

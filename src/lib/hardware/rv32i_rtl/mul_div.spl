@@ -1,0 +1,139 @@
+# ============================================================================
+# RV32M RTL — Iterative Multiply/Divide Unit
+# ============================================================================
+
+use std.hardware.rv32i_rtl.pkg.{MULDIV_MUL, MULDIV_MULH}
+use std.hardware.rv32i_rtl.pkg.{MULDIV_MULHSU, MULDIV_MULHU}
+use std.hardware.rv32i_rtl.pkg.{MULDIV_DIV, MULDIV_DIVU}
+use std.hardware.rv32i_rtl.pkg.{MULDIV_REM, MULDIV_REMU}
+
+struct MulDivState32:
+    busy: bool
+    op: i64
+    a: u32
+    b: u32
+    result: u32
+    steps_left: u32
+    accumulator_low: u32
+    accumulator_high: u32
+    multiplicand_low: u32
+    multiplicand_high: u32
+    multiplier: u32
+    dividend: u32
+    divisor: u32
+    quotient: u32
+    remainder: u32
+
+@hardware
+fn mul_div32_is_multiply(op: i64) -> bool:
+    (op == MULDIV_MUL or op == MULDIV_MULH or
+     op == MULDIV_MULHSU or op == MULDIV_MULHU)
+
+@hardware
+fn mul_div32_signed_magnitude(value: u32) -> u32:
+    if (value & 0x80000000) != 0:
+        return 0 - value
+    value
+
+@hardware
+fn mul_div32_create() -> MulDivState32:
+    MulDivState32(busy: false, op: 0, a: 0, b: 0, result: 0,
+        steps_left: 0, accumulator_low: 0, accumulator_high: 0,
+        multiplicand_low: 0, multiplicand_high: 0, multiplier: 0,
+        dividend: 0, divisor: 0, quotient: 0, remainder: 0)
+
+@hardware
+fn mul_div32_start(op: i64, a: u32, b: u32) -> MulDivState32:
+    val signed_division = op == MULDIV_DIV or op == MULDIV_REM
+    val dividend = if signed_division: mul_div32_signed_magnitude(a) else: a
+    val divisor = if signed_division: mul_div32_signed_magnitude(b) else: b
+    MulDivState32(busy: true, op: op, a: a, b: b, result: 0,
+        steps_left: 32, accumulator_low: 0, accumulator_high: 0,
+        multiplicand_low: a, multiplicand_high: 0, multiplier: b,
+        dividend: dividend, divisor: divisor, quotient: 0, remainder: 0)
+
+@hardware
+fn mul_div32_tick_multiply(state: MulDivState32) -> MulDivState32:
+    var out = state
+    var low = state.accumulator_low
+    var high = state.accumulator_high
+    if (state.multiplier & 1) != 0:
+        val next_low = low + state.multiplicand_low
+        val carry: u32 = if next_low < low: 1 else: 0
+        low = next_low
+        high = high + state.multiplicand_high + carry
+
+    out.accumulator_low = low
+    out.accumulator_high = high
+    out.multiplicand_high = (state.multiplicand_high << 1) |
+        (state.multiplicand_low >> 31)
+    out.multiplicand_low = state.multiplicand_low << 1
+    out.multiplier = state.multiplier >> 1
+    out.steps_left = state.steps_left - 1
+
+    if state.steps_left == 1:
+        out.busy = false
+        if state.op == MULDIV_MUL:
+            out.result = low
+        else:
+            var corrected_high = high
+            if ((state.op == MULDIV_MULH or
+                 state.op == MULDIV_MULHSU) and
+                (state.a & 0x80000000) != 0):
+                corrected_high = corrected_high - state.b
+            if (state.op == MULDIV_MULH and
+                (state.b & 0x80000000) != 0):
+                corrected_high = corrected_high - state.a
+            out.result = corrected_high
+    out
+
+@hardware
+fn mul_div32_tick_divide(state: MulDivState32) -> MulDivState32:
+    var out = state
+    val carry = state.remainder >> 31
+    var remainder = (state.remainder << 1) | (state.dividend >> 31)
+    var quotient_bit: u32 = 0
+    if carry != 0 or remainder >= state.divisor:
+        remainder = remainder - state.divisor
+        quotient_bit = 1
+    val quotient = (state.quotient << 1) | quotient_bit
+
+    out.dividend = state.dividend << 1
+    out.quotient = quotient
+    out.remainder = remainder
+    out.steps_left = state.steps_left - 1
+
+    if state.steps_left == 1:
+        out.busy = false
+        if state.b == 0:
+            out.result = if (state.op == MULDIV_DIV or
+                state.op == MULDIV_DIVU): 0xFFFFFFFF else: state.a
+        else if ((state.op == MULDIV_DIV or state.op == MULDIV_REM) and
+                 state.a == 0x80000000 and state.b == 0xFFFFFFFF):
+            out.result = if state.op == MULDIV_DIV: state.a else: 0
+        else if state.op == MULDIV_DIVU:
+            out.result = quotient
+        else if state.op == MULDIV_REMU:
+            out.result = remainder
+        else if state.op == MULDIV_DIV:
+            out.result = quotient
+            if ((state.a ^ state.b) & 0x80000000) != 0:
+                out.result = 0 - quotient
+        else:
+            out.result = remainder
+            if (state.a & 0x80000000) != 0:
+                out.result = 0 - remainder
+    out
+
+@hardware
+fn mul_div32_tick(state: MulDivState32) -> MulDivState32:
+    """Advance exactly one radix-2 multiply or divide bit."""
+    if not state.busy:
+        return state
+    if mul_div32_is_multiply(state.op):
+        return mul_div32_tick_multiply(state)
+    mul_div32_tick_divide(state)
+
+@hardware
+fn mul_div32_ready(state: MulDivState32) -> bool:
+    not state.busy

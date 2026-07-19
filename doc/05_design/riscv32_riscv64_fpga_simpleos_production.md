@@ -263,7 +263,8 @@ generation consume the same values; a checker rejects mismatches.
 For each XLEN record path, size, SHA-256, load address, entrypoint, tool
 identity, configuration hash, and DT relationship for firmware, kernel, DTB,
 rootfs, and optional combined image. QEMU, RTL, and FPGA consumers reject a
-different hash set.
+different hash set. Rootfs load address `0` means the pinned CPIO is embedded
+in the kernel Image; every independently loaded role requires a nonzero address.
 
 ## Linux execution and evidence
 
