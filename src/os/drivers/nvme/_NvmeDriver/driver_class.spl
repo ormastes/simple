@@ -54,6 +54,24 @@ val SYS_MAP_BAR: u64 = 83
 val SYS_ALLOC_DMA: u64 = 84
 val SYS_NOTIFICATION_WAIT: u64 = 26
 
+# NVMe 64-bit BAR high-window (real firmware, e.g. OVMF, assigns 64-bit BARs
+# above 4GB; observed 0xC000004000 on the q35 NVMe controller). The kernel
+# pre-maps an EXCLUSIVE higher-half slot for this window
+# (vmm_map_nvme_bar_high(), PML4[384]) that is carried into every user address
+# space for free via the existing PML4[256..511] copy loop. Referencing that
+# already-mapped VA directly -- instead of a fresh syscall-83 per-task mapping
+# -- mirrors the proven-working C bridge (_nvme_init_controller) address math
+# and sidesteps whatever makes the syscall-83 mapping unreliable under OVMF.
+# KEEP THESE VALUES IN SYNC WITH:
+#   - src/os/kernel/memory/vmm_address_space.spl: vmm_map_nvme_bar_high()
+#   - examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:
+#     NVME_BAR_PHYS_BASE / NVME_BAR_VIRT_BASE
+val NVME_BAR_PHYS_BASE: u64 = 0xC000000000
+val NVME_BAR_VIRT_BASE: u64 = 0xFFFFC00000000000
+# 64KiB actually page-mapped by vmm_map_nvme_bar_high() -- covers CAP/CC/CSTS
+# plus doorbells for the driver's current max queue count.
+val NVME_BAR_WINDOW_SIZE: u64 = 0x10000
+
 class NvmeDriver:
     """NVMe block device driver.
 

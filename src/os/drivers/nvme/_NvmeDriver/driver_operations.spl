@@ -83,17 +83,32 @@ impl NvmeDriver:
         """
         self.notif_id = grant.irq_notification_id
 
-        # Step 1: Map BAR0 via syscall
-        val bar0_result = syscall(SYS_MAP_BAR, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
-        # Reject 0 (no device / unsatisfied) and small-negative errnos. Do NOT
-        # use `<= 0`: a valid higher-half kernel VA (e.g. the pinned NVMe slot
-        # 0xFFFFC00000000000+off returned under OVMF, where firmware assigns
-        # the BAR above 4GB) is NEGATIVE as i64 and must be accepted. Without
-        # the 0-guard, bar0_virt=0 and the next MMIO read null-faults (cr2=0x0)
-        # instead of degrading to no-disk.
-        if bar0_result == 0 or (bar0_result < 0 and bar0_result > -4096):
-            return Result.Err("NVMe: failed to map BAR0 rc={bar0_result} phys={grant.bar0_phys} size={grant.bar0_size}")
-        self.bar0_virt = bar0_result.to_u64()
+        # Step 1: Map BAR0.
+        #
+        # Real firmware (OVMF) assigns the 64-bit q35 NVMe BAR above 4GB
+        # (observed 0xC000004000) inside the kernel's EXCLUSIVE NVMe MMIO
+        # window (vmm_map_nvme_bar_high(), PML4[384] -> phys 0xC000000000,
+        # 64KiB page-mapped). For phys addresses inside that window, reference
+        # the SAME already-mapped higher-half VA the C bridge
+        # (_nvme_init_controller in baremetal_stubs.c) uses, computed as
+        # NVME_BAR_VIRT_BASE + (bar0_phys - NVME_BAR_PHYS_BASE), instead of a
+        # fresh syscall-83 per-task mapping -- avoids a second, independently
+        # constructed alias of the same physical registers. BARs outside the
+        # window (e.g. below 4GB under -kernel/SeaBIOS) keep the existing
+        # syscall-83 path unchanged.
+        if grant.bar0_phys >= NVME_BAR_PHYS_BASE and grant.bar0_phys < NVME_BAR_PHYS_BASE + NVME_BAR_WINDOW_SIZE:
+            self.bar0_virt = NVME_BAR_VIRT_BASE + (grant.bar0_phys - NVME_BAR_PHYS_BASE)
+            log_info("[nvme] " + "NVMe: BAR0 in high window, using pinned VA")
+        else:
+            val bar0_result = syscall(SYS_MAP_BAR, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
+            # Reject 0 (no device / unsatisfied) and small-negative errnos. Do
+            # NOT use `<= 0`: a valid higher-half kernel VA is NEGATIVE as i64
+            # and must be accepted. Without the 0-guard, bar0_virt=0 and the
+            # next MMIO read null-faults (cr2=0x0) instead of degrading to
+            # no-disk.
+            if bar0_result == 0 or (bar0_result < 0 and bar0_result > -4096):
+                return Result.Err("NVMe: failed to map BAR0 rc={bar0_result} phys={grant.bar0_phys} size={grant.bar0_size}")
+            self.bar0_virt = bar0_result.to_u64()
         if self.bar0_virt == 0u64:
             return Result.Err("NVMe: BAR0 mapped to null address")
         log_info("[nvme] " + "NVMe: BAR0 mapped")
