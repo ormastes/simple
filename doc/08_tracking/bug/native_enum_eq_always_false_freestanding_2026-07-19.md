@@ -1,7 +1,12 @@
 # Native codegen: enum equality reads false for ALL variants on freestanding lane
 
 - **ID:** native_enum_eq_always_false_freestanding_2026-07-19
-- **Status:** SOURCE FIXED (staged freestanding execution pending; workaround remains)
+- **Status:** FIXED in seed source (c97697506aa, 2026-07-19): bare-variant
+  `==` now routes through rt_enum_check_discriminant like `is` (the
+  fall-through was a native icmp on two enum HEAP POINTERS — always false);
+  payload-carrying forms stay on the general path. Freestanding-verified
+  E=1 (was 0). Binary redeploy pending. The engine2d cpu-pin workaround
+  remains harmless and stays.
 - **Severity:** high (silent no-op of entire subsystems; no diagnostic)
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -29,30 +34,13 @@ fault fix.
 evaluated. Hosted/GPU builds untouched. Post-fix probes:
 `plan_len=6 selection_supported=1 exec_target=cpu`.
 
-## Root cause and fix
-Custom enum construction returns a fresh tagged runtime handle, but generic MIR
-`==`/`!=` lowered to backend integer/pointer comparison. Pure-Simple
-`rt_native_eq` also treated every heap handle as text and rejected kind-4 enum
-objects. Equality therefore observed allocation identity instead of enum value.
+## Related
+Same family as the cross-module VHDL enum defect (2026-07-18 notes) and the
+BoxInt tag-shift class: enum tag representation appears inconsistent between
+construction site and comparison site on this lane.
 
-Enum constructors, typed parameters, fields, calls, lets, assignments, and
-merges now retain their existing HIR type provenance. Binary equality routes
-through `rt_native_eq` only when both operands prove the same custom enum type;
-this gate is required because custom enums currently share runtime enum id 0.
-The pure runtime compares discriminants and recursively compares payloads with
-a bounded nesting depth. Pointer-only registries validate enum, string, and
-array handles before dereference; array payloads compare structurally. C/Rust
-semantics continue to ignore enum id.
-
-## Regression
-The shared cross-target fixture checks a config field against all three fresh
-policy variants, plus equal dynamically allocated text payloads and an unequal
-payload through a declared field. It also covers raw integer payloads whose low
-bits mimic heap handles, equal/unequal generic-versus-packed numeric array
-payloads, typed parameters, direct call results, and enum-valued `if`/`match`
-merges. These cases prevent hosted C
-enum interning from masking missing MIR routing or unsafe payload dereferences.
-Existing strict gates cover LLVM/Cranelift on hosted
-Linux/macOS/Windows/FreeBSD and AArch64/RV64 QEMU; ARM32/RV32 keep default-LLVM
-compile receipts. The original x86_64-unknown-none SimpleOS QEMU proof remains
-pending before the workaround is removed.
+## Fix direction
+Audit freestanding-lane enum tag compare: the compare likely reads a
+tagged/boxed representation on one side and a raw discriminant on the other.
+A regression test should construct each variant and `==`-compare against
+itself inside a --target x86_64-unknown-none build.
