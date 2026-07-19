@@ -7,6 +7,12 @@ use std.nogc_sync_mut.env.{env_get, env_has}
 use app.ui.render.ansi.{ansi_red, ansi_green, ansi_yellow, ansi_bold, ansi_reset, ansi_dim}
 use std.json.{json_parse, json_serialize, json_pretty, json_object_get, json_object_keys, json_object_has, json_object, json_string, json_array, json_array_get, json_array_length, json_get_type}
 use app.itf.flags.{_extract_flag, _has_flag}
+use std.tui.terminal.{terminal_get_size}
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
 
 
 fn should_use_color() -> bool:
@@ -139,7 +145,6 @@ fn relative_time_at(iso: text, now_epoch_secs: i64) -> text:
 
 fn relative_time(iso: text) -> text:
     """relative_time_at() against the real current time (jira/github listings)."""
-    use std.io_runtime.{time_now_unix_micros}
     relative_time_at(iso, time_now_unix_micros() / 1000000)
 
 
@@ -401,9 +406,14 @@ fn print_table_dynamic(headers: [text], rows: [[text]]):
     github issue/PR listings where titles vary widely in length. Padding is
     visible-width-aware (see _pad_visible) so colorize_state()'d cells still
     align with plain headers/columns.
+
+    Output goes through _emit_lines(), which pages long output through
+    $ITF_PAGER/$PAGER/less -R when stdout looks like an interactive
+    terminal and the table is taller than it (see should_page()/set_no_pager()).
     """
     val widths = _table_col_widths(headers, rows)
     val color = should_use_color()
+    var lines: [text] = []
     var header_line = ""
     var i = 0
     while i < headers.len():
@@ -411,9 +421,9 @@ fn print_table_dynamic(headers: [text], rows: [[text]]):
         header_line = header_line + _pad_visible(headers[i], w + 2)
         i = i + 1
     if color:
-        print "{ansi_bold()}{header_line}{ansi_reset()}"
+        lines.push("{ansi_bold()}{header_line}{ansi_reset()}")
     else:
-        print header_line
+        lines.push(header_line)
     for row in rows:
         var line = ""
         var j = 0
@@ -421,7 +431,96 @@ fn print_table_dynamic(headers: [text], rows: [[text]]):
             val w = if j < widths.len(): widths[j] else: 0
             line = line + _pad_visible(row[j], w + 2)
             j = j + 1
-        print line
+        lines.push(line)
+    _emit_lines(lines)
+
+
+# ---------------------------------------------------------------------------
+# Pager (J4): $ITF_PAGER / $PAGER / less -R for output taller than the
+# terminal, when stdout looks like an interactive terminal. --no-pager
+# (set_no_pager) always wins.
+# ---------------------------------------------------------------------------
+
+var _no_pager: bool = false
+
+
+fn set_no_pager(value: bool):
+    """Set/clear the --no-pager override. Callers parse --no-pager from
+    their own args and call this once before any print_table_dynamic() —
+    a module-level flag (rather than threading a param through every table
+    call site) keeps existing signatures/call sites stable."""
+    _no_pager = value
+
+
+fn _is_interactive_terminal() -> bool:
+    """Heuristic tty check: a real terminal sets TERM to something other
+    than empty/"dumb". Mirrors std.nogc_sync_mut.cli_output.progress's
+    _check_tty — nogc_sync_mut exposes no isatty() extern to check stdout
+    directly, so this is the same approximation already used elsewhere in
+    this codebase for the same reason."""
+    val term = env_get("TERM")
+    term != "" and term != "dumb"
+
+
+fn should_page(line_count: i64, term_rows: i64, no_pager: bool, is_tty: bool) -> bool:
+    """Pure pager decision — no env/subprocess access, so specs can drive it
+    directly without any risk of spawning a real pager. True only when NOT
+    suppressed, the terminal looks interactive, and the content is taller
+    than the terminal."""
+    if no_pager or not is_tty:
+        return false
+    line_count > term_rows
+
+
+fn resolve_pager_cmd() -> text:
+    """${ITF_PAGER:-${PAGER:-less -R}}."""
+    val itf_pager = env_get("ITF_PAGER")
+    if itf_pager != "":
+        return itf_pager
+    val pager = env_get("PAGER")
+    if pager != "":
+        return pager
+    "less -R"
+
+
+fn _split_pager_cmd(cmd_line: text) -> (text, [text]):
+    """Split a pager command line ("less -R", "bat --paging=always") into
+    (binary, argv) on whitespace. Falls back to `less -R` if empty."""
+    var parts: [text] = []
+    for part in cmd_line.trim().split(" "):
+        if part != "":
+            parts.push(part)
+    if parts.len() == 0:
+        return ("less", ["-R"])
+    (parts[0], parts[1:])
+
+
+fn _emit_lines(lines: [text]):
+    """Print `lines`, routing through the resolved pager when
+    should_page() says to. Falls back to a plain print (never silently
+    drops output) if the pager can't be spawned.
+
+    NEVER call this from a spec with lines.len() > terminal rows unless
+    ITF_PAGER is overridden to a non-interactive command (e.g. "cat") or
+    --no-pager (set_no_pager(true)) is set first — a real interactive
+    pager reading from this process's inherited stdin could hang the test
+    runner. should_page() itself is pure and safe to unit-test directly.
+    """
+    val rows = terminal_get_size().rows
+    if not should_page(lines.len(), rows, _no_pager, _is_interactive_terminal()):
+        for line in lines:
+            print line
+        return
+
+    val tmp_path = "/tmp/itf_pager_output.txt"
+    file_write_text(tmp_path, lines.join("\n") + "\n")
+    val (pager_bin, pager_args) = _split_pager_cmd(resolve_pager_cmd())
+    val code = rt_process_run_inherit(pager_bin, pager_args + [tmp_path])
+    file_delete(tmp_path)
+    if code < 0:
+        # Pager binary missing/unspawnable — never drop the output.
+        for line in lines:
+            print line
 
 
 fn colorize_state(state: text) -> text:
@@ -445,8 +544,6 @@ fn colorize_state(state: text) -> text:
 
 fn open_in_browser(url: text) -> i64:
     """Open URL in browser (--web flag handler)."""
-    use std.nogc_sync_mut.io.process_ops.{process_run}
-
     # Try platform-specific openers
     val (_, _, code) = process_run("xdg-open", [url])
     if code == 0:

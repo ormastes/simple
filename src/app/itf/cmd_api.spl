@@ -33,10 +33,7 @@ fn handle_api(args: [text]) -> i64:
     # Resolve full URL if relative path given
     val config = load_config()
     val base = if use_jira: jira_api_base(config) else: confluence_api_base(config)
-    var full_url = url
-    if url.starts_with("/"):
-        if base != "":
-            full_url = "{base}{url}"
+    val full_url = _resolve_api_url(url, base)
 
     # Build headers — real attachment via rt_http_request's headers: [text]
     # (the prior std.nogc_sync_mut.http_client-based version only *computed*
@@ -46,13 +43,7 @@ fn handle_api(args: [text]) -> i64:
     # rt_http_request is the real extern-backed transport, already used this
     # way by adapter_minio.spl).
     val auth = if use_jira: jira_auth_header(config) else: confluence_auth_header(config)
-    var headers: [text] = ["Accept: application/json"]
-    if auth != "":
-        headers = headers + ["Authorization: {auth}"]
-    if data != "":
-        headers = headers + ["Content-Type: application/json"]
-    if extra_header != "":
-        headers = headers + [extra_header]
+    val headers = _build_api_headers(auth, extra_header, data != "")
 
     if verbose:
         print "> {method} {full_url}"
@@ -87,6 +78,29 @@ fn handle_api(args: [text]) -> i64:
         0
     else:
         1
+
+
+fn _resolve_api_url(url: text, base: text) -> text:
+    """Prefix a relative path (e.g. "/pages?limit=5") with `base`; an
+    already-absolute URL (http://..., https://...) passes through
+    unchanged. Pure/testable — no config or network access."""
+    if url.starts_with("/") and base != "":
+        return "{base}{url}"
+    url
+
+
+fn _build_api_headers(auth: text, extra_header: text, has_body: bool) -> [text]:
+    """Build the header list for rt_http_request: always Accept: json, plus
+    Authorization when auth is configured, Content-Type when a body is
+    present, and the user's --header verbatim when given. Pure/testable."""
+    var headers: [text] = ["Accept: application/json"]
+    if auth != "":
+        headers = headers + ["Authorization: {auth}"]
+    if has_body:
+        headers = headers + ["Content-Type: application/json"]
+    if extra_header != "":
+        headers = headers + [extra_header]
+    headers
 
 
 fn _print_api_help():

@@ -42,6 +42,33 @@ Side policy is per-path: paths whose latest truth is local restore from the pre-
 - Stale `.git/index.lock` with no live holder: `find .git/index.lock -mmin +5 -delete`. Check `pgrep -af 'jj (rebase|restore)'` first — a D-state jj may still be progressing (verify via `/proc/PID/io` deltas) and must not be killed.
 - Edit-tool changes are not auto-snapshotted: commit immediately after editing, and re-verify file content (`grep`) after any `workspace update-stale` — a parallel-session reconcile can silently clobber uncommitted edits.
 
+## Sync must never clobber (anti-revert protocol)
+
+Hourly/periodic "sync" commits (e.g. `chore(sync): session work products`) have
+repeatedly REVERTED other sessions' landed fixes by snapshotting a **stale**
+whole working copy and pushing it — while falsely claiming "fixes preserved at
+origin versions". A sync that reverts is worse than no sync. Mandatory:
+
+1. **Rebase before you snapshot.** `sj raw jj git fetch && sj raw jj rebase -d
+   main@origin` FIRST, resolve, and only then snapshot the WC. Never commit a WC
+   captured before the latest fetch.
+2. **Never whole-WC-commit files this session didn't change.** A sync commit
+   carries only files THIS session actually authored. Do not `jj commit -a` /
+   `git add -A` a full stale tree. Scope the commit to your changed paths.
+3. **Revert guard (blocks the push).** For every file in the outgoing range,
+   confirm the change is a forward delta, not a rewind of someone else's fix:
+   `git diff main@origin..$TIP -- <path>` must not restore an older version of a
+   file you didn't touch. If any hunk reintroduces code origin already moved past
+   (symbol-grep origin to confirm), STOP and drop that path — do not push.
+4. **Never write "fixes preserved at origin versions"** unless you verified it by
+   symbol-grep on `main@origin` for each fix. An unverified preservation claim is
+   how the last three clobbers hid themselves.
+
+Non-code artifacts (docs, skills, workflows, spipe state) may sync freely; the
+danger is only `src/**`, `scripts/**`, and other product code — hold those to the
+guards above. Upgrade path: a `scripts/check/` pre-push hook that fails when the
+outgoing range reverts a product file the committer didn't author.
+
 ## LLM wiki before commit
 
 Before committing feature work, refresh the related LLM wiki entries so the
