@@ -434,3 +434,14 @@ the shared binary — deploys require explicit user go-ahead).
   aggressive optimization. Linux/macOS/Windows/FreeBSD and AArch64/RV64
   execution are scheduled through existing gates; ARM32/RV32 and Windows ARM64
   remain compile-only. First staged platform execution is pending.
+- Custom enum `==`/`!=` now uses declared-type provenance to route same-type
+  handles through structural runtime equality instead of pointer comparison.
+  The pure runtime compares discriminants and recursively compares payloads;
+  pointer registries reject false heap tags before dereference, and numeric
+  arrays compare across generic, byte-packed, and u64-packed storage. A
+  64-level guard bounds malformed nesting. The shared fixture covers a
+  three-variant config field, separately allocated equal text payloads, raw
+  heap-tag-collision integers, and generic-versus-packed array payloads so
+  hosted interning cannot false-green. Hosted LLVM/Cranelift and AArch64/RV64
+  execution are scheduled; ARM32/RV32 remain default-LLVM compile receipts.
+  The original x86_64-unknown-none QEMU proof is pending.

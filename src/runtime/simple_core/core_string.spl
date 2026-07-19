@@ -23,12 +23,45 @@ extern fn rt_byte_array_new(cap: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
 extern fn rt_array_get(array: i64, idx: i64) -> i64
 extern fn array_is_valid(array: i64) -> i64
+extern fn array_items(array: i64) -> i64
+extern fn array_flags(array: i64) -> i64
 extern fn rt_dict_len(dict: i64) -> i64
 extern fn rt_dict_contains(dict: i64, key: i64) -> i8
 extern fn rt_value_int(value: i64) -> i64
 extern fn rt_value_as_int(value: i64) -> i64
 extern fn rt_value_float(raw_bits: i64) -> i64
 extern fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64
+extern fn rt_enum_discriminant(value: i64) -> i64
+extern fn rt_enum_payload(value: i64) -> i64
+
+# ponytail: bootstrap-sized string sets only need a compact linear registry;
+# replace it only if equality profiles show pointer validation is hot.
+var string_registry_items: i64 = 0
+var string_registry_len: i64 = 0
+var string_registry_cap: i64 = 0
+
+fn register_string_ptr(ptr: i64) -> i64:
+    if string_registry_len >= string_registry_cap:
+        val next_cap = if string_registry_cap < 1: 64 else: string_registry_cap * 2
+        val next_items = realloc(string_registry_items, next_cap * 8)
+        if next_items < 1:
+            return 0
+        string_registry_items = next_items
+        string_registry_cap = next_cap
+    spl_store_i64(string_registry_items, string_registry_len * 8, ptr)
+    string_registry_len = string_registry_len + 1
+    1
+
+fn registered_string_ptr(value: i64) -> i64:
+    if value < 4096 or (value & 7) != 1:
+        return 0
+    val candidate = value & -8
+    var i = 0
+    while i < string_registry_len:
+        if spl_load_i64(string_registry_items, i * 8) == candidate:
+            return candidate
+        i = i + 1
+    0
 
 fn string_ptr(value: i64) -> i64:
     if (value & 7) < 1 or (value & 7) > 1:
@@ -66,6 +99,9 @@ fn is_space_byte(ch: i64) -> i64:
 fn alloc_string(len: i64) -> i64:
     val ptr = malloc(17 + len)
     if ptr < 1:
+        return 3
+    if register_string_ptr(ptr) < 1:
+        free(ptr)
         return 3
     spl_store_i64(ptr, 0, 1398034993)
     spl_store_i64(ptr, 8, len)
@@ -387,23 +423,23 @@ pub fn rt_len(value: i64) -> i64:
             return rt_dict_len(value)
     return 0
 
-pub fn rt_native_eq(left: i64, right: i64) -> i64:
-    val left_text_tag = left >= 4096 and (left & 7) == 1
-    val right_text_tag = right >= 4096 and (right & 7) == 1
-    if left_text_tag or right_text_tag:
-        if not left_text_tag or not right_text_tag:
+fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
+    if left == right:
+        return 1
+    # ponytail: the depth guard safely rejects cyclic aggregate graphs; add
+    # visited-pair tracking only if cyclic structural equality is required.
+    if depth >= 64:
+        return 0
+    val left_disc = rt_enum_discriminant(left)
+    val right_disc = rt_enum_discriminant(right)
+    if left_disc >= 0 or right_disc >= 0:
+        if left_disc < 0 or right_disc < 0 or left_disc != right_disc:
             return 0
-        val left_ptr = left & -8
-        val right_ptr = right & -8
+        return rt_native_eq_inner(rt_enum_payload(left), rt_enum_payload(right), depth + 1)
+    val left_ptr = registered_string_ptr(left)
+    val right_ptr = registered_string_ptr(right)
+    if left_ptr > 0 or right_ptr > 0:
         if left_ptr < 1 or right_ptr < 1:
-            return 0
-        if left_ptr == right_ptr:
-            return 1
-        val left_kind = spl_load_i64(left_ptr, 0) & 4294967295
-        val right_kind = spl_load_i64(right_ptr, 0) & 4294967295
-        if left_kind < 1398034993 or left_kind > 1398034993:
-            return 0
-        if right_kind < 1398034993 or right_kind > 1398034993:
             return 0
         val len = spl_load_i64(left_ptr, 8)
         if len != spl_load_i64(right_ptr, 8):
@@ -414,9 +450,71 @@ pub fn rt_native_eq(left: i64, right: i64) -> i64:
         if cmp < 0 or cmp > 0:
             return 0
         return 1
-    if left < right or left > right:
-        return 0
-    return 1
+    val left_array = array_is_valid(left) > 0
+    val right_array = array_is_valid(right) > 0
+    if left_array or right_array:
+        if not left_array or not right_array:
+            return 0
+        val len = rt_array_len(left)
+        if len != rt_array_len(right):
+            return 0
+        val left_flags = array_flags(left)
+        val right_flags = array_flags(right)
+        val left_bytes = (left_flags & 8) > 0
+        val right_bytes = (right_flags & 8) > 0
+        val left_u64 = (left_flags & 16) > 0
+        val right_u64 = (right_flags & 16) > 0
+        val left_items = array_items(left)
+        val right_items = array_items(right)
+        var i = 0
+        if left_bytes and right_bytes:
+            while i < len:
+                if spl_load_u8(left_items, i) != spl_load_u8(right_items, i):
+                    return 0
+                i = i + 1
+            return 1
+        if left_u64 and right_u64:
+            while i < len:
+                if spl_load_i64(left_items, i * 8) != spl_load_i64(right_items, i * 8):
+                    return 0
+                i = i + 1
+            return 1
+        while i < len:
+            if left_bytes:
+                val value = spl_load_u8(left_items, i)
+                if right_u64:
+                    if spl_load_i64(right_items, i * 8) != value:
+                        return 0
+                else:
+                    val other = spl_load_i64(right_items, i * 8)
+                    if (other & 7) != 0 or (other >> 3) != value:
+                        return 0
+            elif right_bytes:
+                val value = spl_load_u8(right_items, i)
+                if left_u64:
+                    if spl_load_i64(left_items, i * 8) != value:
+                        return 0
+                else:
+                    val other = spl_load_i64(left_items, i * 8)
+                    if (other & 7) != 0 or (other >> 3) != value:
+                        return 0
+            elif left_u64:
+                val other = spl_load_i64(right_items, i * 8)
+                if (other & 7) != 0 or (other >> 3) != spl_load_i64(left_items, i * 8):
+                    return 0
+            elif right_u64:
+                val other = spl_load_i64(left_items, i * 8)
+                if (other & 7) != 0 or (other >> 3) != spl_load_i64(right_items, i * 8):
+                    return 0
+            else:
+                if rt_native_eq_inner(spl_load_i64(left_items, i * 8), spl_load_i64(right_items, i * 8), depth + 1) < 1:
+                    return 0
+            i = i + 1
+        return 1
+    return 0
+
+pub fn rt_native_eq(left: i64, right: i64) -> i64:
+    rt_native_eq_inner(left, right, 0)
 
 pub fn rt_native_neq(left: i64, right: i64) -> i64:
     val eq = rt_native_eq(left, right)

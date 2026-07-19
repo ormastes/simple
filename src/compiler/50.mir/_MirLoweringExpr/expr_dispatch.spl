@@ -203,6 +203,21 @@ impl MirLowering:
                 return self.mir_type_is_str(item.type_)
         false
 
+    fn local_enum_type_id(local: LocalId) -> i64:
+        """Return the declared enum symbol id for a proven enum local."""
+        if not self.local_hir_types.has(local.id):
+            return -1
+        val hir_type = self.local_hir_types[local.id]
+        match hir_type.kind:
+            case HirTypeKind.Named(symbol, _):
+                val enum_symbol = self.symbols.get_symbol(symbol)
+                if val found_enum_symbol = enum_symbol:
+                    if self.enum_variant_index.has(found_enum_symbol.name):
+                        return symbol.id
+            case _:
+                ()
+        -1
+
     fn local_is_float(local: LocalId) -> bool:
         """True when a lowered local holds an f64/f32 value.
 
@@ -823,11 +838,11 @@ impl MirLowering:
                             val field_types = self.struct_field_hir_type[field_owner]
                             if field_idx >= 0 and field_idx < field_types.len():
                                 val declared_field_type = field_types[field_idx]
+                                self.local_hir_types[field_result.id] = declared_field_type
                                 match declared_field_type.kind:
                                     case HirTypeKind.Optional(_):
                                         self.option_value_locals[field_result.id] = true
                                         self.runtime_value_locals[field_result.id] = true
-                                        self.local_hir_types[field_result.id] = declared_field_type
                                     case _:
                                         ()
                     return field_result
@@ -1180,6 +1195,40 @@ impl MirLowering:
                     case _:
                         val left_local = self.lower_expr(left)
                         val right_local = self.lower_expr(right)
+                        # Custom enum values are tagged runtime handles, so a
+                        # raw backend Eq compares allocation addresses. Route
+                        # only operands proven to share one declared enum type
+                        # before Named values can enter struct-dunder dispatch;
+                        # all user enums currently share enum_id=0.
+                        var bin_is_enum_eq = false
+                        match op:
+                            case Eq | NotEq:
+                                val left_enum_type = self.local_enum_type_id(left_local)
+                                val right_enum_type = self.local_enum_type_id(right_local)
+                                bin_is_enum_eq = left_enum_type >= 0 and left_enum_type == right_enum_type
+                            case _:
+                                ()
+                        if bin_is_enum_eq:
+                            val enum_eq_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_native_eq"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var b_enum_eq = self.builder
+                            val enum_eq_res = b_enum_eq.emit_call(enum_eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
+                            self.builder = b_enum_eq
+                            if val enum_eq_local = enum_eq_res:
+                                var enum_raw_bool = enum_eq_local
+                                match op:
+                                    case NotEq:
+                                        var b_enum_neq = self.builder
+                                        enum_raw_bool = b_enum_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(enum_eq_local), mir_operand_const_int(1), MirType.i64())
+                                        self.builder = b_enum_neq
+                                    case _:
+                                        ()
+                                var b_enum_narrow = self.builder
+                                val enum_bool = b_enum_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(enum_raw_bool), mir_operand_const_int(1), MirType.bool())
+                                self.builder = b_enum_narrow
+                                return enum_bool
                         # #168: struct-operand binary ops must dispatch to the
                         # user's own __add__/__sub__/__mul__/__div__/__eq__/
                         # __lt__/__gt__ impl method instead of falling through

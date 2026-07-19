@@ -13,6 +13,9 @@ extern fn rt_string_join(array: i64, separator: i64) -> i64
 extern fn rt_string_char_at(value: i64, index: i64) -> i64
 extern fn rt_native_eq(left: i64, right: i64) -> i64
 
+# Registry links live in the private fifth word of each pure-Simple array.
+var array_registry_head: i64 = 0
+
 # ============================================================================
 # Internal ABI helpers — pub so split files (core_array_ops, core_array_query)
 # can call them as extern fn without duplicating logic.
@@ -41,6 +44,11 @@ pub fn array_is_valid(array: i64) -> i64:
     val ptr = array_ptr(array)
     if (ptr & 7) > 0:
         return 0
+    var current = array_registry_head
+    while current > 0 and current != ptr:
+        current = spl_load_i64(current, 32)
+    if current < 1:
+        return 0
     if spl_load_u8(ptr, 0) != 2:
         return 0
     val len = spl_load_i64(ptr, 8)
@@ -52,6 +60,24 @@ pub fn array_is_valid(array: i64) -> i64:
     if cap > 100000000:
         return 0
     return 1
+
+pub fn register_array(array: i64):
+    spl_store_i64(array, 32, array_registry_head)
+    array_registry_head = array
+
+pub fn unregister_array(array: i64):
+    var previous: i64 = 0
+    var current = array_registry_head
+    while current > 0:
+        val next = spl_load_i64(current, 32)
+        if current == array:
+            if previous < 1:
+                array_registry_head = next
+            else:
+                spl_store_i64(previous, 32, next)
+            return
+        previous = current
+        current = next
 
 pub fn set_array_items(array: i64, items: i64):
     spl_store_i64(array_ptr(array), 24, items)
@@ -81,7 +107,7 @@ fn array_new_with_flags(cap: i64, flags: i64, elem_size: i64) -> i64:
     var actual_cap = cap
     if actual_cap < 4:
         actual_cap = 4
-    val array = calloc(1, 32)
+    val array = calloc(1, 40)
     if array < 1:
         return 0
     val items = calloc(actual_cap, elem_size)
@@ -102,6 +128,7 @@ fn array_new_with_flags(cap: i64, flags: i64, elem_size: i64) -> i64:
     set_array_items(array, items)
     set_array_len(array, 0)
     set_array_cap(array, actual_cap)
+    register_array(array)
     return array | 1
 
 pub fn rt_array_new(cap: i64) -> i64:

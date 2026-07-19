@@ -1,6 +1,11 @@
 use native_crossmodule_result_u8.provider.{BytesError, CrossZeroArgReceiver, fail_bytes, load_bytes}
 use std.path.{normalize, path_join, relative_to}
 
+extern fn rt_array_new_with_cap_u64(cap: i64) -> [u64]
+extern fn rt_typed_words_u64_push(array: [u64], value: i64) -> bool
+extern fn rt_byte_array_new(cap: i64) -> [u8]
+extern fn rt_typed_bytes_u8_push(array: [u8], value: i64) -> bool
+
 var option_receiver_calls = 0
 
 fn next_cross_target_option() -> i64?:
@@ -118,6 +123,96 @@ fn cross_target_tuple_return_survives_call() -> bool:
         return false
     parts.0 == 17 and parts.1 == 37 and parts.2
 
+enum CrossExecutionPolicy:
+    Suggested
+    Preferred
+    Required
+
+enum CrossNamedPolicy:
+    Named(text)
+
+enum CrossScalarPolicy:
+    Scalar(i64)
+
+enum CrossArrayPolicy:
+    Values([u64])
+
+enum CrossAnyArrayPolicy:
+    Values(Any)
+
+class CrossExecutionConfig:
+    var execution_policy: CrossExecutionPolicy
+
+class CrossNamedConfig:
+    var policy: CrossNamedPolicy
+
+fn cross_target_policy_is_suggested(policy: CrossExecutionPolicy) -> bool:
+    policy == CrossExecutionPolicy.Suggested
+
+fn cross_target_policy_value() -> CrossExecutionPolicy:
+    CrossExecutionPolicy.Required
+
+fn cross_target_enum_merge_ok(choose_suggested: bool) -> bool:
+    val policy: CrossExecutionPolicy = if choose_suggested: CrossExecutionPolicy.Suggested else: CrossExecutionPolicy.Preferred
+    policy == CrossExecutionPolicy.Suggested
+
+fn cross_target_enum_match_ok(choose_suggested: bool) -> bool:
+    val selector = if choose_suggested: 1 else: 2
+    val policy: CrossExecutionPolicy = match selector:
+        1 => CrossExecutionPolicy.Suggested
+        _ => CrossExecutionPolicy.Preferred
+    policy == CrossExecutionPolicy.Suggested
+
+fn cross_target_enum_field_equality_ok() -> bool:
+    val config = CrossExecutionConfig(execution_policy: CrossExecutionPolicy.Suggested)
+    if config.execution_policy != CrossExecutionPolicy.Suggested:
+        return false
+    if config.execution_policy == CrossExecutionPolicy.Preferred or config.execution_policy == CrossExecutionPolicy.Required:
+        return false
+    if CrossExecutionPolicy.Preferred != CrossExecutionPolicy.Preferred:
+        return false
+    if CrossExecutionPolicy.Required != CrossExecutionPolicy.Required:
+        return false
+    if not cross_target_policy_is_suggested(CrossExecutionPolicy.Suggested):
+        return false
+    if cross_target_policy_value() != CrossExecutionPolicy.Required:
+        return false
+    if not cross_target_enum_merge_ok(true) or cross_target_enum_merge_ok(false):
+        return false
+    if not cross_target_enum_match_ok(true) or cross_target_enum_match_ok(false):
+        return false
+    val named_config = CrossNamedConfig(policy: CrossNamedPolicy.Named("enum" + "-payload"))
+    val equal_policy = CrossNamedPolicy.Named("enum-" + "payload")
+    val other = CrossNamedPolicy.Named("other")
+    if named_config.policy != equal_policy or named_config.policy == other:
+        return false
+    val raw_left = CrossScalarPolicy.Scalar(4097)
+    val raw_right = CrossScalarPolicy.Scalar(4105)
+    if raw_left == raw_right:
+        return false
+    val packed: [u64] = rt_array_new_with_cap_u64(2)
+    if not rt_typed_words_u64_push(packed, 17) or not rt_typed_words_u64_push(packed, 37):
+        return false
+    val packed_same: [u64] = rt_array_new_with_cap_u64(2)
+    if not rt_typed_words_u64_push(packed_same, 17) or not rt_typed_words_u64_push(packed_same, 37):
+        return false
+    val array_left = CrossArrayPolicy.Values([17u64, 37u64])
+    val array_right = CrossArrayPolicy.Values(packed)
+    val array_other = CrossArrayPolicy.Values([17u64, 38u64])
+    if array_left != array_right or array_left == array_other:
+        return false
+    if array_right != CrossArrayPolicy.Values(packed_same):
+        return false
+    val packed_bytes_left: [u8] = rt_byte_array_new(2)
+    val packed_bytes_right: [u8] = rt_byte_array_new(2)
+    if not rt_typed_bytes_u8_push(packed_bytes_left, 17) or not rt_typed_bytes_u8_push(packed_bytes_left, 37):
+        return false
+    if not rt_typed_bytes_u8_push(packed_bytes_right, 17) or not rt_typed_bytes_u8_push(packed_bytes_right, 37):
+        return false
+    val bytes_left = CrossAnyArrayPolicy.Values(packed_bytes_left)
+    val bytes_right = CrossAnyArrayPolicy.Values(packed_bytes_right)
+    bytes_left == bytes_right
+
 fn forward_load_bytes() -> Result<[u8], BytesError>:
     val data = load_bytes()?
     Ok(data)
@@ -185,6 +280,8 @@ fn main() -> i64:
         return 13
     if not cross_target_tuple_return_survives_call():
         return 14
+    if not cross_target_enum_field_equality_ok():
+        return 15
 
     match forward_fail_bytes():
         Ok(_):
