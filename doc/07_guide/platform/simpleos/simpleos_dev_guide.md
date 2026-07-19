@@ -358,7 +358,8 @@ bin/simple run src/os/port/llvm/build.spl -- --status
 bin/simple run src/os/port/llvm/test_smoke.spl
 ```
 
-Uses fork: `ormastes/llvm-project` (branch: `simpleos`)
+Uses the fork revision pinned in `src/os/port/llvm/README.md`; the in-tree
+`patches/` files are porting notes, not an applicable patch bundle.
 
 Current evidence: `doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md`
 records passing x86_64 SimpleOS Clang/LLD link smokes, compiler-rt builtins

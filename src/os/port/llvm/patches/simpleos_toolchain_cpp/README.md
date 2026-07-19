@@ -5,7 +5,7 @@ for adding a first-class `SimpleOS` toolchain class to the vendored LLVM
 fork used by the SimpleOS build.
 
 - **Upstream fork:** <https://github.com/ormastes/llvm-project>
-- **Branch:** `simpleos`
+- **Source revision:** the pinned commit in `src/os/port/llvm/README.md`
 - **Plan reference:** item A3 in the SimpleOS LLVM port plan.
 
 ## Why a ToolChain class

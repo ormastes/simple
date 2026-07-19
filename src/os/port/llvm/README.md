@@ -24,8 +24,11 @@ Build LLVM from the `ormastes/llvm-project` fork for SimpleOS cross-compilation 
 ```bash
 git clone https://github.com/ormastes/llvm-project.git
 cd llvm-project
-git checkout simpleos
+git checkout --detach 3b33ba807a99855133981897fa8c9d91933f759d
 ```
+
+That commit is the pinned, published SimpleOS toolchain source. Do not copy
+changes from a dirty LLVM checkout into this repository.
 
 ## Building LLVM for SimpleOS
 
@@ -82,16 +85,18 @@ ninja -C build-rt
 ninja -C build-rt install
 ```
 
-## Applying SimpleOS Patches
+## SimpleOS Fork Contract
 
-The `simpleos` branch in `ormastes/llvm-project` contains all necessary patches. Key changes:
+The pinned `ormastes/llvm-project` commit contains all necessary changes. Key changes:
 
 1. **Target triple recognition** -- Adds `simpleos` as a known OS in `llvm/lib/TargetParser/Triple.cpp`
 2. **Clang driver** -- SimpleOS driver in `clang/lib/Driver/ToolChains/SimpleOS.cpp` sets default flags (`-ffreestanding`, `-nostdlib`, correct linker)
-3. **LLD support** -- ELF linker recognizes SimpleOS output format and default linker script locations
+3. **Clang linker wiring** -- the SimpleOS driver invokes `ld.lld` and appends the installed `lib/simpleos.lds` script
 4. **compiler-rt** -- Builtins build configuration for freestanding SimpleOS targets
 
-To update patches from upstream:
+Files under `patches/` are historical porting notes, not an applicable patch
+bundle. To update the pinned source revision, update and verify the fork first,
+then change the commit above:
 
 ```bash
 git fetch upstream
