@@ -471,13 +471,14 @@ the shared binary — deploys require explicit user go-ahead).
   cache identity, and linking, so flagless enabled-seed builds actually use the
   documented LLVM default while explicit Cranelift remains supported; see
   `rust_seed_native_build_default_backend_config_ignored_2026-07-19.md`. The Rust
-  MIR-to-bytecode now lowers `EnumUnit`/`EnumWith` through a widened `ENUM_NEW`
-  wire format carrying the stable custom enum ID and full 32-bit discriminant;
-  focused compile-and-execute coverage pins both payload shapes. Qualified
-  variant `PatternTest` also preserves that type ID and full discriminant;
-  general bytecode payload binding and runtime-call match lowering remain open.
-  Fresh Rust
-  execution and the original x86_64-unknown-none QEMU proof remain open.
+  MIR-to-bytecode path now lowers `EnumUnit`/`EnumWith` with the full `u32` enum
+  ID and discriminant in `ENUM_NEW_TYPED`; variant tests use
+  `ENUM_MATCH_TYPED`. Legacy opcode layouts remain compatible. Duplicated SMF
+  writers emit version 2 while loaders accept versions `1..=2`. Focused Linux
+  Rust execution passes and hosted Linux/macOS/Windows jobs schedule the same
+  tests. Canonical FreeBSD bytecode execution remains pending; native
+  ARM32/AArch64/RV32/RV64 gates are not bytecode evidence. The original
+  x86_64-unknown-none QEMU proof remains open.
 - Module-init symbols now exclude punctuation inherited from absolute or
   hyphenated source paths in both the pure-Simple bootstrap MIR mirror and the
   Rust seed's owning module-prefix derivation. The existing hosted native smoke

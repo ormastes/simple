@@ -35,9 +35,10 @@ The shared fixture reads `rt_enum_id` directly and requires both custom IDs to
 be at least 2 and different, in addition to retaining the cross-type inequality
 oracle.
 
-The MIR-to-bytecode compiler still has no `EnumUnit`/`EnumWith` lowering and
-falls through to unsupported-instruction handling. That bytecode metadata lane
-remains a separate open gap; this native fix makes no bytecode claim.
+The Rust MIR-to-bytecode path now lowers `EnumUnit`/`EnumWith` through typed
+`ENUM_NEW_TYPED` metadata carrying the full `u32` enum ID and discriminant. SMF
+bytecode writers emit format version 2; both duplicated loaders retain version
+1 compatibility and reject versions outside `1..=2`.
 
 ## Evidence
 
@@ -48,5 +49,9 @@ remains a separate open gap; this native fix makes no bytecode claim.
   and in the canonical FreeBSD full-QEMU bootstrap after those artifacts
   exist. Cross-compiled seed binaries remain build-only; no unsupported cross
   runtime is claimed. These are scheduled gates, not local execution evidence.
+- Focused Rust bytecode tests are scheduled in hosted Linux, macOS, and Windows
+  workspace jobs. Canonical FreeBSD bytecode execution remains pending. The
+  native ARM32/AArch64/RV32/RV64 gates do not exercise this bytecode lane and
+  are not claimed as evidence for it.
 - Explicit pure-simple-core execution and freestanding x86_64 QEMU proof remain
   pending with the existing deployed self-hosted compiler crash.

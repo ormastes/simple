@@ -5,7 +5,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
-use super::bytecode_writer::{BytecodeFuncEntry, BYTECODE_MAGIC, BYTECODE_VERSION};
+use super::bytecode_writer::{BytecodeFuncEntry, BYTECODE_MAGIC, BYTECODE_VERSION, MIN_BYTECODE_VERSION};
 use super::header::SmfHeader;
 use super::section::{SectionType, SmfSection};
 
@@ -105,7 +105,7 @@ pub fn load_bytecode_module<R: Read + Seek>(reader: &mut R) -> Result<LoadedByte
 
     // Check version
     let version = u16::from_le_bytes([code_data[4], code_data[5]]);
-    if version != BYTECODE_VERSION {
+    if !(MIN_BYTECODE_VERSION..=BYTECODE_VERSION).contains(&version) {
         return Err(LoadError::UnsupportedVersion(version));
     }
 
@@ -204,6 +204,10 @@ mod tests {
     use crate::loader::smf::bytecode_writer::{BytecodeFunction, SmfBytecodeWriter};
     use std::io::Cursor;
 
+    fn bytecode_version_offset() -> usize {
+        std::mem::size_of::<SmfHeader>() + std::mem::size_of::<SmfSection>() * 2 + BYTECODE_MAGIC.len()
+    }
+
     #[test]
     fn test_roundtrip_single_function() {
         // Write
@@ -216,6 +220,12 @@ mod tests {
         });
         let data = writer.write_to_vec().expect("Write failed");
 
+        let version_offset = bytecode_version_offset();
+        assert_eq!(
+            u16::from_le_bytes([data[version_offset], data[version_offset + 1]]),
+            BYTECODE_VERSION
+        );
+
         // Read
         let mut cursor = Cursor::new(&data);
         let module = load_bytecode_module(&mut cursor).expect("Load failed");
@@ -224,6 +234,24 @@ mod tests {
         assert_eq!(module.functions[0].name, "main");
         assert_eq!(module.functions[0].param_count, 0);
         assert_eq!(module.functions[0].local_count, 1);
+    }
+
+    #[test]
+    fn test_bytecode_version_compatibility() {
+        let writer = SmfBytecodeWriter::new();
+        let mut data = writer.write_to_vec().expect("Write failed");
+        let version_offset = bytecode_version_offset();
+
+        data[version_offset..version_offset + 2].copy_from_slice(&MIN_BYTECODE_VERSION.to_le_bytes());
+        assert!(load_bytecode_module(&mut Cursor::new(&data)).is_ok());
+
+        for version in [0_u16, 3_u16] {
+            data[version_offset..version_offset + 2].copy_from_slice(&version.to_le_bytes());
+            assert!(matches!(
+                load_bytecode_module(&mut Cursor::new(&data)),
+                Err(LoadError::UnsupportedVersion(actual)) if actual == version
+            ));
+        }
     }
 
     #[test]

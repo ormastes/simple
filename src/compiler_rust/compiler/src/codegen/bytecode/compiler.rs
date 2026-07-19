@@ -168,7 +168,7 @@ impl BytecodeCompiler {
             self.encoder.emit_opcode(opcodes::PUSH);
             self.encoder.emit_u16(payload_slot);
         }
-        self.encoder.emit_opcode(opcodes::ENUM_NEW);
+        self.encoder.emit_opcode(opcodes::ENUM_NEW_TYPED);
         self.encoder.emit_u16(dest_slot);
         self.encoder
             .emit_u32(crate::codegen::shared::enum_runtime_type_id(enum_name));
@@ -491,7 +491,7 @@ impl BytecodeCompiler {
             } => {
                 let dest_slot = self.alloc_slot(*dest)?;
                 let subject_slot = self.get_slot(*subject)?;
-                self.encoder.emit_opcode(opcodes::ENUM_MATCH);
+                self.encoder.emit_opcode(opcodes::ENUM_MATCH_TYPED);
                 self.encoder.emit_u16(dest_slot);
                 self.encoder.emit_u16(subject_slot);
                 self.encoder
@@ -525,6 +525,13 @@ impl BytecodeCompiler {
                 self.encoder.emit_u16(coll_slot);
                 self.encoder.emit_u16(idx_slot);
                 self.encoder.emit_u16(val_slot);
+            }
+
+            MirInst::PatternTest { pattern, .. } => {
+                return Err(CompileError::UnsupportedInstruction(format!(
+                    "PatternTest {:?}",
+                    pattern
+                )));
             }
 
             // =================================================================

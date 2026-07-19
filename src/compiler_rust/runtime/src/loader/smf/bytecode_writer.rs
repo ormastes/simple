@@ -43,8 +43,11 @@ use super::section::{SectionType, SmfSection, SECTION_FLAG_EXEC, SECTION_FLAG_RE
 /// Bytecode section magic marker.
 pub const BYTECODE_MAGIC: &[u8; 4] = b"BCOD";
 
-/// Bytecode section version.
-pub const BYTECODE_VERSION: u16 = 1;
+/// Oldest bytecode section version accepted by loaders.
+pub const MIN_BYTECODE_VERSION: u16 = 1;
+
+/// Bytecode section version emitted by writers.
+pub const BYTECODE_VERSION: u16 = 2;
 
 /// Metadata for a single bytecode function within the Code section.
 #[repr(C)]

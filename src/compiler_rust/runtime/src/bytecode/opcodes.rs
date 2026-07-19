@@ -429,7 +429,7 @@ pub const APPEND: Opcode = 0x0076;
 pub const SLICE: Opcode = 0x0077;
 
 // ============================================================================
-// Pattern Matching (6 instructions - Phase 2)
+// Pattern Matching (8 instructions - Phase 2)
 // ============================================================================
 
 /// Test if value matches pattern.
@@ -446,11 +446,11 @@ pub const PATTERN_TEST: Opcode = 0x0080;
 /// **Effect:** Extract values from pattern match into locals
 pub const PATTERN_BIND: Opcode = 0x0081;
 
-/// Match enum type and discriminant.
+/// Match enum discriminant.
 ///
-/// **Encoding:** `ENUM_MATCH dest:u16 enum_val:u16 enum_id:u32 discriminant:u32`
-/// **Size:** 14 bytes
-/// **Effect:** `stack[dest] = (stack[enum_val].type == enum_id && stack[enum_val].tag == discriminant)`
+/// **Encoding:** `ENUM_MATCH dest:u16 enum_val:u16 discriminant:u16`
+/// **Size:** 8 bytes
+/// **Effect:** `stack[dest] = (stack[enum_val].tag == discriminant)`
 pub const ENUM_MATCH: Opcode = 0x0082;
 
 /// Extract enum payload.
@@ -462,8 +462,8 @@ pub const ENUM_PAYLOAD: Opcode = 0x0083;
 
 /// Create enum value.
 ///
-/// **Encoding:** `ENUM_NEW dest:u16 enum_id:u32 discriminant:u32 field_count:u16`
-/// **Size:** 14 bytes
+/// **Encoding:** `ENUM_NEW dest:u16 discriminant:u16 field_count:u16`
+/// **Size:** 8 bytes
 /// **Effect:** Pop fields from stack, create enum
 pub const ENUM_NEW: Opcode = 0x0084;
 
@@ -473,6 +473,18 @@ pub const ENUM_NEW: Opcode = 0x0084;
 /// **Size:** 6 bytes
 /// **Effect:** `stack[dest] = stack[opt].is_some()`
 pub const IS_SOME: Opcode = 0x0085;
+
+/// Match enum runtime type and discriminant without truncating either hash.
+///
+/// **Encoding:** `ENUM_MATCH_TYPED dest:u16 enum_val:u16 enum_id:u32 discriminant:u32`
+/// **Size:** 14 bytes
+pub const ENUM_MATCH_TYPED: Opcode = 0x0086;
+
+/// Create an enum with its stable runtime type identifier.
+///
+/// **Encoding:** `ENUM_NEW_TYPED dest:u16 enum_id:u32 discriminant:u32 field_count:u16`
+/// **Size:** 14 bytes
+pub const ENUM_NEW_TYPED: Opcode = 0x0087;
 
 // ============================================================================
 // Async (4 instructions - Phase 2)
@@ -668,6 +680,8 @@ pub fn opcode_name(opcode: Opcode) -> &'static str {
         ENUM_PAYLOAD => "ENUM_PAYLOAD",
         ENUM_NEW => "ENUM_NEW",
         IS_SOME => "IS_SOME",
+        ENUM_MATCH_TYPED => "ENUM_MATCH_TYPED",
+        ENUM_NEW_TYPED => "ENUM_NEW_TYPED",
         // Async
         AWAIT => "AWAIT",
         YIELD => "YIELD",

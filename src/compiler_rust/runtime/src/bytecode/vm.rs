@@ -991,12 +991,10 @@ impl BytecodeVM {
                 ENUM_MATCH => {
                     let dest = self.read_u16()?;
                     let enum_val = self.read_u16()?;
-                    let enum_id = self.read_u32()?;
-                    let discriminant = self.read_u32()?;
+                    let discriminant = self.read_u16()?;
                     let val = self.get_stack(enum_val)?;
-                    let type_id = crate::value::rt_enum_id(val);
                     let disc = crate::value::rt_enum_discriminant(val);
-                    let matches = type_id == enum_id as i64 && disc == discriminant as i64;
+                    let matches = disc == discriminant as i64;
                     self.set_stack(dest, RuntimeValue::from_bool(matches))?;
                 }
 
@@ -1011,6 +1009,32 @@ impl BytecodeVM {
 
                 ENUM_NEW => {
                     let dest = self.read_u16()?;
+                    let discriminant = self.read_u16()?;
+                    let field_count = self.read_u16()?;
+
+                    let mut fields = Vec::with_capacity(field_count as usize);
+                    for _ in 0..field_count {
+                        fields.push(self.pop()?);
+                    }
+                    fields.reverse();
+                    let payload = fields.first().copied().unwrap_or(RuntimeValue::NIL);
+                    let enum_val = crate::value::rt_enum_new(0, discriminant as u32, payload);
+                    self.set_stack(dest, enum_val)?;
+                }
+
+                ENUM_MATCH_TYPED => {
+                    let dest = self.read_u16()?;
+                    let enum_val = self.read_u16()?;
+                    let enum_id = self.read_u32()?;
+                    let discriminant = self.read_u32()?;
+                    let value = self.get_stack(enum_val)?;
+                    let matches = crate::value::rt_enum_id(value) == i64::from(enum_id)
+                        && crate::value::rt_enum_discriminant(value) == i64::from(discriminant);
+                    self.set_stack(dest, RuntimeValue::from_bool(matches))?;
+                }
+
+                ENUM_NEW_TYPED => {
+                    let dest = self.read_u16()?;
                     let enum_id = self.read_u32()?;
                     let discriminant = self.read_u32()?;
                     let field_count = self.read_u16()?;
@@ -1020,14 +1044,7 @@ impl BytecodeVM {
                         fields.push(self.pop()?);
                     }
                     fields.reverse();
-
-                    let payload = if fields.is_empty() {
-                        RuntimeValue::NIL
-                    } else {
-                        fields[0]
-                    };
-
-                    // rt_enum_new takes (enum_id: u32, discriminant: u32, payload: RuntimeValue)
+                    let payload = fields.first().copied().unwrap_or(RuntimeValue::NIL);
                     let enum_val = crate::value::rt_enum_new(enum_id, discriminant, payload);
                     self.set_stack(dest, enum_val)?;
                 }

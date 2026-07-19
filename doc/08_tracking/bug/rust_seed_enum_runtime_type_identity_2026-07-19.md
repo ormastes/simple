@@ -1,27 +1,19 @@
 # Rust seed enum runtime type identity
 
-Status: source-fixed; focused Rust execution pending.
+Status: source-fixed; focused Linux Rust execution passed, hosted matrix scheduled.
 
 The Pure implementation remains canonical. Rust LLVM and Cranelift constructors
-now reuse the same stable qualified-type ID, and structural equality/hashing
-include that ID. The remaining bytecode constructor path formerly rejected
-`EnumUnit` and `EnumWith`; its dormant `ENUM_NEW` opcode also hardcoded enum ID
-0 and truncated the hashed discriminant to 16 bits.
+reuse the same stable qualified-type ID, and structural equality/hashing include
+that ID. The bytecode compiler now lowers `EnumUnit`, `EnumWith`, and variant
+`PatternTest` through `ENUM_NEW_TYPED` and `ENUM_MATCH_TYPED`, preserving the
+full `u32` enum ID and discriminant.
 
-The bytecode compiler now lowers both constructors through the existing opcode.
-`ENUM_NEW` carries the stable `u32` enum ID and full `u32` discriminant into
-`rt_enum_new`, with zero or one payload field. The disassembler uses the same
-wire layout.
+Legacy `ENUM_NEW` and `ENUM_MATCH` retain their version-1 wire layouts. SMF
+writers emit version 2, while both duplicated loaders accept versions `1..=2`
+and reject versions outside that range.
 
-Prevention coverage compiles and executes unit and payload constructors with
-the same variant name under two qualified enum types, then checks distinct IDs
-at least 2, the untruncated discriminant, NIL unit payload, and payload value.
-
-Fresh focused Rust execution and the scheduled cross-platform seed matrix remain
-pending; no seed redeploy is authorized by this source fix.
-
-Qualified variant `PatternTest` now uses `ENUM_MATCH` with the stable `u32` enum
-ID and full `u32` discriminant. Distinct assigned type IDs therefore no longer
-collapse to the old hardcoded ID 0 during matching. General payload binding and
-runtime-call match lowering remain unsupported in the experimental bytecode
-compiler, which no production backend currently selects.
+Focused compiler/runtime tests cover unit and payload constructors, qualified
+cross-type mismatch, full-width IDs/discriminants, legacy enum ID 0, and SMF
+version compatibility. Hosted Linux/macOS/Windows jobs schedule the same Rust
+tests. Canonical FreeBSD bytecode execution remains pending; native
+ARM32/AArch64/RV32/RV64 gates do not exercise this bytecode lane.

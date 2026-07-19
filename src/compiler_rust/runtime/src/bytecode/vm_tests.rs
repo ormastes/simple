@@ -650,6 +650,69 @@ fn test_vm_is_some_nil() {
     assert!(!result.as_bool());
 }
 
+#[test]
+fn typed_enum_bytecode_preserves_full_identity_and_legacy_id_zero() {
+    const ENUM_ID: u32 = 0xdead_beef;
+    const DISCRIMINANT: u32 = 0xf123_4567;
+
+    let mut constructor = InstructionEncoder::new();
+    constructor.emit_opcode(ENUM_NEW_TYPED);
+    constructor.emit_u16(0);
+    constructor.emit_u32(ENUM_ID);
+    constructor.emit_u32(DISCRIMINANT);
+    constructor.emit_u16(0);
+    constructor.emit_opcode(RET);
+    constructor.emit_u16(0);
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&constructor.finish());
+    let value = vm.execute().expect("typed enum construction failed");
+    assert_eq!(crate::value::rt_enum_id(value), i64::from(ENUM_ID));
+    assert_eq!(crate::value::rt_enum_discriminant(value), i64::from(DISCRIMINANT));
+
+    let run_match = |enum_id, discriminant| {
+        let mut code = InstructionEncoder::new();
+        code.emit_opcode(LOAD);
+        code.emit_u16(0);
+        code.emit_u16(0);
+        code.emit_opcode(ENUM_MATCH_TYPED);
+        code.emit_u16(1);
+        code.emit_u16(0);
+        code.emit_u32(enum_id);
+        code.emit_u32(discriminant);
+        code.emit_opcode(RET);
+        code.emit_u16(1);
+        let code = code.finish();
+        let metadata = FunctionMetadata {
+            name: "typed_match".to_string(),
+            code_offset: 0,
+            code_length: code.len(),
+            param_count: 1,
+            local_count: 1,
+        };
+        let mut vm = BytecodeVM::new();
+        vm.load_bytecode(&code);
+        vm.set_functions(vec![metadata]);
+        vm.call_function(0, &[value])
+            .expect("typed enum match failed")
+            .as_bool()
+    };
+    assert!(run_match(ENUM_ID, DISCRIMINANT));
+    assert!(!run_match(ENUM_ID ^ 0x10000, DISCRIMINANT));
+    assert!(!run_match(ENUM_ID, DISCRIMINANT ^ 0x10000));
+
+    let mut legacy = InstructionEncoder::new();
+    legacy.emit_opcode(ENUM_NEW);
+    legacy.emit_u16(0);
+    legacy.emit_u16(7);
+    legacy.emit_u16(0);
+    legacy.emit_opcode(RET);
+    legacy.emit_u16(0);
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&legacy.finish());
+    let legacy_value = vm.execute().expect("legacy enum construction failed");
+    assert_eq!(crate::value::rt_enum_id(legacy_value), 0);
+}
+
 // =============================================================================
 // Super-Instruction Tests
 // =============================================================================

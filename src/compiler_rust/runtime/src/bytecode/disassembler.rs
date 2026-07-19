@@ -137,9 +137,8 @@ pub fn disassemble(code: &[u8]) -> String {
             ENUM_MATCH => {
                 let dest = decoder.read_u16().unwrap_or(0);
                 let val = decoder.read_u16().unwrap_or(0);
-                let enum_id = decoder.read_u32().unwrap_or(0);
-                let disc = decoder.read_u32().unwrap_or(0);
-                write!(output, " s{}, s{}, enum={}, disc={}", dest, val, enum_id, disc).unwrap();
+                let disc = decoder.read_u16().unwrap_or(0);
+                write!(output, " s{}, s{}, disc={}", dest, val, disc).unwrap();
             }
             ENUM_PAYLOAD => {
                 let dest = decoder.read_u16().unwrap_or(0);
@@ -149,10 +148,28 @@ pub fn disassemble(code: &[u8]) -> String {
             }
             ENUM_NEW => {
                 let dest = decoder.read_u16().unwrap_or(0);
+                let disc = decoder.read_u16().unwrap_or(0);
+                let count = decoder.read_u16().unwrap_or(0);
+                write!(output, " s{}, disc={}, fields={}", dest, disc, count).unwrap();
+            }
+            ENUM_MATCH_TYPED => {
+                let dest = decoder.read_u16().unwrap_or(0);
+                let val = decoder.read_u16().unwrap_or(0);
+                let enum_id = decoder.read_u32().unwrap_or(0);
+                let disc = decoder.read_u32().unwrap_or(0);
+                write!(output, " s{}, s{}, enum_id={}, disc={}", dest, val, enum_id, disc).unwrap();
+            }
+            ENUM_NEW_TYPED => {
+                let dest = decoder.read_u16().unwrap_or(0);
                 let enum_id = decoder.read_u32().unwrap_or(0);
                 let disc = decoder.read_u32().unwrap_or(0);
                 let count = decoder.read_u16().unwrap_or(0);
-                write!(output, " s{}, enum={}, disc={}, fields={}", dest, enum_id, disc, count).unwrap();
+                write!(
+                    output,
+                    " s{}, enum_id={}, disc={}, fields={}",
+                    dest, enum_id, disc, count
+                )
+                .unwrap();
             }
             // Super-instructions
             CONST_I64_PUSH => {
