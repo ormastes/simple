@@ -280,5 +280,22 @@ the shared binary — deploys require explicit user go-ahead).
   narrow current-source probe reached the known `HirExpr.is_some` bootstrap
   crash, and the cache-preserving Stage2-to-Stage3 rebuild was OOM-killed at
   the 4 GiB safety cap before producing a candidate. Per the bounded retry
-  policy, those failing commands were not repeated. See
+  policy, those failing commands were not repeated. A later current-source
+  incremental LLVM Stage2/Stage3 rebuild completed without Cargo or a full-CLI
+  relink: Stage3 compiled 657 files with zero failures, linked in 618.2 seconds,
+  and its one-file LLVM capability probe printed `windows native hello`. Its
+  hash is `950f96418ae2f55d2eae1732a440e66509335c34526a603b92d31a060e16bdbc`.
+  The first capped Stage4 follow-up lacked usable phase evidence because the
+  canonical launcher set `SIMPLE_BOOTSTRAP_STAGE4=1`, while `log_phase` reads
+  `SIMPLE_COMPILER_PHASE_PROFILE`; the six-minute run timed out with an empty
+  profile log. The launcher now enables phase profiling by default while
+  preserving an explicit `0` override. Source review also found that sync
+  commit `0a749ba7f10c` had restored the allocation-heavy per-character
+  `substring(scan_pos, scan_pos + 3)` triple-quote scan in phase-one entry
+  closure loading. The retained-good `index_of` delimiter search is restored;
+  the existing regression covers docstring correctness plus a 65,536-character
+  line and rejects the slow loop. A focused LLVM execution probe then stopped
+  on the separate undeclared `call_type_args` bug recorded in
+  `doc/08_tracking/bug/native_entry_closure_call_type_args_undeclared_2026-07-19.md`.
+  A correctly instrumented bounded Stage4 profile remains pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
