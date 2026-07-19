@@ -266,6 +266,15 @@ explicitly non-ready before a real slice replaces them.
 Accepted. Linux-sized BRAM and output-only markers cannot qualify the physical
 product.
 
+### ADR-5 — One RV32 interrupt topology owns hardware and DT
+
+Accepted. The canonical RV32 SoC reuses the shared two-context PLIC, routes
+UART source 10 to its M/S contexts, and presents CLINT software/timer causes
+through the machine CSR owner and masked supervisor aliases. The RV32 product
+DT is derived from that fixed memory/interrupt map, including context phandles
+and clock/timebase values. The separate RV64 text-emitted product stays
+fail-closed until it has an equally authoritative implemented topology.
+
 ## Dependency and change boundaries
 
 - Source/core changes stay in their existing architecture capsule.

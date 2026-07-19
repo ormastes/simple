@@ -1,0 +1,33 @@
+use std.spipe.*
+use std.hardware.soc_rtl.soc_top.{soc_create, soc_tick, soc_mem_read}
+use std.hardware.soc_rtl.soc_top.{soc_mem_read_update, soc_mem_write}
+use std.hardware.soc_rtl.wb_interconnect.{wb_decode_address, WB_SLAVE_PLIC}
+use std.hardware.soc_rtl.wb_interconnect.UART_BASE
+use std.hardware.soc_rtl.plic.{PLIC_BASE, PLIC_S_ENABLE_OFF}
+use std.hardware.soc_rtl.plic.{PLIC_S_THRESHOLD_OFF, PLIC_S_CLAIM_OFF}
+use std.hardware.soc_rtl.uart16550.IER_THRI
+use std.hardware.rv32i_rtl.csr.{MIP_MEIP_MASK, MIP_SEIP_MASK}
+
+describe "RV32 SoC shared PLIC wiring":
+    it "routes UART source 10 through the supervisor PLIC context to SEIP":
+        var state = soc_create(64)
+        state = soc_mem_write(state, PLIC_BASE + (10 << 2), 3, 2).state
+        state = soc_mem_write(state, PLIC_BASE + PLIC_S_ENABLE_OFF,
+            1 << 10, 2).state
+        state = soc_mem_write(state, PLIC_BASE + PLIC_S_THRESHOLD_OFF,
+            0, 2).state
+        state = soc_mem_write(state, UART_BASE + 1, IER_THRI, 0).state
+
+        state = soc_tick(state).state
+        expect(wb_decode_address(PLIC_BASE)).to_equal(WB_SLAVE_PLIC)
+        expect(state.plic.pending & (1 << 10)).to_equal(1 << 10)
+        expect(state.core.csr_m.mip & MIP_SEIP_MASK).to_equal(
+            MIP_SEIP_MASK)
+        expect(state.core.csr_m.mip & MIP_MEIP_MASK).to_equal(0)
+        expect(soc_mem_read(state, PLIC_BASE + PLIC_S_CLAIM_OFF)).to_equal(
+            10)
+
+        state = soc_mem_read_update(state,
+            PLIC_BASE + PLIC_S_CLAIM_OFF)
+        expect(state.plic.pending & (1 << 10)).to_equal(0)
+        expect(state.plic.s_in_service & (1 << 10)).to_equal(1 << 10)

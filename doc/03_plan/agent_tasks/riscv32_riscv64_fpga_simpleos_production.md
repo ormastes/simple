@@ -29,7 +29,8 @@ Date: 2026-07-18
 | `rv32_linux_isa_audit` | canonical RV32 Linux readiness | Real Sv32/PMP/privilege path; missing M/A, S interrupts, PLIC, WFI, and counters | accepted; implementation order frozen |
 | `rv32_m_impl` | iterative RV32M execution | 32-step radix-2 M unit, registered ready/RVFI phase, IMSU MISA, and focused core-path coverage | accepted after independent review PASS; primary owns merge |
 | `rv32_a_design` | RV32A execution and retirement | Reuse the Sv32/PMP atomic frontend; add physical LR/SC reservation state, registered RVFI-ready retirement, exact AMO results, and one coherent-agent gate | accepted after independent high-capability review PASS; primary owns merge |
-| `linux_media_audit` | RV32 supervisor interrupt and PLIC wiring | Port the proven RV64 CSR alias/delivery rules, reuse the shared two-context PLIC, route UART source 10, and derive binding-complete DT cells from that topology | design accepted; implementation is the next lane |
+| `linux_media_audit` | RV32 supervisor interrupt and PLIC wiring | Port the proven RV64 CSR alias/delivery rules, reuse the shared two-context PLIC, route UART source 10, and derive binding-complete DT cells from that topology | accepted after gateway/CSR repair and independent high-capability review PASS; primary owns merge |
+| `rv32_dtb_impl` | binding-complete RV32 product DT | Emit binary/DTS from the fixed RV32 SoC map with CPU/CLINT/PLIC/UART bindings and keep the unimplemented RV64 product API fail-closed | accepted after independent high-capability review PASS; primary owns merge |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

@@ -11,7 +11,9 @@ use std.nogc_async_mut_noalloc.baremetal.riscv.dtb_gen.{
     fdt_begin_node, fdt_end_node,
     fdt_prop_raw, fdt_prop_u32, fdt_prop_string, fdt_prop_empty,
     fdt_finish,
-    build_riscv_virt_dtb, dtb_verify_magic, dtb_total_size
+    build_riscv_virt_dtb, dtb_verify_magic, dtb_total_size,
+    Rv32SocMemoryMap, rv32_linux_dtb_generate, rv32_linux_dtb_to_dts,
+    Rv64SocMemoryMap, rv64_linux_dtb_generate, rv64_linux_dtb_to_dts
 }
 
 describe "FDT Constants":
@@ -163,6 +165,99 @@ describe "RISC-V Virt DTB Template":
         val blob4 = build_riscv_virt_dtb(4, 0x80000000, 128 * 1024 * 1024)
         expect blob4.len() > blob1.len()
 
+describe "RV32 K26 Product DTB":
+    it "uses the canonical one-hart map and real peripheral clocks":
+        val mem_map = Rv32SocMemoryMap.k26()
+        expect mem_map.dram_base == 0x8000_0000
+        expect mem_map.dram_size == 0x0800_0000
+        expect mem_map.uart_addr == 0x1000_0000
+        expect mem_map.uart_clock_hz == 100_000_000
+        expect mem_map.clint_addr == 0x0200_0000
+        expect mem_map.plic_addr == 0x0C00_0000
+        expect mem_map.timebase_hz == 100_000_000
+        expect mem_map.boot_hartid == 0
+
+    it "emits a valid binary DTB":
+        val blob = rv32_linux_dtb_generate(Rv32SocMemoryMap.k26())
+        expect dtb_verify_magic(blob) == true
+        expect dtb_total_size(blob) == blob.len()
+
+    it "encodes the exact interrupt and serial bindings in the binary tree":
+        val blob = rv32_linux_dtb_generate(Rv32SocMemoryMap.k26())
+        expect fdt_has_property(blob, "cpus", "timebase-frequency", be32_bytes(100_000_000))
+        expect fdt_has_property(blob, "memory@80000000", "reg", be32_bytes(0) + be32_bytes(0x8000_0000) + be32_bytes(0) + be32_bytes(0x0800_0000))
+        expect fdt_has_property(blob, "cpu@0", "riscv,isa", fdt_test_string_bytes("rv32ima_zicsr_zifencei"))
+        expect fdt_has_property(blob, "cpu@0", "mmu-type", fdt_test_string_bytes("riscv,sv32"))
+        expect fdt_has_property(blob, "interrupt-controller", "#interrupt-cells", be32_bytes(1))
+        expect fdt_has_property(blob, "interrupt-controller", "interrupt-controller", [])
+        expect fdt_has_property(blob, "interrupt-controller", "compatible", fdt_test_string_bytes("riscv,cpu-intc"))
+        expect fdt_has_property(blob, "interrupt-controller", "phandle", be32_bytes(1))
+        expect fdt_has_property(blob, "clint@2000000", "compatible", fdt_test_string_pair_bytes("sifive,clint0", "riscv,clint0"))
+        expect fdt_has_property(blob, "clint@2000000", "reg", be32_bytes(0) + be32_bytes(0x0200_0000) + be32_bytes(0) + be32_bytes(0x0001_0000))
+        expect fdt_has_property(blob, "clint@2000000", "interrupts-extended", be32_bytes(1) + be32_bytes(3) + be32_bytes(1) + be32_bytes(7))
+        expect fdt_has_property(blob, "plic@c000000", "compatible", fdt_test_string_pair_bytes("sifive,plic-1.0.0", "riscv,plic0"))
+        expect fdt_has_property(blob, "plic@c000000", "reg", be32_bytes(0) + be32_bytes(0x0C00_0000) + be32_bytes(0) + be32_bytes(0x0040_0000))
+        expect fdt_has_property(blob, "plic@c000000", "#address-cells", be32_bytes(0))
+        expect fdt_has_property(blob, "plic@c000000", "#interrupt-cells", be32_bytes(1))
+        expect fdt_has_property(blob, "plic@c000000", "interrupt-controller", [])
+        expect fdt_has_property(blob, "plic@c000000", "riscv,ndev", be32_bytes(31))
+        expect fdt_has_property(blob, "plic@c000000", "phandle", be32_bytes(2))
+        expect fdt_has_property(blob, "plic@c000000", "interrupts-extended", be32_bytes(1) + be32_bytes(11) + be32_bytes(1) + be32_bytes(9))
+        expect fdt_has_property(blob, "serial@10000000", "compatible", fdt_test_string_bytes("ns16550a"))
+        expect fdt_has_property(blob, "serial@10000000", "reg", be32_bytes(0) + be32_bytes(0x1000_0000) + be32_bytes(0) + be32_bytes(0x100))
+        expect fdt_has_property(blob, "serial@10000000", "clock-frequency", be32_bytes(100_000_000))
+        expect fdt_has_property(blob, "serial@10000000", "reg-shift", be32_bytes(0))
+        expect fdt_has_property(blob, "serial@10000000", "reg-io-width", be32_bytes(1))
+        expect fdt_has_property(blob, "serial@10000000", "interrupt-parent", be32_bytes(2))
+        expect fdt_has_property(blob, "serial@10000000", "interrupts", be32_bytes(10))
+
+    it "binds the RV32 CPU and stable CPU interrupt-controller phandle":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect dts.contains("timebase-frequency = <100000000>;")
+        expect dts.contains("riscv,isa = \"rv32ima_zicsr_zifencei\";")
+        expect dts.contains("mmu-type = \"riscv,sv32\";")
+        expect dts.contains("compatible = \"riscv,cpu-intc\";")
+        expect dts.contains("phandle = <1>;")
+
+    it "binds CLINT machine and supervisor contexts to CPU phandle one":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect dts.contains("compatible = \"sifive,clint0\", \"riscv,clint0\";")
+        expect dts.contains("reg = <0x0 0x2000000 0x0 0x10000>;")
+        expect dts.contains("interrupts-extended = <1 3 1 7>;")
+
+    it "binds PLIC machine and supervisor contexts with stable phandle two":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect dts.contains("compatible = \"sifive,plic-1.0.0\", \"riscv,plic0\";")
+        expect dts.contains("reg = <0x0 0xc000000 0x0 0x400000>;")
+        expect dts.contains("#address-cells = <0>;")
+        expect dts.contains("riscv,ndev = <31>;")
+        expect dts.contains("phandle = <2>;")
+        expect dts.contains("interrupts-extended = <1 11 1 9>;")
+
+    it "binds UART source ten with the K26 clock and byte register spacing":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect dts.contains("serial@10000000 {")
+        expect dts.contains("clock-frequency = <100000000>;")
+        expect dts.contains("reg-shift = <0>;")
+        expect dts.contains("reg-io-width = <1>;")
+        expect dts.contains("interrupt-parent = <2>;")
+        expect dts.contains("interrupts = <10>;")
+
+describe "RV64 Product DTB Gate":
+    it "fails closed until canonical emitted RV64 topology exists":
+        val mem_map = Rv64SocMemoryMap(
+            dram_base: 0x8000_0000,
+            dram_size: 0x0400_0000,
+            uart_addr: 0x1000_0000,
+            clint_addr: 0x0200_0000,
+            plic_addr: 0x0C00_0000,
+            boot_hartid: 0
+        )
+        expect rv64_linux_dtb_generate(mem_map).len() == 0
+        val blocker = rv64_linux_dtb_to_dts(mem_map)
+        expect blocker.contains("contract-not-ready")
+        expect blocker.contains("GENERATED_RTL_NOT_IMPLEMENTED lane=rv64")
+
 describe "DTB Verification":
     it "rejects empty blob":
         expect dtb_verify_magic([]) == false
@@ -175,3 +270,84 @@ describe "DTB Verification":
 
     it "total size returns zero for short blob":
         expect dtb_total_size([0xD0]) == 0
+
+fn fdt_test_string_bytes(value: text) -> [u8]:
+    var data: [u8] = []
+    for ch in value:
+        data = data + [ch as u8]
+    data + [0]
+
+fn fdt_test_string_pair_bytes(first: text, second: text) -> [u8]:
+    fdt_test_string_bytes(first) + fdt_test_string_bytes(second)
+
+fn fdt_test_text_at(blob: [u8], offset: u64, expected: text) -> bool:
+    if offset + expected.len() >= blob.len():
+        return false
+    var idx: u64 = 0
+    for ch in expected:
+        if blob[offset + idx] != ch as u8:
+            return false
+        idx = idx + 1
+    blob[offset + expected.len()] == 0
+
+fn fdt_test_bytes_at(blob: [u8], offset: u64, expected: [u8]) -> bool:
+    if offset + expected.len() > blob.len():
+        return false
+    var idx: u64 = 0
+    while idx < expected.len():
+        if blob[offset + idx] != expected[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn fdt_test_align4(offset: u64) -> u64:
+    var out = offset
+    while out % 4 != 0:
+        out = out + 1
+    out
+
+fn fdt_has_property(blob: [u8], node_name: text, property_name: text, expected: [u8]) -> bool:
+    if blob.len() < FDT_HEADER_SIZE:
+        return false
+    val struct_start = read_be32(blob, 8)
+    val strings_start = read_be32(blob, 12)
+    val struct_limit = struct_start + read_be32(blob, 36)
+    if struct_limit > blob.len() or strings_start > blob.len():
+        return false
+
+    var offset = struct_start
+    var depth: i64 = -1
+    var target_depth: i64 = -2
+    while offset + 4 <= struct_limit:
+        val token = read_be32(blob, offset)
+        offset = offset + 4
+        if token == FDT_BEGIN_NODE:
+            val name_offset = offset
+            while offset < struct_limit and blob[offset] != 0:
+                offset = offset + 1
+            if offset >= struct_limit:
+                return false
+            depth = depth + 1
+            if fdt_test_text_at(blob, name_offset, node_name):
+                target_depth = depth
+            offset = fdt_test_align4(offset + 1)
+        else if token == FDT_END_NODE:
+            if depth == target_depth:
+                target_depth = -2
+            depth = depth - 1
+        else if token == FDT_PROP:
+            if offset + 8 > struct_limit:
+                return false
+            val value_len = read_be32(blob, offset)
+            val name_offset = strings_start + read_be32(blob, offset + 4)
+            offset = offset + 8
+            if offset + value_len > struct_limit:
+                return false
+            if depth == target_depth and fdt_test_text_at(blob, name_offset, property_name):
+                return value_len == expected.len() and fdt_test_bytes_at(blob, offset, expected)
+            offset = fdt_test_align4(offset + value_len)
+        else if token == FDT_END:
+            return false
+        else if token != FDT_NOP:
+            return false
+    false

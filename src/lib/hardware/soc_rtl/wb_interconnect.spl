@@ -8,7 +8,7 @@
 # Memory map:
 #   0x00001000-0x00001FFF  Boot ROM   (4 KB)      — slave 0
 #   0x02000000-0x0200FFFF  CLINT      (64 KB)     — slave 1
-#   0x0C000000-0x0FFFFFFF  PLIC       (future)    — slave 5 (unmapped)
+#   0x0C000000-0x0C3FFFFF  PLIC       (4 MB)      — slave 6
 #   0x10000000-0x100000FF  UART0      (256 bytes) — slave 2
 #   0x10010000-0x100100FF  ETH DMA    (256 bytes) — slave 5
 #   0x80000000-0x87FFFFFF  RAM        (128 MB)    — slave 3
@@ -18,6 +18,7 @@
 # ============================================================================
 
 use std.hardware.soc_rtl.bootrom.BOOTROM_BASE
+use std.hardware.soc_rtl.plic.PLIC_BASE
 use std.hardware.rv32i_rtl.pkg.MB_BASE_ADDR
 
 # ============================================================================
@@ -30,6 +31,7 @@ val WB_SLAVE_UART: u32     = 2
 val WB_SLAVE_RAM: u32      = 3
 val WB_SLAVE_MAILBOX: u32  = 4
 val WB_SLAVE_ETH_DMA: u32  = 5
+val WB_SLAVE_PLIC: u32     = 6
 val WB_SLAVE_UNMAPPED: u32 = 0xFF
 
 # ============================================================================
@@ -41,6 +43,8 @@ val ROM_END: u32    = 0x00001FFF
 
 val CLINT_BASE: u32 = 0x02000000
 val CLINT_END: u32  = 0x0200FFFF
+
+val PLIC_END: u32   = 0x0C3FFFFF
 
 val UART_BASE: u32  = 0x10000000
 val UART_END: u32   = 0x100000FF
@@ -102,6 +106,7 @@ fn wb_decode_address(addr: u32) -> u32:
       2  = UART
       3  = RAM
       4  = Mailbox
+      6  = PLIC
       0xFF = unmapped
     """
     # Mailbox is inside RAM range — check first
@@ -115,6 +120,10 @@ fn wb_decode_address(addr: u32) -> u32:
     # CLINT
     if addr >= CLINT_BASE and addr <= CLINT_END:
         return WB_SLAVE_CLINT
+
+    # PLIC
+    if addr >= PLIC_BASE and addr <= PLIC_END:
+        return WB_SLAVE_PLIC
 
     # UART
     if addr >= UART_BASE and addr <= UART_END:
@@ -134,7 +143,9 @@ fn wb_decode_address(addr: u32) -> u32:
 # Read Routing
 # ============================================================================
 
-fn wb_route_read(slave_idx: u32, addr: u32, rom_data: u32, clint_data: u32, uart_data: u32, ram_data: u32, mb_data: u32, eth_data: u32) -> WbSlaveResponse:
+fn wb_route_read(slave_idx: u32, addr: u32, rom_data: u32, clint_data: u32,
+                 plic_data: u32, uart_data: u32, ram_data: u32,
+                 mb_data: u32, eth_data: u32) -> WbSlaveResponse:
     """Route a read response from the correct slave based on decoded index.
     Each slave's data is pre-read by the caller; this function selects which
     one to return and generates ack/err signals."""
@@ -143,6 +154,8 @@ fn wb_route_read(slave_idx: u32, addr: u32, rom_data: u32, clint_data: u32, uart
         return WbSlaveResponse(rdata: rom_data, ack: true, err: false)
     if slave_idx == WB_SLAVE_CLINT:
         return WbSlaveResponse(rdata: clint_data, ack: true, err: false)
+    if slave_idx == WB_SLAVE_PLIC:
+        return WbSlaveResponse(rdata: plic_data, ack: true, err: false)
     if slave_idx == WB_SLAVE_UART:
         return WbSlaveResponse(rdata: uart_data, ack: true, err: false)
     if slave_idx == WB_SLAVE_RAM:
@@ -173,6 +186,10 @@ fn wb_route_write(slave_idx: u32, addr: u32, wdata: u32) -> WbWriteResult:
         val offset = addr - CLINT_BASE
         return WbWriteResult(slave_idx: WB_SLAVE_CLINT, offset: offset, wdata: wdata)
 
+    if slave_idx == WB_SLAVE_PLIC:
+        val offset = addr - PLIC_BASE
+        return WbWriteResult(slave_idx: WB_SLAVE_PLIC, offset: offset, wdata: wdata)
+
     if slave_idx == WB_SLAVE_UART:
         val offset = addr - UART_BASE
         return WbWriteResult(slave_idx: WB_SLAVE_UART, offset: offset, wdata: wdata)
@@ -198,11 +215,13 @@ export WB_SLAVE_UART
 export WB_SLAVE_RAM
 export WB_SLAVE_MAILBOX
 export WB_SLAVE_ETH_DMA
+export WB_SLAVE_PLIC
 export WB_SLAVE_UNMAPPED
 export ROM_BASE
 export ROM_END
 export CLINT_BASE
 export CLINT_END
+export PLIC_END
 export UART_BASE
 export UART_END
 export RAM_BASE

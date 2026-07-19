@@ -159,8 +159,11 @@ Sv32 fetch/data stalls, precise faults, and separate cycle/retire counters;
 response. Its focused SoC scenario writes SATP in S-mode and executes the next
 instruction through physical page-table bus reads. Reserved RV32I encodings
 and misaligned taken targets trap before side effects, and mailbox EXIT drains
-its response before halt. Supervisor interrupt contexts, RV32 A/C extensions,
-generated VHDL execution, and Linux acceptance remain incomplete. The
+its response before halt. RV32M and RV32A now execute with registered one-shot
+retirement; supervisor interrupt contexts, shared PLIC routing, and the RV32
+product DT are implemented and independently source-reviewed. RV32C, WFI,
+counter-access policy, generated VHDL execution, and Linux acceptance remain
+incomplete. The
 multi-cycle M unit is clocked into commit with exact high
 multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
 LR/SC and AMO.W/D now reserve translated physical byte ranges and retire through
@@ -250,9 +253,10 @@ At `buildroot login:` enter `root`, then run `ls /` and `uname -m`. The
 records a live PASS with the DT advertising exactly
 `rv32ima_zicsr_zifencei` and `riscv,sv32`. It pins the firmware, kernel,
 rootfs, and QEMU-oracle DTB, but does not satisfy generated-RTL or FPGA
-evidence. Default product manifests remain `unpinned` until a binding-complete
-Simple SoC DTB replaces the QEMU DTB and both lanes share their exact product
-inputs across QEMU, RTL, and FPGA.
+evidence. A binding-complete canonical RV32 product DT now exists in Simple
+source, but its default product manifest remains `unpinned` until
+compiler-emitted RTL proves that same topology and the exact product inputs are
+shared across QEMU, RTL, and FPGA. The RV64 product DT remains fail-closed.
 
 QEMU success is recorded as `qemu-media`; it never satisfies `rtl-sim`.
 

@@ -43,6 +43,7 @@ struct PlicState:
     """PLIC register file.  32 interrupt sources (source 0 unused)."""
     priority: [u32]       # Source priorities (index 0-31, source 0 unused)
     pending: u32          # 32-bit pending bitmap
+    input_level: u32      # Current gateway input levels
     enable: u32           # 32-bit enable bitmap for context 0 (M-mode)
     s_enable: u32         # 32-bit enable bitmap for context 1 (S-mode)
     threshold: u32        # Priority threshold for context 0
@@ -86,6 +87,7 @@ fn plic_create() -> PlicState:
     PlicState(
         priority: prio,
         pending: 0,
+        input_level: 0,
         enable: 0,
         s_enable: 0,
         threshold: 0,
@@ -107,19 +109,19 @@ fn plic_mmio_read(state: PlicState, offset: u32) -> u32:
     # Priority registers: offset 0x000000 .. 0x00007C (source 0-31)
     if offset < PLIC_PRIORITY_END:
         val src = offset >> 2
-        if src < 32:
+        if src > 0 and src < 32:
             return state.priority[src]
         return 0
 
     # Pending bits
     if offset == PLIC_PENDING_OFF:
-        return state.pending
+        return state.pending & 0xFFFFFFFE
 
     # Enable bits for context 0
     if offset == PLIC_ENABLE_OFF:
-        return state.enable
+        return state.enable & 0xFFFFFFFE
     if offset == PLIC_S_ENABLE_OFF:
-        return state.s_enable
+        return state.s_enable & 0xFFFFFFFE
 
     # Priority threshold for context 0
     if offset == PLIC_THRESHOLD_OFF:
@@ -168,7 +170,7 @@ fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
     # Priority registers
     if offset < PLIC_PRIORITY_END:
         val src = offset >> 2
-        if src < 32:
+        if src > 0 and src < 32:
             # Clamp priority to 3 bits (0-7)
             out.priority[src] = value & 0x7
         return out
@@ -179,10 +181,10 @@ fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
 
     # Enable bits for context 0
     if offset == PLIC_ENABLE_OFF:
-        out.enable = value
+        out.enable = value & 0xFFFFFFFE
         return out
     if offset == PLIC_S_ENABLE_OFF:
-        out.s_enable = value
+        out.s_enable = value & 0xFFFFFFFE
         return out
 
     # Priority threshold for context 0
@@ -208,16 +210,18 @@ fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
 # ============================================================================
 
 fn plic_set_pending(state: PlicState, source: u32, pending: bool) -> PlicState:
-    """Set or clear the pending bit for an interrupt source.
-    Source 0 is ignored (always "no interrupt")."""
+    """Drive one gateway input, latching accepted requests until claim."""
     if source == 0 or source >= 32:
         return state
     var out = state
     val mask: u32 = 1 << source
     if pending:
-        out.pending = state.pending | mask
+        out.input_level = state.input_level | mask
+        if ((state.in_service | state.s_in_service) & mask) == 0:
+            out.pending = state.pending | mask
     else:
-        out.pending = state.pending & (mask ^ 0xFFFFFFFF)
+        # Deassertion records the level but cannot withdraw an accepted IP bit.
+        out.input_level = state.input_level & (mask ^ 0xFFFFFFFF)
     out
 
 # ============================================================================
@@ -302,8 +306,12 @@ fn plic_complete(state: PlicState, source: u32) -> PlicState:
         return state
     var out = state
     val mask: u32 = 1 << source
+    val was_in_service = (state.in_service & mask) != 0
     out.in_service = state.in_service & (mask ^ 0xFFFFFFFF)
     out.claim_complete = 0
+    if (was_in_service and (out.input_level & mask) != 0 and
+        ((out.in_service | out.s_in_service) & mask) == 0):
+        out.pending = out.pending | mask
     out
 
 fn plic_complete_s(state: PlicState, source: u32) -> PlicState:
@@ -312,6 +320,10 @@ fn plic_complete_s(state: PlicState, source: u32) -> PlicState:
         return state
     var out = state
     val mask: u32 = 1 << source
+    val was_in_service = (state.s_in_service & mask) != 0
     out.s_in_service = state.s_in_service & (mask ^ 0xFFFFFFFF)
     out.s_claim_complete = 0
+    if (was_in_service and (out.input_level & mask) != 0 and
+        ((out.in_service | out.s_in_service) & mask) == 0):
+        out.pending = out.pending | mask
     out

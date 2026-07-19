@@ -311,3 +311,12 @@ pending/enable aliases into RV32, connect CLINT and UART source 10 through the
 canonical SoC, and emit the product DT from that same fixed topology. The
 separate text-emitted RV64 FPGA driver—not the shared Simple peripheral models—
 still contains non-authoritative stubs and remains fail-closed.
+
+That interrupt/DT slice is now implemented and independently reviewed. RV32
+owns canonical `mideleg`/`mie`/`mip` state with masked `sie`/`sip` aliases,
+separate software and external `SEIP`, machine-before-supervisor delivery, and
+the shared two-context PLIC. UART source 10 reaches both PLIC contexts, and the
+RV32 binary DT describes the same 128 MiB RAM, 100 MHz CLINT/timebase, UART,
+PLIC range, context interrupts, and phandles. The RV64 product DT API remains
+explicitly fail-closed. This is source-level readiness only; compiler-emitted
+VHDL execution and Linux/FPGA evidence remain outstanding.

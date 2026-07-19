@@ -1,0 +1,65 @@
+use std.spipe.*
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read}
+use std.hardware.soc_rtl.plic.{plic_mmio_write, plic_set_pending}
+use std.hardware.soc_rtl.plic.{plic_check_interrupt, plic_claim, plic_claim_s}
+use std.hardware.soc_rtl.plic.{plic_complete, PLIC_PENDING_OFF}
+use std.hardware.soc_rtl.plic.{PLIC_ENABLE_OFF, PLIC_S_ENABLE_OFF}
+use std.hardware.soc_rtl.plic.{PLIC_THRESHOLD_OFF, PLIC_S_THRESHOLD_OFF}
+
+fn plic_source_10_both_contexts() -> PlicState:
+    var plic = plic_create()
+    plic = plic_mmio_write(plic, 10 << 2, 3)
+    plic = plic_mmio_write(plic, PLIC_ENABLE_OFF, 1 << 10)
+    plic = plic_mmio_write(plic, PLIC_S_ENABLE_OFF, 1 << 10)
+    plic = plic_mmio_write(plic, PLIC_THRESHOLD_OFF, 0)
+    plic = plic_mmio_write(plic, PLIC_S_THRESHOLD_OFF, 0)
+    plic
+
+describe "shared PLIC gateway semantics":
+    it "keeps an accepted request pending after input deassertion":
+        var plic = plic_source_10_both_contexts()
+        plic = plic_set_pending(plic, 10, true)
+        plic = plic_set_pending(plic, 10, false)
+        expect(plic.pending & (1 << 10)).to_equal(1 << 10)
+        val claimed = plic_claim(plic)
+        expect(claimed.source_id).to_equal(10)
+        plic = plic_complete(claimed.state, 10)
+        expect(plic.pending & (1 << 10)).to_equal(0)
+
+    it "re-pends a still-high source only after completion":
+        var plic = plic_source_10_both_contexts()
+        plic = plic_set_pending(plic, 10, true)
+        val claimed = plic_claim(plic)
+        plic = claimed.state
+        plic = plic_set_pending(plic, 10, true)
+        val held = plic_check_interrupt(plic)
+        expect(held.meip).to_equal(false)
+        expect(held.seip).to_equal(false)
+        plic = plic_complete(plic, 10)
+        expect(plic.pending & (1 << 10)).to_equal(1 << 10)
+        val retriggered = plic_check_interrupt(plic)
+        expect(retriggered.meip).to_equal(true)
+        expect(retriggered.seip).to_equal(true)
+
+    it "keeps source zero hardwired to zero":
+        var plic = plic_create()
+        plic = plic_mmio_write(plic, 0, 7)
+        plic = plic_mmio_write(plic, PLIC_ENABLE_OFF, 0xFFFFFFFF)
+        plic = plic_mmio_write(plic, PLIC_S_ENABLE_OFF, 0xFFFFFFFF)
+        plic = plic_set_pending(plic, 0, true)
+        expect(plic_mmio_read(plic, 0)).to_equal(0)
+        expect(plic_mmio_read(plic, PLIC_PENDING_OFF) & 1).to_equal(0)
+        expect(plic_mmio_read(plic, PLIC_ENABLE_OFF) & 1).to_equal(0)
+        expect(plic_mmio_read(plic, PLIC_S_ENABLE_OFF) & 1).to_equal(0)
+
+    it "allows only one context to own a claimed source":
+        var plic = plic_source_10_both_contexts()
+        plic = plic_set_pending(plic, 10, true)
+        val eligible = plic_check_interrupt(plic)
+        expect(eligible.meip).to_equal(true)
+        expect(eligible.seip).to_equal(true)
+        val machine = plic_claim(plic)
+        expect(machine.source_id).to_equal(10)
+        val supervisor = plic_claim_s(machine.state)
+        expect(supervisor.source_id).to_equal(0)
+        expect(supervisor.state.s_in_service & (1 << 10)).to_equal(0)

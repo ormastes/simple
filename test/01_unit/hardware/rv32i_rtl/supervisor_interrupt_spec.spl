@@ -1,0 +1,89 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.csr.{csr_create, csr_write, csr_update_mip_ext}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MIDELEG, CSR_ADDR_MIE, CSR_ADDR_MIP}
+use std.hardware.rv32i_rtl.csr.{MIP_MSIP_MASK, MIP_STIP_MASK, MIP_SEIP_MASK}
+use std.hardware.rv32i_rtl.csr.{MIP_SUPERVISOR_MASK, MIP_SUPPORTED_MASK}
+use std.hardware.rv32i_rtl.csr.FUNCT3_CSRRS
+use std.hardware.rv32i_rtl.csr_s.SSTATUS_SIE_MASK
+use std.hardware.rv32i_rtl.core.{core32_init_single_master, core32_begin_instruction}
+use std.hardware.rv32i_rtl.regfile.regfile_read
+use std.hardware.rv32i_rtl.trap.trap_check_interrupt_from_priv
+use std.hardware.rv32i_rtl.trap.{CAUSE_MSI, CAUSE_STI, CAUSE_SEI}
+
+fn csr_instruction(addr: u32, rs1: u32, funct3: u32, rd: u32) -> u32:
+    (addr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
+
+describe "RV32 supervisor interrupt pending state":
+    it "WARL-masks delegation and interrupt enables":
+        var csr = csr_write(csr_create(0), CSR_ADDR_MIDELEG, 0xFFFFFFFF)
+        expect(csr.mideleg).to_equal(MIP_SUPERVISOR_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIE, 0xFFFFFFFF)
+        expect(csr.mie).to_equal(MIP_SUPPORTED_MASK)
+
+    it "ORs software and external SEIP while preserving injected STIP":
+        var csr = csr_write(csr_create(0), CSR_ADDR_MIP, MIP_STIP_MASK)
+        csr = csr_update_mip_ext(csr, false, false, false, true)
+        expect(csr.mip & MIP_STIP_MASK).to_equal(MIP_STIP_MASK)
+        expect(csr.mip & MIP_SEIP_MASK).to_equal(MIP_SEIP_MASK)
+        csr = csr_update_mip_ext(csr, false, false, false, false)
+        expect(csr.mip & MIP_STIP_MASK).to_equal(MIP_STIP_MASK)
+        expect(csr.mip & MIP_SEIP_MASK).to_equal(0)
+
+        csr = csr_write(csr, CSR_ADDR_MIP,
+            MIP_STIP_MASK | MIP_SEIP_MASK)
+        csr = csr_update_mip_ext(csr, false, false, false, false)
+        expect(csr.mip & MIP_SEIP_MASK).to_equal(MIP_SEIP_MASK)
+        csr = csr_update_mip_ext(csr, false, false, false, true)
+        csr = csr_write(csr, CSR_ADDR_MIP, MIP_STIP_MASK)
+        expect(csr.mip & MIP_SEIP_MASK).to_equal(MIP_SEIP_MASK)
+        csr = csr_update_mip_ext(csr, false, false, false, false)
+        expect(csr.mip & MIP_SEIP_MASK).to_equal(0)
+
+    it "does not latch external SEIP during CSRRS mip with x0":
+        var state = core32_init_single_master(0x80000000)
+        state.csr_m = csr_update_mip_ext(state.csr_m, false, false,
+            false, true)
+        state = core32_begin_instruction(state,
+            csr_instruction(CSR_ADDR_MIP, 0, FUNCT3_CSRRS, 2))
+        expect(regfile_read(state.rf, 2, 0).rs1_data & MIP_SEIP_MASK).to_equal(
+            MIP_SEIP_MASK)
+        expect(state.csr_m.seip_software).to_equal(false)
+        state.csr_m = csr_update_mip_ext(state.csr_m, false, false,
+            false, false)
+        expect(state.csr_m.mip & MIP_SEIP_MASK).to_equal(0)
+
+describe "RV32 supervisor interrupt delivery":
+    it "takes delegated SEIP before STIP in S-mode":
+        var csr = csr_create(0)
+        csr = csr_write(csr, CSR_ADDR_MIDELEG,
+            MIP_STIP_MASK | MIP_SEIP_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIE,
+            MIP_STIP_MASK | MIP_SEIP_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIP,
+            MIP_STIP_MASK | MIP_SEIP_MASK)
+        csr.mstatus = csr.mstatus | SSTATUS_SIE_MASK
+        val pending = trap_check_interrupt_from_priv(csr, 1)
+        expect(pending.pending).to_equal(true)
+        expect(pending.cause).to_equal(CAUSE_SEI)
+
+    it "takes an M-target interrupt before a delegated S-target interrupt":
+        var csr = csr_create(0)
+        csr = csr_write(csr, CSR_ADDR_MIDELEG, MIP_SEIP_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIE,
+            MIP_MSIP_MASK | MIP_SEIP_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIP, MIP_SEIP_MASK)
+        csr = csr_update_mip_ext(csr, false, true, false, false)
+        val pending = trap_check_interrupt_from_priv(csr, 0)
+        expect(pending.pending).to_equal(true)
+        expect(pending.cause).to_equal(CAUSE_MSI)
+
+    it "masks delegated interrupts in M-mode and enables them automatically in U-mode":
+        var csr = csr_create(0)
+        csr = csr_write(csr, CSR_ADDR_MIDELEG, MIP_STIP_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIE, MIP_STIP_MASK)
+        csr = csr_write(csr, CSR_ADDR_MIP, MIP_STIP_MASK)
+        val machine = trap_check_interrupt_from_priv(csr, 3)
+        expect(machine.pending).to_equal(false)
+        val user = trap_check_interrupt_from_priv(csr, 0)
+        expect(user.pending).to_equal(true)
+        expect(user.cause).to_equal(CAUSE_STI)

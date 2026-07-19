@@ -59,9 +59,15 @@ val MPP_M_MODE: u32         = 0x00001800
 val MIP_MSIP_MASK: u32 = 0x00000008   # bit 3 — Machine Software Interrupt
 val MIP_MTIP_MASK: u32 = 0x00000080   # bit 7 — Machine Timer Interrupt
 val MIP_MEIP_MASK: u32 = 0x00000800   # bit 11 — Machine External Interrupt
+val MIP_SSIP_MASK: u32 = 0x00000002   # bit 1 — Supervisor Software Interrupt
+val MIP_STIP_MASK: u32 = 0x00000020   # bit 5 — Supervisor Timer Interrupt
+val MIP_SEIP_MASK: u32 = 0x00000200   # bit 9 — Supervisor External Interrupt
+val MIP_MACHINE_MASK: u32 = MIP_MSIP_MASK | MIP_MTIP_MASK | MIP_MEIP_MASK
+val MIP_SUPERVISOR_MASK: u32 = MIP_SSIP_MASK | MIP_STIP_MASK | MIP_SEIP_MASK
+val MIP_SUPPORTED_MASK: u32 = MIP_MACHINE_MASK | MIP_SUPERVISOR_MASK
 # Implemented synchronous causes, including Sv32 page faults 12/13/15.
 val MEDELEG_SUPPORTED_MASK: u32 = 0x0000B3AE
-val MIDELEG_SUPPORTED_MASK: u32 = 0
+val MIDELEG_SUPPORTED_MASK: u32 = MIP_SUPERVISOR_MASK
 
 # ============================================================================
 # MISA: MXL=01 (bits [31:30]) plus implemented extension bits
@@ -112,6 +118,12 @@ export MPP_M_MODE
 export MIP_MSIP_MASK
 export MIP_MTIP_MASK
 export MIP_MEIP_MASK
+export MIP_SSIP_MASK
+export MIP_STIP_MASK
+export MIP_SEIP_MASK
+export MIP_MACHINE_MASK
+export MIP_SUPERVISOR_MASK
+export MIP_SUPPORTED_MASK
 export MEDELEG_SUPPORTED_MASK
 export MIDELEG_SUPPORTED_MASK
 export MISA_RV32I
@@ -142,6 +154,8 @@ struct CsrFile:
     mcause: u32
     mtval: u32
     mip: u32
+    seip_external: bool
+    seip_software: bool
     mcycle: u32
     mcycleh: u32
     minstret: u32
@@ -177,6 +191,8 @@ fn csr_create(hartid: u32) -> CsrFile:
         mcause: 0,
         mtval: 0,
         mip: 0,
+        seip_external: false,
+        seip_software: false,
         mcycle: 0,
         mcycleh: 0,
         minstret: 0,
@@ -258,7 +274,7 @@ fn csr_write(csr: CsrFile, addr: u32, value: u32) -> CsrFile:
     else if addr == CSR_ADDR_MIDELEG:
         out.mideleg = value & MIDELEG_SUPPORTED_MASK
     else if addr == CSR_ADDR_MIE:
-        out.mie = value
+        out.mie = value & MIP_SUPPORTED_MASK
     else if addr == CSR_ADDR_MTVEC:
         out.mtvec = value
     else if addr == CSR_ADDR_MSCRATCH:
@@ -271,8 +287,14 @@ fn csr_write(csr: CsrFile, addr: u32, value: u32) -> CsrFile:
     else if addr == CSR_ADDR_MTVAL:
         out.mtval = value
     else if addr == CSR_ADDR_MIP:
-        # Only MSIP is software-writable in mip; MTIP and MEIP are external
-        out.mip = (csr.mip & (MIP_MTIP_MASK | MIP_MEIP_MASK)) | (value & MIP_MSIP_MASK)
+        # Machine firmware injects supervisor pending bits.  Platform-owned
+        # machine bits remain driven by CLINT/PLIC, and SEIP is the logical OR
+        # of the software latch and the external supervisor PLIC context.
+        out.seip_software = (value & MIP_SEIP_MASK) != 0
+        out.mip = (csr.mip & MIP_MACHINE_MASK) |
+            (value & (MIP_SSIP_MASK | MIP_STIP_MASK))
+        if out.seip_software or csr.seip_external:
+            out.mip = out.mip | MIP_SEIP_MASK
     # misa, mhartid, mcycle*, minstret* — read-only or counter (updated by tick)
     out
 
@@ -311,9 +333,16 @@ fn csr_rw(csr: CsrFile, addr: u32, rs1_val: u32, funct3: u32) -> CsrRwResult:
       CSRRCI (0x7): clear bits with immediate
     """
     val old_value = csr_read(csr, addr)
-    val new_value = csr_next_value(old_value, rs1_val, funct3)
-    val new_csr = csr_write(csr, addr, new_value)
-    CsrRwResult(csr: new_csr, old_value: old_value)
+    if not csr_write_requested(rs1_val, funct3):
+        return CsrRwResult(csr: csr, old_value: old_value)
+    var software_value = old_value
+    if addr == CSR_ADDR_MIP:
+        software_value = old_value & (MIP_SEIP_MASK ^ 0xFFFFFFFF)
+        if csr.seip_software:
+            software_value = software_value | MIP_SEIP_MASK
+    val new_value = csr_next_value(software_value, rs1_val, funct3)
+    CsrRwResult(csr: csr_write(csr, addr, new_value),
+        old_value: old_value)
 
 # ============================================================================
 # CSR Tick — increment cycle and instruction counters
@@ -347,17 +376,23 @@ fn csr_tick(csr: CsrFile) -> CsrFile:
 # Update MIP — set interrupt pending bits from external sources
 # ============================================================================
 
-fn csr_update_mip(csr: CsrFile, mtip: bool, msip: bool, meip: bool) -> CsrFile:
-    """Update the interrupt-pending register from external interrupt sources.
-    mtip = timer interrupt (from CLINT), msip = software interrupt (from CLINT),
-    meip = external interrupt (from PLIC)."""
-    var new_mip: u32 = 0
+fn csr_update_mip_ext(csr: CsrFile, mtip: bool, msip: bool, meip: bool,
+                      seip: bool) -> CsrFile:
+    """Update platform-owned pending bits while preserving M-injected S bits."""
+    var new_mip = csr.mip & (MIP_SSIP_MASK | MIP_STIP_MASK)
     if msip:
         new_mip = new_mip | MIP_MSIP_MASK
     if mtip:
         new_mip = new_mip | MIP_MTIP_MASK
     if meip:
         new_mip = new_mip | MIP_MEIP_MASK
+    if seip or csr.seip_software:
+        new_mip = new_mip | MIP_SEIP_MASK
     var out = csr
+    out.seip_external = seip
     out.mip = new_mip
     out
+
+fn csr_update_mip(csr: CsrFile, mtip: bool, msip: bool, meip: bool) -> CsrFile:
+    """Compatibility update for platforms with machine interrupt inputs only."""
+    csr_update_mip_ext(csr, mtip, msip, meip, false)

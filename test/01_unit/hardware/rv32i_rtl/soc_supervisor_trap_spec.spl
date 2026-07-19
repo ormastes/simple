@@ -1,7 +1,10 @@
 use std.spipe.*
-use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
+use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick, soc_mem_write}
 use std.hardware.soc_rtl.ram.ram_write
-use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
+use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, UART_BASE}
+use std.hardware.soc_rtl.plic.{PLIC_BASE, PLIC_S_ENABLE_OFF}
+use std.hardware.soc_rtl.plic.PLIC_S_THRESHOLD_OFF
+use std.hardware.soc_rtl.uart16550.IER_THRI
 use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
 use std.hardware.rv32i_rtl.core.{core32_restart_fetch, CORE32_FETCH}
 use std.hardware.rv32i_rtl.memory_access.MEMORY32_REQUEST
@@ -9,6 +12,11 @@ use std.hardware.rv32i_rtl.pmp_csr.pmp32_csr_write
 use std.hardware.rv32i_rtl.mmu_sv32.mmu_satp_value
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPRV_MASK, MEDELEG_SUPPORTED_MASK}
 use std.hardware.rv32i_rtl.csr.{MIDELEG_SUPPORTED_MASK, csr_create, csr_write}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MIP, MIP_MSIP_MASK, MIP_SSIP_MASK}
+use std.hardware.rv32i_rtl.csr.MIP_STIP_MASK
+use std.hardware.rv32i_rtl.csr.{MIP_SEIP_MASK, MIP_SUPERVISOR_MASK}
+use std.hardware.rv32i_rtl.trap.{CAUSE_STI, CAUSE_SEI}
+use std.hardware.rv32i_rtl.atomics.atomics32_lr
 use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SIE_MASK, SSTATUS_SPIE_MASK}
 use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SPP_MASK, SSTATUS_SUM_MASK}
 
@@ -163,6 +171,86 @@ describe "RV32 supervisor CSR and trap routing":
         expect(delegated.medeleg).to_equal(MEDELEG_SUPPORTED_MASK)
         val interrupts = csr_write(delegated, 0x303, 0xFFFFFFFF)
         expect(interrupts.mideleg).to_equal(MIDELEG_SUPPORTED_MASK)
+
+    it "routes sie and sip through masked machine CSR aliases":
+        var sie_state = soc_create(64)
+        sie_state.core.pc = RAM_BASE
+        sie_state.core.priv_mode = 1
+        sie_state.core.csr_m.mideleg = MIP_STIP_MASK | MIP_SEIP_MASK
+        sie_state.core.csr_m.mie = MIP_MSIP_MASK
+        sie_state.ram = ram_write(sie_state.ram, 0,
+            csr_instruction(0x104, 1, 1, 2), 2)
+        sie_state.core.rf = regfile_write(sie_state.core.rf, 1,
+            0xFFFFFFFF, true)
+        sie_state = executable_ram(sie_state)
+        sie_state = retire_one(sie_state)
+        expect(sie_state.core.csr_m.mie & MIP_SUPERVISOR_MASK).to_equal(
+            MIP_STIP_MASK | MIP_SEIP_MASK)
+        expect(sie_state.core.csr_m.mie & MIP_MSIP_MASK).to_equal(
+            MIP_MSIP_MASK)
+
+        var sip_state = soc_create(64)
+        sip_state.core.pc = RAM_BASE
+        sip_state.core.priv_mode = 1
+        sip_state.core.csr_m.mideleg = MIP_SUPERVISOR_MASK
+        sip_state.core.csr_m = csr_write(sip_state.core.csr_m,
+            CSR_ADDR_MIP, MIP_STIP_MASK | MIP_SEIP_MASK)
+        sip_state.ram = ram_write(sip_state.ram, 0,
+            csr_instruction(0x144, 1, 1, 2), 2)
+        sip_state.core.rf = regfile_write(sip_state.core.rf, 1,
+            0xFFFFFFFF, true)
+        sip_state = executable_ram(sip_state)
+        sip_state = retire_one(sip_state)
+        expect(regfile_read(sip_state.core.rf, 2, 0).rs1_data).to_equal(
+            MIP_STIP_MASK | MIP_SEIP_MASK)
+        expect(sip_state.core.csr_m.mip & MIP_SUPERVISOR_MASK).to_equal(
+            MIP_SUPERVISOR_MASK)
+
+    it "retires before taking delegated STIP and clears the reservation":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.priv_mode = 1
+        state.core.csr_m.mideleg = MIP_STIP_MASK
+        state.core.csr_m.mie = MIP_STIP_MASK
+        state.core.csr_m.mip = MIP_STIP_MASK
+        state.core.csr_m.mstatus = SSTATUS_SIE_MASK
+        state.core.csr_s.stvec = 0x2000
+        state.core.atomics = atomics32_lr(state.core.atomics,
+            RAM_BASE as i64, 4)
+        state.ram = ram_write(state.ram, 0, 0x00000013, 2)
+        state = executable_ram(state)
+
+        state = retire_one(state)
+        expect(state.core.priv_mode).to_equal(1)
+        expect(state.core.pc).to_equal(0x2000)
+        expect(state.core.csr_s.scause).to_equal(CAUSE_STI)
+        expect(state.core.csr_s.sepc).to_equal(RAM_BASE + 4)
+        expect(state.core.csr_m.minstret).to_equal(1)
+        expect(state.core.atomics.reservation_valid).to_equal(false)
+
+    it "takes a delegated UART PLIC interrupt at an instruction boundary":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.priv_mode = 1
+        state.core.csr_m.mideleg = MIP_SEIP_MASK
+        state.core.csr_m.mie = MIP_SEIP_MASK
+        state.core.csr_m.mstatus = SSTATUS_SIE_MASK
+        state.core.csr_s.stvec = 0x2000
+        state.ram = ram_write(state.ram, 0, 0x00000013, 2)
+        state = executable_ram(state)
+        state = soc_mem_write(state, PLIC_BASE + (10 << 2), 3, 2).state
+        state = soc_mem_write(state, PLIC_BASE + PLIC_S_ENABLE_OFF,
+            1 << 10, 2).state
+        state = soc_mem_write(state, PLIC_BASE + PLIC_S_THRESHOLD_OFF,
+            0, 2).state
+        state = soc_mem_write(state, UART_BASE + 1, IER_THRI, 0).state
+
+        state = retire_one(state)
+        expect(state.core.priv_mode).to_equal(1)
+        expect(state.core.pc).to_equal(0x2000)
+        expect(state.core.csr_s.scause).to_equal(CAUSE_SEI)
+        expect(state.core.csr_s.sepc).to_equal(RAM_BASE + 4)
+        expect(state.core.csr_m.minstret).to_equal(1)
 
     it "writes satp, translates fetches, and flushes with SFENCE.VMA":
         var state = soc_create(2048)

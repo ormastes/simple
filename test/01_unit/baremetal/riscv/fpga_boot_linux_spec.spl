@@ -2,9 +2,9 @@
 # @cover src/os/kernel/arch/riscv64/fpga_boot.spl 0%
 # @cover src/lib/nogc_async_mut_noalloc/baremetal/riscv/sbi.spl 0%
 """
-# FPGA Boot and Linux DTB Specification
+# FPGA Linux Product DT Specification
 
-**Feature IDs:** rv64-fpga-linux-boot
+**Feature IDs:** rv32-rv64-fpga-linux-product-dtb
 **Category:** Infrastructure
 **Difficulty:** 4/5
 **Status:** Draft
@@ -14,27 +14,27 @@
 
 ## Overview
 
-Tests for the FPGA Linux boot chain: DTB generation for the RV64 SoC
-memory map, boot contract validation (a0=hartid, a1=dtb_addr, satp=0),
-and SBI interface verification.
+Tests the binding-complete RV32 K26 product DT and the fail-closed RV64 product
+DT gate. QEMU DTBs remain software-media oracles, not FPGA product topology.
 
-Covers:
-- AC-6 (FPGA boots, UART outputs SBI banner and Linux boot messages)
-- AC-7 (Linux reaches userspace on the FPGA-hosted RV64GC)
+Covers the fixed RV32 memory map, CPU/CLINT/PLIC/UART bindings, and the RV64
+contract-not-ready boundary. FPGA boot and userspace evidence remain separate.
 
 ## Compiled-Mode Notes
 
-DTB generation and structural checks (magic bytes, node presence,
-memory map values) are interpreter-safe. Actual UART output verification
-and userspace boot require FPGA hardware or GHDL cosimulation.
+The RV64 product DT remains unavailable until its emitted topology is
+authoritative. Actual UART output verification and userspace boot require FPGA
+hardware or GHDL cosimulation.
 """
 
 use std.spipe.*
 use std.nogc_async_mut_noalloc.baremetal.riscv.dtb_gen.{
+    Rv32SocMemoryMap,
+    rv32_linux_dtb_generate,
+    rv32_linux_dtb_to_dts,
     Rv64SocMemoryMap,
     rv64_linux_dtb_generate,
-    rv64_linux_dtb_to_dts,
-    dtb_verify_magic
+    rv64_linux_dtb_to_dts
 }
 
 
@@ -42,61 +42,63 @@ use std.nogc_async_mut_noalloc.baremetal.riscv.dtb_gen.{
 # AC-6/AC-7: DTB Generation — FDT Structure (REQ-14)
 # ============================================================================
 
-describe "DTB Generation for RV64 SoC":
-    it "AC-6: rv64_linux_dtb_generate returns non-empty byte array":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb = rv64_linux_dtb_generate(mem_map)
-        val len = dtb.length()
-        expect(len).to_be_greater_than(0)
+describe "RV32 K26 Product DTB":
+    it "exposes the canonical product map":
+        val mem_map = Rv32SocMemoryMap.k26()
+        expect(mem_map.dram_base).to_equal(0x8000_0000)
+        expect(mem_map.dram_size).to_equal(0x0800_0000)
+        expect(mem_map.uart_addr).to_equal(0x1000_0000)
+        expect(mem_map.uart_clock_hz).to_equal(100_000_000)
+        expect(mem_map.clint_addr).to_equal(0x0200_0000)
+        expect(mem_map.plic_addr).to_equal(0x0C00_0000)
+        expect(mem_map.timebase_hz).to_equal(100_000_000)
+        expect(mem_map.boot_hartid).to_equal(0)
 
-    it "AC-6: DTB starts with FDT magic bytes 0xD00DFEED":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb = rv64_linux_dtb_generate(mem_map)
-        # FDT magic: big-endian 0xD00DFEED = [0xD0, 0x0D, 0xFE, 0xED]
-        val magic_ok = dtb_check_magic(dtb)
-        expect(magic_ok).to_equal(true)
+    it "generates a non-empty FDT blob":
+        val dtb = rv32_linux_dtb_generate(Rv32SocMemoryMap.k26())
+        expect(dtb.length()).to_be_greater_than(40)
+        expect(dtb[0]).to_equal(0xD0)
+        expect(dtb[1]).to_equal(0x0D)
+        expect(dtb[2]).to_equal(0xFE)
+        expect(dtb[3]).to_equal(0xED)
 
-    it "AC-6: DTB size is at least 256 bytes (minimal valid FDT)":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb = rv64_linux_dtb_generate(mem_map)
-        val len = dtb.length()
-        expect(len).to_be_greater_than(256)
+    it "reports exact CPU, interrupt-controller, and memory bindings":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect(dts).to_contain("timebase-frequency = <100000000>;")
+        expect(dts).to_contain("riscv,isa = \"rv32ima_zicsr_zifencei\";")
+        expect(dts).to_contain("mmu-type = \"riscv,sv32\";")
+        expect(dts).to_contain("compatible = \"riscv,cpu-intc\";")
+        expect(dts).to_contain("phandle = <1>;")
+        expect(dts).to_contain("reg = <0x0 0x80000000 0x0 0x8000000>;")
 
+    it "reports exact CLINT and PLIC bindings":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect(dts).to_contain("compatible = \"sifive,clint0\", \"riscv,clint0\";")
+        expect(dts).to_contain("interrupts-extended = <1 3 1 7>;")
+        expect(dts).to_contain("compatible = \"sifive,plic-1.0.0\", \"riscv,plic0\";")
+        expect(dts).to_contain("reg = <0x0 0xc000000 0x0 0x400000>;")
+        expect(dts).to_contain("riscv,ndev = <31>;")
+        expect(dts).to_contain("phandle = <2>;")
+        expect(dts).to_contain("interrupts-extended = <1 11 1 9>;")
 
-# ============================================================================
-# AC-6/AC-7: DTB Content — Required Nodes
-# ============================================================================
+    it "reports exact UART interrupt, clock, and register spacing":
+        val dts = rv32_linux_dtb_to_dts(Rv32SocMemoryMap.k26())
+        expect(dts).to_contain("serial@10000000 {")
+        expect(dts).to_contain("clock-frequency = <100000000>;")
+        expect(dts).to_contain("reg-shift = <0>;")
+        expect(dts).to_contain("reg-io-width = <1>;")
+        expect(dts).to_contain("interrupt-parent = <2>;")
+        expect(dts).to_contain("interrupts = <10>;")
 
-describe "DTB Required Nodes":
-    it "AC-6: DTB contains cpus node":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb_text = rv64_linux_dtb_to_dts(mem_map)
-        expect(dtb_text).to_contain("cpus")
+describe "RV64 Product DTB Gate":
+    it "AC-6: binary generation fails closed":
+        val dtb = rv64_linux_dtb_generate(rv64_soc_memory_map_default())
+        expect(dtb.length()).to_equal(0)
 
-    it "AC-6: DTB contains memory node":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb_text = rv64_linux_dtb_to_dts(mem_map)
-        expect(dtb_text).to_contain("memory")
-
-    it "AC-6: DTB contains uart node":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb_text = rv64_linux_dtb_to_dts(mem_map)
-        expect(dtb_text).to_contain("uart")
-
-    it "AC-6: DTB contains clint node":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb_text = rv64_linux_dtb_to_dts(mem_map)
-        expect(dtb_text).to_contain("clint")
-
-    it "AC-6: DTB contains plic node":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb_text = rv64_linux_dtb_to_dts(mem_map)
-        expect(dtb_text).to_contain("plic")
-
-    it "AC-7: DTB contains chosen node with stdout-path":
-        val mem_map = rv64_soc_memory_map_default()
-        val dtb_text = rv64_linux_dtb_to_dts(mem_map)
-        expect(dtb_text).to_contain("chosen")
+    it "AC-6: diagnostic names the unimplemented generated topology":
+        val blocker = rv64_linux_dtb_to_dts(rv64_soc_memory_map_default())
+        expect(blocker).to_contain("contract-not-ready")
+        expect(blocker).to_contain("GENERATED_RTL_NOT_IMPLEMENTED lane=rv64")
 
 
 # ============================================================================
@@ -126,7 +128,7 @@ describe "DTB Memory Map Values":
 
 
 # ============================================================================
-# AC-6/AC-7: Boot Contract — fpga_boot_main (REQ-15)
+# AC-6/AC-7: Boot Register Preconditions (REQ-15)
 # ============================================================================
 
 describe "FPGA Boot Contract":
@@ -139,15 +141,6 @@ describe "FPGA Boot Contract":
         # satp must be 0 on kernel entry (no virtual memory yet)
         val satp_bare = 0
         expect(satp_bare).to_equal(0)
-
-    it "AC-6: fpga_boot_main sets up SBI handoff (compiled mode for full test)":
-        # Full verification requires compiled mode:
-        # - fpga_boot_main(0) runs
-        # - checks a0=0, a1=dtb_addr, satp=0 before jump
-        val hartid = 0
-        val observed_hartid = fpga_boot_main(hartid)
-        expect(observed_hartid).to_equal(hartid)
-
 
 # ============================================================================
 # AC-6: SBI Interface Verification
@@ -166,28 +159,6 @@ describe "SBI Interface":
         val sbi_base_eid = 0x10
         expect(sbi_base_eid).to_equal(0x10)
 
-
-# ============================================================================
-# Helpers
-# ============================================================================
-
-fn fpga_boot_main(hart_id: i64) -> i64:
-    # Stub for interpreter-mode testing.
-    # The real fpga_boot_main (src/os/kernel/arch/riscv64/fpga_boot.spl) invokes
-    # hardware externs (rt_riscv_uart_put, rt_riscv_noalloc_pmm_init, etc.) that
-    # are not available in the test runtime.  This no-op stub satisfies the boot
-    # contract check: "if we reach here without crash, basic boot path executes".
-    hart_id
-
-fn dtb_check_magic(dtb: [u8]) -> bool:
-    # FDT magic: big-endian 0xD00DFEED
-    if dtb.length() < 4:
-        return false
-    val b0 = dtb[0]
-    val b1 = dtb[1]
-    val b2 = dtb[2]
-    val b3 = dtb[3]
-    return b0 == 0xD0 and b1 == 0x0D and b2 == 0xFE and b3 == 0xED
 
 fn rv64_soc_memory_map_default() -> Rv64SocMemoryMap:
     return Rv64SocMemoryMap(

@@ -45,10 +45,13 @@ use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_MPP_MASK}
 use std.hardware.rv32i_rtl.csr.MSTATUS_MPP_LO_BIT
+use std.hardware.rv32i_rtl.csr.MIP_SSIP_MASK
+use std.hardware.rv32i_rtl.csr.MIP_SUPERVISOR_MASK
 use std.hardware.rv32i_rtl.csr.MISA_RV32IMASU
 use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_create, csr_s_is_known}
 use std.hardware.rv32i_rtl.csr_s.{csr_s_read, csr_s_write, csr_s_merge_mstatus}
-use std.hardware.rv32i_rtl.csr_s.{CSR_ADDR_SSTATUS, CSR_ADDR_SATP}
+use std.hardware.rv32i_rtl.csr_s.{CSR_ADDR_SSTATUS, CSR_ADDR_SIE}
+use std.hardware.rv32i_rtl.csr_s.{CSR_ADDR_SIP, CSR_ADDR_SATP}
 use std.hardware.rv32i_rtl.csr_s.{SSTATUS_WRITABLE, SSTATUS_SUM_MASK}
 use std.hardware.rv32i_rtl.csr_s.SSTATUS_MXR_MASK
 use std.hardware.rv32i_rtl.pmp.PmpEntries32
@@ -760,6 +763,23 @@ fn core32_execute_instruction(state: CoreState, instruction: u32,
                     dec.funct3)
                 out.csr_m.mstatus = csr_s_merge_mstatus(out.csr_m.mstatus,
                     next_value)
+            else if csr_addr == CSR_ADDR_SIE:
+                val writable = out.csr_m.mideleg & MIP_SUPERVISOR_MASK
+                old_value = out.csr_m.mie & writable
+                if csr_write_requested(csr_src, dec.funct3):
+                    val next_value = csr_next_value(old_value, csr_src,
+                        dec.funct3)
+                    out.csr_m.mie = (out.csr_m.mie &
+                        (writable ^ 0xFFFFFFFF)) | (next_value & writable)
+            else if csr_addr == CSR_ADDR_SIP:
+                val visible = out.csr_m.mideleg & MIP_SUPERVISOR_MASK
+                old_value = out.csr_m.mip & visible
+                if csr_write_requested(csr_src, dec.funct3):
+                    val writable = out.csr_m.mideleg & MIP_SSIP_MASK
+                    val next_value = csr_next_value(old_value, csr_src,
+                        dec.funct3)
+                    out.csr_m.mip = (out.csr_m.mip &
+                        (writable ^ 0xFFFFFFFF)) | (next_value & writable)
             else if csr_addr == CSR_ADDR_SATP:
                 old_value = mmu_satp_value(out.mmu)
                 if csr_write_requested(csr_src, dec.funct3):

@@ -2,10 +2,10 @@
 # RV32I RTL Trap Controller — Exception and Interrupt Handling
 # ============================================================================
 #
-# Implements RISC-V M-mode trap entry/exit logic:
-#   - Interrupt priority checking (MEI > MSI > MTI)
-#   - Trap entry: save context, jump to mtvec
-#   - Trap exit (mret): restore context, return to mepc
+# Implements RISC-V M/S-mode trap entry/exit logic:
+#   - Machine-before-supervisor interrupt priority checking
+#   - Delegated trap entry through mtvec/stvec
+#   - Trap exit through mret/sret
 #
 # All operations are pure functions — suitable for synthesizable RTL.
 # Only direct mtvec mode is supported (vectored mode is a future extension).
@@ -18,6 +18,7 @@ use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv32i_rtl.csr.MSTATUS_MPRV_MASK
 use std.hardware.rv32i_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
+use std.hardware.rv32i_rtl.csr.{MIP_SSIP_MASK, MIP_STIP_MASK, MIP_SEIP_MASK}
 use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_merge_mstatus}
 use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SIE_MASK, SSTATUS_SPIE_MASK}
 use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SPP_MASK, SSTATUS_SPP_BIT}
@@ -50,6 +51,9 @@ val CAUSE_ECALL_M: u32         = 11
 val CAUSE_MSI: u32 = 0x80000003   # Machine Software Interrupt
 val CAUSE_MTI: u32 = 0x80000007   # Machine Timer Interrupt
 val CAUSE_MEI: u32 = 0x8000000B   # Machine External Interrupt
+val CAUSE_SSI: u32 = 0x80000001   # Supervisor Software Interrupt
+val CAUSE_STI: u32 = 0x80000005   # Supervisor Timer Interrupt
+val CAUSE_SEI: u32 = 0x80000009   # Supervisor External Interrupt
 
 # ============================================================================
 # Trap State
@@ -104,29 +108,63 @@ struct InterruptCheckResult:
 # ============================================================================
 
 @hardware
+fn trap_interrupt_enabled(csr: CsrFile, priv_mode: u32,
+                          bit: u32) -> bool:
+    if priv_mode != 0 and priv_mode != 1 and priv_mode != 3:
+        return false
+    val delegated = (csr.mideleg & bit) != 0
+    if delegated:
+        if priv_mode == 3 or (csr.mie & bit) == 0:
+            return false
+        return priv_mode == 0 or (priv_mode == 1 and
+            (csr.mstatus & SSTATUS_SIE_MASK) != 0)
+    if (csr.mie & bit) == 0:
+        return false
+    priv_mode < 3 or (priv_mode == 3 and
+        (csr.mstatus & MSTATUS_MIE_MASK) != 0)
+
+@hardware
 fn trap_check_interrupt_from_priv(csr: CsrFile,
                                   priv_mode: u32) -> InterruptCheckResult:
-    """Check if an interrupt should be taken.
-    Conditions: mstatus.MIE is set AND (mie & mip) has enabled pending bits.
-    Priority: MEI > MSI > MTI (per RISC-V spec)."""
-
-    # Global interrupt enable must be set
-    val mie_enabled = (priv_mode < 3 or
-        (priv_mode == 3 and (csr.mstatus & MSTATUS_MIE_MASK) != 0))
-    if mie_enabled == false:
-        return InterruptCheckResult(pending: false, cause: 0)
-
-    # Check enabled AND pending interrupts
-    val enabled_pending = csr.mie & csr.mip
-
-    # Priority: Machine External > Machine Software > Machine Timer
-    if (enabled_pending & MIP_MEIP_MASK) != 0:
+    """Select the highest-priority enabled M- or S-target interrupt."""
+    val pending = csr.mip
+    # Every M-target interrupt outranks every delegated S-target interrupt.
+    if (csr.mideleg & MIP_MEIP_MASK) == 0 and
+        (pending & MIP_MEIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_MEIP_MASK):
         return InterruptCheckResult(pending: true, cause: CAUSE_MEI)
-    if (enabled_pending & MIP_MSIP_MASK) != 0:
+    if (csr.mideleg & MIP_MSIP_MASK) == 0 and
+        (pending & MIP_MSIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_MSIP_MASK):
         return InterruptCheckResult(pending: true, cause: CAUSE_MSI)
-    if (enabled_pending & MIP_MTIP_MASK) != 0:
+    if (csr.mideleg & MIP_MTIP_MASK) == 0 and
+        (pending & MIP_MTIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_MTIP_MASK):
         return InterruptCheckResult(pending: true, cause: CAUSE_MTI)
-
+    if (csr.mideleg & MIP_SEIP_MASK) == 0 and
+        (pending & MIP_SEIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_SEIP_MASK):
+        return InterruptCheckResult(pending: true, cause: CAUSE_SEI)
+    if (csr.mideleg & MIP_SSIP_MASK) == 0 and
+        (pending & MIP_SSIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_SSIP_MASK):
+        return InterruptCheckResult(pending: true, cause: CAUSE_SSI)
+    if (csr.mideleg & MIP_STIP_MASK) == 0 and
+        (pending & MIP_STIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_STIP_MASK):
+        return InterruptCheckResult(pending: true, cause: CAUSE_STI)
+    if (csr.mideleg & MIP_SEIP_MASK) != 0 and
+        (pending & MIP_SEIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_SEIP_MASK):
+        return InterruptCheckResult(pending: true, cause: CAUSE_SEI)
+    if (csr.mideleg & MIP_SSIP_MASK) != 0 and
+        (pending & MIP_SSIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_SSIP_MASK):
+        return InterruptCheckResult(pending: true, cause: CAUSE_SSI)
+    if (csr.mideleg & MIP_STIP_MASK) != 0 and
+        (pending & MIP_STIP_MASK) != 0 and
+        trap_interrupt_enabled(csr, priv_mode, MIP_STIP_MASK):
+        return InterruptCheckResult(pending: true, cause: CAUSE_STI)
     InterruptCheckResult(pending: false, cause: 0)
 
 fn trap_check_interrupt(csr: CsrFile) -> InterruptCheckResult:
@@ -295,3 +333,6 @@ export CAUSE_ECALL_S
 export CAUSE_MSI
 export CAUSE_MTI
 export CAUSE_MEI
+export CAUSE_SSI
+export CAUSE_STI
+export CAUSE_SEI

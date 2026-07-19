@@ -216,6 +216,17 @@ fn fdt_prop_string(bld: FdtBuilder, name: text, value: text) -> FdtBuilder:
     data = data + [0]
     fdt_prop_raw(bld, name, data)
 
+fn fdt_prop_string_pair(bld: FdtBuilder, name: text, first: text, second: text) -> FdtBuilder:
+    """Add a two-entry null-separated FDT string-list property."""
+    var data: [u8] = []
+    for ch in first:
+        data = data + [ch as u8]
+    data = data + [0]
+    for ch in second:
+        data = data + [ch as u8]
+    data = data + [0]
+    fdt_prop_raw(bld, name, data)
+
 fn fdt_prop_empty(bld: FdtBuilder, name: text) -> FdtBuilder:
     """Add an empty property (flag property with no value)."""
     fdt_prop_raw(bld, name, [])
@@ -316,7 +327,190 @@ fn build_riscv_virt_dtb(num_cpus: u64, ram_base: u64, ram_size: u64) -> [u8]:
     fdt_finish(b)
 
 # ============================================================================
-# RV64 SoC Memory Map and Linux DTB Generation
+# RV32 K26 Product Memory Map and Linux DTB Generation
+# ============================================================================
+
+struct Rv32SocMemoryMap:
+    """Canonical one-hart RV32 K26 product map used by RTL and its DT."""
+    dram_base: i64
+    dram_size: i64
+    uart_addr: i64
+    uart_clock_hz: i64
+    clint_addr: i64
+    plic_addr: i64
+    timebase_hz: i64
+    boot_hartid: i64
+
+impl Rv32SocMemoryMap:
+    static fn k26() -> Rv32SocMemoryMap:
+        Rv32SocMemoryMap(
+            dram_base: 0x8000_0000,
+            dram_size: 0x0800_0000,
+            uart_addr: 0x1000_0000,
+            uart_clock_hz: 100_000_000,
+            clint_addr: 0x0200_0000,
+            plic_addr: 0x0C00_0000,
+            timebase_hz: 100_000_000,
+            boot_hartid: 0
+        )
+
+fn rv32_linux_dtb_generate(mem_map: Rv32SocMemoryMap) -> [u8]:
+    """Generate the binding-complete DTB for the canonical one-hart RV32 SoC."""
+    var b = FdtBuilder.new()
+
+    b = fdt_begin_node(b, "")
+    b = fdt_prop_u32(b, "#address-cells", 2)
+    b = fdt_prop_u32(b, "#size-cells", 2)
+    b = fdt_prop_string(b, "compatible", "simple,riscv32-k26")
+    b = fdt_prop_string(b, "model", "Simple RV32 K26 FPGA")
+
+    b = fdt_begin_node(b, "cpus")
+    b = fdt_prop_u32(b, "#address-cells", 1)
+    b = fdt_prop_u32(b, "#size-cells", 0)
+    b = fdt_prop_u32(b, "timebase-frequency", mem_map.timebase_hz as u64)
+    b = fdt_begin_node(b, "cpu@0")
+    b = fdt_prop_string(b, "device_type", "cpu")
+    b = fdt_prop_u32(b, "reg", mem_map.boot_hartid as u64)
+    b = fdt_prop_string(b, "compatible", "riscv")
+    b = fdt_prop_string(b, "riscv,isa", "rv32ima_zicsr_zifencei")
+    b = fdt_prop_string(b, "mmu-type", "riscv,sv32")
+    b = fdt_prop_string(b, "status", "okay")
+    b = fdt_begin_node(b, "interrupt-controller")
+    b = fdt_prop_u32(b, "#interrupt-cells", 1)
+    b = fdt_prop_empty(b, "interrupt-controller")
+    b = fdt_prop_string(b, "compatible", "riscv,cpu-intc")
+    b = fdt_prop_u32(b, "phandle", 1)
+    b = fdt_end_node(b)
+    b = fdt_end_node(b)
+    b = fdt_end_node(b)
+
+    b = fdt_begin_node(b, "memory@{mem_map.dram_base:x}")
+    b = fdt_prop_string(b, "device_type", "memory")
+    val dram_base = mem_map.dram_base as u64
+    val dram_size = mem_map.dram_size as u64
+    val dram_reg = be32_bytes((dram_base >> 32) & 0xFFFFFFFF) + be32_bytes(dram_base & 0xFFFFFFFF) + be32_bytes((dram_size >> 32) & 0xFFFFFFFF) + be32_bytes(dram_size & 0xFFFFFFFF)
+    b = fdt_prop_raw(b, "reg", dram_reg)
+    b = fdt_end_node(b)
+
+    b = fdt_begin_node(b, "chosen")
+    b = fdt_prop_string(b, "bootargs", "earlycon=uart8250,mmio,0x{mem_map.uart_addr:x} console=ttyS0,115200")
+    b = fdt_prop_string(b, "stdout-path", "/soc/serial@{mem_map.uart_addr:x}:115200n8")
+    b = fdt_end_node(b)
+
+    b = fdt_begin_node(b, "soc")
+    b = fdt_prop_u32(b, "#address-cells", 2)
+    b = fdt_prop_u32(b, "#size-cells", 2)
+    b = fdt_prop_string(b, "compatible", "simple-bus")
+    b = fdt_prop_empty(b, "ranges")
+
+    b = fdt_begin_node(b, "clint@{mem_map.clint_addr:x}")
+    b = fdt_prop_string_pair(b, "compatible", "sifive,clint0", "riscv,clint0")
+    val clint_addr = mem_map.clint_addr as u64
+    val clint_reg = be32_bytes((clint_addr >> 32) & 0xFFFFFFFF) + be32_bytes(clint_addr & 0xFFFFFFFF) + be32_bytes(0) + be32_bytes(0x10000)
+    b = fdt_prop_raw(b, "reg", clint_reg)
+    b = fdt_prop_raw(b, "interrupts-extended", be32_bytes(1) + be32_bytes(3) + be32_bytes(1) + be32_bytes(7))
+    b = fdt_end_node(b)
+
+    b = fdt_begin_node(b, "plic@{mem_map.plic_addr:x}")
+    b = fdt_prop_string_pair(b, "compatible", "sifive,plic-1.0.0", "riscv,plic0")
+    val plic_addr = mem_map.plic_addr as u64
+    val plic_reg = be32_bytes((plic_addr >> 32) & 0xFFFFFFFF) + be32_bytes(plic_addr & 0xFFFFFFFF) + be32_bytes(0) + be32_bytes(0x400000)
+    b = fdt_prop_raw(b, "reg", plic_reg)
+    b = fdt_prop_u32(b, "#address-cells", 0)
+    b = fdt_prop_u32(b, "#interrupt-cells", 1)
+    b = fdt_prop_empty(b, "interrupt-controller")
+    b = fdt_prop_u32(b, "riscv,ndev", 31)
+    b = fdt_prop_u32(b, "phandle", 2)
+    b = fdt_prop_raw(b, "interrupts-extended", be32_bytes(1) + be32_bytes(11) + be32_bytes(1) + be32_bytes(9))
+    b = fdt_end_node(b)
+
+    b = fdt_begin_node(b, "serial@{mem_map.uart_addr:x}")
+    b = fdt_prop_string(b, "compatible", "ns16550a")
+    val uart_addr = mem_map.uart_addr as u64
+    val uart_reg = be32_bytes((uart_addr >> 32) & 0xFFFFFFFF) + be32_bytes(uart_addr & 0xFFFFFFFF) + be32_bytes(0) + be32_bytes(0x100)
+    b = fdt_prop_raw(b, "reg", uart_reg)
+    b = fdt_prop_u32(b, "clock-frequency", mem_map.uart_clock_hz as u64)
+    b = fdt_prop_u32(b, "reg-shift", 0)
+    b = fdt_prop_u32(b, "reg-io-width", 1)
+    b = fdt_prop_u32(b, "interrupt-parent", 2)
+    b = fdt_prop_u32(b, "interrupts", 10)
+    b = fdt_prop_string(b, "status", "okay")
+    b = fdt_end_node(b)
+
+    b = fdt_end_node(b)
+    b = fdt_end_node(b)
+    fdt_finish(b)
+
+fn rv32_linux_dtb_to_dts(mem_map: Rv32SocMemoryMap) -> text:
+    """Return the exact human-readable contract represented by the RV32 DTB."""
+    "/dts-v1/;\n" +
+    "/ {\n" +
+    "    #address-cells = <2>;\n" +
+    "    #size-cells = <2>;\n" +
+    "    compatible = \"simple,riscv32-k26\";\n" +
+    "    model = \"Simple RV32 K26 FPGA\";\n" +
+    "    cpus {\n" +
+    "        #address-cells = <1>;\n" +
+    "        #size-cells = <0>;\n" +
+    "        timebase-frequency = <{mem_map.timebase_hz}>;\n" +
+    "        cpu@0 {\n" +
+    "            device_type = \"cpu\";\n" +
+    "            reg = <{mem_map.boot_hartid}>;\n" +
+    "            compatible = \"riscv\";\n" +
+    "            riscv,isa = \"rv32ima_zicsr_zifencei\";\n" +
+    "            mmu-type = \"riscv,sv32\";\n" +
+    "            status = \"okay\";\n" +
+    "            interrupt-controller {\n" +
+    "                #interrupt-cells = <1>;\n" +
+    "                interrupt-controller;\n" +
+    "                compatible = \"riscv,cpu-intc\";\n" +
+    "                phandle = <1>;\n" +
+    "            };\n" +
+    "        };\n" +
+    "    };\n" +
+    "    memory@{mem_map.dram_base:x} {\n" +
+    "        device_type = \"memory\";\n" +
+    "        reg = <0x0 0x{mem_map.dram_base:x} 0x0 0x{mem_map.dram_size:x}>;\n" +
+    "    };\n" +
+    "    chosen {\n" +
+    "        bootargs = \"earlycon=uart8250,mmio,0x{mem_map.uart_addr:x} console=ttyS0,115200\";\n" +
+    "        stdout-path = \"/soc/serial@{mem_map.uart_addr:x}:115200n8\";\n" +
+    "    };\n" +
+    "    soc {\n" +
+    "        #address-cells = <2>;\n" +
+    "        #size-cells = <2>;\n" +
+    "        compatible = \"simple-bus\";\n" +
+    "        ranges;\n" +
+    "        clint@{mem_map.clint_addr:x} {\n" +
+    "            compatible = \"sifive,clint0\", \"riscv,clint0\";\n" +
+    "            reg = <0x0 0x{mem_map.clint_addr:x} 0x0 0x10000>;\n" +
+    "            interrupts-extended = <1 3 1 7>;\n" +
+    "        };\n" +
+    "        plic@{mem_map.plic_addr:x} {\n" +
+    "            compatible = \"sifive,plic-1.0.0\", \"riscv,plic0\";\n" +
+    "            reg = <0x0 0x{mem_map.plic_addr:x} 0x0 0x400000>;\n" +
+    "            #address-cells = <0>;\n" +
+    "            #interrupt-cells = <1>;\n" +
+    "            interrupt-controller;\n" +
+    "            riscv,ndev = <31>;\n" +
+    "            phandle = <2>;\n" +
+    "            interrupts-extended = <1 11 1 9>;\n" +
+    "        };\n" +
+    "        serial@{mem_map.uart_addr:x} {\n" +
+    "            compatible = \"ns16550a\";\n" +
+    "            reg = <0x0 0x{mem_map.uart_addr:x} 0x0 0x100>;\n" +
+    "            clock-frequency = <{mem_map.uart_clock_hz}>;\n" +
+    "            reg-shift = <0>;\n" +
+    "            reg-io-width = <1>;\n" +
+    "            interrupt-parent = <2>;\n" +
+    "            interrupts = <10>;\n" +
+    "            status = \"okay\";\n" +
+    "        };\n" +
+    "    };\n" +
+    "};\n"
+
+# ============================================================================
+# Legacy RV64 Product API (fail closed until emitted topology is authoritative)
 # ============================================================================
 
 struct Rv64SocMemoryMap:
@@ -328,140 +522,12 @@ struct Rv64SocMemoryMap:
     plic_addr: i64
     boot_hartid: i64
 
-fn rv64_linux_dtb_generate(mem_map: Rv64SocMemoryMap) -> [u8]:
-    """Generate a minimal FDT binary blob for RV64 Linux boot.
+fn rv64_linux_dtb_generate(_mem_map: Rv64SocMemoryMap) -> [u8]:
+    """Fail closed until the emitted RV64 product topology is authoritative."""
+    []
 
-    Produces a valid FDT with: root, cpus, memory@80000000, chosen,
-    and a soc node containing uart@10000000, clint@2000000, plic@c000000.
-    """
-    var b = FdtBuilder.new()
-
-    # Root node
-    b = fdt_begin_node(b, "")
-    b = fdt_prop_u32(b, "#address-cells", 2)
-    b = fdt_prop_u32(b, "#size-cells", 2)
-    b = fdt_prop_string(b, "compatible", "riscv-simple")
-    b = fdt_prop_string(b, "model", "riscv-simple,fpga")
-
-    # /cpus node
-    b = fdt_begin_node(b, "cpus")
-    b = fdt_prop_u32(b, "#address-cells", 1)
-    b = fdt_prop_u32(b, "#size-cells", 0)
-    b = fdt_prop_u32(b, "timebase-frequency", 1000000)
-
-    b = fdt_begin_node(b, "cpu@0")
-    b = fdt_prop_string(b, "device_type", "cpu")
-    b = fdt_prop_u32(b, "reg", mem_map.boot_hartid as u64)
-    b = fdt_prop_string(b, "compatible", "riscv")
-    b = fdt_prop_string(b, "riscv,isa", "rv64imafdc")
-    b = fdt_prop_string(b, "mmu-type", "riscv,sv39")
-    b = fdt_prop_string(b, "status", "okay")
-    b = fdt_begin_node(b, "interrupt-controller")
-    b = fdt_prop_u32(b, "#interrupt-cells", 1)
-    b = fdt_prop_empty(b, "interrupt-controller")
-    b = fdt_prop_string(b, "compatible", "riscv,cpu-intc")
-    b = fdt_end_node(b)
-    b = fdt_end_node(b)  # cpu@0
-
-    b = fdt_end_node(b)  # /cpus
-
-    # /memory@80000000 node
-    b = fdt_begin_node(b, "memory@80000000")
-    b = fdt_prop_string(b, "device_type", "memory")
-    val dram_base_u = mem_map.dram_base as u64
-    val dram_size_u = mem_map.dram_size as u64
-    val mem_reg = be32_bytes((dram_base_u >> 32) & 0xFFFFFFFF) + be32_bytes(dram_base_u & 0xFFFFFFFF) + be32_bytes((dram_size_u >> 32) & 0xFFFFFFFF) + be32_bytes(dram_size_u & 0xFFFFFFFF)
-    b = fdt_prop_raw(b, "reg", mem_reg)
-    b = fdt_end_node(b)  # /memory
-
-    # /chosen node
-    b = fdt_begin_node(b, "chosen")
-    b = fdt_prop_string(b, "bootargs", "earlycon=sbi console=ttyS0,115200")
-    b = fdt_prop_string(b, "stdout-path", "/soc/uart@10000000")
-    b = fdt_end_node(b)  # /chosen
-
-    # /soc node containing MMIO peripherals
-    b = fdt_begin_node(b, "soc")
-    b = fdt_prop_u32(b, "#address-cells", 2)
-    b = fdt_prop_u32(b, "#size-cells", 2)
-    b = fdt_prop_string(b, "compatible", "simple-bus")
-    b = fdt_prop_empty(b, "ranges")
-
-    # uart@10000000
-    b = fdt_begin_node(b, "uart@10000000")
-    b = fdt_prop_string(b, "compatible", "ns16550a")
-    val uart_u = mem_map.uart_addr as u64
-    val uart_reg = be32_bytes((uart_u >> 32) & 0xFFFFFFFF) + be32_bytes(uart_u & 0xFFFFFFFF) + be32_bytes(0) + be32_bytes(0x100)
-    b = fdt_prop_raw(b, "reg", uart_reg)
-    b = fdt_prop_u32(b, "clock-frequency", 1843200)
-    b = fdt_prop_u32(b, "reg-shift", 0)
-    b = fdt_prop_u32(b, "reg-io-width", 1)
-    b = fdt_prop_string(b, "status", "okay")
-    b = fdt_end_node(b)  # uart
-
-    # clint@2000000
-    b = fdt_begin_node(b, "clint@2000000")
-    b = fdt_prop_string(b, "compatible", "riscv,clint0")
-    val clint_u = mem_map.clint_addr as u64
-    val clint_reg = be32_bytes((clint_u >> 32) & 0xFFFFFFFF) + be32_bytes(clint_u & 0xFFFFFFFF) + be32_bytes(0) + be32_bytes(0x10000)
-    b = fdt_prop_raw(b, "reg", clint_reg)
-    b = fdt_end_node(b)  # clint
-
-    # plic@c000000
-    b = fdt_begin_node(b, "plic@c000000")
-    b = fdt_prop_string(b, "compatible", "riscv,plic0")
-    val plic_u = mem_map.plic_addr as u64
-    val plic_reg = be32_bytes((plic_u >> 32) & 0xFFFFFFFF) + be32_bytes(plic_u & 0xFFFFFFFF) + be32_bytes(0) + be32_bytes(0x4000000)
-    b = fdt_prop_raw(b, "reg", plic_reg)
-    b = fdt_prop_u32(b, "#interrupt-cells", 1)
-    b = fdt_prop_empty(b, "interrupt-controller")
-    b = fdt_prop_u32(b, "riscv,ndev", 31)
-    b = fdt_end_node(b)  # plic
-
-    b = fdt_end_node(b)  # /soc
-
-    b = fdt_end_node(b)  # root
-
-    fdt_finish(b)
-
-fn rv64_linux_dtb_to_dts(mem_map: Rv64SocMemoryMap) -> text:
-    """Return a human-readable DTS text representation of the SoC.
-
-    Contains all required node names: cpus, memory, uart, clint, plic, chosen.
-    """
-    "/dts-v1/;\n" +
-    "/ {\n" +
-    "    #address-cells = <2>;\n" +
-    "    #size-cells = <2>;\n" +
-    "    compatible = \"riscv-simple\";\n" +
-    "    chosen {\n" +
-    "        stdout-path = \"/soc/uart@10000000\";\n" +
-    "    };\n" +
-    "    cpus {\n" +
-    "        #address-cells = <1>;\n" +
-    "        #size-cells = <0>;\n" +
-    "        cpu@0 {\n" +
-    "            compatible = \"riscv\";\n" +
-    "            device_type = \"cpu\";\n" +
-    "            status = \"okay\";\n" +
-    "        };\n" +
-    "    };\n" +
-    "    memory@80000000 {\n" +
-    "        device_type = \"memory\";\n" +
-    "    };\n" +
-    "    soc {\n" +
-    "        uart@10000000 {\n" +
-    "            compatible = \"ns16550a\";\n" +
-    "            status = \"okay\";\n" +
-    "        };\n" +
-    "        clint@2000000 {\n" +
-    "            compatible = \"riscv,clint0\";\n" +
-    "        };\n" +
-    "        plic@c000000 {\n" +
-    "            compatible = \"riscv,plic0\";\n" +
-    "        };\n" +
-    "    };\n" +
-    "};\n"
+fn rv64_linux_dtb_to_dts(_mem_map: Rv64SocMemoryMap) -> text:
+    "contract-not-ready: GENERATED_RTL_NOT_IMPLEMENTED lane=rv64 product-dtb\n"
 
 fn dtb_verify_magic(blob: [u8]) -> bool:
     """Verify that a blob starts with the FDT magic number."""

@@ -16,7 +16,7 @@
 
 # -- Clocked core
 use std.hardware.rv32i_rtl.core.{CoreState, core32_init_single_master, core32_cycle}
-use std.hardware.rv32i_rtl.csr.csr_update_mip
+use std.hardware.rv32i_rtl.csr.csr_update_mip_ext
 use std.hardware.rv32i_rtl.mmu_sv32.ACCESS_FETCH
 use std.hardware.rv32i_rtl.memory_access.memory32_reset
 
@@ -24,12 +24,16 @@ use std.hardware.rv32i_rtl.memory_access.memory32_reset
 use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
 use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update, uart_mmio_write, uart_tick}
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_mmio_read, clint_mmio_write, clint_tick}
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read}
+use std.hardware.soc_rtl.plic.{plic_mmio_read_update, plic_mmio_write}
+use std.hardware.soc_rtl.plic.{plic_set_pending, plic_check_interrupt, PLIC_BASE}
 use std.hardware.soc_rtl.ram.{RamState, ram_create, ram_read, ram_write}
 use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create, mailbox_mmio_read, mailbox_mmio_write}
 
 # -- Wishbone interconnect
 use std.hardware.soc_rtl.wb_interconnect.{wb_decode_address, wb_route_read, wb_route_write}
-use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_ROM, WB_SLAVE_CLINT, WB_SLAVE_UART}
+use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_ROM, WB_SLAVE_CLINT, WB_SLAVE_PLIC}
+use std.hardware.soc_rtl.wb_interconnect.WB_SLAVE_UART
 use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_RAM, WB_SLAVE_MAILBOX}
 use std.hardware.soc_rtl.wb_interconnect.WB_SLAVE_UNMAPPED
 use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BASE}
@@ -43,6 +47,7 @@ struct SocState:
     core: CoreState
     uart: Uart16550State
     clint: ClintState
+    plic: PlicState
     mailbox: MailboxState
     ram: RamState
     response_valid: bool
@@ -80,6 +85,7 @@ fn soc_create(ram_size_words: u32) -> SocState:
         core: core32_init_single_master(BOOTROM_BASE),
         uart: uart_create(),
         clint: clint_create(),
+        plic: plic_create(),
         mailbox: mailbox_create(),
         ram: ram_create(ram_size_words),
         response_valid: false,
@@ -118,6 +124,7 @@ fn soc_mem_read(state: SocState, addr: u32) -> u32:
 
     var rom_data: u32 = 0
     var clint_data: u32 = 0
+    var plic_data: u32 = 0
     var uart_data: u32 = 0
     var ram_data: u32 = 0
     var mb_data: u32 = 0
@@ -126,6 +133,8 @@ fn soc_mem_read(state: SocState, addr: u32) -> u32:
         rom_data = bootrom_read(addr)
     else if slave_idx == WB_SLAVE_CLINT:
         clint_data = clint_mmio_read(state.clint, addr - CLINT_BASE)
+    else if slave_idx == WB_SLAVE_PLIC:
+        plic_data = plic_mmio_read(state.plic, addr - PLIC_BASE)
     else if slave_idx == WB_SLAVE_UART:
         uart_data = uart_mmio_read(state.uart, addr - UART_BASE)
     else if slave_idx == WB_SLAVE_RAM:
@@ -133,7 +142,8 @@ fn soc_mem_read(state: SocState, addr: u32) -> u32:
     else if slave_idx == WB_SLAVE_MAILBOX:
         mb_data = mailbox_mmio_read(state.mailbox, addr - MB_BASE)
 
-    val resp = wb_route_read(slave_idx, addr, rom_data, clint_data, uart_data, ram_data, mb_data, 0)
+    val resp = wb_route_read(slave_idx, addr, rom_data, clint_data,
+        plic_data, uart_data, ram_data, mb_data, 0)
     resp.rdata
 
 # ============================================================================
@@ -146,6 +156,10 @@ fn soc_mem_read_update(state: SocState, addr: u32) -> SocState:
     if slave_idx == WB_SLAVE_UART:
         var out = state
         out.uart = uart_mmio_read_update(state.uart, addr - UART_BASE)
+        return out
+    if slave_idx == WB_SLAVE_PLIC:
+        var out = state
+        out.plic = plic_mmio_read_update(state.plic, addr - PLIC_BASE)
         return out
     state
 
@@ -171,6 +185,9 @@ fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWrite
 
     if slave_idx == WB_SLAVE_CLINT:
         out.clint = clint_mmio_write(state.clint, wr.offset, wdata)
+
+    else if slave_idx == WB_SLAVE_PLIC:
+        out.plic = plic_mmio_write(state.plic, wr.offset, wdata)
 
     else if slave_idx == WB_SLAVE_UART:
         out.uart = uart_mmio_write(state.uart, wr.offset, wdata)
@@ -207,6 +224,7 @@ fn soc_width_from_size(size_bytes: u32) -> u32:
 
 fn soc_bus_target_valid(slave_idx: u32) -> bool:
     (slave_idx == WB_SLAVE_ROM or slave_idx == WB_SLAVE_CLINT or
+        slave_idx == WB_SLAVE_PLIC or
         slave_idx == WB_SLAVE_UART or slave_idx == WB_SLAVE_RAM or
         slave_idx == WB_SLAVE_MAILBOX)
 
@@ -236,8 +254,10 @@ fn soc_tick(state: SocState) -> SocTickResult:
     out.clint = ct.state
     val ut = uart_tick(out.uart)
     out.uart = ut.state
-    out.core.csr_m = csr_update_mip(out.core.csr_m, ct.mtip,
-        ct.msip_out, false)
+    out.plic = plic_set_pending(out.plic, 10, ut.irq)
+    val external = plic_check_interrupt(out.plic)
+    out.core.csr_m = csr_update_mip_ext(out.core.csr_m, ct.mtip,
+        ct.msip_out, external.meip, external.seip)
 
     val drain_halt = out.halt_pending and out.response_valid
     val request_access = out.core.memory.access_type

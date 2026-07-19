@@ -219,6 +219,20 @@ Delivery checks all machine-target causes before all supervisor-target causes,
 orders S causes as external/software/timer, suppresses
 delegated interrupts in M-mode, and treats global SIE as implicit below S-mode.
 
+The RV32 implementation applies the same ownership rules. `mideleg` is WARL
+masked to `0x222`; `sie` and `sip` are views of canonical machine state; and
+software `SEIP` remains distinct from the external PLIC line. CLINT supplies
+MSIP/MTIP, while UART THRE is source 10 in the shared two-context PLIC. The
+gateway latches an accepted level until claim, suppresses repending while either
+context owns it, and repends a still-asserted source after valid completion.
+
+`Rv32SocMemoryMap.k26()` is the product-DT source of truth: RAM starts at
+`0x80000000` and is 128 MiB; CLINT is at `0x02000000`; the 4 MiB PLIC window is
+at `0x0c000000`; UART is at `0x10000000`; UART and timebase clocks are 100 MHz.
+CPU interrupt-controller phandle 1 feeds CLINT M software/timer and PLIC M/S
+external contexts; PLIC phandle 2 feeds UART interrupt 10. RV64 product DT
+generation returns contract-not-ready until its separate hardware matches.
+
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,
 then performs RV64 PMP before bus issue. Fault cause/address and RVFI trap fields
