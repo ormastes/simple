@@ -245,7 +245,8 @@ the shared binary — deploys require explicit user go-ahead).
   i64-to-f64 casts remain `sitofp`. The former native XFAIL is now
   a source-fixed fixture. Its direct LLVM-IR regression is present; the bounded
   current-source mini build hit its 240-second cap, so native execution remains
-  pending and was not retried.
+  pending and was not retried. The shared native smoke matrix now schedules the
+  fixture on Linux, macOS, Windows, and FreeBSD; Cranelift is the hosted control.
 - LLVM aggregate reads now load uniform native-width field slots into a fresh
   SSA temporary and truncate to the declared narrow integer/bool width. The
   focused IR regression covers `i32` and `i1`, preventing the former

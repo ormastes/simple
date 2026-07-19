@@ -87,6 +87,8 @@ does not touch, so **there is no regression** (native f64-enum was already broke
 LLVM constructor and extractor preserve the payload bits. The interpreter /
 Cranelift control remains in
 `test/01_unit/compiler/codegen/enum_f64_payload_precision_spec.spl`.
+The shared native smoke matrix schedules the system fixture on Linux, macOS,
+Windows, and FreeBSD; hosted Cranelift remains the control backend.
 
 ## Source fix
 
