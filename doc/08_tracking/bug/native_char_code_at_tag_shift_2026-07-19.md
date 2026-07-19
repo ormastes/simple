@@ -37,3 +37,13 @@ Audit native-lane text method returns for missing untag/unbox on the
 char_code_at path (value appears to be handed back still-tagged, then
 consumed as if raw, i.e. one >>3 applied to the payload). Workaround in
 callers: use a byte accessor where ASCII suffices.
+
+## Update 2026-07-19 (later): three tag-shifted views of one value
+Deeper probing in FontRenderer showed the SAME logical codepoint 88 ('X')
+reads as **0** (= 88 & 7) at one site, **11** (= 88 >> 3) at another, and
+the true **88** at a third — per-read-site views of one boxed value, not
+independent corruptions. WARNING for workaround authors: two miscompiled
+reads can cancel and "work" by coincidence (a bytes()-based read feeding a
+downstream that re-applies the shift produced correct-looking results and
+was retracted). Fix must be at the boxing/untag layer, not by compensating
+at call sites.
