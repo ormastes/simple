@@ -280,6 +280,7 @@ void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
 void     rt_exit(int64_t code);
+void     rt_cli_exit(int64_t code);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_ms(int64_t ms);
