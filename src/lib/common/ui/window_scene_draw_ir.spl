@@ -56,6 +56,53 @@ val WM_DRAW_IR_CHROME_SURFACE: text = "wm-chrome"
 val WM_WINDOW_SHADOW_OFFSET_X: i32 = 5
 val WM_WINDOW_SHADOW_OFFSET_Y: i32 = 6
 
+# --- Aqua titlebar gloss (scout prototype) ------------------------------
+# Classic Aqua titlebars are a vertical gradient (light top -> darker
+# bottom) plus a 1px darker separator on the bottom edge. There is no
+# gradient/hline draw primitive on the raw pixel-buffer path (only
+# fill_rect), and the two concrete framebuffer backends both opt out of
+# CompositorGlassCapable (`as_glass_capable() -> nil`), so the gradient is
+# built from a per-row fill_rect loop rather than a new primitive. Colors
+# are derived arithmetically from theme.title_focused/title_unfocused (NOT
+# new WmChromeColors fields) so an installed theme keeps reskinning the
+# titlebar without this prototype needing struct changes.
+val WM_TITLEBAR_GLOSS_LIGHTEN: i32 = 14
+val WM_TITLEBAR_GLOSS_DARKEN: i32 = 14
+val WM_TITLEBAR_BORDER_DARKEN: i32 = 40
+
+fn _wm_argb_channel(color: u32, shift: i32) -> i32:
+    ((color >> shift) & 0xFFu32) as i32
+
+fn _wm_argb_clamp_u8(v: i32) -> i32:
+    if v < 0: 0 elif v > 255: 255 else: v
+
+fn _wm_argb_from_channels(r: i32, g: i32, b: i32) -> u32:
+    0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+
+fn _wm_titlebar_shade(base: u32, delta: i32) -> u32:
+    """Shift each RGB channel of `base` by `delta` (positive lightens,
+    negative darkens), clamped to u8 range. Alpha stays opaque."""
+    val r = _wm_argb_clamp_u8(_wm_argb_channel(base, 16) + delta)
+    val g = _wm_argb_clamp_u8(_wm_argb_channel(base, 8) + delta)
+    val b = _wm_argb_clamp_u8(_wm_argb_channel(base, 0) + delta)
+    _wm_argb_from_channels(r, g, b)
+
+fn _wm_titlebar_lerp(top: u32, bottom: u32, row: i32, last_row: i32) -> u32:
+    """Linear-interpolate between `top` and `bottom` at `row` of
+    [0, last_row]."""
+    if last_row <= 0:
+        return top
+    val tr = _wm_argb_channel(top, 16)
+    val tg = _wm_argb_channel(top, 8)
+    val tb = _wm_argb_channel(top, 0)
+    val br = _wm_argb_channel(bottom, 16)
+    val bg = _wm_argb_channel(bottom, 8)
+    val bb = _wm_argb_channel(bottom, 0)
+    val r = tr + (br - tr) * row / last_row
+    val g = tg + (bg - tg) * row / last_row
+    val b = tb + (bb - tb) * row / last_row
+    _wm_argb_from_channels(_wm_argb_clamp_u8(r), _wm_argb_clamp_u8(g), _wm_argb_clamp_u8(b))
+
 # Stage3 baremetal proved the `[u32]` pixels class field is a live corruption
 # boundary: mutations through receiver methods write to a copy, and reading
 # the field back across the aggregate boundary returned a garbage length
@@ -178,6 +225,26 @@ class SharedWmPixelBufferBackend:
             memcpy(_shared_wm_px_addr + cy * buf_row_bytes + x0 * 4, _shared_wm_px_addr + first_row_off, span_bytes)
             cy = cy + 1
 
+    me _px_fill_titlebar_gradient(x: i32, y: i32, width: i32, height: i32, base_color: u32):
+        # Aqua gloss: light-top -> dark-bottom vertical gradient plus a 1px
+        # darker separator on the last row. Each row is a 1-row fill_rect
+        # (no memcpy-replicate work since height=1 per call), so this is
+        # ~`height` extra fill_rect calls per titlebar per frame — cheap
+        # next to the ~800k-call/frame budget noted above for _px_clear.
+        if height <= 0:
+            return
+        val top = _wm_titlebar_shade(base_color, WM_TITLEBAR_GLOSS_LIGHTEN)
+        val bottom = _wm_titlebar_shade(base_color, 0 - WM_TITLEBAR_GLOSS_DARKEN)
+        val border = _wm_titlebar_shade(base_color, 0 - WM_TITLEBAR_BORDER_DARKEN)
+        val gradient_rows = if height > 1: height - 1 else: height
+        val last_row = if gradient_rows > 1: gradient_rows - 1 else: 1
+        var row = 0
+        while row < gradient_rows:
+            self._px_fill_rect(x, y + row, width, 1, _wm_titlebar_lerp(top, bottom, row, last_row))
+            row = row + 1
+        if height > 1:
+            self._px_fill_rect(x, y + height - 1, width, 1, border)
+
     me _px_blit(x: i32, y: i32, width: i32, height: i32, source: [u32]):
         var row = 0
         while row < height:
@@ -230,7 +297,7 @@ class SharedWmPixelBufferBackend:
         val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
         self._px_fill_rect(window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
         self._px_fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
-        self._px_fill_rect(window.x, window.y, window.width, 28, title_color)
+        self._px_fill_titlebar_gradient(window.x, window.y, window.width, 28, title_color)
         self._px_fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
         self._px_fill_rect(window.x + 30, window.y + 9, 10, 10, 0xFFF1C40Fu32)
         self._px_fill_rect(window.x + 48, window.y + 9, 10, 10, 0xFF27AE60u32)
@@ -839,13 +906,31 @@ fn shared_wm_scene_render_desktop_chrome(backend: CompositorBackend, width: i32,
     backend.fill_rect(0, height - taskbar_h, width, taskbar_h, theme.taskbar)
     backend.fill_rect(0, height - taskbar_h, width, 2, theme.accent)
 
+fn _wm_draw_titlebar_gradient(backend: CompositorBackend, x: i32, y: i32, width: i32, height: i32, base_color: u32):
+    """Same Aqua gloss as SharedWmPixelBufferBackend._px_fill_titlebar_gradient,
+    but through the generic CompositorBackend.fill_rect trait method for the
+    hosted/GPU backends that route through this shared draw-contract fn."""
+    if height <= 0:
+        return
+    val top = _wm_titlebar_shade(base_color, WM_TITLEBAR_GLOSS_LIGHTEN)
+    val bottom = _wm_titlebar_shade(base_color, 0 - WM_TITLEBAR_GLOSS_DARKEN)
+    val border = _wm_titlebar_shade(base_color, 0 - WM_TITLEBAR_BORDER_DARKEN)
+    val gradient_rows = if height > 1: height - 1 else: height
+    val last_row = if gradient_rows > 1: gradient_rows - 1 else: 1
+    var row = 0
+    while row < gradient_rows:
+        backend.fill_rect(x, y + row, width, 1, _wm_titlebar_lerp(top, bottom, row, last_row))
+        row = row + 1
+    if height > 1:
+        backend.fill_rect(x, y + height - 1, width, 1, border)
+
 fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: SharedWmWindow, theme: WmChromeColors):
     if window.minimized:
         return
     val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
     backend.fill_rect(window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
     backend.fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
-    backend.fill_rect(window.x, window.y, window.width, 28, title_color)
+    _wm_draw_titlebar_gradient(backend, window.x, window.y, window.width, 28, title_color)
     backend.fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
     backend.fill_rect(window.x + 30, window.y + 9, 10, 10, 0xFFF1C40Fu32)
     backend.fill_rect(window.x + 48, window.y + 9, 10, 10, 0xFF27AE60u32)

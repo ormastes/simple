@@ -1517,6 +1517,20 @@ fn _argb_to_css_hex(color: u32) -> text:
     val b = (color % 256u32).to_i64()
     "#" + int_to_hex(r) + int_to_hex(g) + int_to_hex(b)
 
+# Aqua titlebar gloss (scout prototype, CSS evidence backend): shift each RGB
+# channel of an opaque ARGB u32 by `delta` (positive lightens, negative
+# darkens), clamped to u8. Mirrors _wm_titlebar_shade in
+# window_scene_draw_ir.spl but kept local (no cross-module private-fn
+# coupling) since this backend renders titlebars as CSS, not fill_rect rows.
+fn _host_argb_shade(color: u32, delta: i64) -> u32:
+    val r = ((color / 65536u32) % 256u32).to_i64()
+    val g = ((color / 256u32) % 256u32).to_i64()
+    val b = (color % 256u32).to_i64()
+    val cr = if r + delta < 0: 0 elif r + delta > 255: 255 else: r + delta
+    val cg = if g + delta < 0: 0 elif g + delta > 255: 255 else: g + delta
+    val cb = if b + delta < 0: 0 elif b + delta > 255: 255 else: b + delta
+    0xFF000000u32 | (cr.to_u32() << 16) | (cg.to_u32() << 8) | cb.to_u32()
+
 # Build the host WM chrome as a single HTML/CSS document. Element geometry and
 # colors mirror the direct-draw chrome in render_frame() exactly (desktop
 # backdrop = compositor_bg, window body = host_window_body, titlebar =
@@ -1531,6 +1545,9 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
     val bg_hex = _argb_to_css_hex(theme.compositor_bg)
     val body_hex = _argb_to_css_hex(theme.host_window_body)
     val title_focused_hex = _argb_to_css_hex(theme.title_focused)
+    val titlebar_gloss_top_hex = _argb_to_css_hex(_host_argb_shade(theme.title_focused, 14))
+    val titlebar_gloss_bottom_hex = _argb_to_css_hex(_host_argb_shade(theme.title_focused, 0 - 14))
+    val titlebar_border_hex = _argb_to_css_hex(_host_argb_shade(theme.title_focused, 0 - 40))
     val close_hex = _argb_to_css_hex(theme.close_button)
     val text_hex = _argb_to_css_hex(theme.text_primary)
     var body = ""
@@ -1542,7 +1559,8 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
             val close_text_x = win.x + win.w - 17
             val title_w = if win.w - 40 > 0: win.w - 40 else: 0
             body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:{win.h}px;background:{body_hex}'></div>"
-            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:24px;background:{title_focused_hex}'></div>"
+            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:23px;background:linear-gradient(to bottom, {titlebar_gloss_top_hex}, {titlebar_gloss_bottom_hex})'></div>"
+            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y + 23}px;width:{win.w}px;height:1px;background:{titlebar_border_hex}'></div>"
             body = body + "<div style='position:absolute;left:{title_x}px;top:{title_y}px;width:{title_w}px;height:16px;color:{text_hex};font:12px monospace;overflow:hidden;white-space:nowrap'>{win.title}</div>"
             body = body + "<div style='position:absolute;left:{close_x}px;top:{win.y}px;width:24px;height:24px;background:{close_hex}'></div>"
             body = body + "<div style='position:absolute;left:{close_text_x}px;top:{title_y}px;width:16px;height:16px;color:{text_hex};font:12px monospace'>X</div>"
