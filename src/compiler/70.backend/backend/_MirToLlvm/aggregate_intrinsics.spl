@@ -195,6 +195,21 @@ impl MirToLlvm:
             # to the field's real float type -- the exact mirror of
             # store_field_bits on write.
             self.load_field_bits(dest_name, field_ptr, dest_ty, nit)
+        elif dest_ty != nit and (is_integer_type(dest_ty) or dest_ty == "i1"):
+            # narrow-field readback fix
+            # (native_llvm_narrow_field_load_type_mismatch): aggregates store
+            # every field in one native-int word, so the physical load is
+            # native_int. But a field whose declared type is NARROWER than the
+            # native int (i32/i16/i8/bool) keeps that declared LLVM type in
+            # local_types -- so a later widening consumer emits
+            # `sext/zext <declared> dest to i64`, which llc rejects if dest's
+            # real definition is the i64 word ("'%x' defined with type 'i64'
+            # but expected 'i32'"). Load the word into a temp, then `trunc` it
+            # down to the declared width so the definition matches the
+            # registered type and any later sign/zero-extension is well typed.
+            val raw_field_val = self.builder.fresh_local()
+            self.builder.emit_load(raw_field_val, nit, field_ptr)
+            self.builder.emit("  {dest_name} = trunc {nit} {raw_field_val} to {dest_ty}")
         else:
             self.builder.emit_load(dest_name, nit, field_ptr)
 
