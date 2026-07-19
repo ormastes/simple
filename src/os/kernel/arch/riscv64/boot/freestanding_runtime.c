@@ -3342,18 +3342,6 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_FLUSH, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
 
-static void rt_gpu_fill_test_pattern(void) {
-    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
-    for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
-        for (spl_u32 x = 0; x < RT_GPU_WIDTH; x = x + 1U) {
-            spl_u8 r = (spl_u8)(x & 0xffU);
-            spl_u8 g = (spl_u8)(y & 0xffU);
-            spl_u8 b = (spl_u8)((x ^ y) & 0xffU);
-            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff000000U | ((spl_u32)r << 16) | ((spl_u32)g << 8) | (spl_u32)b;
-        }
-    }
-}
-
 static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {
     volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
     spl_u32 y_end = y + h;

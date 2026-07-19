@@ -146,7 +146,7 @@ netstack, TLS, and HTTP closures.
 **Current boundary after B3/B5/B6:**
 - The RISC-V service probe now requires VirtIO-net TX completion and packet RX
   readiness before setting `riscv_network_ready()`.
-- RV64 QEMU has prebuilt smoke evidence for packet RX/TX through the boot-local
+- RV64 QEMU has prebuilt evidence covering packet RX/TX for QEMU HTTP smoke through the boot-local
   ARP/TCP/HTTP provider, then serving `/health` and `/` over host forwarding.
   The `scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --with-storage`
   path now requires a current-source build stamp by default and only accepts
@@ -274,9 +274,9 @@ netstack, TLS, and HTTP closures.
   LBA 1, exposes it through `virtio-blk-pci`, initializes the RV64 freestanding
   legacy virtio-blk queue, completes three-descriptor sector-read requests,
   verifies the NVFS magic/version/generation fields, and requires
-  `[storage-riscv] Storage service ready` plus `[fs-riscv] NVFS root superblock
-  ready` (`NVFS root superblock ready`) before accepting the live HTTP smoke
-  result.
+  `[storage-riscv] Storage service ready`, `[fs-riscv] NVFS root superblock
+  ready` (`NVFS root superblock ready`), and `[fs-riscv] NVFS arena payload
+  ready` before accepting the live HTTP smoke result.
 - The current source-built RV64 HTTP ELF links with zero unexpected
   freestanding unresolved symbols and QEMU reaches the live HTTP marker. The
   serial log now reports `PMM OK` and `HEAP OK` before service startup. The

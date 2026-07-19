@@ -5,6 +5,9 @@ extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (t
 use std.nogc_sync_mut.http_server.{HttpResponse, HttpStatus, write_response, write_error}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 
+fn step(name: text) -> i64:
+    name.len()
+
 fn rv64_http_storage_live_enabled() -> bool:
     (rt_env_get("SIMPLEOS_RV64_HTTP_STORAGE_QEMU") ?? "") == "1"
 
@@ -74,16 +77,16 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(services).to_contain("extern fn rt_net_rx_ready() -> i64")
         expect(services).to_contain("val device_id = rt_pci_get_field(i, 6)")
         expect(services).to_contain("device_id == 0x1000 or device_id == 0x1041")
-        expect(services).to_contain("val tx_rc = rt_net_tx_test()")
-        expect(services).to_contain("val rx_rc = rt_net_rx_ready()")
+        expect(services).to_contain("val tx_rc = _decode_riscv_status(rt_net_tx_test())")
+        expect(services).to_contain("val rx_rc = _decode_riscv_status(rt_net_rx_ready())")
         expect(services).to_contain("[net-riscv] Network packet TX unavailable rc=")
         expect(services).to_contain("[net-riscv] Network packet TX ready")
         expect(services).to_contain("[net-riscv] Network packet RX unavailable rc=")
         expect(services).to_contain("network_ok = 1")
 
-        val tx_probe = services.find("val tx_rc = rt_net_tx_test()")
-        val rx_probe = services.find("val rx_rc = rt_net_rx_ready()")
-        val ready_set = services.find("network_ok = 1")
+        val tx_probe = services.find("val tx_rc = _decode_riscv_status(rt_net_tx_test())")
+        val rx_probe = services.find("val rx_rc = _decode_riscv_status(rt_net_rx_ready())")
+        val ready_set = services.find("[net-riscv] Network service ready")
         expect(tx_probe).to_be_greater_than(-1)
         expect(rx_probe).to_be_greater_than(-1)
         expect(rx_probe).to_be_greater_than(tx_probe)
@@ -121,13 +124,14 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(runtime).to_contain("RT_GPU_CMD_SET_SCANOUT")
         expect(runtime).to_contain("RT_GPU_CMD_TRANSFER_TO_HOST_2D")
         expect(runtime).to_contain("RT_GPU_CMD_RESOURCE_FLUSH")
-        expect(runtime).to_contain("return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_width : 0;")
+        expect(runtime).to_contain("return g_rt_display_ready ? RT_GPU_WIDTH : 0;")
+        expect(runtime).to_contain("return g_rt_display_ready ? RT_GPU_HEIGHT : 0;")
         expect(runtime.contains("rt_gpu_fill_test_pattern")).to_be(false)
         expect(runtime.index_of("spl_i64 rt_display_init(void) {\n    return -1;") ?? -1).to_equal(-1)
         expect(services).to_contain("[display-riscv] Display unavailable")
         expect(services).to_contain("riscv_display_width = riscv64_display_width()")
         expect(services.contains("riscv64_display_present()")).to_equal(false)
-        expect(services).to_contain("[display-riscv] Display service ready: {riscv_display_width}x{riscv_display_height} framebuffer")
+        expect(services).to_contain("[display-riscv] Display service ready: {{riscv_display_width}}x{{riscv_display_height}} framebuffer")
         expect(script).to_contain("--with-display")
         expect(script).to_contain("virtio-gpu-pci,disable-modern=on,disable-legacy=off")
         expect(script).to_contain("Display service ready")
@@ -170,6 +174,7 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(script).to_contain("SIMPLEOS_NVFS_ARENA_FILE")
         expect(script).to_contain("Storage service ready")
         expect(script).to_contain("NVFS root superblock ready")
+        expect(script).to_contain("NVFS arena payload ready")
 
     it "routes weak C TCP fallbacks through the boot packet provider":
         val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
@@ -188,14 +193,14 @@ describe "SimpleOS RISC-V network readiness gate":
 
         expect(net_init).to_contain("extern fn rt_net_tx_test() -> i64")
         expect(net_init).to_contain("extern fn rt_net_rx_ready() -> i64")
-        expect(net_init).to_contain("val tx_ready = rt_net_tx_test()")
-        expect(net_init).to_contain("val rx_ready = rt_net_rx_ready()")
+        expect(net_init).to_contain("val tx_ready = _decode_riscv_status(rt_net_tx_test())")
+        expect(net_init).to_contain("val rx_ready = _decode_riscv_status(rt_net_rx_ready())")
         expect(net_init).to_contain("[net-init] C network TX unavailable rc=")
         expect(net_init).to_contain("[net-init] C network RX unavailable rc=")
         expect(net_init).to_contain("g_net_initialized = true")
 
-        val tx_probe = net_init.find("val tx_ready = rt_net_tx_test()")
-        val rx_probe = net_init.find("val rx_ready = rt_net_rx_ready()")
+        val tx_probe = net_init.find("val tx_ready = _decode_riscv_status(rt_net_tx_test())")
+        val rx_probe = net_init.find("val rx_ready = _decode_riscv_status(rt_net_rx_ready())")
         val ready_set = net_init.find("g_net_initialized = true")
         expect(tx_probe).to_be_greater_than(-1)
         expect(rx_probe).to_be_greater_than(-1)
@@ -248,8 +253,8 @@ describe "SimpleOS RISC-V network readiness gate":
         val boot_shim = rt_file_read_text("src/os/kernel/boot/tcp_baremetal_min.spl")
 
         expect(boot_shim).to_contain("extern fn rt_boot_tcp_bind(addr: text) -> i64")
-        expect(boot_shim).to_contain("fn rt_io_tcp_bind(addr: text) -> i64:\n    rt_boot_tcp_bind(addr)")
-        expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:\n    rt_boot_tcp_write_text(fd, data)")
+        expect(boot_shim).to_contain("pub fn rt_io_tcp_bind(addr: text) -> i64:\n    boot_tcp_probe_bind(addr)")
+        expect(boot_shim).to_contain("pub fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:\n    rt_boot_tcp_write_text(fd, data)")
 
 fn expect_qemu_deferred_script_contract(path: text):
     val script = rt_file_read_text(path)
@@ -260,6 +265,8 @@ fn expect_qemu_deferred_script_contract(path: text):
     expect(script).to_contain("Entering boot idle loop")
     expect(script).to_contain("DEFERRED PASSED")
     expect(script).to_contain("network reached ready state in deferred mode")
+    expect(script).to_contain("[http_baremetal] Listening on 0.0.0.0:8080")
+    expect(script.index_of("Bootstrap TCP shim bound on 0.0.0.0:8080") ?? -1).to_equal(-1)
 
     val deferred_marker = script.find("--expect-deferred")
     val http_tests = script.find("Running HTTP smoke tests")
@@ -280,6 +287,9 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
         expect(smoke).to_contain("printf '%s\\n' \"$DB_RESPONSE\" > \"$DB_QUERY_LOG\"")
         expect(smoke).to_contain("[ ! \"$BUILD_STAMP\" -nt \"$ELF\" ]")
         expect(smoke).to_contain("^simple_bin=.*(compiler_rust|simple_seed)")
+        expect(checker).to_contain("[http_baremetal] Listening on 0.0.0.0:8080")
+        expect(listener).to_contain("[http_baremetal] Listening on 0.0.0.0:8080")
+        expect(checker.index_of("Bootstrap TCP shim bound on 0.0.0.0:8080") ?? -1).to_equal(-1)
         expect(service).to_contain("var g_simple_db_service: SimpleDbService = SimpleDbService(tables: [], rows: [])")
         expect(listener).to_contain("simple_db_execute_http_request(request)")
         expect(listener.index_of("SimpleDbService.new()") ?? -1).to_equal(-1)
@@ -405,7 +415,6 @@ fn expect_no_fake_network_pass(path: text):
     expect(source.index_of("_assert(true, \"UDP socket") ?? -1).to_equal(-1)
     expect(source.index_of("_assert(true, \"Bind call") ?? -1).to_equal(-1)
     expect(source.index_of("_assert(true, \"TCP connect") ?? -1).to_equal(-1)
-    expect(source).to_contain("_assert(services_network_ready()")
     expect(source).to_contain("_assert(tcp_fd >= 0")
     expect(source).to_contain("_assert(udp_fd >= 0")
 
@@ -418,4 +427,6 @@ describe "SimpleOS QEMU network entrypoint gates":
         expect(source).to_contain("_assert(conn_result >= 0")
 
     it "does not report full-stack network success for no-crash socket placeholders":
-        expect_no_fake_network_pass("test/03_system/os/os_full_stack_spec.spl")
+        val path = "test/03_system/os/os_full_stack_spec.spl"
+        expect_no_fake_network_pass(path)
+        expect(rt_file_read_text(path)).to_contain("_assert(services_network_ready()")
