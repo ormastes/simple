@@ -71,6 +71,7 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(runtime).to_contain("return 0;")
 
     it "requires packet TX and RX readiness before reporting network ready":
+        step("Require every packet and socket facade gate before readiness")
         val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
 
         expect(services).to_contain("extern fn rt_net_tx_test() -> i64")
@@ -83,6 +84,7 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(services).to_contain("[net-riscv] Network packet TX ready")
         expect(services).to_contain("[net-riscv] Network packet RX unavailable rc=")
         expect(services).to_contain("network_ok = 1")
+        expect(services).to_contain("if not net_facade_linked:\n                                    log_raw_println(\"[net-riscv] Net socket facade unavailable\")\n                                    network_ok = 0\n                                else:\n                                    val tcp_probe_fd = boot_tcp_probe_bind(\"0.0.0.0:0\")")
 
         val tx_probe = services.find("val tx_rc = _decode_riscv_status(rt_net_tx_test())")
         val rx_probe = services.find("val rx_rc = _decode_riscv_status(rt_net_rx_ready())")
@@ -174,7 +176,7 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(script).to_contain("SIMPLEOS_NVFS_ARENA_FILE")
         expect(script).to_contain("Storage service ready")
         expect(script).to_contain("NVFS root superblock ready")
-        expect(script).to_contain("NVFS arena payload ready")
+        expect(script).to_contain("[fs-riscv] NVFS arena payload ready")
 
     it "routes weak C TCP fallbacks through the boot packet provider":
         val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
@@ -275,6 +277,10 @@ fn expect_qemu_deferred_script_contract(path: text):
 
 describe "SimpleOS RISC-V QEMU HTTP scripts":
     it "requires live POST database state evidence beyond boot readiness":
+        """A passing boot must use the canonical HTTP listener, preserve one
+        database service across requests, execute CREATE then INSERT then
+        SELECT in that order, retain every HTTP response, and reject evidence
+        that contains only boot-readiness markers."""
         step("Inspect the live guest request client")
         val smoke = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
         val checker = rt_file_read_text("scripts/qemu/check_simpleos_rv64_db_server.shs")

@@ -129,7 +129,7 @@ expect(qemu_contract).to_contain("[arm64-user] kernel-resumed exit=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -140,8 +140,12 @@ expect(source).to_contain("_write_text_z(stack_phys, string_off, binary_path)")
 expect(source).to_contain("_write_text_z(stack_phys, string_off, argv[i])")
 expect(source).to_contain("_write_text_z(stack_phys, string_off, envp[e])")
 expect(source).to_contain("val expected_argc = (argv.len() as u64) + 1")
-expect(source).to_contain("AT_EXECFN")
-expect(source).to_contain("AT_NULL")
+expect(source).to_contain("val argv0_addr = page_base + string_off")
+expect(source).to_contain("_wr64(stack_phys + frame_off + (slot * 8), argv0_addr)")
+expect(source).to_contain("_wr64(stack_phys + frame_off + (slot * 8), AT_PAGESZ)")
+expect(source).to_contain("_wr64(stack_phys + frame_off + ((slot + 2) * 8), AT_RANDOM)")
+expect(source).to_contain("_wr64(stack_phys + frame_off + ((slot + 4) * 8), AT_NULL)")
+expect(source.contains("AT_EXECFN")).to_be(false)
 expect(source).to_contain("TaskContext(")
 ```
 
