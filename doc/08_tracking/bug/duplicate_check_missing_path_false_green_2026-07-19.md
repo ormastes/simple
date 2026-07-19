@@ -1,8 +1,8 @@
 # Bare `duplicate-check` exited successfully without checking anything
 
-- **Status:** OPEN — bounded fix experiment removed after final review found a flags-only bypass.
+- **Status:** FIXED in source; current Stage 4 qualification remains pending.
 - **Reproducer:** `simple duplicate-check` printed usage and exited `0` before reaching argument validation, so automation could report a vacuous clean result.
 - **Cause:** `run_duplicate_check` returns usage/0 for truly bare argv, while `target_path_from_args` silently defaults to `src/`. Checking argv length alone is insufficient: flags-only input such as `--format json` also has no positional path and would reach the implicit full-repository scan.
 - **Root fix:** make positional target extraction return empty/optional when absent, process explicit help first, then require the target with usage/2 for both bare and flags-only invocations. Update every active help surface from `[path]` to `<path>`. Explicit `--help` and `-h` must remain `0`.
 - **Why no implicit `src/` scan:** the semantic default can traverse the full repository and is unsuitable as an unbounded bootstrap sanity action. The essential-tools smoke already uses bounded calibrated fixtures.
-- **Required regression:** cover bare, flags-only, explicit-help, and explicit-path argument shapes without starting a repository scan. Two heavy owner-spec attempts timed out in compiler diagnostic flood; a lightweight source contract passed but missed the flags-only bypass and was removed.
+- **Regression:** the lightweight `target_path_args_spec.spl` imports only config parsing and covers bare, split/equal flags-only, help remaining non-positional, and explicit paths before/after options without loading the detector or starting a scan (3 examples, 0 failures). Branch-order review confirms explicit help returns `0` before missing-target validation. MCP dynamic/static required-path coverage passed 4 examples with 0 failures. Two earlier heavy owner-spec attempts timed out and a weaker source contract was removed.

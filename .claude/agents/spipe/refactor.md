@@ -18,7 +18,7 @@
 ## Process
 
 1. Read `.spipe/<feature>/state.md` to get implementation file paths
-2. Run duplication check: `bin/simple duplicate-check` on impl files
+2. Run duplication check: `bin/simple duplicate-check <impl-file-or-dir>` for each implementation scope
 3. Run linter: `bin/simple build lint` on impl files
 4. For each issue found (max 10 refactor-test cycles total; stop after 10 even if issues remain):
    a. **Duplication:** Extract shared logic into helper functions
@@ -69,7 +69,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 
 ## Exit Criteria
 
-- [ ] No duplications reported by `bin/simple duplicate-check`
+- [ ] No duplications reported by `bin/simple duplicate-check <impl-file-or-dir>`
 - [ ] Lint clean: `bin/simple build lint` passes with no warnings
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
