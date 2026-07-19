@@ -2379,34 +2379,23 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
     let needle_len = rt_string_len(needle);
 
     if str_len < 0 || needle_len < 0 {
-        return RuntimeValue::NIL;
+        return super::objects::rt_option_none();
     }
 
     if needle_len == 0 {
         // Empty needle: return Some(0)
-        let payload = RuntimeValue::from_int(0);
-        return super::objects::rt_enum_new(
-            0,
-            {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                "Some".hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as u32
-            },
-            payload,
-        );
+        return super::objects::rt_option_some(RuntimeValue::from_int(0));
     }
 
     if needle_len > str_len {
-        return RuntimeValue::NIL;
+        return super::objects::rt_option_none();
     }
 
     let str_data = rt_string_data(string);
     let needle_data = rt_string_data(needle);
 
     if str_data.is_null() || needle_data.is_null() {
-        return RuntimeValue::NIL;
+        return super::objects::rt_option_none();
     }
 
     unsafe {
@@ -2414,20 +2403,9 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
         let needle_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(needle_data, needle_len as usize));
         match haystack.find(needle_str) {
             Some(idx) => {
-                let payload = RuntimeValue::from_int(idx as i64);
-                super::objects::rt_enum_new(
-                    0,
-                    {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        "Some".hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as u32
-                    },
-                    payload,
-                )
+                super::objects::rt_option_some(RuntimeValue::from_int(idx as i64))
             }
-            None => RuntimeValue::NIL,
+            None => super::objects::rt_option_none(),
         }
     }
 }

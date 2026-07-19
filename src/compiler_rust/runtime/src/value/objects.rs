@@ -256,6 +256,20 @@ pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
     (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
+pub(crate) const OPTION_ENUM_ID: u32 = 1;
+
+pub(crate) fn rt_option_none() -> RuntimeValue {
+    rt_enum_new(
+        OPTION_ENUM_ID,
+        hash_variant_discriminant("None"),
+        RuntimeValue::NIL,
+    )
+}
+
+pub(crate) fn rt_option_some(payload: RuntimeValue) -> RuntimeValue {
+    rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("Some"), payload)
+}
+
 /// Allocate a new enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue {
@@ -317,7 +331,7 @@ pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
 /// Check if a value is None/nil.
 /// Returns true if:
 /// - value is nil (raw 0 / TAG_SPECIAL with SPECIAL_NIL)
-/// - value is an enum with discriminant hash("None")
+/// - value is an Option enum (reserved ID 1) with discriminant hash("None")
 #[no_mangle]
 pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     // Check for raw nil (value == 0 or TAG_SPECIAL with NIL)
@@ -327,14 +341,9 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     if value.is_nil() {
         return true;
     }
-    // Check for enum None variant
-    rt_enum_check_discriminant(value, {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        "None".hash(&mut hasher);
-        (hasher.finish() & 0xFFFFFFFF) as i64
-    })
+    let none_disc = hash_variant_discriminant("None");
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+        .is_some_and(|p| unsafe { (*p).enum_id == OPTION_ENUM_ID && (*p).discriminant == none_disc })
 }
 
 /// Check if a value is Some (not None/nil).
@@ -368,8 +377,7 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
     let result = func(closure, payload);
 
     // Wrap result in Some
-    let some_disc = hash_variant_discriminant("Some");
-    rt_enum_new(0, some_disc, result)
+    rt_option_some(result)
 }
 
 // ============================================================================

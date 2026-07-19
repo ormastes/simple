@@ -1209,8 +1209,12 @@ impl LlvmBackend {
                                 .map_err(|e| format!("pattern zext: {e}"))?
                         }
                     },
-                    crate::mir::MirPattern::Variant { variant_name, .. } => {
-                        // Get discriminant and compare
+                    crate::mir::MirPattern::Variant {
+                        enum_name,
+                        variant_name,
+                        ..
+                    } => {
+                        // Runtime type and discriminant must both match.
                         let rt_enum_disc = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_enum_discriminant", fn_type, None)
@@ -1222,6 +1226,17 @@ impl LlvmBackend {
                             .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
+                        let rt_enum_id = module.get_function("rt_enum_id").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            module.add_function("rt_enum_id", fn_type, None)
+                        });
+                        let enum_id = builder
+                            .build_call(rt_enum_id, &[subject_val.into()], "enum_id")
+                            .map_err(|e| format!("pattern enum id: {e}"))?
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| i64_type.const_int(u64::MAX, false).into())
+                            .into_int_value();
                         let expected = {
                             use std::collections::hash_map::DefaultHasher;
                             use std::hash::{Hash, Hasher};
@@ -1230,9 +1245,19 @@ impl LlvmBackend {
                             (hasher.finish() & 0xFFFFFFFF) as u64
                         };
                         let expected_val = i64_type.const_int(expected, false);
-                        let cmp = builder
+                        let disc_cmp = builder
                             .build_int_compare(inkwell::IntPredicate::EQ, disc, expected_val, "pat_var_eq")
                             .map_err(|e| format!("pattern var icmp: {e}"))?;
+                        let expected_id = i64_type.const_int(
+                            u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
+                            false,
+                        );
+                        let id_cmp = builder
+                            .build_int_compare(inkwell::IntPredicate::EQ, enum_id, expected_id, "pat_enum_eq")
+                            .map_err(|e| format!("pattern enum id icmp: {e}"))?;
+                        let cmp = builder
+                            .build_and(disc_cmp, id_cmp, "pat_enum_variant_eq")
+                            .map_err(|e| format!("pattern enum and: {e}"))?;
                         builder
                             .build_int_z_extend(cmp, i64_type, "pat_ext")
                             .map_err(|e| format!("pattern zext: {e}"))?
@@ -1328,7 +1353,11 @@ impl LlvmBackend {
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
-            MirInst::EnumUnit { dest, variant_name, .. } => {
+            MirInst::EnumUnit {
+                dest,
+                enum_name,
+                variant_name,
+            } => {
                 // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
@@ -1343,7 +1372,8 @@ impl LlvmBackend {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
                 });
-                let enum_id_val = i32_t.const_int(0, false);
+                let enum_id_val =
+                    i32_t.const_int(u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)), false);
                 let disc_val = i32_t.const_int(disc as u64, false);
                 // NIL = 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
                 let nil_val = i64_t.const_int(3, false);
@@ -1361,9 +1391,9 @@ impl LlvmBackend {
             }
             MirInst::EnumWith {
                 dest,
+                enum_name,
                 variant_name,
                 payload,
-                ..
             } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
@@ -1378,7 +1408,8 @@ impl LlvmBackend {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
                 });
-                let enum_id_val = i32_t.const_int(0, false);
+                let enum_id_val =
+                    i32_t.const_int(u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)), false);
                 let disc_val = i32_t.const_int(disc as u64, false);
                 let payload_val = vreg_map
                     .get(payload)

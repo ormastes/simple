@@ -5,6 +5,145 @@
 
 use super::imports::{resolve_name_variants, resolve_by_suffix, suffix_of};
 
+fn dotted_enum_runtime_name(mangled: &str) -> String {
+    mangled.replace("_dot_", ".").replace("__", ".")
+}
+
+fn qualify_enum_pattern(
+    pattern: &mut crate::mir::MirPattern,
+    qualify: &impl Fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    use crate::mir::MirPattern;
+    match pattern {
+        MirPattern::Variant {
+            enum_name, payload, ..
+        } => {
+            *enum_name = qualify(enum_name)?;
+            if let Some(payload) = payload {
+                qualify_enum_pattern(payload, qualify)?;
+            }
+        }
+        MirPattern::Tuple(items) | MirPattern::Or(items) => {
+            for item in items {
+                qualify_enum_pattern(item, qualify)?;
+            }
+        }
+        MirPattern::Struct { fields, .. } => {
+            for (_, field) in fields {
+                qualify_enum_pattern(field, qualify)?;
+            }
+        }
+        MirPattern::Guard { pattern, .. } => qualify_enum_pattern(pattern, qualify)?,
+        MirPattern::Union { inner: Some(inner), .. } => qualify_enum_pattern(inner, qualify)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Replace bare enum owners in constructor and pattern MIR with stable,
+/// declaring-module-qualified runtime identities before either native backend.
+pub(crate) fn qualify_enum_runtime_names(
+    mir: &mut crate::mir::MirModule,
+    runtime_module_name: &str,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    runtime_names: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    use crate::hir::HirType;
+    use crate::mir::MirInst;
+
+    let local_enums: std::collections::HashSet<String> = mir
+        .local_globals
+        .iter()
+        .filter(|name| {
+            mir.type_registry
+                .lookup(name)
+                .and_then(|id| mir.type_registry.get(id))
+                .is_some_and(|ty| matches!(ty, HirType::Enum { .. }))
+        })
+        .cloned()
+        .collect();
+    let known_enums: std::collections::HashSet<String> = mir
+        .type_registry
+        .iter()
+        .filter_map(|(_, ty)| match ty {
+            HirType::Enum { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let known_runtime_names: std::collections::HashSet<&str> = runtime_names.values().map(String::as_str).collect();
+    let local_runtime_name = |name: &str| {
+        if runtime_module_name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{runtime_module_name}.{name}")
+        }
+    };
+
+    let mut names = runtime_names.values().cloned().collect::<Vec<_>>();
+    names.extend(local_enums.iter().map(|name| local_runtime_name(name)));
+    names.sort();
+    names.dedup();
+    let mut ids = std::collections::HashMap::new();
+    for name in names {
+        let id = crate::codegen::shared::enum_runtime_type_id(&name);
+        if let Some(existing) = ids.insert(id, name.clone()) {
+            return Err(format!("enum runtime ID collision: '{existing}' and '{name}'"));
+        }
+    }
+
+    let qualify = |name: &str| -> Result<String, String> {
+        if known_runtime_names.contains(name) {
+            return Ok(name.to_string());
+        }
+        let resolved = if local_enums.contains(name) {
+            return Ok(local_runtime_name(name));
+        } else {
+            use_map.get(name).or_else(|| import_map.get(name)).cloned()
+        };
+        if let Some(resolved) = resolved {
+            return Ok(runtime_names
+                .get(&resolved)
+                .cloned()
+                .unwrap_or_else(|| dotted_enum_runtime_name(&resolved)));
+        }
+        if matches!(name, "Result" | "Option") {
+            return Ok(name.to_string());
+        }
+        if name.contains("__") || name.contains('.') {
+            return Ok(dotted_enum_runtime_name(name));
+        }
+        Err(format!("enum construction: missing runtime identity for '{name}'"))
+    };
+
+    for func in &mut mir.functions {
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                match inst {
+                    MirInst::EnumUnit { enum_name, .. } | MirInst::EnumWith { enum_name, .. } => {
+                        *enum_name = qualify(enum_name)?;
+                    }
+                    MirInst::PatternTest { pattern, .. } => qualify_enum_pattern(pattern, &qualify)?,
+                    MirInst::Call { target, .. } => {
+                        let name = target.name();
+                        if let Some((owner, variant)) = name.rsplit_once("::") {
+                            let resolved_owner = use_map.get(owner).or_else(|| import_map.get(owner));
+                            let is_custom_enum = known_enums.contains(owner)
+                                || local_enums.contains(owner)
+                                || resolved_owner.is_some_and(|resolved| runtime_names.contains_key(resolved));
+                            if is_custom_enum {
+                                *target = target.with_name(format!("{}::{variant}", qualify(owner)?));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 pub(crate) fn mangle_mir(
     mir: &mut crate::mir::MirModule,

@@ -213,6 +213,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_tuple_get"
             | "rt_tuple_set"
             | "rt_enum_new"
+            | "rt_enum_discriminant"
+            | "rt_enum_id"
             | "rt_enum_payload"
             | "rt_string_eq"
             | "rt_hash_text"
@@ -2333,6 +2335,53 @@ pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::p
     }
 }
 
+/// Compute the dotted module name used by Pure Simple for runtime type identity.
+/// Unlike symbol mangling, numbered layer prefixes are significant here.
+pub fn enum_runtime_module_name_from_path(
+    file_path: &std::path::Path,
+    source_root: &std::path::Path,
+) -> String {
+    let stripped = file_path.strip_prefix(source_root);
+    let root_matched = stripped.is_ok();
+    let relative = stripped.unwrap_or(file_path);
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let start = if root_matched {
+        0
+    } else if let Some(index) = components.iter().position(|part| part == "src") {
+        index + 1
+    } else {
+        components.iter().position(|part| part == "examples").unwrap_or(0)
+    };
+
+    components
+        .into_iter()
+        .skip(start)
+        .map(|part| {
+            let part = part
+                .strip_suffix(".spl")
+                .or_else(|| part.strip_suffix(".sdn"))
+                .unwrap_or(&part);
+            part.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2360,8 +2409,10 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_string_bytes_runtime_symbol_is_retained() {
+    fn synthesized_runtime_symbols_are_retained() {
         assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
+        assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
+        assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
     }
 
     #[test]

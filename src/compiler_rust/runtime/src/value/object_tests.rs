@@ -391,7 +391,10 @@ fn test_option_map_none_enum() {
         "None".hash(&mut h);
         (h.finish() & 0xFFFFFFFF) as u32
     };
-    let none_val = rt_enum_new(0, none_disc, RuntimeValue::NIL);
+    let none_val = rt_enum_new(super::OPTION_ENUM_ID, none_disc, RuntimeValue::NIL);
+    let custom_none = rt_enum_new(super::OPTION_ENUM_ID + 1, none_disc, RuntimeValue::NIL);
+    assert!(super::rt_is_none(none_val));
+    assert!(!super::rt_is_none(custom_none));
     let closure = rt_closure_new(std::ptr::null(), 0);
     let result = rt_option_map(none_val, closure);
     // Should return the original None
@@ -410,7 +413,7 @@ fn test_option_map_some_with_identity() {
         "Some".hash(&mut h);
         (h.finish() & 0xFFFFFFFF) as u32
     };
-    let some_val = rt_enum_new(0, some_disc, RuntimeValue::from_int(42));
+    let some_val = rt_enum_new(super::OPTION_ENUM_ID, some_disc, RuntimeValue::from_int(42));
 
     // Identity closure: returns its second arg (the payload)
     extern "C" fn identity(_closure: RuntimeValue, payload: RuntimeValue) -> RuntimeValue {
@@ -422,6 +425,7 @@ fn test_option_map_some_with_identity() {
 
     // Result should be Some(42)
     assert!(!super::rt_is_none(result));
+    assert_eq!(rt_enum_id(result), super::OPTION_ENUM_ID as i64);
     let payload = rt_enum_payload(result);
     assert_eq!(payload.as_int(), 42);
 }

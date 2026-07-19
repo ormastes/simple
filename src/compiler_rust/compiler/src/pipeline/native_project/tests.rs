@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use crate::codegen::common_backend::{module_init_symbol, module_prefix_from_path};
+use crate::codegen::common_backend::{
+    enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path,
+};
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
@@ -18,6 +20,124 @@ fn pure_simple_lambda_inline_helper_has_both_callers() {
     assert!(lowering.contains("me lower_inline_lambda_with_locals("));
     assert!(lowering.contains("self.lower_inline_lambda_with_locals(params, body, arg_locals)"));
     assert!(methods.contains("self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])"));
+}
+
+#[test]
+fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
+    use crate::hir::{HirType, TypeId};
+    use crate::mir::{BlockId, MirFunction, MirInst, MirModule, MirPattern};
+    use simple_parser::Visibility;
+
+    let mut mir = MirModule::new();
+    mir.type_registry.register_named(
+        "Result".to_string(),
+        HirType::Enum {
+            name: "Result".to_string(),
+            variants: vec![("Same".to_string(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
+        },
+    );
+    mir.local_globals.insert("Result".to_string());
+    let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
+    let unit = function.new_vreg();
+    let matched = function.new_vreg();
+    let block = function.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::EnumUnit {
+        dest: unit,
+        enum_name: "Result".to_string(),
+        variant_name: "Same".to_string(),
+    });
+    block.instructions.push(MirInst::PatternTest {
+        dest: matched,
+        subject: unit,
+        pattern: MirPattern::Variant {
+            enum_name: "Option".to_string(),
+            variant_name: "None".to_string(),
+            payload: None,
+        },
+    });
+    mir.functions.push(function);
+
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let block = &mir.functions[0].blocks[0];
+    assert!(matches!(
+        &block.instructions[0],
+        MirInst::EnumUnit { enum_name, .. } if enum_name == "pkg.owner.Result"
+    ));
+    assert!(matches!(
+        &block.instructions[1],
+        MirInst::PatternTest { pattern: MirPattern::Variant { enum_name, .. }, .. }
+            if enum_name == "Option"
+    ));
+}
+
+#[test]
+fn enum_runtime_identity_collision_is_reported_before_codegen() {
+    let root = std::path::PathBuf::from("/tmp/enum-runtime-identity/src");
+    let file_sources = vec![(
+        root.join("collision.spl"),
+        "enum Type175882:\n    Same\n\nenum Type255081:\n    Same\n".to_string(),
+    )];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&root), &root);
+    assert_eq!(
+        result.enum_runtime_collision.as_deref(),
+        Some("enum runtime ID collision: 'collision.Type175882' and 'collision.Type255081'")
+    );
+
+    use crate::hir::HirType;
+    let mut mir = crate::mir::MirModule::new();
+    for name in ["Type175882", "Type255081"] {
+        mir.type_registry.register_named(
+            name.to_string(),
+            HirType::Enum {
+                name: name.to_string(),
+                variants: vec![],
+                generic_params: vec![],
+                is_generic_template: false,
+                type_bindings: std::collections::HashMap::new(),
+            },
+        );
+        mir.local_globals.insert(name.to_string());
+    }
+    let collision = super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "collision",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        collision,
+        "enum runtime ID collision: 'collision.Type175882' and 'collision.Type255081'"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("collision.spl"), &file_sources[0].1).unwrap();
+    let error = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out"))
+        .config(NativeBuildConfig {
+            no_mangle: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_dir)
+        .build()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "enum runtime ID collision: 'collision.Type175882' and 'collision.Type255081'"
+    );
 }
 
 #[test]
@@ -478,6 +598,13 @@ fn test_module_prefix_from_path() {
         ),
         "compiler__frontend__core__lexer"
     );
+    assert_eq!(
+        enum_runtime_module_name_from_path(
+            &PathBuf::from("/project/src/compiler/10.frontend/core/lexer.spl"),
+            &source_root
+        ),
+        "compiler.10.frontend.core.lexer"
+    );
 
     assert_eq!(
         module_prefix_from_path(&PathBuf::from("/project/src/app/cli/main.spl"), &source_root),
@@ -517,6 +644,40 @@ fn test_module_prefix_from_path() {
     assert!(module_init_symbol(Some(&punctuation_prefix))
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_'));
+}
+
+#[test]
+fn enum_runtime_names_keep_explicit_source_dir_namespace() {
+    let source_root = PathBuf::from("/project/src");
+    let source_dirs = vec![
+        source_root.join("compiler"),
+        source_root.join("app"),
+        source_root.join("lib"),
+    ];
+    let file_sources = vec![
+        (
+            source_root.join("compiler/10.frontend/probe.spl"),
+            "enum CompilerProbe:\n    Ready\n".to_string(),
+        ),
+        (
+            source_root.join("app/tool/probe.spl"),
+            "enum AppProbe:\n    Ready\n".to_string(),
+        ),
+        (
+            source_root.join("lib/common/probe.spl"),
+            "enum LibProbe:\n    Ready\n".to_string(),
+        ),
+    ];
+
+    let result = super::imports::build_import_map(&file_sources, &source_dirs, &source_root);
+    let names = result.enum_runtime_names.values().collect::<std::collections::HashSet<_>>();
+    for expected in [
+        "compiler.10.frontend.probe.CompilerProbe",
+        "app.tool.probe.AppProbe",
+        "lib.common.probe.LibProbe",
+    ] {
+        assert!(names.iter().any(|name| name.as_str() == expected), "missing {expected}");
+    }
 }
 
 #[test]
@@ -915,6 +1076,10 @@ fn test_default_config_mangle() {
     );
     assert!(config.incremental, "incremental should default to true");
     assert!(!config.clean, "clean should default to false");
+    assert_eq!(
+        config.backend,
+        if cfg!(feature = "llvm") { "llvm" } else { "cranelift" }
+    );
 }
 
 #[test]
@@ -4175,6 +4340,7 @@ int main(void) { app_call(); return 0; }
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4284,6 +4450,7 @@ void __module_init_security_registry(void) {
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4410,6 +4577,7 @@ int main(int argc, char** argv) {
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4514,6 +4682,7 @@ int main(void) {
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4581,6 +4750,7 @@ int main(void) {
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4642,6 +4812,7 @@ int main(void) { return (int)run_check(); }
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5357,6 +5528,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6019,6 +6191,8 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         struct_defs: std::collections::HashMap::new(),
         duplicate_struct_defs: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
+        enum_runtime_names: std::collections::HashMap::new(),
+        enum_runtime_collision: None,
         data_exports: std::collections::HashSet::new(),
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),

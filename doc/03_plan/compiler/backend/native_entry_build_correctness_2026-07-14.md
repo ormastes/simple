@@ -461,9 +461,18 @@ the shared binary — deploys require explicit user go-ahead).
   heap-tag-collision integers, and generic-versus-packed array payloads so
   hosted interning cannot false-green. Hosted LLVM/Cranelift and AArch64/RV64
   execution are scheduled; ARM32/RV32 remain default-LLVM compile receipts.
-  The shared fixture also rejects cross-type enums nested behind `Any`; see
-  `native_enum_runtime_type_identity_2026-07-19.md`. The original
-  x86_64-unknown-none QEMU proof is pending.
+  The shared fixture also rejects cross-type enums nested behind `Any` and now
+  asserts that both custom runtime IDs are distinct and at least 2; see
+  `native_enum_runtime_type_identity_2026-07-19.md`. Existing hosted
+  Linux/macOS/Windows and canonical FreeBSD full-QEMU gates schedule the Rust
+  seed against that fixture with both emitted backends after seed/native-all
+  exists. Cross-compiled seed binaries remain build-only. The Rust
+  native-project path now threads its configured backend through compilation,
+  cache identity, and linking, so flagless enabled-seed builds actually use the
+  documented LLVM default while explicit Cranelift remains supported; see
+  `rust_seed_native_build_default_backend_config_ignored_2026-07-19.md`. The Rust
+  MIR-to-bytecode compiler still lacks `EnumUnit`/`EnumWith` lowering, so that
+  metadata lane and the original x86_64-unknown-none QEMU proof remain open.
 - Module-init symbols now exclude punctuation inherited from absolute or
   hyphenated source paths in both the pure-Simple bootstrap MIR mirror and the
   Rust seed's owning module-prefix derivation. The existing hosted native smoke

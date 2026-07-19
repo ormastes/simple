@@ -75,13 +75,21 @@ pub(crate) fn compile_pattern_test<M: Module>(
             // All enums now use rt_enum_new format consistently.
             // rt_enum_discriminant extracts the discriminant.
             let disc = call_runtime_1(ctx, builder, "rt_enum_discriminant", subject_val);
+            let enum_id = call_runtime_1(ctx, builder, "rt_enum_id", subject_val);
 
             // All enums use hashed variant name discriminants consistently
             let expected_disc = calculate_variant_discriminant(variant_name) as i64;
             let expected_val = builder.ins().iconst(types::I64, expected_disc);
-            builder
+            let disc_matches = builder
                 .ins()
-                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, disc, expected_val)
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, disc, expected_val);
+            let expected_id = builder
+                .ins()
+                .iconst(types::I64, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
+            let id_matches = builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, enum_id, expected_id);
+            builder.ins().band(disc_matches, id_matches)
         }
         _ => {
             // Struct/tuple patterns: always match for now (destructuring handled separately)
@@ -127,11 +135,14 @@ pub(crate) fn compile_enum_unit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
+    enum_name: &str,
     variant_name: &str,
 ) {
     let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
-    let enum_id = builder.ins().iconst(types::I32, 0);
+    let enum_id = builder
+        .ins()
+        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
     // Nil payload: tagged value 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
     let nil_val = builder.ins().iconst(types::I64, 3);
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, nil_val);
@@ -142,12 +153,15 @@ pub(crate) fn compile_enum_with<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
+    enum_name: &str,
     variant_name: &str,
     payload: VReg,
 ) {
     let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
-    let enum_id = builder.ins().iconst(types::I32, 0);
+    let enum_id = builder
+        .ins()
+        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
     let payload_val = ctx.vreg_values[&payload];
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);

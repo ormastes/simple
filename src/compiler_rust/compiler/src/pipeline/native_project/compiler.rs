@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use simple_common::target::TargetCpu;
 use simple_parser::ast::{Block, Expr, FunctionDef, Node, ReturnStmt, Type, Visibility};
 
-use crate::codegen::common_backend::module_prefix_from_path;
+use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_prefix_from_path};
 use crate::codegen::Codegen;
 use crate::hir::Lowerer;
 use crate::module_resolver::ModuleResolver;
@@ -16,7 +16,7 @@ use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
 use super::imports::{build_suffix_index, build_use_map_from_ast};
-use super::mangle::mangle_mir;
+use super::mangle::{mangle_mir, qualify_enum_runtime_names};
 use super::module_global_init::inject_freestanding_module_global_init;
 
 fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), String> {
@@ -214,6 +214,7 @@ impl NativeProjectBuilder {
         let temp_dir = temp_dir.to_path_buf();
         let total = entries.len();
         let no_mangle = self.config.no_mangle;
+        let backend = self.config.backend.clone();
         let opt_level = self.config.opt_level;
         let canonical_entry = canonical_entry.clone();
         let imports = imports.clone();
@@ -235,6 +236,7 @@ impl NativeProjectBuilder {
                     file_timeout,
                     stack_size,
                     no_mangle,
+                    backend.clone(),
                     opt_level,
                     is_entry,
                     imports.clone(),
@@ -285,6 +287,7 @@ impl NativeProjectBuilder {
                     self.config.file_timeout,
                     self.config.stack_size,
                     self.config.no_mangle,
+                    self.config.backend.clone(),
                     self.config.opt_level,
                     is_entry,
                     imports.clone(),
@@ -317,8 +320,10 @@ pub(crate) fn compile_file_to_object(
     file_path: &Path,
     project_root: &Path,
     source_root: &Path,
+    enum_runtime_root: &Path,
     source_dirs: &[PathBuf],
     no_mangle: bool,
+    backend: &str,
     opt_level: crate::optimizations::NativeOptimizationLevel,
     is_entry: bool,
     imports: &ModuleImports,
@@ -457,6 +462,16 @@ pub(crate) fn compile_file_to_object(
     // MIR
     let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
         .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    let module_prefix = module_prefix_from_path(file_path, source_root);
+    let enum_runtime_module_name = enum_runtime_module_name_from_path(file_path, enum_runtime_root);
+    qualify_enum_runtime_names(
+        &mut mir,
+        &enum_runtime_module_name,
+        &use_map,
+        imports.import_map.as_ref(),
+        imports.enum_runtime_names.as_ref(),
+    )
+    .map_err(|e| format!("{}: mir enum identity: {e}", file_path.display()))?;
 
     // Trampoline: when the entry file has no local `main` but re-exports one
     // via `use`, inject a synthetic MIR function that forwards to the resolved
@@ -564,8 +579,7 @@ pub(crate) fn compile_file_to_object(
         }
     }
 
-    // Codegen -- select backend via SIMPLE_BACKEND env var
-    let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
+    let use_llvm = backend == "llvm";
 
     if use_llvm {
         #[cfg(feature = "llvm")]
@@ -576,7 +590,7 @@ pub(crate) fn compile_file_to_object(
             let mut mir = mir;
 
             if !no_mangle {
-                let prefix = module_prefix_from_path(file_path, source_root);
+                let prefix = module_prefix.clone();
                 let global_suffix_index = build_suffix_index(imports.all_mangled.as_ref());
                 let unresolved = mangle_mir(
                     &mut mir,
@@ -613,7 +627,7 @@ pub(crate) fn compile_file_to_object(
             llvm.set_data_exports(imports.data_exports.clone());
             llvm.set_use_map(use_map.clone());
             if !no_mangle {
-                llvm.set_module_prefix(module_prefix_from_path(file_path, source_root));
+                llvm.set_module_prefix(module_prefix.clone());
             }
             let obj = llvm
                 .compile(&mir)
@@ -636,7 +650,7 @@ pub(crate) fn compile_file_to_object(
         ));
     }
 
-    // Cranelift backend (default)
+    // Cranelift backend
     let target = effective_target();
     let mut codegen =
         Codegen::for_target_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
@@ -650,8 +664,7 @@ pub(crate) fn compile_file_to_object(
     codegen.set_enum_defs(imports.enum_defs.clone());
     codegen.set_tag_runtime_pool_join_result(true);
     if !no_mangle {
-        let prefix = module_prefix_from_path(file_path, source_root);
-        codegen.set_module_prefix(prefix);
+        codegen.set_module_prefix(module_prefix);
     }
     let obj = codegen
         .compile_module(&mir)
@@ -671,6 +684,7 @@ pub(crate) fn compile_file_safe(
     timeout_secs: u64,
     stack_size: usize,
     no_mangle: bool,
+    backend: String,
     opt_level: crate::optimizations::NativeOptimizationLevel,
     is_entry: bool,
     imports: ModuleImports,
@@ -692,8 +706,10 @@ pub(crate) fn compile_file_safe(
                     &file_path,
                     &project_root,
                     &source_root,
+                    &fallback_root,
                     &source_dirs,
                     no_mangle,
+                    &backend,
                     opt_level,
                     is_entry,
                     &imports,
@@ -705,8 +721,10 @@ pub(crate) fn compile_file_safe(
                         &file_path,
                         &project_root,
                         &source_root,
+                        &fallback_root,
                         &source_dirs,
                         no_mangle,
+                        &backend,
                         opt_level,
                         is_entry,
                         &imports,

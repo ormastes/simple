@@ -439,7 +439,7 @@ pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> Runti
 #[cfg(test)]
 mod dict_composite_key_tests {
     use super::*;
-    use crate::value::collections::{rt_string_new, rt_tuple_new, rt_tuple_set};
+    use crate::value::collections::{rt_array_new, rt_array_push, rt_string_new, rt_tuple_new, rt_tuple_set};
     use crate::value::objects::{rt_enum_new, rt_object_field_set, rt_object_new};
 
     fn text(s: &str) -> RuntimeValue {
@@ -526,16 +526,34 @@ mod dict_composite_key_tests {
     #[test]
     fn enum_key_via_variable_is_found_by_structural_equality() {
         let d = rt_dict_new(8);
-        let k1 = rt_enum_new(0, 3, RuntimeValue::from_int(9));
+        let k1 = rt_enum_new(7, 3, RuntimeValue::from_int(9));
         assert!(rt_dict_set(d, k1, RuntimeValue::from_int(42)));
 
-        let k2 = rt_enum_new(0, 3, RuntimeValue::from_int(9));
+        let k2 = rt_enum_new(7, 3, RuntimeValue::from_int(9));
         assert_ne!(k1.to_raw(), k2.to_raw());
         assert!(rt_dict_contains(d, k2));
         assert_eq!(rt_dict_get(d, k2).as_int(), 42);
 
-        let k_diff = rt_enum_new(0, 4, RuntimeValue::from_int(9));
+        let k_diff = rt_enum_new(7, 4, RuntimeValue::from_int(9));
         assert!(!rt_dict_contains(d, k_diff));
+
+        let k_other_type = rt_enum_new(8, 3, RuntimeValue::from_int(9));
+        assert!(!rt_dict_contains(d, k_other_type));
+        assert!(rt_dict_get(d, k_other_type).is_nil());
+    }
+
+    #[test]
+    fn enum_key_with_array_payload_has_structural_hash() {
+        fn key() -> RuntimeValue {
+            let payload = rt_array_new(2);
+            assert!(rt_array_push(payload, RuntimeValue::from_int(4)));
+            assert!(rt_array_push(payload, RuntimeValue::from_int(5)));
+            rt_enum_new(7, 3, payload)
+        }
+
+        let d = rt_dict_new(8);
+        assert!(rt_dict_set(d, key(), RuntimeValue::from_int(42)));
+        assert_eq!(rt_dict_get(d, key()).as_int(), 42);
     }
 
     #[test]

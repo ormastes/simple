@@ -759,7 +759,7 @@ int main(int argc, char** argv) {
         let cross_target = effective_target();
         let cxx = target_cxx_compiler(cross_target);
         let is_clang_cl = cxx.contains("clang-cl");
-        let use_llvm_backend = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
+        let use_llvm_backend = self.config.backend == "llvm";
         let init_target_triple = if cross_target.is_host() {
             None
         } else {
@@ -1495,7 +1495,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         let triple = Self::freestanding_target_triple(cross_target)
             .ok_or_else(|| "unsupported freestanding target architecture".to_string())?;
 
-        let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
+        let use_llvm = self.config.backend == "llvm";
         let riscv32_march_override = std::env::var("SIMPLE_RISCV32_MARCH").ok();
         let riscv32_mabi_override = std::env::var("SIMPLE_RISCV32_MABI").ok();
         let (march, mabi) = match cross_target.arch {

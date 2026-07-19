@@ -63,12 +63,8 @@ const MAX_HASH_DEPTH: u32 = 64;
 /// values that compare equal MUST hash equal, or dict lookups (linear
 /// probing starts at `hash % capacity`) will probe the wrong bucket and miss
 /// an already-inserted structurally-equal key. Strings/Enums/Objects/Tuples
-/// hash their CONTENTS (recursively); every other heap type (Array, Closure,
-/// Dict, ...) falls back to a raw-bits hash, matching pre-fix behavior for
-/// types `value_eq` does not structurally compare (Array is a pre-existing
-/// exception: `value_eq` already compares array contents, but arrays are not
-/// used as dict keys in practice and are left out of scope here, matching
-/// the interpreter-side fix's scope of struct/enum/tuple keys).
+/// hash their CONTENTS (recursively); heap types without structural equality
+/// (Closure, Dict, ...) fall back to a raw-bits hash.
 pub(crate) fn value_hash(v: RuntimeValue) -> u64 {
     value_hash_inner(v, 0)
 }
@@ -107,16 +103,41 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
             let Some(ep) = get_typed_ptr::<RuntimeEnum>(v, HeapObjectType::Enum) else {
                 return fnv1a_bits(v.to_raw());
             };
-            // NOTE: deliberately does NOT mix in `enum_id`, matching
-            // `heap_value_eq`'s Enum case below (which also only compares
-            // `discriminant` + `payload`). Hash MUST be consistent with
-            // equality -- if `enum_id` were hashed here while eq ignores it,
-            // two values eq() calls "equal" could still hash unequal and a
-            // dict lookup would miss them (the same class of bug this fix
-            // closes, just introduced fresh via an inconsistent hash).
             unsafe {
-                let hash = fnv1a_bits((*ep).discriminant as u64);
-                hash ^ value_hash_inner((*ep).payload, depth + 1)
+                let mut hash = fnv1a_bits((*ep).enum_id as u64);
+                hash = hash.wrapping_mul(0x100000001b3) ^ fnv1a_bits((*ep).discriminant as u64);
+                hash.wrapping_mul(0x100000001b3) ^ value_hash_inner((*ep).payload, depth + 1)
+            }
+        }
+        Some(HeapObjectType::Array) => {
+            let Some(ap) = get_typed_ptr::<RuntimeArray>(v, HeapObjectType::Array) else {
+                return fnv1a_bits(v.to_raw());
+            };
+            unsafe {
+                if (*ap).len > 0 && (*ap).data.is_null() {
+                    return fnv1a_bits(v.to_raw());
+                }
+                let mut hash = fnv1a_bits((*ap).len);
+                for index in 0..(*ap).len as usize {
+                    let element_hash = if (*ap).is_byte_packed() {
+                        value_hash_inner(
+                            RuntimeValue::from_int(*((*ap).data as *const u8).add(index) as i64),
+                            depth + 1,
+                        )
+                    } else if (*ap).is_u64_packed() {
+                        let word = *((*ap).data as *const u64).add(index);
+                        let signed = word as i64;
+                        if RuntimeValue::from_int(signed).as_int() == signed {
+                            value_hash_inner(RuntimeValue::from_int(signed), depth + 1)
+                        } else {
+                            fnv1a_bits(word)
+                        }
+                    } else {
+                        value_hash_inner(*(*ap).data.add(index), depth + 1)
+                    };
+                    hash = hash.wrapping_mul(0x100000001b3) ^ element_hash;
+                }
+                hash
             }
         }
         Some(HeapObjectType::Object) => {
@@ -186,7 +207,11 @@ fn heap_value_eq(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usi
             let Some(eb) = get_typed_ptr::<RuntimeEnum>(b, HeapObjectType::Enum) else {
                 return false;
             };
-            unsafe { (*ea).discriminant == (*eb).discriminant && value_eq_inner((*ea).payload, (*eb).payload, visited) }
+            unsafe {
+                (*ea).enum_id == (*eb).enum_id
+                    && (*ea).discriminant == (*eb).discriminant
+                    && value_eq_inner((*ea).payload, (*eb).payload, visited)
+            }
         }
         (Some(HeapObjectType::Array), Some(HeapObjectType::Array)) => {
             let Some(aa) = get_typed_ptr::<RuntimeArray>(a, HeapObjectType::Array) else {
@@ -556,9 +581,12 @@ mod tests {
         let a = rt_enum_new(0, 42, RuntimeValue::NIL);
         let b = rt_enum_new(0, 42, RuntimeValue::NIL);
         let c = rt_enum_new(0, 99, RuntimeValue::NIL);
+        let d = rt_enum_new(1, 42, RuntimeValue::NIL);
 
         assert_eq!(rt_value_eq(a, b), 1, "same disc should be equal");
         assert_eq!(rt_value_eq(a, c), 0, "diff disc should not be equal");
+        assert_eq!(rt_value_eq(a, d), 0, "different enum IDs must not be equal");
+        assert_ne!(value_hash(a), value_hash(d), "enum ID must contribute to the hash");
     }
 
     #[test]

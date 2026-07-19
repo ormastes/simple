@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::codegen::common_backend::module_prefix_from_path;
+use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_prefix_from_path};
 use super::{safe_canonicalize, source_root_for_file};
 
 /// Import map build result.
@@ -35,6 +35,10 @@ pub(crate) struct ImportMapResult {
     /// `expr/access.rs::lower_field_access` returned None and the
     /// enum-variant early-return fell through to the field-access fallback.
     pub enum_defs: std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
+    /// Mangled enum owner (`module__Enum`) to stable dotted runtime identity.
+    pub enum_runtime_names: std::collections::HashMap<String, String>,
+    /// First project-wide stable-ID collision, if any.
+    pub enum_runtime_collision: Option<String>,
     /// Set of mangled names that correspond to module-level `val`/`var`/`const`
     /// (i.e. DATA, not functions). Used by the cranelift backend to decide
     /// whether a cross-module imported global should be declared as a data
@@ -231,6 +235,9 @@ pub(crate) fn build_import_map(
     let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
+    let mut enum_runtime_names: HashMap<String, String> = HashMap::new();
+    let mut enum_runtime_id_names: HashMap<u32, String> = HashMap::new();
+    let mut enum_runtime_collision = None;
     let mut duplicate_enum_defs: HashSet<String> = HashSet::new();
     let mut data_exports: HashSet<String> = HashSet::new();
     let mut fn_arities: HashMap<String, usize> = HashMap::new();
@@ -248,6 +255,7 @@ pub(crate) fn build_import_map(
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
+        let runtime_module_name = enum_runtime_module_name_from_path(path, fallback_root);
         let filtered_source =
             crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
         let mut parser = simple_parser::Parser::new(&filtered_source);
@@ -376,6 +384,23 @@ pub(crate) fn build_import_map(
                         // Register the bare enum type name so cross-module imports
                         // resolve to the defining module's symbol, not the importer's.
                         let type_mangled = format!("{}__{}", prefix, e.name);
+                        let runtime_name = if runtime_module_name.is_empty() {
+                            e.name.clone()
+                        } else {
+                            format!("{}.{}", runtime_module_name, e.name)
+                        };
+                        let runtime_id = crate::codegen::shared::enum_runtime_type_id(&runtime_name);
+                        if let Some(existing) = enum_runtime_id_names.get(&runtime_id) {
+                            if existing != &runtime_name && enum_runtime_collision.is_none() {
+                                enum_runtime_collision = Some(format!(
+                                    "enum runtime ID collision: '{}' and '{}'",
+                                    existing, runtime_name
+                                ));
+                            }
+                        } else {
+                            enum_runtime_id_names.insert(runtime_id, runtime_name.clone());
+                        }
+                        enum_runtime_names.insert(type_mangled.clone(), runtime_name);
                         raw_to_mangled
                             .entry(e.name.clone())
                             .or_default()
@@ -743,6 +768,8 @@ pub(crate) fn build_import_map(
         struct_defs,
         duplicate_struct_defs,
         enum_defs,
+        enum_runtime_names,
+        enum_runtime_collision,
         data_exports,
         fn_arities,
         fn_return_types,

@@ -1240,6 +1240,29 @@ fn codegen_pattern_test() {
 }
 
 #[test]
+fn codegen_variant_pattern_test() {
+    assert!(aot_compiles("variant_pat_test", |f| {
+        let subject = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt {
+            dest: subject,
+            value: 0,
+        });
+        block.instructions.push(MirInst::PatternTest {
+            dest,
+            subject,
+            pattern: MirPattern::Variant {
+                enum_name: "pkg.Status".to_string(),
+                variant_name: "Ready".to_string(),
+                payload: None,
+            },
+        });
+        dest
+    }));
+}
+
+#[test]
 fn codegen_pattern_bind() {
     assert!(aot_compiles("pat_bind", |f| {
         let subject = f.new_vreg();

@@ -2288,33 +2288,40 @@ fn runtime_payload_value<M: Module>(
     }
 }
 
-fn known_enum_variant_name<'a, M: Module>(ctx: &InstrContext<'_, M>, func_name: &'a str) -> Option<&'a str> {
+fn known_enum_variant<'a, M: Module>(ctx: &InstrContext<'_, M>, func_name: &'a str) -> Option<(&'a str, &'a str)> {
     let split = func_name
         .rsplit_once("::")
         .or_else(|| func_name.rsplit_once('.'))
         .or_else(|| func_name.rsplit_once("_dot_"))?;
     let enum_name = split.0;
     let variant_name = split.1;
-    let enum_tail = enum_name.rsplit("__").next().unwrap_or(enum_name);
+    let enum_tail = enum_name
+        .rsplit_once('.')
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| enum_name.rsplit("__").next().unwrap_or(enum_name));
     let variants = ctx.enum_defs.get(enum_name).or_else(|| ctx.enum_defs.get(enum_tail))?;
     variants
         .iter()
         .any(|(candidate, _)| candidate == variant_name)
-        .then_some(variant_name)
+        .then_some((enum_name, variant_name))
 }
 
-fn unresolved_enum_constructor_variant_name(func_name: &str) -> Option<&str> {
+fn unresolved_enum_constructor_variant(func_name: &str) -> Option<(&str, &str)> {
     let (type_name, variant_name) = func_name.rsplit_once("::")?;
-    let type_tail = type_name.rsplit("__").next().unwrap_or(type_name);
+    let type_tail = type_name
+        .rsplit_once('.')
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| type_name.rsplit("__").next().unwrap_or(type_name));
     let type_head_is_upper = type_tail.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     let variant_head_is_upper = variant_name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-    (type_head_is_upper && variant_head_is_upper).then_some(variant_name)
+    (type_head_is_upper && variant_head_is_upper).then_some((type_name, variant_name))
 }
 
 fn compile_known_enum_constructor_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
+    enum_name: &str,
     variant_name: &str,
     args: &[VReg],
 ) -> bool {
@@ -2327,7 +2334,9 @@ fn compile_known_enum_constructor_call<M: Module>(
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
     let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
-    let enum_id_val = builder.ins().iconst(types::I32, 0);
+    let enum_id_val = builder
+        .ins()
+        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
@@ -2790,14 +2799,20 @@ pub fn compile_call<M: Module>(
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;
-    // Handle Result/Option constructor builtins (Ok, Err, Some, None)
-    // Also handle qualified names like "MyResult::Ok", "Option::None", etc.
-    let variant_name = func_name
+    // Handle only the true Result/Option constructors. A custom enum may use
+    // the same variant leaves and must retain its qualified custom type ID.
+    let split_variant = func_name
         .rsplit_once("::")
-        .or_else(|| func_name.rsplit_once('.'))
-        .map(|(_, v)| v)
-        .unwrap_or(func_name);
-    if matches!(variant_name, "Ok" | "Err" | "Some" | "None") {
+        .or_else(|| func_name.rsplit_once('.'));
+    let (enum_owner, variant_name) = split_variant
+        .map(|(owner, variant)| (Some(owner), variant))
+        .unwrap_or((None, func_name));
+    let builtin_enum_id = match (enum_owner, variant_name) {
+        (None | Some("Result"), "Ok" | "Err") => Some(0),
+        (None | Some("Option"), "Some" | "None") => Some(1),
+        _ => None,
+    };
+    if let Some(builtin_enum_id) = builtin_enum_id {
         if let Some(d) = dest {
             // Use hashed discriminants consistently with pattern matching
             let disc = {
@@ -2807,7 +2822,7 @@ pub fn compile_call<M: Module>(
                 variant_name.hash(&mut hasher);
                 (hasher.finish() & 0xFFFFFFFF) as i64
             };
-            let enum_id_val = builder.ins().iconst(types::I32, 0);
+            let enum_id_val = builder.ins().iconst(types::I32, builtin_enum_id);
             let disc_val = builder.ins().iconst(types::I32, disc);
             let payload_val = if !args.is_empty() {
                 // Tag scalar payloads (Ok/Err/Some) to match the multi-arg /
@@ -3133,12 +3148,12 @@ pub fn compile_call<M: Module>(
     } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
         compile_user_function_call(ctx, builder, dest, func_name, args, callee_id)?;
     } else {
-        if let Some(variant_name) = known_enum_variant_name(ctx, func_name) {
-            if compile_known_enum_constructor_call(ctx, builder, dest, variant_name, args) {
+        if let Some((enum_name, variant_name)) = known_enum_variant(ctx, func_name) {
+            if compile_known_enum_constructor_call(ctx, builder, dest, enum_name, variant_name, args) {
                 return Ok(());
             }
-        } else if let Some(variant_name) = unresolved_enum_constructor_variant_name(func_name) {
-            if compile_known_enum_constructor_call(ctx, builder, dest, variant_name, args) {
+        } else if let Some((enum_name, variant_name)) = unresolved_enum_constructor_variant(func_name) {
+            if compile_known_enum_constructor_call(ctx, builder, dest, enum_name, variant_name, args) {
                 return Ok(());
             }
         }

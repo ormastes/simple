@@ -538,11 +538,17 @@ impl CodegenEmitter for MirInterpreterEmitter {
         self.set(dest, 0);
         Ok(())
     }
-    fn emit_enum_unit(&mut self, dest: VReg, _variant_name: &str) -> Result<(), Self::Error> {
+    fn emit_enum_unit(&mut self, dest: VReg, _enum_name: &str, _variant_name: &str) -> Result<(), Self::Error> {
         self.set(dest, 0);
         Ok(())
     }
-    fn emit_enum_with(&mut self, dest: VReg, _variant_name: &str, _payload: VReg) -> Result<(), Self::Error> {
+    fn emit_enum_with(
+        &mut self,
+        dest: VReg,
+        _enum_name: &str,
+        _variant_name: &str,
+        _payload: VReg,
+    ) -> Result<(), Self::Error> {
         self.set(dest, 0);
         Ok(())
     }

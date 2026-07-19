@@ -250,15 +250,15 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
         MirInst::EnumPayload { dest, value } => emitter.emit_enum_payload(*dest, *value),
         MirInst::EnumUnit {
             dest,
-            enum_name: _,
+            enum_name,
             variant_name,
-        } => emitter.emit_enum_unit(*dest, variant_name),
+        } => emitter.emit_enum_unit(*dest, enum_name, variant_name),
         MirInst::EnumWith {
             dest,
-            enum_name: _,
+            enum_name,
             variant_name,
             payload,
-        } => emitter.emit_enum_with(*dest, variant_name, *payload),
+        } => emitter.emit_enum_with(*dest, enum_name, variant_name, *payload),
         MirInst::UnionDiscriminant { dest, value } => emitter.emit_union_discriminant(*dest, *value),
         MirInst::UnionPayload {
             dest,

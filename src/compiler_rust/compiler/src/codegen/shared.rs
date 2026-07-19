@@ -16,6 +16,25 @@ use crate::mir::{
 
 use super::types_util::type_to_cranelift;
 
+/// Stable runtime type ID shared by native enum constructors and match checks.
+/// IDs 0 and 1 are reserved for the built-in Result and Option types.
+pub(crate) fn enum_runtime_type_id(runtime_name: &str) -> u32 {
+    match runtime_name {
+        "Result" => return 0,
+        "Option" => return 1,
+        _ => {}
+    }
+
+    let mut hash = if runtime_name.is_empty() { 0 } else { 0xcbf29ce484222325_u64 };
+    for byte in runtime_name.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let signed = hash as i64;
+    let positive = if signed < 0 { signed.wrapping_neg() } else { signed };
+    (positive.rem_euclid(2_147_483_646) as u32) + 2
+}
+
 /// Return the platform-appropriate calling convention.
 ///
 /// On Windows, Cranelift JIT-compiled code must use WindowsFastcall to match
@@ -199,6 +218,18 @@ mod tests {
             kind: LocalKind::Parameter,
             is_ghost: false,
         }
+    }
+
+    #[test]
+    fn enum_runtime_type_id_reserves_builtins_and_matches_known_collision() {
+        assert_eq!(enum_runtime_type_id("Result"), 0);
+        assert_eq!(enum_runtime_type_id("Option"), 1);
+        assert_ne!(enum_runtime_type_id("pkg.Result"), 0);
+        assert_ne!(enum_runtime_type_id("pkg.Option"), 1);
+        assert_eq!(
+            enum_runtime_type_id("collision.Type175882"),
+            enum_runtime_type_id("collision.Type255081")
+        );
     }
 
     #[test]

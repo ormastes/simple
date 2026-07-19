@@ -56,9 +56,9 @@ impl<'a> MirLowerer<'a> {
             // The RHS is either Global("E::A") (bare field access, no args) or
             // Call{Global("E::A"), []} (called with no args). In both cases the HIR
             // type is HirType::Enum. Plain pointer equality (icmp) always fails because
-            // LHS and RHS are distinct heap allocations. Emit
-            // rt_enum_check_discriminant(lhs, disc) where disc is the same hash used
-            // by rt_enum_new / match patterns. We check this BEFORE lowering the RHS
+            // LHS and RHS are distinct heap allocations. Emit a typed pattern test
+            // that checks both the enum runtime ID and the variant discriminant. We
+            // check this BEFORE lowering the RHS
             // to avoid emitting the dead rt_enum_new constructor call.
             // `is` and `==` against a bare enum variant both reduce to a
             // discriminant test. `==` MUST use it too: for two same-typed enum
@@ -66,8 +66,8 @@ impl<'a> MirLowerer<'a> {
             // compares the two enum HEAP POINTERS — a freshly built RHS variant
             // is a different allocation than the LHS, so `p == Policy.Suggested`
             // is ALWAYS false on the freestanding/dynload lane (E=0). Routing a
-            // bare-variant `==` through rt_enum_check_discriminant (the same hash
-            // the constructor and `match` use) fixes it. Restricted to a bare
+            // bare-variant `==` through the same typed pattern test fixes it.
+            // Restricted to a bare
             // `Global` variant for `==`/`!=`: a payload-carrying constructor
             // (`Some(x)`) is a pure discriminant test only for `is` — `==` there
             // must also compare the payload, so that form stays on the general
@@ -85,34 +85,27 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 };
                 if let Some(gname) = rhs_global_name {
-                    let variant_name: Option<&str> = gname
+                    let enum_variant = gname
                         .rsplit_once("::")
-                        .or_else(|| gname.rsplit_once('.'))
-                        .map(|(_, v)| v);
-                    let is_enum_rhs = variant_name.is_some()
+                        .or_else(|| gname.rsplit_once('.'));
+                    let is_enum_rhs = enum_variant.is_some()
                         && self
                             .type_registry
                             .and_then(|tr| tr.get(right.ty))
                             .is_some_and(|ty| matches!(ty, HirType::Enum { .. }));
-                    if let (true, Some(variant)) = (is_enum_rhs, variant_name) {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        variant.hash(&mut hasher);
-                        let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
+                    if let (true, Some((enum_name, variant_name))) = (is_enum_rhs, enum_variant) {
                         let left_reg = self.lower_expr(left)?;
                         return self.with_func(|func, current_block| {
-                            let disc_reg = func.new_vreg();
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::ConstInt {
-                                dest: disc_reg,
-                                value: disc,
-                            });
-                            block.instructions.push(MirInst::Call {
-                                dest: Some(dest),
-                                target: crate::mir::CallTarget::from_name("rt_enum_check_discriminant"),
-                                args: vec![left_reg, disc_reg],
+                            block.instructions.push(MirInst::PatternTest {
+                                dest,
+                                subject: left_reg,
+                                pattern: crate::mir::MirPattern::Variant {
+                                    enum_name: enum_name.to_string(),
+                                    variant_name: variant_name.to_string(),
+                                    payload: None,
+                                },
                             });
                             dest
                         });

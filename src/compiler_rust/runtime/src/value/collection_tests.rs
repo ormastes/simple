@@ -65,6 +65,7 @@ use super::{
     rt_string_ends_with,
     rt_string_eq,
     rt_string_find,
+    rt_string_index_of,
     rt_string_rfind,
     rt_string_char_at,
     rt_string_split,
@@ -1939,6 +1940,18 @@ fn test_rt_contains_string() {
 fn test_rt_contains_invalid() {
     let not_a_collection = RuntimeValue::from_int(42);
     assert_eq!(rt_contains(not_a_collection, RuntimeValue::from_int(1)), 0);
+}
+
+#[test]
+fn string_index_of_returns_typed_option_variants() {
+    let haystack = rt_string_new("abc".as_ptr(), 3);
+    let found = rt_string_index_of(haystack, rt_string_new("b".as_ptr(), 1));
+    let missing = rt_string_index_of(haystack, rt_string_new("z".as_ptr(), 1));
+
+    assert_eq!(crate::value::objects::rt_enum_id(found), 1);
+    assert_eq!(crate::value::objects::rt_enum_payload(found).as_int(), 1);
+    assert_eq!(crate::value::objects::rt_enum_id(missing), 1);
+    assert!(crate::value::objects::rt_is_none(missing));
 }
 
 #[test]

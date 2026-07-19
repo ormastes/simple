@@ -207,6 +207,8 @@ pub(crate) struct ModuleImports {
     /// with `ty=ANY` because the enum reached the file via re-export but
     /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
     pub enum_defs: EnumDefs,
+    /// Mangled enum owner to stable dotted runtime identity.
+    pub enum_runtime_names: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
     /// `const`/`static`) rather than functions. Consulted by the cranelift
     /// backend so cross-module imported data constants are declared as
@@ -493,7 +495,16 @@ impl NativeProjectBuilder {
     ///
     /// Returns an error when file discovery, source loading, incremental cache
     /// setup, compilation, or linking fails.
-    pub fn build(self) -> Result<NativeBuildResult, String> {
+    pub fn build(mut self) -> Result<NativeBuildResult, String> {
+        if let Ok(backend) = std::env::var("SIMPLE_BACKEND") {
+            if !matches!(backend.as_str(), "llvm" | "cranelift") {
+                return Err(format!(
+                    "invalid SIMPLE_BACKEND '{}', expected llvm or cranelift",
+                    backend
+                ));
+            }
+            self.config.backend = backend;
+        }
         if self
             .config
             .target
@@ -639,8 +650,11 @@ impl NativeProjectBuilder {
         // the closure's global type layout / signatures from the same result.
         let incr_hardening = incremental_hardening_requested(self.config.incremental_hardening);
         let mut layout_fp: u64 = 0;
+        let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
+        if let Some(collision) = &result.enum_runtime_collision {
+            return Err(collision.clone());
+        }
         let imports = if !self.config.no_mangle {
-            let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
             if incr_hardening {
                 layout_fp = cross_module_layout_fingerprint(&result);
             }
@@ -671,6 +685,7 @@ impl NativeProjectBuilder {
                 struct_defs: std::sync::Arc::new(result.struct_defs),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
+                enum_runtime_names: std::sync::Arc::new(result.enum_runtime_names),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
                 fn_return_types: std::sync::Arc::new(result.fn_return_types),
@@ -687,6 +702,7 @@ impl NativeProjectBuilder {
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -722,12 +738,7 @@ impl NativeProjectBuilder {
         };
         let global_fp_combined: u64 = global_fp.as_ref().map(GlobalBuildFingerprint::combined).unwrap_or(0);
 
-        // compile_file_to_object selects LLVM only for this exact override.
-        let effective_backend = if std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm") {
-            "llvm"
-        } else {
-            "cranelift"
-        };
+        let effective_backend = self.config.backend.as_str();
 
         // Determine which files need recompilation via content hash
         let mut to_compile: Vec<(usize, PathBuf, String, Option<PathBuf>)> = Vec::new();
@@ -1329,6 +1340,9 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     }
     for (k, v) in result.enum_defs.iter() {
         fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));
+    }
+    for (k, v) in result.enum_runtime_names.iter() {
+        fp = fold_unordered(fp, hash_one(&(k, v)));
     }
     for k in result.data_exports.iter() {
         fp = fold_unordered(fp, hash_one(&("data", k)));

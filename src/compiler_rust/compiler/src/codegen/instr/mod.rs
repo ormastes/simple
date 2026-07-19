@@ -937,19 +937,19 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::EnumUnit {
             dest,
-            enum_name: _,
+            enum_name,
             variant_name,
         } => {
-            compile_enum_unit(ctx, builder, *dest, variant_name);
+            compile_enum_unit(ctx, builder, *dest, enum_name, variant_name);
         }
 
         MirInst::EnumWith {
             dest,
-            enum_name: _,
+            enum_name,
             variant_name,
             payload,
         } => {
-            compile_enum_with(ctx, builder, *dest, variant_name, *payload);
+            compile_enum_with(ctx, builder, *dest, enum_name, variant_name, *payload);
         }
 
         // Union type instructions - reuse enum runtime functions with type index
