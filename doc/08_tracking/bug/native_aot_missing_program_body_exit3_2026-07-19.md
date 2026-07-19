@@ -29,7 +29,38 @@ exits with code **3** — none of the app's internal prints fire.
   confounded — likely by compiling repros inside `examples/06_io/ui/` where
   sibling-import resolution differs.)
 
-## Hypothesis (unverified)
+## ROOT CAUSE (2026-07-19, verified source-level + disassembly)
+NOT dead_strip / reachability / Engine2D / arg-count (all disproved by a
+20-rung bisection in build/tmp/aotbody/). Mechanism:
+`compile --native` (driver/src/cli/compile.rs:687 →
+pipeline/execution.rs:882→911) runs `compilability::analyze_module`
+(compiler/src/compilability.rs) — the HYBRID-JIT classifier — and any
+function containing a flagged construct (`Expr::FString` string
+interpolation, compilability.rs:535-556, is the common one; ~19 others:
+closures, pattern match, generators, async, try, actor ops) is marked
+"requires interpreter". execution.rs:1013-1019 then applies
+`mir::apply_hybrid_transform` (mir/hybrid.rs:39,49), rewriting every call
+to it into `MirInst::InterpCall` → codegen (codegen/instr/core.rs:758)
+emits `rt_interp_call(name, argc, args)`. In a standalone native binary no
+interpreter handler is ever registered, and the bridge
+(runtime/src/value/sffi/interpreter_bridge.rs:32-39) **unconditionally
+returns NIL** → silent no-op call, exit 3, body never emitted (hence
+22-symbol 58KB binaries). Disassembly confirms `_spl_main` branches to
+`_rt_interp_call` with the callee name built on the stack.
+
+## FIX APPLIED (fail loudly; seed pipeline/execution.rs, cargo-check green)
+`compile --native` now hard-errors (UNSUPPORTED_FEATURE) listing every
+interpreter-required function with its FallbackReasons instead of emitting
+a silently-nil binary. Escape hatches: `SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1`
+or bootstrap mode → loud warning + old behavior. Hybrid `run` lane
+untouched. Takes effect on next seed rebuild. Follow-up (open): narrow the
+FString classifier for the AOT path — native interpolation codegen already
+works, so interpolation should not force interpreter routing.
+
+Side finding: files with no qualifying global-init import fail to link with
+undefined `___module_init` — separate pre-existing defect.
+
+## Original hypothesis (superseded)
 Native codegen's reachability/emission drops function bodies beyond some
 boundary (imported-module bodies? functions above a size threshold?) — nm
 confirms: the g2d binary has only ~22 T symbols and NO
