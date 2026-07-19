@@ -14,7 +14,7 @@ use app.llm_dashboard.tui.rooms.{RoomState, create_room_set,
     build_chat_content, build_server_content_with_mcp, build_tasks_content}
 use app.llm_dashboard.tui.agent_panel.{render_agent_tree}
 use app.llm_dashboard.tui.activity_feed.{FeedState, render_feed}
-use app.llm_dashboard.tui.status_bar.{render_status_bar, render_availability_banner}
+use app.llm_dashboard.tui.status_bar.{render_status_bar, render_availability_banner, render_refresh_indicator}
 use app.io.mod.{env_get}
 
 fn detect_project_dir() -> text:
@@ -52,6 +52,8 @@ class TuiAppState:
     last_poll: i64
     poll_interval_ms: i64
     refresh_count: i64
+    last_error: text
+    last_error_at: i64
 
     static fn new(store: AgentDashboardStore) -> TuiAppState:
         return TuiAppState(
@@ -61,7 +63,9 @@ class TuiAppState:
             running: true,
             last_poll: 0,
             poll_interval_ms: 2000,
-            refresh_count: 0
+            refresh_count: 0,
+            last_error: "",
+            last_error_at: 0
         )
 
 # =========================================================================
@@ -119,6 +123,8 @@ fn render_frame(state: TuiAppState):
 
     # Check availability
     if not state.store.is_available():
+        state.last_error = "JSONL watcher unavailable"
+        state.last_error_at = current_time_secs()
         val banner = render_availability_banner(false)
         var row = 2
         for line in banner:
@@ -137,16 +143,19 @@ fn render_frame(state: TuiAppState):
     val feed_entries = state.store.get_feed(100)
     val feed_lines = render_feed(feed_entries, state.feed_state, dims.feed_h - 2)
 
-    # Build status bar
+    # Build status bar (+ refresh countdown / last-error indicator)
     val status = render_status_bar(state.store)
+    val indicator = render_refresh_indicator(current_time_secs(), state.last_poll,
+        state.poll_interval_ms, state.last_error, state.last_error_at)
+    val status_line = "{status}  {indicator}"
 
     match dims.mode:
         LayoutMode.Full:
-            screen = render_full_layout(screen, dims, rooms, tree_lines, feed_lines, status)
+            screen = render_full_layout(screen, dims, rooms, tree_lines, feed_lines, status_line)
         LayoutMode.Compact:
             val active_room = if state.active_tab < rooms.len(): rooms[state.active_tab]
                 else: rooms[0]
-            screen = render_compact_layout(screen, dims, active_room, state.active_tab, status)
+            screen = render_compact_layout(screen, dims, active_room, state.active_tab, status_line)
 
     print screen.render()
 
