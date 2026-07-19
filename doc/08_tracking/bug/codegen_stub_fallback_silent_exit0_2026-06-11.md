@@ -59,3 +59,12 @@ currently emits one `.text` section per Simple module, so unused functions in
 an imported module remain live together and must still be removed at the module
 ownership boundary. The focused regression is
 `test_no_stub_fallback_defers_unresolved_host_symbols_to_linker`.
+
+## Focused tooling regression 2026-07-19
+
+A non-strict incremental duplication-check build generated unresolved linker
+stubs, reported success, then either scanned zero files or crashed with
+`function not found: to_equal`. Repeating the build with
+`SIMPLE_NO_STUB_FALLBACK=1` failed at
+link time with the exact missing symbols. The unstable-build workflow now makes
+strict linking mandatory for candidate and verification artifacts.

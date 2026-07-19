@@ -16,12 +16,14 @@ Goal: produce the requested Simple executable without throwing away useful cache
   `build/mini_cache_<entry>`.
 - If a source fix lands while a build is still before object output, prefer letting it fail or finish. Restart only when no cache/output can be lost.
 - Keep every log under `build/mini_builds/` or `build/native_probe/`.
+- Set `SIMPLE_NO_STUB_FALLBACK=1` for every candidate or verification build;
+  a binary containing generated unresolved stubs is debug evidence only.
 
 ## Loop
 
 1. Start or keep the main build:
    ```bash
-   bin/simple native-build --backend cranelift --source src/compiler --source src/app --source src/lib \
+   SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --backend cranelift --source src/compiler --source src/app --source src/lib \
      --entry-closure --threads 8 --cache-dir build/bootstrap/native_cache --mode dynload \
      --entry src/app/cli/_CliMain/main_and_help.spl -o build/native_probe/simple
    ```
