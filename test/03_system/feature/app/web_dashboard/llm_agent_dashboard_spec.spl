@@ -54,3 +54,61 @@ describe "LLM agent dashboard web contracts":
         expect(server_source).to_contain("fn _is_agents_path(path: text) -> bool:")
         expect(server_source).to_contain("path == \"/agents\" or path.starts_with(\"/agents/\")")
         expect(html_source).to_contain("window.location='/agents'")
+
+    it "redirects unauthenticated /agents/full requests to /login":
+        val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+        val response = server.route_http("GET", "/agents/full", "", nil)
+
+        expect(response).to_contain("HTTP/1.1 302 Found")
+        expect(response).to_contain("Location: /login")
+
+    it "renders the full LLM agent dashboard (all gui/*_panel_html panels) at /agents/full":
+        val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+        val response = server.route_http("GET", "/agents/full", "", "sid")
+
+        expect(response).to_contain("HTTP/1.1 200 OK")
+        expect(response).to_contain("LLM Agent Dashboard")
+        # Shared card/status/empty/error CSS module + fragment-refresh JS chrome.
+        expect(response).to_contain(".panel-card")
+        expect(response).to_contain(".panel-empty")
+        expect(response).to_contain("@media (max-width: 700px)")
+        expect(response).to_contain("PANEL_NAMES")
+        expect(response).to_contain("refreshPanel")
+        expect(response).to_contain("data-panel-updated")
+        # Each gui/*_panel_html generator's output is mounted for fragment swap.
+        expect(response).to_contain("id=\"panel-stats\"")
+        expect(response).to_contain("id=\"panel-cache\"")
+        expect(response).to_contain("id=\"panel-message\"")
+        expect(response).to_contain("id=\"panel-mcp\"")
+        expect(response).to_contain("id=\"panel-tasks\"")
+        expect(response).to_contain("id=\"panel-env\"")
+
+    it "serves /api/panel/<name> as a bare fragment (not a full page)":
+        val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+        val response = server.route_http("GET", "/api/panel/mcp", "", "sid")
+
+        expect(response).to_contain("HTTP/1.1 200 OK")
+        expect(response).to_contain("mcp-panel")
+        expect(response.split("<!DOCTYPE html>").len()).to_equal(1)
+        expect(response.split("<html").len()).to_equal(1)
+
+    it "renders /api/panel/<name>'s own empty state with the shared panel-empty card":
+        val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+        val response = server.route_http("GET", "/api/panel/mcp", "", "sid")
+
+        expect(response).to_contain("panel-empty")
+        expect(response).to_contain("No MCP server calls captured yet.")
+
+    it "reports an unknown panel name as 'collector unavailable' instead of a blank/broken panel":
+        val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+        val response = server.route_http("GET", "/api/panel/does-not-exist", "", "sid")
+
+        expect(response).to_contain("HTTP/1.1 200 OK")
+        expect(response).to_contain("panel-error")
+        expect(response).to_contain("collector unavailable:")
+
+    it "rejects unauthenticated /api/panel/<name> requests":
+        val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+        val response = server.route_http("GET", "/api/panel/stats", "", nil)
+
+        expect(response).to_contain("HTTP/1.1 401")

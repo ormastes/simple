@@ -81,7 +81,7 @@ fn generate_agents_html_with_ios(store: AgentDashboardStore, is_ios: bool) -> te
             <button class="tab-btn" onclick="switchTab('tasks', this)">Tasks</button>
             <button class="tab-btn" onclick="switchTab('terminal', this)">Terminal</button>
         </nav>
-        <div id="refresh-status" class="refresh-status">Auto-refresh: 2s</div>
+        <div id="refresh-status" class="refresh-status">Panels auto-refresh every 10s</div>
     </header>
 
     <div id="tab-agents" class="tab-content active">
@@ -193,16 +193,19 @@ PANEL_NAMES.forEach(markPanelUpdated);
 setInterval(refreshAllPanels, 10000);
 setInterval(tickPanelTimestamps, 1000);
 
-// Agents tab (room grid / tree / activity feed): refresh via WebSocket push,
-// falling back to polling. Kept separate from the panel fragment refresh
-// above since it does not map onto a single /api/panel/<name> fragment.
+// Agents tab (room grid / tree / activity feed): opportunistic WebSocket
+// push, for when something serves /ws/agents. No server currently upgrades
+// that route, so this intentionally does NOT fall back to reloading the
+// page -- an earlier version fell back to `setInterval(reload, 2000)`,
+// which reloaded the whole page every 2s regardless of which tab was open
+// and silently defeated the per-panel fragment refresh above (the 10s
+// interval and "updated Ns ago" stamps never had a chance to run). Real
+// per-room live updates are tracked as deferred (see per-app guide); until
+// then the room grid/tree/feed are as fresh as the last full page load.
 (function() {
-    var ws = null;
-    var wsUrl = 'ws://' + window.location.host + '/ws/agents';
-
     function connectWs() {
         try {
-            ws = new WebSocket(wsUrl);
+            var ws = new WebSocket('ws://' + window.location.host + '/ws/agents');
             ws.onmessage = function(e) {
                 var data = JSON.parse(e.data);
                 if (data.type === 'refresh') {
@@ -213,19 +216,11 @@ setInterval(tickPanelTimestamps, 1000);
                 setTimeout(connectWs, 3000);
             };
         } catch(e) {
-            // Fallback to polling
-            setTimeout(function() { window.location.reload(); }, 2000);
+            // No live-push transport available; panels still self-refresh above.
         }
     }
 
     connectWs();
-
-    // Fallback polling
-    setTimeout(function() {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            setInterval(function() { window.location.reload(); }, 2000);
-        }
-    }, 5000);
 })();
 
 """
