@@ -325,7 +325,11 @@ directly owned the compiler PID and the full process chain exited, so no orphan
 remained. Evidence is retained in
 `build/native_probe/stage4-arena-restore.{log,time}`. The parser corruption and
 per-node environment wall are fixed; retained allocation growth remains the
-next focused blocker. This profile used Stage3, while every retained
-long-progress profile used Stage2, so the next diagnostic must first isolate a
-generation-specific miscompile/runtime difference with one bounded Stage2 A/B;
-do not select another source allocation patch from these unlike generations.
+next focused blocker. Because this profile used Stage3 while earlier
+long-progress profiles used Stage2, one 90-second Stage2 A/B ran under the same
+one-thread/8 GiB envelope. It reproduced the same 50-file frontier, clean
+`parser.spl`, active `database/bug.spl`, TLS-destructor OOM, and 63.86-second
+abort at 8,371,548 KiB peak RSS. Compiler generation is therefore ruled out.
+The next focused owner is phase-two parse scratch/runtime allocation lifetime;
+do not patch TLS, raise the cap, or rerun Stage4 before a narrow allocation
+count/RSS regression exists.
