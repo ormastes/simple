@@ -2623,9 +2623,26 @@ impl MirLowering:
                 operands = operands.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
             else:
                 if operands.len() == 0:
-                    val local_type = self.local_mir_type_of(local)
-                    if local_type != nil:
-                        lowered_elem_type = local_type
+                    # Bug (array_index_rw native-build failure): `local_mir_type_of`
+                    # returns `MirType?` via an explicit `Some(item.type_)`/`nil`
+                    # construction (mir_lowering_stmts.spl), not a bare
+                    # value-or-nil. A plain `if local_type != nil: lowered_elem_type
+                    # = local_type` never unwraps that Option -- `Some(...)` is
+                    # itself non-nil, so the whole `Enum{Option,Some,payload}`
+                    # got assigned straight into `lowered_elem_type` (declared
+                    # plain `MirType`, no `?`). That corrupted value then got
+                    # embedded as the array's element type
+                    # (`MirTypeKind.Array(elem_type, ...)`), and every later
+                    # `arr[i]` read/write derived its pointee type from it,
+                    # reaching `MirType.ptr(pointee, mutable)` with an
+                    # Option-wrapped `pointee` -- the interpreter's static-method
+                    # overload matcher (constructor_value_matches_type) rejects
+                    # the shape mismatch and reports the misleading "unknown
+                    # static method ptr on class MirType". Use the same `??`
+                    # unwrap already used by every other safe caller of
+                    # `local_mir_type_of` in this file (e.g. lower_dict_lit's
+                    # key_type/value_type a few dozen lines below).
+                    lowered_elem_type = self.local_mir_type_of(local) ?? lowered_elem_type
                     val elem_vname = self.struct_value_syms.get(local.id)
                     if elem_vname != nil:
                         elem_struct_name = elem_vname ?? ""
