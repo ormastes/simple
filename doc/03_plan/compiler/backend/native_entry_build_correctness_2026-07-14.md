@@ -307,6 +307,15 @@ the shared binary — deploys require explicit user go-ahead).
   inspection found a second post-baseline overwrite: `fa1ee50c35c5` replaced
   the constant-allocation bucket membership test with `bucket.split("\n")` on
   every closure lookup and removed its source guards. The retained-good
-  `starts_with`/`contains` check and both regression guards are restored. A
-  bounded profile of that restoration remains pending. See
+  `starts_with`/`contains` check and both regression guards are restored. Its
+  bounded six-minute follow-up still did not leave phase one and retained only
+  about 28 MiB, excluding retention growth. History then exposed the remaining
+  half of the same overwrite: `0a749ba7f10c` replaced the retained pure-Simple
+  `hm_hash_text` with runtime `rt_hash_text`, whose registered-string validation
+  linearly scans the global string registry on every hot-set hash. The proven
+  pure-Simple hash is restored and source-pinned. A cache-preserving LLVM
+  compile emitted the loader object with a direct `hm_hash_text` relocation;
+  the standalone bootstrap relink remained unavailable because that partial
+  route omitted the existing runtime providers. Its bounded profile therefore
+  remains pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
