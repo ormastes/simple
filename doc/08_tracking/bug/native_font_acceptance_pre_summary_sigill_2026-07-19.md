@@ -23,6 +23,11 @@ all three specs.
 - FontRenderer and Vulkan quarantine locks now use explicit free-function mutex
   calls, avoiding the confirmed native method-receiver loss at `Mutex.lock` and
   `Mutex.unlock`; the next surface trap remains under cached-object analysis.
+- Font configuration, atlas-owner, and atlas-cache identity now have explicit
+  receiver free functions. Existing methods delegate for source compatibility,
+  while `font_renderer` uses the free configuration identity path. The focused
+  pure-Simple Cranelift spec passes (1 example, 0 failures); canonical font
+  acceptance remains capped and is not claimed green by this incremental fix.
 
 ## Retained evidence
 
@@ -31,6 +36,7 @@ all three specs.
 - `build/test-artifacts/shared_multilingual_gpu_fonts/shared_font_surfaces_spec_cycle{1,2,3}.log`
 - `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/fail_fast_return_helper_v3.log`
 - `build/test-artifacts/shared_multilingual_gpu_fonts/vulkan_provenance_self_test.log`
+- `build/test-artifacts/shared_multilingual_gpu_fonts/unit/font_identity_free_function_spec_cycle3.log`
 
 ## Next fix targets
 
@@ -39,8 +45,13 @@ method-call lowering dropped the `Mutex` receiver. The explicit-argument mutex
 repair is present in cycle 3. Execution advances to `warm.atlas_owner_identity()`,
 whose generated call again omits its receiver; `_font_render_batch_with_config`
 also passes the batch where `config.identity()` requires the config receiver.
-This is the broader Cranelift direct-method receiver-loss defect, not a mutex or
-batch-return defect. Shaping cycle 3 proves the path-based identity
+Object review further proves immutable instance `fn` calls behave like MIR's
+`StaticMethod` arm: an explicit-argument call shifts arguments left, whereas
+mutable `me` methods retain their receiver. This is a broader method-resolution
+or flag-roundtrip defect, not a mutex, batch-return, or Cranelift argument
+forwarding defect. The font identity free-function compatibility path is green;
+GPU backend call-site migration and the compiler root guard remain follow-up
+work. Shaping cycle 3 proves the path-based identity
 repair is active, then
 `val owned = handle.?` stores `rt_is_some(handle)` (boolean `1`) instead of the
 `FontHandle` payload and traps at the first `owned.handle`. Track pure-native
