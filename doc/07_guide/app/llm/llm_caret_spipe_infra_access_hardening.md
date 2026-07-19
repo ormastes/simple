@@ -25,7 +25,7 @@ Research inputs:
 
 ## Baseline truth before this lane
 
-LLM Caret and ITF are separate today.
+At the research baseline, LLM Caret and ITF were separate.
 
 - The LLM Caret permission gate recognizes only `bash`, `read_file`,
   `write_file`, `list_dir`, and `glob`.
@@ -34,7 +34,7 @@ LLM Caret and ITF are separate today.
 - ITF dispatches Jira, Confluence wiki, Bitbucket, MinIO, Outlook, raw API,
   authentication, and daily-debug commands.
 - GitHub is an undispatched `gh` passthrough marked as a stub.
-- Gmail and GitHub Wiki adapters do not exist.
+- Gmail and GitHub Wiki adapters did not exist at that baseline.
 - The wired Bitbucket, Outlook, and Confluence pure-Simple paths build request
   data but lack proven production transport.
 - Most current live evidence uses separate curl or `mc` fallback adapters; that
@@ -118,7 +118,7 @@ The selected implementation registers five names behind `run_tool`:
 | `infra_task` | Jira through `acli jira`; GitHub Issues through `gh issue` |
 | `infra_storage` | S3/MinIO through `aws s3` and `aws s3api` |
 | `infra_mail` | Gmail resources through provisional `gws gmail`; Outlook subset through `bin/simple itf outlook` |
-| `infra_wiki` | Confluence through `bin/simple itf wiki`; GitHub Wiki Markdown/git through `bin/simple itf github-wiki` |
+| `infra_wiki` | Confluence through `bin/simple itf wiki`; GitHub Wiki reads through direct `git`, mutations/raw through `bin/simple itf github-wiki` |
 
 Each call uses scalar JSON fields: `provider`, `operation`, optional `args`,
 `format`, `endpoint`, and `raw_safety`. `args` is one direct argv item per

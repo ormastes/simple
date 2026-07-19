@@ -1,4 +1,5 @@
 # @cover src/app/llm_caret/infra_access.spl 80%
+# codex-system-test
 """
 # LLM Caret + SPipe infrastructure access hardening
 
@@ -13,7 +14,10 @@ parity.
 """
 
 use std.spec
-use std.io_runtime.{file_read, time_now_unix_micros}
+use std.io_runtime.{
+    process_run, dir_create_all, file_read, file_write,
+    time_now_unix_micros
+}
 use app.llm_caret.infra_access.{
     InfraPlan, plan_infra_call, execute_infra_plan_with,
     render_infra_execution
@@ -24,6 +28,7 @@ use app.llm_caret.tools.{
 }
 
 val ROOT = "build/tmp/llm_caret_infra_system"
+val WIKI_REPO = ROOT + "/production_wiki"
 
 fn _lb() -> text: (123 as char).to_text()
 fn _rb() -> text: (125 as char).to_text()
@@ -56,6 +61,20 @@ fn expect_permission_denied(result: ToolResult):
 
 fn recording_runner(program: text, args: [text]) -> (text, text, i64):
     ("{\"provider_id\":\"remote-42\",\"cursor\":\"next-opaque\",\"request_id\":\"req-7\"}", "", 0)
+
+fn _wiki_git(args: [text]) -> (text, text, i64):
+    process_run("git", ["-C", WIKI_REPO] + args)
+
+fn _setup_production_wiki():
+    dir_create_all(WIKI_REPO)
+    process_run("git", ["init", WIKI_REPO])
+    _wiki_git(["config", "user.email", "spec@example.invalid"])
+    _wiki_git(["config", "user.name", "LLM Caret SSpec"])
+    file_write(WIKI_REPO + "/Home.md", "# Production route\n")
+    _wiki_git(["add", "Home.md"])
+    val (_, _, code) = _wiki_git(["commit", "-m", "Initial system-test wiki"])
+    if code != 0:
+        _wiki_git(["reset", "--hard", "HEAD"])
 
 describe "LLM Caret typed infrastructure boundary":
     it "REQ-LCSI-001 and REQ-LCSI-010 register gated typed families":
@@ -111,7 +130,8 @@ describe "LLM Caret typed infrastructure boundary":
         val confluence = plan_infra_call("wiki", input("confluence", "page.create", "--space\nENG\n--title\nRunbook\n--from-file\nbuild/tmp/llm_caret_infra_system/runbook.html", "json"), ROOT)
         val github = plan_infra_call("wiki", input("github", "page.get", "--repo-path\nbuild/tmp/llm_caret_infra_system/wiki\n--page\nHome.md", "json"), ROOT)
         expect(confluence.args[0:3].join(" ")).to_equal("itf wiki create")
-        expect(github.args[0:3].join(" ")).to_equal("itf github-wiki view")
+        expect(github.program).to_equal("git")
+        expect(github.args.join(" ")).to_equal("-C build/tmp/llm_caret_infra_system/wiki show HEAD:Home.md")
 
     it "REQ-LCSI-008 reports provider capabilities and unsupported mappings explicitly":
         step("Reject unsupported lossy or workspace-escaping requests explicitly")
@@ -153,6 +173,17 @@ describe "LLM Caret typed infrastructure boundary":
         expect(result.success).to_equal(true)
         expect(result.plan.program).to_equal("gh")
         expect(result.plan.adapter).to_equal("github_cli")
+
+    it "REQ-LCSI-012 should execute the GitHub Wiki route through the production runner":
+        step("Create a local git-backed wiki with one committed page")
+        _setup_production_wiki()
+        step("Invoke the Caret infra_wiki tool through its production process runner")
+        val call = new_tool_call("list local wiki", "infra_wiki", input("github", "page.list", "--repo-path\n" + WIKI_REPO, "json"))
+        val result = run_tool(default_policy(ROOT), call)
+        expect(result.is_error).to_equal(false)
+        expect(result.content).to_contain("\"transport\":\"git\"")
+        expect(result.content).to_contain("\"status\":\"ok\"")
+        expect(result.content).to_contain("Home.md")
 
     it "REQ-LCSI-013 and REQ-LCSI-014 keep executable evidence and reviewed guide provenance":
         step("Preserve route identity and provider output in stable JSON")

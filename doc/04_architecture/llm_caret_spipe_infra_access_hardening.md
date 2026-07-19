@@ -48,7 +48,7 @@ argument. Credentials are never accepted as dedicated input fields.
 | mail | Gmail | `gws gmail` | provisional transport behind Gmail resource operation names |
 | mail | Outlook | `bin/simple itf outlook` | Microsoft Graph mapping subset |
 | wiki | Confluence | `bin/simple itf wiki` | neutral page operation mapping |
-| wiki | GitHub Wiki | `bin/simple itf github-wiki` | Markdown/git page mapping |
+| wiki | GitHub Wiki | direct `git` for reads; `bin/simple itf github-wiki` for mutations/raw | Markdown/git page mapping |
 
 An absent executable is a route failure, not an emulated success. Capability
 output names the adapter and transport and distinguishes supported, unsupported,

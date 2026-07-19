@@ -15,6 +15,8 @@ Generated/manual output mirrors it under `doc/06_spec/03_system/app/llm_caret/fe
 - `expect_permission_denied` checks no provider runner marker was produced.
 - `recording_runner` returns deterministic provider-shaped output while
   recording the exact plan it received.
+- `_setup_production_wiki` creates the local committed Markdown fixture used by
+  the real `run_tool -> execute_infra_plan -> git` scenario.
 
 ## Coverage matrix
 
@@ -23,7 +25,7 @@ Generated/manual output mirrors it under `doc/06_spec/03_system/app/llm_caret/fe
 | registration/gate | 001, 010, 011 | known names; read/write/destructive decisions; no shell program |
 | repo/task | 002-004, 008 | GitHub, Bitbucket, Jira plans and unsupported rows |
 | storage/mail/wiki | 005-008 | S3/MinIO, Gmail/Outlook, Confluence/GitHub Wiki plans |
-| normalized evidence | 009, 012 | injected runner proves exact plan and stable result |
+| normalized evidence | 009, 012 | injected runner proves stable output; local GitHub Wiki SSpec proves the production subprocess |
 | documentation | 013, 014 | executable doc block and generated manual links |
 | security/NFR | all NFRs | offline determinism, path/secret rejection, streaming file routes, diagnostic cap, performance sample |
 

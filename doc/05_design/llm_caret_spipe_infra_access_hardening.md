@@ -52,8 +52,8 @@ ambiguous raw safety fail before process launch.
 - Mail exposes Gmail resource names through `gws gmail` and maps Outlook
   folders/messages/get/move/mark to ITF. Unsupported send/draft/label mappings
   are capability errors until their production route exists.
-- Wiki maps `page.list/get/create/update/delete/search` to Confluence ITF
-  list/view/create/edit/delete/search and the GitHub Wiki ITF helper.
+- Wiki maps Confluence operations to ITF. GitHub Wiki list/get/search reads use
+  direct `git` argv; create/update/delete/raw retain the ITF helper.
 
 ## Result contract
 
