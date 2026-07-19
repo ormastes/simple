@@ -11,7 +11,6 @@ extern fn serial_println(msg: text)
 extern fn simpleos_fat32_path_read_buffer_addr() -> u64
 extern fn simpleos_fat32_stream_open(path: text) -> i64
 extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
-extern fn simpleos_fat32_preloaded_size() -> u64
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 # Per-spawn RAM file-table reset (baremetal_stubs.c). Without it a SECOND
 # ring-3 exec in the same boot inherits the first run's fd slots and the
@@ -86,24 +85,6 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
         return gate as i64
     serial_println("[fs-exec] spawn:resolve path={path}")
     simpleos_bare_exec_reset()
-
-    # PRELOAD short-circuit: in the merged SSH kernel the exec-time FAT/NVMe read
-    # returns 0 (device/FS state clobbered after rt_net_init + vmm + SSH activity —
-    # bug x64_ssh_kernel_fat32_stream_open_zero), so the streaming re-read below
-    # cannot succeed. The boot entry preloaded the whole ELF into the static
-    # path-read buffer while state was pristine and recorded its size. If that
-    # size is valid, consume the resident bytes directly via the general image +
-    # ring-3 handoff (proven prod path). Single i64 return, no tuple.
-    val pre = simpleos_fat32_preloaded_size()
-    if pre > 4:
-        val pbuf = simpleos_fat32_path_read_buffer_addr()
-        if pbuf != 0.to_u64() and (mmio_read32(pbuf) as u64) == 0x464C457F.to_u64():
-            serial_println("[fs-exec] spawn:preloaded len={pre}")
-            val pbytes = rt_bytes_from_raw(pbuf as i64, pre as i64)
-            val pimage = build_user_process_image_unchecked(path, pbytes, Architecture.X86_64, argv, envp)
-            val prc = x86_64_fs_exec_enter_image_ring3(pimage, pbuf, argv, envp)
-            serial_println("[fs-exec] spawn:preloaded handoff-return rc={prc}")
-            return prc
 
     # Raw ELF files use the opened path's stream directly. Only the bounded header
     # prefix is resident; PT_LOAD bytes are read into their destination frames.

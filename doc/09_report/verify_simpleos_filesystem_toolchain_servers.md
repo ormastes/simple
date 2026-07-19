@@ -215,6 +215,17 @@ Reviewer: normal/highest-capability Codex merge owner
   rebuilt with 3 compiled/613 cached, zero failed (SHA-256
   `63b362e327b58ba7718e8f42e446a4ec73e6d058313ff53639bf1d433345e71b`),
   but the new staged profiles are not live-proven yet.
+- [PASS] Current-source web/DB contracts: the canonical HTTP route spec passes
+  11/11 for `/`, `/health`, bounded file routes, and fail-closed malformed or
+  traversal requests. The Simple DB command core passes 4/4 for retained
+  CREATE/INSERT/SELECT state, invalid transitions, and capacity bounds. Shared
+  HTTP response/router/server mutators now use mutable `me` receivers, so the
+  route spec JIT-compiles instead of silently falling back to interpretation.
+- [PASS] Filesystem-only x86 loader contract: the reintroduced boot-preload
+  short-circuit is removed from the shared spawn owner. The focused contract
+  passes 3/3 and requires streamed mounted-file bytes, bounded PT_LOAD reads,
+  SysV argv/envp, and no `simpleos_fat32_preloaded_size` substitution. This is
+  source/unit evidence; no fresh current-source QEMU launch is claimed.
 
 STATUS: FAIL (REQ-003 through REQ-005 remain release blockers)
 
