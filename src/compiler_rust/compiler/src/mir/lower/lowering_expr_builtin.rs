@@ -77,7 +77,45 @@ impl<'a> MirLowerer<'a> {
                         unboxed
                     }
                 });
+            } else if expr_ty == TypeId::F64 {
+                // Enum f64 payloads are stored RAW in the enum's 64-bit payload
+                // slot: every construct site (Some/Ok/Err and user-enum
+                // single-field, `box_enum_payload_if_needed` / the EnumWith
+                // path) excludes floats from BoxInt/BoxFloat, so the slot holds
+                // the verbatim IEEE-754 bit pattern and `rt_enum_payload`
+                // returns that raw i64. Emitting `UnboxFloat` here would apply
+                // the tagged-float mask `(bits >> 3) << 3`, zeroing the low 3
+                // mantissa bits and corrupting any f64 with nonzero low bits
+                // (e.g. 0.1) — the enum_payload f64 precision leak. `UnboxFloat`
+                // must stay masked for genuinely BoxFloat'd values (array/dict
+                // f64 in `lowering_expr_collection`), so it cannot be de-masked
+                // globally.
+                //
+                // Instead reinterpret the raw bits with an F64->F64 self-cast:
+                //   - cranelift: the float->float cast bitcasts an i64-typed
+                //     source to f64 (see codegen `compile_cast`), the lossless
+                //     reinterpret with no mask;
+                //   - LLVM: `Cast` stamps the dest F64 in the type map while the
+                //     tagged-i64 ABI coerces i64->f64 via `bitcast` at each typed
+                //     use (`coerce_value_to_type`); without this stamp the value
+                //     stays i64 and the `==` compare / return mis-handles it;
+                //   - MIR interpreter: identity.
+                return self.with_func(|func, current_block| {
+                    let casted = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Cast {
+                        dest: casted,
+                        source: raw_result,
+                        from_ty: TypeId::F64,
+                        to_ty: TypeId::F64,
+                    });
+                    casted
+                });
             } else if needs_float_unbox {
+                // F32 enum payloads keep the existing tagged path. Their
+                // construct-side representation (f32 stored via a separate
+                // coercion) is a distinct concern from the f64 precision leak
+                // and is out of scope here.
                 return self.with_func(|func, current_block| {
                     let unboxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();

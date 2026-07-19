@@ -1,0 +1,44 @@
+# Enum f64 Payload Precision Regression Spec
+#
+# Regression coverage for the 2026-07-19 tagged-float mask leak: an `f64`
+# carried as an enum / Option / Result single-field payload was corrupted on
+# extraction because MIR lowering of the `rt_enum_payload` builtin emitted
+# `UnboxFloat` — the tagged-float mask `(bits >> 3) << 3` — which zeroes the
+# low 3 mantissa bits. Enum payloads are stored RAW (no BoxFloat at the
+# construct site), so masking on extract corrupted any f64 with nonzero low
+# bits (e.g. 0.1 read back as a slightly different value).
+#
+# Fix (src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs):
+# the `rt_enum_payload` arm now, for `expr_ty == F64`, emits an F64->F64
+# `Cast` (a lossless bit reinterpret) instead of `UnboxFloat`. UnboxFloat is
+# kept for F32 enum payloads and for genuinely BoxFloat'd array/dict f64
+# (a disjoint lowering path — `name == "rt_enum_payload"` gates this arm).
+#
+# This spec runs on the interpreter / cranelift path, where the fix takes
+# full effect. The native-build (LLVM) backend has a SEPARATE, deeper defect
+# (construct-side passes the f64 payload in xmm0 instead of bitcast-to-i64;
+# extract sitofp-coerces) tracked in
+# doc/08_tracking/bug/native_llvm_f64_enum_payload_argpass_2026-07-19.md and
+# guarded by test/03_system/native/enum_f64_payload_precision_XFAIL.spl.
+
+use std.spec.*
+
+enum FBoxF64Prec:
+    V(f64)
+
+describe "enum f64 payload precision":
+    it "round-trips a fractional f64 payload (0.1) without the tagged-float mask":
+        val b = FBoxF64Prec.V(0.1)
+        var got = 0.0
+        match b:
+            case FBoxF64Prec.V(x):
+                got = x
+        expect(got == 0.1).to_equal(true)
+
+    it "round-trips a whole-number f64 payload (2.0)":
+        val b = FBoxF64Prec.V(2.0)
+        var got = 0.0
+        match b:
+            case FBoxF64Prec.V(x):
+                got = x
+        expect(got == 2.0).to_equal(true)

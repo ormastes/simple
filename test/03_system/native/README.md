@@ -35,3 +35,16 @@ Flip to expected-PASS (rc=7) once that bug is fixed. Same "Some payload not
 extracted" family as the recurring class in
 `doc/08_tracking/bug/baremetal_option_field_unwrap_faults_class_2026-07-18.md`
 (see `feedback_recurring_problem_team_analysis_and_tests`).
+
+## XFAIL: `enum_f64_payload_precision_XFAIL.spl`
+
+Returns **40** on native-build, expected **30** — an f64 enum payload
+(`0.1`) is lost. The 2026-07-19 MIR-lowering fix (the `rt_enum_payload`
+F64 extract emits an `F64->F64` bit-reinterpret instead of the tagged-float
+mask `(bits>>3)<<3`) makes this correct on the interpreter + cranelift; see
+`test/01_unit/compiler/codegen/enum_f64_payload_precision_spec.spl` (2/2).
+native-build has a SEPARATE, deeper defect (construct passes the f64
+payload in xmm0 instead of bitcast-to-i64; extract sitofp-coerces), tracked
+in `doc/08_tracking/bug/native_llvm_f64_enum_payload_argpass_2026-07-19.md`.
+Flip to expected-PASS (rc=30) once that backend fix lands. Same tagged-float
+family as the recurring `<<3`/`>>3` tag-box class.
