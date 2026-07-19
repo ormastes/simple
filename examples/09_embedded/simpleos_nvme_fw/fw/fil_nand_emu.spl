@@ -33,10 +33,15 @@ Two honest divergences from `fil_nand_device`, both because this backend is
 *real-NAND faithful* rather than a placeholder:
   1. An erased / never-programmed page reads FFh (the real NAND erased state),
      not 0 — `fil_nand_device` returns a placeholder 0. OOB still reads UNMAP.
-  2. The `err` field carries the injected bit-flip count (matching
-     `fil_nand_device`), NOT a physics count; retention flips surface as WRONG
-     DATA (which the FIL ECC layer then catches against the stored `ecc`), which
-     is exactly how a real controller observes them.
+  2. The `err` field carries a PHYSICS-derived bit-error count — popcount(sensed
+     XOR last-written byte, via the per-page `shadow`) — with any injected flips
+     added on top, where `fil_nand_device` reports only the injected count. So
+     retention / read-disturb drift surfaces a real corrected-bit count (not just
+     wrong data): a drooped single cell reads back as an ECC-correctable single-bit
+     error, a heavily-drifted page as an honest uncorrectable one. Consequence: a
+     `corrupt_page_data` overwrite is counted the same way (sensed diverges from
+     the written intent), so it is caught via the bit-error path — a 3+bit silent
+     corrupt now correctly FAILs instead of risking a syndrome mis-correction.
 
 Geometry: the firmware addresses a 64-block × 64-page space (nvme_types), while
 the S1 emulator backs 8 blocks × 4 pages. Firmware addresses are folded into the
@@ -352,9 +357,13 @@ impl NandEmu:
 
     me corrupt_page_data(ppn: i64, data: i64):
         """Overwrite the column-0 Vt cells so the page senses `data`, leaving the
-        stored OOB ECC untouched — a silent media corruption the ECC layer must
-        catch (mirrors fil_nand_device.corrupt_page_data). No effect on an
-        unallocated (never-touched) page."""
+        stored OOB ECC and the written-intent `shadow` untouched (mirrors
+        fil_nand_device.corrupt_page_data). Because the sensed byte then diverges
+        from the written intent, the next read reports the divergence as a
+        bit-error count (popcount(sensed XOR intent)) — so the FIL ECC layer
+        catches it via the flips path (definitively FAIL for a multi-bit corrupt),
+        as well as against the stored `ecc`. No effect on an unallocated
+        (never-touched) page."""
         if not ppn_in_range(ppn):
             return
         val geo = me.chip.geometry
