@@ -67,6 +67,10 @@ struct PmpCheckResult32:
     allowed: bool
     matched_index: u32
 
+struct PmpEntryCheck32:
+    matched: bool
+    allowed: bool
+
 struct PmpAccessGateResult32:
     bus_valid: bool
     paddr: i64
@@ -75,24 +79,24 @@ struct PmpAccessGateResult32:
     matched_index: u32
 
 @hardware
-fn pmp32_check_entry(cfg: u32, prev_addr: i64, addr: i64, first: i64, last: i64, access_kind: u32, effective_priv: u32) -> (matched: bool, allowed: bool):
+fn pmp32_check_entry(cfg: u32, prev_addr: i64, addr: i64, first: i64, last: i64, access_kind: u32, effective_priv: u32) -> PmpEntryCheck32:
     val cfg_byte = cfg & 0xFF
     val address_mode = (cfg_byte >> 3) & PMP32_CFG_A_MASK
     if address_mode == PMP32_CFG_A_OFF:
-        return (matched: false, allowed: false)
+        return PmpEntryCheck32(matched: false, allowed: false)
 
     if first < 0 or last < first or last > PMP32_PHYS_MAX:
-        return (matched: false, allowed: false)
+        return PmpEntryCheck32(matched: false, allowed: false)
 
     if addr < 0 or addr > PMP32_MAX_PMPADDR:
-        return (matched: true, allowed: false)
+        return PmpEntryCheck32(matched: true, allowed: false)
 
     var region_first: i64 = 0
     var region_limit: i64 = 0
 
     if address_mode == PMP32_CFG_A_TOR:
         if prev_addr < 0 or prev_addr > PMP32_MAX_PMPADDR:
-            return (matched: true, allowed: false)
+            return PmpEntryCheck32(matched: true, allowed: false)
         region_first = prev_addr << 2
         region_limit = addr << 2
     else if address_mode == PMP32_CFG_A_NA4:
@@ -108,23 +112,23 @@ fn pmp32_check_entry(cfg: u32, prev_addr: i64, addr: i64, first: i64, last: i64,
         region_limit = region_first + napot_size
 
     if region_limit <= region_first:
-        return (matched: false, allowed: false)
+        return PmpEntryCheck32(matched: false, allowed: false)
 
     val overlaps = last >= region_first and first < region_limit
     if overlaps == false:
-        return (matched: false, allowed: false)
+        return PmpEntryCheck32(matched: false, allowed: false)
 
     val fully_contained = first >= region_first and last < region_limit
     if fully_contained == false:
-        return (matched: true, allowed: false)
+        return PmpEntryCheck32(matched: true, allowed: false)
 
     val valid_privilege = effective_priv == PMP32_PRIV_U or effective_priv == PMP32_PRIV_S or effective_priv == PMP32_PRIV_M
     if access_kind > PMP32_ACCESS_STORE or valid_privilege == false:
-        return (matched: true, allowed: false)
+        return PmpEntryCheck32(matched: true, allowed: false)
 
     val locked = (cfg_byte & PMP32_CFG_L) != 0
     if effective_priv == PMP32_PRIV_M and locked == false:
-        return (matched: true, allowed: true)
+        return PmpEntryCheck32(matched: true, allowed: true)
 
     val readable = (cfg_byte & PMP32_CFG_R) != 0
     val writable = (cfg_byte & PMP32_CFG_W) != 0
@@ -132,15 +136,15 @@ fn pmp32_check_entry(cfg: u32, prev_addr: i64, addr: i64, first: i64, last: i64,
 
     # R=0/W=1 is reserved.  Fail closed whenever PMP permissions apply.
     if writable and readable == false:
-        return (matched: true, allowed: false)
+        return PmpEntryCheck32(matched: true, allowed: false)
 
     if access_kind == PMP32_ACCESS_FETCH:
-        return (matched: true, allowed: executable)
+        return PmpEntryCheck32(matched: true, allowed: executable)
     if access_kind == PMP32_ACCESS_LOAD:
-        return (matched: true, allowed: readable)
+        return PmpEntryCheck32(matched: true, allowed: readable)
     if access_kind == PMP32_ACCESS_STORE:
-        return (matched: true, allowed: writable)
-    (matched: true, allowed: false)
+        return PmpEntryCheck32(matched: true, allowed: writable)
+    PmpEntryCheck32(matched: true, allowed: false)
 
 @hardware
 fn pmp32_check16(entries: PmpEntries32, paddr: i64, size_bytes: u32, access_kind: u32, effective_priv: u32) -> PmpCheckResult32:

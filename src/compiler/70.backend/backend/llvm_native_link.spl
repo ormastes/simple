@@ -192,6 +192,14 @@ fn llvm_stage4_rollback_replacement(receipt: Stage4Replacement) -> bool:
         return llvm_stage4_promote_artifact(receipt.backup, receipt.destination)
     true
 
+fn llvm_stage4_ensure_executable(path: text) -> Result<(), text>:
+    if _is_windows():
+        return Ok(())
+    val (_, chmod_err, chmod_code) = process_run("chmod", ["+x", path])
+    if chmod_code != 0:
+        return Err("Stage4 final executable chmod failed: '" + path + "': " + chmod_err)
+    Ok(())
+
 fn llvm_stage4_replace_verified_artifact(source: text, destination: text) -> Result<Stage4Replacement, text>:
     if not llvm_stage4_recover_replacement(destination):
         return Err("Stage4 artifact backup recovery failed: '" + destination + "'")
@@ -199,6 +207,9 @@ fn llvm_stage4_replace_verified_artifact(source: text, destination: text) -> Res
     if source_hash == "":
         return Err("Stage4 artifact source hash failed: '" + source + "'")
     if file_exists(destination) and file_size(destination) > 0 and llvm_stage4_file_sha256(destination) == source_hash:
+        match llvm_stage4_ensure_executable(destination):
+            case Err(err): return Err(err)
+            case Ok(()): ()
         return Ok(Stage4Replacement(destination: destination, backup: "", changed: false))
     val temporary = destination + ".stage4.tmp"
     val backup = destination + ".stage4.backup"
@@ -232,7 +243,14 @@ fn llvm_stage4_replace_verified_artifact(source: text, destination: text) -> Res
         if not llvm_stage4_rollback_replacement(receipt):
             return Err("Stage4 artifact promotion verification failed and rollback failed: '" + destination + "'")
         return Err("Stage4 artifact promotion verification failed: '" + destination + "'")
-    Ok(Stage4Replacement(destination: destination, backup: backup_path, changed: true))
+    val receipt = Stage4Replacement(destination: destination, backup: backup_path, changed: true)
+    match llvm_stage4_ensure_executable(destination):
+        case Err(err):
+            if not llvm_stage4_rollback_replacement(receipt):
+                return Err(err + "; Stage4 executable rollback also failed")
+            return Err(err)
+        case Ok(()): ()
+    Ok(receipt)
 
 fn llvm_stage4_copy_verified_neighbor(source: text, destination: text) -> Result<bool, text>:
     if source == "" or not file_exists(source) or file_size(source) <= 0:
