@@ -403,6 +403,11 @@ the shared binary — deploys require explicit user go-ahead).
   The text predicate Part A lane now keeps `starts_with`, `ends_with`, and
   `contains` results typed as MIR Bool instead of i64, preventing native
   interpolation from rendering them as `1`/`0`; one focused source regression
-  pins all three existing lowering paths. The pure-Simple test runner crashed
-  before scenario output, so native execution and the separate primitive
-  `.to_string()` Parts B/C remain open.
+  pins all three existing lowering paths. Primitive `.to_string()`/`.to_text()`
+  recovery now runs after custom method dispatch, accepts only known text or
+  supported bool/numeric MIR types, and reuses the existing renderer.
+  Cranelift now gives `rt_raw_f64_to_string` its required f64 argument ABI
+  instead of the generic all-i64 import signature. Focused MIR/source
+  regressions pin both aliases and the typed import. The
+  available pure-Simple test artifacts either crash before scenario output or
+  lack the `test` command, so native execution remains pending.

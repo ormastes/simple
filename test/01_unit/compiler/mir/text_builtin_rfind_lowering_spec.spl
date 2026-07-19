@@ -4,7 +4,7 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir.*
 
-fn lower_text_rfind_mir(src: text, fname: text) -> text:
+fn lower_text_method_mir(src: text, fname: text) -> text:
     val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(fname + ".spl")
     val hir = hir_lowering.lower_module(module)
@@ -14,9 +14,19 @@ fn lower_text_rfind_mir(src: text, fname: text) -> text:
 describe "Text builtin rfind MIR lowering", tag: ["only-compiled"]:
     it "keeps a replace result on the string runtime owner":
         val source = "fn parent_dir(path: text) -> i64:\n    val normalized = path.replace(\"\\\\\", \"/\")\n    return normalized.rfind(\"/\")\n"
-        val mir = lower_text_rfind_mir(source, "parent_dir")
+        val mir = lower_text_method_mir(source, "parent_dir")
 
         expect(mir).to_contain("rt_string_replace")
         expect(mir).to_contain("rt_string_rfind")
         expect(mir.contains("rt_string_to_lower")).to_equal(false)
         expect(mir.contains("DoubleEndedIterator")).to_equal(false)
+
+describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
+    it "selects each scalar renderer for both aliases":
+        val source = "fn render_string(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_string() + \"|\" + f.to_string() + \"|\" + u.to_string() + \"|\" + i.to_string()\n\nfn render_text(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_text() + \"|\" + f.to_text() + \"|\" + u.to_text() + \"|\" + i.to_text()\n"
+        val mir = lower_text_method_mir(source, "primitive_to_string")
+
+        expect(mir.split("rt_raw_bool_to_string").len() - 1).to_equal(2)
+        expect(mir.split("rt_raw_f64_to_string").len() - 1).to_equal(2)
+        expect(mir.split("rt_raw_u64_to_string").len() - 1).to_equal(2)
+        expect(mir.split("rt_raw_i64_to_string").len() - 1).to_equal(2)

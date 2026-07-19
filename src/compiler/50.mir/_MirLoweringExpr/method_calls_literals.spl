@@ -1335,50 +1335,6 @@ impl MirLowering:
                     return result_local
                 return receiver_local
 
-        # `.to_text()` on a numeric receiver (task #178 text3 probe #5: int -> string
-        # conversion). Had NO native MIR lowering at all (fell to the Task
-        # #145 loud-fail like char_at did before its fix above). A text
-        # receiver's `.to_text()` is a no-op passthrough (matches the
-        # language convention that to_text() on text returns itself
-        # unchanged); anything else falls through to rt_raw_i64_to_string,
-        # which formats a RAW (untagged) native i64 value directly via
-        # snprintf -- this is deliberately NOT rt_to_string/rt_value_to_string,
-        # which expect a TAGGED/boxed Any value (tag bits set on the int
-        # itself) and would misrender a plain typed i64 local as a bogus
-        # "<value:0x2a>" pointer-style dump. Scoped to i64 (this task's
-        # tested construct); bool/float receivers are not covered here and
-        # still loud-fail via the Unresolved fallthrough below.
-        if method == "to_text" and args.len() == 0 and resolution_is_unresolved:
-            val tt_receiver = self.lower_expr(receiver)
-            var tt_is_str = false
-            if val tt_ty = self.local_mir_type_of(tt_receiver):
-                match tt_ty.kind:
-                    case MirTypeKind.Opaque(tt_ty_name):
-                        if tt_ty_name == "str":
-                            tt_is_str = true
-                    case _: ()
-            if tt_is_str:
-                return tt_receiver
-            # rt_raw_i64_to_string returns a TAGGED string handle (a real
-            # string constructor), not an integer -- the dest type MUST be
-            # registered as Opaque("str"), not i64. Registering i64 here (a
-            # bug caught during verification) made lower_bootstrap_print_call's
-            # numeric-coercion check (switch_operators_calls.spl, which keys
-            # off local_mir_type_of) see an i64-typed local for `print(s)` and
-            # re-run rt_raw_i64_to_string A SECOND TIME on the already-tagged
-            # handle, formatting its pointer bits as a bogus decimal number
-            # instead of printing the text.
-            val tt_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_raw_i64_to_string"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-            ))
-            var b_tt = self.builder
-            val tt_res = b_tt.emit_call(tt_op, [mir_operand_copy(tt_receiver)], MirType(kind: MirTypeKind.Opaque("str")))
-            self.builder = b_tt
-            if val tt_local = tt_res:
-                return tt_local
-            return tt_receiver
-
         if method == "bytes" and args.len() == 0:
             var is_text_receiver = false
             if maybe_receiver_type_for_call != nil:
@@ -1403,52 +1359,6 @@ impl MirLowering:
                 if val result_local = result:
                     return result_local
                 return receiver_local
-
-        # Task #144: `n.to_string()` on the bootstrap flat-HIR path resolves to
-        # MethodResolution.Unresolved (no method-resolution info), so it fell
-        # through to `case Unresolved:` below, which emits an error and returns
-        # a placeholder const-0 i64 WITHOUT lowering the receiver or calling any
-        # runtime conversion. `print(n.to_string())` then received the raw i64
-        # 0 in place of a string pointer -> rt_print silently printed nothing.
-        #
-        # Lower the receiver, then render it exactly like Bug #136's numeric
-        # string-interpolation coercion: rt_raw_i64_to_string(i64) -> a TAGGED
-        # heap string, then rt_interp_cstr unwraps that tag to the raw char*
-        # (Opaque "str") that rt_print/rt_println expect. A receiver that is
-        # already a string (`s.to_string()`) is an identity — detected from its
-        # lowered MIR type and returned as-is instead of being fed to the
-        # integer conversion.
-        if method == "to_string" and args.len() == 0 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            val ts_receiver = self.lower_expr(receiver)
-            var ts_is_str = false
-            if val ts_recv_ty = self.local_mir_type_of(ts_receiver):
-                match ts_recv_ty.kind:
-                    case MirTypeKind.Opaque(ts_recv_ty_name):
-                        if ts_recv_ty_name == "str":
-                            ts_is_str = true
-                    case _: ()
-            if ts_is_str:
-                return ts_receiver
-            val i64s_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_raw_i64_to_string"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-            ))
-            var b_i64s = self.builder
-            val i64s_res = b_i64s.emit_call(i64s_op, [mir_operand_copy(ts_receiver)], MirType.i64())
-            self.builder = b_i64s
-            var ts_tagged = ts_receiver
-            if val i64s_local = i64s_res:
-                ts_tagged = i64s_local
-            val ts_cstr_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_interp_cstr"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-            ))
-            var b_ts_cstr = self.builder
-            val ts_cstr_res = b_ts_cstr.emit_call(ts_cstr_op, [mir_operand_copy(ts_tagged)], MirType(kind: MirTypeKind.Opaque("str")))
-            self.builder = b_ts_cstr
-            if val ts_cstr_local = ts_cstr_res:
-                return ts_cstr_local
-            return ts_tagged
 
         # Task #145 (join-family silent-null): `[...].join(sep)` on the
         # bootstrap flat-HIR path resolves to MethodResolution.Unresolved (no
@@ -2284,6 +2194,30 @@ impl MirLowering:
                         im_b2.emit_const(im_temp, MirConstValue.Int(0), MirType.i64())
                         self.builder = im_b2
                         return im_temp
+
+                # Primitive/text `.to_text()` and `.to_string()` share the
+                # existing interpolation renderer, but only after custom
+                # struct methods had first chance to resolve above.
+                val is_text_conversion = (method == "to_text" or method == "to_string") and args.len() == 0
+                if is_text_conversion:
+                    var conversion_supported = self.local_is_str(unresolved_receiver_local)
+                    if not conversion_supported:
+                        if val conversion_type = self.local_mir_type_of(unresolved_receiver_local):
+                            match conversion_type.kind:
+                                case MirTypeKind.Bool | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.U64 | MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+                                    conversion_supported = true
+                                case _: ()
+                    if conversion_supported:
+                        val conversion_rendered = self.coerce_concat_operand(unresolved_receiver_local)
+                        val conversion_cstr_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_interp_cstr"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                        ))
+                        var b_conversion = self.builder
+                        val conversion_result = b_conversion.emit_call(conversion_cstr_op, [conversion_rendered], MirType(kind: MirTypeKind.Opaque("str")))
+                        self.builder = b_conversion
+                        if val conversion_local = conversion_result:
+                            return conversion_local
 
                 # Task #155: native lowering for array `map`/`filter`/`fold` with
                 # lambda arguments, on top of #165's lambda-lift/fnptr machinery
