@@ -471,14 +471,21 @@ bin/simple fix file.spl --interactive
 |-------|----------|
 | Deny | Exit code 1, blocks build |
 | Warn | Reported, doesn't block by default |
-| Allow | Info level, not enforced by default |
+| Allow | Suppressed by default |
 
 Override with flags:
 
 ```bash
 bin/simple lint file.spl --deny-all    # Treat all warnings as errors
-bin/simple lint file.spl --warn-all    # Enable all style lints
+bin/simple lint file.spl --warn-all    # Raise configured allow rules to warnings
+bin/simple lint file.spl --json        # Emit JSON Lines diagnostics and summaries
+bin/simple lint file.spl --fix-dry-run # Preview safe lint fixes without writing
 ```
+
+`--json` cannot be combined with `--all` or `--mcp-perf`; those modes invoke
+repository scripts that do not provide structured output. It may be combined
+with `--fix`, `--fix-all`, or `--fix-dry-run`; fixes use the atomic file owner
+and emit a `lint-fix-summary` JSON line instead of human progress.
 
 ---
 

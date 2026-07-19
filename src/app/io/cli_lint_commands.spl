@@ -3,19 +3,21 @@
 # src / app / cli / lint_entry.spl starts quickly and reliably.
 
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
-use lazy compiler.tools.lint.main.{run_lint_file}
+use compiler.tools.lint.main.{run_lint_file}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor, easyfix_id_text, easyfix_description_text}
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
+use common.text.{escape_json}
 
 fn run_lint_command(args: [text]) -> i64:
     var files: [text] = []
     var run_mcp_perf = false
     var run_repo_gates = false
     var run_simd = false
+    val json_output = args.contains("--json")
     for arg in args:
         if arg == "lint":
             val _ = 0
@@ -30,11 +32,14 @@ fn run_lint_command(args: [text]) -> i64:
             files.push(arg)
 
     var exit_code = 0
-    val root_guard_exit = _cli_run_workspace_root_guard()
-    if root_guard_exit != 0:
-        exit_code = 1
-
+    if json_output and (run_repo_gates or run_mcp_perf):
+        print "{\"type\":\"lint-error\",\"message\":\"--json is unavailable with --all or --mcp-perf\"}"
+        return 2
     if run_repo_gates:
+        val root_guard_exit = _cli_run_workspace_root_guard()
+        if root_guard_exit != 0:
+            exit_code = 1
+
         val (iso_stdout, iso_stderr, iso_exit) = _cli_process_run("sh", ["scripts/check/check-ui-backend-isolation.shs"])
         if iso_stdout.len() > 0:
             print(iso_stdout)
@@ -58,6 +63,9 @@ fn run_lint_command(args: [text]) -> i64:
             return exit_code
 
     if files.len() == 0:
+        if json_output:
+            print "{\"type\":\"lint-error\",\"message\":\"no input files\"}"
+            return 2
         print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
@@ -74,8 +82,12 @@ fn run_lint_command(args: [text]) -> i64:
     var failed_files = 0
     for file_path in files:
         if not file_exists(file_path):
-            _cli_eprint("Error: File not found: {file_path}")
+            if json_output:
+                print "{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}"
+            else:
+                _cli_eprint("Error: File not found: {file_path}")
             exit_code = 1
+            failed_files = failed_files + 1
             continue
 
         val file_exit = run_lint_file(file_path, args)
@@ -93,15 +105,26 @@ fn run_lint_command(args: [text]) -> i64:
                 val sf = simd_fixes[si]
                 val id_parts2 = easyfix_id_text(sf).split(":")
                 val line_str2 = if id_parts2.len() > 3: id_parts2[3] else: "?"
-                print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
+                if json_output:
+                    val line_json = if line_str2 == "?": "null" else: line_str2
+                    val rule_code = if id_parts2.len() > 2: id_parts2[2] else: "simd_opportunity"
+                    print "{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(file_path)}\",\"line\":{line_json},\"column\":0,\"level\":\"info\",\"code\":\"{escape_json(rule_code)}\",\"message\":\"{escape_json(easyfix_description_text(sf))}\"}"
+                else:
+                    print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
 
     if failed_files > 0:
-        print ""
-        print "Lint failed in {failed_files} file(s)"
+        if json_output:
+            print "{\"type\":\"lint-summary\",\"status\":\"failed\",\"failed_files\":{failed_files}}"
+        else:
+            print ""
+            print "Lint failed in {failed_files} file(s)"
     elif exit_code == 0:
-        print ""
-        print "Lint passed: all files clean"
+        if json_output:
+            print "{\"type\":\"lint-summary\",\"status\":\"passed\",\"failed_files\":0}"
+        else:
+            print ""
+            print "Lint passed: all files clean"
     exit_code
 
 fn run_fmt_command(args: [text]) -> i64:

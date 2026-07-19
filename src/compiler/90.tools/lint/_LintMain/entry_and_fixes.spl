@@ -5,7 +5,7 @@ use compiler.tools.lint.main.*
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
 
 # I/O imports
-use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write)
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_atomic_write)
 use std.nogc_sync_mut.io.dir_ops (is_dir)
 use app.io.cli_ops (get_args)
 
@@ -14,6 +14,7 @@ use std.log.{error, info}
 
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.*
+use common.text.{escape_json}
 use nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 
@@ -21,8 +22,12 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 
 fn main() -> Int:
     val args = get_args()
+    val json_output = args.contains("--json")
 
     if args.len() < 2:
+        if json_output:
+            print("{\"type\":\"lint-error\",\"message\":\"no input files\"}")
+            return 2
         print("Usage: simple_lint <file.spl> [options]")
         print("")
         print("Options:")
@@ -49,7 +54,10 @@ fn main() -> Int:
 
     # Verify file exists
     if not file_exists(file_path):
-        error("lint", "File not found: " + file_path)
+        if json_output:
+            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}")
+        else:
+            error("lint", "File not found: " + file_path)
         return 1
 
     run_lint_file(file_path, args)
@@ -60,6 +68,8 @@ fn main() -> Int:
 # clean (or only warnings, unless --deny-all is set), 1 otherwise.
 fn run_lint_file(file_path: String, args: [text]) -> Int:
     val deny_all = args.contains("--deny-all")
+    val warn_all = args.contains("--warn-all")
+    val json_output = args.contains("--json")
     val fix_mode = args.contains("--fix")
     val fix_all = args.contains("--fix-all")
     val fix_dry_run = args.contains("--fix-dry-run")
@@ -79,11 +89,22 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
             val prof_str = arg.slice(10, arg.len())
             linter.config.set_profile_from_string(prof_str)
 
+    if warn_all:
+        for lint_name in all_lint_names():
+            match linter.config.get_level(lint_name):
+                case Allow:
+                    linter.config.set_level(lint_name, LintLevel.Warn)
+                case _:
+                    val _ = 0
+
     val lint_result = linter.lint_file(file_path)
     match lint_result:
         case LintFileResult.LintFileOk(results):
             if results.is_empty():
-                info("lint", "No issues found in " + file_path)
+                if json_output:
+                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":0,\"warnings\":0,\"fixes\":0}")
+                else:
+                    info("lint", "No issues found in " + file_path)
                 return 0
             else:
                 var error_count = 0
@@ -91,7 +112,15 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                 var fix_count = 0
 
                 for lint_item in results:
-                    print(lint_item.format())
+                    if json_output:
+                        var level_text = "allow"
+                        match lint_item.lint.level:
+                            case Deny: level_text = "error"
+                            case Warn: level_text = "warning"
+                            case Allow: val _ = 0
+                        print("{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(lint_item.file_path)}\",\"line\":{lint_item.line},\"column\":{lint_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(lint_item.lint.code)}\",\"message\":\"{escape_json(lint_item.lint.message)}\"}")
+                    else:
+                        print(lint_item.format())
 
                     match lint_item.lint.level:
                         case Deny:
@@ -106,14 +135,18 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                     if lint_item.has_easy_fix():
                         fix_count = fix_count + 1
 
-                print("")
-                print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+                if json_output:
+                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count}}")
+                else:
+                    print("")
+                    print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
 
                 # Apply fixes if requested
-                if (fix_mode or fix_all) and fix_count > 0:
+                if (fix_mode or fix_all or fix_dry_run) and fix_count > 0:
                     val fixes_to_apply = collect_easy_fixes(results, fix_all)
                     if not fixes_to_apply.is_empty():
-                        apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run)
+                        if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output):
+                            return 1
 
                 if error_count > 0:
                     return 1
@@ -121,7 +154,10 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                     return 0
 
         case LintFileResult.LintFileErr(error):
-            error("lint", error)
+            if json_output:
+                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(error)}\"}")
+            else:
+                error("lint", error)
             return 1
 
     return 0
@@ -137,14 +173,14 @@ fn collect_easy_fixes(results: [LintResult], include_all: Bool) -> [EasyFix]:
                 val _ = 0
     fixes
 
-fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool):
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool) -> Bool:
     val source = file_read(file_path)
     if source == "":
-        error("lint", "reading file for fix failed: {file_path}")
-        return
-
-    var sources: Dict<String, String> = {}
-    sources[file_path] = source
+        if json_output:
+            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"reading file for fix failed\"}")
+        else:
+            error("lint", "reading file for fix failed: {file_path}")
+        return false
 
     # Sort replacements by position descending and apply
     var all_replacements: [Replacement] = []
@@ -170,11 +206,23 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool):
             new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
 
     if dry_run:
-        print("\nDry run - would apply {fixes.len()} fix(es):")
-        for fix in fixes:
-            print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
+        if json_output:
+            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"dry-run\",\"fixes\":{fixes.len()}}")
+        else:
+            print("\nDry run - would apply {fixes.len()} fix(es):")
+            for fix in fixes:
+                print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
     else:
-        file_write(file_path, new_source)
-        print("\nApplied {fixes.len()} fix(es):")
-        for fix in fixes:
-            print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
+        if not file_atomic_write(file_path, new_source):
+            if json_output:
+                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
+            else:
+                error("lint", "atomic fix write failed: {file_path}")
+            return false
+        if json_output:
+            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"applied\",\"fixes\":{fixes.len()}}")
+        else:
+            print("\nApplied {fixes.len()} fix(es):")
+            for fix in fixes:
+                print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
+    true
