@@ -1122,7 +1122,15 @@ int64_t rt_string_bytes(int64_t string) {
     if (!bytes) return rt_core_nil();
     if (s) {
         for (uint64_t i = 0; i < s->len; i++) {
-            rt_array_push(bytes, rt_value_int((uint8_t)s->data[i]));
+            /* BUGFIX (byte_span_cross_module_misread_2026-07-19): store the RAW
+             * byte, NOT rt_value_int(byte). `.bytes()` is declared `[u8]`; a
+             * `[u8]` array (literal `[73u8,..]` / `push(u8)`) stores raw untagged
+             * bytes and the `[u8]` element read truncates with `& 0xFF` without
+             * untagging. rt_value_int tagged the slot as `byte << 3`, so `[u8]`
+             * reads at param/struct-field/typed-var sites returned the tag's low
+             * byte (73<<3=0x248 -> 0x48=72) instead of 73. Mirrors the pure-Simple
+             * fix in simple_core/core_string.spl rt_string_bytes. */
+            rt_array_push(bytes, (uint8_t)s->data[i]);
         }
     }
     return (int64_t)(uintptr_t)bytes;

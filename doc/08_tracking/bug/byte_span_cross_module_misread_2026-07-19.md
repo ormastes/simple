@@ -53,3 +53,23 @@ image export prefer formats without checksums (BMP + host `sips -s format
 png`; see build/tmp/ppm2bmp.spl) or keep png_encode for small images. The
 ROOT fix (interpreter representation of small arrays stored into imported
 struct fields) removes the dilemma.
+
+## TRUE ROOT CAUSE (2026-07-19 agent sweep — supersedes title & hypothesis)
+NOT cross-module, NOT small-array/SSO. `rt_string_bytes` (backing
+`text.bytes()`) stored each byte TAGGED via `rt_value_int(b)` = `b << 3`,
+while every other `[u8]` producer (literals, `push(u8)`) stores RAW bytes.
+The `[u8]`-typed element read truncates the slot with `& 0xFF` WITHOUT
+untagging → returns the tag's low byte (73<<3=0x248 → 0x48=72 — the exact
+"72,2,0,0"). The generic/[i64]/inferred read path conditionally untags,
+masking the bug everywhere except `[u8]`-typed sites (params, struct fields
+like ByteSpan.data, `var x: [u8]`). Size-independent; "local replica works"
+was a red herring (local test read via inferred path).
+
+FIX (landed): store the raw byte in both runtimes —
+`src/runtime/simple_core/core_string.spl:173` and
+`src/runtime/runtime_native.c:1125`. UNVERIFIED-ON-DEPLOY until the next
+bootstrap redeploy; verify with `build/tmp/bspan/m_localvs.spl` (expect
+73,69,78,68 everywhere) and the Crc32 oracle (expect 0xAE426082 for IEND).
+Pre-existing separate quirk (unchanged): `[u8]` passed to `[i64]` param
+misdecodes multiples of 8. The png_encode flat-fn workaround can be
+reverted after redeploy verification.

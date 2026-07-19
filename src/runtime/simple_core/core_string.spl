@@ -170,7 +170,18 @@ pub fn rt_string_bytes(value: i64) -> i64:
     val out = rt_array_new(len)
     var i = 0
     while i < len:
-        rt_array_push(out, rt_value_int(spl_load_u8(string_data_ptr_value(ptr), i) & 255))
+        # BUGFIX (byte_span_cross_module_misread_2026-07-19): store the RAW byte,
+        # NOT rt_value_int(byte). `.bytes()` is declared `[u8]`, and a `[u8]`
+        # array (as produced by `[73u8,..]` literals and `push(u8)`) stores raw
+        # untagged byte values in its slots — the `[u8]` element read truncates
+        # the slot with `& 0xFF` and does NOT untag. Wrapping in rt_value_int
+        # tagged the slot as `byte << 3` (rt_value_int(73)=584=0x248), so the
+        # `[u8]` read returned the tag's low byte (0x48=72) instead of 73. The
+        # generic/[i64]/inferred read path conditionally untags, so it happened
+        # to still work — which is why the corruption only surfaced at `[u8]`
+        # sites (function params, struct fields like ByteSpan.data, `var x:[u8]`).
+        # Storing raw matches push-built [u8] exactly and is correct at ALL sites.
+        rt_array_push(out, spl_load_u8(string_data_ptr_value(ptr), i) & 255)
         i = i + 1
     return out
 
