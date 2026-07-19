@@ -162,8 +162,10 @@ and misaligned taken targets trap before side effects, and mailbox EXIT drains
 its response before halt. RV32M and RV32A now execute with registered one-shot
 retirement; supervisor interrupt contexts, shared PLIC routing, the RV32
 product DT, WFI/Zicntr policy, and pin-level bidirectional 16550 behavior are
-implemented and independently source-reviewed. RV32C, the compiler-emitted
-full-SoC/external-DDR boundary, generated VHDL execution, and Linux acceptance
+implemented and independently source-reviewed. The Simple-owned
+`soc32_clocked` source root now adds a registered external-DDR boundary and
+fixed-storage peripherals, while the DT reserves the in-RAM mailbox page.
+RV32C, executed compiler/GHDL proof, the K26 AXI adapter, and Linux acceptance
 remain incomplete. The
 multi-cycle M unit is clocked into commit with exact high
 multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
@@ -180,12 +182,15 @@ the existing delegated trap path at instruction boundaries. RAM-backed
 `mmu*_translate*_test_adapter()` functions remain unit adapters, not RTL
 evidence.
 
-The current compiler-produced VHDL gate still ends at `core32_clocked` and
-`core64_clocked`. The embedded-RAM `soc_tick()` model, hand-rendered FPGA bundle
-VHDL, and bridge-only K26 wrapper are not a compiler-emitted product SoC. The
-next accepted gate is one `soc32_clocked` Simple root with real UART pins and a
-backpressured external-memory request/response seam; K26 only adapts that seam
-to board pins and PS DDR.
+The Simple source now contains `soc32_clocked`, with real UART pins and a
+backpressured, single-outstanding external-memory request/response seam. It
+holds requests stable, preserves PTE/atomic qualifiers, aligns subword lanes,
+and excludes dynamic RAM from the hardware root. Its external memory must be
+exclusive/noncoherent for LR/SC correctness. The compiler/GHDL gate for this
+root has not run, so no emitted product VHDL is claimed. The embedded-RAM
+`soc_tick()` model, hand-rendered FPGA bundle VHDL, and bridge-only K26 wrapper
+also remain outside product evidence until simulation and K26 adapt this same
+contract.
 
 The focused pure-Simple source check currently exits 139 before diagnostics;
 see `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. Do not rerun

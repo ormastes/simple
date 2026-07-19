@@ -248,11 +248,22 @@ bit intervals, then reuses the existing RX FIFO/RDI and UART-source-10 PLIC
 route. The compatibility tick ties RX high; the product boundary supplies the
 real pin.
 
-The next product slice factors peripheral/bus routing out of the embedded-RAM
-simulation top and adds `soc32_clocked`. Its external-memory seam carries
-ready/valid/error/data plus address, size, byte enables, write data, PTE, and
-atomic qualifiers. Backpressure and one outstanding request are explicit; the
-K26 shell adapts this seam to PS DDR without owning CPU behavior.
+The source product boundary is now `soc32_clocked`. It owns the core, UART,
+CLINT, PLIC, mailbox, internal response latch, halt-drain state, and one DDR
+pending/waiting entry; it does not own a dynamic RAM model. Internal devices
+respond on the next cycle. A DDR request remains stable until accepted and may
+receive a response on that acceptance cycle or later. Byte and halfword writes
+shift data and strobes into their word lanes, and reads shift the returned word
+back to the core lane. The seam preserves PTE and atomic qualifiers and rejects
+invalid sizes, cross-word accesses, non-RAM targets, and addresses outside the
+canonical 32-bit map. Mailbox EXIT halts only after its response drains.
+
+The external DDR consumer must be the sole coherent master while atomics are
+enabled. The canonical DT excludes the mailbox page at `0x80ff0000` from Linux
+with a 4 KiB `reserved-memory`/`no-map` node. The compiler/GHDL scenario covers
+the new root but remains unexecuted under the exhausted pure-Simple CLI retry
+cap. Factoring `soc_tick` onto this seam and adding the thin K26 AXI adapter are
+still required; the K26 shell must not own CPU behavior.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

@@ -18,7 +18,7 @@
 #
 # Source 0 is hardwired to "no interrupt" per the RISC-V spec.
 #
-# VHDL synthesizable subset: u32, bool, [u32], structs only.
+# VHDL synthesizable subset: u32, bool, structs only.
 # ============================================================================
 
 # ============================================================================
@@ -41,7 +41,9 @@ val PLIC_S_CLAIM_OFF: u32     = 0x00201004
 
 struct PlicState:
     """PLIC register file.  32 interrupt sources (source 0 unused)."""
-    priority: [u32]       # Source priorities (index 0-31, source 0 unused)
+    priority_bit_0: u32   # Three bitplanes encode 3-bit source priorities
+    priority_bit_1: u32
+    priority_bit_2: u32
     pending: u32          # 32-bit pending bitmap
     input_level: u32      # Current gateway input levels
     enable: u32           # 32-bit enable bitmap for context 0 (M-mode)
@@ -77,15 +79,46 @@ struct PlicClaimResult:
 # Create — initial PLIC state
 # ============================================================================
 
+@hardware
+fn plic_priority_get(state: PlicState, source: u32) -> u32:
+    if source == 0 or source >= 32:
+        return 0
+    val mask: u32 = 1 << source
+    var priority: u32 = 0
+    if (state.priority_bit_0 & mask) != 0:
+        priority = priority | 1
+    if (state.priority_bit_1 & mask) != 0:
+        priority = priority | 2
+    if (state.priority_bit_2 & mask) != 0:
+        priority = priority | 4
+    priority
+
+@hardware
+fn plic_priority_set(state: PlicState, source: u32,
+                     priority: u32) -> PlicState:
+    if source == 0 or source >= 32:
+        return state
+    var out = state
+    val mask: u32 = 1 << source
+    val clear = mask ^ 0xFFFFFFFF
+    out.priority_bit_0 = state.priority_bit_0 & clear
+    out.priority_bit_1 = state.priority_bit_1 & clear
+    out.priority_bit_2 = state.priority_bit_2 & clear
+    if (priority & 1) != 0:
+        out.priority_bit_0 = out.priority_bit_0 | mask
+    if (priority & 2) != 0:
+        out.priority_bit_1 = out.priority_bit_1 | mask
+    if (priority & 4) != 0:
+        out.priority_bit_2 = out.priority_bit_2 | mask
+    out
+
+@hardware
 fn plic_create() -> PlicState:
     """Create initial PLIC state.  All priorities 0, nothing pending/enabled."""
-    var prio: [u32] = []
-    var i: u32 = 0
-    while i < 32:
-        prio = prio + [0]
-        i = i + 1
     PlicState(
-        priority: prio,
+        priority_bit_0: 0,
+        priority_bit_1: 0,
+        priority_bit_2: 0,
         pending: 0,
         input_level: 0,
         enable: 0,
@@ -102,6 +135,7 @@ fn plic_create() -> PlicState:
 # MMIO Read
 # ============================================================================
 
+@hardware
 fn plic_mmio_read(state: PlicState, offset: u32) -> u32:
     """Read a PLIC register by byte offset from PLIC base.
     Unknown offsets return 0."""
@@ -110,7 +144,7 @@ fn plic_mmio_read(state: PlicState, offset: u32) -> u32:
     if offset < PLIC_PRIORITY_END:
         val src = offset >> 2
         if src > 0 and src < 32:
-            return state.priority[src]
+            return plic_priority_get(state, src)
         return 0
 
     # Pending bits
@@ -146,6 +180,7 @@ fn plic_mmio_read(state: PlicState, offset: u32) -> u32:
 # MMIO Read with Side Effects — claim pending-bit clear
 # ============================================================================
 
+@hardware
 fn plic_mmio_read_update(state: PlicState, offset: u32) -> PlicState:
     """Apply read side-effects.  Only the claim register (0x200004) has a
     side-effect: it atomically claims the highest-priority pending interrupt
@@ -162,6 +197,7 @@ fn plic_mmio_read_update(state: PlicState, offset: u32) -> PlicState:
 # MMIO Write
 # ============================================================================
 
+@hardware
 fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
     """Write a PLIC register by byte offset from PLIC base.
     Unknown offsets are silently ignored."""
@@ -172,7 +208,7 @@ fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
         val src = offset >> 2
         if src > 0 and src < 32:
             # Clamp priority to 3 bits (0-7)
-            out.priority[src] = value & 0x7
+            out = plic_priority_set(out, src, value & 0x7)
         return out
 
     # Pending bits — read-only from software; ignore writes
@@ -209,6 +245,7 @@ fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
 # Set Pending — driven by external interrupt sources
 # ============================================================================
 
+@hardware
 fn plic_set_pending(state: PlicState, source: u32, pending: bool) -> PlicState:
     """Drive one gateway input, latching accepted requests until claim."""
     if source == 0 or source >= 32:
@@ -228,6 +265,7 @@ fn plic_set_pending(state: PlicState, source: u32, pending: bool) -> PlicState:
 # Check Interrupt — find highest-priority enabled pending source
 # ============================================================================
 
+@hardware
 fn plic_select_context(state: PlicState, supervisor: bool) -> u32:
     """Return one context's highest-priority enabled pending source."""
     var best_src: u32 = 0
@@ -242,13 +280,14 @@ fn plic_select_context(state: PlicState, supervisor: bool) -> u32:
         val is_enabled = (enable & mask) != 0
         val is_in_service = ((state.in_service | state.s_in_service) & mask) != 0
         if is_pending and is_enabled and not is_in_service:
-            val pri = state.priority[src]
+            val pri = plic_priority_get(state, src)
             if pri > threshold and pri > best_pri:
                 best_pri = pri
                 best_src = src
         src = src + 1
     best_src
 
+@hardware
 fn plic_check_interrupt(state: PlicState) -> PlicCheckResult:
     """Check the independent M and S contexts against shared pending state."""
     val machine = plic_select_context(state, false)
@@ -265,6 +304,7 @@ fn plic_check_interrupt(state: PlicState) -> PlicCheckResult:
 # Claim — atomically returns winning source and clears its pending bit
 # ============================================================================
 
+@hardware
 fn plic_claim(state: PlicState) -> PlicClaimResult:
     """Claim the highest-priority enabled pending interrupt.
     Clears the pending bit of the claimed source.
@@ -280,6 +320,7 @@ fn plic_claim(state: PlicState) -> PlicClaimResult:
         out.claim_complete = 0
     PlicClaimResult(state: out, source_id: check.source_id)
 
+@hardware
 fn plic_claim_s(state: PlicState) -> PlicClaimResult:
     """Claim the S-context winner and clear its shared pending bit."""
     val check = plic_check_interrupt(state)
@@ -297,6 +338,7 @@ fn plic_claim_s(state: PlicState) -> PlicClaimResult:
 # Complete — signal that ISR processing is done for a source
 # ============================================================================
 
+@hardware
 fn plic_complete(state: PlicState, source: u32) -> PlicState:
     """Complete interrupt handling for the given source.
     Standard PLIC semantics: the completion allows the source to
@@ -314,6 +356,7 @@ fn plic_complete(state: PlicState, source: u32) -> PlicState:
         out.pending = out.pending | mask
     out
 
+@hardware
 fn plic_complete_s(state: PlicState, source: u32) -> PlicState:
     """Complete one S-context claim."""
     if source == 0 or source >= 32:

@@ -338,6 +338,8 @@ struct Rv32SocMemoryMap:
     uart_clock_hz: i64
     clint_addr: i64
     plic_addr: i64
+    mailbox_addr: i64
+    mailbox_reserved_size: i64
     timebase_hz: i64
     boot_hartid: i64
 
@@ -350,6 +352,8 @@ impl Rv32SocMemoryMap:
             uart_clock_hz: 100_000_000,
             clint_addr: 0x0200_0000,
             plic_addr: 0x0C00_0000,
+            mailbox_addr: 0x80FF_0000,
+            mailbox_reserved_size: 0x1000,
             timebase_hz: 100_000_000,
             boot_hartid: 0
         )
@@ -390,6 +394,21 @@ fn rv32_linux_dtb_generate(mem_map: Rv32SocMemoryMap) -> [u8]:
     val dram_size = mem_map.dram_size as u64
     val dram_reg = be32_bytes((dram_base >> 32) & 0xFFFFFFFF) + be32_bytes(dram_base & 0xFFFFFFFF) + be32_bytes((dram_size >> 32) & 0xFFFFFFFF) + be32_bytes(dram_size & 0xFFFFFFFF)
     b = fdt_prop_raw(b, "reg", dram_reg)
+    b = fdt_end_node(b)
+
+    # The compiler-emitted SoC keeps its simulation/qualification mailbox in
+    # the DRAM aperture, so Linux must never allocate or map that page as RAM.
+    b = fdt_begin_node(b, "reserved-memory")
+    b = fdt_prop_u32(b, "#address-cells", 2)
+    b = fdt_prop_u32(b, "#size-cells", 2)
+    b = fdt_prop_empty(b, "ranges")
+    b = fdt_begin_node(b, "mailbox@{mem_map.mailbox_addr:x}")
+    val mailbox_addr = mem_map.mailbox_addr as u64
+    val mailbox_size = mem_map.mailbox_reserved_size as u64
+    val mailbox_reg = be32_bytes((mailbox_addr >> 32) & 0xFFFFFFFF) + be32_bytes(mailbox_addr & 0xFFFFFFFF) + be32_bytes((mailbox_size >> 32) & 0xFFFFFFFF) + be32_bytes(mailbox_size & 0xFFFFFFFF)
+    b = fdt_prop_raw(b, "reg", mailbox_reg)
+    b = fdt_prop_empty(b, "no-map")
+    b = fdt_end_node(b)
     b = fdt_end_node(b)
 
     b = fdt_begin_node(b, "chosen")
@@ -471,6 +490,15 @@ fn rv32_linux_dtb_to_dts(mem_map: Rv32SocMemoryMap) -> text:
     "    memory@{mem_map.dram_base:x} {\n" +
     "        device_type = \"memory\";\n" +
     "        reg = <0x0 0x{mem_map.dram_base:x} 0x0 0x{mem_map.dram_size:x}>;\n" +
+    "    };\n" +
+    "    reserved-memory {\n" +
+    "        #address-cells = <2>;\n" +
+    "        #size-cells = <2>;\n" +
+    "        ranges;\n" +
+    "        mailbox@{mem_map.mailbox_addr:x} {\n" +
+    "            reg = <0x0 0x{mem_map.mailbox_addr:x} 0x0 0x{mem_map.mailbox_reserved_size:x}>;\n" +
+    "            no-map;\n" +
+    "        };\n" +
     "    };\n" +
     "    chosen {\n" +
     "        bootargs = \"earlycon=uart8250,mmio,0x{mem_map.uart_addr:x} console=ttyS0,115200\";\n" +

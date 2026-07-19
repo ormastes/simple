@@ -1,0 +1,314 @@
+# ==========================================================================
+# Clocked RV32 SoC product boundary
+# ==========================================================================
+#
+# The core owns one translated physical-memory master.  ROM and MMIO requests
+# complete through a one-cycle response latch.  DRAM requests use one holding
+# entry (`ddr_pending`) followed by one accepted transaction (`ddr_waiting`).
+# Request payload remains registered while valid and no second request can
+# overlap an accepted transaction, preserving the RV32A exclusive-master
+# invariant established by core32_init_single_master().
+# ==========================================================================
+
+use std.hardware.rv32i_rtl.core.{CoreState, core32_init_single_master, core32_cycle}
+use std.hardware.rv32i_rtl.csr.csr_update_mip_ext
+use std.hardware.rv32i_rtl.mmu_sv32.ACCESS_FETCH
+use std.hardware.rv32i_rtl.memory_access.memory32_reset
+
+use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
+use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read}
+use std.hardware.soc_rtl.uart16550.{uart_mmio_read_update, uart_mmio_write}
+use std.hardware.soc_rtl.uart16550.uart_tick_with_rx
+use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_mmio_read}
+use std.hardware.soc_rtl.clint.{clint_mmio_write, clint_tick}
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read}
+use std.hardware.soc_rtl.plic.{plic_mmio_read_update, plic_mmio_write}
+use std.hardware.soc_rtl.plic.{plic_set_pending, plic_check_interrupt, PLIC_BASE}
+use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create}
+use std.hardware.soc_rtl.mailbox.{mailbox_mmio_read, mailbox_mmio_write}
+
+use std.hardware.soc_rtl.wb_interconnect.{wb_decode_address, wb_route_write}
+use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_ROM, WB_SLAVE_CLINT}
+use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_PLIC, WB_SLAVE_UART}
+use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_RAM, WB_SLAVE_MAILBOX}
+use std.hardware.soc_rtl.wb_interconnect.{RAM_END, CLINT_BASE}
+use std.hardware.soc_rtl.wb_interconnect.{UART_BASE, MB_BASE}
+
+struct Soc32ClockedState:
+    """All registered state owned by the synthesizable RV32 SoC boundary."""
+    core: CoreState
+    uart: Uart16550State
+    clint: ClintState
+    plic: PlicState
+    mailbox: MailboxState
+
+    # Core response staging.  A value written in one transition is consumed by
+    # core32_cycle on the following transition.
+    response_valid: bool
+    response_error: bool
+    response_data: u32
+
+    # Mailbox EXIT is committed only after its MMIO response reaches the core.
+    halt_pending: bool
+
+    # One external request entry: pending waits for request_ready; waiting has
+    # been accepted and waits for response_valid.
+    ddr_pending: bool
+    ddr_waiting: bool
+    ddr_addr: i64
+    ddr_lane: u32
+    ddr_size: u32
+    ddr_write: bool
+    ddr_wdata: u32
+    ddr_byte_enable: u32
+    ddr_is_pte: bool
+    ddr_atomic: bool
+
+struct Soc32ClockedResult:
+    """Registered SoC state and pin-level outputs for the next clock cycle."""
+    initialized: bool
+    state: Soc32ClockedState
+    uart_tx: bool
+    halted: bool
+    ddr_valid: bool
+    ddr_addr: i64
+    ddr_size: u32
+    ddr_write: bool
+    ddr_wdata: u32
+    ddr_byte_enable: u32
+    ddr_is_pte: bool
+    ddr_atomic: bool
+
+@hardware
+fn soc32_clocked_init() -> Soc32ClockedState:
+    """Create reset state with an exclusive single RV32 memory master."""
+    Soc32ClockedState(
+        core: core32_init_single_master(BOOTROM_BASE),
+        uart: uart_create(),
+        clint: clint_create(),
+        plic: plic_create(),
+        mailbox: mailbox_create(),
+        response_valid: false,
+        response_error: false,
+        response_data: 0,
+        halt_pending: false,
+        ddr_pending: false,
+        ddr_waiting: false,
+        ddr_addr: 0,
+        ddr_lane: 0,
+        ddr_size: 1,
+        ddr_write: false,
+        ddr_wdata: 0,
+        ddr_byte_enable: 0,
+        ddr_is_pte: false,
+        ddr_atomic: false
+    )
+
+@clocked(clk, reset_n)
+@hardware
+fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
+                 uart_rx: bool, ddr_request_ready: bool,
+                 ddr_response_valid: bool, ddr_response_error: bool,
+                 ddr_response_data: u32) -> Soc32ClockedResult:
+    """Advance the SoC and its one-entry external DRAM request channel.
+
+    `ddr_valid` remains asserted with stable payload until a cycle presented
+    with `ddr_request_ready`.  Acceptance moves the entry to `ddr_waiting`.
+    A response is accepted only for a waiting request, or on the same cycle as
+    request acceptance.  The accepted response is staged for the core's next
+    transition.  Read data is a 32-bit aligned DDR lane and is right-justified
+    here for byte/halfword core loads.
+    """
+    if not initialized:
+        val reset_state = soc32_clocked_init()
+        return Soc32ClockedResult(
+            initialized: true,
+            state: reset_state,
+            uart_tx: true,
+            halted: false,
+            ddr_valid: false,
+            ddr_addr: 0,
+            ddr_size: 1,
+            ddr_write: false,
+            ddr_wdata: 0,
+            ddr_byte_enable: 0,
+            ddr_is_pte: false,
+            ddr_atomic: false
+        )
+
+    var out = state
+
+    # Peripheral time and interrupt inputs are sampled before the core step.
+    val ct = clint_tick(out.clint)
+    out.clint = ct.state
+    out.core.time_lo = out.clint.mtime_lo
+    out.core.time_hi = out.clint.mtime_hi
+    val ut = uart_tick_with_rx(out.uart, uart_rx)
+    out.uart = ut.state
+    out.plic = plic_set_pending(out.plic, 10, ut.irq)
+    val external = plic_check_interrupt(out.plic)
+    out.core.csr_m = csr_update_mip_ext(out.core.csr_m, ct.mtip,
+        ct.msip_out, external.meip, external.seip)
+
+    # An occupied external slot backpressures the only core master.  Normal
+    # core operation is already in WAIT then, but this guard also makes the
+    # one-entry invariant explicit for malformed/restored state.
+    val ddr_busy = state.ddr_pending or state.ddr_waiting
+    val core_request_ready = not ddr_busy
+    val drain_halt = state.halt_pending and state.response_valid
+    val request_access = out.core.memory.access_type
+    val core_result = core32_cycle(out.core, core_request_ready,
+        state.response_valid, state.response_error, state.response_data)
+    out.core = core_result.state
+    out.response_valid = false
+    out.response_error = false
+    out.response_data = 0
+
+    # The request output reflects registered pending state from the preceding
+    # transition.  Same-cycle request/response is accepted when both handshakes
+    # are asserted, otherwise an accepted request advances to waiting.
+    val ddr_accept = state.ddr_pending and ddr_request_ready
+    val ddr_complete = ddr_response_valid and
+        (state.ddr_waiting or ddr_accept)
+    if ddr_accept:
+        out.ddr_pending = false
+        out.ddr_waiting = true
+    if ddr_complete:
+        out.ddr_pending = false
+        out.ddr_waiting = false
+        out.response_valid = true
+        out.response_error = ddr_response_error
+        var read_data = ddr_response_data
+        val lane_shift = state.ddr_lane * 8
+        if not state.ddr_write:
+            if state.ddr_size == 1:
+                read_data = (ddr_response_data >> lane_shift) & 0xFF
+            else if state.ddr_size == 2:
+                read_data = (ddr_response_data >> lane_shift) & 0xFFFF
+        else:
+            read_data = 0
+        out.response_data = read_data
+
+    # A request is routed only when the core observed request_ready.  Internal
+    # targets stage an immediate response; RAM occupies the external entry.
+    if core_result.bus_valid and core_request_ready:
+        if core_result.bus_addr < 0 or core_result.bus_addr > 0xFFFFFFFF:
+            out.response_valid = true
+            out.response_error = true
+        else:
+            val addr = core_result.bus_addr as u32
+            val slave_idx = wb_decode_address(addr)
+            val target_valid = (slave_idx == WB_SLAVE_ROM or
+                slave_idx == WB_SLAVE_CLINT or slave_idx == WB_SLAVE_PLIC or
+                slave_idx == WB_SLAVE_UART or slave_idx == WB_SLAVE_RAM or
+                slave_idx == WB_SLAVE_MAILBOX)
+            var request_error = not target_valid
+            if core_result.bus_size != 1 and core_result.bus_size != 2 and
+               core_result.bus_size != 4:
+                request_error = true
+            if slave_idx == WB_SLAVE_RAM and
+               core_result.bus_size > (RAM_END - addr) + 1:
+                request_error = true
+            if core_result.bus_is_pte and slave_idx != WB_SLAVE_RAM:
+                request_error = true
+            if request_access == ACCESS_FETCH and
+               slave_idx != WB_SLAVE_ROM and slave_idx != WB_SLAVE_RAM:
+                request_error = true
+            if core_result.bus_atomic and slave_idx != WB_SLAVE_RAM:
+                request_error = true
+            if core_result.bus_write and slave_idx == WB_SLAVE_ROM:
+                request_error = true
+
+            if request_error:
+                out.response_valid = true
+                out.response_error = true
+            else if slave_idx == WB_SLAVE_RAM:
+                val lane = addr & 3
+                val lane_shift = lane * 8
+                var byte_enable: u32 = 0xF
+                var write_data = core_result.bus_wdata
+                if core_result.bus_size == 1:
+                    byte_enable = 1 << lane
+                    write_data = (core_result.bus_wdata & 0xFF) << lane_shift
+                else if core_result.bus_size == 2:
+                    byte_enable = 3 << lane
+                    write_data = (core_result.bus_wdata & 0xFFFF) << lane_shift
+                out.ddr_pending = true
+                out.ddr_waiting = false
+                out.ddr_addr = (addr & 0xFFFFFFFC) as i64
+                out.ddr_lane = lane
+                out.ddr_size = core_result.bus_size
+                out.ddr_write = core_result.bus_write
+                out.ddr_wdata = write_data
+                out.ddr_byte_enable = byte_enable
+                out.ddr_is_pte = core_result.bus_is_pte
+                out.ddr_atomic = core_result.bus_atomic
+            else if core_result.bus_write:
+                out.response_valid = true
+                val wr = wb_route_write(slave_idx, addr,
+                    core_result.bus_wdata)
+                if slave_idx == WB_SLAVE_CLINT:
+                    out.clint = clint_mmio_write(out.clint, wr.offset,
+                        core_result.bus_wdata)
+                else if slave_idx == WB_SLAVE_PLIC:
+                    out.plic = plic_mmio_write(out.plic, wr.offset,
+                        core_result.bus_wdata)
+                else if slave_idx == WB_SLAVE_UART:
+                    out.uart = uart_mmio_write(out.uart, wr.offset,
+                        core_result.bus_wdata)
+                else if slave_idx == WB_SLAVE_MAILBOX:
+                    val mb = mailbox_mmio_write(out.mailbox, wr.offset,
+                        core_result.bus_wdata)
+                    out.mailbox = mb.state
+                    if mb.halt_request:
+                        out.halt_pending = true
+            else:
+                out.response_valid = true
+                if slave_idx == WB_SLAVE_ROM:
+                    val raw = bootrom_read(addr)
+                    val shifted = raw >> ((addr & 3) * 8)
+                    if core_result.bus_size == 1:
+                        out.response_data = shifted & 0xFF
+                    else if core_result.bus_size == 2:
+                        out.response_data = shifted & 0xFFFF
+                    else:
+                        out.response_data = shifted
+                else if slave_idx == WB_SLAVE_CLINT:
+                    out.response_data = clint_mmio_read(out.clint,
+                        addr - CLINT_BASE)
+                else if slave_idx == WB_SLAVE_PLIC:
+                    out.response_data = plic_mmio_read(out.plic,
+                        addr - PLIC_BASE)
+                    out.plic = plic_mmio_read_update(out.plic,
+                        addr - PLIC_BASE)
+                else if slave_idx == WB_SLAVE_UART:
+                    out.response_data = uart_mmio_read(out.uart,
+                        addr - UART_BASE)
+                    out.uart = uart_mmio_read_update(out.uart,
+                        addr - UART_BASE)
+                else if slave_idx == WB_SLAVE_MAILBOX:
+                    out.response_data = mailbox_mmio_read(out.mailbox,
+                        addr - MB_BASE)
+
+    if drain_halt:
+        out.core.halt = true
+        out.core.memory = memory32_reset()
+        out.halt_pending = false
+
+    Soc32ClockedResult(
+        initialized: true,
+        state: out,
+        uart_tx: ut.tx_out != 0,
+        halted: out.core.halt,
+        ddr_valid: out.ddr_pending,
+        ddr_addr: out.ddr_addr,
+        ddr_size: out.ddr_size,
+        ddr_write: out.ddr_write,
+        ddr_wdata: out.ddr_wdata,
+        ddr_byte_enable: out.ddr_byte_enable,
+        ddr_is_pte: out.ddr_is_pte,
+        ddr_atomic: out.ddr_atomic
+    )
+
+export Soc32ClockedState, Soc32ClockedResult
+export soc32_clocked_init, soc32_clocked

@@ -33,7 +33,10 @@ Date: 2026-07-18
 | `rv32_dtb_impl` | binding-complete RV32 product DT | Emit binary/DTS from the fixed RV32 SoC map with CPU/CLINT/PLIC/UART bindings and keep the unimplemented RV64 product API fail-closed | accepted after independent high-capability review PASS; primary owns merge |
 | `rv32_a_design` | RV32 WFI and Zicntr | Add legal immediate-completion WFI, TW interception, writable machine counters, gated Zicntr aliases/high halves, and CLINT-backed time | accepted after independent high-capability review PASS; primary owns merge |
 | `linux_media_audit` | bidirectional RV32 16550 pins | Correct divisor/THRE/TX framing, synchronize and midpoint-sample RX, preserve FIFO/IRQ owners, and expose an RX-aware SoC tick | accepted after primary TX repair and independent high-capability review PASS; primary owns merge |
-| `rv32_m_review` | compiler-emitted SoC boundary audit | Trace the real VHDL root, simulation SoC, bundle writer, and K26 wrappers; define the minimum external-memory/UART product seam | accepted; `soc32_clocked` implementation is the next lane |
+| `rv32_m_review` | compiler-emitted SoC boundary audit | Trace the real VHDL root, simulation SoC, bundle writer, and K26 wrappers; define the minimum external-memory/UART product seam | accepted; boundary contract implemented in `soc32_clocked` |
+| `rv32_a_design` | clocked RV32 SoC boundary | Own CPU/peripherals/response state, expose a held single-outstanding DDR seam, preserve lane/PTE/atomic metadata, and exclude dynamic RAM | accepted after independent high-capability review PASS; primary owns merge |
+| `linux_media_audit` | synthesizable PLIC priority storage | Replace the dynamic priority array with fixed bitplanes while preserving source-zero, selection, claim, completion, and re-pend behavior | accepted after bounded read-only review PASS; primary owns merge |
+| `rv32_dtb_impl` | mailbox DT reservation | Reserve the 4 KiB product mailbox page inside DRAM and mark it `no-map` in binary DT and DTS output | accepted after independent high-capability review PASS; primary owns merge |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

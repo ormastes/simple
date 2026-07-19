@@ -285,6 +285,17 @@ external-memory transaction state. It exposes UART RX/TX plus a backpressured
 DDR request/response seam. The K26 layer remains a thin pin/AXI adapter, and the
 simulation RAM becomes only another consumer of the same fabric contract.
 
+The RV32 source implementation now realizes that root with one registered,
+single-outstanding DDR transaction. Requests remain stable through
+backpressure, byte/halfword lanes are shifted at the boundary, PTE and atomic
+qualifiers are preserved, and internal MMIO responses retire through the same
+latched core interface. The external memory system must remain exclusive and
+noncoherent so LR/SC reservations cannot be invalidated invisibly. The product
+map is deliberately 32-bit and rejects wider physical addresses. Because the
+mailbox occupies a page inside the DRAM aperture, the canonical DT reserves
+that page with `no-map`. Static review is complete; compiler emission, the
+shared simulation adapter, and the K26 AXI adapter remain later gates.
+
 ## Dependency and change boundaries
 
 - Source/core changes stay in their existing architecture capsule.

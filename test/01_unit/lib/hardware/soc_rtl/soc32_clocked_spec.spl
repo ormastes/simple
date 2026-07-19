@@ -1,0 +1,129 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.memory_access.MEMORY32_REQUEST
+use std.hardware.rv32i_rtl.pkg.{MB_CMD_EXIT, MB_OFF_TRIGGER, MB_TRIGGER_MAGIC}
+use std.hardware.soc_rtl.bootrom.BOOTROM_BASE
+use std.hardware.soc_rtl.soc32_clocked.{soc32_clocked_init, soc32_clocked}
+use std.hardware.soc_rtl.wb_interconnect.MB_BASE
+
+describe "clocked RV32 SoC DDR boundary":
+    it "resets to the boot ROM with one exclusive atomic master":
+        val reset = soc32_clocked_init()
+        expect(reset.core.pc).to_equal(BOOTROM_BASE)
+        expect(reset.core.atomic_bus_exclusive).to_equal(true)
+        expect(reset.response_valid).to_equal(false)
+        expect(reset.ddr_pending).to_equal(false)
+        expect(reset.ddr_waiting).to_equal(false)
+
+    it "aligns and holds a byte-store request until DDR accepts it":
+        var state = soc32_clocked_init()
+        state.core.memory.phase = MEMORY32_REQUEST
+        state.core.memory.paddr = 0x80000001
+        state.core.memory.size_bytes = 1
+        state.core.memory.access_type = ACCESS_STORE
+        state.core.memory.bus_write = true
+        state.core.memory.write_data = 0xAB
+
+        val queued = soc32_clocked(true, state, true, false, false, false, 0)
+        expect(queued.ddr_valid).to_equal(true)
+        expect(queued.ddr_addr).to_equal(0x80000000)
+        expect(queued.ddr_size).to_equal(1)
+        expect(queued.ddr_write).to_equal(true)
+        expect(queued.ddr_wdata).to_equal(0x0000AB00)
+        expect(queued.ddr_byte_enable).to_equal(0x2)
+
+        val held = soc32_clocked(true, queued.state, true, false, false,
+            false, 0)
+        expect(held.ddr_valid).to_equal(true)
+        expect(held.ddr_addr).to_equal(queued.ddr_addr)
+        expect(held.ddr_wdata).to_equal(queued.ddr_wdata)
+        expect(held.ddr_byte_enable).to_equal(queued.ddr_byte_enable)
+
+        val accepted = soc32_clocked(true, held.state, true, true, false,
+            false, 0)
+        expect(accepted.ddr_valid).to_equal(false)
+        expect(accepted.state.ddr_pending).to_equal(false)
+        expect(accepted.state.ddr_waiting).to_equal(true)
+
+    it "accepts an aligned response with an already-visible request handshake":
+        var state = soc32_clocked_init()
+        state.core.memory.phase = MEMORY32_REQUEST
+        state.core.memory.paddr = 0x80000002
+        state.core.memory.size_bytes = 2
+        state.core.memory.access_type = ACCESS_LOAD
+        state.core.memory.bus_write = false
+
+        val queued = soc32_clocked(true, state, true, false, false, false, 0)
+        expect(queued.ddr_valid).to_equal(true)
+        expect(queued.ddr_addr).to_equal(0x80000000)
+        expect(queued.ddr_byte_enable).to_equal(0xC)
+
+        val completed = soc32_clocked(true, queued.state, true, true, true,
+            false, 0xBEEF0000)
+        expect(completed.state.ddr_pending).to_equal(false)
+        expect(completed.state.ddr_waiting).to_equal(false)
+        expect(completed.state.response_valid).to_equal(true)
+        expect(completed.state.response_error).to_equal(false)
+        expect(completed.state.response_data).to_equal(0xBEEF)
+
+    it "preserves the single-master atomic qualifier and word lanes":
+        var state = soc32_clocked_init()
+        state.core.memory.phase = MEMORY32_REQUEST
+        state.core.memory.paddr = 0x80000004
+        state.core.memory.size_bytes = 4
+        state.core.memory.access_type = ACCESS_STORE
+        state.core.memory.bus_write = true
+        state.core.memory.atomic = true
+        state.core.memory.write_data = 0xA5A55A5A
+
+        val queued = soc32_clocked(true, state, true, false, false, false, 0)
+        expect(queued.ddr_valid).to_equal(true)
+        expect(queued.ddr_addr).to_equal(0x80000004)
+        expect(queued.ddr_atomic).to_equal(true)
+        expect(queued.ddr_byte_enable).to_equal(0xF)
+        expect(queued.ddr_wdata).to_equal(0xA5A55A5A)
+
+    it "faults physical requests above the 32-bit product address map":
+        var state = soc32_clocked_init()
+        state.core.memory.phase = MEMORY32_REQUEST
+        state.core.memory.paddr = 0x100000000
+        state.core.memory.size_bytes = 4
+        state.core.memory.access_type = ACCESS_LOAD
+
+        val rejected = soc32_clocked(true, state, true, false, false,
+            false, 0)
+        expect(rejected.ddr_valid).to_equal(false)
+        expect(rejected.state.response_valid).to_equal(true)
+        expect(rejected.state.response_error).to_equal(true)
+
+        var unmapped_state = soc32_clocked_init()
+        unmapped_state.core.memory.phase = MEMORY32_REQUEST
+        unmapped_state.core.memory.paddr = 0x10010000
+        unmapped_state.core.memory.size_bytes = 4
+        unmapped_state.core.memory.access_type = ACCESS_LOAD
+        val unmapped = soc32_clocked(true, unmapped_state, true, false,
+            false, false, 0)
+        expect(unmapped.ddr_valid).to_equal(false)
+        expect(unmapped.state.response_valid).to_equal(true)
+        expect(unmapped.state.response_error).to_equal(true)
+
+    it "halts only after the mailbox response is presented to the core":
+        var state = soc32_clocked_init()
+        state.mailbox.cmd = MB_CMD_EXIT
+        state.core.memory.phase = MEMORY32_REQUEST
+        state.core.memory.paddr = MB_BASE + MB_OFF_TRIGGER
+        state.core.memory.size_bytes = 4
+        state.core.memory.access_type = ACCESS_STORE
+        state.core.memory.bus_write = true
+        state.core.memory.write_data = MB_TRIGGER_MAGIC
+
+        val requested = soc32_clocked(true, state, true, false, false,
+            false, 0)
+        expect(requested.state.halt_pending).to_equal(true)
+        expect(requested.state.response_valid).to_equal(true)
+        expect(requested.halted).to_equal(false)
+
+        val drained = soc32_clocked(true, requested.state, true, false,
+            false, false, 0)
+        expect(drained.state.halt_pending).to_equal(false)
+        expect(drained.halted).to_equal(true)

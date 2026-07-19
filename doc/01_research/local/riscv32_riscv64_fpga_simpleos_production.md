@@ -331,10 +331,18 @@ registers, midpoint-samples it into the existing FIFO, and drives the existing
 UART/PLIC interrupt path. Independent high-capability static review reports
 PASS; executable Simple checks remain deferred by the exhausted session cap.
 
-The compiler-path audit also narrows the next blocker: the current VHDL gate
-ends at `core32_clocked`. `soc_tick` remains a simulation composition with
-embedded RAM, the FPGA bundle still writes placeholder/hand-rendered SoC VHDL,
-and the K26 wrapper contains bridge/LED state but no Simple CPU. The next owner
-must be one compiler-emitted `soc32_clocked` fabric with UART pins and an
-external-memory request/response boundary; K26 should only adapt those pins and
-the DDR bus.
+The compiler-path audit also narrowed the next blocker, and the corresponding
+Simple source root now exists as `soc32_clocked`. It owns the RV32 core, UART,
+CLINT, shared two-context PLIC, mailbox, response staging, and one held
+external-DDR transaction without embedding dynamic RAM. Its lane-aligned
+request/response seam carries PTE and atomic qualifiers, rejects addresses
+outside the canonical 32-bit product map, and requires exclusive external
+memory ownership. The PLIC priority store is now synthesizable fixed bitplanes,
+and the DT reserves the mailbox page inside the advertised DRAM range with
+`no-map`. Independent high-capability static review reports PASS.
+
+This is still source-level readiness. The compiler/GHDL gate was not executed
+because the pure-Simple CLI retry cap is exhausted; `soc_tick` still needs to
+be factored onto the same fabric contract, and the K26 wrapper still needs a
+thin AXI/DDR adapter. No generated-VHDL, RTL-Linux, or FPGA claim follows from
+this slice.
