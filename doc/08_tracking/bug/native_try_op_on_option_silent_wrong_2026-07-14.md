@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** typed local/direct-call support implemented; execution and uniform tagged Option ABI pending
+**Status:** enum-id-1 Option migration is source-implemented across typed boundaries; strict LLVM/Cranelift execution remains opt-in and pending
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -158,10 +158,21 @@ objects and reject the retired fail-closed diagnostic. Static portability
 coverage pins backend selection and the target-object contract. Execution is
 pending; the payload-3 collision and uniform tagged Option ABI remain open.
 
-The exact open ABI matrix is preserved in
+The exact ABI matrix is preserved in
 `test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl`. It covers
-raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`, and
-raw/explicit `Some(0)` controls. Set `NATIVE_OPEN_BUG_REPROS=1` on the native
-parity harness to run it under default LLVM and explicit Cranelift; expected
-output is `3377777700`. It remains opt-in and red until all typed boundaries
-share the uniform tagged representation.
+raw and explicit `Some(3)`, raw and explicit absence, `Some(0)`, typed locals,
+aliases, parameters, returns, fields, function values, `if`/`match` merges, and
+present/absent `?` propagation. Its final `rt_enum_id(through_try(nil))` check
+requires the canonical None handle rather than legacy raw nil. Set
+The default parity gate now runs it under default LLVM and explicit Cranelift;
+both current-source backend legs are mandatory.
+
+## Sync-clobber restoration (2026-07-19)
+
+A later sync restored the pre-migration dual ABI while the correctness plan
+still claimed the enum-id-1 fix. The retained pure-Simple implementation and
+its expanded fixture are restored without replacing newer struct-default
+lowering. Typed lets, assignments, fields, parameters, direct/function-value
+calls, returns, control-flow merges, Option methods, and early `?` absence now
+route through `ensure_option_handle`; the runtime recognizes only enum id 1 /
+None ordinal 1 plus the raw-nil migration fallback. Execution remains pending.

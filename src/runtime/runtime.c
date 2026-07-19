@@ -1186,7 +1186,7 @@ int64_t rt_enum_payload(int64_t value) {
     return enum_value ? enum_value->payload : 0;
 }
 
-bool rt_enum_check_discriminant(int64_t value, int64_t expected) {
+int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value && enum_value->discriminant == (int32_t)expected;
 }

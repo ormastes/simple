@@ -27,6 +27,7 @@ describe "MIR Option variant order":
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_try_unresolved_method_loud.spl") ?? ""
         val method_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
         val dispatch_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val call_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
         val harness = rt_file_read_text("scripts/check/check-native-seed-parity.shs") ?? ""
 
         expect(fixture).to_contain("fn maybe(self) -> i64?:")
@@ -35,9 +36,33 @@ describe "MIR Option variant order":
         expect(dispatch_source).to_contain("self.local_hir_types[local.id] = found_type")
         expect(harness).to_contain("run_native_authoritative_case option_try_unresolved_method_loud write_case_option_try_unresolved_method_loud \"6\"")
 
-    it "keeps the uniform tagged ABI bug exactly reproducible":
+        # ROOT-FIX guard (native_try_op_on_option_silent_wrong_2026-07-14):
+        # enum_match_expr_type MUST recover a MethodCall's Option return type,
+        # or `?` on `source.maybe()` falls through to lower_try_expr's
+        # unconditional Result decode and silently misreads the Option
+        # payload. This exact arm was landed by 8b332df02b9, then silently
+        # dropped by an unrelated struct-init hunk in ae57d190640 (confirmed
+        # via `git log -S`) with no spec catching the loss -- native-build
+        # of the fixture above regressed from "6" to a silent "0" with no
+        # diagnostic. Pin the source text of both recovery paths so neither
+        # can be dropped silently again:
+        #   1. the `resolution.get_symbol_id()` path (works once a full
+        #      type-inference pass populates MethodResolution), and
+        #   2. the `struct_method_syms` name-keyed fallback (required on
+        #      native-build's --entry fast path, which never runs type
+        #      inference, so `resolution` stays Unresolved).
+        expect(call_source).to_contain("case MethodCall(receiver, method, _, resolution):")
+        expect(call_source).to_contain("if val method_id = resolution.get_symbol_id():")
+        expect(call_source).to_contain("val receiver_type = self.receiver_declared_type(receiver)")
+        expect(call_source).to_contain('val method_key = "{struct_name}::{method}"')
+        expect(call_source).to_contain("if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):")
+        expect(call_source).to_contain("me receiver_declared_type(receiver: HirExpr) -> HirType?:")
+
+    it "pins the uniform tagged ABI migration and exact behavioral gate":
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl") ?? ""
         val harness = rt_file_read_text("scripts/check/check-native-seed-parity.shs") ?? ""
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        val core_string = rt_file_read_text("src/runtime/simple_core/core_string.spl") ?? ""
 
         expect(fixture).to_contain("fn raw_three() -> i64?:")
         expect(fixture).to_contain("fn explicit_three() -> Option<i64>:")
@@ -45,5 +70,16 @@ describe "MIR Option variant order":
         expect(fixture).to_contain("fn explicit_none() -> Option<i64>:")
         expect(fixture).to_contain("None")
         expect(fixture).to_contain("unwrap_or(777)")
+        expect(fixture).to_contain("fn through_function_value(f: fn(i64?) -> i64, present: bool) -> i64:")
+        expect(fixture).to_contain("        f(3)")
+        expect(fixture).to_contain("        f(nil)")
+        expect(fixture).to_contain("fn through_try(value: i64?) -> i64?:")
+        expect(fixture).to_contain("extern fn rt_enum_id(value: i64) -> i64")
+        expect(fixture).to_contain("print(rt_enum_id(through_try(nil)))")
+        expect(fixture).to_contain('print(rt_enum_id(rt_string_index_of("abc", "z")))')
+        expect(lowering).to_contain("val none_handle = self.ensure_option_handle(nil_result, base_type)")
+        expect(lowering).to_contain("if mir_expr_symbol_id_value(direct_symbol) >= 0:")
+        expect(lowering).to_contain("if call_param_types.len() == 0 and callee.has_type_:")
         expect(harness).to_contain("NATIVE_OPEN_BUG_REPROS")
-        expect(harness).to_contain("run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl \"3377777700\"")
+        expect(core_string).to_contain("return rt_enum_new(1, 1, 3)")
+        expect(harness).to_contain("run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl \"33777777003337770337773777377737773777111\"")

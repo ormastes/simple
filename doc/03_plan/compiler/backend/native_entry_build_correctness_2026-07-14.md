@@ -15,11 +15,11 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **91 logical cases / 124 recorded checks** because strict-dual cases
+  defines **92 logical cases / 126 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
   to **93 logical cases / 127 recorded checks**; execution is opt-in because
-  those two reproductions remain known-red. Execution of the expanded matrix
-  is pending.
+  the exact brace-literal reproduction remains known-red. Execution of the
+  expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
   cases also build Cranelift); its first CI execution is pending. Five modes:
   PARITY (seed==native after newline-normalize, with an optional fixed expected
@@ -113,7 +113,7 @@ the shared binary — deploys require explicit user go-ahead).
   of consuming later functions while seeking a `}`; exact lexer and HIR
   regressions cover the source. The broad map-initialization workaround
   `f06e5829` remains reverted by `0f535b099788`. Exact Linux execution remains
-  pending, so the opt-in case stays known-red until measured.
+  pending.
 - Open filed bugs, in bottom-up order:
   - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements `?`
     for authoritatively typed flat and boxed Option locals/direct-call returns;
@@ -133,8 +133,8 @@ the shared binary — deploys require explicit user go-ahead).
     Focused
     runnable tests cover the Rust MIR interpreter, raw-bool `Option.map`, the C
     runtime contract, and pure-runtime rejection of raw heap-tag collisions.
-    The exact LLVM/Cranelift fixture remains opt-in pending current-source
-    execution: the available seed-hosted worker emitted a multi-million-token
+    The exact LLVM/Cranelift fixture is now a mandatory strict-dual gate;
+    current-source execution remains pending because the available seed-hosted worker emitted a multi-million-token
     parser-hint flood and was terminated before native lowering rather than
     risking a runaway or crash.
   - The cross-module `Result<[u8], E>` control now routes both its Ok and Err

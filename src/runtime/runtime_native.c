@@ -1947,20 +1947,11 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 int8_t rt_is_none(int64_t value) {
-    /* Bug (native_i64opt_some0_collapses_to_nil): the `value == 0` fallback
-     * used to treat ANY raw zero as None, colliding with a real `Some(0)`
-     * payload on the flat (non-boxed) primitive `i64?`/`bool?` lane, where
-     * ints/bools are passed through as their bare bit pattern (not the
-     * NaN-boxed RT_VALUE_TAG_INT scheme -- a boxed int 0 would also be 0,
-     * so a bare `value == 0` check can never safely stand in for "is this
-     * the nil sentinel" once nil itself is *not* 0). The MIR-side NilLit
-     * materialization (expr_dispatch.spl `case NilLit:`) now emits the
-     * runtime's actual reserved nil sentinel (`rt_core_nil()`, bit pattern
-     * 3) instead of a bare 0, so nil and Some(0) are now distinct raw
-     * values -- test ONLY against rt_core_nil(); a properly-constructed
-     * Option never legitimately carries raw 0 as its nil marker anymore. */
+    /* Keep the raw nil sentinel as a migration fallback. Canonical typed
+     * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
+     * a valid present payload and other enum types are never classified nil. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
+    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
@@ -3212,7 +3203,7 @@ int64_t rt_enum_id(int64_t value) {
     return e ? (int64_t)e->enum_id : -1;
 }
 
-bool rt_enum_check_discriminant(int64_t value, int64_t expected) {
+int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e && (int64_t)e->discriminant == expected;
 }

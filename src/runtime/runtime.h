@@ -420,7 +420,7 @@ int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
-bool     rt_enum_check_discriminant(int64_t value, int64_t expected);
+int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_text_eq_fast(int64_t left, int64_t right);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
