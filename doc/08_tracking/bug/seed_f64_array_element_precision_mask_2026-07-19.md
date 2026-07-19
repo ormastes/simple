@@ -1,24 +1,20 @@
-# `[f64]` array element read-back loses precision (tagged-float mask on rt_array_get)
+# f64 loses low 3 mantissa bits through a RuntimeValue tagged slot (arrays/dicts) — inline tagged-float box
 
 - **id:** seed_f64_array_element_precision_mask_2026-07-19
 - **status:** open
-- **severity:** high (silent miscompile — arrays of floats are ubiquitous)
-- **class:** tag-box `<<3`/`>>3` mask — the **array-element sibling** of the
-  enum-payload f64 mask fixed in `fc7cdcb0b90`
-  (`doc/08_tracking/bug/native_llvm_f64_enum_payload_argpass_2026-07-19.md` is
-  the native-backend cousin).
+- **severity:** high (silent miscompile — any `[f64]` element read back wrong)
+- **class:** tag-box `<<3`/`>>3` — the **store-side, representation-level** cousin
+  of the enum-payload f64 mask fixed in `fc7cdcb0b90`. NOT the same shape of fix.
 - **found on:** the deployed `bin/simple`
   (`bin/release/x86_64-unknown-linux-gnu/simple`), which is currently the **Rust
-  bootstrap seed** (prints the "bootstrap seed only" banner) — i.e. today's
-  shipping tool.
+  bootstrap seed** — today's shipping tool.
 
-## Symptom
+## Symptom (verified by running)
 
-An `f64` read back out of an array is corrupted: any value with nonzero low
-mantissa bits (e.g. `0.1`) reads back slightly wrong, so `arr[0] == 0.1` is
-false. Confirmed for both an untyped literal and a **typed `[f64]` parameter**.
-Scalar `f64` values (params, locals) are correct — the loss is specific to array
-element extraction.
+An `f64` read back out of an array is corrupted: `arr[0] == 0.1` is false.
+Confirmed for a **typed `[f64]` parameter** (not just untyped literals). Scalar
+`f64` (param/local) is correct — the loss is specific to values routed through a
+heterogeneous RuntimeValue slot.
 
 Repro (typed `[f64]` param), deployed seed → **rc=40** (expected 30):
 
@@ -28,47 +24,67 @@ fn first(xs: [f64]) -> f64:
 
 fn main() -> i64:
     val a = [0.1, 0.2, 0.3]
-    val x = first(a)
-    if x == 0.1:
-        return 30
+    if first(a) == 0.1: return 30
     return 40
 ```
 
 Control (scalar f64) → rc=30 (correct):
 
 ```simple
-fn ident(v: f64) -> f64:
-    return v
+fn ident(v: f64) -> f64: return v
 fn main() -> i64:
     if ident(0.1) == 0.1: return 30
     return 40
 ```
 
-## Root cause (same class)
+## Root cause (read from codegen — the loss is at STORE, not extract)
 
-`rt_array_get` returns a TAGGED runtime value (`value << 3` for small values;
-see `src/compiler/50.mir/mir_lowering_stmts.spl:1713`). For an `f64` element the
-extract applies the tagged-float mask `(bits >> 3) << 3`, zeroing the low 3
-mantissa bits — exactly the leak fixed for enum payloads in `rt_enum_payload`
-(`src/compiler_rust/.../mir/lower/lowering_expr_builtin.rs`, commit fc7cdcb0b90).
-The array path is disjoint from the enum path (that fix is gated on
-`name == "rt_enum_payload"`), so the enum fix does **not** cover this.
+Array/tuple/dict literals box every native element uniformly into tagged
+RuntimeValue slots (`mir/lower/lowering_expr_collection.rs:18,36`: F32/F64 →
+`MirInst::BoxFloat`). The compiled `BoxFloat`
+(`codegen/instr/mod.rs:1388`) is an **inline tagged float**:
 
-## Fix sketch
+```
+payload = (bits >> 3) << 3      // ZEROES the low 3 mantissa bits
+boxed   = payload | 2           // TAG_FLOAT = 0b010
+```
 
-At the array-element extract, when the element type is F64, reinterpret the raw
-i64 bits (`Cast{F64→F64}` / bitcast) instead of applying the tagged-float mask —
-the same shape as the enum-payload fix. Locate the seed's array-element float
-unbox (the `rt_array_get` result coercion). Needs a seed rebuild to verify
-(disk-gated).
+So a value with nonzero low 3 bits (0.1) **loses those bits at box time**.
+`UnboxFloat` (`codegen/instr/mod.rs:1439`, `(val>>3)<<3` then bitcast) is a
+faithful inverse — it clears the tag and reinterprets — but the 3 bits are
+already gone. **The loss is upstream, at BoxFloat.** This is the inherent cost of
+stealing 3 low bits for the tag in the inline representation.
 
-## Scope note
+This is why the enum-payload fix does NOT apply here: enum single-field payloads
+are stored **raw** (no BoxFloat) in a full 64-bit slot, so removing a spurious
+extract-mask sufficed. Array/dict elements share a uniform tagged slot and are
+genuinely BoxFloat'd, so an extract-side `Cast` would NOT recover the lost bits
+(and, without a matching store change, would corrupt the round-trip). **The
+earlier "Cast-at-extract" sketch was wrong.**
 
-Confirmed on the deployed seed. The pure-Simple self-hosted MIR lowering has no
-`UnboxFloat` instruction (uses `emit_bitcast`/`emit_cast`); its `rt_array_get`
-f64 behavior was not run here (the self-hosted binary is not currently deployed —
-the "redeploy wall"). Re-run this repro through the self-hosted `bin/simple`
-once it is built to confirm whether pure-Simple is already clean.
+## Scope
+
+Affects any f64 routed through a heterogeneous RuntimeValue slot: array
+elements (confirmed), and by construction dict values and other ANY-channel f64.
+**Open discrepancy (needs a rebuild to trace):** in a MIR-interpreter probe
+`{"a":0.1}["a"] == 0.1` came back *correct* while `[0.1][0]` did not — dict-value
+and array-element paths, or interp-vs-codegen `BoxFloat` semantics, differ. Do
+not assume all containers behave the same until re-run.
+
+## Fix direction (representation change — needs a design decision, not a patch)
+
+The low bits are destroyed at box, so the fix is store-side:
+1. **Heap-box f64 elements** — store a tagged *pointer* to a heap f64 (full
+   precision), `UnboxFloat`/extract loads from the heap. Lossless; allocates.
+   Smallest correctness-preserving change; make `BoxFloat` (and its unbox) heap
+   the value instead of inline-masking.
+2. **Typed untagged `[f64]` arrays** — homogeneous raw-f64 backing store, no
+   per-element tag. Faster, larger change (typed-array runtime + element ops).
+
+Either touches `BoxFloat`/`UnboxFloat` together (and every f64 extract site:
+`lowering_stmt.rs` for-in ~1616, direct index, struct field
+`lowering_expr_struct.rs:609`, etc.). Verifying needs a seed rebuild — **blocked
+on disk** (156M free at time of filing). Do NOT ship a one-site extract patch.
 
 ## Regression guard
 
