@@ -287,9 +287,12 @@ the shared binary — deploys require explicit user go-ahead).
   incremental native probe now parses sequential modules with stale declaration,
   expression, and statement mirrors under the restored arena path (exit 0,
   2,816 KiB RSS). Full Stage4 execution proof remains pending: the broad parser
-  fixture stopped on existing phase-three lowering errors, a
-  narrow current-source probe reached the known `HirExpr.is_some` bootstrap
-  crash, and the cache-preserving Stage2-to-Stage3 rebuild was OOM-killed at
-  the 4 GiB safety cap before producing a candidate. Per the bounded retry
-  policy, those failing commands were not repeated. See
+  fixture stopped on existing phase-three lowering errors. The former
+  `HirExpr.is_some` bootstrap crash is source-fixed at both MIR Return sites
+  with canonical optional binding; present and bare returns are regression
+  covered, and the focused current-source Stage3 native build completed. Its
+  runtime probe then stopped earlier because entry-closure did not link the
+  uniquely named HIR lowering method, so it was not retried after the bounded
+  verification cap. The cache-preserving Stage2-to-Stage3 rebuild was also
+  OOM-killed at the 4 GiB safety cap before producing a candidate. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

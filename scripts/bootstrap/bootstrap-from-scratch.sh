@@ -36,7 +36,7 @@ Options:
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
                      SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
   --full-cli         Relink the full CLI after the staged pure-Simple build
-                     (supported on native Linux and macOS hosts).
+                     (supported on native Linux, macOS, FreeBSD, and Windows hosts).
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
@@ -185,9 +185,9 @@ host_os=$(uname -s 2>/dev/null || echo unknown)
 
 if [ "${full_cli}" -eq 1 ]; then
   case "${host_os}" in
-    Linux|Darwin) ;;
+    Linux|Darwin|FreeBSD|MINGW*|MSYS*|CYGWIN*|Windows*) ;;
     *)
-      echo "error: Stage 4 full-CLI capsule preparation requires native Linux or macOS" >&2
+      echo "error: Stage 4 full-CLI capsule preparation requires a supported native host" >&2
       exit 1
       ;;
   esac
