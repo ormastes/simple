@@ -44,10 +44,15 @@ use std.hardware.rv32i_rtl.csr.{csr_cycle_tick, csr_retire_tick}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_MPP_MASK}
-use std.hardware.rv32i_rtl.csr.MSTATUS_MPP_LO_BIT
+use std.hardware.rv32i_rtl.csr.{MSTATUS_MPP_LO_BIT, MSTATUS_TW_MASK}
 use std.hardware.rv32i_rtl.csr.MIP_SSIP_MASK
 use std.hardware.rv32i_rtl.csr.MIP_SUPERVISOR_MASK
 use std.hardware.rv32i_rtl.csr.MISA_RV32IMASU
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_CYCLE, CSR_ADDR_TIME}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_INSTRET, CSR_ADDR_CYCLEH}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_TIMEH, CSR_ADDR_INSTRETH}
+use std.hardware.rv32i_rtl.csr.{COUNTEREN_CY_MASK, COUNTEREN_TM_MASK}
+use std.hardware.rv32i_rtl.csr.COUNTEREN_IR_MASK
 use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_create, csr_s_is_known}
 use std.hardware.rv32i_rtl.csr_s.{csr_s_read, csr_s_write, csr_s_merge_mstatus}
 use std.hardware.rv32i_rtl.csr_s.{CSR_ADDR_SSTATUS, CSR_ADDR_SIE}
@@ -93,6 +98,8 @@ struct CoreState:
     priv_mode: u32      # Current privilege: U=0, S=1, M=3
     csr_m: CsrFile      # Canonical machine CSR state
     csr_s: CsrSMode     # Supervisor trap and address-space CSR state
+    time_lo: u32        # Platform-owned CLINT mtime low input
+    time_hi: u32        # Platform-owned CLINT mtime high input
     pmp: PmpEntries32   # Canonical physical protection state
     mmu: MmuState       # Canonical SATP and Sv32 TLB state
     rf: RegFile         # Architectural integer register file
@@ -378,6 +385,8 @@ fn core_update(state: CoreState, imem_data: u32, comb: CoreCombResult, a0_val: u
         priv_mode: state.priv_mode,
         csr_m: state.csr_m,
         csr_s: state.csr_s,
+        time_lo: state.time_lo,
+        time_hi: state.time_hi,
         pmp: state.pmp,
         mmu: state.mmu,
         rf: state.rf,
@@ -516,6 +525,8 @@ fn core_reset(reset_addr: u32) -> CoreState:
         priv_mode: 3,
         csr_m: csr_create(0),
         csr_s: csr_s_create(),
+        time_lo: 0,
+        time_hi: 0,
         pmp: pmp,
         mmu: mmu,
         rf: regfile_create(),
@@ -570,6 +581,22 @@ fn core32_is_csr_funct3(funct3: u32) -> bool:
      funct3 == FUNCT3_CSRRSI or funct3 == FUNCT3_CSRRCI)
 
 @hardware
+fn core32_counter_access_allowed(state: CoreState, addr: u32) -> bool:
+    var mask: u32 = 0
+    if addr == CSR_ADDR_CYCLE or addr == CSR_ADDR_CYCLEH:
+        mask = COUNTEREN_CY_MASK
+    else if addr == CSR_ADDR_TIME or addr == CSR_ADDR_TIMEH:
+        mask = COUNTEREN_TM_MASK
+    else if addr == CSR_ADDR_INSTRET or addr == CSR_ADDR_INSTRETH:
+        mask = COUNTEREN_IR_MASK
+    if mask == 0 or state.priv_mode == 3:
+        return true
+    if ((state.priv_mode != 0 and state.priv_mode != 1) or
+        (state.csr_m.mcounteren & mask) == 0):
+        return false
+    state.priv_mode == 1 or (state.csr_s.scounteren & mask) != 0
+
+@hardware
 fn core32_is_mret(dec: DecodeResult) -> bool:
     (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
      dec.funct7 == 0x18 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
@@ -578,6 +605,11 @@ fn core32_is_mret(dec: DecodeResult) -> bool:
 fn core32_is_sret(dec: DecodeResult) -> bool:
     (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
      dec.funct7 == 0x08 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
+
+@hardware
+fn core32_is_wfi(dec: DecodeResult) -> bool:
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
+     dec.funct7 == 0x08 and dec.rs2 == 5 and dec.rs1 == 0 and dec.rd == 0)
 
 @hardware
 fn core32_is_sfence_vma(dec: DecodeResult) -> bool:
@@ -655,7 +687,8 @@ fn core32_instruction_legal(instruction: u32, dec: DecodeResult) -> bool:
         if core32_is_csr_funct3(f3):
             return true
         return (core32_is_mret(dec) or core32_is_sret(dec) or
-            core32_is_sfence_vma(dec) or core32_is_ecall(dec) or
+            core32_is_wfi(dec) or core32_is_sfence_vma(dec) or
+            core32_is_ecall(dec) or
             core32_is_ebreak(dec))
     if op == OP_AMO:
         return core32_amo_legal(instruction, dec)
@@ -741,6 +774,7 @@ fn core32_execute_instruction(state: CoreState, instruction: u32,
         val known = (pmp_read.handled or csr_is_known(csr_addr) or
             csr_s_is_known(csr_addr))
         val illegal = (out.priv_mode < required_priv or not known or
+            not core32_counter_access_allowed(out, csr_addr) or
             (read_only and csr_write_requested(csr_src, dec.funct3)))
         if illegal:
             return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
@@ -756,6 +790,10 @@ fn core32_execute_instruction(state: CoreState, instruction: u32,
             val result = csr_rw(out.csr_m, csr_addr, csr_src, dec.funct3)
             out.csr_m = result.csr
             old_value = result.old_value
+            if csr_addr == CSR_ADDR_TIME:
+                old_value = out.time_lo
+            else if csr_addr == CSR_ADDR_TIMEH:
+                old_value = out.time_hi
         else:
             if csr_addr == CSR_ADDR_SSTATUS:
                 old_value = out.csr_m.mstatus & SSTATUS_WRITABLE
@@ -822,6 +860,17 @@ fn core32_execute_instruction(state: CoreState, instruction: u32,
                 return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
                     instruction)
             out.mmu = mmu_flush(out.mmu)
+            out.pc = state.pc + 4
+            return core32_finish_instruction(out)
+
+        if core32_is_wfi(dec):
+            val invalid_mode = (out.priv_mode != 0 and
+                out.priv_mode != 1 and out.priv_mode != 3)
+            if (invalid_mode or (out.priv_mode != 3 and
+                (out.csr_m.mstatus & MSTATUS_TW_MASK) != 0)):
+                return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
+                    instruction)
+            # Immediate completion is the permitted NOP implementation.
             out.pc = state.pc + 4
             return core32_finish_instruction(out)
 

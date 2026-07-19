@@ -1,0 +1,167 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset}
+use std.hardware.rv32i_rtl.core.core32_begin_instruction
+use std.hardware.rv32i_rtl.csr.{csr_create, csr_read, csr_write}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MSTATUS, CSR_ADDR_MCOUNTEREN}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MCYCLE, CSR_ADDR_MCYCLEH}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MINSTRET, CSR_ADDR_MINSTRETH}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_CYCLE, CSR_ADDR_TIME}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_INSTRET, CSR_ADDR_CYCLEH}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_TIMEH, CSR_ADDR_INSTRETH}
+use std.hardware.rv32i_rtl.csr.{MSTATUS_TW_MASK, COUNTEREN_CY_MASK}
+use std.hardware.rv32i_rtl.csr.{COUNTEREN_TM_MASK, COUNTEREN_IR_MASK}
+use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS}
+use std.hardware.rv32i_rtl.csr_s.{csr_s_write, CSR_ADDR_SCOUNTEREN}
+use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+
+val RESET_PC: u32 = 0x80000000
+val WFI: u32 = 0x10500073
+
+fn csr_instruction(addr: u32, funct3: u32, rs1: u32, rd: u32) -> u32:
+    (addr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
+
+fn read_counter(state: CoreState, addr: u32, rd: u32) -> CoreState:
+    core32_begin_instruction(state,
+        csr_instruction(addr, FUNCT3_CSRRS, 0, rd))
+
+fn counter_state() -> CoreState:
+    var state = core_reset(RESET_PC)
+    state.csr_m.mcycle = 0x11112222
+    state.csr_m.mcycleh = 0x33334444
+    state.csr_m.minstret = 0x55556666
+    state.csr_m.minstreth = 0x77778888
+    state.time_lo = 0x99AABBCC
+    state.time_hi = 0xDDEEFF00
+    state
+
+describe "RV32 Zicntr and WFI Linux compatibility":
+    it "writes machine counters while keeping Zicntr shadows read-only":
+        var csr = csr_create(0)
+        csr = csr_write(csr, CSR_ADDR_MCOUNTEREN, 0xFFFFFFFF)
+        csr = csr_write(csr, CSR_ADDR_MCYCLE, 0x11112222)
+        csr = csr_write(csr, CSR_ADDR_MCYCLEH, 0x33334444)
+        csr = csr_write(csr, CSR_ADDR_MINSTRET, 0x55556666)
+        csr = csr_write(csr, CSR_ADDR_MINSTRETH, 0x77778888)
+        expect(csr.mcounteren).to_equal(0x7)
+        expect(csr_read(csr, CSR_ADDR_CYCLE)).to_equal(0x11112222)
+        expect(csr_read(csr, CSR_ADDR_CYCLEH)).to_equal(0x33334444)
+        expect(csr_read(csr, CSR_ADDR_INSTRET)).to_equal(0x55556666)
+        expect(csr_read(csr, CSR_ADDR_INSTRETH)).to_equal(0x77778888)
+
+        csr = csr_write(csr, CSR_ADDR_CYCLE, 1)
+        csr = csr_write(csr, CSR_ADDR_CYCLEH, 2)
+        csr = csr_write(csr, CSR_ADDR_INSTRET, 3)
+        csr = csr_write(csr, CSR_ADDR_INSTRETH, 4)
+        expect(csr.mcycle).to_equal(0x11112222)
+        expect(csr.mcycleh).to_equal(0x33334444)
+        expect(csr.minstret).to_equal(0x55556666)
+        expect(csr.minstreth).to_equal(0x77778888)
+
+        var state = counter_state()
+        state.rf = regfile_write(state.rf, 1, 0x12345678, true)
+        val machine_write = core32_begin_instruction(state,
+            csr_instruction(CSR_ADDR_MCYCLE, FUNCT3_CSRRW, 1, 5))
+        expect(machine_write.csr_m.mcycle).to_equal(0x12345678)
+        expect(regfile_read(machine_write.rf, 5, 0).rs1_data).to_equal(
+            0x11112222)
+
+        val shadow_write = core32_begin_instruction(state,
+            csr_instruction(CSR_ADDR_CYCLE, FUNCT3_CSRRW, 1, 5))
+        expect(shadow_write.csr_m.mcause).to_equal(2)
+        expect(shadow_write.csr_m.mcycle).to_equal(0x11112222)
+        expect(shadow_write.csr_m.minstret).to_equal(0x55556666)
+        val time_write = core32_begin_instruction(state,
+            csr_instruction(CSR_ADDR_TIME, FUNCT3_CSRRW, 1, 5))
+        expect(time_write.csr_m.mcause).to_equal(2)
+        expect(time_write.time_lo).to_equal(0x99AABBCC)
+        val instret_write = core32_begin_instruction(state,
+            csr_instruction(CSR_ADDR_INSTRET, FUNCT3_CSRRW, 1, 5))
+        expect(instret_write.csr_m.mcause).to_equal(2)
+        expect(instret_write.csr_m.minstret).to_equal(0x55556666)
+
+    it "reads cycle time and instret low and high halves in M-mode":
+        val state = counter_state()
+        val cycle = read_counter(state, CSR_ADDR_CYCLE, 5)
+        val time = read_counter(state, CSR_ADDR_TIME, 5)
+        val instret = read_counter(state, CSR_ADDR_INSTRET, 5)
+        val cycleh = read_counter(state, CSR_ADDR_CYCLEH, 5)
+        val timeh = read_counter(state, CSR_ADDR_TIMEH, 5)
+        val instreth = read_counter(state, CSR_ADDR_INSTRETH, 5)
+        expect(regfile_read(cycle.rf, 5, 0).rs1_data).to_equal(0x11112222)
+        expect(regfile_read(time.rf, 5, 0).rs1_data).to_equal(0x99AABBCC)
+        expect(regfile_read(instret.rf, 5, 0).rs1_data).to_equal(0x55556666)
+        expect(regfile_read(cycleh.rf, 5, 0).rs1_data).to_equal(0x33334444)
+        expect(regfile_read(timeh.rf, 5, 0).rs1_data).to_equal(0xDDEEFF00)
+        expect(regfile_read(instreth.rf, 5, 0).rs1_data).to_equal(0x77778888)
+        expect(time.time_lo).to_equal(0x99AABBCC)
+        expect(time.csr_m.mcycle).to_equal(0x11112222)
+
+    it "enforces mcounteren for S and both counteren registers for U":
+        var supervisor = counter_state()
+        supervisor.priv_mode = 1
+        val s_denied = read_counter(supervisor, CSR_ADDR_CYCLE, 5)
+        expect(s_denied.csr_m.mcause).to_equal(2)
+        expect(s_denied.csr_m.minstret).to_equal(0x55556666)
+
+        supervisor.csr_m.mcounteren = COUNTEREN_CY_MASK
+        val s_cycle = read_counter(supervisor, CSR_ADDR_CYCLE, 5)
+        expect(regfile_read(s_cycle.rf, 5, 0).rs1_data).to_equal(0x11112222)
+        val s_time_denied = read_counter(supervisor, CSR_ADDR_TIME, 5)
+        expect(s_time_denied.csr_m.mcause).to_equal(2)
+
+        supervisor.csr_m.mcounteren = COUNTEREN_TM_MASK
+        val s_time = read_counter(supervisor, CSR_ADDR_TIME, 5)
+        expect(regfile_read(s_time.rf, 5, 0).rs1_data).to_equal(0x99AABBCC)
+
+        var user = counter_state()
+        user.priv_mode = 0
+        user.csr_m.mcounteren = COUNTEREN_IR_MASK
+        val u_denied = read_counter(user, CSR_ADDR_INSTRET, 5)
+        expect(u_denied.csr_m.mcause).to_equal(2)
+        user.csr_s = csr_s_write(user.csr_s, CSR_ADDR_SCOUNTEREN,
+            COUNTEREN_IR_MASK)
+        val u_instret = read_counter(user, CSR_ADDR_INSTRET, 5)
+        expect(regfile_read(u_instret.rf, 5, 0).rs1_data).to_equal(
+            0x55556666)
+
+        user.csr_m.mcounteren = COUNTEREN_TM_MASK
+        user.csr_s = csr_s_write(user.csr_s, CSR_ADDR_SCOUNTEREN,
+            COUNTEREN_TM_MASK | 0xFFFF0000)
+        expect(user.csr_s.scounteren).to_equal(COUNTEREN_TM_MASK)
+        val u_timeh = read_counter(user, CSR_ADDR_TIMEH, 5)
+        expect(regfile_read(u_timeh.rf, 5, 0).rs1_data).to_equal(0xDDEEFF00)
+
+    it "completes WFI as a NOP except for lower privilege with TW set":
+        var machine = core_reset(RESET_PC)
+        machine.csr_m.mstatus = MSTATUS_TW_MASK
+        val m_done = core32_begin_instruction(machine, WFI)
+        expect(m_done.pc).to_equal(RESET_PC + 4)
+        expect(m_done.csr_m.minstret).to_equal(1)
+        expect(m_done.halt).to_be(false)
+
+        var supervisor = core_reset(RESET_PC)
+        supervisor.priv_mode = 1
+        val s_done = core32_begin_instruction(supervisor, WFI)
+        expect(s_done.pc).to_equal(RESET_PC + 4)
+        expect(s_done.csr_m.minstret).to_equal(1)
+
+        var user = core_reset(RESET_PC)
+        user.priv_mode = 0
+        val u_done = core32_begin_instruction(user, WFI)
+        expect(u_done.pc).to_equal(RESET_PC + 4)
+        expect(u_done.csr_m.minstret).to_equal(1)
+
+        supervisor.csr_m = csr_write(supervisor.csr_m, CSR_ADDR_MSTATUS,
+            MSTATUS_TW_MASK)
+        val s_trap = core32_begin_instruction(supervisor, WFI)
+        expect(s_trap.csr_m.mcause).to_equal(2)
+        expect(s_trap.csr_m.mepc).to_equal(RESET_PC)
+        expect(s_trap.csr_m.mtval).to_equal(WFI)
+        expect(s_trap.csr_m.minstret).to_equal(0)
+
+        user.csr_m = csr_write(user.csr_m, CSR_ADDR_MSTATUS,
+            MSTATUS_TW_MASK)
+        val u_trap = core32_begin_instruction(user, WFI)
+        expect(u_trap.csr_m.mcause).to_equal(2)
+        expect(u_trap.csr_m.mepc).to_equal(RESET_PC)
+        expect(u_trap.csr_m.minstret).to_equal(0)

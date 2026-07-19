@@ -275,6 +275,16 @@ DT is derived from that fixed memory/interrupt map, including context phandles
 and clock/timebase values. The separate RV64 text-emitted product stays
 fail-closed until it has an equally authoritative implemented topology.
 
+### ADR-6 — The product boundary is one compiler-emitted SoC root
+
+Accepted. `core32_clocked` proves only the CPU boundary; simulation-only
+`soc_tick`, hand-rendered bundle VHDL, and the bridge-only K26 wrapper cannot be
+composed as product evidence. One generic Simple-owned `soc32_clocked` root
+shall own the CPU, UART, CLINT, PLIC, mailbox, internal response routing, and
+external-memory transaction state. It exposes UART RX/TX plus a backpressured
+DDR request/response seam. The K26 layer remains a thin pin/AXI adapter, and the
+simulation RAM becomes only another consumer of the same fabric contract.
+
 ## Dependency and change boundaries
 
 - Source/core changes stay in their existing architecture capsule.

@@ -233,6 +233,27 @@ CPU interrupt-controller phandle 1 feeds CLINT M software/timer and PLIC M/S
 external contexts; PLIC phandle 2 feeds UART interrupt 10. RV64 product DT
 generation returns contract-not-ready until its separate hardware matches.
 
+RV32 WFI completes immediately as a legal NOP. Machine mode is always allowed;
+S/U trap with illegal-instruction cause when `mstatus.TW` is set. Architectural
+`cycle`, `time`, and `instret` plus their RV32 high halves are read-only aliases.
+S access requires the matching `mcounteren` bit; U requires both `mcounteren`
+and `scounteren`. Machine counter halves remain writable, while `time/timeh`
+come from the post-tick CLINT `mtime` halves.
+
+The 16550 uses the programmed 16-bit divisor as a 16x baud divisor. TX retains
+its output state between boundaries and emits one start bit, eight LSB-first
+data bits, and one stop bit. RX crosses a two-register synchronizer, confirms a
+falling start at the midpoint, samples eight data bits and the stop bit at full
+bit intervals, then reuses the existing RX FIFO/RDI and UART-source-10 PLIC
+route. The compatibility tick ties RX high; the product boundary supplies the
+real pin.
+
+The next product slice factors peripheral/bus routing out of the embedded-RAM
+simulation top and adds `soc32_clocked`. Its external-memory seam carries
+ready/valid/error/data plus address, size, byte enables, write data, PTE, and
+atomic qualifiers. Backpressure and one outstanding request are explicit; the
+K26 shell adapts this seam to PS DDR without owning CPU behavior.
+
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,
 then performs RV64 PMP before bus issue. Fault cause/address and RVFI trap fields

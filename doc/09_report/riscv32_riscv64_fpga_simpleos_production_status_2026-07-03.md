@@ -48,12 +48,13 @@ board-origin login evidence.
   early Linux with memory corruption/page faults before login. The retained
   failure transcript records all three attempts; the iteration cap is exhausted
   for this session, so RV64 has no terminal oracle and no PASS claim.
-- The canonical RV32 core now contains reviewed RV32M/RV32A execution,
-  supervisor interrupt aliases/delivery, shared two-context PLIC routing, and a
-  binding-complete product DT for the fixed SoC map. This is source-level
-  progress, not generated-VHDL evidence: WFI, counter-access policy, compiler
-  emission, synthesis, and physical Linux boot remain outstanding; RV64 DT
-  generation remains fail-closed.
+- The canonical RV32 source now contains reviewed RV32M/RV32A execution,
+  supervisor interrupt aliases/delivery, shared two-context PLIC routing, a
+  binding-complete product DT, WFI/Zicntr policy, CLINT-backed time, and
+  synchronized bidirectional 16550 pins. This is source-level progress, not
+  generated-VHDL evidence: the compiler-emitted full-SoC/external-DDR root,
+  synthesis, and physical Linux boot remain outstanding; RV64 DT generation
+  remains fail-closed.
 
 Physical F1/N3 execution remains **BLOCKED**, not passed. Restore the FTDI
 interface before touching JTAG, then produce new compiler-provenance-bound

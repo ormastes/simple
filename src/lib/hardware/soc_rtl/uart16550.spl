@@ -102,6 +102,16 @@ struct Uart16550State:
     tx_busy: bool
     tx_bit_count: u32
     baud_counter: u32
+    tx_out: u32
+
+    # RX serial sampler state
+    rx_shift: u32
+    rx_busy: bool
+    rx_bit_count: u32
+    rx_baud_counter: u32
+    rx_sync_0: bool
+    rx_sync_1: bool
+    rx_prev: bool
 
 # ============================================================================
 # UART Tick Result
@@ -218,7 +228,10 @@ fn uart_create() -> Uart16550State:
         rx_head: 0, rx_tail: 0, rx_count: 0,
         dll: 1, dlm: 0,
         lcr: 0, ier: 0, iir: IIR_NO_INT,
-        tx_shift: 0, tx_busy: false, tx_bit_count: 0, baud_counter: 0
+        tx_shift: 0, tx_busy: false, tx_bit_count: 0, baud_counter: 0,
+        tx_out: 1,
+        rx_shift: 0, rx_busy: false, rx_bit_count: 0,
+        rx_baud_counter: 0, rx_sync_0: true, rx_sync_1: true, rx_prev: true
     )
 
 # ============================================================================
@@ -231,8 +244,8 @@ fn uart_compute_lsr(state: Uart16550State) -> u32:
     # Data Ready: RX FIFO not empty
     if state.rx_count > 0:
         lsr = lsr | LSR_DR
-    # TX Holding Register Empty: TX FIFO not full
-    if state.tx_count < UART_FIFO_SIZE:
+    # TX Holding Register Empty: holding FIFO has no queued bytes
+    if state.tx_count == 0:
         lsr = lsr | LSR_THRE
     # Transmitter Empty: TX FIFO empty and shift register idle
     if state.tx_count == 0 and state.tx_busy == false:
@@ -343,56 +356,93 @@ fn uart_mmio_write(state: Uart16550State, offset: u32, value: u32) -> Uart16550S
 # UART Tick — baud rate generator and TX shift
 # ============================================================================
 
-fn uart_tick(state: Uart16550State) -> UartTickResult:
+fn uart_tick_with_rx(state: Uart16550State, rx_in: bool) -> UartTickResult:
     """Advance the UART by one system clock cycle.
-    Manages the baud rate counter and shifts out TX data.
+    Manages TX framing and midpoint-sampled 8-N-1 serial RX.
     Returns updated state, current TX output bit, and IRQ signal."""
     var out = state
-    var tx_out: u32 = 1   # Idle line is high
+    out.rx_sync_0 = rx_in
+    out.rx_sync_1 = state.rx_sync_0
+    val rx_sample = state.rx_sync_1
+    out.rx_prev = rx_sample
 
-    # Compute baud divisor (DLL + DLM<<8), minimum 1
+    # A 16550 divisor counts 16x baud clocks, so one serial bit is divisor*16.
     var divisor = state.dll | (state.dlm << 8)
     if divisor == 0:
         divisor = 1
+    val bit_ticks = divisor << 4
 
-    # Baud counter tick
+    # TX baud counter and shift register. tx_out is state so it remains stable
+    # between bit boundaries.
     var baud_tick: bool = false
     val new_counter = state.baud_counter + 1
-    if new_counter >= divisor:
+    if new_counter >= bit_ticks:
         out.baud_counter = 0
         baud_tick = true
     else:
         out.baud_counter = new_counter
 
-    # TX shift register logic (on baud tick)
     if baud_tick:
-        if state.tx_busy:
-            # Shift out next bit (LSB first)
-            tx_out = state.tx_shift & 1
+        if state.tx_busy and state.tx_bit_count < 10:
+            out.tx_out = state.tx_shift & 1
             out.tx_shift = state.tx_shift >> 1
             out.tx_bit_count = state.tx_bit_count + 1
-            # 8-N-1: start(1) + data(8) + stop(1) = 10 bits
-            if state.tx_bit_count + 1 >= 10:
-                out.tx_busy = false
-                out.tx_bit_count = 0
         else:
-            # Load next byte from TX FIFO if available
+            out.tx_out = 1
+            out.tx_busy = false
+            out.tx_bit_count = 0
             if state.tx_count > 0:
                 val byte_val = tx_fifo_get(state, state.tx_head)
-                # Frame: start bit (0) + 8 data bits + stop bit (1)
-                # Pack as: [stop][data7..data0][start] = bit9..bit0
-                out.tx_shift = (1 << 9) | (byte_val << 1) | 0
+                # Start is driven now; shift data0..data7 and stop afterward.
+                out.tx_shift = byte_val | (1 << 8)
                 out.tx_busy = true
-                out.tx_bit_count = 0
+                out.tx_bit_count = 1
                 out.tx_head = (state.tx_head + 1) & 0xF
                 out.tx_count = state.tx_count - 1
-                tx_out = 0   # Start bit
+                out.tx_out = 0
+
+    # Detect a falling start edge, confirm it at the start-bit midpoint, then
+    # sample the eight data bits and stop bit at full-bit intervals.
+    if not state.rx_busy:
+        if state.rx_prev and not rx_sample:
+            out.rx_busy = true
+            out.rx_shift = 0
+            out.rx_bit_count = 0
+            out.rx_baud_counter = 0
+    else:
+        var rx_sample_ticks = bit_ticks
+        if state.rx_bit_count == 0:
+            rx_sample_ticks = bit_ticks >> 1
+        val new_rx_counter = state.rx_baud_counter + 1
+        if new_rx_counter >= rx_sample_ticks:
+            out.rx_baud_counter = 0
+            if state.rx_bit_count == 0:
+                if not rx_sample:
+                    out.rx_bit_count = 1
+                else:
+                    out.rx_busy = false
+            else if state.rx_bit_count <= 8:
+                if rx_sample:
+                    val rx_bit = 1 << (state.rx_bit_count - 1)
+                    out.rx_shift = state.rx_shift | rx_bit
+                out.rx_bit_count = state.rx_bit_count + 1
+            else:
+                out.rx_busy = false
+                out.rx_bit_count = 0
+                if rx_sample:
+                    out = uart_rx_push(out, state.rx_shift)
+        else:
+            out.rx_baud_counter = new_rx_counter
 
     # Compute IRQ
     val iir_val = uart_compute_iir(out)
     val irq = (iir_val & 0x01) == 0   # bit 0 = 0 means interrupt pending
 
-    UartTickResult(state: out, tx_out: tx_out, irq: irq)
+    UartTickResult(state: out, tx_out: out.tx_out, irq: irq)
+
+fn uart_tick(state: Uart16550State) -> UartTickResult:
+    """Compatibility clock tick with an idle-high RX pin."""
+    uart_tick_with_rx(state, true)
 
 # ============================================================================
 # RX Push — external byte received

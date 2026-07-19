@@ -160,10 +160,11 @@ response. Its focused SoC scenario writes SATP in S-mode and executes the next
 instruction through physical page-table bus reads. Reserved RV32I encodings
 and misaligned taken targets trap before side effects, and mailbox EXIT drains
 its response before halt. RV32M and RV32A now execute with registered one-shot
-retirement; supervisor interrupt contexts, shared PLIC routing, and the RV32
-product DT are implemented and independently source-reviewed. RV32C, WFI,
-counter-access policy, generated VHDL execution, and Linux acceptance remain
-incomplete. The
+retirement; supervisor interrupt contexts, shared PLIC routing, the RV32
+product DT, WFI/Zicntr policy, and pin-level bidirectional 16550 behavior are
+implemented and independently source-reviewed. RV32C, the compiler-emitted
+full-SoC/external-DDR boundary, generated VHDL execution, and Linux acceptance
+remain incomplete. The
 multi-cycle M unit is clocked into commit with exact high
 multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
 LR/SC and AMO.W/D now reserve translated physical byte ranges and retire through
@@ -178,6 +179,13 @@ CLINT and qualified PLIC signals feed `mip`, and enabled interrupts enter
 the existing delegated trap path at instruction boundaries. RAM-backed
 `mmu*_translate*_test_adapter()` functions remain unit adapters, not RTL
 evidence.
+
+The current compiler-produced VHDL gate still ends at `core32_clocked` and
+`core64_clocked`. The embedded-RAM `soc_tick()` model, hand-rendered FPGA bundle
+VHDL, and bridge-only K26 wrapper are not a compiler-emitted product SoC. The
+next accepted gate is one `soc32_clocked` Simple root with real UART pins and a
+backpressured external-memory request/response seam; K26 only adapts that seam
+to board pins and PS DDR.
 
 The focused pure-Simple source check currently exits 139 before diagnostics;
 see `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. Do not rerun

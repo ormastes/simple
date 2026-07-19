@@ -22,7 +22,9 @@ use std.hardware.rv32i_rtl.memory_access.memory32_reset
 
 # -- Peripherals
 use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
-use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update, uart_mmio_write, uart_tick}
+use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read}
+use std.hardware.soc_rtl.uart16550.{uart_mmio_read_update, uart_mmio_write}
+use std.hardware.soc_rtl.uart16550.uart_tick_with_rx
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_mmio_read, clint_mmio_write, clint_tick}
 use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read}
 use std.hardware.soc_rtl.plic.{plic_mmio_read_update, plic_mmio_write}
@@ -244,15 +246,17 @@ fn soc_bus_read(state: SocState, addr: u32, slave_idx: u32,
 # SoC Tick — one stalled core/bus/peripheral clock
 # ============================================================================
 
-fn soc_tick(state: SocState) -> SocTickResult:
-    """Advance the clocked RV32 core and latch one physical bus response."""
+fn soc_tick_with_uart_rx(state: SocState, uart_rx: bool) -> SocTickResult:
+    """Advance the clocked RV32 SoC with the current external UART RX pin."""
     var out = state
     var char_out: u32 = 0
     var char_valid = false
 
     val ct = clint_tick(out.clint)
     out.clint = ct.state
-    val ut = uart_tick(out.uart)
+    out.core.time_lo = out.clint.mtime_lo
+    out.core.time_hi = out.clint.mtime_hi
+    val ut = uart_tick_with_rx(out.uart, uart_rx)
     out.uart = ut.state
     out.plic = plic_set_pending(out.plic, 10, ut.irq)
     val external = plic_check_interrupt(out.plic)
@@ -319,3 +323,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
         char_valid: char_valid
     )
     SocTickResult(state: out, ports: ports)
+
+fn soc_tick(state: SocState) -> SocTickResult:
+    """Compatibility clock tick with the external UART RX pin idle high."""
+    soc_tick_with_uart_rx(state, true)

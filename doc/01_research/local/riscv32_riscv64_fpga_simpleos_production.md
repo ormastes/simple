@@ -320,3 +320,21 @@ RV32 binary DT describes the same 128 MiB RAM, 100 MHz CLINT/timebase, UART,
 PLIC range, context interrupts, and phandles. The RV64 product DT API remains
 explicitly fail-closed. This is source-level readiness only; compiler-emitted
 VHDL execution and Linux/FPGA evidence remain outstanding.
+
+The next source slice now closes RV32 WFI, Zicntr, and pin-level UART behavior.
+WFI retires immediately as the permitted NOP implementation and traps lower
+privilege when `mstatus.TW` requests interception. `cycle/time/instret` and
+their RV32 high halves obey `mcounteren`/`scounteren`; `time` is sampled from
+CLINT rather than aliased to `mcycle`. The existing 16550 owner now holds each
+TX bit for `16 * divisor`, emits exact 8-N-1 frames, synchronizes RX through two
+registers, midpoint-samples it into the existing FIFO, and drives the existing
+UART/PLIC interrupt path. Independent high-capability static review reports
+PASS; executable Simple checks remain deferred by the exhausted session cap.
+
+The compiler-path audit also narrows the next blocker: the current VHDL gate
+ends at `core32_clocked`. `soc_tick` remains a simulation composition with
+embedded RAM, the FPGA bundle still writes placeholder/hand-rendered SoC VHDL,
+and the K26 wrapper contains bridge/LED state but no Simple CPU. The next owner
+must be one compiler-emitted `soc32_clocked` fabric with UART pins and an
+external-memory request/response boundary; K26 should only adapt those pins and
+the DDR bus.

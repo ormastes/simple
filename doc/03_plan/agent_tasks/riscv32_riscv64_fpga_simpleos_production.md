@@ -31,6 +31,9 @@ Date: 2026-07-18
 | `rv32_a_design` | RV32A execution and retirement | Reuse the Sv32/PMP atomic frontend; add physical LR/SC reservation state, registered RVFI-ready retirement, exact AMO results, and one coherent-agent gate | accepted after independent high-capability review PASS; primary owns merge |
 | `linux_media_audit` | RV32 supervisor interrupt and PLIC wiring | Port the proven RV64 CSR alias/delivery rules, reuse the shared two-context PLIC, route UART source 10, and derive binding-complete DT cells from that topology | accepted after gateway/CSR repair and independent high-capability review PASS; primary owns merge |
 | `rv32_dtb_impl` | binding-complete RV32 product DT | Emit binary/DTS from the fixed RV32 SoC map with CPU/CLINT/PLIC/UART bindings and keep the unimplemented RV64 product API fail-closed | accepted after independent high-capability review PASS; primary owns merge |
+| `rv32_a_design` | RV32 WFI and Zicntr | Add legal immediate-completion WFI, TW interception, writable machine counters, gated Zicntr aliases/high halves, and CLINT-backed time | accepted after independent high-capability review PASS; primary owns merge |
+| `linux_media_audit` | bidirectional RV32 16550 pins | Correct divisor/THRE/TX framing, synchronize and midpoint-sample RX, preserve FIFO/IRQ owners, and expose an RX-aware SoC tick | accepted after primary TX repair and independent high-capability review PASS; primary owns merge |
+| `rv32_m_review` | compiler-emitted SoC boundary audit | Trace the real VHDL root, simulation SoC, bundle writer, and K26 wrappers; define the minimum external-memory/UART product seam | accepted; `soc32_clocked` implementation is the next lane |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

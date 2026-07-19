@@ -1,0 +1,117 @@
+use std.spipe.*
+use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create}
+use std.hardware.soc_rtl.uart16550.{uart_mmio_read, uart_mmio_read_update}
+use std.hardware.soc_rtl.uart16550.{uart_mmio_write, uart_tick_with_rx}
+use std.hardware.soc_rtl.uart16550.{uart_compute_lsr, uart_compute_iir}
+use std.hardware.soc_rtl.uart16550.{LSR_DR, LSR_THRE, LSR_TEMT, IER_RDI}
+use std.hardware.soc_rtl.uart16550.{IIR_RDI, IIR_FIFO_ENABLED}
+use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_mem_read}
+use std.hardware.soc_rtl.soc_top.{soc_mem_write, soc_tick}
+use std.hardware.soc_rtl.soc_top.soc_tick_with_uart_rx
+use std.hardware.soc_rtl.wb_interconnect.UART_BASE
+
+fn uart_line_ticks(state: Uart16550State, rx_high: bool,
+                   cycles: u32) -> Uart16550State:
+    var out = state
+    var cycle: u32 = 0
+    while cycle < cycles:
+        out = uart_tick_with_rx(out, rx_high).state
+        cycle = cycle + 1
+    out
+
+fn uart_receive_byte(state: Uart16550State,
+                     byte_val: u32) -> Uart16550State:
+    var out = uart_line_ticks(state, false, 16)
+    var bit: u32 = 0
+    while bit < 8:
+        val high = ((byte_val >> bit) & 1) != 0
+        out = uart_line_ticks(out, high, 16)
+        bit = bit + 1
+    uart_line_ticks(out, true, 16)
+
+fn soc_line_ticks(state: SocState, rx_high: bool,
+                  cycles: u32) -> SocState:
+    var out = state
+    var cycle: u32 = 0
+    while cycle < cycles:
+        out = soc_tick_with_uart_rx(out, rx_high).state
+        cycle = cycle + 1
+    out
+
+fn soc_receive_byte(state: SocState, byte_val: u32) -> SocState:
+    var out = soc_line_ticks(state, false, 16)
+    var bit: u32 = 0
+    while bit < 8:
+        val high = ((byte_val >> bit) & 1) != 0
+        out = soc_line_ticks(out, high, 16)
+        bit = bit + 1
+    soc_line_ticks(out, true, 16)
+
+describe "UART 16550 serial pins":
+    it "uses divisor times sixteen and holds each TX bit":
+        var uart = uart_create()
+        uart = uart_mmio_write(uart, 0, 0x01)
+        expect(uart_compute_lsr(uart) & LSR_THRE).to_equal(0)
+
+        uart = uart_line_ticks(uart, true, 15)
+        expect(uart.tx_out).to_equal(1)
+        uart = uart_line_ticks(uart, true, 1)
+        expect(uart.tx_out).to_equal(0)
+        expect(uart_compute_lsr(uart) & LSR_THRE).to_equal(LSR_THRE)
+        expect(uart_compute_lsr(uart) & LSR_TEMT).to_equal(0)
+
+        uart = uart_line_ticks(uart, true, 15)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 1)
+        expect(uart.tx_out).to_equal(1)
+
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(0)
+
+        uart = uart_line_ticks(uart, true, 16)
+        expect(uart.tx_out).to_equal(1)
+        expect(uart_compute_lsr(uart) & LSR_TEMT).to_equal(0)
+        uart = uart_line_ticks(uart, true, 15)
+        expect(uart.tx_out).to_equal(1)
+        expect(uart_compute_lsr(uart) & LSR_TEMT).to_equal(0)
+        uart = uart_line_ticks(uart, true, 1)
+        expect(uart_compute_lsr(uart) & LSR_TEMT).to_equal(LSR_TEMT)
+        expect(uart_compute_lsr(uart) & LSR_THRE).to_equal(LSR_THRE)
+
+    it "rejects a false start then receives a serial byte":
+        var uart = uart_create()
+        uart = uart_mmio_write(uart, 1, IER_RDI)
+        uart = uart_line_ticks(uart, false, 4)
+        uart = uart_line_ticks(uart, true, 8)
+        expect(uart.rx_count).to_equal(0)
+
+        uart = uart_receive_byte(uart, 0xA5)
+        expect(uart.rx_count).to_equal(1)
+        expect(uart_compute_lsr(uart) & LSR_DR).to_equal(LSR_DR)
+        expect(uart_compute_iir(uart)).to_equal(IIR_RDI | IIR_FIFO_ENABLED)
+        expect(uart_mmio_read(uart, 0)).to_equal(0xA5)
+        uart = uart_mmio_read_update(uart, 0)
+        expect(uart_compute_lsr(uart) & LSR_DR).to_equal(0)
+
+    it "accepts UART RX at the clocked SoC boundary":
+        var soc = soc_create(64)
+        soc.core.halt = true
+        soc = soc_mem_write(soc, UART_BASE + 1, IER_RDI, 0).state
+        soc = soc_receive_byte(soc, 0x6C)
+        expect(soc_mem_read(soc, UART_BASE)).to_equal(0x6C)
+        expect(soc.plic.pending & (1 << 10)).to_equal(1 << 10)
+        soc.uart.rx_prev = false
+        soc = soc_tick(soc).state
+        expect(soc.uart.rx_prev).to_equal(true)
