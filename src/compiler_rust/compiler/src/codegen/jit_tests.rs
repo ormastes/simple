@@ -311,6 +311,8 @@ fn consume(v: f64) -> i64:
     if v > 5.0:
         return 1
     return 0
+fn first(xs: [f64]) -> f64:
+    return xs[0]
 fn main() -> i64:
     var score = 0
     val x = half()
@@ -322,14 +324,17 @@ fn main() -> i64:
         score = score + 1
     if consume(half()) > 0:
         score = score + 1
+    val values = [0.1, 0.2, 0.3]
+    if first(values) == 0.1:
+        score = score + 1
     return score
 "#;
     let jit = jit_compile(source).unwrap();
     let result = unsafe { jit.call_i64_void("main").unwrap() };
     assert_eq!(
-        result, 4,
-        "all 4 f64 call-result cases (bound local, binop of two calls, binop on \
-         params, call result as fn arg) must be correct; got score {}",
+        result, 5,
+        "all 5 f64 call-result cases (bound local, binop of two calls, binop on \
+         params, call result as fn arg, inline array-element return compare) must be correct; got score {}",
         result
     );
 }

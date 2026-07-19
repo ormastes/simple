@@ -273,6 +273,9 @@ pub struct CodegenBackend<M: Module> {
     /// Mangled function name → declared parameter count for cross-module free
     /// functions. Used to strip spurious nil receivers from module-qualified calls.
     pub fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
+    /// Raw/resolved function name → declared return type. Direct calls do not
+    /// carry a return type in seed MIR, so vreg typing consults this declaration table.
+    function_return_types: std::collections::HashMap<String, TypeId>,
     /// Global enum definitions harvested during native-project discovery.
     pub enum_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     /// Native-project compatibility: tag rt_pool_join results after raw
@@ -788,6 +791,7 @@ impl<M: Module> CodegenBackend<M> {
             use_map: std::collections::HashMap::new(),
             data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
             fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+            function_return_types: std::collections::HashMap::new(),
             enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
             tag_runtime_pool_join_result: false,
             vtable_data_ids: BTreeMap::new(),
@@ -1042,14 +1046,22 @@ impl<M: Module> CodegenBackend<M> {
                 // replaces a preloaded same-named runtime import.
                 self.func_ids.insert(func.name.clone(), func_id);
                 if symbol_name != func.name {
-                    self.func_ids.insert(symbol_name, func_id);
+                    self.func_ids.insert(symbol_name.clone(), func_id);
                 }
+                self.function_return_types.insert(func.name.clone(), func.return_type);
+                self.function_return_types.insert(symbol_name, func.return_type);
             } else {
                 // Imports never displace an already-known local body.
                 self.func_ids.entry(func.name.clone()).or_insert(func_id);
                 if symbol_name != func.name {
-                    self.func_ids.entry(symbol_name).or_insert(func_id);
+                    self.func_ids.entry(symbol_name.clone()).or_insert(func_id);
                 }
+                self.function_return_types
+                    .entry(func.name.clone())
+                    .or_insert(func.return_type);
+                self.function_return_types
+                    .entry(symbol_name)
+                    .or_insert(func.return_type);
             }
         }
         Ok(())
@@ -1318,6 +1330,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.vtable_data_ids,
                 &self.vtable_type_ids,
                 &self.fn_arities,
+                &self.function_return_types,
                 &self.enum_defs,
                 self.tag_runtime_pool_join_result,
             )

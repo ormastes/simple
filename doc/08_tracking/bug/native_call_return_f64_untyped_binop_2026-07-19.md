@@ -1,7 +1,7 @@
 # User-fn f64 return is untyped in JIT binop coercion → garbage compare
 
 - **id:** native_call_return_f64_untyped_binop_2026-07-19
-- **status:** open
+- **status:** fixed (seed JIT/local Cranelift calls)
 - **severity:** medium (silent wrong result for `f(...) <cmp> <f64>` when `f` is a user fn returning f64)
 - **backend:** seed cranelift-JIT / `run` path (build_vreg_types). Orthogonal to the f64 heap-box precision fix.
 
@@ -37,17 +37,23 @@ integer and emits `fcvt_from_sint` (signed-int→float numeric convert) instead 
 a bitcast/identity — turning the f64 bit pattern into a garbage float. The `==`
 against the real `0.1` then fails.
 
-## Fix direction
+## Resolution
 
-Propagate user-function call return types into `build_vreg_types` (whole-program
-call-return-type propagation from the HIR/MIR function signatures), so a `Call`
-to a user fn returning F64 stamps its dest VReg as F64 and the binop path
-coerces correctly (bitcast, not `fcvt_from_sint`). Needs a seed rebuild to
-verify.
+The shared Cranelift backend records raw and emitted/mangled function declaration names
+with their MIR return types. `build_vreg_types` consults that table before its
+runtime-call fallbacks, so a local user call returning F64 stamps its destination
+as F64 and the binop path preserves the value instead of converting integer bits.
+The table follows the existing incremental JIT ownership rule: local bodies
+replace entries, while imports only fill missing entries.
+
+Cross-file native-project calls are a separate scope: an imported function that
+is absent from the current file's `MirModule.functions` still needs authoritative
+typed call metadata from project discovery rather than another name-based guess.
 
 ## Regression guard
 
-Once fixed, add `if first(a) == 0.1` (the inline call-result-compare form) as an
-expected-30 case. Until then the f64 precision spec deliberately uses the
-store-to-local form
-(`test/01_unit/compiler/codegen/array_f64_element_precision_spec.spl`).
+- Rust JIT behavior: `test_jit_f64_call_result_value` includes the original
+  inline `first(values) == 0.1` reproducer.
+- Seed vreg unit: `build_vreg_types_uses_direct_callee_return_type`.
+- Simple spec: `array_f64_element_precision_spec.spl` covers both direct array
+  access and inline user-function return comparison.

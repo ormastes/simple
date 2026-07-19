@@ -69,7 +69,10 @@ fn binop_result_type(op: BinOp, lhs_ty: Option<TypeId>) -> Option<TypeId> {
 /// is topological for most functions. Cross-block phi-like propagation may
 /// miss some `Copy` destinations — consumers treat missing entries as
 /// "unknown" (default signed in FR-0002b).
-pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
+pub(super) fn build_vreg_types(
+    func: &MirFunction,
+    function_return_types: &HashMap<String, TypeId>,
+) -> HashMap<VReg, TypeId> {
     let mut types_map: HashMap<VReg, TypeId> = HashMap::new();
 
     for block in &func.blocks {
@@ -220,6 +223,10 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 MirInst::Call {
                     dest: Some(d), target, ..
                 } => {
+                    if let Some(&ty) = function_return_types.get(target.name()) {
+                        types_map.insert(*d, ty);
+                        continue;
+                    }
                     let base = target
                         .name()
                         .rsplit_once("__")
@@ -400,6 +407,7 @@ pub fn compile_function_body<M: Module>(
     vtable_data_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     vtable_type_ids: &std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
     fn_arities: &std::sync::Arc<std::collections::HashMap<String, usize>>,
+    function_return_types: &HashMap<String, TypeId>,
     enum_defs: &std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     tag_runtime_pool_join_result: bool,
 ) -> InstrResult<()> {
@@ -442,7 +450,7 @@ pub fn compile_function_body<M: Module>(
     let mut vreg_from_local: HashMap<VReg, usize> = HashMap::new();
     // FR-DRIVER-0002a: per-VReg TypeId, populated once up front from MIR.
     // Consumers (FR-0002b widening + shift emission) read via InstrContext.vreg_types.
-    let mut vreg_types: HashMap<VReg, TypeId> = build_vreg_types(func);
+    let mut vreg_types: HashMap<VReg, TypeId> = build_vreg_types(func, function_return_types);
 
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
@@ -1170,7 +1178,7 @@ mod tests {
         entry.instructions.push(MirInst::ConstBool { dest: r7, value: true });
         entry.terminator = Terminator::Return(Some(r3));
 
-        let map = build_vreg_types(&func);
+        let map = build_vreg_types(&func, &HashMap::new());
 
         assert_eq!(map.get(&r0).copied(), Some(TypeId::I64), "ConstInt -> I64");
         assert_eq!(map.get(&r1).copied(), Some(TypeId::I32), "Cast to I32");
@@ -1205,10 +1213,26 @@ mod tests {
         });
         entry.terminator = Terminator::Return(Some(hoisted_word));
 
-        let map = build_vreg_types(&func);
+        let map = build_vreg_types(&func, &HashMap::new());
 
         assert_eq!(map.get(&word).copied(), Some(TypeId::U64));
         assert_eq!(map.get(&hoisted_word).copied(), Some(TypeId::U64));
+    }
+
+    #[test]
+    fn build_vreg_types_uses_direct_callee_return_type() {
+        let mut func = MirFunction::new("caller".to_string(), TypeId::BOOL, Visibility::Private);
+        let result = func.new_vreg();
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::Call {
+            dest: Some(result),
+            target: CallTarget::from_name("first_f64"),
+            args: vec![],
+        });
+
+        let returns = HashMap::from([("first_f64".to_string(), TypeId::F64)]);
+        assert_eq!(build_vreg_types(&func, &returns).get(&result), Some(&TypeId::F64));
     }
 
     #[test]
@@ -1226,7 +1250,10 @@ mod tests {
         });
         entry.terminator = Terminator::Return(Some(present));
 
-        assert_eq!(build_vreg_types(&func).get(&present).copied(), Some(TypeId::BOOL));
+        assert_eq!(
+            build_vreg_types(&func, &HashMap::new()).get(&present).copied(),
+            Some(TypeId::BOOL)
+        );
     }
 
     /// Signedness classification derived from `build_vreg_types` output —
@@ -1257,7 +1284,7 @@ mod tests {
         });
         entry.terminator = Terminator::Return(None);
 
-        let map = build_vreg_types(&func);
+        let map = build_vreg_types(&func, &HashMap::new());
 
         // Signed integer types
         for ty in [TypeId::I8, TypeId::I16, TypeId::I32, TypeId::I64] {
