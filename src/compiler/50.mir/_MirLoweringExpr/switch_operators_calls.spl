@@ -134,6 +134,17 @@ fn struct_construct_spread_base(e: HirExpr) -> HirExpr:
 # ============================================================================
 
 impl MirLowering:
+    me enum_payload_value(raw: LocalId, result_type: MirType) -> LocalId:
+        """Recover an untagged enum payload word using its semantic type."""
+        match result_type.kind:
+            case MirTypeKind.F64:
+                var b = self.builder
+                val value = b.emit_bitcast(mir_operand_copy(raw), result_type)
+                self.builder = b
+                value
+            case _:
+                raw
+
     me ensure_option_handle(local: LocalId, option_type: HirType) -> LocalId:
         """Promote a typed Optional value to the canonical enum-id-1 handle."""
         if self.option_value_locals.has(local.id):
@@ -1087,7 +1098,6 @@ impl MirLowering:
                 val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
                 self.builder = bp
                 if val pl = pr:
-                    self.local_map[bind_syms[0].id] = pl
                     # Struct-value chain fix: if this variant's payload was
                     # constructed from a known struct VALUE (recorded in
                     # enum_payload_struct_names at the construction site),
@@ -1098,6 +1108,16 @@ impl MirLowering:
                     val payload_key = "{enum_name}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
                     val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci])
+                    var payload_hir_type = result_payload_type
+                    if payload_hir_type == nil:
+                        val bind_symbol = self.symbols.get_symbol(bind_syms[0])
+                        if val found_bind_symbol = bind_symbol:
+                            payload_hir_type = found_bind_symbol.type_
+                    var bound_payload = pl
+                    if payload_hir_type != nil:
+                        val found_payload_type = payload_hir_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+                        bound_payload = self.enum_payload_value(pl, self.lower_type(found_payload_type))
+                    self.local_map[bind_syms[0].id] = bound_payload
                     var result_payload_is_text = false
                     if result_payload_type != nil:
                         val payload_type = result_payload_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
@@ -1107,7 +1127,7 @@ impl MirLowering:
                                 # but an array word remains the same tagged runtime
                                 # handle. Keep that provenance across the pattern
                                 # bind so indexing uses rt_array_get.
-                                self.runtime_array_locals[pl.id] = true
+                                self.runtime_array_locals[bound_payload.id] = true
                             case HirTypeKind.Str:
                                 result_payload_is_text = true
                             case _: ()
@@ -1142,7 +1162,7 @@ impl MirLowering:
                         if val text_local = text_res:
                             self.local_map[bind_syms[0].id] = text_local
                     elif payload_struct != nil and payload_struct != "":
-                        self.struct_value_syms[pl.id] = payload_struct ?? ""
+                        self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
             elif bind_syms.len() > 1:
                 # #164 multi-field payload: the scalar payload slot holds a
                 # boxed rt_tuple (see box_tuple_payload); unbox each field by
@@ -1392,6 +1412,8 @@ impl MirLowering:
                         case _:
                             if self.runtime_value_locals.has(raw_payload_local.id):
                                 payload_local = self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
+                            else:
+                                payload_local = self.enum_payload_value(raw_payload_local, self.lower_type(inner))
                     return payload_local
                 case _: ()
         val res_local = self.lower_expr(base)
@@ -1423,7 +1445,15 @@ impl MirLowering:
         val pr = b_ok.emit_call(pf, [mir_operand_copy(res_local)], MirType.i64())
         self.builder = b_ok
         if val pl = pr:
-            return pl
+            var payload_local = pl
+            val found_base_type = self.enum_match_expr_type(base)
+            if found_base_type != nil:
+                val base_type = found_base_type ?? HirType(kind: HirTypeKind.Error, span: base.span)
+                match base_type.kind:
+                    case HirTypeKind.Result(ok_type, _):
+                        payload_local = self.enum_payload_value(pl, self.lower_type(ok_type))
+                    case _: ()
+            return payload_local
         res_local
 
     me box_tuple_payload(values: [HirExpr]) -> LocalId:

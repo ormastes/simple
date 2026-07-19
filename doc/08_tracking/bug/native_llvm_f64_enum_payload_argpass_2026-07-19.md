@@ -1,7 +1,7 @@
 # Native (LLVM) backend loses f64 enum payloads: construct passes in xmm0, extract sitofp-coerces
 
 - **id:** native_llvm_f64_enum_payload_argpass_2026-07-19
-- **status:** open
+- **status:** source fixed; incremental LLVM execution pending
 - **severity:** high (silent miscompile — wrong f64 value, no error)
 - **backend:** native-build (LLVM) only. cranelift JIT and the MIR interpreter are correct.
 - **class:** tag-box / enum-payload coercion (sibling of the `<<3` tagged-float mask leak, but a *different* root)
@@ -83,7 +83,21 @@ does not touch, so **there is no regression** (native f64-enum was already broke
 
 ## Regression guard
 
-`test/03_system/native/option_box_unbox/` (or the tag-box test dir): keep
-`tb_e28_enum_f64` XFAIL for native-build asserting the current wrong value, and
-assert the correct value on the interp/cranelift path. Flip the native XFAIL to a
-PASS when this backend fix lands.
+`test/03_system/native/enum_f64_payload_precision.spl` returns 30 only when the
+LLVM constructor and extractor preserve the payload bits. The interpreter /
+Cranelift control remains in
+`test/01_unit/compiler/codegen/enum_f64_payload_precision_spec.spl`.
+
+## Source fix
+
+The pure-Simple LLVM backend now reuses its aggregate float-word helper for the
+third `rt_enum_new` argument. On extraction, MIR lowering emits an explicit
+i64-to-f64 bitcast only where the enum/Option/Result payload's semantic type is
+f64. An i64 enum payload later cast with `as f64` remains an ordinary numeric
+`sitofp` conversion.
+
+The direct LLVM-IR regression constructs both runtime calls, rejects
+`fptosi`/`sitofp` on the f64 payload path, and requires `sitofp` for a normal
+i64-to-f64 cast. A cache-isolated current-source mini build was
+bounded at 4 GiB and 240 seconds; it reached the time cap with no output, so a
+fresh native executable is not claimed.

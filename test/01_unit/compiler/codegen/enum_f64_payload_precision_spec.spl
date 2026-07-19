@@ -14,17 +14,79 @@
 # kept for F32 enum payloads and for genuinely BoxFloat'd array/dict f64
 # (a disjoint lowering path — `name == "rt_enum_payload"` gates this arm).
 #
-# This spec runs on the interpreter / cranelift path, where the fix takes
-# full effect. The native-build (LLVM) backend has a SEPARATE, deeper defect
-# (construct-side passes the f64 payload in xmm0 instead of bitcast-to-i64;
-# extract sitofp-coerces) tracked in
-# doc/08_tracking/bug/native_llvm_f64_enum_payload_argpass_2026-07-19.md and
-# guarded by test/03_system/native/enum_f64_payload_precision_XFAIL.spl.
+# The same source is the pending LLVM native-build fixture at
+# test/03_system/native/enum_f64_payload_precision.spl.
 
 use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+extern fn rt_file_read_text(path: text) -> text
 
 enum FBoxF64Prec:
     V(f64)
+
+fn enum_runtime_ref(name: text, params: [MirType], ret: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params, return_type: ret, is_variadic: false)))
+    ))
+
+fn enum_payload_llvm_module() -> MirModule:
+    val i32t = MirType(kind: MirTypeKind.I32)
+    val f64t = MirType.f64()
+    val i64t = MirType.i64()
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("payload"), type_: f64t, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 1), name: Some("boxed"), type_: i64t, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 2), name: Some("raw"), type_: i64t, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 3), name: Some("decoded"), type_: f64t, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 4), name: Some("integer"), type_: i64t, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 5), name: Some("numeric"), type_: f64t, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 6), name: Some("ret"), type_: i64t, kind: LocalKind.Temp, is_ghost: false)
+    ]
+    val zero32 = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), i32t))
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Float(0.1), f64t), span: nil),
+        MirInst(kind: MirInstKind.Call(
+            Some(LocalId(id: 1)),
+            enum_runtime_ref("rt_enum_new", [i32t, i32t, i64t], i64t),
+            [zero32, zero32, mir_operand_copy(LocalId(id: 0))]
+        ), span: nil),
+        MirInst(kind: MirInstKind.Call(
+            Some(LocalId(id: 2)),
+            enum_runtime_ref("rt_enum_payload", [i64t], i64t),
+            [mir_operand_copy(LocalId(id: 1))]
+        ), span: nil),
+        MirInst(kind: MirInstKind.Bitcast(LocalId(id: 3), mir_operand_copy(LocalId(id: 2)), f64t), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 4), MirConstValue.Int(7), i64t), span: nil),
+        MirInst(kind: MirInstKind.Cast(LocalId(id: 5), mir_operand_copy(LocalId(id: 4)), f64t), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 6), MirConstValue.Int(0), i64t), span: nil)
+    ]
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 1), name: "main",
+        signature: MirSignature(params: [], return_type: i64t, is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"), instructions: insts,
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 6))))
+        )],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.enum.f64", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "enum f64 payload precision":
     it "round-trips a fractional f64 payload (0.1) without the tagged-float mask":
@@ -42,3 +104,20 @@ describe "enum f64 payload precision":
             case FBoxF64Prec.V(x):
                 got = x
         expect(got == 2.0).to_equal(true)
+
+    it "bit-preserves the LLVM runtime payload word in both directions":
+        val llvm = MirToLlvm.create("test.enum.f64", CodegenTarget.X86_64, nil).translate_module(enum_payload_llvm_module())
+        expect(llvm).to_contain("bitcast double %l0 to i64")
+        expect(llvm).to_contain("%l3 = bitcast i64 %l2 to double")
+        expect(llvm).to_contain("sitofp i64 %l4 to double")
+        expect(llvm.contains("fptosi double %l0 to i64")).to_equal(false)
+        expect(llvm.contains("sitofp i64 %l2 to double")).to_equal(false)
+
+    it "wires semantic f64 payload decoding into enum, Result, and Option lowering":
+        val switches = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        val methods = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+        val expressions = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(switches).to_contain("bound_payload = self.enum_payload_value")
+        expect(methods).to_contain("payload_value = self.enum_payload_value(payload_value, result_type)")
+        expect(expressions).to_contain("left_value = self.option_payload_or_self(left_local)")
+        expect(expressions).to_contain("left_value = self.enum_payload_value(left_value, result_type)")

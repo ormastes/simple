@@ -239,6 +239,13 @@ the shared binary — deploys require explicit user go-ahead).
   generic runtime decoding. Hosted and cross-target fixtures pin `7`, not the
   former handle-derived `84`; rebuilt executable proof remains pending. See
   `doc/08_tracking/bug/hosted_native_option_try_unwrap_payload_leak_2026-07-19.md`.
+- LLVM enum f64 payloads now preserve the runtime payload-word ABI in both
+  directions: `rt_enum_new` receives the f64 bits as i64, while MIR lowering
+  bitcasts back only when the semantic payload type is f64; ordinary numeric
+  i64-to-f64 casts remain `sitofp`. The former native XFAIL is now
+  a source-fixed fixture. Its direct LLVM-IR regression is present; the bounded
+  current-source mini build hit its 240-second cap, so native execution remains
+  pending and was not retried.
 - `local_mir_type_of` now honors its nilable contract by returning a bare
   `MirType` or `nil`; its two wrapper-dependent consumers were converted in
   the same owner. The focused regression reproduces the former plain
