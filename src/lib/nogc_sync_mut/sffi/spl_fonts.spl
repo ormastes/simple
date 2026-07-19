@@ -310,17 +310,31 @@ impl FontRasterizer:
         val parts = sfnt_rasterize_codepoint_parts(self.selected_blob, codepoint, size_px)
         if not parts.2:
             return nil
+        # Decode every tuple field right away, before any further method call
+        # (is_current() below) gets a chance to run between two `parts.N`
+        # reads. 2026-07-19 render-fault: with is_current() sitting between
+        # parts.2 and parts.1, `parts.1`'s tag-1 pointer resolved to memory
+        # holding self.font_cache_identity's text bytes instead of the
+        # metrics array (cr2 landed inside the hash string) — heap-layout
+        # dependent, not reproducible on every glyph. Snapshot to locals here
+        # so is_current() no longer runs inside the tuple's decode window.
+        val metrics: [i64] = parts.1
+        val gw = metrics[0]
+        val gh = metrics[1]
+        val gadv = metrics[2]
+        val gbx = metrics[3]
+        val gby = metrics[4]
+        val gpixels = parts.0
         if not self.is_current():
             return nil
-        val metrics: [i64] = parts.1
         GlyphBitmap(
-            gbm_width: metrics[0],
-            gbm_height: metrics[1],
-            gbm_advance: metrics[2],
-            gbm_bearing_x: metrics[3],
-            gbm_bearing_y: metrics[4],
+            gbm_width: gw,
+            gbm_height: gh,
+            gbm_advance: gadv,
+            gbm_bearing_x: gbx,
+            gbm_bearing_y: gby,
             handle: 0,
-            gbm_pixels: parts.0,
+            gbm_pixels: gpixels,
         )
 
     # Rasterize the given Unicode codepoint at the given pixel size.
@@ -387,17 +401,27 @@ impl FontRasterizer:
         val parts = sfnt_rasterize_glyph_index_parts(self.selected_blob, glyph_index, size_px)
         if not parts.2:
             return nil
+        # Same tuple-decode-window hazard as _rasterize_selected_outline
+        # (2026-07-19 render-fault): snapshot every parts.N field to locals
+        # before calling is_current(), so it never runs between two parts.N
+        # reads.
+        val metrics: [i64] = parts.1
+        val gw = metrics[0]
+        val gh = metrics[1]
+        val gadv = metrics[2]
+        val gbx = metrics[3]
+        val gby = metrics[4]
+        val gpixels = parts.0
         if not self.is_current():
             return nil
-        val metrics: [i64] = parts.1
         GlyphBitmap(
-            gbm_width: metrics[0],
-            gbm_height: metrics[1],
-            gbm_advance: metrics[2],
-            gbm_bearing_x: metrics[3],
-            gbm_bearing_y: metrics[4],
+            gbm_width: gw,
+            gbm_height: gh,
+            gbm_advance: gadv,
+            gbm_bearing_x: gbx,
+            gbm_bearing_y: gby,
             handle: 0,
-            gbm_pixels: parts.0,
+            gbm_pixels: gpixels,
         )
 
     fn has_glyph(codepoint: i64) -> bool:
