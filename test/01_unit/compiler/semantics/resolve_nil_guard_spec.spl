@@ -5,7 +5,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_definitions.{HirCallArg}
+use compiler.hir.hir_definitions.{HirCallArg, HirExpr, HirExprKind}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolId, SymbolKind, SymbolTable}
@@ -125,6 +125,35 @@ describe "MethodResolver nil guards":
         val result = resolver.try_ufcs(i64_type, "ping", args)
 
         expect(result.?).to_equal(true)
+
+    it "rejects a same-named UFCS function with the wrong arity":
+        var symbols = SymbolTable.new()
+        val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        val array_type = HirType(kind: HirTypeKind.Array(text_type, nil), span: Span.empty())
+        val join_type = HirType(
+            kind: HirTypeKind.Function([array_type], text_type, []),
+            span: Span.empty()
+        )
+        symbols.define(
+            "join",
+            SymbolKind.Function,
+            Some(join_type),
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+
+        val separator = HirExpr(
+            kind: HirExprKind.StringLit("/", []),
+            has_type_: true,
+            type_: text_type,
+            span: Span.empty()
+        )
+        val args = [HirCallArg(has_name: false, name: "", value: separator, span: Span.empty())]
+        var resolver = MethodResolver.new(symbols)
+
+        expect(resolver.try_ufcs(array_type, "join", args).?).to_equal(false)
 
     it "keeps UFCS optional bindings visible to HIR lowering":
         val source = file_read("src/compiler/35.semantics/resolve_strategies.spl")
