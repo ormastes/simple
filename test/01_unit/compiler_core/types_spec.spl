@@ -1,4 +1,12 @@
 use std.io_runtime.{file_read}
+use compiler.core.types.{
+    union_type_register, intersection_type_register, refinement_type_register,
+    tuple_type_register, dict_type_register, result_type_register,
+    array_generic_type_register, union_type_get_members, intersection_type_get_members,
+    refinement_type_base, refinement_type_predicate, tuple_type_get_elems,
+    dict_type_get_key, dict_type_get_value, result_type_get_ok, result_type_get_err,
+    array_generic_type_get_elem, reset_all_pools
+}
 
 describe "Types":
     fn types_source() -> text:
@@ -48,6 +56,104 @@ describe "Types":
         expect(source).to_contain("if idx >= TYPE_RESULT_LIMIT - TYPE_RESULT_BASE:")
         expect(source).to_contain("result_type_ok = []")
         expect(source).to_contain("result_type_err = []")
+
+    it "interns and bounds every encoded composite type registry":
+        # Local raw tags keep this native-runnable through bootstrap compilers
+        # whose cross-module imported `val` representation is not yet stable.
+        val i64_tag = 2
+        val text_tag = 4
+        val any_tag = 12
+        val union_base = 500
+        val intersection_base = 600
+        val refinement_base = 700
+        val dict_base = 1000
+        val result_base = 2000
+        val tuple_base = 3000
+        val tuple_limit = 4000
+        val array_base = 4000
+        val array_limit = 5000
+        val named_base = 10000
+        reset_all_pools()
+        expect(union_type_register([i64_tag, text_tag])).to_equal(union_base)
+        expect(union_type_register([i64_tag, text_tag])).to_equal(union_base)
+        expect(union_type_register([text_tag, i64_tag])).to_equal(union_base + 1)
+        expect(intersection_type_register([i64_tag, text_tag])).to_equal(intersection_base)
+        expect(intersection_type_register([i64_tag, text_tag])).to_equal(intersection_base)
+        expect(intersection_type_register([text_tag, i64_tag])).to_equal(intersection_base + 1)
+        expect(refinement_type_register(i64_tag, "value > 0")).to_equal(refinement_base)
+        expect(refinement_type_register(i64_tag, "value > 0")).to_equal(refinement_base)
+        expect(tuple_type_register([i64_tag, text_tag])).to_equal(tuple_base)
+        expect(tuple_type_register([i64_tag, text_tag])).to_equal(tuple_base)
+        expect(tuple_type_register([text_tag, i64_tag])).to_equal(tuple_base + 1)
+        expect(dict_type_register(i64_tag, text_tag)).to_equal(dict_base)
+        expect(dict_type_register(i64_tag, text_tag)).to_equal(dict_base)
+        expect(result_type_register(i64_tag, text_tag)).to_equal(result_base)
+        expect(result_type_register(i64_tag, text_tag)).to_equal(result_base)
+        expect(array_generic_type_register(named_base)).to_equal(array_base)
+        expect(array_generic_type_register(named_base)).to_equal(array_base)
+        expect(union_type_get_members(-1)).to_equal([])
+        expect(intersection_type_get_members(-1)).to_equal([])
+        expect(refinement_type_base(-1)).to_equal(any_tag)
+        expect(refinement_type_predicate(-1)).to_equal("")
+        expect(tuple_type_get_elems(-1)).to_equal([])
+        expect(dict_type_get_key(-1)).to_equal(any_tag)
+        expect(dict_type_get_value(-1)).to_equal(any_tag)
+        expect(result_type_get_ok(-1)).to_equal(any_tag)
+        expect(result_type_get_err(-1)).to_equal(any_tag)
+        expect(array_generic_type_get_elem(-1)).to_equal(any_tag)
+
+        var union_last = union_base
+        for i in 2..(intersection_base - union_base):
+            union_last = union_type_register([i64_tag, named_base + i])
+        expect(union_last).to_equal(intersection_base - 1)
+        expect(union_type_register([i64_tag, text_tag])).to_equal(union_base)
+        expect(union_type_register([text_tag, -1])).to_equal(-1)
+        var intersection_last = intersection_base
+        for i in 2..(refinement_base - intersection_base):
+            intersection_last = intersection_type_register([i64_tag, named_base + i])
+        expect(intersection_last).to_equal(refinement_base - 1)
+        expect(intersection_type_register([i64_tag, text_tag])).to_equal(intersection_base)
+        expect(intersection_type_register([text_tag, -1])).to_equal(-1)
+        var refinement_last = refinement_base
+        for i in 1..(dict_base - refinement_base):
+            refinement_last = refinement_type_register(i64_tag, "value > {i}")
+        expect(refinement_last).to_equal(dict_base - 1)
+        expect(refinement_type_register(i64_tag, "value > 0")).to_equal(refinement_base)
+        expect(refinement_type_register(text_tag, "overflow")).to_equal(-1)
+        var tuple_last = tuple_base
+        for i in 2..(tuple_limit - tuple_base):
+            tuple_last = tuple_type_register([i64_tag, named_base + i])
+        expect(tuple_last).to_equal(tuple_limit - 1)
+        expect(tuple_type_register([i64_tag, text_tag])).to_equal(tuple_base)
+        expect(tuple_type_register([text_tag, -1])).to_equal(-1)
+        var dict_last = dict_base
+        for i in 1..(result_base - dict_base):
+            dict_last = dict_type_register(named_base + i, text_tag)
+        expect(dict_last).to_equal(result_base - 1)
+        expect(dict_type_register(i64_tag, text_tag)).to_equal(dict_base)
+        expect(dict_type_register(-1, text_tag)).to_equal(-1)
+        var result_last = result_base
+        for i in 1..(tuple_base - result_base):
+            result_last = result_type_register(named_base + i, text_tag)
+        expect(result_last).to_equal(tuple_base - 1)
+        expect(result_type_register(i64_tag, text_tag)).to_equal(result_base)
+        expect(result_type_register(-1, text_tag)).to_equal(-1)
+        var array_last = array_base
+        for i in 1..(array_limit - array_base):
+            array_last = array_generic_type_register(named_base + i)
+        expect(array_last).to_equal(array_limit - 1)
+        expect(array_generic_type_register(named_base)).to_equal(array_base)
+        expect(array_generic_type_register(-1)).to_equal(-1)
+
+        reset_all_pools()
+        expect(union_type_register([text_tag, i64_tag])).to_equal(union_base)
+        expect(intersection_type_register([text_tag, i64_tag])).to_equal(intersection_base)
+        expect(refinement_type_register(text_tag, "fresh")).to_equal(refinement_base)
+        expect(tuple_type_register([text_tag, i64_tag])).to_equal(tuple_base)
+        expect(dict_type_register(text_tag, i64_tag)).to_equal(dict_base)
+        expect(result_type_register(text_tag, i64_tag)).to_equal(result_base)
+        expect(array_generic_type_register(named_base + 1)).to_equal(array_base)
+        reset_all_pools()
 
 # # Core Simple — Types and Pools Tests
 # use compiler.core.types.*

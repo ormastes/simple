@@ -349,6 +349,13 @@ the shared binary — deploys require explicit user go-ahead).
   Warning collection also retains every warning from the current parse instead
   of discarding the previous one. The lexer's per-source `source.chars()`
   materialization remains a separate Unicode-sensitive retention candidate.
+  Composite flat-type registries now intern exact payloads before enforcing
+  their fixed tag ranges. Union/intersection/refinement/tuple registrations can
+  no longer spill into the next namespace, duplicate Dict/Result/array shapes
+  no longer consume fresh IDs, tuple state participates in pool reset, and
+  negative registry IDs are rejected. Parser exhaustion follows the existing
+  diagnostic-plus-bare-type fallback instead of propagating `-1`. See
+  `doc/08_tracking/bug/composite_type_registry_tag_overflow_2026-07-19.md`.
   Current-source object emission reached the
   existing hosted `path_join` provider gap, so bounded RSS and executable proof
   remain pending. See
