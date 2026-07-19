@@ -446,11 +446,11 @@ pub const PATTERN_TEST: Opcode = 0x0080;
 /// **Effect:** Extract values from pattern match into locals
 pub const PATTERN_BIND: Opcode = 0x0081;
 
-/// Match enum discriminant.
+/// Match enum type and discriminant.
 ///
-/// **Encoding:** `ENUM_MATCH dest:u16 enum_val:u16 discriminant:u16`
-/// **Size:** 8 bytes
-/// **Effect:** `stack[dest] = (stack[enum_val].tag == discriminant)`
+/// **Encoding:** `ENUM_MATCH dest:u16 enum_val:u16 enum_id:u32 discriminant:u32`
+/// **Size:** 14 bytes
+/// **Effect:** `stack[dest] = (stack[enum_val].type == enum_id && stack[enum_val].tag == discriminant)`
 pub const ENUM_MATCH: Opcode = 0x0082;
 
 /// Extract enum payload.

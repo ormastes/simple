@@ -991,10 +991,12 @@ impl BytecodeVM {
                 ENUM_MATCH => {
                     let dest = self.read_u16()?;
                     let enum_val = self.read_u16()?;
-                    let discriminant = self.read_u16()?;
+                    let enum_id = self.read_u32()?;
+                    let discriminant = self.read_u32()?;
                     let val = self.get_stack(enum_val)?;
+                    let type_id = crate::value::rt_enum_id(val);
                     let disc = crate::value::rt_enum_discriminant(val);
-                    let matches = disc == discriminant as i64;
+                    let matches = type_id == enum_id as i64 && disc == discriminant as i64;
                     self.set_stack(dest, RuntimeValue::from_bool(matches))?;
                 }
 

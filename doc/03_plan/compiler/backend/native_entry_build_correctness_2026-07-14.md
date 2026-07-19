@@ -473,7 +473,10 @@ the shared binary — deploys require explicit user go-ahead).
   `rust_seed_native_build_default_backend_config_ignored_2026-07-19.md`. The Rust
   MIR-to-bytecode now lowers `EnumUnit`/`EnumWith` through a widened `ENUM_NEW`
   wire format carrying the stable custom enum ID and full 32-bit discriminant;
-  focused compile-and-execute coverage pins both payload shapes. Fresh Rust
+  focused compile-and-execute coverage pins both payload shapes. Qualified
+  variant `PatternTest` also preserves that type ID and full discriminant;
+  general bytecode payload binding and runtime-call match lowering remain open.
+  Fresh Rust
   execution and the original x86_64-unknown-none QEMU proof remain open.
 - Module-init symbols now exclude punctuation inherited from absolute or
   hyphenated source paths in both the pure-Simple bootstrap MIR mirror and the

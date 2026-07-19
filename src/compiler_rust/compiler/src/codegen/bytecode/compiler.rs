@@ -34,7 +34,7 @@ use simple_runtime::value::hash_variant_discriminant;
 use simple_runtime::RuntimeValue;
 
 use crate::hir::{BinOp, UnaryOp};
-use crate::mir::{BlockId, CallTarget, MirBlock, MirFunction, MirInst, Terminator, VReg};
+use crate::mir::{BlockId, CallTarget, MirBlock, MirFunction, MirInst, MirPattern, Terminator, VReg};
 
 /// Compilation error.
 #[derive(Debug, Clone)]
@@ -478,6 +478,26 @@ impl BytecodeCompiler {
                 variant_name,
                 payload,
             } => self.compile_enum_constructor(*dest, enum_name, variant_name, Some(*payload))?,
+
+            MirInst::PatternTest {
+                dest,
+                subject,
+                pattern:
+                    MirPattern::Variant {
+                        enum_name,
+                        variant_name,
+                        payload: None,
+                    },
+            } => {
+                let dest_slot = self.alloc_slot(*dest)?;
+                let subject_slot = self.get_slot(*subject)?;
+                self.encoder.emit_opcode(opcodes::ENUM_MATCH);
+                self.encoder.emit_u16(dest_slot);
+                self.encoder.emit_u16(subject_slot);
+                self.encoder
+                    .emit_u32(crate::codegen::shared::enum_runtime_type_id(enum_name));
+                self.encoder.emit_u32(hash_variant_discriminant(variant_name));
+            }
 
             MirInst::IndexGet {
                 dest,

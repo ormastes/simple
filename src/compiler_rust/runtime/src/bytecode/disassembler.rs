@@ -137,8 +137,9 @@ pub fn disassemble(code: &[u8]) -> String {
             ENUM_MATCH => {
                 let dest = decoder.read_u16().unwrap_or(0);
                 let val = decoder.read_u16().unwrap_or(0);
-                let disc = decoder.read_u16().unwrap_or(0);
-                write!(output, " s{}, s{}, disc={}", dest, val, disc).unwrap();
+                let enum_id = decoder.read_u32().unwrap_or(0);
+                let disc = decoder.read_u32().unwrap_or(0);
+                write!(output, " s{}, s{}, enum={}, disc={}", dest, val, enum_id, disc).unwrap();
             }
             ENUM_PAYLOAD => {
                 let dest = decoder.read_u16().unwrap_or(0);

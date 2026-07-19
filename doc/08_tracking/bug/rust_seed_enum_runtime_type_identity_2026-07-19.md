@@ -20,8 +20,8 @@ at least 2, the untruncated discriminant, NIL unit payload, and payload value.
 Fresh focused Rust execution and the scheduled cross-platform seed matrix remain
 pending; no seed redeploy is authorized by this source fix.
 
-Separate bytecode matching remains unsupported: the compiler does not emit
-`EnumDiscriminant`, `EnumPayload`, or `ENUM_MATCH`, and the dormant match opcode
-still has its older discriminant-only `u16` layout. Widen that opcode only when
-the compiler gains a real matching producer; it is not part of constructor
-metadata acceptance.
+Qualified variant `PatternTest` now uses `ENUM_MATCH` with the stable `u32` enum
+ID and full `u32` discriminant. Distinct assigned type IDs therefore no longer
+collapse to the old hardcoded ID 0 during matching. General payload binding and
+runtime-call match lowering remain unsupported in the experimental bytecode
+compiler, which no production backend currently selects.

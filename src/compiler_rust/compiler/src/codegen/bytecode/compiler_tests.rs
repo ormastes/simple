@@ -7,7 +7,7 @@ use simple_runtime::RuntimeValue;
 
 use super::compiler::BytecodeCompiler;
 use crate::hir::{BinOp, TypeId, UnaryOp};
-use crate::mir::{BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, Terminator, VReg};
+use crate::mir::{BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirPattern, Terminator, VReg};
 
 /// Helper to create a simple MIR function with one block.
 fn make_function(name: &str, params: Vec<MirLocal>, instructions: Vec<MirInst>, terminator: Terminator) -> MirFunction {
@@ -360,4 +360,72 @@ fn test_compile_enum_constructors_preserve_runtime_type_identity() {
     assert_eq!(rt_enum_discriminant(payload), i64::from(discriminant));
     assert!(rt_enum_payload(unit).is_nil());
     assert_eq!(rt_enum_payload(payload).as_int(), 42);
+}
+
+#[test]
+fn test_compile_enum_variant_test_preserves_type_and_full_discriminant() {
+    let variant = |enum_name: &str, variant_name: &str| MirPattern::Variant {
+        enum_name: enum_name.to_string(),
+        variant_name: variant_name.to_string(),
+        payload: None,
+    };
+    let func = make_function(
+        "enum_variant_test",
+        vec![],
+        vec![
+            MirInst::EnumUnit {
+                dest: VReg(0),
+                enum_name: "pkg.Config".to_string(),
+                variant_name: "Ready".to_string(),
+            },
+            MirInst::PatternTest {
+                dest: VReg(1),
+                subject: VReg(0),
+                pattern: variant("pkg.Config", "Ready"),
+            },
+            MirInst::PatternTest {
+                dest: VReg(2),
+                subject: VReg(0),
+                pattern: variant("pkg.Other", "Ready"),
+            },
+            MirInst::PatternTest {
+                dest: VReg(3),
+                subject: VReg(0),
+                pattern: variant("pkg.Config", "Waiting"),
+            },
+            MirInst::UnaryOp {
+                dest: VReg(4),
+                op: UnaryOp::Not,
+                operand: VReg(2),
+            },
+            MirInst::UnaryOp {
+                dest: VReg(5),
+                op: UnaryOp::Not,
+                operand: VReg(3),
+            },
+            MirInst::BinOp {
+                dest: VReg(6),
+                op: BinOp::And,
+                left: VReg(1),
+                right: VReg(4),
+            },
+            MirInst::BinOp {
+                dest: VReg(7),
+                op: BinOp::And,
+                left: VReg(6),
+                right: VReg(5),
+            },
+        ],
+        Terminator::Return(Some(VReg(7))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler
+        .compile_function(&func)
+        .expect("variant test compilation failed");
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+
+    assert!(hash_variant_discriminant("Ready") > u32::from(u16::MAX));
+    assert!(vm.execute().expect("variant test execution failed").as_bool());
 }
