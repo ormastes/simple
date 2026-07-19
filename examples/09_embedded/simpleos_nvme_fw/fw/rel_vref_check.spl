@@ -90,12 +90,24 @@ fn main():
     fail = fail + expect_eq(rel_vref_lookup(c7, nd_block(13)), 24, "calibrate(+24) already in-range (table[6]): passes through unclamped")
 
     # ── Oracle 5b: out-of-range block index fails CLOSED, no OOB read/write ───
-    fail = fail + expect_eq(rel_vref_lookup(c1, nd_block(NUM_BLOCKS)), 0, "lookup(blk == NUM_BLOCKS) fails closed -> 0, no OOB read")
-    fail = fail + expect_eq(rel_vref_lookup(c1, nd_block(0 - 1)), 0, "lookup(blk == -1) fails closed -> 0, no OOB read")
-    val c8: RelVrefCache = rel_vref_calibrate(c1, nd_block(NUM_BLOCKS), 6)
-    fail = fail + expect_eq(rel_vref_lookup(c8, nd_block(3)), 6, "calibrate(blk == NUM_BLOCKS) is a no-op -- real block 3 entry untouched")
-    val c9: RelVrefCache = rel_vref_decay_on_erase(c1, nd_block(0 - 1))
-    fail = fail + expect_eq(rel_vref_lookup(c9, nd_block(3)), 6, "decay(blk == -1) is a no-op -- real block 3 entry untouched")
+    # A dedicated fresh chain (not the earlier c0/c1/c2/c3 lineage, whose
+    # underlying arrays keep being threaded through further real mutations in
+    # the sections above): real usage always threads ONE mount value linearly
+    # (design §2's `m.vref = rel_vref_calibrate(m.vref, blk, offset)`), never
+    # resurrects an older snapshot after later calls kept mutating the same
+    # value -- so the isolated chain here matches the module's real call shape.
+    val cb0: RelVrefCache = fresh_cache()
+    fail = fail + expect_eq(rel_vref_lookup(cb0, nd_block(NUM_BLOCKS)), 0, "lookup(blk == NUM_BLOCKS) fails closed -> 0, no OOB read")
+    fail = fail + expect_eq(rel_vref_lookup(cb0, nd_block(0 - 1)), 0, "lookup(blk == -1) fails closed -> 0, no OOB read")
+
+    val cb1: RelVrefCache = rel_vref_calibrate(cb0, nd_block(3), 6)
+    fail = fail + expect_eq(rel_vref_lookup(cb1, nd_block(3)), 6, "calibrated block 3 (fresh chain): lookup == +6")
+
+    val cb2: RelVrefCache = rel_vref_calibrate(cb1, nd_block(NUM_BLOCKS), 9)
+    fail = fail + expect_eq(rel_vref_lookup(cb2, nd_block(3)), 6, "calibrate(blk == NUM_BLOCKS) is a no-op -- real block 3 entry untouched")
+
+    val cb3: RelVrefCache = rel_vref_decay_on_erase(cb1, nd_block(0 - 1))
+    fail = fail + expect_eq(rel_vref_lookup(cb3, nd_block(3)), 6, "decay(blk == -1) is a no-op -- real block 3 entry untouched")
 
     if fail == 0:
         print "REL VREF OK"

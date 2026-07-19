@@ -4,8 +4,8 @@ wear-leveling policy rel_wear.spl (contract: doc/05_design/hardware/nand_recover
 recovery_algorithms_design.md §6, design §9 lane L7). Known values at known
 points, not self-comparison.
 
-This module is SEPARATE from rel_wear.spl: every RelWearState is built here (or
-by rel_wear.spl's own return-the-object mutator) and read back / verdicted here,
+This module is SEPARATE from rel_wear.spl: every RelWearState is built via
+rel_wear.spl's own rel_wear_new() constructor and read back / verdicted here,
 proving no cross-module struct decay and exercising the module's public API only
 (nvme_types.* + nd_types.* + rel_types.* import graph honored transitively).
 
@@ -38,16 +38,6 @@ use nd_types.*
 use rel_types.*
 use rel_wear.*
 
-# Loop-built dense zero array (rel_types owns no array constructor; mirrors the
-# idiom used by rel_types_check.spl / ftl_fill).
-fn zeros(n: i64) -> [i64]:
-    var a: [i64] = []
-    var i: i64 = 0
-    while i < n:
-        a.push(0)
-        i = i + 1
-    a
-
 fn kind_of(a: RelAction) -> i64:
     a.kind
 
@@ -58,7 +48,7 @@ fn main():
     var fail: i64 = 0
 
     # ── Oracle 1: no verdict below spread threshold (dwell irrelevant) ────────
-    val st0: RelWearState = RelWearState(last_global_erase: zeros(NUM_BLOCKS))
+    val st0: RelWearState = rel_wear_new()
     val blk_a: NdBlock = nd_block(5)
 
     # spread = 2 (erase_min 10, erase_max 12) — never erased -> dwell huge, but
@@ -94,7 +84,7 @@ fn main():
 
     # ── Oracle 3: hysteresis — scripted sequence, no immediate re-fire ────────
     val blk_h: NdBlock = nd_block(9)
-    var hst: RelWearState = RelWearState(last_global_erase: zeros(NUM_BLOCKS))
+    var hst: RelWearState = rel_wear_new()
     val h_min: i64 = 10
     val h_max: i64 = 10 + WL_THRESHOLD + 1   # spread == 3, stays hot for the whole sequence
 
@@ -125,7 +115,7 @@ fn main():
     print "  PROBE oracle3: step1={kind_of(step1)} step3={kind_of(step3)} step4={kind_of(step4)} step5={kind_of(step5)}"
 
     # ── Oracle 4: per-block isolation ──────────────────────────────────────────
-    var ist: RelWearState = RelWearState(last_global_erase: zeros(NUM_BLOCKS))
+    var ist: RelWearState = rel_wear_new()
     val blk_recent: NdBlock = nd_block(3)    # erased recently -> small dwell
     val blk_stale:  NdBlock = nd_block(50)   # never erased -> large dwell
     ist = rel_wear_on_erase(ist, blk_recent, 96)   # dwell will be 100-96=4 at total_erases=100
