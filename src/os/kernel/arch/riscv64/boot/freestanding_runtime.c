@@ -822,17 +822,44 @@ spl_i64 rt_string_eq(spl_i64 lhs, spl_i64 rhs) {
 
 spl_i64 rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
     RtString *string = rt_as_string(value);
-    spl_i64 index = rt_index_arg(index_value);
-    if (!string) {
-        return -1;
+    const spl_u8 *data;
+    spl_u64 len;
+    spl_i64 index = index_value;
+    spl_u64 byte_index = 0;
+    spl_u64 char_index = 0;
+    if (index < 0) return 0;
+    if (string) {
+        data = (const spl_u8 *)string->data;
+        len = string->len;
+    } else {
+        data = (const spl_u8 *)(spl_u64)value;
+        if (!data) return 0;
+        len = 0;
+        while (data[len] != 0) len = len + 1;
     }
-    if (index < 0) {
-        index = (spl_i64)string->len + index;
+    while (byte_index < len) {
+        spl_u8 b0 = data[byte_index];
+        spl_u64 width = 1;
+        spl_i64 code = (spl_i64)b0;
+        if (b0 >= 194 && b0 <= 223 && byte_index + 1 < len) {
+            width = 2;
+            code = ((spl_i64)(b0 & 31) << 6) | (data[byte_index + 1] & 63);
+        } else if (b0 >= 224 && b0 <= 239 && byte_index + 2 < len) {
+            width = 3;
+            code = ((spl_i64)(b0 & 15) << 12) | ((spl_i64)(data[byte_index + 1] & 63) << 6) | (data[byte_index + 2] & 63);
+        } else if (b0 >= 240 && b0 <= 244 && byte_index + 3 < len) {
+            width = 4;
+            code = ((spl_i64)(b0 & 7) << 18) | ((spl_i64)(data[byte_index + 1] & 63) << 12) | ((spl_i64)(data[byte_index + 2] & 63) << 6) | (data[byte_index + 3] & 63);
+        }
+        if (char_index == (spl_u64)index) return code;
+        byte_index = byte_index + width;
+        char_index = char_index + 1;
     }
-    if (index < 0 || (spl_u64)index >= string->len) {
-        return -1;
-    }
-    return (spl_i64)(spl_u8)string->data[index];
+    return 0;
+}
+
+spl_i64 __simple_rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
+    return rt_string_char_code_at(value, index_value);
 }
 
 spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {

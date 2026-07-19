@@ -1,7 +1,7 @@
 # Native codegen: text.char_code_at returns value >>3 (tag-shift corruption) on freestanding lane
 
 - **ID:** native_char_code_at_tag_shift_2026-07-19
-- **Status:** OPEN
+- **Status:** SOURCE FIXED; freestanding redeploy/QEMU proof pending
 - **Severity:** high (silent wrong value; broke all baremetal WM chrome text)
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -37,6 +37,20 @@ Audit native-lane text method returns for missing untag/unbox on the
 char_code_at path (value appears to be handed back still-tagged, then
 consumed as if raw, i.e. one >>3 applied to the payload). Workaround in
 callers: use a byte accessor where ASCII suffices.
+
+## Source fix (2026-07-19)
+Pure-Simple MIR now lowers unresolved text `char_code_at(index)` after custom
+owner dispatch through the reserved `__simple_rt_string_char_code_at` alias
+with raw i64 index/result, so a same-named source function cannot capture the
+synthesized call.
+Both LLVM emitters register the exact i64 ABI and Cranelift reserves the
+runtime-owned symbol. The runtime accepts tagged or raw text without allocating
+and walks valid UTF-8 by character index; hosted, x86_64, AArch64, RV64, and the
+canonical pure-Simple runtime share the contract. Existing hosted OS matrix and
+AArch64/RV64 cross fixtures cover raw literals, concat-built tagged text,
+Unicode, and bounds. C syntax and a focused hosted runtime behavior harness
+pass. The original x86_64-unknown-none QEMU probe still needs a current-source
+pure-Simple compiler redeploy, so this report is not closed yet.
 
 ## Update 2026-07-19 (later): three tag-shifted views of one value
 Deeper probing in FontRenderer showed the SAME logical codepoint 88 ('X')

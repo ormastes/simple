@@ -913,12 +913,45 @@ RuntimeValue rt_for_iterable(RuntimeValue collection)
 
 RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return 0;
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    const uint8_t *data;
+    uint64_t len;
     int64_t i = (int64_t)idx;
-    if (i < 0 || (uint64_t)i >= s->len) return 0;
-    return (RuntimeValue)(uint8_t)s->data[i];
+    uint64_t byte_index = 0;
+    uint64_t char_index = 0;
+    if (i < 0) return 0;
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    if (s && s->hdr.type == HEAP_STRING) {
+        data = (const uint8_t *)s->data;
+        len = s->len;
+    } else {
+        data = (const uint8_t *)(uintptr_t)str;
+        if (!data) return 0;
+        len = strlen((const char *)data);
+    }
+    while (byte_index < len) {
+        uint8_t b0 = data[byte_index];
+        uint64_t width = 1;
+        RuntimeValue code = b0;
+        if (b0 >= 194 && b0 <= 223 && byte_index + 1 < len) {
+            width = 2;
+            code = ((RuntimeValue)(b0 & 31) << 6) | (data[byte_index + 1] & 63);
+        } else if (b0 >= 224 && b0 <= 239 && byte_index + 2 < len) {
+            width = 3;
+            code = ((RuntimeValue)(b0 & 15) << 12) | ((RuntimeValue)(data[byte_index + 1] & 63) << 6) | (data[byte_index + 2] & 63);
+        } else if (b0 >= 240 && b0 <= 244 && byte_index + 3 < len) {
+            width = 4;
+            code = ((RuntimeValue)(b0 & 7) << 18) | ((RuntimeValue)(data[byte_index + 1] & 63) << 12) | ((RuntimeValue)(data[byte_index + 2] & 63) << 6) | (data[byte_index + 3] & 63);
+        }
+        if (char_index == (uint64_t)i) return code;
+        byte_index += width;
+        char_index += 1;
+    }
+    return 0;
+}
+
+RuntimeValue __simple_rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_char_code_at(str, idx);
 }
 
 int64_t rt_pool_safepoint(void)

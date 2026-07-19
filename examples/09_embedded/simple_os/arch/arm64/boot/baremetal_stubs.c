@@ -750,14 +750,46 @@ RuntimeValue rt_hash_text(RuntimeValue str)
 /* --- string char code (adapted from riscv64 freestanding_runtime.c) --- */
 RuntimeValue rt_string_char_code_at(RuntimeValue value, RuntimeValue index_value)
 {
-    if (!IS_HEAP(value)) return ENCODE_INT(-1);
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
-    if (!h || h->type != HEAP_STRING) return ENCODE_INT(-1);
-    RuntimeString *s = (RuntimeString *)h;
-    int64_t index = DECODE_INT(index_value);
-    if (index < 0) index = (int64_t)s->len + index;
-    if (index < 0 || (uint32_t)index >= s->len) return ENCODE_INT(-1);
-    return ENCODE_INT((int64_t)(uint8_t)s->data[index]);
+    const uint8_t *data;
+    uint64_t len;
+    int64_t index = (int64_t)index_value;
+    uint64_t byte_index = 0;
+    uint64_t char_index = 0;
+    if (index < 0) return 0;
+    HeapHeader *h = IS_HEAP(value) ? (HeapHeader *)DECODE_PTR(value) : (HeapHeader *)0;
+    if (h && h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        data = (const uint8_t *)s->data;
+        len = s->len;
+    } else {
+        data = (const uint8_t *)(uintptr_t)value;
+        if (!data) return 0;
+        len = strlen((const char *)data);
+    }
+    while (byte_index < len) {
+        uint8_t b0 = data[byte_index];
+        uint64_t width = 1;
+        RuntimeValue code = b0;
+        if (b0 >= 194 && b0 <= 223 && byte_index + 1 < len) {
+            width = 2;
+            code = ((RuntimeValue)(b0 & 31) << 6) | (data[byte_index + 1] & 63);
+        } else if (b0 >= 224 && b0 <= 239 && byte_index + 2 < len) {
+            width = 3;
+            code = ((RuntimeValue)(b0 & 15) << 12) | ((RuntimeValue)(data[byte_index + 1] & 63) << 6) | (data[byte_index + 2] & 63);
+        } else if (b0 >= 240 && b0 <= 244 && byte_index + 3 < len) {
+            width = 4;
+            code = ((RuntimeValue)(b0 & 7) << 18) | ((RuntimeValue)(data[byte_index + 1] & 63) << 12) | ((RuntimeValue)(data[byte_index + 2] & 63) << 6) | (data[byte_index + 3] & 63);
+        }
+        if (char_index == (uint64_t)index) return code;
+        byte_index += width;
+        char_index += 1;
+    }
+    return 0;
+}
+
+RuntimeValue __simple_rt_string_char_code_at(RuntimeValue value, RuntimeValue index_value)
+{
+    return rt_string_char_code_at(value, index_value);
 }
 
 /* --- bytes <-> text. arrays here are RuntimeArray of ENCODE_INT(byte). --- */

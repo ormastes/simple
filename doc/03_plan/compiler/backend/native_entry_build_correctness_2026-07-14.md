@@ -416,3 +416,13 @@ the shared binary — deploys require explicit user go-ahead).
   plus bool/f64/i64/u64/text primitive output. The
   available pure-Simple test artifacts either crash before scenario output or
   lack the `test` command, so native execution remains pending.
+  Pure-Simple text `.char_code_at(index)` now lowers after custom-owner
+  dispatch through a reserved alias to the exact raw-i64 runtime ABI instead
+  of boxing/decoding the codepoint or capturing a same-named source function.
+  The shared runtime accepts raw literals and tagged dynamic text
+  without allocation and decodes valid UTF-8 consistently; hosted x86_64,
+  freestanding x86_64/AArch64/RV64, textual LLVM, LLVM-lib, and Cranelift owners
+  are aligned. Existing Linux/macOS/Windows/FreeBSD smoke and AArch64/RV64
+  execution fixtures now pin raw/tagged/Unicode/bounds behavior. Focused C
+  syntax and hosted runtime behavior pass; the original x86_64-unknown-none
+  pure-Simple redeploy/QEMU proof remains pending.

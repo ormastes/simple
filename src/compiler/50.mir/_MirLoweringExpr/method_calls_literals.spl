@@ -2195,6 +2195,31 @@ impl MirLowering:
                         self.builder = im_b2
                         return im_temp
 
+                # `char_code_at` is a text runtime primitive, but flat HIR has
+                # no method symbol for it. Keep custom owner methods above,
+                # then use the runtime's tagged-or-raw text ABI directly.
+                # Its index and result are raw i64 values; boxing either side
+                # recreates the native 88 -> 11 tag-shift corruption.
+                if method == "char_code_at" and args.len() == 1 and self.local_is_str(unresolved_receiver_local):
+                    val char_code_index = self.lower_expr(args[0].value)
+                    val char_code_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("__simple_rt_string_char_code_at"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64(), MirType.i64()],
+                            return_type: MirType.i64(),
+                            is_variadic: false
+                        )))
+                    ))
+                    var char_code_builder = self.builder
+                    val char_code_result = char_code_builder.emit_call(
+                        char_code_op,
+                        [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(char_code_index)],
+                        MirType.i64()
+                    )
+                    self.builder = char_code_builder
+                    if val char_code_local = char_code_result:
+                        return char_code_local
+
                 # Primitive/text `.to_text()` and `.to_string()` share the
                 # existing interpolation renderer, but only after custom
                 # struct methods had first chance to resolve above.
