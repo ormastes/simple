@@ -1,0 +1,395 @@
+# devhub `email` facade — pure Gmail-operator translation tables
+#
+# Implements doc/05_design/app/devhub/facade_email.md §5 (search operator
+# translation) and §6 (label/star/archive verb mapping). Every function here
+# is pure (no I/O, no clock, no env) so it is fully unit-testable offline —
+# see test/01_unit/app/itf/email_translate_spec.spl for the golden-table
+# coverage (one assertion per operator row).
+#
+# Three translation targets, matching §5's three backends:
+#   (a) X-GM-RAW passthrough   — real Gmail IMAP servers (§5a): zero
+#       translation, the query string goes through byte-for-byte.
+#   (b) generic IMAP SEARCH    — non-Gmail IMAP / outlook_imap (§5b):
+#       per-operator translation into IMAP SEARCH terms.
+#   (c) Graph KQL + $filter    — outlook/Graph (§5c): per-operator
+#       translation into $search KQL terms and $filter predicates.
+#
+# This module does NOT decide which mail-cli/Graph CLI flag actually carries
+# these values today — cmd_email.spl owns that (subprocess argv / adapter
+# calls), because the real CLI/adapter surfaces are narrower than the full
+# protocol grammar modeled here (see cmd_email.spl's comments for the gap).
+
+
+# ============================================================================
+# §5a — Gmail path: X-GM-RAW passthrough (primary, zero translation)
+# ============================================================================
+
+fn translate_query_gm_raw(query: text) -> text:
+    """The Gmail X-GM-RAW IMAP extension accepts the exact Gmail search-box
+    grammar verbatim — every operator (including ones with no IMAP
+    equivalent at all, e.g. category:/larger:/has:drive/newer_than:) is
+    parsed server-side. No translation needed; this is the identity
+    function, kept as a named seam so callers document *why* no translation
+    happens here, and so it's ready to wire once mail-cli grows a raw-SEARCH
+    passthrough flag (doc §8 gap item 1)."""
+    query
+
+
+# ============================================================================
+# §5b — Generic IMAP SEARCH per-operator translation (fallback path)
+# ============================================================================
+
+fn imap_term_from(value: text) -> text:
+    "FROM \"{value}\""
+
+fn imap_term_to(value: text) -> text:
+    "TO \"{value}\""
+
+fn imap_term_cc(value: text) -> text:
+    "CC \"{value}\""
+
+fn imap_term_bcc(value: text) -> text:
+    "BCC \"{value}\""
+
+fn imap_term_subject(value: text) -> text:
+    "SUBJECT \"{value}\""
+
+fn imap_term_text(value: text) -> text:
+    "TEXT \"{value}\""
+
+fn imap_term_is_unread() -> text:
+    "UNSEEN"
+
+fn imap_term_is_read() -> text:
+    "SEEN"
+
+fn imap_term_is_starred() -> text:
+    "FLAGGED"
+
+fn imap_warning_is_important() -> text:
+    "is:important has no IMAP equivalent (no standard flag for \"important\" outside Gmail) - term dropped"
+
+fn imap_term_has_attachment() -> text:
+    """Best-effort heuristic only — false negatives on multipart/alternative
+    with an attachment, false positives on multipart/alternative HTML+text.
+    Documented as lossy in doc §5b; never silently presented as exact."""
+    "HEADER \"Content-Type\" \"multipart/mixed\""
+
+fn imap_warning_has_attachment() -> text:
+    "has:attachment is a lossy multipart/mixed heuristic on generic IMAP (false positives/negatives possible)"
+
+fn imap_warning_category() -> text:
+    "category:X has no IMAP equivalent - unsupported, use X-GM-RAW on a Gmail account instead"
+
+fn imap_warning_filename() -> text:
+    "filename:X is unsupported without a MIME-structure fetch (BODYSTRUCTURE); needs an opt-in --slow fallback, not built"
+
+fn imap_warning_larger_smaller() -> text:
+    "larger:/smaller: has no IMAP SEARCH equivalent; needs a FETCH RFC822.SIZE post-filter, not built"
+
+fn imap_term_negate(term: text) -> text:
+    "NOT {term}"
+
+fn imap_term_or(term_a: text, term_b: text) -> text:
+    """IMAP SEARCH's OR takes exactly 2 args - n-ary Gmail `OR` chains must
+    right-fold into nested OR (see imap_term_or_nary)."""
+    "OR {term_a} {term_b}"
+
+fn imap_term_or_nary(terms: [text]) -> text:
+    """Right-fold an n-ary Gmail OR chain into nested 2-ary IMAP OR terms.
+    ["a","b","c"] -> "OR a OR b c" (i.e. OR a (OR b c))."""
+    if terms.len() == 0:
+        return ""
+    if terms.len() == 1:
+        return terms[0]
+    var acc = terms[terms.len() - 1]
+    var i = terms.len() - 2
+    while i >= 0:
+        acc = imap_term_or(terms[i], acc)
+        i = i - 1
+    acc
+
+fn imap_label_to_folder(label: text) -> text:
+    """label:X -> select IMAP folder X instead of INBOX. Only works when
+    label==folder name; lossy for true multi-label Gmail messages when not
+    using X-GM-RAW/X-GM-LABELS. Identity function, kept as a named seam."""
+    label
+
+fn imap_folder_for_in(in_value: text) -> text:
+    """in:trash/in:spam -> provider-specific folder name. in:anywhere is
+    handled by the caller (union search across all folders), not here."""
+    match in_value.lower():
+        "trash":
+            "Trash"
+        "spam":
+            "Spam"
+        _:
+            ""
+
+fn imap_gmail_folder_for_in(in_value: text) -> text:
+    """Gmail-specific folder names for in:trash/in:spam (the [Gmail]/...
+    namespace), used when the account provider is gmail."""
+    match in_value.lower():
+        "trash":
+            "[Gmail]/Trash"
+        "spam":
+            "[Gmail]/Spam"
+        _:
+            ""
+
+
+# ---- date handling (pure - callers inject "today" for newer_than/older_than) ----
+
+val _IMAP_MONTH_NAMES: [text] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+fn _digits(s: text, start: i64, count: i64) -> i64:
+    """Parse `count` ASCII digits from `s` starting at `start`; -1 on any
+    non-digit or out-of-range access."""
+    if start < 0 or start + count > s.len():
+        return -1
+    var n: i64 = 0
+    var i = start
+    while i < start + count:
+        val ch = s.char_at(i)
+        if ch < "0" or ch > "9":
+            return -1
+        n = n * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    n
+
+
+fn parse_gmail_date(date_slash: text) -> (i64, i64, i64):
+    """Parse a Gmail `YYYY/MM/DD` date into (year, month, day). Returns
+    (-1, -1, -1) if it doesn't parse in the expected shape."""
+    if date_slash.len() != 10:
+        return (-1, -1, -1)
+    if date_slash.char_at(4) != "/" or date_slash.char_at(7) != "/":
+        return (-1, -1, -1)
+    val year = _digits(date_slash, 0, 4)
+    val month = _digits(date_slash, 5, 2)
+    val day = _digits(date_slash, 8, 2)
+    if year < 0 or month < 1 or month > 12 or day < 1 or day > 31:
+        return (-1, -1, -1)
+    (year, month, day)
+
+
+fn imap_date_from_gmail(date_slash: text) -> text:
+    """Gmail `YYYY/MM/DD` -> IMAP SEARCH date `dd-Mon-yyyy` (e.g.
+    "2026/07/05" -> "05-Jul-2026"). Returns "" if unparseable — caller must
+    check before building a SINCE/BEFORE term."""
+    val (year, month, day) = parse_gmail_date(date_slash)
+    if year < 0:
+        return ""
+    val day_text = if day < 10: "0{day}" else: "{day}"
+    "{day_text}-{_IMAP_MONTH_NAMES[month - 1]}-{year}"
+
+
+fn iso_date_from_gmail(date_slash: text) -> text:
+    """Gmail `YYYY/MM/DD` -> ISO `YYYY-MM-DD` (Graph's date shape). Returns
+    "" if unparseable."""
+    val (year, month, day) = parse_gmail_date(date_slash)
+    if year < 0:
+        return ""
+    val month_text = if month < 10: "0{month}" else: "{month}"
+    val day_text = if day < 10: "0{day}" else: "{day}"
+    "{year}-{month_text}-{day_text}"
+
+
+fn relative_window_days(term_value: text) -> i64:
+    """Parse a Gmail `newer_than:`/`older_than:` value (`Nd`|`Nm`|`Ny`) into
+    an approximate day count (months=30d, years=365d, per doc §5b's own
+    approximation). Returns -1 if malformed."""
+    if term_value.len() < 2:
+        return -1
+    val unit = term_value.char_at(term_value.len() - 1)
+    val n = _digits(term_value, 0, term_value.len() - 1)
+    if n < 0:
+        return -1
+    match unit:
+        "d":
+            n
+        "m":
+            n * 30
+        "y":
+            n * 365
+        _:
+            -1
+
+
+# ============================================================================
+# §5c — Outlook/Graph: $search KQL (primary) + $filter (structured listing)
+# ============================================================================
+
+fn kql_term_from(value: text) -> text:
+    "from:{value}"
+
+fn kql_term_to(value: text) -> text:
+    "to:{value}"
+
+fn kql_term_cc(value: text) -> text:
+    "cc:{value}"
+
+fn kql_term_bcc(value: text) -> text:
+    "bcc:{value}"
+
+fn kql_term_subject(value: text) -> text:
+    "subject:{value}"
+
+fn kql_warning_bcc() -> text:
+    "bcc:X is a documented KQL property but unclear if populated for received mail"
+
+fn kql_term_is_important() -> text:
+    "importance:high"
+
+fn kql_term_has_attachment() -> text:
+    "hasattachment:true"
+
+fn kql_term_received_after(iso_date: text) -> text:
+    "received:{iso_date}.."
+
+fn kql_term_received_before(iso_date: text) -> text:
+    "received:..{iso_date}"
+
+fn kql_term_size_larger(bytes: text) -> text:
+    "size:{bytes}.."
+
+fn kql_term_size_smaller(bytes: text) -> text:
+    "size:..{bytes}"
+
+fn kql_term_filename(name: text) -> text:
+    "attachment:{name}"
+
+fn kql_term_negate(term: text) -> text:
+    "NOT {term}"
+
+fn kql_term_or(term_a: text, term_b: text) -> text:
+    "{term_a} OR {term_b}"
+
+fn kql_warning_category() -> text:
+    "category:X (Gmail ML auto-categorization) has no Graph equivalent - unsupported, error clearly"
+
+fn kql_warning_larger_smaller_filter() -> text:
+    "size has no $filter equivalent on the message resource - the search verb (KQL) is the only path for larger:/smaller:"
+
+
+# ---- $filter (structured list-scoping only, e.g. `inbox --unread`) ----
+
+fn filter_term_is_unread() -> text:
+    "isRead eq false"
+
+fn filter_term_is_read() -> text:
+    "isRead eq true"
+
+fn filter_term_is_starred() -> text:
+    "flag/flagStatus eq 'flagged'"
+
+fn filter_term_has_attachment() -> text:
+    "hasAttachments eq true"
+
+fn filter_term_importance_high() -> text:
+    "importance eq 'high'"
+
+fn filter_term_from(value: text) -> text:
+    "from/emailAddress/address eq '{value}'"
+
+fn filter_term_to(value: text) -> text:
+    "toRecipients/any(r:r/emailAddress/address eq '{value}')"
+
+fn filter_term_cc(value: text) -> text:
+    "ccRecipients/any(r:r/emailAddress/address eq '{value}')"
+
+fn filter_term_subject_contains(value: text) -> text:
+    "contains(subject,'{value}')"
+
+fn filter_term_received_after(iso_date: text) -> text:
+    "receivedDateTime ge {iso_date}T00:00:00Z"
+
+fn filter_term_received_before(iso_date: text) -> text:
+    "receivedDateTime le {iso_date}T00:00:00Z"
+
+fn filter_term_category(name: text) -> text:
+    "categories/any(c:c eq '{name}')"
+
+fn filter_term_negate(predicate: text) -> text:
+    "not({predicate})"
+
+fn filter_term_or(pred_a: text, pred_b: text) -> text:
+    "({pred_a}) or ({pred_b})"
+
+fn filter_term_attachment_filename(name: text) -> text:
+    "attachments/any(a:a/name eq '{name}')"
+
+
+fn graph_well_known_folder_for_label(label: text) -> text:
+    """label:X -> if X is a Gmail system label with a Graph well-known-name
+    analog, route to that mail folder instead of any query string. Returns
+    "" when X isn't one of the mapped system labels (caller falls back to
+    category:X in $search KQL / $filter categories/any)."""
+    match label.upper():
+        "INBOX":
+            "inbox"
+        "SENT":
+            "sentitems"
+        "DRAFT":
+            "drafts"
+        "TRASH":
+            "deleteditems"
+        _:
+            ""
+
+
+# ============================================================================
+# §6 — Label / star / archive verb -> backend action mapping
+# ============================================================================
+
+fn is_archive_equivalent_label_removal(label: text) -> bool:
+    """Removing the INBOX label IS archive on Gmail (drop-label semantics) -
+    label --remove INBOX and archive must produce the same effect."""
+    label.upper() == "INBOX"
+
+fn is_system_label_starred(label: text) -> bool:
+    """STARRED is handled specially (maps to the star verb / \\Flagged),
+    never a real folder-copy on IMAP."""
+    label.upper() == "STARRED"
+
+fn imap_star_flag_term(turn_on: bool) -> text:
+    """STORE term for star on/off. `turn_on=false` (`--off`) matches the
+    `\\Flagged` remove form (mail_imap_remove_flags) - present in mail-cli's
+    library but not yet wired to a CLI flag (doc §8 gap item 1/2); cmd_email
+    must report that gap honestly rather than pretend --off works today."""
+    if turn_on:
+        "+FLAGS (\\Flagged)"
+    else:
+        "-FLAGS (\\Flagged)"
+
+fn graph_flag_status(turn_on: bool) -> text:
+    """Graph flag.flagStatus value for star on/off (outlook_set_flag,
+    doc §8 gap item 3 - adapter fn does not exist yet)."""
+    if turn_on:
+        "flagged"
+    else:
+        "notFlagged"
+
+fn imap_gmail_archive_store_term() -> text:
+    """Ideal Gmail archive: true label-drop via X-GM-LABELS STORE, not a
+    copy+delete. Not implemented in mail-cli yet (doc §6/§8) - named here so
+    cmd_email.spl's fallback-to-copy+delete comment can point at the target
+    this should eventually become."""
+    "X-GM-LABELS -(\"\\\\Inbox\")"
+
+fn archive_folder_for_provider(provider: text) -> text:
+    """mail-cli's own cmd_archive branch: gmail copies to [Gmail]/All Mail,
+    everything else to a generic Archive folder. Mirrored here (read-only)
+    as a pure lookup so cmd_email.spl's help/diagnostics can state the
+    target folder without re-deriving mail-cli's internal logic."""
+    if provider == "gmail":
+        "[Gmail]/All Mail"
+    else:
+        "Archive"
+
+fn graph_archive_folder_id() -> text:
+    """Graph's well-known folder name for archive - outlook_move_message's
+    dest_folder_id. Graph's own move semantics (copy to dest, delete
+    source) already match archive 1:1, no facade-level compromise needed."""
+    "archive"

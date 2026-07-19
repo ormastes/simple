@@ -48,7 +48,7 @@ struct NvmeController:
     power_cycles: i64
     abort_count:  i64
     format_count: i64
-    aer_held_cid: i64   # cid of a single outstanding AER, or -1 if none
+    aer_held_cid: i64   # cid of a single outstanding AER, or NULL_IDX if none
     aer_event:    i64   # event awaiting an AER (0 = none), if one arrived first
     fw_revision:  i64   # active firmware revision (bumped on commit)
     fw_dl_bytes:  i64   # bytes accumulated by the in-progress firmware download
@@ -58,8 +58,8 @@ struct NvmeController:
     last_error:   i64   # status code of the most recent failed IO command
     dirty_since_checkpoint: bool  # true when media state changed after the last clean checkpoint
     fw_slot:         i64   # firmware slot of the most recent successful Commit (0 = none yet)
-    last_abort_sqid: i64   # SQID decoded from the most recent Abort (-1 = none)
-    last_abort_cid:  i64   # CID  decoded from the most recent Abort (-1 = none)
+    last_abort_sqid: i64   # SQID decoded from the most recent Abort (NULL_IDX = none)
+    last_abort_cid:  i64   # CID  decoded from the most recent Abort (NULL_IDX = none)
     pt:           PowerThermal   # power-state + thermal model, driven by live IO (SMART temperature)
     wb:           DramWriteBuffer # fixed DRAM write buffer staged before FTL program
 
@@ -67,7 +67,7 @@ fn nvme_controller_new() -> NvmeController:
     nvme_controller_new_for_target(TARGET_SIMPLE_SIM)
 
 fn nvme_controller_new_for_target(target_id: i64) -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), target: nvme_fw_target_config(target_id), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), target: nvme_fw_target_config(target_id), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: NULL_IDX, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: NULL_IDX, last_abort_cid: NULL_IDX, pt: power_thermal_new(), wb: dram_write_buffer_new())
 
 fn aer_event_valid(evt: i64) -> bool:
     evt == AER_SMART_HEALTH
@@ -117,7 +117,7 @@ impl NvmeController:
         if me.aq.cq_is_full():
             return false
         if me.aq.cq_post(cpl_make(me.aer_held_cid, SC_SUCCESS, me.aer_event)):
-            me.aer_held_cid = -1
+            me.aer_held_cid = NULL_IDX
             me.aer_event = 0
             return true
         false
@@ -274,7 +274,7 @@ impl NvmeController:
                 val evt: i64 = me.aer_event
                 me.aer_event = 0
                 return AdminResult(status: SC_SUCCESS, data: evt, post: true)
-        if me.aer_held_cid == -1:
+        if me.aer_held_cid == NULL_IDX:
             me.aer_held_cid = cmd.cid
             return AdminResult(status: SC_SUCCESS, data: 0, post: false)
         AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)   # AER limit (1) exceeded
@@ -284,12 +284,12 @@ impl NvmeController:
     me raise_async_event(evt: i64):
         if not aer_event_valid(evt):
             return
-        if me.aer_held_cid != -1:
+        if me.aer_held_cid != NULL_IDX:
             if cid_valid(me.aer_held_cid):
                 me.aer_event = evt
                 me.complete_pending_aer()
             else:
-                me.aer_held_cid = -1
+                me.aer_held_cid = NULL_IDX
                 me.aer_event = evt
         else:
             me.aer_event = evt
