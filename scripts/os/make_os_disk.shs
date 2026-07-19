@@ -18,26 +18,27 @@ sha256_file() {
     fi
 }
 
-validate_simple_payload() {
-    simple_path="$1"
+validate_elf_payload() {
+    payload_path="$1"
     expected_machine="$2"
-    if [ ! -f "$simple_path" ]; then
-        echo "missing SimpleOS Simple payload: $simple_path" >&2
+    payload_name="$3"
+    if [ ! -f "$payload_path" ]; then
+        echo "missing SimpleOS $payload_name payload: $payload_path" >&2
         return 1
     fi
-    elf_magic="$(od -An -tx1 -N 4 "$simple_path" 2>/dev/null | tr -d ' \n')"
+    elf_magic="$(od -An -tx1 -N 4 "$payload_path" 2>/dev/null | tr -d ' \n')"
     if [ "$elf_magic" != "7f454c46" ]; then
-        echo "invalid SimpleOS Simple payload (not ELF): $simple_path" >&2
+        echo "invalid SimpleOS $payload_name payload (not ELF): $payload_path" >&2
         return 1
     fi
-    set -- $(od -An -tu1 -j 4 -N 2 "$simple_path" 2>/dev/null)
+    set -- $(od -An -tu1 -j 4 -N 2 "$payload_path" 2>/dev/null)
     if [ "$#" -ne 2 ] || [ "$1" -ne 2 ] || [ "$2" -ne 1 ]; then
-        echo "invalid SimpleOS Simple payload (expected little-endian ELF64): $simple_path" >&2
+        echo "invalid SimpleOS $payload_name payload (expected little-endian ELF64): $payload_path" >&2
         return 1
     fi
-    set -- $(od -An -tu1 -j 18 -N 2 "$simple_path" 2>/dev/null)
+    set -- $(od -An -tu1 -j 18 -N 2 "$payload_path" 2>/dev/null)
     if [ "$#" -ne 2 ] || [ "$(( $1 + 256 * $2 ))" -ne "$expected_machine" ]; then
-        echo "invalid SimpleOS Simple payload machine (expected $expected_machine): $simple_path" >&2
+        echo "invalid SimpleOS $payload_name payload machine (expected $expected_machine): $payload_path" >&2
         return 1
     fi
 }
@@ -167,21 +168,25 @@ run_self_test() {
     make_self_test_elf "$payload" 62
     digest="$(sha256_file "$payload")" || self_test_fail "sha256 tool"
 
-    self_test_expect_pass "valid ELF shape" validate_simple_payload "$payload" 62
+    self_test_expect_pass "valid ELF shape" validate_elf_payload "$payload" 62 Simple
     write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true cranelift bin/release/host/simple "$digest"
     self_test_expect_pass "valid provenance" validate_simple_payload_provenance "$payload"
 
-    self_test_expect_fail "missing payload" validate_simple_payload "$tmp_dir/missing" 62
+    self_test_expect_fail "missing payload" validate_elf_payload "$tmp_dir/missing" 62 Simple
     printf 'not ELF\n' > "$tmp_dir/not-elf"
-    self_test_expect_fail "non-ELF payload" validate_simple_payload "$tmp_dir/not-elf" 62
+    self_test_expect_fail "non-ELF payload" validate_elf_payload "$tmp_dir/not-elf" 62 Simple
     cp "$payload" "$tmp_dir/elf32"
     printf '\001' | dd of="$tmp_dir/elf32" bs=1 seek=4 conv=notrunc 2>/dev/null
-    self_test_expect_fail "ELF32 payload" validate_simple_payload "$tmp_dir/elf32" 62
+    self_test_expect_fail "ELF32 payload" validate_elf_payload "$tmp_dir/elf32" 62 Simple
     cp "$payload" "$tmp_dir/big-endian"
     printf '\002' | dd of="$tmp_dir/big-endian" bs=1 seek=5 conv=notrunc 2>/dev/null
-    self_test_expect_fail "big-endian payload" validate_simple_payload "$tmp_dir/big-endian" 62
+    self_test_expect_fail "big-endian payload" validate_elf_payload "$tmp_dir/big-endian" 62 Simple
     make_self_test_elf "$tmp_dir/wrong-machine" 63
-    self_test_expect_fail "wrong machine" validate_simple_payload "$tmp_dir/wrong-machine" 62
+    self_test_expect_fail "wrong machine" validate_elf_payload "$tmp_dir/wrong-machine" 62 Simple
+    make_self_test_elf "$tmp_dir/riscv64-clang" 243
+    self_test_expect_pass "riscv64 Clang" validate_elf_payload "$tmp_dir/riscv64-clang" 243 Clang
+    make_self_test_elf "$tmp_dir/x86-clang" 62
+    self_test_expect_fail "x86 Clang on riscv64" validate_elf_payload "$tmp_dir/x86-clang" 243 Clang
 
     rm -f "${payload}.build_stamp"
     self_test_expect_fail "missing stamp" validate_simple_payload_provenance "$payload"
@@ -206,7 +211,7 @@ run_self_test() {
     write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true llvm bin/release/host/simple 0000000000000000000000000000000000000000000000000000000000000000
     self_test_expect_fail "mismatched hash" validate_simple_payload_provenance "$payload"
 
-    echo "PASS make_os_disk simple payload validation self-test"
+    echo "PASS make_os_disk target payload validation self-test"
 }
 
 if [ "${1:-}" = "--self-test" ]; then
@@ -234,21 +239,41 @@ SIMPLEOS_SIMPLE_BINARY="$EXPLICIT_SIMPLE_BINARY"
 case "$platform" in
     x86_64)
         if [ -n "$EXPLICIT_SIMPLE_BINARY" ]; then
-            validate_simple_payload "$SIMPLEOS_SIMPLE_BINARY" 62
+            validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 62 Simple
             validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY"
         fi
         ;;
     arm64)
         SIMPLEOS_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-bin/release/aarch64-unknown-simpleos/simple}"
-        validate_simple_payload "$SIMPLEOS_SIMPLE_BINARY" 183
+        validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 183 Simple
         ;;
     riscv64)
         SIMPLEOS_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-bin/release/riscv64-unknown-simpleos/simple}"
-        validate_simple_payload "$SIMPLEOS_SIMPLE_BINARY" 243
+        validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 243 Simple
         ;;
 esac
 
-SIMPLEOS_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-build/os/clang_static/bin/clang_static}"
+EXPLICIT_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-}"
+case "$platform" in
+    x86_64)
+        SIMPLEOS_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-build/os/clang_static/bin/clang_static}"
+        if [ -n "$EXPLICIT_CLANG_BINARY" ] || [ -f "$SIMPLEOS_CLANG_BINARY" ]; then
+            validate_elf_payload "$SIMPLEOS_CLANG_BINARY" 62 Clang
+        fi
+        ;;
+    arm64)
+        SIMPLEOS_CLANG_BINARY="$EXPLICIT_CLANG_BINARY"
+        if [ -n "$SIMPLEOS_CLANG_BINARY" ]; then
+            validate_elf_payload "$SIMPLEOS_CLANG_BINARY" 183 Clang
+        fi
+        ;;
+    riscv64)
+        SIMPLEOS_CLANG_BINARY="$EXPLICIT_CLANG_BINARY"
+        if [ -n "$SIMPLEOS_CLANG_BINARY" ]; then
+            validate_elf_payload "$SIMPLEOS_CLANG_BINARY" 243 Clang
+        fi
+        ;;
+esac
 SIMPLEOS_LLC_BINARY="${SIMPLEOS_LLC_BINARY:-build/os/llc_static/bin/llc_static}"
 SIMPLEOS_LLD_BINARY="${SIMPLEOS_LLD_BINARY:-build/os/lld_static/bin/lld_static}"
 SIMPLEOS_CRT0_OBJECT="${SIMPLEOS_CRT0_OBJECT:-build/os/sysroot/lib/crt0.o}"
