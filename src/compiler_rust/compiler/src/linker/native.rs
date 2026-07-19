@@ -57,12 +57,21 @@ impl NativeLinker {
             return Some(Self::Mold);
         }
 
-        // Try LLD next (cross-platform)
+        // Try LLD next (cross-platform) — EXCEPT macOS. `command()` for Lld
+        // resolves to the plain `ld.lld` binary, which is the ELF/COFF
+        // front-end. It rejects Mach-O-only flags such as `-force_load` and
+        // cannot read the Mach-O objects in libsimple_runtime.a ("neither
+        // ET_REL nor LLVM bitcode"). The Mach-O-capable LLD flavor ships
+        // under the separate `ld64.lld` binary name, which this detector
+        // does not probe for, so treat plain `lld` as unusable on macOS and
+        // fall through to Apple's `ld` (ld64) below instead.
+        #[cfg(not(target_os = "macos"))]
         if Self::is_available(Self::Lld) {
             return Some(Self::Lld);
         }
 
-        // Fall back to GNU ld
+        // Fall back to GNU ld (on macOS this is Apple's ld64, invoked with
+        // the extra -syslibroot/-arch/-platform_version flags in `link()`).
         #[cfg(unix)]
         if Self::is_available(Self::Ld) {
             return Some(Self::Ld);
@@ -116,11 +125,19 @@ impl NativeLinker {
                 None
             }
             LinkerFlavor::Gnu => {
-                // Standard detection order: mold > lld > ld
+                // Standard detection order: mold > lld > ld. macOS is
+                // classified as `LinkerFlavor::Gnu` (there is no separate
+                // Mach-O flavor), but the `lld` binary this detector probes
+                // for is the ELF/COFF front-end (`ld.lld`), not the
+                // Mach-O-capable `ld64.lld`. Invoking plain `ld.lld`
+                // directly on macOS rejects Mach-O-only flags like
+                // `-force_load` and cannot read the Mach-O objects in
+                // libsimple_runtime.a. Skip straight to `ld` (Apple's ld64)
+                // on macOS instead.
                 if matches!(target.os, TargetOS::Linux | TargetOS::FreeBSD) && Self::is_available(Self::Mold) {
                     return Some(Self::Mold);
                 }
-                if Self::is_available(Self::Lld) {
+                if !matches!(target.os, TargetOS::MacOS) && Self::is_available(Self::Lld) {
                     return Some(Self::Lld);
                 }
                 if Self::is_available(Self::Ld) {
