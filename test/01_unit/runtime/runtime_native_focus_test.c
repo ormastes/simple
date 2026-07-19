@@ -83,6 +83,12 @@ int main(void) {
     assert(one_a != one_b);
     assert(rt_string_char_at(short_source, 1) == one_a);
     assert(rt_slice(short_source, 1, 2, 1) == one_a);
+    const uint8_t unicode_text[] = {'A', 0xe2, 0x80, 0x94, 'B', 0};
+    int64_t tagged_unicode = text_bytes(unicode_text, 5);
+    assert(__simple_rt_string_char_code_at((int64_t)(uintptr_t)unicode_text, 1) == 8212);
+    assert(__simple_rt_string_char_code_at(tagged_unicode, 1) == 8212);
+    assert(__simple_rt_string_char_code_at(tagged_unicode, -1) == 0);
+    assert(__simple_rt_string_char_code_at(tagged_unicode, 99) == 0);
 
     SplArray* wffi_args = rt_array_new(2);
     assert(rt_array_push(wffi_args, rt_value_int(0x24c7468)));

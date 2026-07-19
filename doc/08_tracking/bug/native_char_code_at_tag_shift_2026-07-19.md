@@ -1,11 +1,11 @@
 # Native codegen: text.char_code_at returns value >>3 (tag-shift corruption) on freestanding lane
 
 - **ID:** native_char_code_at_tag_shift_2026-07-19
-- **Status:** FIXED in seed source (c97697506aa, 2026-07-19): builtin string
-  scalar methods now typed I64 in method-return fallback so `as u8` is a
-  plain narrow, not a tag-aware unbox. Freestanding-verified U=88 (was 11).
-  Binary redeploy of target/bootstrap pending (dir held/corrupted by a
-  parallel session at fix time).
+- **Status:** SOURCE FIXED in pure Simple (503c075464fc, 2026-07-19) and seed
+  parity (c97697506aa, 2026-07-19). The pure MIR path calls a reserved raw-i64
+  runtime alias after custom-method lookup; the seed fallback types builtin
+  string scalar methods as I64. Seed freestanding verification returned U=88
+  (was 11). Pure-Simple x86_64-unknown-none redeploy/QEMU proof remains pending.
 - **Severity:** high (silent wrong value; broke all baremetal WM chrome text)
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -36,11 +36,14 @@ native-build to x86_64-unknown-none; boot -kernel or OVMF; grep serial for
 `glyph-probe`. Hosted lane (seed interpreter) returns the correct 88 —
 freestanding-native only.
 
-## Fix direction
-Audit native-lane text method returns for missing untag/unbox on the
-char_code_at path (value appears to be handed back still-tagged, then
-consumed as if raw, i.e. one >>3 applied to the payload). Workaround in
-callers: use a byte accessor where ASCII suffices.
+## Fix
+Pure MIR lowers text-owned `char_code_at(index)` to
+`__simple_rt_string_char_code_at(i64, i64) -> i64` after custom-method
+dispatch, so neither the index nor result crosses an `Any` boxing boundary.
+Pure and hosted C runtimes accept raw literals and validated tagged text and
+decode UTF-8 by codepoint index. The seed applies the same raw-I64 result
+contract in its builtin method fallback. HIR rejects user definitions of the
+compiler-owned alias, and the public C runtime header declares its exact ABI.
 
 ## Update 2026-07-19 (later): three tag-shifted views of one value
 Deeper probing in FontRenderer showed the SAME logical codepoint 88 ('X')

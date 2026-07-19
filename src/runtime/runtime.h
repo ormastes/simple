@@ -299,6 +299,7 @@ int64_t  rt_string_builder_finish(int64_t handle);
 int64_t  rt_string_builder_len(int64_t handle);
 void     rt_string_builder_free(int64_t handle);
 int64_t  rt_string_char_code_at(int64_t string, int64_t index);
+int64_t  __simple_rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_char_at(int64_t string, int64_t index);
 int64_t  rt_string_concat(int64_t left, int64_t right);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);

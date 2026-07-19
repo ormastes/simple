@@ -32,6 +32,29 @@ describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
         expect(mir.split("rt_raw_i64_to_string").len() - 1).to_equal(2)
 
 describe "Text char_code_at MIR lowering", tag: ["only-compiled"]:
+    it "rejects a source definition of the compiler-reserved alias":
+        val module = parse_full_frontend("fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:\n    999\n", "reserved_alias.spl", "reserved_alias.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("reserved_alias.spl")
+        val _hir = lowering.lower_module(module)
+
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("is reserved for compiler-generated text calls")
+
+    it "accepts the alias only from the canonical runtime module":
+        val source = "fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:\n    999\n"
+        for filename in ["src/runtime/simple_core/core_string.spl", "src\\runtime\\simple_core\\core_string.spl"]:
+            val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+            var lowering = HirLowering.with_filename(filename)
+            val _hir = lowering.lower_module(module)
+
+            expect(lowering.errors.len()).to_equal(0)
+
+        val spoof = "/tmp/project/src/runtime/simple_core/core_string.spl"
+        val spoof_module = parse_full_frontend(source, spoof, spoof, Logger(level: 0))
+        var spoof_lowering = HirLowering.with_filename(spoof)
+        val _spoof_hir = spoof_lowering.lower_module(spoof_module)
+        expect(spoof_lowering.errors.len()).to_equal(1)
+
     it "uses the reserved raw runtime ABI without capturing a source function":
         val source = "fn rt_string_char_code_at(value: i64, index: i64) -> i64:\n    return 999\n\nfn codes() -> i64:\n    val tagged = \"X\" + \"Y\"\n    return \"X\".char_code_at(0) + tagged.char_code_at(0) + rt_string_char_code_at(1, 2)\n"
         val mir = lower_text_method_mir(source, "text_char_code_at")
