@@ -40,6 +40,18 @@ all three specs.
 - `build/test-artifacts/shared_multilingual_gpu_fonts/option_class_payload_probe_bounded/results.tsv`
 - `build/test-artifacts/shared_multilingual_gpu_fonts/option_class_payload_probe_bounded/option-class-profile.log`
 
+## CUDA semantics-v2 handoff update
+
+The CUDA-only portable-compute checker independently rebuilt and authenticated
+the semantics-v2 font artifact (PTX SHA-256
+`68c258c24e27204c4acade63561cfab3f741a2135b43e5124118eb8b48598bc1`),
+including source/version pins and tamper rejection. The smaller
+`cuda_generated_font_handoff_spec.spl` then built successfully with the pinned
+pure-Simple compiler and core-C runtime, but its native binary exited 132 before
+printing a BDD summary. Therefore the CUDA production-pin change remains
+uncommitted: static artifact authentication is green, while native acceptance
+is still blocked by this existing pure-native execution defect.
+
 ## Next fix targets
 
 Cached surface cycle 2 disassembly proved the batch had not returned: native
