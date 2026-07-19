@@ -1,21 +1,96 @@
-# Release Archive Layout Specification
+# Release Archive Layout
 
-> **Manual draft — pending canonical `spipe-docgen`.** This mirrors the
-> executable unit SSpec while the pure-Simple runner is unavailable.
+> Checks release workflow source resolves installed runtimes from the extracted
 
-Executable source:
-`test/01_unit/app/release/release_archive_layout_spec.spl`
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
 
-## Find installer runtimes below the archive root
+<details>
+<summary>Full Scenario Manual</summary>
 
-Linux and Windows installer preparation derives the extracted package root
-from the selected `.spk` filename. Runtime lookup then uses that root instead
-of incorrectly assuming that `bin/` was extracted at the artifact directory.
+# Release Archive Layout
 
-## Reuse the bootstrap launcher in the full fallback
+Checks release workflow source resolves installed runtimes from the extracted
 
-The full-package job requires the successful Linux bootstrap job, downloads its
-artifact, and copies its checked runtime and asset-root launcher into the full
-archive. A missing runtime or launcher stops packaging instead of publishing a
-falsely runnable archive. The artifact upload includes the fallback's `dist/`
-output and checksum paths.
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/release/release_archive_layout_spec.spl` |
+| Updated | 2026-07-19 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Checks release workflow source resolves installed runtimes from the extracted
+archive root and reuses the declared bootstrap runtime and launcher for fallback.
+
+## Scenarios
+
+### release archive layout
+
+#### should derive installer runtime paths from the extracted archive root
+
+- Verify release archives expose the installed runtime layout
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify release archives expose the installed runtime layout")
+val workflow = rt_file_read_text(".github/workflows/release.yml") ?? ""
+
+expect(workflow).to_contain("LINUX_PKG_ROOT=\"${LINUX_ARCHIVE%.spk}\"")
+expect(workflow).to_contain("$LINUX_PKG_ROOT/bin/simple-runtime")
+expect(workflow).to_contain("WINDOWS_PKG_ROOT=\"${WINDOWS_ARCHIVE%.spk}\"")
+expect(workflow).to_contain("$WINDOWS_PKG_ROOT/bin/simple.exe")
+expect(workflow.contains("if [ -f bin/simple-runtime ]; then")).to_be(false)
+expect(workflow.contains("if [ -f bin/simple.exe ]; then")).to_be(false)
+```
+
+</details>
+
+#### should reuse the bootstrap runtime and launcher in the full fallback
+
+- Verify release archives expose the installed runtime layout
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify release archives expose the installed runtime layout")
+val workflow = rt_file_read_text(".github/workflows/release.yml") ?? ""
+
+expect(workflow).to_contain("needs: [check-version, build-bootstrap]")
+expect(workflow).to_contain("name: bootstrap-linux-x86_64")
+expect(workflow).to_contain("FULL_BOOTSTRAP_ROOT=\"${FULL_ARCHIVE%.spk}\"")
+expect(workflow).to_contain("test -x \"$FULL_BOOTSTRAP_ROOT/bin/simple-runtime\"")
+expect(workflow).to_contain("test -x \"$FULL_BOOTSTRAP_ROOT/bin/simple\"")
+expect(workflow).to_contain("cp \"$FULL_BOOTSTRAP_ROOT/bin/simple-runtime\" \"$PKG_ROOT/bin/\"")
+expect(workflow).to_contain("cp \"$FULL_BOOTSTRAP_ROOT/bin/simple\" \"$PKG_ROOT/bin/\"")
+expect(workflow).to_contain("dist/simple-full-*.tar.gz.sha256")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

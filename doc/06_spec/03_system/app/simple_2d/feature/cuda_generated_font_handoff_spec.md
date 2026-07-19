@@ -1,40 +1,77 @@
 # CUDA Generated Font Handoff
 
-**Status:** fail-closed stale-artifact evidence; native CUDA promotion pending regeneration
-**Traceability:** REQ-010, REQ-014; NFR-002, NFR-008
-**Executable:** `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl`
+> Fail-closed evidence for the source-tracked CUDA font artifact while its
 
-> Hand-maintained mirror pending canonical `spipe-docgen`; no generated-manual
-> PASS is claimed.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Operator flow
+<details>
+<summary>Full Scenario Manual</summary>
 
-### Reject the stale source-tracked CUDA font artifact
+# CUDA Generated Font Handoff
 
-The scenario loads the compiled-in PTX from `backend_cuda_font_ptx.spl`, proves
-its retained PTX SHA-256 is intact, and compares it with the corrected common
-straight-ARGB emitter. ABI program version remains `1`; common compositor
-semantics are revision `2`, while the retained PTX is explicitly revision `1`.
-The trust gate therefore rejects both the exact stale bytes and tampered bytes.
+Fail-closed evidence for the source-tracked CUDA font artifact while its
 
-### Restore native submission and device readback
+## At a Glance
 
-Canonical `Engine2D` construction now refuses to install the stale companion,
-while primitive CUDA remains usable. Native font submission and exact CPU pixel
-parity must be restored only after an admitted pure-Simple emitter regenerates
-the CUDA source, PTX, hashes, and semantics revision. Tool-only regeneration is
-not accepted as source provenance.
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` |
+| Updated | 2026-07-19 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-The default CUDA optimization module still contains no font entry. The tracked
-font companion is separate, immutable for the session, and unloaded with the
-CUDA context. The checker remains a regeneration/provenance tool; its ignored
-outputs are not production inputs.
+Fail-closed evidence for the source-tracked CUDA font artifact while its
+straight-ARGB semantics lag the current common compositor. Canonical
+regeneration with an admitted pure-Simple emitter is required before native
+CUDA device-readback promotion can run again.
 
-## Evidence artifacts
+## Scenarios
 
-- source-tracked `src/lib/gc_async_mut/gpu/engine2d/backend_cuda_font_ptx.spl`
-- focused SPipe stale-artifact rejection result
-- optional regeneration output under `build/portable_compute_toolchains/`
+### CUDA generated font handoff evidence
 
-The executable spec is authoritative. Regenerate this manual with the admitted
-SPipe docgen; no CUDA device-origin font readback PASS is currently claimed.
+#### should reject the stale tracked artifact until canonical regeneration
+
+- Compare the retained artifact identity with the corrected common compositor
+   - Expected: FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256 equals `sha256_text(ptx)`
+   - Expected: FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION equals `FONT_ATLAS_COMPOSITE_PROGRAM_VERSION`
+   - Expected: FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION equals `1`
+   - Expected: FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Compare the retained artifact identity with the corrected common compositor")
+val ptx = cuda_font_atlas_composite_ptx()
+val current = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
+expect(FONT_ATLAS_COMPOSITE_CUDA_SOURCE_SHA256 == portable_compute_artifact_source_hash(current)).to_be(false)
+expect(FONT_ATLAS_COMPOSITE_CUDA_VERSION_SHA256 == portable_compute_artifact_version_hash(current)).to_be(false)
+expect(FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256).to_equal(sha256_text(ptx))
+expect(FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION).to_equal(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)
+expect(FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION).to_equal(1)
+expect(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION).to_equal(2)
+expect(cuda_font_atlas_composite_ptx_trusted(ptx)).to_be(false)
+expect(cuda_font_atlas_composite_ptx_trusted(ptx + " ")).to_be(false)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

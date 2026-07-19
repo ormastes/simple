@@ -102,6 +102,9 @@ describe "<Feature Name>":
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
   by policy, and executable SSpec folded below the manual flow.
+  Generated manuals must retain module-level triple-quoted scope and claim-
+  boundary prose; a structurally complete manual that drops those limits is a
+  documentation failure.
   Every named setup/checker helper used by a displayed scenario must appear as
   a visible manual step or in complete folded executable source.
 - If a scenario claims formal verification coverage, include the formal

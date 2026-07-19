@@ -1,118 +1,249 @@
 # Native GPU Font Readback
 
-**Status:** release-blocking and currently unavailable
-**Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-007, NFR-008
-**Executable:** `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`
+> Release-blocking native evidence for Engine2D and Engine3D font texture
 
-> Hand-maintained mirror pending canonical `spipe-docgen`; no generated-manual
-> PASS is claimed.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
 
-This scenario has three SimpleOS provenance rejection rows, two fail-closed
-classification rows, and three independent live evidence rows. Vulkan Engine2D
-and
-the Engine3D font adapter render on a consistent device name/type/driver tuple;
-SimpleOS supplies a
-pinned-font guest framebuffer oracle; and the warm performance/resource
-budgets pass. CUDA Engine2D generated-artifact evidence is owned by the
-separate `cuda_generated_font_handoff_spec.spl` pair. That CUDA row and this
-Vulkan row neither require nor imply the same device or backend. The Vulkan
-tuple check is not a device UUID or retained execution proof. CPU rendering,
-upload-only evidence, and environment claims are not substitutes.
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Operator flow
+# Native GPU Font Readback
 
-### Reject noncanonical SimpleOS artifact evidence
+Release-blocking native evidence for Engine2D and Engine3D font texture
 
-Reject missing or copied wrapper provenance, malformed or ambiguous SHA-256
-fields, and copied metadata whose canonical retained files do not match. These
-three fail-closed rows do not claim QEMU execution or retained pixel evidence.
+## At a Glance
 
-### Classify unavailable hardware
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` |
+| Updated | 2026-07-19 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-The shared promotion classifier returns `unavailable` when controlled
-Engine2D and Engine3D records both report missing native graphics hardware.
-Unavailable is never pass.
+Release-blocking native evidence for Engine2D and Engine3D font texture
+rendering, SimpleOS pinned-font pixels, and warm performance/resource bounds. Unavailable hardware
+and missing durable artifacts fail explicitly; CPU rendering and uploaded-only
+textures cannot satisfy this spec.
 
-### Reject forged native proof
+## Scenarios
 
-The same classifier returns `rejected` for an Engine2D record whose pixels
-came from `cpu_fallback` and an Engine3D record whose claimed readback does
-not match its device evidence. These rows do not require hardware and cannot
-promote a backend.
+### native GPU font promotion evidence
 
-### Prove native submission and device readback
+#### should reject missing or noncanonical SimpleOS artifact provenance
 
-Treat the first unavailable rung as failure: compiled program, native resource
-creation, submission, completed fence, and device-origin readback are required
-before any backend is promoted.
+<details>
+<summary>Executable SSpec</summary>
 
-### Render Engine2D plus Engine3D HUD/world text on Vulkan
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-Engine2D requires a native pipeline, atlas buffer, submitted command, completed
-fence, concrete device-readback handle and device identity, nonblank pixels,
-and exact packed-ARGB CPU pixel equality.
+```simple
+expect(_simpleos_artifact_metadata_valid("")).to_be(false)
+val copied = _simpleos_canonical_artifact_record().replace(
+    SIMPLEOS_WRAPPER_PATH, "/tmp/copied-simpleos-evidence.shs")
+expect(_simpleos_artifact_metadata_valid(copied)).to_be(false)
+```
 
-The checker `expect_engine3d_font_readback` requires nonzero native device,
-distinct HUD/world pipelines, texture, sampler, and fence handles; HUD and world draws; verified
-HUD placement and world transform/depth behavior; a completed and destroyed
-fence; device-origin nonblank readback; and CPU-oracle parity.
+</details>
 
-Current expected result is an explicit failure until native execution is
-retained. Source now owns dedicated HUD/world pipelines, combined sampler
-binding, depth test+write, zero-coverage fragment discard, fenced device-image
-readback, exact atlas owner/generation/payload hash, and public-pixel comparison.
-The public selector reports the honest hybrid identity `vulkan-font`; repeated
-installation must retain the same HUD/world pipelines and sampler. The depth oracle uses a translated
-perspective camera and four native frames (near-only, far-only, and both draw
-orders); every fully opaque overlap pixel must keep the near color.
-The independent HUD-only frame derives the expected nonzero pixel count and
-bounds directly from the shared batch atlas at `(4,4)` and requires an exact
-device-readback match. Reported pipeline and texture identities are resolved
-from their logical handles rather than resource-array positions.
+#### should reject malformed or ambiguous SimpleOS artifact hashes
 
-### Capture SimpleOS pinned-font pixels
+-  simpleos canonical artifact record
 
-The checker `expect_simpleos_font_pixel_oracle` requires the pinned Noto Sans
-Mono asset SHA-256, the canonical taskbar-clock 56×48 RGB region SHA-256,
-exactly 8,064 region bytes, and `qemu-pmemsave` device origin. The guest loads registry-validated
-bytes from the canonical image path or the shared extensionless FAT alias
-`/SYS/FONTS/NOTOSANS`. The pure-Simple reader uses a
-32 MiB ceiling and the C compatibility reader uses 4 MiB; both admit this
-pinned 1,708,408-byte payload without truncation. The existing 12 px
-`taskbar-clock` command is emitted by the canonical WM DrawIR frame; no private
-post-frame font draw remains. The fullscreen wrapper independently hashes the
-dynamic rightmost 56×48 `pmemsave` crop and retains serial, raw/PPM, capture
-output, and region digest. The expected canonical hash is intentionally unset
-until a trusted retained capture establishes it; promotion stays fail-closed
-until the value is pinned and reproduced.
-A disposable host-built FAT32 image contains the fallback at the exact pinned
-length and SHA-256, but no successful QEMU artifact is retained yet; missing
-any durable guest artifact is `unavailable` and fails this promotion gate.
 
-### Measure warm font rendering and resource bounds
+<details>
+<summary>Executable SSpec</summary>
 
-The checker `expect_font_perf_budget` requires at least 95% warm cache hits;
-1,024-glyph p95 at most 4 ms at 1080p and 8 ms at 4K; 4,096-glyph native p95 at
-least 1.25× faster than the CPU oracle; no unchanged full-atlas upload; at most
-10% RSS growth; a nonzero GPU high-water mark at most 128 MiB; controlled
-Vulkan-poison CPU fallback; unchanged prepared-batch identity; and eleven
-post-loss CPU samples whose recomputed p95 does not exceed baseline.
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-The performance SSpec is the sole collector and overwrites the strict v5
-run/host/source/font/device-pinned durable record. This system scenario only loads that
-record; missing, stale, partial, or non-passing evidence fails closed.
+```simple
+val uppercase = _simpleos_canonical_artifact_record().replace(
+    SIMPLEOS_ZERO_SHA256, "A000000000000000000000000000000000000000000000000000000000000000")
+expect(_simpleos_artifact_metadata_valid(uppercase)).to_be(false)
+val duplicate = _simpleos_canonical_artifact_record() +
+    "simpleos_wm_fullscreen_wrapper_sha256={SIMPLEOS_ZERO_SHA256}\n"
+expect(_simpleos_artifact_metadata_valid(duplicate)).to_be(false)
+val empty_first = "simpleos_wm_fullscreen_wrapper_sha256=\n" +
+    _simpleos_canonical_artifact_record()
+expect(_simpleos_artifact_metadata_valid(empty_first)).to_be(false)
+```
 
-## Evidence artifacts
+</details>
 
-- Engine2D/Engine3D evidence: consistent device tuple, native resource/fence handles, draw counts,
-  readback bytes/source, absolute pixels, and CPU diff.
-- SimpleOS evidence: guest serial log plus QEMU `pmemsave` PPM and fixed-region
-  digest.
-- Performance evidence: five budget/recovery arrays, seven stage arrays,
-  recovery identity, upload/RSS, GPU resource high-water, compiled artifact and
-  batch/payload identities, observed handles/fence, changed device pixels, and
-  exact CPU parity. NFR-008 source/schema coverage is present; the retained
-  native v5 record remains pending.
+#### should reject copied env-only SimpleOS artifact evidence
 
-The executable spec is the authority. Regenerate this manual after all eight
-scenarios pass and require SPipe docgen to report zero stubs.
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val copied_record = _simpleos_canonical_artifact_record()
+expect(_simpleos_artifact_metadata_valid(copied_record)).to_be(true)
+expect(_simpleos_artifact_files_valid(copied_record)).to_be(false)
+```
+
+</details>
+
+#### should classify controlled missing native graphics hardware as unavailable
+
+- Prove native submission and device readback
+   - Expected: classify_native_font_promotion(unavailable_2d, unavailable_3d) equals `unavailable`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Prove native submission and device readback")
+val unavailable_2d = _engine2d_unavailable("controlled-device-unavailable")
+val unavailable_3d = _engine3d_unavailable("controlled-device-unavailable")
+expect(classify_native_font_promotion(unavailable_2d, unavailable_3d)).to_equal("unavailable")
+expect(expect_engine2d_font_readback(unavailable_2d)).to_be(false)
+expect(expect_engine3d_font_readback(unavailable_3d)).to_be(false)
+```
+
+</details>
+
+#### should reject forged pass labels without native device proof
+
+- Prove native submission and device readback
+   - Expected: classify_native_font_promotion(forged_2d, forged_3d) equals `rejected`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Prove native submission and device readback")
+val forged_2d = Engine2DFontReadbackEvidence(
+    status: "pass", reason: "forged", device_identity: 1,
+    device_name: "forged-device", device_type: "virtual",
+    driver_identity: "forged-driver", pipeline_handle: 1, atlas_handle: 1,
+    command_handle: 1, fence_handle: 1, fence_waited: true,
+    fence_destroyed: true, readback_source: "cpu_fallback",
+    readback_handle: 1, readback_bytes: 16384, execution_target: "vulkan",
+    nonblank_pixels: true, cpu_oracle_parity: true)
+val forged_3d = Engine3DFontReadbackEvidence(
+    status: "pass", reason: "forged", device_handle: 1,
+    device_name: "forged-device", device_type: "virtual",
+    driver_identity: "forged-driver", submitted_command_handle: 1,
+    pipeline_handle: 1, world_pipeline_handle: 2, texture_handle: 1,
+    texture_binding_ready: true, atlas_owner_identity: "forged-owner",
+    atlas_generation: 1, atlas_payload_sha256: FONT_ASSET_SHA256,
+    sampler_handle: 1, hud_draws: 1, hud_placement_verified: true,
+    world_draws: 1, world_depth_transform_verified: true,
+    fence_handle: 1, fence_waited: true, fence_destroyed: true,
+    readback_source: "device_image_readback", color_image_handle: 1,
+    readback_bytes: 16384, readback_matches_evidence: false,
+    nonblank_pixels: true, cpu_oracle_parity: true,
+    translucent_destination_parity: false)
+expect(classify_native_font_promotion(forged_2d, forged_3d)).to_equal("rejected")
+expect(expect_engine2d_font_readback(forged_2d)).to_be(false)
+expect(expect_engine3d_font_readback(forged_3d)).to_be(false)
+```
+
+</details>
+
+#### should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple
+
+- Prove native submission and device readback
+- Render Engine2D text on the promoted backend
+- Render Engine3D HUD and world text on the promoted backend
+   - Expected: promotion equals `pass`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Prove native submission and device readback")
+step("Render Engine2D text on the promoted backend")
+step("Render Engine3D HUD and world text on the promoted backend")
+val engine2d = _collect_engine2d_font_readback()
+val engine3d = _collect_engine3d_font_readback()
+val promotion = classify_native_font_promotion(engine2d, engine3d)
+print "engine2d_font status={engine2d.status} reason={engine2d.reason} device={engine2d.device_identity} pipeline={engine2d.pipeline_handle} atlas={engine2d.atlas_handle} fence={engine2d.fence_handle} readback_bytes={engine2d.readback_bytes}"
+print "engine3d_font status={engine3d.status} reason={engine3d.reason} device={engine3d.device_handle} hud_pipeline={engine3d.pipeline_handle} world_pipeline={engine3d.world_pipeline_handle} texture={engine3d.texture_handle} atlas_owner={engine3d.atlas_owner_identity} atlas_generation={engine3d.atlas_generation} atlas_sha256={engine3d.atlas_payload_sha256} sampler={engine3d.sampler_handle} fence={engine3d.fence_handle} readback_bytes={engine3d.readback_bytes} translucent_destination_parity={engine3d.translucent_destination_parity}"
+if promotion != "pass":
+    fail_test("native font promotion " + promotion + ": Engine2D=" +
+        engine2d.reason + " Engine3D=" + engine3d.reason)
+expect(expect_engine2d_font_readback(engine2d)).to_be(true)
+expect(expect_engine3d_font_readback(engine3d)).to_be(true)
+expect(promotion).to_equal("pass")
+```
+
+</details>
+
+#### should capture the pinned SimpleOS glyph from guest framebuffer memory
+
+- Boot SimpleOS with the pinned font asset
+- Capture SimpleOS pinned-font pixels
+- fail test
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Boot SimpleOS with the pinned font asset")
+step("Capture SimpleOS pinned-font pixels")
+val evidence = _collect_simpleos_pixel_evidence()
+if not expect_simpleos_font_pixel_oracle(evidence):
+    fail_test("SimpleOS pinned-font pixel oracle unavailable: " + evidence.reason)
+expect(expect_simpleos_font_pixel_oracle(evidence)).to_be(true)
+```
+
+</details>
+
+#### should meet warm latency, recovery, GPU benefit, upload, RSS, and resource budgets
+
+- Measure warm font rendering and resource bounds
+- fail test
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Measure warm font rendering and resource bounds")
+val evidence = read_font_perf_evidence()
+if not expect_font_perf_budget(evidence):
+    fail_test("native font performance evidence unavailable: " + evidence.reason)
+expect(expect_font_perf_budget(evidence)).to_be(true)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
