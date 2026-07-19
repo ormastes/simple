@@ -12,6 +12,7 @@ use compiler.core.ast_expr.{
 use compiler.core.ast_stmt.{
     STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag, stmt_tag
 }
+use compiler.core.types.{named_type_find}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.*
 use std.nogc_sync_mut.io.file_ops.{rt_file_read_text}
@@ -59,6 +60,8 @@ describe "bootstrap native AST arena isolation":
         val expr_source = rt_file_read_text("src/compiler/10.frontend/core/_AstExpr/nodes.spl") ?? ""
         val stmt_source = rt_file_read_text("src/compiler/10.frontend/core/ast_stmt.spl") ?? ""
         val decl_source = rt_file_read_text("src/compiler/10.frontend/core/_Ast/decl_nodes.spl") ?? ""
+        val type_source = rt_file_read_text("src/compiler/10.frontend/core/types.spl") ?? ""
+        val bridge_source = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl") ?? ""
 
         expect(module_source.contains("\n    decl_tag = []\n")).to_equal(false)
         expect(expr_source.contains("\n    expr_tag = []\n")).to_equal(false)
@@ -74,6 +77,9 @@ describe "bootstrap native AST arena isolation":
         expect(stmt_source).to_contain("return stmt_env_mirror_slot[0]")
         expect(decl_source).to_contain("rt_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", 0)")
         expect(module_source).to_contain("rt_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", 0)")
+        expect(type_source).to_contain("span_pool_start = clear_i64_pool(span_pool_start)")
+        expect(type_source.contains("\n    span_pool_start = []\n")).to_equal(false)
+        expect(bridge_source).to_contain("reset_all_pools()\n    parser_init_with_path(source, path)")
 
     it "ignores stale env IDs and tags across sequential module resets":
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
@@ -108,18 +114,21 @@ describe "bootstrap native AST arena isolation":
         # Use canonical entry-shaped paths so this test exercises the real
         # flat bridge instead of receiving flat_empty_module().
         val count_before = rt_heap_registry_count()
-        val first = parse_and_build_module("fn first():\n    7\n", "first/bootstrap_main.spl")
+        val first = parse_and_build_module("struct FirstOnly:\n    value: i64\nfn first():\n    7\n", "first/bootstrap_main.spl")
         val count_after_first = rt_heap_registry_count()
         expect_current_native_arena(7)
         expect(first_body_int(first, "first")).to_equal(7)
+        expect(named_type_find("FirstOnly")).to_equal(0)
 
         val count_before_second = rt_heap_registry_count()
-        val second = parse_and_build_module("fn second():\n    9\n", "second/bootstrap_main.spl")
+        val second = parse_and_build_module("struct SecondOnly:\n    value: i64\nfn second():\n    9\n", "second/bootstrap_main.spl")
         val count_after_second = rt_heap_registry_count()
         expect_current_native_arena(9)
         expect(first_body_int(second, "second")).to_equal(9)
         expect(first_body_int(first, "first")).to_equal(7)
         expect(second.functions.contains("first")).to_equal(false)
+        expect(named_type_find("FirstOnly")).to_equal(-1)
+        expect(named_type_find("SecondOnly")).to_equal(0)
         val first_growth = count_after_first - count_before
         val second_growth = count_after_second - count_before_second
         expect(first_growth).to_be_greater_than(0)

@@ -358,6 +358,13 @@ the shared binary — deploys require explicit user go-ahead).
   Warning collection also retains every warning from the current parse instead
   of discarding the previous one. The lexer's per-source `source.chars()`
   materialization remains a separate Unicode-sensitive retention candidate.
+  The isolated rich-module bridge now resets the flat type/span/token/symbol/
+  signature/composite pools before each file, while `reset_all_pools` clears
+  their outer arrays in place instead of registering replacement arrays. A
+  bounded direct pure-Simple two-module probe preserves the first rich module,
+  drops the first file's named-type scratch entry, assigns the second file's
+  first type ID at zero, and prints `type_pool_reset_ok`. Stage4 RSS impact is
+  still pending; this is not claimed as the full 8 GiB fix.
   Composite flat-type registries now intern exact payloads before enforcing
   their fixed tag ranges. Union/intersection/refinement/tuple registrations can
   no longer spill into the next namespace, duplicate Dict/Result/array shapes

@@ -357,3 +357,20 @@ not complete: rustc exhausted its output filesystem while producing the large
 single-codegen-unit compiler artifact. No Stage4 retry or full bootstrap was
 started. Rebuild the seed/native-all artifacts separately when storage permits,
 then run the updated arena spec once before the next bounded profile.
+
+## Per-file flat pool isolation — 2026-07-19
+
+The isolated rich-module path reset AST/statement/expression arenas but left
+the flat span, token, symbol, named-type, signature, and composite-type pools
+live across files. `parse_and_build_module` now resets those pools at its
+isolated-file boundary. The shared multi-file append compiler remains unchanged.
+`reset_all_pools` also retains each outer array and clears it in place instead
+of registering 37 replacement arrays on every reset.
+
+A 2 GiB/60-second direct pure-Simple probe parsed two entry-shaped modules,
+preserved the first returned rich module, rejected its stale named-type entry,
+assigned the second module's first named type ID at zero, and printed
+`type_pool_reset_ok`. The generic spec runner still traversed the unrelated
+600+ file library before the scenario body, so it is not counted as evidence.
+No Stage4 retry was started because another active session already owns that
+run; RSS impact remains unproven.
