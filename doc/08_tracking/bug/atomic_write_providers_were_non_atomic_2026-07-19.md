@@ -1,6 +1,6 @@
 # atomic-write providers were non-atomic
 
-**Status:** CORE-C ABI BASELINE PASS / COLLISION HARDENING RERUN PENDING
+**Status:** PROVIDER REGRESSIONS PASS / STAGE 4 INTEGRATION PENDING
 **Severity:** P1 — interrupted lint, formatter, runner, or doc writes could lose data
 
 ## Root cause
@@ -21,9 +21,7 @@ Failure leaves the existing destination intact and cleans the temporary file.
 ## Evidence
 
 - interpreter replacement, relative-parent, and fail-closed regression: PASS
-- equivalent native-all regression: authored; execution remains pending after
-  the native-all lane reached its bounded-attempt cap
-- core-C tagged-ABI replacement regression: PASS before the final stale-temp,
-  embedded-NUL, truncation, parent-creation, and rename-cleanup cases were added;
-  the expanded regression awaits a fresh bounded session
+- native-all replacement, relative-parent, directory fail-closed, and temp-cleanup regression: PASS
+- expanded core-C stale-temp collision, embedded-NUL, truncation,
+  parent-creation, rename-cleanup, and collision-preservation regression: PASS
 - admitted Stage 4 lint/formatter integration: pending

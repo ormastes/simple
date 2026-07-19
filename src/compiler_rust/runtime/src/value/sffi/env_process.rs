@@ -815,9 +815,50 @@ pub extern "C" fn rt_process_is_running(pid: i64) -> bool {
     }
 }
 
+fn process_exists_os(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        if pid > libc::pid_t::MAX as i64 {
+            return false;
+        }
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+        if pid > u32::MAX as i64 {
+            return false;
+        }
+        return unsafe {
+            match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) {
+                Ok(handle) => {
+                    let _ = CloseHandle(handle);
+                    true
+                }
+                Err(error) => {
+                    error.code() == windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
+                }
+            }
+        };
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_process_exists(pid: i64) -> bool {
-    rt_process_is_running(pid)
+    process_exists_os(pid)
 }
 
 /// Wait for a previously spawned async process to finish.
@@ -1568,6 +1609,13 @@ mod tests {
         let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
         assert_eq!(result, -1);
         assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn test_process_exists_checks_os_processes_and_rejects_invalid_pids() {
+        assert!(rt_process_exists(std::process::id() as i64));
+        assert!(!rt_process_exists(0));
+        assert!(!rt_process_exists(-1));
     }
 
     #[cfg(unix)]

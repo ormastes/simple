@@ -1171,17 +1171,6 @@ pub extern "C" fn rt_system_cpu_count() -> i64 {
 // `duplicate symbol '_spl_thread_cpu_count'`.
 
 #[no_mangle]
-pub extern "C" fn rt_process_exists(pid: i64) -> i64 {
-    // Check if /proc/<pid> exists on Linux
-    let path = format!("/proc/{}", pid);
-    if std::path::Path::new(&path).exists() {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn rt_current_time_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1385,10 +1374,6 @@ pub extern "C" fn eprint(val: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn eprintln(val: i64) -> i64 {
     spl_eprintln(val)
-}
-#[no_mangle]
-pub extern "C" fn print_raw(val: i64) -> i64 {
-    spl_print_raw(val)
 }
 #[no_mangle]
 pub extern "C" fn eprint_raw(val: i64) -> i64 {
