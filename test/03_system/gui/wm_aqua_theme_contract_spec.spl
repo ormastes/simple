@@ -1,0 +1,77 @@
+# @tag: sys, wm, ui, theme, aqua, contrast
+# @cover src/lib/common/ui/wm_chrome_theme.spl 20%
+# @cover src/lib/common/ui/glass/theme.spl 10%
+# @evidence-display: links
+
+"""# Aqua Theme Contract
+
+Value-level contract for the classic Mac OS X "Aqua" light glass palette that
+`wm_chrome_theme()` now returns by default (see wm_chrome_theme_spec.spl for
+the byte-for-byte pixel-pipeline evidence; this spec pins the palette VALUES
+and the accessibility property they encode: dark title/label text over the
+light Aqua chrome, not saturated accent-on-text).
+
+A contrast guard computes a simple relative luminance from each color's RGB
+channels so a future palette edit that silently regresses dark-text-on-light-
+chrome contrast fails this spec instead of shipping unnoticed. The
+`aqua_light()` registry factory (glass/theme.spl) is spot-checked for
+consistency with the wm_chrome accent, since both derive from the same named
+Aqua palette (glass/numeric_tokens.spl AQUA_LIGHT_*).
+"""
+
+use std.spec.{describe, it, expect, step}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, wm_chrome_theme_defaults, wm_css_color_to_argb, reset_wm_chrome_theme, WmChromeColors}
+use common.ui.glass.theme.{aqua_light}
+
+# Extract one 8-bit ARGB channel (shift 16/8/0 for R/G/B) as an i64.
+fn _argb_channel(color: u32, shift: i64) -> i64:
+    val whole: i64 = color.to_i64()
+    (whole >> shift) & 255
+
+# Simple relative luminance (ITU BT.601-ish weights), scaled by 1000 so the
+# comparison stays in integer i64 space (no f64 matcher dependency).
+fn _relative_luminance_x1000(color: u32) -> i64:
+    val r = _argb_channel(color, 16)
+    val g = _argb_channel(color, 8)
+    val b = _argb_channel(color, 0)
+    r * 299 + g * 587 + b * 114
+
+describe "Aqua chrome theme palette":
+
+    it "wm_chrome_theme returns the Aqua palette values":
+        reset_wm_chrome_theme()
+        val theme = wm_chrome_theme()
+        expect(theme.desktop_bg).to_equal(0xff5a7fb5u32)
+        expect(theme.window_body).to_equal(0xfff2f2f2u32)
+        expect(theme.title_focused).to_equal(0xffdceafbu32)
+        expect(theme.title_unfocused).to_equal(0xffe2e2e6u32)
+        expect(theme.accent).to_equal(0xff2c6fefu32)
+        expect(theme.text_primary).to_equal(0xff1d1d1fu32)
+
+describe "Aqua chrome theme contrast guard":
+
+    it "text_primary stays comfortably darker than the chrome it sits on":
+        step("Read the default Aqua palette")
+        val theme = wm_chrome_theme_defaults()
+
+        step("Compute relative luminance for text vs. the two chrome fills it is painted over")
+        val text_luminance = _relative_luminance_x1000(theme.text_primary)
+        val title_luminance = _relative_luminance_x1000(theme.title_focused)
+        val body_luminance = _relative_luminance_x1000(theme.window_body)
+
+        step("Assert a comfortable dark-text-on-light-chrome contrast margin")
+        # text_primary (~29,29,31) is near-black; title_focused (~220,234,251)
+        # and window_body (242,242,242) are both near-white. A future palette
+        # edit that darkens the chrome or lightens the text enough to erode
+        # readability trips this margin (100000 == luminance delta of 100 on
+        # the unscaled 0..255 channel range).
+        expect(title_luminance - text_luminance).to_be_greater_than(100000)
+        expect(body_luminance - text_luminance).to_be_greater_than(100000)
+
+describe "Aqua registry theme factory consistency":
+
+    it "aqua_light() UITheme accent matches the wm_chrome Aqua accent":
+        val theme = aqua_light()
+        expect(theme.name).to_equal("aqua_light")
+        val accent_argb = wm_css_color_to_argb(theme.colors.accent.to_css())
+        expect(accent_argb).to_equal(wm_chrome_theme_defaults().accent)
