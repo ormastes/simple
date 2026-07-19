@@ -15,6 +15,20 @@ canonical Stage4 branch, so the fixed-arity owner now enables low-memory mode
 directly. The source regression pins the option; bounded RSS and artifact
 evidence are still required.
 
+The next active retention owner was `ast_reset()`: every parsed file replaced
+the declaration, expression, statement, match-arm, module, and lexer-state
+arrays with fresh allocations. The core runtime keeps registered arrays for
+the process lifetime, so those resets both retained old buffers and lengthened
+later validity scans. All three arena reset owners now allocate only nil module
+arrays, clear reusable outer storage in place, and reset one-element state slots
+without replacing them. The same fix adds the trait/mutability and GPU pools
+that the old reset accidentally omitted. Existing sequential large-then-small
+parse coverage remains the stale-state oracle, and a source contract rejects
+unconditional arena replacement. A cached current-source compile emitted the
+changed compiler objects; final linking stopped on the separately known
+`nogc_async_mut__path__join` provider gap, so no RSS or executable PASS is
+claimed.
+
 ## Reproduction
 
 Use the constructor-preserving Stage 3 compiler to build only the full CLI with

@@ -337,5 +337,13 @@ the shared binary — deploys require explicit user go-ahead).
   after `#` inside an active docstring still closes it. The focused regression
   covers both comment states, all declaration forms, long ordinary source,
   indentation, and Unicode before an import; fresh Stage4 execution evidence
-  remains pending. See
+  remains pending. The canonical fixed-arity Stage4 API now also enables the
+  low-memory mode its wrapper already requested; previously it reconstructed
+  default `CompileOptions` and silently disabled every existing eviction point.
+  Per-file AST resets now retain and clear declaration/expression/statement
+  arena storage plus scalar lexer/module slots instead of registering fresh
+  outer arrays for every parsed source. Omitted trait/mutability and GPU pools
+  are reset with their siblings. Current-source object emission reached the
+  existing hosted `path_join` provider gap, so bounded RSS and executable proof
+  remain pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
