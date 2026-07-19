@@ -501,3 +501,12 @@ the shared binary — deploys require explicit user go-ahead).
   hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, and Cranelift AArch64/RISC-V64
   QEMU gates. Rebuilt current-source execution remains pending. See
   `native_string_methods_unresolved_in_mir_2026-07-17.md`.
+- Integer `.chr()`/`.to_char()` now keeps primitive-builtin priority over an
+  unrelated same-named UFCS free function while preserving custom struct
+  method ownership. The pure-Simple runtime/interpreter and x86/ARM C hardware
+  boundaries share the raw-codepoint UTF-8 behavior. The existing cross-target
+  aggregate forces collisions plus two Unicode widths and is scheduled on
+  hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, AArch64/RISC-V64 execution,
+  and ARM32/RISC-V32/Windows-ARM64 object gates; the simple-core smoke runs C5
+  against the pure runtime. Rebuilt current-source execution remains pending. See
+  `native_chr_builtin_no_lowering_2026-07-18.md`.

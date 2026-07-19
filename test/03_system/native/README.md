@@ -16,7 +16,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 |------|-----------|--------|-------------|--------|-----------------------|
 | `key3_struct_spread_paren.spl` | KEY3 native struct-spread (paren form) | f907796e57e | **103** | PASS | spread base dropped → wrong number |
 | `w2_array_index_rw.spl` | W2 `local_mir_type_of` Option in `lower_array_lit` | e7c445145a7 | **72** | PASS | build-fail `unknown static method ptr on class MirType` |
-| `c5_char_from_code.spl` | C5 `rt_char_from_code` runtime backing | fcd28794cd7 | **42** | PASS | build-fail / missing symbol |
+| `c5_char_from_code.spl` | C5 integer builtin/owner precedence + Unicode runtime backing | source update | **42** | SOURCE FIX / execution pending | UFCS/custom dispatch, missing symbol, or ASCII-only result |
 | `c9_string_parse_f64_to_upper.spl` | C9 `.parse_f64()`/`.to_upper()` MIR dispatch | 84701d8fb5e | **42** | PASS | unresolved-in-MIR / wrong value |
 | `dict_struct_value.spl` | dict struct-value round-trip | (batch) | **73** | PASS | wrong value |
 | `dict_fn_value.spl` | dict fn-value round-trip | (batch) | **33** | PASS | wrong value |

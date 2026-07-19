@@ -3,7 +3,7 @@
 - **Date:** 2026-07-18
 - **Area:** compiler / 50.mir method lowering (cranelift native lane)
 - **Severity:** high (silent wrong result, no diagnostic)
-- **Status:** open — workaround landed, compiler fix pending
+- **Status:** source fixed — rebuilt current-source execution pending
 
 ## Symptom
 `val cp: i64 = 65; val s: text = cp.chr()` compiles without error on the
@@ -108,9 +108,18 @@ cranelift --runtime-bundle simple-core --mode dynload` on a 7-line entry spun
 being killed. Tiny-entry native-build is effectively unusable for micro
 repros — separate perf bug worth its own investigation.
 
-## Proper fix (todo)
-Trace what `resolution` becomes for a typed scalar receiver calling a
-runtime-builtin-only method name, and either (a) make HIR leave it
-`Unresolved` so the 50.mir fallback fires, or (b) add an explicit typed-lane
-lowering to `rt_char_from_code` / `string_core.char_from_code`. Then remove
-this workaround note and, optionally, revert call sites to `.chr()`.
+## Root cause and fix (2026-07-19)
+A typed integer receiver can resolve `chr`/`to_char` through UFCS to an
+unrelated same-named free function in the target source closure. MIR then
+honored that resolution even though the interpreter gives primitive integer
+builtins priority. MIR now routes declared integer receivers directly to
+`rt_char_from_code`; the unresolved native-entry path remains supported, but
+only after a custom struct owner has had precedence. The shared cross-target
+native fixture forces both UFCS collisions and custom-owner calls, plus BMP
+and four-byte UTF-8 values. The pure-Simple runtime now exports the same raw
+`rt_char_from_code` ABI, the pure core interpreter accepts both method names,
+and x86/ARM bare-metal owners use the same raw-codepoint UTF-8 contract rather
+than decoding MIR integers as tagged values or replacing non-ASCII with `?`.
+Hosted, FreeBSD, AArch64, RISC-V64, ARM32/RISC-V32, and Windows ARM64 gates
+already consume the aggregate fixture; the simple-core smoke additionally
+builds and runs C5 against the pure runtime. Rebuilt execution is pending.

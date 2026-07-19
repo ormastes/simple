@@ -1308,10 +1308,30 @@ RuntimeValue rt_slice(RuntimeValue collection, RuntimeValue start, RuntimeValue 
 /* ---- Miscellaneous genuinely useful ---- */
 
 RuntimeValue rt_char_from_code(RuntimeValue code) {
-    int64_t c = DECODE_INT(code);
-    if (c < 0 || c > 127) c = '?';
-    char buf[2] = { (char)c, '\0' };
-    return rt_string_from_cstr(buf);
+    int64_t c = (int64_t)code;
+    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF))
+        return rt_string_from_cstr("");
+    char buf[5] = { 0, 0, 0, 0, 0 };
+    RuntimeValue len = 1;
+    if (c < 0x80) {
+        buf[0] = (char)c;
+    } else if (c < 0x800) {
+        len = 2;
+        buf[0] = (char)(0xC0 | (c >> 6));
+        buf[1] = (char)(0x80 | (c & 0x3F));
+    } else if (c < 0x10000) {
+        len = 3;
+        buf[0] = (char)(0xE0 | (c >> 12));
+        buf[1] = (char)(0x80 | ((c >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (c & 0x3F));
+    } else {
+        len = 4;
+        buf[0] = (char)(0xF0 | (c >> 18));
+        buf[1] = (char)(0x80 | ((c >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((c >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (c & 0x3F));
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)buf, len);
 }
 
 RuntimeValue rt_str_hash(RuntimeValue str) {

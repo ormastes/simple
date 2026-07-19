@@ -429,6 +429,7 @@ grep -Fq 'val CL_CC_PLATFORM: i64 = -1' src/compiler/70.backend/backend/cranelif
 grep -Fq 'val CL_CC_PLATFORM: i64 = -1' src/compiler/70.backend/codegen.spl || fail "legacy Cranelift signatures do not use platform calling convention"
 grep -Fq 'if name == "rt_string_parse_f64" and arg_vals.len() == 1:' src/compiler/70.backend/backend/cranelift_codegen_adapter.spl || fail "Cranelift parse-f64 typed dispatch missing"
 grep -Fq 'pub fn rt_string_parse_f64(value: i64) -> f64:' src/runtime/simple_core/core_string.spl || fail "pure runtime raw parse-f64 owner missing"
+grep -Fq 'pub fn rt_char_from_code(code: i64) -> i64:' src/runtime/simple_core/core_string.spl || fail "pure runtime char-from-code owner missing"
 if grep -Fq 'semantic: function expects 2 argument(s), but more were provided' scripts/check/native-smoke-matrix.shs; then
   fail "fixed Cranelift module-global initializer remains XFAIL"
 fi
@@ -804,6 +805,29 @@ for required in \
   'if not cross_target_enum_type_identity_ok():' \
   'print("result-u8-ok")'; do
   grep -Fq -- "${required}" "${result_try_fixture}" || fail "cross-architecture Result try fixture missing: ${required}"
+done
+for required in \
+  'fn chr(code: i64) -> text:' \
+  'fn to_char(code: i64) -> text:' \
+  'fn cross_target_chr_builtin_owner_ok() -> bool:' \
+  '(a.chr() == "A" and z.to_char() == "Z" and acute.chr() == "é" and smile.to_char() == "🙂" and' \
+  'nul.len() == 1 and nul.char_code_at(0) == 0 and' \
+  'owner.chr() == "owned-chr" and owner.to_char() == "owned-to-char"' \
+  'if not cross_target_chr_builtin_owner_ok():'; do
+  grep -Fq -- "${required}" "${result_try_fixture}" || fail "cross-architecture chr fixture missing: ${required}"
+done
+grep -Fq 'var chr_has_custom_owner = false' src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl || fail "custom chr owner probe missing"
+grep -Fq 'chr_receiver_is_declared_int or' src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl || fail "typed integer chr does not override UFCS"
+grep -Fq 'rt_char_from_code rt_u32s_from_raw' scripts/check/check-simple-core-runtime-smoke.shs || fail "simple-core chr ABI symbol gate missing"
+grep -Fq -- '--entry test/03_system/native/c5_char_from_code.spl' scripts/check/check-simple-core-runtime-smoke.shs || fail "simple-core chr execution gate missing"
+for runtime_owner in \
+  examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c \
+  examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c \
+  examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c \
+  examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c; do
+  grep -Eq 'int(32|64)_t (c|cp) = \(int(32|64)_t\)code;' "${runtime_owner}" || fail "baremetal chr raw ABI missing: ${runtime_owner}"
+  grep -Eq '(c|cp) >= 0xD800 && (c|cp) <= 0xDFFF' "${runtime_owner}" || fail "baremetal chr scalar guard missing: ${runtime_owner}"
+  grep -Eq 'return rt_string_new\(\(RuntimeValue\)\(uintptr_t\)buf, (\(RuntimeValue\))?len\);' "${runtime_owner}" || fail "baremetal chr length-aware UTF-8 missing: ${runtime_owner}"
 done
 grep -Fq 'var predicate_has_custom_owner = false' src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl || fail "custom text predicate owner probe missing"
 grep -Fq 'and not predicate_has_custom_owner:' src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl || fail "text predicate fallback can still steal a custom method"

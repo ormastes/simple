@@ -848,10 +848,9 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
  * matching the observed `chr='' cat='' len=0` in-guest symptom exactly.
  * Defining a correct, non-weak, 1-arg version here (mirroring arm32/arm64's
  * rt_char_from_code below) makes the linker prefer this strong symbol over
- * the weak stub. Unlike the arm32/arm64/rt_extras.c siblings (ASCII only,
- * '?' fallback above 127), this encodes full UTF-8 for any valid Unicode
- * code point 0..0x10FFFF -- required for SFNT name-table text, which is the
- * actual reported symptom (font names have non-ASCII bytes).
+ * the weak stub. All self-hosted `rt_` owners accept a raw codepoint and
+ * encode full UTF-8 for any Unicode scalar value -- required for SFNT
+ * name-table text, which is the actual reported symptom.
  *
  * Deliberately NOT adding the bare `char_from_code` alias arm32/arm64 ship
  * alongside this (used only by the Rust seed's LLVM codegen, out of scope --
@@ -865,8 +864,8 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
  * compiler's 50.mir lowering emits for `.chr()`/`.to_char()`. */
 RuntimeValue rt_char_from_code(RuntimeValue code)
 {
-    int64_t cp = IS_INT(code) ? DECODE_INT(code) : (int64_t)code;
-    if (cp < 0 || cp > 0x10FFFF) return rt_string_new(0, 0);
+    int64_t cp = (int64_t)code;
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return rt_string_new(0, 0);
     uint8_t buf[4];
     uint64_t len = 0;
     if (cp < 0x80) {

@@ -1824,21 +1824,13 @@ int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
 }
 
 /* Bug (native_chr_builtin_no_lowering, 2026-07-18): `.chr()`/`.to_char()`
- * routed here by 50.mir/_MirLoweringExpr/method_calls_literals.spl's
- * Unresolved-resolution fallback (same FuncPtr-const emit_call mechanism as
- * rt_string_starts_with above), but this symbol was never defined for the
- * hosted native-build runtime -- the only rt_char_from_code definitions
- * existed in SimpleOS baremetal C files this lane never links, so the
- * hosted lane linked nothing at all. Semantics match the interpreter
- * reference (eval_int_method's "chr" case in
- * 10.frontend/core/interpreter/_EvalOps/call_method_eval.spl): valid Unicode
- * code point 0..0x10FFFF, encoded as UTF-8 (NOT the ASCII-only-with-'?'
- * fallback the SimpleOS baremetal workarounds use -- SFNT name-table text
- * and general text processing need real non-ASCII code points). Out of
- * range collapses to the empty string; there is no exception mechanism at
- * this layer to surface eval_set_error's diagnostic. */
+ * routes here from both typed and flat-HIR integer lowering, but this symbol
+ * was previously absent from the hosted native-build runtime. Semantics match
+ * the pure runtime and hardware C owners: a raw Unicode scalar value encoded
+ * as UTF-8. Invalid scalar values collapse to the empty string because this
+ * ABI layer has no exception mechanism for the interpreter's diagnostic. */
 int64_t rt_char_from_code(int64_t code) {
-    if (code < 0 || code > 0x10FFFF) return rt_string_new(NULL, 0);
+    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) return rt_string_new(NULL, 0);
     uint32_t cp = (uint32_t)code;
     uint8_t buf[4];
     uint64_t len = 0;
