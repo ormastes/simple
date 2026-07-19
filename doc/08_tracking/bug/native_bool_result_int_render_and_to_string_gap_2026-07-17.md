@@ -4,7 +4,7 @@
 **Severity:** Medium-High (silent wrong output for the first half; loud build
 error for the second — bundled here because they share one root cause: lost
 type information for bool/float results)
-**Status:** open
+**Status:** Part A source-fixed with focused regression; Parts B/C remain open
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Part A — `starts_with`/`ends_with`/`contains` interpolate as integers, not booleans
@@ -22,9 +22,10 @@ fn main():
 
 ### Root cause
 
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` (~line
-1789-1794) registers the MIR destination type for these methods as plain
-`MirType.i64()`:
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` registered
+the dedicated `starts_with` and `ends_with` runtime-call results as
+`MirType.i64()`. The shared text-method fallback also sent `contains` through
+the default i64 destination arm:
 
 ```
 val ts_dest_ty = match method:
@@ -33,14 +34,24 @@ val ts_dest_ty = match method:
     case _: MirType.i64()
 ```
 
-`starts_with`/`ends_with`/`contains` fall into the `case _` arm (i64), even
-though they are logically boolean. Downstream, string-interpolation coercion
+All three therefore lost their logical boolean type. Downstream,
+string-interpolation coercion
 (`expr_dispatch.spl` ~line 274) picks the render function by inspecting the
 local's registered MIR type
 (`is_bool`/`is_float`/`is_u64` → `rt_raw_bool_to_string` /
 `rt_raw_f64_to_string` / else `rt_raw_i64_to_string`). Since the dest type says
 i64, it renders through `rt_raw_i64_to_string`, printing `1`/`0` instead of
 `true`/`false`.
+
+### Part A resolution (2026-07-19)
+
+The shared MIR lowering now records `starts_with`, `ends_with`, and `contains`
+runtime-call results as `MirType.bool()` at their existing call sites. This
+matches the LLVM runtime declarations and keeps boolean provenance for print
+and interpolation. `text_bool_result_type_source_spec.spl` pins all three
+paths. The focused pure-Simple test runner currently crashes before reporting
+the scenario, so end-to-end native execution remains pending; Parts B/C are
+unchanged and still open.
 
 ## Part B — `.to_string()` on `i64`/`f64`/`bool` is unresolved outside `SIMPLE_BOOTSTRAP=1`
 

@@ -400,3 +400,9 @@ the shared binary — deploys require explicit user go-ahead).
   a focused native repro prints `left/right`. Bounded RSS and full executable
   proof remain pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
+  The text predicate Part A lane now keeps `starts_with`, `ends_with`, and
+  `contains` results typed as MIR Bool instead of i64, preventing native
+  interpolation from rendering them as `1`/`0`; one focused source regression
+  pins all three existing lowering paths. The pure-Simple test runner crashed
+  before scenario output, so native execution and the separate primitive
+  `.to_string()` Parts B/C remain open.
