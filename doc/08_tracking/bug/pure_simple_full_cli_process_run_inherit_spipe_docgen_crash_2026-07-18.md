@@ -4,6 +4,28 @@ Date: 2026-07-18
 
 Status: open
 
+## 2026-07-19 VHDL Result escape repair
+
+The static root-cause candidate for the reported `Result.unwrap_err` escape is
+`_simple_labeled_tuple_vhdl`.  It wrapped an already-produced
+`assignments: text` value in `Ok(assignments)`, checked that infallible value
+for an impossible error, and unwrapped it again on both output branches.  The
+native entry path intentionally does not run full HIR inference, so this
+unannotated synthetic Result had no recoverable error payload type and escaped
+the type-directed MIR Result lowering as `Result.unwrap_err`.
+
+The dead Result wrapper is removed and both branches now consume `assignments`
+directly.  A source-contract regression check prevents the wrapper and its
+unwrap calls from returning.  This deliberately does not restore
+the Cranelift adapter's unsafe leaf-name identity shortcut: custom methods named
+`unwrap`, `unwrap_err`, or `unwrap_or` still belong to their receiver type.
+
+Runtime closure evidence remains pending.  The session's three allowed
+pure-Simple retry cycles were already exhausted by the preserved exit-139
+failure, so this continuation performed static verification only rather than
+re-running the known-crashing command.  Closure still requires native MIR or
+symbol evidence plus clocked and unclocked labeled-tuple behavioral coverage.
+
 ## 2026-07-18 continuation
 
 The pure Cranelift call boundary was missing the LLVM backend's existing
