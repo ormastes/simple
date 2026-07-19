@@ -31,6 +31,40 @@ fn test_jit_add() {
 }
 
 #[test]
+fn test_jit_char_code_at_tag_shift_repro() {
+    // SEED-UNTAG repro: char_code_at result must survive raw (not tag-shifted).
+    // Prediction: codepoints ≡ 0 mod 8 corrupt via a spurious UnboxInt (>>3).
+    //   index 0 = 'A' = 65 (65&7==1, immune) -> always 65
+    //   index 7 = 'H' = 72 (72&7==0, victim) -> buggy 9 (=72>>3), correct 72
+    let src = "fn probe_direct(i: i64) -> i64:\n    val s = \"ABCDEFGH\"\n    return s.char_code_at(i)\n\nfn read_cc(s: text, i: i64) -> i64:\n    return s.char_code_at(i)\n\nfn probe_via(i: i64) -> i64:\n    val s = \"ABCDEFGH\"\n    return read_cc(s, i)\n\nfn probe_local(i: i64) -> i64:\n    val s = \"ABCDEFGH\"\n    val c = s.char_code_at(i)\n    return c + 0\n";
+    let jit = jit_compile(src).unwrap();
+    let d0 = unsafe { jit.call_i64_i64("probe_direct", 0).unwrap() };
+    let d7 = unsafe { jit.call_i64_i64("probe_direct", 7).unwrap() };
+    let v7 = unsafe { jit.call_i64_i64("probe_via", 7).unwrap() };
+    let l7 = unsafe { jit.call_i64_i64("probe_local", 7).unwrap() };
+    eprintln!("CC_REPRO direct0={d0} direct7={d7} via7={v7} local7={l7}");
+    assert_eq!(d0, 65, "index0 'A' immune");
+    assert_eq!(d7, 72, "index7 'H' direct (buggy=9)");
+    assert_eq!(v7, 72, "index7 'H' via helper (buggy=9)");
+    assert_eq!(l7, 72, "index7 'H' via local (buggy=9)");
+}
+
+#[test]
+fn test_jit_char_code_at_as_u8_and_enum_eq() {
+    // Freestanding repro showed corruption ONLY via `as u8` cast (U=11=88>>3)
+    // and enum==self (E=0). Check whether shared JIT codegen reproduces.
+    let src = "enum Policy:\n    Suggested\n    Preferred\n    Required\n\nfn cc_u8(i: i64) -> i64:\n    val s = \"ABCDEFGH\"\n    val c = s.char_code_at(i) as u8\n    return c as i64\n\nfn pol_self() -> i64:\n    val p = Policy.Suggested\n    if p == Policy.Suggested:\n        return 1\n    else:\n        return 0\n\nfn pol_other() -> i64:\n    val p = Policy.Suggested\n    if p == Policy.Preferred:\n        return 1\n    else:\n        return 0\n";
+    let jit = jit_compile(src).unwrap();
+    let u7 = unsafe { jit.call_i64_i64("cc_u8", 7).unwrap() };
+    let e = unsafe { jit.call_i64_void("pol_self").unwrap() };
+    let e2 = unsafe { jit.call_i64_void("pol_other").unwrap() };
+    eprintln!("CC_U8_REPRO cc_u8_7={u7} pol_self={e} pol_other={e2}");
+    assert_eq!(u7, 72, "index7 'H' as u8 (buggy=9)");
+    assert_eq!(e, 1, "enum == self (buggy=0)");
+    assert_eq!(e2, 0, "enum == other variant must be false (discriminant must discriminate)");
+}
+
+#[test]
 fn test_jit_subtract() {
     let jit = jit_compile("fn sub(a: i64, b: i64) -> i64:\n    return a - b\n").unwrap();
     let result = unsafe { jit.call_i64_i64_i64("sub", 50, 8).unwrap() };

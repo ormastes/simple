@@ -725,6 +725,21 @@ impl Lowerer {
         {
             return ret_ty;
         }
+        // Builtin string methods that return a RAW native i64 (a code point /
+        // hash), not a tagged RuntimeValue. Without this they fall through to
+        // ANY, and `s.char_code_at(i) as u8` then lowers to an ANY->int Cast
+        // that calls rt_value_as_int (a tag-aware unbox): a raw code point whose
+        // low 3 bits are 0 (any codepoint ≡ 0 mod 8, e.g. 'X'=88, 'H'=72) gets
+        // shifted `>>3` and silently corrupts (88->11). Typing them I64 makes
+        // the cast a plain narrow. See
+        // doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md.
+        // Only applies as a last-resort fallback (a genuine user method of the
+        // same name matched above), and only on a string/erased receiver.
+        if matches!(method, "char_code_at" | "ord" | "codepoint" | "code_point" | "hash")
+            && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY)
+        {
+            return TypeId::I64;
+        }
         TypeId::ANY
     }
 

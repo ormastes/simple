@@ -60,10 +60,22 @@ impl<'a> MirLowerer<'a> {
             // rt_enum_check_discriminant(lhs, disc) where disc is the same hash used
             // by rt_enum_new / match patterns. We check this BEFORE lowering the RHS
             // to avoid emitting the dead rt_enum_new constructor call.
-            if op == BinOp::Is {
+            // `is` and `==` against a bare enum variant both reduce to a
+            // discriminant test. `==` MUST use it too: for two same-typed enum
+            // operands (neither ANY) the fall-through emits a native `icmp` that
+            // compares the two enum HEAP POINTERS — a freshly built RHS variant
+            // is a different allocation than the LHS, so `p == Policy.Suggested`
+            // is ALWAYS false on the freestanding/dynload lane (E=0). Routing a
+            // bare-variant `==` through rt_enum_check_discriminant (the same hash
+            // the constructor and `match` use) fixes it. Restricted to a bare
+            // `Global` variant for `==`/`!=`: a payload-carrying constructor
+            // (`Some(x)`) is a pure discriminant test only for `is` — `==` there
+            // must also compare the payload, so that form stays on the general
+            // path. See doc/08_tracking/bug/native_enum_eq_always_false_freestanding_2026-07-19.md.
+            if matches!(op, BinOp::Is | BinOp::Eq) {
                 let rhs_global_name: Option<&str> = match &right.kind {
                     HirExprKind::Global(name) => Some(name.as_str()),
-                    HirExprKind::Call { func, .. } => {
+                    HirExprKind::Call { func, .. } if op == BinOp::Is => {
                         if let HirExprKind::Global(name) = &func.kind {
                             Some(name.as_str())
                         } else {
