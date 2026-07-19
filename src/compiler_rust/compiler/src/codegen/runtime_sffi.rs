@@ -245,6 +245,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_find", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_reverse", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_sort", &[I64], &[I8]),
+    // Bug seed_array_local_alias_cow_bypass_2026-07-17: private shallow copy
+    // used by `HirStmt::Let` lowering to break the local-alias COW bypass
+    // (see mir/lower/lowering_stmt.rs, `is_array_place_alias`). Already
+    // linked into the process image (runtime/src/value/collections.rs); this
+    // just declares its signature for JIT/AOT call codegen.
+    RuntimeFuncSpec::new("rt_array_copy", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_len", &[I64], &[I64]), // Generic length for any collection
     // =========================================================================
     // Tuple operations

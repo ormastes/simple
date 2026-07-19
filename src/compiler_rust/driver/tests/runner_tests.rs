@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 // Import shared test helpers
 mod test_helpers;
-use test_helpers::{run_expect, run_expect_compile_error, run_expect_interp, run_on_stdout, Backend};
+use test_helpers::{run_expect, run_expect_compile_error, run_expect_interp, run_on, run_on_stdout, Backend};
 
 #[test]
 fn runner_compiles_and_runs_stub() {
@@ -353,6 +353,82 @@ while i < 5:
 main = sum
 "#,
         15,
+    );
+}
+
+/// Regression test for bug seed_array_local_alias_cow_bypass_2026-07-17:
+/// `var c = arr` for an array-typed `arr` must materialize a private copy,
+/// not alias the same heap array -- arrays are value types. This bug was
+/// JIT-only: the default JIT lowering path (`lower_to_mir` -> `HirStmt::Let`,
+/// reached only for LOCAL variables inside a `fn main() -> i64:` body, NOT
+/// the `main = <expr>` top-level-global script form other tests in this file
+/// use) stored the raw `rt_array` heap handle straight through without
+/// copying, while the tree-walking interpreter path was already correct via
+/// `Arc::make_mut` COW. Must use `fn main() -> i64:` with LOCAL `var`
+/// bindings + `return` (matching the original .spl repro) -- a top-level
+/// `let arr = [...]` / `main = arr[0]` script binds a MODULE GLOBAL, not a
+/// local, and never reaches `HirStmt::Let`/`lower_local_expr` at all (this
+/// was verified empirically: that form passed even with the fix disabled).
+/// `run_expect` exercises BOTH backends (`RunningType::Both`), so this
+/// guards the JIT regression directly and keeps the interpreter's
+/// already-correct behavior pinned.
+#[test]
+fn runner_array_local_alias_is_value_copy() {
+    // Index-assign through the alias must not leak into the original.
+    run_expect(
+        "fn main() -> i64:\n    var arr = [10, 20, 30]\n    var c = arr\n    c[0] = 99\n    return arr[0]",
+        10,
+    );
+    run_expect(
+        "fn main() -> i64:\n    var arr = [10, 20, 30]\n    var c = arr\n    c[0] = 99\n    return c[0]",
+        99,
+    );
+    // Mutating METHOD call (push) through the alias must not resize the original.
+    run_expect(
+        "fn main() -> i64:\n    var arr = [1, 2, 3]\n    var c = arr\n    c.push(77)\n    return arr.len()",
+        3,
+    );
+    run_expect(
+        "fn main() -> i64:\n    var arr = [1, 2, 3]\n    var c = arr\n    c.push(77)\n    return c.len()",
+        4,
+    );
+    // Mutating the ORIGINAL after the alias-bind must not leak into the alias either.
+    run_expect(
+        "fn main() -> i64:\n    var arr = [10, 20, 30]\n    var c = arr\n    arr[1] = 500\n    return c[1]",
+        20,
+    );
+    // A FRESH array literal binding is unaffected (no place-read to copy from).
+    run_expect(
+        "fn main() -> i64:\n    var d = [7, 8, 9]\n    d[0] = 111\n    return d[0]",
+        111,
+    );
+}
+
+/// Same as `runner_array_local_alias_is_value_copy` but pinned to the JIT
+/// backend explicitly (`RunningType::Compiler`, not `Both`) -- the bug this
+/// guards was JIT-only, so this assertion can't be masked by a passing
+/// interpreter result the way a `Both`-mode helper could be.
+#[test]
+fn runner_array_local_alias_is_value_copy_jit_only() {
+    run_on(
+        Backend::Jit,
+        "fn main() -> i64:\n    var arr = [10, 20, 30]\n    var c = arr\n    c[0] = 99\n    return arr[0]",
+        10,
+    );
+    run_on(
+        Backend::Jit,
+        "fn main() -> i64:\n    var arr = [10, 20, 30]\n    var c = arr\n    c[0] = 99\n    return c[0]",
+        99,
+    );
+    run_on(
+        Backend::Jit,
+        "fn main() -> i64:\n    var arr = [1, 2, 3]\n    var c = arr\n    c.push(77)\n    return arr.len()",
+        3,
+    );
+    run_on(
+        Backend::Jit,
+        "fn main() -> i64:\n    var arr = [1, 2, 3]\n    var c = arr\n    c.push(77)\n    return c.len()",
+        4,
     );
 }
 

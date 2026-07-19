@@ -12,6 +12,23 @@ use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior};
 
 impl<'a> MirLowerer<'a> {
+    /// True when a HIR expression is a PLACE read -- it evaluates to the SAME
+    /// memory an existing binding already owns (a plain local/global variable
+    /// read, a field projection, an index projection) rather than a
+    /// freshly-constructed value (an array/struct literal, a call result,
+    /// ...). Mirrors `mir_expr_kind_is_place` in the pure-Simple compiler's
+    /// `src/compiler/50.mir/mir_lowering_stmts.spl` (bug #177/#186); used
+    /// here by the array-local-alias COW fix (bug
+    /// seed_array_local_alias_cow_bypass_2026-07-17) to decide when
+    /// `var c = arr` needs a private `rt_array_copy` instead of aliasing the
+    /// source array's heap handle straight into the new local.
+    fn hir_expr_is_place(kind: &HirExprKind) -> bool {
+        matches!(
+            kind,
+            HirExprKind::Local(_) | HirExprKind::Global(_) | HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. }
+        )
+    }
+
     fn emit_runtime_pool_safepoint(&mut self) -> MirLowerResult<()> {
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();
@@ -158,6 +175,56 @@ impl<'a> MirLowerer<'a> {
                     let vreg = self.lower_expr(val)?;
                     let local_idx = *local_index;
                     let value_ty = val.ty;
+
+                    // Bug (seed_array_local_alias_cow_bypass_2026-07-17): `var c = arr`
+                    // for an array-typed `arr` aliased the SAME rt_array heap handle
+                    // across both bindings on the default JIT path (`bin/simple run`
+                    // dispatches to `run_file_jit` -> this Rust `lower_to_mir`, a
+                    // sibling of the pure-Simple compiler's MIR lowering fixed by bug
+                    // #186's `maybe_copy_array_value` in
+                    // src/compiler/50.mir/mir_lowering_stmts.spl). Runtime arrays are
+                    // heap-allocated, POINTER-represented handles (`RuntimeArray`), so
+                    // lowering a plain local-bind straight through to `Store` only
+                    // copies the i64 handle, not the backing element buffer -- `c[0] =
+                    // 99` then mutates the exact same heap array `arr` still points
+                    // to, violating "arrays are value types". (The tree-walking
+                    // interpreter path, `SIMPLE_EXECUTION_MODE=interpret`, was already
+                    // correct here -- `env.get(name).clone()` Arc-clones and
+                    // `Arc::make_mut` privatizes on next mutation -- so only this JIT
+                    // lowering path needed the fix.)
+                    //
+                    // Materialize a private shallow copy (`rt_array_copy`, exact
+                    // tagged-word-preserving semantics) when the initializer is a
+                    // PLACE read of an EXISTING array binding (a plain local/global
+                    // read, a field projection, an index projection) -- skipped for a
+                    // FRESH aggregate initializer (an array literal, a call result:
+                    // nothing else names that heap memory yet, so aliasing the fresh
+                    // local is harmless) and for `[u8]` byte-packed arrays (a separate
+                    // rt_byte_array_*/rt_typed_bytes_u8_push heap layout that
+                    // rt_array_copy's rt_array_push-based copy loop does not
+                    // understand).
+                    let is_array_place_alias = Self::hir_expr_is_place(&val.kind)
+                        && self
+                            .type_registry
+                            .and_then(|tr| {
+                                tr.get_array_element(effective_declared_ty)
+                                    .or_else(|| tr.get_array_element(value_ty))
+                            })
+                            .is_some_and(|elem| elem != TypeId::U8);
+                    let vreg = if is_array_place_alias {
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(dest),
+                                target: CallTarget::from_name("rt_array_copy"),
+                                args: vec![vreg],
+                            });
+                            dest
+                        })?
+                    } else {
+                        vreg
+                    };
 
                     // Wrap value in union if assigning to a union type
                     let vreg = self.emit_union_wrap_if_needed(effective_declared_ty, value_ty, vreg)?;
