@@ -460,6 +460,14 @@ authoritative result is
 `build/portable_compute_toolchains-semantics2/evidence.env`, not the checker
 exit alone. The Vulkan compiler and `spirv-val` run through bounded timeouts,
 and the requested-target aggregate ignores unrequested toolchains.
+On ELF/glibc hosts, a resolved native-ELF `glslc` candidate runs `--version`
+under a clean `LD_DEBUG=libs` loader environment, records the actually initialized
+`libshaderc` real path and SHA-256 plus the loader-log SHA-256, and rejects an
+operator-supplied `VULKAN_GLSLC_LIBRARY_PATH` mismatch. The exact canonical
+GLSL is compiled independently to A/B SPIR-V files; unequal SHA-256 values or
+bytes reject the candidate before validation or pin comparison. Other host
+loaders fail closed until they have an equivalent tracer; `glslangValidator`
+is diagnostic-only and cannot produce an admitted Vulkan font candidate.
 
 Admission has two explicit phases. Candidate generation requires semantics
 revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
@@ -709,24 +717,22 @@ and a host-side image hash are not guest rendering evidence.
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.
-On AArch64 the canonical desktop runner attaches that existing VirtIO-BLK FAT32
-image, resets stale VFS state, mounts it, and registers the validated Noto Sans
-bytes before Engine2D creation. A failed mount or post-mount executable probe
-clears VFS readiness. Host image acceptance requires `mtype` extraction plus
+On AArch64 the canonical desktop source route attaches that existing VirtIO-BLK
+FAT32 image, resets stale VFS state, and attempts to mount it and register the
+selected catalog before Engine2D creation. A failed mount or post-mount
+executable probe clears VFS readiness. Host image acceptance requires `mtype` extraction plus
 an exact 1,708,408-byte SHA-256 check; missing tools fail closed. RV64 remains
 on its existing bitmap path because the initializer is ARM-only and the current
 64 KiB runtime heap cannot carry this vector-font bootstrap. Both canonical ARM
 scenario contracts require the exact successful registration marker; bitmap
 fallback cannot satisfy them.
-The x86_64 SimpleOS witness is now the existing 12 px `taskbar-clock` command in the
+The x86_64 SimpleOS witness is the existing 12 px `taskbar-clock` command in the
 real `SharedWmScene -> DrawIrComposition -> Engine2D` frame; the private
-post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper captures the
-dynamic rightmost 56x48 slot (8,064 RGB bytes) and retains the candidate hash,
-and retained consumers now require the canonical wrapper, kernel ELF, and
-FAT32 image paths with independently recomputed SHA-256 values. A genuine guest
-render and independent host `pmemsave` extraction established the same pinned
-crop SHA-256; a current retained PASS bundle is still required. Source routing
-and artifact binding are complete; REQ-011 pixel promotion remains unavailable.
+post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper is configured
+to capture the dynamic rightmost 56x48 slot (8,064 RGB bytes), and retained
+consumers require the canonical wrapper, kernel ELF, and FAT32 image paths with
+independently recomputed SHA-256 values. No current retained guest/`pmemsave`
+PASS bundle proves the crop, so REQ-011 pixel promotion remains unavailable.
 Do not add another font draw path or reuse Engine3D HUD/world.
 
 ## Completion workflow
