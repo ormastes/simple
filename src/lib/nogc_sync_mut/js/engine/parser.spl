@@ -33,10 +33,6 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
 
 fn _js_parser_expression(raw: text) -> JsExpression:
     val expr = _js_parser_strip_outer_parens(raw.trim())
-    if val Some(regex_expr) = _js_parser_try_regex_literal(expr):
-        return regex_expr
-    if val Some(regex_chain_expr) = _js_parser_try_regex_literal_chain(expr):
-        return regex_chain_expr
     val arrow = _js_parser_find_top_level(expr, "=>")
     if arrow >= 0:
         return _js_parser_arrow_expression(expr, arrow)
@@ -100,7 +96,12 @@ fn _js_parser_expression(raw: text) -> JsExpression:
             right: _js_parser_expression(expr.slice(exponent.first + exponent.second.len(), expr.len()))
         )
     if expr.starts_with("new "):
-        return _js_parser_new_expression(expr.slice(4, expr.len()).trim())
+        val new_expr = _js_parser_postfix(expr.slice(4, expr.len()).trim())
+        match new_expr:
+            JsExpression.Call(callee, args):
+                return JsExpression.NewExpr(callee: callee, args: args)
+            _:
+                return JsExpression.NewExpr(callee: new_expr, args: [])
     if expr.starts_with("typeof "):
         return JsExpression.Unary(op: "typeof", operand: _js_parser_expression(expr.slice(7, expr.len())))
     _js_parser_postfix(expr)
@@ -126,37 +127,22 @@ fn _js_parser_arrow_expression(expr: text, arrow: i64) -> JsExpression:
     JsExpression.ArrowFunction(params: params, body: [JsStatement.Return(value: _js_parser_expression(body_text))])
 
 fn _js_parser_postfix(expr: text) -> JsExpression:
-    val current = _js_parser_primary_at(expr, 0)
-    val pos = _js_parser_primary_end(expr, 0)
-    _js_parser_postfix_continue(expr, current, pos).first
-
-# Continues member/call/computed-member (postfix) parsing of `expr` starting
-# at `start_pos` with `start_current` as the already-parsed left operand.
-# Returns the resulting expression paired with the position where parsing
-# stopped (== expr.len() iff the postfix chain consumed the whole string).
-# Factored out of _js_parser_postfix so it can be resumed from a
-# non-primary starting point in two places: an already-built expression such
-# as a `new` expression's result (e.g. `.method(...)` in
-# `new Ctor(args).method(args2)`), and a regex-literal primary
-# (`/re/.test(x)`) resuming postfix parsing right after the literal instead
-# of re-deriving the initial primary via _js_parser_primary_at.
-fn _js_parser_postfix_continue(expr: text, start_current: JsExpression, start_pos: i64) -> Pair<JsExpression, i64>:
-    var current = start_current
-    var pos = start_pos
+    var pos = 0
+    var current = _js_parser_primary_at(expr, pos)
+    pos = _js_parser_primary_end(expr, pos)
     while pos < expr.len():
-        val skipped = _js_parser_skip_spaces(expr, pos)
-        if skipped >= expr.len():
-            pos = skipped
+        pos = _js_parser_skip_spaces(expr, pos)
+        if pos >= expr.len():
             break
-        val ch = expr.slice(skipped, skipped + 1)
+        val ch = expr.slice(pos, pos + 1)
         if ch == ".":
-            val start = _js_parser_skip_spaces(expr, skipped + 1)
+            val start = _js_parser_skip_spaces(expr, pos + 1)
             val end = _js_parser_identifier_end(expr, start)
             current = JsExpression.Member(object: current, property: expr.slice(start, end))
             pos = end
         else if ch == "(":
-            val end = _js_parser_matching_paren(expr, skipped)
-            val arg_text = if end > skipped: expr.slice(skipped + 1, end) else: ""
+            val end = _js_parser_matching_paren(expr, pos)
+            val arg_text = if end > pos: expr.slice(pos + 1, end) else: ""
             val arg_parts = _js_parser_split_top_level(arg_text, ",")
             var args: [JsExpression] = []
             var ai = 0
@@ -168,65 +154,13 @@ fn _js_parser_postfix_continue(expr: text, start_current: JsExpression, start_po
             current = JsExpression.Call(callee: current, args: args)
             pos = if end >= 0: end + 1 else: expr.len()
         else if ch == "[":
-            val end = _js_parser_matching_bracket(expr, skipped)
-            val key_text = if end > skipped: expr.slice(skipped + 1, end) else: ""
-            current = JsExpression.ComputedMember(object: current, property: _js_parser_expression(key_text.trim()))
-            pos = if end >= 0: end + 1 else: expr.len()
-        else:
-            pos = skipped
-            break
-    Pair(first: current, second: pos)
-
-# Parses the target of a `new` expression per JS semantics: `new` binds only to
-# the immediately-following member-access chain (`.`/`[...]`, no calls) plus at
-# most one directly-adjacent argument list. Anything chained after that
-# (`.method(...)`, further calls, more member access) applies to the
-# constructed value instead — e.g. `new Ctor(args).method(args2)` parses as
-# `(new Ctor(args)).method(args2)`, not `new (Ctor(args).method)(args2)`.
-fn _js_parser_new_expression(expr: text) -> JsExpression:
-    val chain = _js_parser_new_member_chain(expr, 0)
-    val callee = chain.first
-    var pos = _js_parser_skip_spaces(expr, chain.second)
-    var args: [JsExpression] = []
-    if pos < expr.len() and expr.slice(pos, pos + 1) == "(":
-        val end = _js_parser_matching_paren(expr, pos)
-        val arg_text = if end > pos: expr.slice(pos + 1, end) else: ""
-        val arg_parts = _js_parser_split_top_level(arg_text, ",")
-        var ai = 0
-        while ai < arg_parts.len():
-            val arg = arg_parts.get(ai).trim()
-            if arg != "":
-                args.push(_js_parser_expression(arg))
-            ai = ai + 1
-        pos = if end >= 0: end + 1 else: expr.len()
-    val new_node = JsExpression.NewExpr(callee: callee, args: args)
-    _js_parser_postfix_continue(expr, new_node, pos).first
-
-# Member-access-only chain (`.` and `[...]`, but NOT `(...)`) for the callee of
-# a `new` expression. Stops right before any `(` so the caller can decide
-# whether that paren is the constructor's argument list. Returns the parsed
-# expression along with the position it stopped at.
-fn _js_parser_new_member_chain(expr: text, pos_in: i64) -> Pair<JsExpression, i64>:
-    var current = _js_parser_primary_at(expr, pos_in)
-    var pos = _js_parser_primary_end(expr, pos_in)
-    while pos < expr.len():
-        pos = _js_parser_skip_spaces(expr, pos)
-        if pos >= expr.len():
-            break
-        val ch = expr.slice(pos, pos + 1)
-        if ch == ".":
-            val start = _js_parser_skip_spaces(expr, pos + 1)
-            val end = _js_parser_identifier_end(expr, start)
-            current = JsExpression.Member(object: current, property: expr.slice(start, end))
-            pos = end
-        else if ch == "[":
             val end = _js_parser_matching_bracket(expr, pos)
             val key_text = if end > pos: expr.slice(pos + 1, end) else: ""
             current = JsExpression.ComputedMember(object: current, property: _js_parser_expression(key_text.trim()))
             pos = if end >= 0: end + 1 else: expr.len()
         else:
-            break
-    Pair(first: current, second: pos)
+            pos = expr.len()
+    current
 
 fn _js_parser_primary_at(expr: text, pos_in: i64) -> JsExpression:
     val pos = _js_parser_skip_spaces(expr, pos_in)
@@ -744,84 +678,6 @@ fn _js_regex_context(prev: text, prev_word: text) -> bool:
         or prev_word == "throw"):
         return true
     false
-
-# Returns the position of the unescaped closing `/` of a regex literal that
-# starts at position 0 of `expr` (i.e. `expr[0] == "/"`), skipping over
-# character classes `[...]` (where an unescaped `/` is not special), or -1 if
-# `expr` doesn't start with `/` or the literal is unterminated. Shared by
-# _js_parser_try_regex_literal (whole-expression regex) and
-# _js_parser_try_regex_literal_chain (regex followed by a postfix chain).
-fn _js_parser_regex_close_pos(expr: text) -> i64:
-    if not expr.starts_with("/"):
-        return -1
-    val n = expr.len()
-    var i = 1
-    var in_class = false
-    while i < n:
-        val ch = expr.slice(i, i + 1)
-        if ch == "\\":
-            i = i + 2
-            continue
-        elif ch == "[":
-            in_class = true
-        elif ch == "]":
-            in_class = false
-        elif ch == "/" and not in_class:
-            return i
-        i = i + 1
-    -1
-
-# Returns the exclusive end position of the flags run (`[a-z]*`) immediately
-# following the closing `/` at `close_pos`.
-fn _js_parser_regex_flags_end(expr: text, close_pos: i64) -> i64:
-    val n = expr.len()
-    var fi = close_pos + 1
-    while fi < n:
-        val fc = expr.slice(fi, fi + 1)
-        if fc >= "a" and fc <= "z":
-            fi = fi + 1
-        else:
-            break
-    fi
-
-# Recognizes a bare regex literal `/pattern/flags` that spans the ENTIRE given
-# expression text (nothing meaningful trails the flags) — e.g.
-# `str.replace(/b/, 'X')` or `var re = /a+b/i;`. Returns nil (falls back to
-# normal operator/primary parsing, e.g. division) when `expr` isn't a complete
-# bare regex literal, including when a member/call chain trails the flags
-# (`/re/.test(x)`) — that case is handled separately by
-# _js_parser_try_regex_literal_chain.
-fn _js_parser_try_regex_literal(expr: text) -> JsExpression?:
-    val close_pos = _js_parser_regex_close_pos(expr)
-    if close_pos < 0:
-        return nil
-    val flags_end = _js_parser_regex_flags_end(expr, close_pos)
-    if flags_end != expr.len():
-        return nil
-    Some(JsExpression.RegexLiteral(pattern: expr.slice(1, close_pos), flags: expr.slice(close_pos + 1, flags_end)))
-
-# Recognizes a regex literal at the START of `expr` immediately followed by a
-# member/call/computed-member chain — e.g. `/re/.test(x)`, `/re/g.exec(s)[0]`.
-# Needed because the operator-precedence scanners below (in particular the
-# multiplicative `/` scan) would otherwise misparse the pattern's internal
-# `/` characters as division operators before postfix parsing ever gets a
-# chance to run. Conservative: only fires when the postfix chain consumes the
-# ENTIRE remainder of `expr` — if something trails that the chain can't
-# consume (e.g. `/re/.test(x) && y`), returns nil rather than silently
-# dropping it, falling back to the (separately scoped, pre-existing)
-# operator-scan behavior for that rarer composition.
-fn _js_parser_try_regex_literal_chain(expr: text) -> JsExpression?:
-    val close_pos = _js_parser_regex_close_pos(expr)
-    if close_pos < 0:
-        return nil
-    val flags_end = _js_parser_regex_flags_end(expr, close_pos)
-    if flags_end >= expr.len():
-        return nil  # No trailing chain — _js_parser_try_regex_literal handles this.
-    val regex_expr = JsExpression.RegexLiteral(pattern: expr.slice(1, close_pos), flags: expr.slice(close_pos + 1, flags_end))
-    val chained = _js_parser_postfix_continue(expr, regex_expr, flags_end)
-    if chained.second != expr.len():
-        return nil
-    Some(chained.first)
 
 # Fail-fast structural gate for eval: the subset expression parser recurses on
 # malformed input and unbalanced delimiters can make it effectively hang.

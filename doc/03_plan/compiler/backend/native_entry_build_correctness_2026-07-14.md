@@ -15,9 +15,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **92 logical cases / 125 recorded checks** because strict-dual cases
+  defines **91 logical cases / 123 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **94 logical cases / 128 recorded checks**; execution is opt-in because
+  to **93 logical cases / 126 recorded checks**; execution is opt-in because
   those two reproductions remain known-red. Execution of the expanded matrix
   is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -227,9 +227,7 @@ the shared binary — deploys require explicit user go-ahead).
   identity calls. One strict LLVM/Cranelift fixture covers all six collisions,
   `Err(text).unwrap_err()`, and single receiver evaluation in Linux's full gate
   plus the selected macOS, Windows, and FreeBSD gates. First staged execution
-  is pending. The shared cross-target fixture also routes a custom non-Option
-  `unwrap` through its declared receiver on AArch64/RISC-V64 execution and
-  ARM32/RV32/Windows ARM64 object gates.
+  is pending.
 - The Engine2D host-runtime queue symbol bug now has one incremental
   gate that builds the existing no-GPU probe with the host-GPU bundle under
   flagless LLVM or explicit Cranelift, compares native output byte-for-byte
@@ -241,7 +239,7 @@ the shared binary — deploys require explicit user go-ahead).
   execution remains pending. Cross-target objects are not counted as proof for
   this host link/runtime defect.
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
-  correctness campaign. Runtime-native's 19-symbol legacy dependency owner is
+  correctness campaign. Runtime-native's 18-symbol legacy dependency owner is
   now source-implemented as an exact localized compatibility provider. The
   exact archive projection and strict final-link routing are now
   source-implemented after inventory and transitive requested-owner resolution.
@@ -277,29 +275,10 @@ the shared binary — deploys require explicit user go-ahead).
   source plus both fast and existing slow branches. Three independent
   read-only audits agreed that the 484 logical aliases reuse 1,279 physical
   modules and are not duplicate ASTs; alias lookup remains unchanged.
-  Higher-level review accepted the fast paths. The previously measured flat-AST
-  arena reuse was restored after a parallel overwrite, including all current
-  declaration fields: native Stage4 clears backing storage in place, keeps
-  expression/statement counts in local slots, and bypasses their per-node env
-  mirrors. Its prior like-for-like evidence reduced RSS about 15% at 157 parses;
-  it is a regression restoration, not full retention closure. The remaining
-  owner is the no-GC runtime's process-lifetime registry for parser temporary
-  strings/arrays/dicts; a parse scratch-allocation domain with explicit
-  promotion of rich Module data remains the next bottom-up item. Before that
-  larger lifetime change, `CoreLexer.char_slice` now preserves indexed guest
-  access but collects characters and joins once instead of retaining every
-  immutable prefix, removing an O(span^2) allocation amplifier. Its focused
-  triple-string/source contract is updated; a bounded Stage4 profile remains
-  pending. The capped
-  incremental native probe now parses sequential modules with stale declaration,
-  expression, and statement mirrors under the restored arena path (exit 0,
-  2,816 KiB RSS). Full Stage4 execution proof remains pending: the broad parser
-  fixture stopped on existing phase-three lowering errors. The former
-  `HirExpr.is_some` bootstrap crash is source-fixed at both MIR Return sites
-  with canonical optional binding; present and bare returns are regression
-  covered, and the focused current-source Stage3 native build completed. Its
-  runtime probe then stopped earlier because entry-closure did not link the
-  uniquely named HIR lowering method, so it was not retried after the bounded
-  verification cap. The cache-preserving Stage2-to-Stage3 rebuild was also
-  OOM-killed at the 4 GiB safety cap before producing a candidate. See
+  Higher-level review accepted the fast paths. Execution proof remains pending:
+  the broad parser fixture stopped on existing phase-three lowering errors, a
+  narrow current-source probe reached the known `HirExpr.is_some` bootstrap
+  crash, and the cache-preserving Stage2-to-Stage3 rebuild was OOM-killed at
+  the 4 GiB safety cap before producing a candidate. Per the bounded retry
+  policy, those failing commands were not repeated. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

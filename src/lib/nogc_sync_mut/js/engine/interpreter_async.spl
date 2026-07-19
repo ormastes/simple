@@ -5,13 +5,12 @@ use std.js.types.pair.{Pair}
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
-use std.js.types.ast_types.JsExpression
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
 use std.nogc_sync_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
 use std.nogc_sync_mut.http.types.{status_text}
-use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_PROMISE_EXECUTOR_RESOLVE, NATIVE_PROMISE_EXECUTOR_REJECT, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 
@@ -222,70 +221,6 @@ impl JsInterpreter:
             self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "fulfilled"))
         self.set_object_property(promise_id, "__simple_value", value)
         promise_id
-
-    # Register a resolve/reject function bound to a specific pending promise so
-    # that `new Promise((resolve, reject) => ...)` can settle it later. Plain
-    # (non-member) calls carry no `this`, so the binding is kept in parallel
-    # arrays keyed by fn_id — same pattern as wasm_export_fn_ids/bound_imports.
-    me _create_promise_executor_fn(promise_id: i64, name: text, native_id: i64) -> i64:
-        val fn_id = self._register_native(name, native_id)
-        var fn_ids = self.promise_executor_fn_ids
-        var target_promise_ids = self.promise_executor_target_promise_ids
-        fn_ids.push(fn_id)
-        target_promise_ids.push(promise_id)
-        self.promise_executor_fn_ids = fn_ids
-        self.promise_executor_target_promise_ids = target_promise_ids
-        fn_id
-
-    me _promise_executor_target_promise_id(fn_id: i64) -> i64:
-        var i = 0
-        while i < self.promise_executor_fn_ids.len():
-            if self.promise_executor_fn_ids.get(i) == fn_id:
-                return self.promise_executor_target_promise_ids.get(i)
-            i = i + 1
-        -1
-
-    # Handle a resolve/reject callback invoked from inside a `new Promise`
-    # executor. Returns true if the native_id was recognized and dispatched.
-    me _dispatch_promise_executor_native(native_id: i64, fn_id: i64, arg_vals: [JsValue]) -> bool:
-        if native_id != NATIVE_PROMISE_EXECUTOR_RESOLVE and native_id != NATIVE_PROMISE_EXECUTOR_REJECT:
-            return false
-        val target_promise_id = self._promise_executor_target_promise_id(fn_id)
-        if target_promise_id < 0:
-            return true
-        val settle_value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
-        if native_id == NATIVE_PROMISE_EXECUTOR_RESOLVE:
-            val _ = self._resolve_promise_from_callback_result(target_promise_id, settle_value, false)
-        else:
-            self._settle_promise(target_promise_id, settle_value, true)
-        true
-
-    # new Promise(executor): create a pending promise, run the executor
-    # synchronously with bound resolve/reject callbacks, and settle on throw.
-    me _eval_new_promise(args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
-        val promise_id = self._create_pending_promise_object()
-        if args.len() == 0:
-            return Ok(JsValue.Object(id: promise_id))
-        val executor_val = self.eval_expression(args.get(0), env)?
-        val executor_fn_id = _get_fn_id(executor_val)
-        if executor_fn_id < 0:
-            return Ok(JsValue.Object(id: promise_id))
-        val resolve_fn_id = self._create_promise_executor_fn(promise_id, "resolve", NATIVE_PROMISE_EXECUTOR_RESOLVE)
-        val reject_fn_id = self._create_promise_executor_fn(promise_id, "reject", NATIVE_PROMISE_EXECUTOR_REJECT)
-        val resolve_val = JsValue.Function(id: resolve_fn_id)
-        val reject_val = JsValue.Function(id: reject_fn_id)
-        val exec_result = self._invoke_function(executor_fn_id, [resolve_val, reject_val], env)
-        if _simple_fetch_state(promise_id, self.object_store) == "pending":
-            match exec_result:
-                Ok(_):
-                    pass_dn
-                Err(e):
-                    self._settle_promise(promise_id, JsValue.String(v: e.message), true)
-            if self.control_thrown:
-                self._settle_promise(promise_id, self.thrown_value, true)
-        self.control_thrown = false
-        self.thrown_value = JsValue.Undefined
-        Ok(JsValue.Object(id: promise_id))
 
     me _create_response_object(url: text, status: i32, headers: text, body: text, error: text) -> i64:
         val response_id = self.create_object()

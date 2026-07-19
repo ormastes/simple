@@ -222,6 +222,7 @@ fn _parse_jira_issue(obj: any) -> JiraIssue:
     val issue_type = if type_obj != nil: _jstr(type_obj, "name") else: ""
     val assignee_obj = json_object_get(source, "assignee")
     val assignee = if assignee_obj != nil: _jstr(assignee_obj, "displayName") else: ""
+    val updated = _jstr(source, "updated")
 
     JiraIssue(
         key: key,
@@ -231,6 +232,7 @@ fn _parse_jira_issue(obj: any) -> JiraIssue:
         issue_type: issue_type,
         priority: priority,
         description: description,
+        updated: updated,
     )
 
 
@@ -266,7 +268,7 @@ fn jira_curl_view_issue(client: JiraClient, issue_key: text) -> (bool, JiraIssue
 
     Returns: (success, issue, raw_body).
     """
-    val empty = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "")
+    val empty = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "", updated: "")
     val auth = client.auth_header()
     if auth == "":
         return (false, empty, "missing email or api_token")
@@ -364,7 +366,7 @@ fn jira_curl_create_issue(
     created issue (key + echoed summary; full fields require a follow-up GET).
     Returns: (success, issue, raw_body).
     """
-    val empty = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "")
+    val empty = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "", updated: "")
     val auth = client.auth_header()
     if auth == "":
         return (false, empty, "missing email or api_token")
@@ -402,6 +404,7 @@ fn jira_curl_create_issue(
         issue_type: issue_type,
         priority: "",
         description: description,
+        updated: "",
     )
     (true, created, resp_body)
 
@@ -431,3 +434,150 @@ fn jira_curl_get_attachment(client: JiraClient, attachment_id: text, dest_path: 
     if not _status_ok(code):
         return (false, _status_message(code, stderr))
     (true, "{code}")
+
+
+# ---------------------------------------------------------------------------
+# Mutating calls (J2): update / comment / transition — the acli-fallback path.
+#
+# Each retries bounded on transport errors/429/5xx via app.itf.retry (the
+# same shared helper adapter_minio.spl uses), and never retries other 4xx —
+# those need the request itself to change, not a resend.
+# ---------------------------------------------------------------------------
+
+class JiraTransition:
+    id: text
+    name: text
+
+
+fn jira_curl_update_issue(client: JiraClient, issue_key: text, summary: text, description: text) -> (bool, text):
+    """Update summary/description via PUT /rest/api/3/issue/\{key\}.
+
+    A successful PUT returns 204 No Content — there is no body to parse.
+    Returns: (success, error_message_or_empty).
+    """
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, "missing email or api_token")
+    if summary == "" and description == "":
+        return (false, "nothing to update: provide --summary and/or --description")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/issue/{issue_key}"
+
+    var parts: [text] = []
+    if summary != "":
+        parts = parts + ["\"summary\":\"{_json_escape(summary)}\""]
+    if description != "":
+        parts = parts + ["\"description\":{_adf_doc(description)}"]
+    val body = "\{\"fields\":\{{parts.join(",")}\}\}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    var attempt = 0
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_put(auth, url, body))
+        if exit_code != 0:
+            return (false, "curl exit {exit_code}: {stderr}")
+        val (resp_body, code) = _split_response(stdout)
+        attempt = attempt + 1
+        if _status_ok(code):
+            return (true, "")
+        if not itf_should_retry(code, "") or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            return (false, _status_message(code, resp_body))
+        itf_retry_wait(attempt - 1, "")
+    (false, "retry attempts exhausted")
+
+
+fn jira_curl_add_comment(client: JiraClient, issue_key: text, comment_text: text) -> (bool, text):
+    """Add a comment via POST /rest/api/3/issue/\{key\}/comment.
+
+    Returns: (success, error_message_or_empty).
+    """
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, "missing email or api_token")
+    if comment_text == "":
+        return (false, "comment text required")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/issue/{issue_key}/comment"
+    val body = "\{\"body\":{_adf_doc(comment_text)}\}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    var attempt = 0
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+        if exit_code != 0:
+            return (false, "curl exit {exit_code}: {stderr}")
+        val (resp_body, code) = _split_response(stdout)
+        attempt = attempt + 1
+        if _status_ok(code):
+            return (true, "")
+        if not itf_should_retry(code, "") or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            return (false, _status_message(code, resp_body))
+        itf_retry_wait(attempt - 1, "")
+    (false, "retry attempts exhausted")
+
+
+fn jira_curl_list_transitions(client: JiraClient, issue_key: text) -> (bool, [JiraTransition], text):
+    """GET /rest/api/3/issue/\{key\}/transitions — the workflow moves
+    available from the issue's current status. Used to resolve a
+    human-typed transition name (e.g. "In Progress") to the numeric id
+    the transitions POST requires."""
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, [], "missing email or api_token")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/issue/{issue_key}/transitions"
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_get(auth, url))
+    if exit_code != 0:
+        return (false, [], "curl exit {exit_code}: {stderr}")
+
+    val (body, code) = _split_response(stdout)
+    if not _status_ok(code):
+        return (false, [], _status_message(code, body))
+
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "invalid JSON from Jira")
+
+    var out: [JiraTransition] = []
+    val arr = json_object_get(parsed, "transitions")
+    if arr != nil and json_get_type(arr) == "array":
+        val n = json_array_length(arr)
+        var i = 0
+        while i < n:
+            val item = json_array_get(arr, i)
+            out = out + [JiraTransition(id: _jstr(item, "id"), name: _jstr(item, "name"))]
+            i = i + 1
+    (true, out, body)
+
+
+fn jira_curl_transition_issue(client: JiraClient, issue_key: text, transition_id: text) -> (bool, text):
+    """POST /rest/api/3/issue/\{key\}/transitions with an already-resolved
+    transition id. Returns: (success, error_message_or_empty)."""
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, "missing email or api_token")
+    if transition_id == "":
+        return (false, "transition id required")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/issue/{issue_key}/transitions"
+    val body = "\{\"transition\":\{\"id\":\"{transition_id}\"\}\}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    var attempt = 0
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+        if exit_code != 0:
+            return (false, "curl exit {exit_code}: {stderr}")
+        val (resp_body, code) = _split_response(stdout)
+        attempt = attempt + 1
+        if _status_ok(code):
+            return (true, "")
+        if not itf_should_retry(code, "") or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            return (false, _status_message(code, resp_body))
+        itf_retry_wait(attempt - 1, "")
+    (false, "retry attempts exhausted")

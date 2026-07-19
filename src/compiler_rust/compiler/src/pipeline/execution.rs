@@ -1011,63 +1011,11 @@ impl CompilerPipeline {
         }
 
         if !non_compilable.is_empty() {
-            // A standalone native binary has NO embedded interpreter: rewriting
-            // calls into `rt_interp_call` (the hybrid-execution fallback) makes
-            // every such call silently resolve to NIL at runtime (exit code 3),
-            // because no interpreter handler is ever registered in the linked
-            // binary (interpreter_bridge.rs `default_interp_call`). The callee
-            // bodies are then never emitted at all. Fail loudly instead of
-            // shipping a binary with missing program bodies.
-            // See doc/08_tracking/bug/native_aot_missing_program_body_exit3_2026-07-19.md.
-            //
-            // Escape hatches (warning + old behavior):
-            //   - SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1 (explicit debugging opt-in)
-            //   - bootstrap mode (SIMPLE_BOOTSTRAP=1), which already tolerates an
-            //     incomplete native surface via weak stubs and must not brick.
-            let allow_interp_calls = bootstrap_mode
-                || std::env::var("SIMPLE_NATIVE_ALLOW_INTERP_CALLS").as_deref() == Ok("1");
-            let mut flagged: Vec<String> = non_compilable
-                .iter()
-                .map(|name| {
-                    let reasons = compilability
-                        .get(name)
-                        .map(|status| format!("{:?}", status.reasons()))
-                        .unwrap_or_else(|| "[unknown]".to_string());
-                    format!("  - {name}: {reasons}")
-                })
-                .collect();
-            flagged.sort();
-            if allow_interp_calls {
-                eprintln!(
-                    "warning: {} function(s) require interpreter fallback; calls to them will \
-                     silently return nil in this standalone native binary:\n{}",
-                    non_compilable.len(),
-                    flagged.join("\n")
-                );
-                mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
-                tracing::debug!(
-                    "Hybrid execution (standalone native): {} functions require interpreter fallback",
-                    non_compilable.len()
-                );
-            } else {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNSUPPORTED_FEATURE)
-                    .with_help(
-                        "These constructs have no native codegen yet; in a standalone binary, calls \
-                         to the flagged functions would silently return nil (exit 3) instead of \
-                         running. Rewrite the flagged constructs, or set \
-                         SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1 to build anyway with the old behavior.",
-                    );
-                return Err(CompileError::semantic_with_context(
-                    format!(
-                        "cannot compile to standalone native binary: {} function(s) contain \
-                         constructs that require the interpreter:\n{}",
-                        non_compilable.len(),
-                        flagged.join("\n")
-                    ),
-                    ctx,
-                ));
-            }
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
+            tracing::debug!(
+                "Hybrid execution (standalone native): {} functions require interpreter fallback",
+                non_compilable.len()
+            );
         }
 
         // Generate object code

@@ -5,7 +5,6 @@ use std.js.types.js_types.JsValue
 use std.js.types.ast_types.JsExpression
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.builtins.regexp.{string_replace, string_match, string_split_regex, RegExpObj, regexp_exec}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
@@ -144,17 +143,6 @@ impl JsInterpreter:
             var sep = ""
             if args.len() > 0:
                 val sep_val = self.eval_expression(args.get(0), env)?
-                val sep_obj_id = _get_obj_id(sep_val)
-                if sep_obj_id >= 0 and to_boolean(self.get_object_property(sep_obj_id, "__simple_is_regexp")):
-                    val pattern = js_to_string(self.get_object_property(sep_obj_id, "source"))
-                    val parts = string_split_regex(str_val, pattern)
-                    val regex_result_id = self.create_object()
-                    var pi2 = 0
-                    while pi2 < parts.len():
-                        self.set_object_property(regex_result_id, "{pi2}", JsValue.String(v: parts.get(pi2)))
-                        pi2 = pi2 + 1
-                    self.set_object_property(regex_result_id, "length", JsValue.Number(v: parts.len().to_f64()))
-                    return Ok(JsValue.Array(id: regex_result_id))
                 sep = js_to_string(sep_val)
             val result_id = self.create_object()
             if sep == "":
@@ -280,63 +268,12 @@ impl JsInterpreter:
                     i = i + 1
             return Ok(JsValue.Boolean(v: false))
 
-        if method == "match":
-            if args.len() > 0:
-                val pattern_val = self.eval_expression(args.get(0), env)?
-                var pattern = ""
-                var flags = ""
-                val pattern_obj_id = _get_obj_id(pattern_val)
-                if pattern_obj_id >= 0 and to_boolean(self.get_object_property(pattern_obj_id, "__simple_is_regexp")):
-                    pattern = js_to_string(self.get_object_property(pattern_obj_id, "source"))
-                    flags = js_to_string(self.get_object_property(pattern_obj_id, "flags"))
-                else:
-                    pattern = js_to_string(pattern_val)
-                val matches = string_match(str_val, pattern, flags)
-                if matches.len() == 0:
-                    return Ok(JsValue.Null)
-                val result_id = self.create_object()
-                var mi = 0
-                while mi < matches.len():
-                    self.set_object_property(result_id, "{mi}", JsValue.String(v: matches.get(mi)))
-                    mi = mi + 1
-                self.set_object_property(result_id, "length", JsValue.Number(v: matches.len().to_f64()))
-                return Ok(JsValue.Array(id: result_id))
-            return Ok(JsValue.Null)
-
-        if method == "search":
-            if args.len() > 0:
-                val pattern_val = self.eval_expression(args.get(0), env)?
-                var pattern = ""
-                var flags = ""
-                val pattern_obj_id = _get_obj_id(pattern_val)
-                if pattern_obj_id >= 0 and to_boolean(self.get_object_property(pattern_obj_id, "__simple_is_regexp")):
-                    pattern = js_to_string(self.get_object_property(pattern_obj_id, "source"))
-                    flags = js_to_string(self.get_object_property(pattern_obj_id, "flags"))
-                else:
-                    pattern = js_to_string(pattern_val)
-                val re = RegExpObj.create(pattern, flags)
-                val result = regexp_exec(re, str_val)
-                if result.matched:
-                    return Ok(JsValue.Number(v: result.index.to_f64()))
-                return Ok(JsValue.Number(v: -1.0))
-            return Ok(JsValue.Number(v: -1.0))
-
         if method == "replace":
             if args.len() >= 2:
                 val search_val = self.eval_expression(args.get(0), env)?
                 val replace_val = self.eval_expression(args.get(1), env)?
-                val replace_str = js_to_string(replace_val)
-                val search_obj_id = _get_obj_id(search_val)
-                if search_obj_id >= 0:
-                    match self.get_object_property(search_obj_id, "__simple_is_regexp"):
-                        JsValue.Boolean(is_regex):
-                            if is_regex:
-                                val pattern = js_to_string(self.get_object_property(search_obj_id, "source"))
-                                val flags = js_to_string(self.get_object_property(search_obj_id, "flags"))
-                                return Ok(JsValue.String(v: string_replace(str_val, pattern, replace_str, flags)))
-                        _:
-                            pass_dn
                 val search_s = js_to_string(search_val)
+                val replace_str = js_to_string(replace_val)
                 val slen = str_val.len()
                 val needle_len = search_s.len()
                 if needle_len == 0:
@@ -369,24 +306,8 @@ impl JsInterpreter:
             if args.len() >= 2:
                 val search_val = self.eval_expression(args.get(0), env)?
                 val replace_val = self.eval_expression(args.get(1), env)?
-                val replace_str = js_to_string(replace_val)
-                val search_obj_id = _get_obj_id(search_val)
-                if search_obj_id >= 0:
-                    match self.get_object_property(search_obj_id, "__simple_is_regexp"):
-                        JsValue.Boolean(is_regex):
-                            if is_regex:
-                                val pattern = js_to_string(self.get_object_property(search_obj_id, "source"))
-                                var flags = js_to_string(self.get_object_property(search_obj_id, "flags"))
-                                # replaceAll always replaces every match — real JS
-                                # throws on a non-global regex here; this subset
-                                # interpreter instead forces the global behavior
-                                # rather than adding throw-on-missing-flag machinery.
-                                if not flags.contains("g"):
-                                    flags = flags + "g"
-                                return Ok(JsValue.String(v: string_replace(str_val, pattern, replace_str, flags)))
-                        _:
-                            pass_dn
                 val search = js_to_string(search_val)
+                val replace_str = js_to_string(replace_val)
                 val slen = str_val.len()
                 val needle_len = search.len()
                 if needle_len == 0:

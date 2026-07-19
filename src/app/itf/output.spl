@@ -47,6 +47,102 @@ fn format_size(bytes: i64) -> text:
     "{whole}.{frac} {unit}"
 
 
+fn _digits_to_i64(s: text, start: i64, count: i64) -> i64:
+    """Parse `count` ASCII digits starting at `start`; -1 if any isn't 0-9
+    or the range runs past the end of `s`."""
+    if start + count > s.len():
+        return -1
+    var n: i64 = 0
+    var i = start
+    val stop = start + count
+    while i < stop:
+        val c = s.char_code_at(i)
+        if c < 48 or c > 57:
+            return -1
+        n = n * 10 + (c - 48)
+        i = i + 1
+    n
+
+
+fn _is_leap_year(y: i64) -> bool:
+    (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+
+
+fn _days_in_month(y: i64, m: i64) -> i64:
+    if m == 2:
+        if _is_leap_year(y): 29 else: 28
+    else if m == 4 or m == 6 or m == 9 or m == 11:
+        30
+    else:
+        31
+
+
+fn _days_since_epoch(year: i64, month: i64, day: i64) -> i64:
+    """Days between 1970-01-01 and the given UTC date (proleptic Gregorian,
+    year >= 1970 only — adequate range for relative-time display)."""
+    var days: i64 = 0
+    var y = 1970
+    while y < year:
+        days = days + (if _is_leap_year(y): 366 else: 365)
+        y = y + 1
+    var m = 1
+    while m < month:
+        days = days + _days_in_month(year, m)
+        m = m + 1
+    days + (day - 1)
+
+
+fn _epoch_seconds_from_iso(iso: text) -> i64:
+    """Parse the fixed `YYYY-MM-DDTHH:MM:SS` prefix of an ISO8601 timestamp
+    into approximate UTC epoch seconds. Any trailing fractional seconds or
+    timezone offset (`.000+0000`, `Z`, ...) is ignored — adequate for
+    bucketed "Xh ago" display, not exact-instant math. -1 if the prefix
+    doesn't parse as digits in the expected positions.
+    """
+    if iso.len() < 19:
+        return -1
+    val year = _digits_to_i64(iso, 0, 4)
+    val month = _digits_to_i64(iso, 5, 2)
+    val day = _digits_to_i64(iso, 8, 2)
+    val hour = _digits_to_i64(iso, 11, 2)
+    val minute = _digits_to_i64(iso, 14, 2)
+    val second = _digits_to_i64(iso, 17, 2)
+    if year < 0 or month < 1 or month > 12 or day < 1 or hour < 0 or minute < 0 or second < 0:
+        return -1
+    _days_since_epoch(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
+
+
+fn relative_time_at(iso: text, now_epoch_secs: i64) -> text:
+    """Format an ISO8601 timestamp as a relative string ("3h ago") relative
+    to an explicit `now_epoch_secs` — pure and deterministic, so specs can
+    pin a fixed "now" instead of flaking on wall-clock time. Returns `iso`
+    unchanged if it doesn't parse (never hides a raw value silently as "").
+    """
+    val ts = _epoch_seconds_from_iso(iso)
+    if ts < 0:
+        return iso
+    var delta = now_epoch_secs - ts
+    if delta < 0:
+        delta = 0
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return "{delta / 60}m ago"
+    if delta < 86400:
+        return "{delta / 3600}h ago"
+    if delta < 86400 * 30:
+        return "{delta / 86400}d ago"
+    if delta < 86400 * 365:
+        return "{delta / (86400 * 30)}mo ago"
+    "{delta / (86400 * 365)}y ago"
+
+
+fn relative_time(iso: text) -> text:
+    """relative_time_at() against the real current time (jira/github listings)."""
+    use std.io_runtime.{time_now_unix_micros}
+    relative_time_at(iso, time_now_unix_micros() / 1000000)
+
+
 fn print_error(msg: text):
     """Print error message to stderr (red if color enabled)."""
     if should_use_color():

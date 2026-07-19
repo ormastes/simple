@@ -9,12 +9,11 @@ use std.js.types.ast_types.JsExpression
 use std.js.types.ast_types.JsStatement
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_SET_TIMEOUT, NATIVE_CLEAR_TIMEOUT, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_PROMISE_EXECUTOR_RESOLVE, NATIVE_PROMISE_EXECUTOR_REJECT}
+use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_SET_TIMEOUT, NATIVE_CLEAR_TIMEOUT, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
 use std.js.node.buffer_module.{buffer_byteLength}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.js.builtins.array.{array_isArray, array_from_values}
-use std.js.builtins.regexp.{RegExpObj, regexp_exec}
 
 impl JsInterpreter:
     # ── JsExpression evaluation ────────────────────────────────────────────
@@ -162,52 +161,9 @@ impl JsInterpreter:
                 return Ok(JsValue.Undefined)
             JsExpression.ArrayPattern(elements):
                 return Ok(JsValue.Undefined)
-            JsExpression.RegexLiteral(pattern, flags):
-                return Ok(self._create_regex_value(pattern, flags))
-
-    # Regex literal /pattern/flags — materialized as a plain object carrying
-    # source/flags/global/ignoreCase/multiline plus an internal marker so
-    # callers (e.g. String.prototype.replace) can detect "this argument is a
-    # regex" without a dedicated JsValue variant (which would ripple through
-    # every exhaustive match on JsValue across the interpreter).
-    me _create_regex_value(pattern: text, flags: text) -> JsValue:
-        val obj_id = self.create_object()
-        self.set_object_property(obj_id, "__simple_is_regexp", JsValue.Boolean(v: true))
-        self.set_object_property(obj_id, "source", JsValue.String(v: pattern))
-        self.set_object_property(obj_id, "flags", JsValue.String(v: flags))
-        self.set_object_property(obj_id, "global", JsValue.Boolean(v: flags.contains("g")))
-        self.set_object_property(obj_id, "ignoreCase", JsValue.Boolean(v: flags.contains("i")))
-        self.set_object_property(obj_id, "multiline", JsValue.Boolean(v: flags.contains("m")))
-        self.set_object_property(obj_id, "lastIndex", JsValue.Number(v: 0.0))
-        JsValue.Object(id: obj_id)
 
     # new operator: new Foo(args)
     me eval_new(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
-        # `Promise` resolves to a plain host object (not JsValue.Function), so
-        # it needs its own construction path: a real pending promise whose
-        # executor runs synchronously with bound resolve/reject callbacks.
-        if self.ident_name(callee) == "Promise":
-            return self._eval_new_promise(args, env)
-        if self.ident_name(callee) == "RegExp":
-            # new RegExp(pattern, flags) / new RegExp(existingRegExp, flags) —
-            # RegExp has no JsValue.Function representation (it isn't a real
-            # global, unlike Promise which at least gets a plain-object
-            # global), so short-circuit before the generic callee-evaluation
-            # path below, which would just see an undefined identifier and
-            # return Ok(JsValue.Undefined).
-            var pattern = ""
-            var flags = ""
-            if args.len() > 0:
-                val pattern_val = self.eval_expression(args.get(0), env)?
-                val pattern_obj_id = _get_obj_id(pattern_val)
-                if pattern_obj_id >= 0 and to_boolean(self.get_object_property(pattern_obj_id, "__simple_is_regexp")):
-                    pattern = js_to_string(self.get_object_property(pattern_obj_id, "source"))
-                    flags = js_to_string(self.get_object_property(pattern_obj_id, "flags"))
-                else:
-                    pattern = js_to_string(pattern_val)
-            if args.len() > 1:
-                flags = js_to_string(self.eval_expression(args.get(1), env)?)
-            return Ok(self._create_regex_value(pattern, flags))
         val callee_val = self.eval_expression(callee, env)?
         var arg_vals: [JsValue] = []
         var i = 0
@@ -417,27 +373,11 @@ impl JsInterpreter:
                             val clear_immediate_fn = JsValue.Function(id: self._register_native("clearImmediate", NATIVE_CLEAR_IMMEDIATE))
                             self.define_global_value("clearImmediate", clear_immediate_fn)
                             return Ok(JsValue.String(v: typeof_value(clear_immediate_fn)))
-                        if name == "Promise":
-                            # Promise is a constructor (callable), but this
-                            # interpreter represents it internally as a plain
-                            # Object carrying resolve/reject/prototype (see
-                            # _promise_global_object) rather than a JsValue.Function,
-                            # so typeof needs an explicit override here to match
-                            # real JS: `typeof Promise === "function"`.
-                            return Ok(JsValue.String(v: "function"))
-                        # Fall through to eval_expression: it is the single source of
-                        # truth for pseudo-globals (window, document, Promise, Buffer,
-                        # process, require, setTimeout, clearTimeout, ...). Duplicating
-                        # that name list here previously drifted out of sync and caused
-                        # `typeof Promise` etc. to wrongly report "undefined" even
-                        # though the identifier resolves fine outside of `typeof`.
-                        val resolved = self.eval_expression(operand, env)?
-                        return Ok(JsValue.String(v: typeof_value(resolved)))
+                        return Ok(JsValue.String(v: "undefined"))
                     val lookup = self.env_stack.get_var(env, name)
                     if val Some(v) = lookup:
                         return Ok(JsValue.String(v: typeof_value(v)))
-                    val resolved_local = self.eval_expression(operand, env)?
-                    return Ok(JsValue.String(v: typeof_value(resolved_local)))
+                    return Ok(JsValue.String(v: "undefined"))
                 _:
                     val v = self.eval_expression(operand, env)?
                     return Ok(JsValue.String(v: typeof_value(v)))
@@ -633,40 +573,6 @@ impl JsInterpreter:
                 _: pass_dn
             if is_string:
                 return self._dispatch_string_method(str_val, member_method, args, env)
-
-        # RegExp.prototype.test / RegExp.prototype.exec — dispatched on the
-        # plain-object regex marker created by _create_regex_value (regex
-        # literals and `new RegExp(...)`). Mirrors the __simple_is_regexp
-        # check already used by String.prototype.replace/match/search/split.
-        if is_member and (member_method == "test" or member_method == "exec"):
-            val regex_val = self.eval_expression(member_obj_expr, env)?
-            val regex_obj_id = _get_obj_id(regex_val)
-            if regex_obj_id >= 0 and to_boolean(self.get_object_property(regex_obj_id, "__simple_is_regexp")):
-                var input = ""
-                if args.len() > 0:
-                    input = js_to_string(self.eval_expression(args.get(0), env)?)
-                val pattern = js_to_string(self.get_object_property(regex_obj_id, "source"))
-                val flags = js_to_string(self.get_object_property(regex_obj_id, "flags"))
-                var re = RegExpObj.create(pattern, flags)
-                re.last_index = f64_to_i64(to_number(self.get_object_property(regex_obj_id, "lastIndex")))
-                val result = regexp_exec(re, input)
-                if re.global:
-                    # Stateful lastIndex tracking for global regexes, matching
-                    # real JS test()/exec() iteration semantics.
-                    if result.matched:
-                        self.set_object_property(regex_obj_id, "lastIndex", JsValue.Number(v: (result.index + result.value.len()).to_f64()))
-                    else:
-                        self.set_object_property(regex_obj_id, "lastIndex", JsValue.Number(v: 0.0))
-                if member_method == "test":
-                    return Ok(JsValue.Boolean(v: result.matched))
-                if not result.matched:
-                    return Ok(JsValue.Null)
-                val match_id = self.create_object()
-                self.set_object_property(match_id, "0", JsValue.String(v: result.value))
-                self.set_object_property(match_id, "length", JsValue.Number(v: 1.0))
-                self.set_object_property(match_id, "index", JsValue.Number(v: result.index.to_f64()))
-                self.set_object_property(match_id, "input", JsValue.String(v: input))
-                return Ok(JsValue.Array(id: match_id))
 
         if is_member and member_method == "set":
             val dst_val = self.eval_expression(member_obj_expr, env)?
@@ -1436,9 +1342,6 @@ impl JsInterpreter:
                                     self.call_stack.pop()
                                     self.control_return = compile_saved_return
                                     return Ok(compile_result)
-                            if mapping.second == NATIVE_PROMISE_EXECUTOR_RESOLVE or mapping.second == NATIVE_PROMISE_EXECUTOR_REJECT:
-                                val _ = self._dispatch_promise_executor_native(mapping.second, fn_id, arg_vals)
-                                return Ok(JsValue.Undefined)
                             if mapping.second == NATIVE_WEBASSEMBLY_EXPORT_FUNCTION:
                                 return Ok(self._native_webassembly_export_function(this_val, arg_vals, fn_id))
                             if mapping.second == NATIVE_UINT8_ARRAY_SUBARRAY:

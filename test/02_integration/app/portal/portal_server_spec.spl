@@ -3,8 +3,9 @@ use std.nogc_sync_mut.io.process_ops.{process_run}
 use app.portal.server.{PortalServer}
 
 fn _fixture_repo_root() -> text:
-    """Create a throwaway git repo with a README, a subdirectory, and two
-    commits, and return its parent directory (the PORTAL_REPO_ROOT)."""
+    """Create a throwaway git repo with a README, a subdirectory, two
+    commits, a slash-containing branch, and a fake submodule gitlink, and
+    return its parent directory (the PORTAL_REPO_ROOT)."""
     val script = "set -eu\n" +
         "ROOT=$(mktemp -d /tmp/portal-git-fixture.XXXXXX)\n" +
         "REPO=\"$ROOT/demo\"\n" +
@@ -20,12 +21,37 @@ fn _fixture_repo_root() -> text:
         "printf 'print 2\\n' > src/main.spl\n" +
         "git add -A\n" +
         "git commit -q -m 'second commit'\n" +
+        "git checkout -q -b feature/x\n" +
+        "printf 'print 3\\n' > src/feature.spl\n" +
+        "git add -A\n" +
+        "git commit -q -m 'feature branch commit'\n" +
+        "git checkout -q main\n" +
+        "git update-index --add --cacheinfo 160000,$(git rev-parse HEAD),vendor\n" +
+        "git commit -q -m 'add fake submodule gitlink'\n" +
         "printf '%s' \"$ROOT\"\n"
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
     out.trim()
 
 fn _server() -> PortalServer:
     PortalServer.with_repo_root("127.0.0.1", "0", _fixture_repo_root())
+
+fn _fixture_repo_root_is_itself_a_repo() -> text:
+    """Create a throwaway repo where PORTAL_REPO_ROOT points DIRECTLY at a
+    git repo (root/.git exists), instead of at a parent directory holding
+    one. This reproduces the shape used in production (`PORTAL_REPO_ROOT`
+    defaults to `.`, and `.` is a repo)."""
+    val script = "set -eu\n" +
+        "REPO=$(mktemp -d /tmp/portal-git-fixture-self.XXXXXX)\n" +
+        "cd \"$REPO\"\n" +
+        "git init -q -b main\n" +
+        "git config user.email test@example.invalid\n" +
+        "git config user.name 'Portal Test'\n" +
+        "printf 'hello\\n' > README.md\n" +
+        "git add -A\n" +
+        "git commit -q -m 'only commit'\n" +
+        "printf '%s' \"$REPO\"\n"
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    out.trim()
 
 describe "portal server":
     it "serves the home page through the shared layout":
@@ -95,3 +121,34 @@ describe "portal server":
     it "rejects unsupported HTTP methods":
         val resp = _server().route_request("POST", "/repos", "", "")
         expect(resp).to_start_with("HTTP/1.1 405 Method Not Allowed")
+
+    it "resolves a branch ref containing a slash for the tree view":
+        val resp = _server().route_request("GET", "/repos/demo/tree/feature/x", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("href=\"/repos/demo/tree/feature/x/src\"")
+
+    it "resolves a blob under a branch ref containing a slash":
+        val resp = _server().route_request("GET", "/repos/demo/blob/feature/x/src/feature.spl", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("print 3")
+
+    it "resolves commits for a branch ref containing a slash":
+        val resp = _server().route_request("GET", "/repos/demo/commits/feature/x", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("feature branch commit")
+
+    it "does not double-list the repo when PORTAL_REPO_ROOT points directly at it":
+        val repo_root = _fixture_repo_root_is_itself_a_repo()
+        val server = PortalServer.with_repo_root("127.0.0.1", "0", repo_root)
+        val resp = server.route_request("GET", "/repos", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp.contains("href=\"/repos/\"")).to_equal(false)
+        val repo_link_count = resp.split("<a href=\"/repos/").len() - 1
+        expect(repo_link_count).to_equal(1)
+
+    it "renders a submodule tree entry as non-link text instead of a 404 link":
+        val resp = _server().route_request("GET", "/repos/demo/tree/main", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("submodule")
+        expect(resp).to_contain("vendor")
+        expect(resp.contains("href=\"/repos/demo/tree/main/vendor\"")).to_equal(false)

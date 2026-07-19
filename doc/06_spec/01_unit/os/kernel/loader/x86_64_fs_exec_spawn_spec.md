@@ -1,180 +1,43 @@
-# X86 64 Fs Exec Spawn Specification
+# x86_64 Filesystem Executable Launch
 
-> <details>
+Source: `test/01_unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl`
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+Status: source contract implemented; live QEMU proof pending. Stubs: 0.
 
-<details>
-<summary>Full Scenario Manual</summary>
+## Flow
 
-# X86 64 Fs Exec Spawn Specification
-
-## Scenarios
-
-### x86_64 filesystem exec ring3 launch contract
-
-#### streams the exact filesystem ELF into PT_LOAD frames without preload substitution
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 21 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val spawn_source = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
-val handoff = file_read("src/os/kernel/loader/x86_64_fs_exec_ring3.spl")
-
-expect(spawn_source).to_contain("simpleos_fat32_stream_open(path)")
-expect(spawn_source).to_contain("simpleos_fat32_stream_read_at(0.to_u64(), buf, prefix_len)")
-expect(spawn_source).to_contain("x86_64_fs_exec_enter_stream_ring3(path, header_blob, hdr_prefix, stream_len as u64, argv, envp)")
-# Streaming-mode phdr parse is bounded to the RESIDENT header prefix
-# (hdr_len), not the full on-disk size — a corrupt phdr cannot drive
-# mmio reads past the header buffer.
-expect(handoff).to_contain("phnum > ((hdr_len - phoff) / phentsize)")
-expect(handoff).to_contain("simpleos_fat32_stream_read_at(file_pos, dst, clen)")
-expect(handoff).to_contain("FAIL short PT_LOAD read")
-expect(handoff).to_contain("file_len, true, true, false, argv, envp")
-expect(handoff).to_contain("rt_user_heap_init_returning")
-expect(handoff).to_contain("val HEAP_PAGE_SIZE: u64 = 4096")
-expect(handoff).to_contain("val HEAP_SIZE: u64 = 67108864")
-expect(handoff).to_contain("true, true, false, argv, envp")
-expect(handoff).to_contain("fb.len().to_u64(), false, false, false, argv, envp")
-expect(handoff).to_contain("mmio_write8(dst + t, mmio_read8(blob + file_pos + t))")
-expect(spawn_source.contains("simpleos_fat32_preloaded_size")).to_equal(false)
-expect(spawn_source.contains("spawn:preloaded")).to_equal(false)
+```text
+requested VFS path → bounded ELF header/program headers
+                   → stream each PT_LOAD into mapped user frames
+                   → build argc/argv/envp/auxv → enter ring 3
 ```
 
-</details>
+## Scenario: stream the requested filesystem ELF
 
-#### routes shell PATH execution through the ring3 fs-exec dispatcher
+1. Open the exact requested path with `simpleos_fat32_stream_open(path)`.
+2. Retain at most the bounded ELF/program-header prefix.
+3. Stream every PT_LOAD range directly to its physical destination.
+4. Fail on a short range read or wrapped/out-of-file ELF range.
+5. Never substitute the unkeyed boot-preload buffer.
 
-<details>
-<summary>Executable SSpec</summary>
+Legacy SMF/extracted-image callers remain blob-backed and copy from the supplied
+ELF blob; they do not reuse raw container-file offsets.
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+## Scenario: preserve the shell dispatch path
 
-```simple
-val shell = file_read("src/os/apps/shell/exec.spl")
-val bridge = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
+Shell PATH execution continues through `fs_exec_spawn_ring3` and the existing
+architecture dispatcher. No seeded-app registry or parallel loader is added.
 
-expect(shell).to_contain("fs_exec_spawn_ring3")
-expect(shell).to_contain("exec:dispatch=ring3-fs-exec-spawn")
-expect(bridge).to_contain("pub fn fs_exec_spawn_ring3")
-expect(bridge).to_contain("x86_64_fs_exec_spawn(path, argv, envp)")
-```
+## Scenario: construct process arguments
 
-</details>
+The loader places the binary path at `argv[0]`, appends caller argv, then writes
+envp and the `AT_PAGESZ`, `AT_EXECFN`, and `AT_NULL` auxiliary entries. The
+single-page startup frame is bounded to 64 caller arguments, 64 environment
+entries, and 4096 bytes; overflow fails before ring-3 entry.
 
-#### routes ARM64 filesystem execution through the validated live user-entry facade
+## Verification
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 42 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val bridge = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
-val arm_spawn = file_read("src/os/kernel/loader/arm64_fs_exec_spawn.spl")
-val facade = file_read("src/os/kernel/arch/user_entry_bridge.spl")
-val user_entry = file_read("src/os/kernel/arch/arm64/user_entry.spl")
-val entry = file_read("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
-val payload = file_read("examples/09_embedded/simple_os/arch/arm64/user_fsexec_src/mounted_elf.S")
-val payload_build = file_read("scripts/os/build_arm64_fsexec_payload.shs")
-val disk_build = file_read("scripts/os/make_os_disk.shs")
-val disk_readiness = file_read("src/os/_QemuRunner/scenario_exec.spl")
-val vfs_alias = file_read("src/os/services/vfs/arm_fs_exec_alias.spl")
-val qemu_contract = file_read("src/os/qemu_systest_contract.spl")
-
-expect(bridge).to_contain("arm64_fs_exec_spawn_ring3(path, argv, envp)")
-expect(bridge.contains("arm64:no-ring3-handoff")).to_equal(false)
-expect(arm_spawn).to_contain("dispatch_fs_exec_user_handoff(Architecture.Arm64, prepared.pid as u64, prepared.scheduler)")
-expect(facade).to_contain("dispatch_arm64_enter_user(pid_hint, scheduler)")
-expect(user_entry).to_contain("val probe_rc = dispatch_enter_user_blocking_probe(pid_hint, scheduler)")
-expect(user_entry).to_contain("rt_arm64_enter_recorded_user_live()")
-expect(user_entry).to_contain("blocking live return exit={{live_rc}}")
-expect(user_entry.contains("if live_rc == 0:")).to_equal(false)
-expect(user_entry.contains("return -16")).to_equal(false)
-expect(entry).to_contain("arm64_fs_exec_spawn_ring3(")
-expect(entry).to_contain("\"/FSEXEC.ELF\", [\"/FSEXEC.ELF\"], []")
-expect(entry).to_contain("if handoff_rc == 0:")
-expect(entry).to_contain("[arm64-user] kernel-resumed exit=0")
-expect(entry.contains("rt_arm64_exec_probe_live_real")).to_equal(false)
-expect(payload).to_contain("[arm64-fs-user] mounted-elf-ok")
-expect(payload).to_contain("mov     x8, #60")
-expect(payload).to_contain("mov     x8, #0")
-expect(payload_build).to_contain("--target=aarch64-unknown-none-elf")
-expect(payload_build).to_contain("-Ttext=0x201000")
-expect(payload_build).to_contain("entry is not in an executable PT_LOAD")
-expect(payload_build).to_contain("PT_LOAD span exceeds 1 MiB direct-load arena")
-expect(disk_build).to_contain("[ \"$platform\" = \"arm64\" ] && [ -z \"$SIMPLEOS_FSEXEC_BINARY\" ]")
-expect(disk_build).to_contain("SIMPLEOS_FSEXEC_BINARY=\"build/os/arm64_fsexec/mounted_elf.elf\"")
-expect(vfs_alias).to_contain("case \"/fsexec.elf\":")
-expect(vfs_alias).to_contain("case \"/FSEXEC.ELF\":")
-expect(vfs_alias).to_contain("\"FSEXEC.ELF\"")
-expect(disk_readiness).to_contain("::/FSEXEC.ELF")
-expect(disk_readiness).to_contain("grep -a -F -q '[arm64-fs-user] mounted-elf-ok'")
-expect(qemu_contract).to_contain("[arm64-fs-user] mounted-elf-ok")
-expect(qemu_contract).to_contain("[arm64-user] kernel-resumed exit=0")
-```
-
-</details>
-
-#### builds binary path argv and envp into a bounded SysV startup frame
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val source = file_read("src/os/kernel/loader/x86_64_fs_exec_ring3.spl")
-
-expect(source).to_contain("_build_sysv_stack_frame")
-expect(source).to_contain("_write_text_z(stack_phys, string_off, binary_path)")
-expect(source).to_contain("_write_text_z(stack_phys, string_off, argv[i])")
-expect(source).to_contain("_write_text_z(stack_phys, string_off, envp[e])")
-expect(source).to_contain("val expected_argc = (argv.len() as u64) + 1")
-expect(source).to_contain("val argv0_addr = page_base + string_off")
-expect(source).to_contain("_wr64(stack_phys + frame_off + (slot * 8), argv0_addr)")
-expect(source).to_contain("_wr64(stack_phys + frame_off + (slot * 8), AT_PAGESZ)")
-expect(source).to_contain("_wr64(stack_phys + frame_off + ((slot + 2) * 8), AT_RANDOM)")
-expect(source).to_contain("_wr64(stack_phys + frame_off + ((slot + 4) * 8), AT_NULL)")
-expect(source.contains("AT_EXECFN")).to_be(false)
-expect(source).to_contain("TaskContext(")
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/01_unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl` |
-| Updated | 2026-07-19 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- x86_64 filesystem exec ring3 launch contract
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
+The focused source spec checks both stream and blob sources, the short-read
+failure, preload absence, shell dispatch, and real SysV argument population.
+Final acceptance additionally requires the QEMU Clang and Simple filesystem
+launch scenarios.
