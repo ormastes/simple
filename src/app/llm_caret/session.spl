@@ -11,8 +11,22 @@
 
 use app.io.mod.{home, file_exists, file_read, file_write, dir_create_all, dir_list, is_dir, getpid, current_time_ms}
 use app.llm_caret.types.{Message}
-use app.llm_caret.json_helpers.{jo6, ja, build_message_json, json_find, extract_json_string, extract_json_int}
+use app.llm_caret.json_helpers.{jo6, ja, build_message_json, json_find}
 use std.mcp.helpers.{jp, js}
+
+# extract_json_string/extract_json_int are deliberately NOT imported from
+# json_helpers.spl here - under a whole-tree `simple test` build those names
+# resolve to an unrelated same-signature fn in a different module (confirmed
+# via a zero-hit sentinel print: json_helpers.extract_json_string was never
+# invoked despite editing it, while a local private fn with the identical
+# body worked correctly), so calls silently ran the wrong module's code and
+# truncated escaped content at the first embedded quote. Every other
+# llm_caret file (tools.spl _json_get_str, provider.spl, chat.spl, mod.spl,
+# server.spl) already avoids the shared json_helpers functions for exactly
+# this reason - keep a local copy here too rather than relying on the
+# collision-prone shared ones. Filed as a cross-module fn-name collision bug
+# (same class as the documented struct-name collision landmine); a real fix
+# belongs in the compiler's symbol resolution, out of scope for this package.
 
 struct Session:
     id: text
@@ -88,6 +102,51 @@ fn _extract_object_at(json: text, start: i64) -> text:
         i = i + 1
     json.substring(start)
 
+# Local escape-aware string/int extractors (NOT imported from
+# json_helpers.spl - see the collision note above). Mirrors
+# json_helpers.extract_json_string/extract_json_int's logic, kept private
+# to this module so it can't collide with any other module's same-named fn.
+fn _extract_json_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx = json_find(json, search)
+    if idx < 0:
+        return ""
+    val after = json.substring(idx + search.len())
+    val trimmed = after.trim()
+    if trimmed.starts_with(quote):
+        val rest = trimmed.substring(1)
+        var end = 0
+        var escaped = false
+        while end < rest.len():
+            val ch = rest.substring(end, end + 1)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                return rest.substring(0, end)
+            end = end + 1
+    ""
+
+fn _extract_json_int(json: text, key: text) -> i64:
+    val search = "\"" + key + "\":"
+    val idx = json_find(json, search)
+    if idx < 0:
+        return 0
+    val after = json.substring(idx + search.len()).trim()
+    var end = 0
+    while end < after.len():
+        val ch = after.substring(end, end + 1)
+        val is_digit = ch >= "0" and ch <= "9"
+        val is_neg = ch == "-" and end == 0
+        if not (is_digit or is_neg):
+            break
+        end = end + 1
+    if end == 0:
+        return 0
+    int(after.substring(0, end))
+
 # extract_json_string returns the RAW escaped slice between quotes (it does
 # not unescape) - fine for content with no JSON-special chars, but message
 # content routinely contains quotes/backslashes (tool output, code). Undo
@@ -119,7 +178,7 @@ fn _json_unescape(s: text) -> text:
     out
 
 fn _extract_json_string_unescaped(json: text, key: text) -> text:
-    _json_unescape(extract_json_string(json, key))
+    _json_unescape(_extract_json_string(json, key))
 
 fn parse_messages_array(json: text) -> [Message]:
     val key = "\"messages\":"
@@ -139,12 +198,8 @@ fn parse_messages_array(json: text) -> [Message]:
             break
         if ch == "{":
             val obj = _extract_object_at(json, i)
-            print("PROBE obj.len=" + obj.len().to_text() + " obj=[" + obj + "]")
-            val raw_content = extract_json_string(obj, "content")
-            print("PROBE raw_content.len=" + raw_content.len().to_text() + " raw_content=[" + raw_content + "]")
             val role = _extract_json_string_unescaped(obj, "role")
-            val content = _json_unescape(raw_content)
-            print("PROBE content.len=" + content.len().to_text() + " content=[" + content + "]")
+            val content = _extract_json_string_unescaped(obj, "content")
             msgs = msgs + [Message(role: role, content: content)]
             i = i + obj.len()
         else:
@@ -158,7 +213,7 @@ fn session_from_json(raw: text) -> Session:
         model: _extract_json_string_unescaped(raw, "model"),
         provider_session_id: _extract_json_string_unescaped(raw, "provider_session_id"),
         messages: parse_messages_array(raw),
-        updated_at_ms: extract_json_int(raw, "updated_at_ms")
+        updated_at_ms: _extract_json_int(raw, "updated_at_ms")
     )
 
 # ============================================================================
