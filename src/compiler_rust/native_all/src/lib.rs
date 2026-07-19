@@ -25,7 +25,8 @@ pub use simple_driver;
 use spl_hosted_runtime as _;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -1118,17 +1119,31 @@ pub extern "C" fn __rt_btreemap_last_key(handle: i64) -> i64 {
 // NOT redefined here (duplicate symbols fail the macOS link). Only shims the
 // runtime lacks remain below.
 
+fn atomic_write_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn atomic_write_file(path: &Path, content: &[u8]) -> bool {
+    let parent = atomic_write_parent(path);
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
+        return false;
+    };
+    if temp.write_all(content).is_err() || temp.as_file().sync_all().is_err() {
+        return false;
+    }
+    temp.persist(path).is_ok()
+}
+
 #[no_mangle]
 pub extern "C" fn rt_file_atomic_write(path: i64, content: i64) -> i64 {
-    // Fall back to normal write
-    if let (Some(p), Some(c)) = (stub_extract_path(path), stub_extract_path(content)) {
-        if std::fs::write(&p, &c).is_ok() {
-            1
-        } else {
-            0
-        }
-    } else {
-        0
+    match (stub_extract_path(path), stub_extract_path(content)) {
+        (Some(path), Some(content)) if atomic_write_file(Path::new(&path), content.as_bytes()) => 1,
+        _ => 0,
     }
 }
 
@@ -2119,3 +2134,20 @@ mod tests {
         assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }
+    #[test]
+    fn atomic_write_file_replaces_complete_content_and_fails_closed() {
+        assert_eq!(atomic_write_parent(Path::new("state.txt")), Path::new("."));
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("state.txt");
+        std::fs::write(&target, b"old").unwrap();
+
+        assert!(atomic_write_file(&target, b"complete replacement"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
+
+        let occupied = dir.path().join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+        assert!(!atomic_write_file(&occupied, b"must not replace a directory"));
+        assert!(occupied.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+    }

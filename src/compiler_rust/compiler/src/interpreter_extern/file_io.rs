@@ -309,44 +309,31 @@ pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Atomically write text to file (write to temp, then rename)
-///
-/// This provides atomic writes by:
-/// 1. Writing content to a temporary file (.tmp suffix)
-/// 2. Atomically renaming the temp file to the target path
-///
-/// This ensures that readers never see partial writes, and the operation
-/// is all-or-nothing. On POSIX systems, rename is atomic.
-///
-/// Note: This does NOT provide file locking. For concurrent access,
-/// use a higher-level API with locking (e.g., Database<T>).
+fn atomic_write_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn atomic_write_file(path: &Path, content: &[u8]) -> bool {
+    let parent = atomic_write_parent(path);
+    if fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
+        return false;
+    };
+    if temp.write_all(content).is_err() || temp.as_file().sync_all().is_err() {
+        return false;
+    }
+    temp.persist(path).is_ok()
+}
+
+/// Atomically write text to a file through a same-directory unique temp file.
 pub fn rt_file_atomic_write(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let content = extract_content(args, 1)?;
-
-    // Create parent directories if needed
-    if let Some(parent) = Path::new(&path).parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return Ok(Value::Bool(false));
-        }
-    }
-
-    // Write to temporary file
-    let temp_path = format!("{}.tmp", path);
-    match fs::write(&temp_path, &content) {
-        Ok(_) => {
-            // Atomically rename temp to target
-            match fs::rename(&temp_path, &path) {
-                Ok(_) => Ok(Value::Bool(true)),
-                Err(_) => {
-                    // Cleanup temp file on failure
-                    let _ = fs::remove_file(&temp_path);
-                    Ok(Value::Bool(false))
-                }
-            }
-        }
-        Err(_) => Ok(Value::Bool(false)),
-    }
+    Ok(Value::Bool(atomic_write_file(Path::new(&path), content.as_bytes())))
 }
 
 /// Copy file
@@ -1013,6 +1000,34 @@ mod tests {
         assert_eq!(first, Value::Int(3));
         assert_eq!(second, Value::Int(3));
         assert_eq!(std::fs::read_to_string(path).expect("read"), "abcdef");
+    }
+
+    #[test]
+    fn atomic_write_replaces_complete_content_and_fails_closed() {
+        assert_eq!(atomic_write_parent(Path::new("state.txt")), Path::new("."));
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("state.txt");
+        std::fs::write(&target, b"old").unwrap();
+        let result = rt_file_atomic_write(&[
+            Value::text(target.to_string_lossy().to_string()),
+            Value::text("complete replacement".to_string()),
+        ])
+        .unwrap();
+
+        assert_eq!(result, Value::Bool(true));
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
+
+        let occupied = dir.path().join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+        let failed = rt_file_atomic_write(&[
+            Value::text(occupied.to_string_lossy().to_string()),
+            Value::text("must not replace a directory".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(failed, Value::Bool(false));
+        assert!(occupied.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
     }
 
     #[test]
