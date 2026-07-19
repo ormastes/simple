@@ -1,6 +1,6 @@
 # interpreter BDD omitted structured test evidence
 
-**Status:** PRODUCER FIXED / PURE-SIMPLE CONSUMER DEPLOYMENT PENDING  
+**Status:** PRODUCER FIXED / PURE-SIMPLE CONSUMER DEPLOYMENT PENDING
 **Severity:** P1 — `--assert-ran` could not authenticate interpreter results
 
 ## Root cause

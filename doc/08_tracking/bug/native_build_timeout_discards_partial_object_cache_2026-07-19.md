@@ -1,7 +1,7 @@
 # native-build timeout discards successfully compiled object cache
 
-**Status:** NO-MANGLE SOURCE FIXED / DEPLOY QUALIFICATION PENDING  
-**Severity:** P1 — prevents bounded incremental builds from converging  
+**Status:** NO-MANGLE SOURCE FIXED / DEPLOY QUALIFICATION PENDING
+**Severity:** P1 — prevents bounded incremental builds from converging
 **Owner:** `src/compiler_rust/compiler/src/pipeline/native_project/`
 
 ## Reproduction

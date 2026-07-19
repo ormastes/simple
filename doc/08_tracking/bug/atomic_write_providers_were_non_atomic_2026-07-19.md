@@ -1,6 +1,6 @@
 # atomic-write providers were non-atomic
 
-**Status:** SOURCE FIXED / NATIVE-ALL EXECUTION PENDING  
+**Status:** SOURCE FIXED / NATIVE-ALL EXECUTION PENDING
 **Severity:** P1 — interrupted lint, formatter, runner, or doc writes could lose data
 
 ## Root cause
