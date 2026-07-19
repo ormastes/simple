@@ -2,7 +2,8 @@
 
 Source: `test/03_system/app/tooling/feature/pure_simple_tool_infra_hardening_spec.spl`
 
-Status: Implemented, production qualification blocked by deployed seed runtime
+Status: Manually synchronized source contract; generated evidence awaits an
+admitted current Stage 4 runtime
 
 ## Purpose
 
@@ -24,6 +25,10 @@ Test child failure is authoritative. Parsed summaries can explain a failure but
 cannot erase it. Multiple sibling test groups must all execute, nested daemon
 runs bypass the owning serial daemon, and CLI outcomes distinguish assertion,
 usage, internal, empty-discovery, and timeout/resource failures.
+The implemented interpreter paths exchange exact `simple-bdd-v1` passed/failed
+counts through `SIMPLE_TEST_RESULT_FILE`. Missing, malformed, zero-executed,
+pending-only, or stdout-forged evidence fails; other modes are not yet
+authenticated release evidence.
 The interpreter wrapper compares authored and reported example counts when no
 filter is active. Checker global flags and the pure-Simple `gen-lean` worker are
 deadline-bound; `gen-lean` never dispatches back into itself.
@@ -49,6 +54,8 @@ focused lint remains scoped. MCP performance lint fails closed until its
 per-source rules have a production repository-scanner owner; it no longer
 delegates to the inert `build lint` compatibility route. `check` truthfully promises parse/validation only
 until full type inference has an enforcing implementation.
+Lint JSON mode is JSON Lines only, `--fix-dry-run` does not imply mutation, and
+write failure from the canonical atomic-file owner keeps the command nonzero.
 
 ## Reject unsafe paths and stale fallbacks
 
@@ -58,6 +65,13 @@ data and cannot execute a command. One canonical benchmark provides real
 result, persistence, and cache assertions. Cosine comparison progress uses an
 unknown-total count and the shared time throttle; it never treats every
 candidate pair as a completed phase.
+Line windows use canonical `lines()` semantics, and cosine refinement
+canonicalizes occurrence sets before totals so terminal newlines and repeated
+exact groups cannot inflate the report.
+
+Incremental native-cache keys include the effective backend and optimization
+level. Only dependency-independent `no_mangle` objects may publish atomically
+during a failed batch; mangled objects wait for whole-batch success.
 
 MCP and LSP launchers select validated cached native artifacts. A missing or
 failed native probe is an explicit failure, never permission to run source,
@@ -85,10 +99,12 @@ an argv vector, so qualification never silently switches to deployed tooling.
 ## Gate essential tools on the fresh Stage 4 CLI
 
 The bootstrap gate uses one exact, absolute Stage 4 candidate from a temporary
-non-repository working directory. “Run the fresh test runner sanity” calibrates
-green, assertion-failing, and empty suites. “Run the fresh lint sanity” checks
+non-repository working directory and fails closed if no timeout utility exists.
+“Run the fresh test runner sanity” calibrates green, assertion-failing,
+zero-executed, and stdout-forged suites. “Run the fresh lint sanity” checks
 one clean file and one `STUB003` denial. “Run the fresh duplicate checker
-sanity” requires clean JSON and the deterministic one-group/two-occurrence/
+sanity” uses an above-threshold clean fixture and requires clean JSON plus the
+deterministic one-group/two-occurrence/
 ten-line clone result. Only all three markers plus the aggregate marker pass;
 raw-source, seed, wrapper, stale-binary, and fallback paths are rejected.
 

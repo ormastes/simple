@@ -20,7 +20,6 @@ debug fallbacks.
 use std.spec.*
 use std.io_runtime.{env_get}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -35,7 +34,7 @@ fn qualification_binary() -> text:
     "bin/simple"
 
 fn qualification_runtime_identity() -> text:
-    val (out, err, code) = rt_process_run(qualification_binary(), ["--version"])
+    val (out, err, code) = rt_process_run_timeout(qualification_binary(), ["--version"], 30000)
     val identity = out + err
     if code != 0:
         return "unrunnable"
@@ -72,11 +71,19 @@ fn qualification_source_contract(path: text, required: [text], forbidden: [text]
             return "forbidden:{marker}"
     "safe"
 
+fn qualification_no_placeholders(path: text) -> text:
+    val source = rt_file_read_text(path)
+    if source == "": return "missing"
+    val markers = ["pass_" + "todo(", "expect(true)" + ".to_equal(true)", "assert(" + "false)"]
+    for marker in markers:
+        if source.contains(marker): return "placeholder:{marker}"
+    "safe"
+
 fn qualification_hostile_path_probe() -> text:
     val root = "build/qualification-duplicate;touch build/qualification-pwned #"
     val sentinel = "build/qualification-pwned"
     val setup = "rm -rf '" + root + "' '" + sentinel + "'; mkdir -p '" + root + "'; printf 'fn alpha(): 1\nfn beta(): 1\n' > '" + root + "/fixture.spl'"
-    val (_setup_out, _setup_err, setup_code) = rt_process_run("/bin/sh", ["-c", setup])
+    val (_setup_out, _setup_err, setup_code) = rt_process_run_timeout("/bin/sh", ["-c", setup], 30000)
     if setup_code != 0:
         return "setup-failed"
     val (_out, _err, _code) = rt_process_run_timeout(qualification_binary(), ["duplicate-check", root], 30000)
@@ -140,7 +147,7 @@ fn qualification_measure_warm(args: [text]) -> i64:
     samples[18]
 
 describe "Pure-Simple tool and infrastructure hardening":
-    it "REQ-001 REQ-002 REQ-011 admits only a truthful production runtime and inventory":
+    it "REQ-001 REQ-002 REQ-011 NFR-003 NFR-011 NFR-012 admits only a truthful production runtime and inventory":
         step("Admit a pure-Simple production runtime")
         expect(qualification_runtime_identity()).to_equal("pure-simple")
         expect(qualification_source_contract(
@@ -167,8 +174,11 @@ describe "Pure-Simple tool and infrastructure hardening":
             ["g_command_count = 53", "g_simple_impl_count = 53"]
         )).to_equal("safe")
 
-    it "REQ-003 through REQ-006 REQ-009 REQ-010 REQ-014 preserves developer-tool failures":
+    it "REQ-003 through REQ-006 REQ-009 REQ-010 REQ-014 NFR-002 NFR-004 preserves developer-tool failures":
         step("Run truth-preserving developer tools")
+        expect(qualification_no_placeholders(
+            "test/03_system/app/tooling/feature/pure_simple_tool_infra_hardening_spec.spl"
+        )).to_equal("safe")
         expect(qualification_source_contract(
             "src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl",
             ["exit_code != 0", "timeout"],
@@ -234,6 +244,61 @@ describe "Pure-Simple tool and infrastructure hardening":
             [],
             ["fn cli_run_lint", "fn cli_run_fmt", "fn cli_run_fix"]
         )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/lib/nogc_sync_mut/spec.spl",
+            ["SIMPLE_TEST_RESULT_FILE", "simple-bdd-v1", "_write_test_result_evidence()"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl",
+            ["read_structured_test_evidence", "make_result_from_structured_evidence", "simple-bdd-v1"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/app/test_runner_new/test_runner_single.spl",
+            ["read_test_result_evidence", "SIMPLE_TEST_RESULT_FILE", "simple-bdd-v1"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/app/io/_CliCommands/handler_commands.spl",
+            ["--test-result-file=", "SIMPLE_TEST_RESULT_FILE"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl",
+            ["--test-result-file={evidence_path}", "make_result_from_structured_evidence", "file_delete(evidence_path)"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl",
+            ["--fix-dry-run", "file_atomic_write", "apply_collected_fixes"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/runtime/runtime_native.c",
+            ["rt_file_atomic_write(int64_t path_value", "O_EXCL", "fsync(fd)", "rename(temp_path, path)"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/lib/nogc_sync_mut/io/file_ops.spl",
+            ["rt_file_atomic_write(path, content)"],
+            ["fn file_atomic_write(path: text, content: text) -> bool:\n    file_delete(path)"]
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/compiler_rust/compiler/src/interpreter_extern/file_io.rs",
+            ["NamedTempFile::new_in(parent)", "sync_all()", "temp.persist(path)"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/compiler_rust/native_all/src/lib.rs",
+            ["NamedTempFile::new_in(parent)", "sync_all()", "temp.persist(path)"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "test/01_unit/runtime/runtime_native_focus_test.c",
+            ["rt_file_atomic_write(text(atomic_path)", "replacement", "missing_path"],
+            []
+        )).to_equal("safe")
         expect(qualification_exit_class(0)).to_equal("pass")
         expect(qualification_exit_class(1)).to_equal("assertion_failure")
         expect(qualification_exit_class(2)).to_equal("usage_error")
@@ -241,7 +306,7 @@ describe "Pure-Simple tool and infrastructure hardening":
         expect(qualification_exit_class(4)).to_equal("empty_discovery")
         expect(qualification_exit_class(124)).to_equal("timeout_resource")
         val (_outcome_out, _outcome_err, outcome_code) = rt_process_run_timeout(
-            "sh", ["scripts/check/check-test-runner-outcome-exits.shs"], 90000)
+            "sh", ["scripts/check/check-test-runner-outcome-exits.shs"], 30000)
         expect(outcome_code).to_equal(0)
         expect(qualification_source_contract(
             "scripts/check/check-test-runner-outcome-exits.shs",
@@ -268,11 +333,11 @@ describe "Pure-Simple tool and infrastructure hardening":
         expect(fix_code).to_equal(0)
         expect(qualification_termination_probe()).to_equal("safe")
 
-    it "REQ-003 REQ-007 REQ-009 REQ-010 gates essential tools on the fresh Stage 4 CLI":
+    it "REQ-003 REQ-007 REQ-009 REQ-010 NFR-004 gates essential tools on the fresh Stage 4 CLI":
         step("Run the fresh test runner sanity")
         expect(qualification_source_contract(
             "scripts/check/check-bootstrap-essential-tools-smoke.shs",
-            ["run_probe test_runner_pass 0", "run_probe test_runner_fail 1", "run_probe test_runner_empty 1", "essential_test_runner_smoke=true"],
+            ["error=timeout_command_missing", "run_probe test_runner_pass 0", "run_probe test_runner_fail 1", "run_probe test_runner_empty 1", "run_probe test_runner_forged 1", "essential_test_runner_smoke=true"],
             ["src/compiler_rust", "|| true"]
         )).to_equal("safe")
         step("Run the fresh lint sanity")
@@ -284,7 +349,7 @@ describe "Pure-Simple tool and infrastructure hardening":
         step("Run the fresh duplicate checker sanity")
         expect(qualification_source_contract(
             "scripts/check/check-bootstrap-essential-tools-smoke.shs",
-            ["run_probe duplicate_clean 0", "run_probe duplicate_found 1", "\"total_groups\": 1", "\"total_occurrences\": 2", "\"total_lines\": 10", "essential_duplicate_checker_smoke=true", "bootstrap_essential_tools_smoke=true"],
+            ["test/fixtures/duplication/clean_pair", "--no-default-excludes", "run_probe duplicate_clean 0", "run_probe duplicate_found 1", "\"total_groups\": 1", "\"total_occurrences\": 2", "\"total_lines\": 10", "essential_duplicate_checker_smoke=true", "bootstrap_essential_tools_smoke=true"],
             ["bin/simple duplicate-check", "src/compiler/90.tools/duplicate_check/main.spl"]
         )).to_equal("safe")
         expect(qualification_source_contract(
@@ -298,7 +363,7 @@ describe "Pure-Simple tool and infrastructure hardening":
             ["cli_run_file(\"src/compiler/90.tools/duplicate_check/main.spl\""]
         )).to_equal("safe")
 
-    it "REQ-007 REQ-008 REQ-012 REQ-013 rejects unsafe paths and stale fallbacks":
+    it "REQ-007 REQ-008 REQ-012 REQ-013 NFR-001 NFR-008 NFR-010 NFR-012 rejects unsafe paths and stale fallbacks":
         step("Reject unsafe paths and stale fallbacks")
         expect(qualification_source_contract(
             "src/compiler/90.tools/duplicate_check/detector_files.spl",
@@ -322,13 +387,23 @@ describe "Pure-Simple tool and infrastructure hardening":
         )).to_equal("safe")
         expect(qualification_source_contract(
             "src/compiler/90.tools/duplicate_check/_Detector/similarity_grouping.spl",
-            ["progress_tick(config, \"compare pass\", comparison_count, 0, start_ms, last_ms)"],
+            ["progress_tick(config, \"compare pass\", comparison_count, 0, start_ms, last_ms)", "group_occurrence_key", "source.lines()"],
             ["comparison_count, comparison_count, start_ms"]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "src/compiler/90.tools/duplicate_check/_Detector/interner_and_logging.spl",
-            ["val count_text = if total > 0:", r"[dupcheck] {phase}: {count_text} elapsed="],
+            ["val count_text = if total > 0:", r"[dupcheck] {phase}: {count_text} elapsed=", "source.lines()"],
             [r"{done}/{total} ({pct}%) elapsed="]
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/compiler_rust/compiler/src/pipeline/native_project/compiler.rs",
+            ["persist_compiled_object", "temp.persist(cache_path)", "no_mangle"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/compiler_rust/compiler/src/pipeline/native_project/mod.rs",
+            ["effective_backend", "SIMPLE_BACKEND", "opt_level"],
+            []
         )).to_equal("safe")
         expect(qualification_source_contract(
             "scripts/audit/fast_duplicate_check.spl",
@@ -399,11 +474,11 @@ describe "Pure-Simple tool and infrastructure hardening":
         expect(qualification_source_contract(
             "test/05_perf/duplicate_check_benchmark_spec.spl",
             ["run_benchmark"],
-            ["expect(true).to_equal(true)"]
+            ["expect(true)." + "to_equal(true)"]
         )).to_equal("safe")
         expect(qualification_daemon_cache_probe()).to_equal("safe")
 
-    it "REQ-015 and NFR-004 through NFR-012 retain measurable qualification evidence":
+    it "REQ-015 and NFR-005 through NFR-009 retain measurable qualification evidence":
         step("Measure warm tooling budgets")
         expect(qualification_measure_warm(["check", "test/fixtures/pure_simple_tooling/clean.spl"])).to_be_less_than(2000)
         expect(qualification_measure_warm(["lint", "test/fixtures/pure_simple_tooling/clean.spl"])).to_be_less_than(2000)
@@ -412,7 +487,7 @@ describe "Pure-Simple tool and infrastructure hardening":
         expect(qualification_source_contract(
             "scripts/check/check-test-runner-rss-batch.shs",
             ["TEST_RUNNER_RSS_FILE_COUNT:-500", "--batch-size=", "Batch worker: pid=", "parent_max_rss_kib", "expected_examples=$(( FILE_COUNT * 2 ))"],
-            ["expect(true).to_equal(true)"]
+            ["expect(true)." + "to_equal(true)"]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "scripts/check/check-mcp-lsp-nfr-evidence.shs",

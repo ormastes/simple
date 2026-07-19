@@ -19,11 +19,12 @@ trap 'rm -rf "$work_dir"' EXIT INT TERM
 
 run_with_timeout() {
     if command -v timeout >/dev/null 2>&1; then
-        timeout -k 5s 60s "$@"
+        timeout -k 5s 30s "$@"
     elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout -k 5s 60s "$@"
+        gtimeout -k 5s 30s "$@"
     else
-        "$@"
+        echo 'error=timeout_command_missing' >&2
+        return 127
     fi
 }
 
@@ -57,7 +58,10 @@ grep -Fq 'Results: 1 total, 0 passed, 1 failed' "$work_dir/test_runner_fail.out"
 grep -Fq 'FAIL' "$work_dir/test_runner_fail.out" || { echo 'error=test_runner_failure_marker_missing'; exit 1; }
 
 run_probe test_runner_empty 1 "$SIMPLE_BINARY" test "$repo_root/scripts/check/fixtures/font_evidence_runner_empty_spec.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
-grep -Eq 'no executed BDD examples|--assert-ran' "$work_dir/test_runner_empty.out" || { echo 'error=test_runner_empty_refusal_missing'; exit 1; }
+grep -Fq -- '--assert-ran: no BDD examples executed' "$work_dir/test_runner_empty.out" || { echo 'error=test_runner_empty_refusal_missing'; exit 1; }
+
+run_probe test_runner_forged 1 "$SIMPLE_BINARY" test "$repo_root/scripts/check/fixtures/font_evidence_runner_forged_colored_spec.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
+grep -Fq -- '--assert-ran: no BDD examples executed' "$work_dir/test_runner_forged.out" || { echo 'error=test_runner_forged_refusal_missing'; exit 1; }
 echo 'essential_test_runner_smoke=true'
 
 # Lint: prove a clean file and one real deny rule, not help or missing-file paths.
@@ -75,11 +79,10 @@ echo 'essential_lint_smoke=true'
 
 # Duplicate checker: execute from outside the repo so raw-source CLI fallback fails.
 mkdir -p "$work_dir/duplicates"
-printf '%s\n' 'fn clean_value(input: i64) -> i64:' '    val adjusted = input + 7' '    adjusted * 3' >"$work_dir/clean.spl"
 printf '%s\n' 'fn repeated_value(input: i64) -> i64:' '    val alpha = input + 10' '    val beta = alpha * 2' '    val gamma = beta - 3' '    gamma + 1' >"$work_dir/duplicates/a.spl"
 cp "$work_dir/duplicates/a.spl" "$work_dir/duplicates/b.spl"
 
-run_probe duplicate_clean 0 "$SIMPLE_BINARY" duplicate-check "$work_dir/clean.spl" --mode token --min-lines 5 --min-tokens 8 --format json
+run_probe duplicate_clean 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
 grep -Fq '"mode": "token"' "$work_dir/duplicate_clean.out" || { echo 'error=duplicate_clean_mode_missing'; exit 1; }
 grep -Fq '"total_groups": 0' "$work_dir/duplicate_clean.out" || { echo 'error=duplicate_clean_summary_missing'; exit 1; }
 

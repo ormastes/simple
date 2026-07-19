@@ -59,6 +59,8 @@ markers. Raw-source execution, a deployed wrapper, Rust seed, stale artifact,
 or disabled stub-fallback guard is not equivalent evidence. Treat this as
 post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates.
+Authenticated interpreter `--assert-ran` requires canonical `simple-bdd-v1`
+evidence; stdout summaries or colored pass markers are never execution proof.
 
 If a stale deployed pure-Simple test runner crashes during repair, temporary
 Rust-runner evidence may use only the explicit `SIMPLE_TEST_RUNNER_RUST=1`

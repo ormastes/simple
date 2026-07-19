@@ -65,6 +65,21 @@ The client must detect stale or dead daemon state, replace the stale lock/PID,
 and keep `test-daemon start/status/stop` available through pure Simple
 entrypoints. A stale daemon lock must not force users to clean files manually.
 
+For the implemented interpreter paths, `--assert-ran` requires an exact private
+`SIMPLE_TEST_RESULT_FILE` payload: `simple-bdd-v1`, passed count, failed count,
+and one final newline. Counts are canonical nonnegative integers; missing,
+malformed, or zero-executed evidence fails. Stdout is presentation, never test
+evidence. Other execution modes are not yet authenticated release evidence.
+
+## Mutation and cache safety
+
+Lint JSON mode emits JSON Lines only. `--fix-dry-run` is independent of
+`--fix`; applied fixes use the canonical atomic-write facade and a failed write
+keeps the command nonzero. Native object-cache keys include optimization level
+and effective backend. Dependency-independent `no_mangle` objects may publish
+atomically during a failed batch; mangled objects publish only after the whole
+batch succeeds.
+
 ## Resource Guard
 
 Tooling must avoid default-output floods, unbounded child process output,
@@ -103,7 +118,7 @@ not production evidence.
 Every bootstrap route that produces a Stage 4 full CLI runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` with the exact fresh
 binary. From a temporary non-repository working directory it checks real
-test-runner pass/fail/empty outcomes, focused lint pass/deny outcomes, and
+test-runner pass/fail/zero/forged outcomes, focused lint pass/deny outcomes, and
 duplicate-check clean/exact-clone JSON outcomes. The aggregate is bounded,
 sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed; a deployed wrapper, raw
 source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
