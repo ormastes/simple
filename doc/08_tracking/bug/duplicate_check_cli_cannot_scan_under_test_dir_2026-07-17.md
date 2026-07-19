@@ -6,9 +6,8 @@
   `src/compiler/90.tools/duplicate_check/detector_files.spl`
   (`matches_detector_exclude`).
 - **Severity:** low (usability gap, not a detection-correctness bug).
-- **Status:** open — recorded per repo rule against silently working around
-  gaps; found while building CLI contract tests for `duplicate-check`
-  (task: worker_O_dup_sanity).
+- **Status:** fixed in source; production CLI verification awaits an admitted
+  Stage 4 artifact.
 
 ## Symptom
 
@@ -35,26 +34,9 @@ Practical consequence: a user cannot run `simple duplicate-check` against
 their own test suite (a legitimate use case — finding copy-pasted test
 boilerplate) without editing a config file first.
 
-## Not fixed here
-
-Scope for this task was the `duplicate-check` detection/scoring logic and
-its CLI *contract* (via `src/app/cli/duplicate_check.spl` /
-`test/**`), not `main.spl`'s argument surface. Per repo rule ("when a
-workaround would be needed, fix it or record it"), recording this instead of
-adding an ad hoc flag. The system contract spec for this task
-(`test/03_system/app/cli/duplicate_check_contract_spec.spl`) works around it
-by copying the fixtures to a scratch directory outside any `test/` segment
-before invoking the CLI, mirroring the existing pattern in
-`test/03_system/infrastructure/app_io_mod_source_run_spec.spl`.
-
-## Suggested fix (not implemented)
-
-Add a `--no-default-excludes` (or `--exclude-reset`) flag to `main.spl`'s
-`parse_args` that clears `config.exclude_patterns` before applying
-`--exclude` additions from the command line — analogous to `--no-ignore` in
-common file-search tools. Small, backward compatible, does not change
-default behavior.
-
 ## Resolution (2026-07-17)
 
-FIXED (haiku fix lane F4, opus-reviewed APPROVE, static verification only — tool unreachable by working harness): --no-default-excludes flag added to parse_args + help text; exact-match arm, no prefix shadowing of --exclude=.
+`--no-default-excludes` now clears the default patterns before later
+`--exclude` additions. Parsing uses an exact-match arm, so it cannot be
+shadowed by the `--exclude=` prefix. Production verification still awaits an
+admitted Stage 4 CLI.

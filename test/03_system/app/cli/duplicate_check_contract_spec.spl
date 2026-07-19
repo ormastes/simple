@@ -6,12 +6,9 @@
 # a native subcommand; the dispatch table only wires it up on the
 # self-hosted binary).
 #
-# Note: default_config()'s exclude_patterns include "test/", which makes the
-# CLI report 0 files for ANY path under a test/ directory (see
-# doc/08_tracking/bug/duplicate_check_cli_cannot_scan_under_test_dir_2026-07-17.md).
-# So this spec copies the fixtures to a scratch directory outside test/
-# before invoking the CLI, mirroring the existing pattern in
-# test/03_system/infrastructure/app_io_mod_source_run_spec.spl.
+# The duplicated fixture stays under test/ so this contract also proves that
+# --no-default-excludes reaches the scanner instead of silently scanning zero
+# files.
 
 use std.nogc_sync_mut.io.process_ops.{shell, ProcessResult}
 
@@ -23,17 +20,14 @@ fn stage_fixture(scratch_dir: text, fixture_dir: text) -> i64:
     val result = shell("rm -rf {scratch_dir} && mkdir -p {scratch_dir} && cp {fixture_dir}/*.spl {scratch_dir}/")
     result.exit_code
 
-fn run_duplicate_check(simple: text, scratch_dir: text) -> ProcessResult:
-    val cmd = "timeout 60 {simple} run src/compiler/90.tools/duplicate_check/main.spl -- {scratch_dir} --mode token --min-tokens 10 --min-lines 5 --max-allowed 0"
+fn run_duplicate_check(simple: text, path: text) -> ProcessResult:
+    val cmd = "timeout 60 {simple} run src/compiler/90.tools/duplicate_check/main.spl -- {path} --no-default-excludes --mode token --min-tokens 10 --min-lines 5 --max-allowed 0"
     shell(cmd)
 
 describe "duplicate-check CLI contract":
-    it "detects the duplicated pair in a scratch copy of dup_pair (nonzero exit)":
+    it "scans an excluded fixture when --no-default-excludes is set":
         val simple = simple_binary()
-        val scratch_dir = "/tmp/duplicate_check_contract_dup_pair"
-        expect(stage_fixture(scratch_dir, "test/fixtures/duplication/dup_pair")).to_equal(0)
-
-        val result = run_duplicate_check(simple, scratch_dir)
+        val result = run_duplicate_check(simple, "test/fixtures/duplication/dup_pair")
 
         # Bounded-time: `timeout 60` kills a runaway process with exit code
         # 124. On these two tiny fixture files, the token-mode scan must

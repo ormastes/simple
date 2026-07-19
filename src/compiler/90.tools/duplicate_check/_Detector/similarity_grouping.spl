@@ -274,6 +274,12 @@ fn build_similarity_groups(adjacency: {text: [i64]}, blocks_to_analyze: [Duplica
 
     groups
 
+fn group_occurrence_key(group: DuplicateGroup) -> text:
+    var key = ""
+    for block in group.blocks:
+        key = key + "{block.file.len()}:{block.file}:{block.line_start}:{block.line_end};"
+    key
+
 fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
     val blocks_to_analyze = sample_blocks_for_similarity(all_blocks, config)
@@ -282,10 +288,15 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     val similarity_groups = build_similarity_groups(adjacency, blocks_to_analyze, config)
 
     var refined_groups = []
+    var seen_occurrences: {text: bool} = {}
     for group in exact_groups:
         refined_groups.push(group)
+        seen_occurrences[group_occurrence_key(group)] = true
     for group in similarity_groups:
-        refined_groups.push(group)
+        val occurrence_key = group_occurrence_key(group)
+        if not seen_occurrences.has(occurrence_key):
+            refined_groups.push(group)
+            seen_occurrences[occurrence_key] = true
     refined_groups
 
 fn parse_idx(value: text) -> i64:
@@ -354,7 +365,7 @@ fn collect_cheap_line_window_candidates(files: [text], config: DuplicationConfig
 
     for file in files:
         val source = read_detector_source(file)
-        val lines = source.split("\n")
+        val lines = source.lines()
         val signal_prefix = signal_line_prefix(source, config)
         if lines.len() < window:
             continue

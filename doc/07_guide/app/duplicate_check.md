@@ -49,6 +49,11 @@ The compatibility aliases `--semantic` and `--cosine` are still accepted. Lexica
 - `--min-impact`
 - `--similarity-threshold`
 
+Use `--no-default-excludes` when the requested scan root is itself under a
+normally excluded directory such as `test/`. Normal newline-terminated source
+is counted by logical lines; the terminal split artifact is not a candidate
+line or duplicate window.
+
 ---
 
 ## Progress And Resource Usage
