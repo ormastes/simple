@@ -2429,31 +2429,14 @@ impl MirLowering:
         "str"), reusing Bug #136's string-interpolation coercion scheme (see
         `lower_string_interpolation` in expr_dispatch.spl). A string operand
         (Opaque "str") passes straight through rt_interp_cstr unchanged. A
-        non-string operand (e.g. an i64) is first rendered to a decimal
-        string via rt_raw_i64_to_string (a tagged heap string), which
-        rt_interp_cstr then unwraps to its char* buffer. Used by the
-        bootstrap `.join()` fix (Task #145) to normalize array-literal
+        non-string operand is first rendered through the shared scalar text
+        conversion path, then rt_interp_cstr unwraps the tagged result to its
+        char* buffer. Used by string interpolation and the bootstrap `.join()`
+        fix (Task #145) to normalize array-literal
         elements and the separator to the raw char* representation
         `emit_raw_strcat`/rt_strcat expects.
         """
-        var is_str = false
-        if val ty = self.local_mir_type_of(local):
-            match ty.kind:
-                case MirTypeKind.Opaque(ty_name):
-                    if ty_name == "str":
-                        is_str = true
-                case _: ()
-        var cstr_src = mir_operand_copy(local)
-        if not is_str:
-            val num_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_raw_i64_to_string"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-            ))
-            var b_num = self.builder
-            val num_res = b_num.emit_call(num_op, [mir_operand_copy(local)], MirType.i64())
-            self.builder = b_num
-            if val num_local = num_res:
-                cstr_src = mir_operand_copy(num_local)
+        val cstr_src = self.coerce_concat_operand(local)
         val cstr_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_interp_cstr"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
@@ -3274,7 +3257,10 @@ impl MirLowering:
                 Some(MirConstValue.Float(value))
             case BoolLit(value):
                 Some(MirConstValue.Bool(value))
-            case StringLit(value, _):
+            case StringLit(value, interps):
+                if val parts = interps:
+                    if parts.len() > 0:
+                        return nil
                 Some(MirConstValue.Str(value))
             case _:
                 nil

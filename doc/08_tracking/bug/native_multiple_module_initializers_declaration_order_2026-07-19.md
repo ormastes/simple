@@ -37,14 +37,18 @@ global is read through `LoadGlobal`. Equal synthetic
 spans exercise the symbol-ID tie-break. Current-source native execution
 awaits the next incremental self-hosted compiler candidate.
 
-## Open follow-up: interpolated string globals
+## Interpolated string globals
 
-`lower_const_expr` currently folds every `StringLit`, including a literal with
-runtime interpolations. A focused follow-up must reproduce a module binding
-such as `val label = "value={runtime_value()}"`, keep it out of compile-time
-constants, and assert that its runtime value is stored and later loaded. This
-change does not broaden string static support because Cranelift currently
-rejects tuple-backed string statics.
+`lower_const_expr` formerly folded every `StringLit`, including a literal with
+runtime interpolations. MIR now keeps plain literals constant but gives an
+interpolated module binding a nil-backed raw-text pointer static and evaluates
+it in the existing ordered initializer. Cranelift admits only `Opaque("str")`
+runtime statics, not tuple-backed strings or other opaque types. Its literal
+segments reuse the existing tagged-or-raw `rt_interp_cstr` normalization before
+raw concatenation, so the pointer stored globally has the same representation
+on LLVM and Cranelift. The shared native fixture checks `value=7` on the hosted,
+FreeBSD, AArch64, and RISC-V64 execution lanes; ARM32, RISC-V32, and Windows
+ARM64 retain their object gates.
 
 The shared cross-target fixture repeats the dependent `4 -> 5 -> 45` startup
 oracle. Existing schedulers execute it with LLVM and Cranelift on FreeBSD,

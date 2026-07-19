@@ -509,6 +509,9 @@ the shared binary — deploys require explicit user go-ahead).
   FreeBSD gates already own that fixture. The cross-target fixture repeats the
   dependent `4 -> 5 -> 45` oracle for AArch64/RV64 LLVM+Cranelift execution and
   ARM32/RV32/Windows-ARM64 object gates. Rebuilt execution remains pending.
+  The same fixture now pins an interpolated `text` global as a runtime raw-text
+  pointer, preserving `value=7` across LLVM and Cranelift without admitting
+  tuple-backed or unrelated opaque statics.
   See `native_multiple_module_initializers_declaration_order_2026-07-19.md`.
 - Cranelift text `.parse_f64()` now uses a Pure-runtime raw-f64 owner and an
   explicit i64-argument/f64-result import signature instead of the generic
