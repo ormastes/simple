@@ -18,6 +18,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_path_absolute(path: text) -> text
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -52,20 +53,21 @@ pub fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:
     path.ends_with("/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl" or module_name == "app.cli.bootstrap_main"
 
 pub fn _driver_module_name_from_path(path: text) -> text:
-    # THREE copies of this derivation exist and MUST stay byte-identical
+    # FOUR copies of this derivation exist and MUST stay byte-identical
     # (lower layers cannot import 80.driver): this one,
     # llvm_module_name_from_entry_path (70.backend _MirToLlvm/core_codegen.spl)
-    # and hir_module_logical_name_from_path (20.hir _Items/module_lowering.spl).
+    # hir_module_logical_name_from_path (20.hir _Items/module_lowering.spl),
+    # and bootstrap_mir_logical_module_name (50.mir bootstrap_globals.spl).
     # 70a29867bc2 changed only this copy; the drift made entry_main_symbol
     # false for every out-of-tree entry -> no __simple_main -> 0/19 matrix.
+    # Explicitly resolved imports may arrive as absolute workspace paths.
+    # Keep module identity repo-relative so temporary/worktree directory names
+    # cannot leak host-path punctuation into native symbols.
     var mod_path = path.replace("\\", "/")
     while mod_path.starts_with("../"):
         mod_path = mod_path.substring(3)
     if mod_path.starts_with("./"):
         mod_path = mod_path.substring(2)
-    # Explicitly resolved imports may arrive as absolute workspace paths.
-    # Keep module identity repo-relative so temporary/worktree directory names
-    # cannot leak '-' or other host-path punctuation into native symbols.
     val absolute_src = mod_path.find("/src/") ?? -1
     if absolute_src >= 0:
         mod_path = mod_path.substring(absolute_src + 5)
@@ -77,8 +79,14 @@ pub fn _driver_module_name_from_path(path: text) -> text:
         mod_path = mod_path.substring(4)
     mod_path = mod_path.replace(".spl", "")
     mod_path = mod_path.replace(".sdn", "")
-    mod_path = mod_path.replace("-", "_")
-    mod_path = mod_path.replace(" ", "_")
+    var portable = ""
+    for ch in mod_path:
+        val keep = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "." or ch == "/"
+        if keep:
+            portable = portable + ch
+        else:
+            portable = portable + "_"
+    mod_path = portable
     mod_path.replace("/", ".")
 
 pub fn _driver_canonical_source_path(path: text) -> text:
@@ -149,6 +157,21 @@ pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
             seen = _driver_text_bucket_set_add(seen, key)
             unique = unique.push(source)
     unique
+
+pub fn _driver_module_name_collision(sources: [SourceFile]) -> text:
+    """Return a deterministic diagnostic when distinct files normalize to one module."""
+    var first_paths: Dict<text, text> = {}
+    for source in sources:
+        val path = _driver_canonical_source_path(source.path)
+        if val first = first_paths.get(source.module_name):
+            if first != path:
+                val first_physical = _driver_canonical_source_path(rt_path_absolute(first))
+                val path_physical = _driver_canonical_source_path(rt_path_absolute(path))
+                if first_physical != path_physical:
+                    return "native module name collision after path sanitization: '{first}' and '{path}' both map to '{source.module_name}'; rename one file or directory"
+        else:
+            first_paths[source.module_name] = path
+    ""
 
 pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
     # Entry-closure loading adds the requested import name after resolution.

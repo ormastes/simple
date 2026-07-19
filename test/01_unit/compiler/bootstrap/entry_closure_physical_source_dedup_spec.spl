@@ -1,14 +1,27 @@
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_path_absolute(path: text) -> text
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.driver.driver_source_loading.{
     _driver_canonical_source_path, _driver_module_name_from_path, _driver_unique_physical_sources,
+    _driver_module_name_collision,
     _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
     _driver_collect_sources_via_find, _driver_entry_import_module_paths
 }
+
+fn module_name_normalizer_body(source: text) -> text:
+    val start = source.find("    var mod_path = path.replace(\"\\\\\", \"/\")") ?? -1
+    if start < 0:
+        return ""
+    val tail = source.substring(start)
+    val marker = "    mod_path.replace(\"/\", \".\")"
+    val end = tail.find(marker) ?? -1
+    if end < 0:
+        return ""
+    tail.substring(0, end + marker.len())
 
 describe "entry-closure physical source deduplication":
     it "normalizes aliases to one physical parse source":
@@ -22,9 +35,29 @@ describe "entry-closure physical source deduplication":
         expect(_driver_unique_physical_sources(sources).len()).to_equal(1)
 
     it "keeps absolute workspace punctuation out of native module symbols":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val bootstrap_mir = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
+        val hir = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        val llvm = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
         expect(_driver_module_name_from_path("/private/tmp/simple-main-bootstrap/src/compiler/80.driver/driver.spl")).to_equal("compiler.80.driver.driver")
         expect(_driver_module_name_from_path("/private/tmp/simple-main-bootstrap/examples/10_tooling/trace32_tools/t32_cli/cli_shell.spl")).to_equal("examples.10_tooling.trace32_tools.t32_cli.cli_shell")
         expect(_driver_module_name_from_path("plugins/my-tool/main.spl")).to_equal("plugins.my_tool.main")
+        expect(_driver_module_name_from_path("plugins/tool+kit/naïve@entry.spl")).to_equal("plugins.tool_kit.na_ve_entry")
+        val canonical_body = module_name_normalizer_body(driver)
+        expect(canonical_body == "").to_be(false)
+        expect(module_name_normalizer_body(bootstrap_mir)).to_equal(canonical_body)
+        expect(module_name_normalizer_body(hir)).to_equal(canonical_body)
+        expect(module_name_normalizer_body(llvm)).to_equal(canonical_body)
+
+    it "rejects distinct physical files with one sanitized module name":
+        val dashed = SourceFile(path: "plugins/my-tool/main.spl", content: "", module_name: _driver_module_name_from_path("plugins/my-tool/main.spl"))
+        val underscored = SourceFile(path: "plugins/my_tool/main.spl", content: "", module_name: _driver_module_name_from_path("plugins/my_tool/main.spl"))
+        val same_file = SourceFile(path: "plugins/my-tool/../my-tool/main.spl", content: "", module_name: dashed.module_name)
+        val absolute_same_file = SourceFile(path: rt_path_absolute(dashed.path), content: "", module_name: dashed.module_name)
+
+        expect(_driver_module_name_collision([dashed, underscored])).to_contain("both map to 'plugins.my_tool.main'")
+        expect(_driver_module_name_collision([dashed, same_file])).to_equal("")
+        expect(_driver_module_name_collision([dashed, absolute_same_file])).to_equal("")
 
     it "keeps colliding bucket keys exact and persistent":
         var buckets = _driver_text_bucket_set_new(1)

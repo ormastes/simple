@@ -451,3 +451,14 @@ the shared binary — deploys require explicit user go-ahead).
   hosted interning cannot false-green. Hosted LLVM/Cranelift and AArch64/RV64
   execution are scheduled; ARM32/RV32 remain default-LLVM compile receipts.
   The original x86_64-unknown-none QEMU proof is pending.
+- Module-init symbols now exclude punctuation inherited from absolute or
+  hyphenated source paths in both the pure-Simple bootstrap MIR mirror and the
+  Rust seed's owning module-prefix derivation. The existing hosted native smoke
+  matrix adds a dynamic module-global case under its punctuated work directory.
+  See
+  `native_module_init_symbol_path_sanitization_2026-07-19.md`; the focused LLVM
+  execution passes and the Cranelift initializer failure is tracked separately.
+- Cranelift still rejects a function-initialized module global during semantic
+  lowering with a spurious two-argument arity diagnostic. LLVM passes the same
+  focused case; Cranelift remains a platform-matrix XFAIL tracked by
+  `cranelift_module_global_initializer_arity_2026-07-19.md`.

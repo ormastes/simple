@@ -560,6 +560,36 @@ impl NativeProjectBuilder {
         if files.is_empty() {
             return Err("No .spl files found in source directories".to_string());
         }
+
+        // Reject normalized-name collisions before clean/cache/staging can mutate state.
+        let compile_indices: std::collections::HashSet<usize> = if self.config.entry_closure {
+            (0..files.len()).collect()
+        } else {
+            Self::deduplicate_for_compilation(&files).into_iter().collect()
+        };
+        let mut module_paths: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
+        for (i, (path, _)) in file_sources.iter().enumerate() {
+            if !compile_indices.contains(&i) {
+                continue;
+            }
+            let root = self.effective_source_root_for(path);
+            let prefix = crate::codegen::common_backend::module_prefix_from_path(path, &root);
+            let canonical_path = safe_canonicalize(path);
+            if let Some(first) = module_paths.get(&prefix) {
+                if first != &canonical_path {
+                    return Err(format!(
+                        "native module name collision after path sanitization: '{}' and '{}' both map to '{}'; rename one file or directory",
+                        first.display(),
+                        canonical_path.display(),
+                        prefix
+                    ));
+                }
+            } else {
+                module_paths.insert(prefix, canonical_path);
+            }
+        }
+
         if rust_trace {
             eprintln!("[native-rust-trace] discovered {} file(s)", files.len());
             for (idx, path) in files.iter().take(12).enumerate() {
@@ -602,16 +632,6 @@ impl NativeProjectBuilder {
 
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();
-        // Deduplicate files for compilation (symlink aliases compile once, but
-        // all paths remain in file_sources for import map indexing).
-        let compile_indices: std::collections::HashSet<usize> = if self.config.entry_closure {
-            // Entry-closure discovery already canonicalizes and deduplicates the
-            // reachable file set, so we can compile every discovered file directly.
-            (0..files.len()).collect()
-        } else {
-            Self::deduplicate_for_compilation(&files).into_iter().collect()
-        };
-
         // 4b. Discovery phase (hoisted above the dirty-set determination so the
         // opt-in safe-incremental object cache key can fold in every cross-module
         // codegen input): build the import map for cross-module function

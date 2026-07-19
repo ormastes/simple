@@ -2265,27 +2265,51 @@ impl<M: Module> CodegenBackend<M> {
 ///
 /// The numbered layer prefixes (e.g., `10.`, `70.`) are stripped.
 pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::path::Path) -> String {
-    let relative = file_path.strip_prefix(source_root).unwrap_or(file_path);
+    let stripped = file_path.strip_prefix(source_root);
+    let root_matched = stripped.is_ok();
+    let relative = stripped.unwrap_or(file_path);
+
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let start = if root_matched {
+        0
+    } else if let Some(index) = components.iter().position(|part| part == "src") {
+        index + 1
+    } else {
+        components.iter().position(|part| part == "examples").unwrap_or(0)
+    };
 
     let mut parts = Vec::new();
-    for component in relative.components() {
-        if let std::path::Component::Normal(s) = component {
-            let s = s.to_string_lossy();
-            // Strip .spl extension for the last component
-            let s = s.strip_suffix(".spl").unwrap_or(&s).to_string();
-            // Strip numbered layer prefix (e.g., "10.frontend" -> "frontend")
-            let s = if let Some(dot_pos) = s.find('.') {
-                if s[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                    s[dot_pos + 1..].to_string()
-                } else {
-                    s
-                }
+    for s in components.into_iter().skip(start) {
+        // Strip .spl extension for the last component
+        let s = s.strip_suffix(".spl").unwrap_or(&s).to_string();
+        // Strip numbered layer prefix (e.g., "10.frontend" -> "frontend")
+        let s = if let Some(dot_pos) = s.find('.') {
+            if s[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                s[dot_pos + 1..].to_string()
             } else {
                 s
-            };
-            if !s.is_empty() {
-                parts.push(s);
             }
+        } else {
+            s
+        };
+        let s = s
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        if !s.is_empty() {
+            parts.push(s);
         }
     }
     let prefix = parts.join("__");

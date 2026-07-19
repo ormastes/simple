@@ -501,6 +501,58 @@ fn test_module_prefix_from_path() {
         ),
         "m_01_unit__lib__nogc_async_mut__concurrent_wrappers_spec"
     );
+
+    let punctuation_prefix = module_prefix_from_path(
+        &PathBuf::from("/private/tmp/simple-main-bootstrap/src/app/heap-global.spl"),
+        &PathBuf::from("/unrelated/root"),
+    );
+    assert_eq!(punctuation_prefix, "app__heap_global");
+    assert_eq!(
+        module_prefix_from_path(
+            &PathBuf::from("/private/tmp/simple-main-bootstrap/examples/tool+kit/naïve@entry.spl"),
+            &PathBuf::from("/unrelated/root"),
+        ),
+        "examples__tool_kit__na_ve_entry"
+    );
+    assert!(module_init_symbol(Some(&punctuation_prefix))
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_'));
+}
+
+#[test]
+fn test_native_build_rejects_module_prefix_collision_before_codegen() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src = project_root.join("src");
+    let cache = project_root.join("cache");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    let cache_marker = cache.join("must-survive");
+    std::fs::write(&cache_marker, "owned cache state").unwrap();
+    let dashed = src.join("my-tool.spl");
+    let underscored = src.join("my_tool.spl");
+    std::fs::write(&dashed, "fn dashed() -> i64: 1\n").unwrap();
+    std::fs::write(&underscored, "fn underscored() -> i64: 2\n").unwrap();
+
+    let error = NativeProjectBuilder::new(project_root.clone(), project_root.join("out"))
+        .config(NativeBuildConfig {
+            cache_dir: Some(cache),
+            clean: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src)
+        .build()
+        .expect_err("sanitized module names must not silently alias");
+
+    assert!(error.contains("native module name collision after path sanitization"));
+    assert!(error.contains("my-tool.spl"));
+    assert!(error.contains("my_tool.spl"));
+    assert!(error.contains("my_tool"));
+    assert!(!project_root.join("out").exists());
+    assert!(
+        cache_marker.exists(),
+        "collision rejection must precede cache cleanup"
+    );
 }
 
 #[test]
