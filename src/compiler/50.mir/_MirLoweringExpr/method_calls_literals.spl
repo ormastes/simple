@@ -312,6 +312,17 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me remember_optional_inner_identity(inner: HirType, payload_local: LocalId):
+        match inner.kind:
+            case HirTypeKind.Named(symbol, _):
+                val type_symbol = self.symbols.get_symbol(symbol)
+                if val found = type_symbol:
+                    match found.kind:
+                        case Class | Struct:
+                            self.struct_value_syms[payload_local.id] = found.name
+                        case _: ()
+            case _: ()
+
     me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
         """Recover the primitive type needed to decode an Option.map result."""
         if self.local_hir_types.has(local.id):
@@ -536,8 +547,8 @@ impl MirLowering:
 
         # `.unwrap()` for the flat nullable ABI: a present value yields itself
         # and nil panics. Branch on rt_is_some(receiver), never truthiness, so
-        # a present numeric zero is preserved. Explicit enum `Some`/`None`
-        # still needs the separately tracked uniform Option ABI redesign.
+        # a present numeric zero is preserved. rt_unwrap_or_self recognizes
+        # only the reserved boxed Option id, leaving flat enum payloads intact.
         if method == "unwrap" and args.len() == 0:
             val result_ok_type = self.result_ok_hir_type(receiver)
             if result_ok_type != nil:
@@ -583,11 +594,11 @@ impl MirLowering:
             var b_some_uw = self.builder
             b_some_uw.switch_to_block(some_block_uw)
             self.builder = b_some_uw
-            var some_val_uw = receiver_local
+            var some_val_uw = self.unwrap_option_payload(receiver_local)
             if unwrap_is_text:
-                some_val_uw = self.option_text_value(receiver_local, unwrap_result_type)
+                some_val_uw = self.option_text_value(some_val_uw, unwrap_result_type)
             elif self.runtime_value_locals.has(receiver_local.id):
-                some_val_uw = self.decode_runtime_value(receiver_local, unwrap_result_type)
+                some_val_uw = self.decode_runtime_value(some_val_uw, unwrap_result_type)
             b_some_uw = self.builder
             b_some_uw.emit_copy(result_local_uw, some_val_uw)
             b_some_uw.terminate_goto(merge_block_uw)
@@ -612,11 +623,13 @@ impl MirLowering:
             var b_merge_uw = self.builder
             b_merge_uw.switch_to_block(merge_block_uw)
             self.builder = b_merge_uw
+            if val found_inner_uw = inner_type_uw:
+                self.remember_optional_inner_identity(found_inner_uw, result_local_uw)
             return result_local_uw
 
         # `.unwrap_or(default)` for the flat nullable ABI: a present value
-        # yields itself and nil yields `default`. Explicit enum `Some`/`None`
-        # remains in the separately tracked uniform Option ABI redesign.
+        # yields itself and nil yields `default`; boxed Option payloads pass
+        # through the same reserved-id unwrap as `.unwrap()`.
         # Structurally identical to the `NullCoalesce` (`x ?? default`)
         # lowering in expr_dispatch.spl: branch on rt_is_some (not
         # truthiness, so `Some(0).unwrap_or(9)` yields 0), lower the default
@@ -673,11 +686,11 @@ impl MirLowering:
             match uo_result_type.kind:
                 case MirTypeKind.Bool: uo_is_bool = true
                 case _: ()
-            var some_val_uo = receiver_local
+            var some_val_uo = self.unwrap_option_payload(receiver_local)
             if uo_is_text:
-                some_val_uo = self.option_text_value(receiver_local, uo_result_type)
+                some_val_uo = self.option_text_value(some_val_uo, uo_result_type)
             elif self.runtime_value_locals.has(receiver_local.id):
-                some_val_uo = self.decode_runtime_value(receiver_local, uo_result_type)
+                some_val_uo = self.decode_runtime_value(some_val_uo, uo_result_type)
             elif uo_is_bool:
                 # Bare `some_bool.unwrap_or(default)` (no `.map()` in
                 # between): the receiver is the `Option<bool>` variable
@@ -685,7 +698,7 @@ impl MirLowering:
                 # yet routed through box_runtime_value/decode_runtime_value's
                 # tagged-Bool scheme (that only applies to a `.map()` result).
                 # Decode the same way.
-                some_val_uo = self.option_bool_value(receiver_local)
+                some_val_uo = self.option_bool_value(some_val_uo)
             b_some_uo = self.builder
             b_some_uo.emit_copy(result_local_uo, some_val_uo)
             b_some_uo.terminate_goto(merge_block_uo)
@@ -711,6 +724,8 @@ impl MirLowering:
             var b_merge_uo = self.builder
             b_merge_uo.switch_to_block(merge_block_uo)
             self.builder = b_merge_uo
+            if val found_inner_uo = inner_type_uo:
+                self.remember_optional_inner_identity(found_inner_uo, result_local_uo)
             return result_local_uo
 
         # `.map(fn)` on an Option -- Some(v) yields Some(transform(v)), nil
@@ -774,13 +789,13 @@ impl MirLowering:
                         var b_some_map = self.builder
                         b_some_map.switch_to_block(some_block_map)
                         self.builder = b_some_map
-                        var some_val_map = receiver_local
+                        var some_val_map = self.unwrap_option_payload(receiver_local)
                         var map_inner_is_bool = false
                         match map_inner_type.kind:
                             case MirTypeKind.Bool: map_inner_is_bool = true
                             case _: ()
                         if self.runtime_value_locals.has(receiver_local.id):
-                            some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
+                            some_val_map = self.decode_runtime_value(some_val_map, map_inner_type)
                         elif map_inner_is_bool:
                             # `Option<bool>` receiver: see option_bool_value's
                             # doc comment -- the receiver is ptr-shaped (the
@@ -789,7 +804,9 @@ impl MirLowering:
                             # it straight to the lambda's `x: bool` parameter
                             # would feed a `ptr` value into `not x` / any bool
                             # op. Decode explicitly.
-                            some_val_map = self.option_bool_value(receiver_local)
+                            some_val_map = self.option_bool_value(some_val_map)
+                        if val found_inner_map_identity = map_inner_hir:
+                            self.remember_optional_inner_identity(found_inner_map_identity, some_val_map)
                         val map_call_local = self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])
                         val map_value_type = self.option_map_value_hir_type(map_call_local, map_body.span)
                         var map_call_tagged = map_call_local

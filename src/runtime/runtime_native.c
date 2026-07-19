@@ -1970,7 +1970,9 @@ int8_t rt_contains(int64_t collection, int64_t value) {
 }
 
 int64_t rt_unwrap_or_self(int64_t value) {
-    if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);
+    if (rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 0) {
+        return rt_enum_payload(value);
+    }
     return value;
 }
 
@@ -1988,7 +1990,7 @@ int8_t rt_is_none(int64_t value) {
      * values -- test ONLY against rt_core_nil(); a properly-constructed
      * Option never legitimately carries raw 0 as its nil marker anymore. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
+    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);

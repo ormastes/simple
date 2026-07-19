@@ -646,6 +646,15 @@ impl MirLowering:
         if val found_type = return_type:
             self.local_hir_types[local.id] = found_type
 
+    me unwrap_option_payload(value_local: LocalId) -> LocalId:
+        val unwrap_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_unwrap_or_self"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false
+            )))
+        ))
+        self.emit_resolved_direct_call(unwrap_op, [mir_operand_copy(value_local)], MirType.i64())
+
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
         val hir_return_type = self.resolved_call_hir_return_type(symbol)
         if val found_type = hir_return_type:
@@ -1870,9 +1879,10 @@ impl MirLowering:
                 var b_left = self.builder
                 b_left.switch_to_block(then_block)
                 self.builder = b_left
-                var left_value = left_local
+                val unwrapped = self.unwrap_option_payload(left_local)
+                var left_value = unwrapped
                 if self.runtime_value_locals.has(left_local.id):
-                    left_value = self.decode_runtime_value(left_local, result_type)
+                    left_value = self.decode_runtime_value(unwrapped, result_type)
                 b_left = self.builder
                 b_left.emit_copy(result_local, left_value)
                 b_left.terminate_goto(merge_block)
@@ -1901,6 +1911,8 @@ impl MirLowering:
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
                 self.builder = b_merge
+                if val left_inner = self.option_inner_hir_type_for_local(left, left_local):
+                    self.remember_optional_inner_identity(left_inner, result_local)
                 result_local
 
             case ExistsCheck(base):
@@ -1953,9 +1965,9 @@ impl MirLowering:
                 var b_then = self.builder
                 b_then.switch_to_block(then_block)
                 self.builder = b_then
-                var some_value = base_local
+                var some_value = self.unwrap_option_payload(base_local)
                 if self.runtime_value_locals.has(base_local.id):
-                    some_value = self.decode_runtime_value(base_local, result_type)
+                    some_value = self.decode_runtime_value(some_value, result_type)
                 b_then = self.builder
                 b_then.emit_copy(result_local, some_value)
                 b_then.terminate_goto(merge_block)
@@ -1986,6 +1998,8 @@ impl MirLowering:
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
                 self.builder = b_merge
+                if val base_inner = self.option_inner_hir_type_for_local(base, base_local):
+                    self.remember_optional_inner_identity(base_inner, result_local)
                 result_local
 
             case Try(try_base):
