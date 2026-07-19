@@ -26,3 +26,8 @@ failed with undefined `rt_string_trim_start` and `rt_cli_run_file` symbols.
 Stage4 qualification remains pending until the retained incremental build
 finishes and the exact candidate passes the bounded source and essential-tools
 checks.
+
+The settled-tree replay reached its 1200-second cap with exit 124, produced no
+candidate, and left an empty diagnostic log. The 222 MiB cache (2,713 files) is
+retained; do not start another replay without first instrumenting the silent
+pre-output phase.
