@@ -275,8 +275,19 @@ the shared binary — deploys require explicit user go-ahead).
   source plus both fast and existing slow branches. Three independent
   read-only audits agreed that the 484 logical aliases reuse 1,279 physical
   modules and are not duplicate ASTs; alias lookup remains unchanged.
-  Higher-level review accepted the fast paths. Execution proof remains pending:
-  the broad parser fixture stopped on existing phase-three lowering errors, a
+  Higher-level review accepted the fast paths. The previously measured flat-AST
+  arena reuse was restored after a parallel overwrite, including all current
+  declaration fields: native Stage4 clears backing storage in place, keeps
+  expression/statement counts in local slots, and bypasses their per-node env
+  mirrors. Its prior like-for-like evidence reduced RSS about 15% at 157 parses;
+  it is a regression restoration, not full retention closure. The remaining
+  owner is the no-GC runtime's process-lifetime registry for parser temporary
+  strings/arrays/dicts; a parse scratch-allocation domain with explicit
+  promotion of rich Module data remains the next bottom-up item. A capped
+  incremental native probe now parses sequential modules with stale declaration,
+  expression, and statement mirrors under the restored arena path (exit 0,
+  2,816 KiB RSS). Full Stage4 execution proof remains pending: the broad parser
+  fixture stopped on existing phase-three lowering errors, a
   narrow current-source probe reached the known `HirExpr.is_some` bootstrap
   crash, and the cache-preserving Stage2-to-Stage3 rebuild was OOM-killed at
   the 4 GiB safety cap before producing a candidate. Per the bounded retry

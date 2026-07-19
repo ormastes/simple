@@ -2,10 +2,14 @@
 #
 # @cover src/compiler/10.frontend/core/_Ast/decl_nodes.spl
 # @cover src/compiler/10.frontend/core/_Ast/module_state.spl
+# @cover src/compiler/10.frontend/core/_AstExpr/nodes.spl
+# @cover src/compiler/10.frontend/core/ast_stmt.spl
 
 use compiler.core.ast.{
-    ast_reset, decl_count, decl_fn, module_add_decl,
-    module_decl_at, module_decl_count_get
+    ast_reset, decl_count, decl_fn, decl_get_is_comptime, decl_get_is_lazy,
+    expr_count, expr_get_tag, module_add_decl,
+    module_decl_at, module_decl_count_get,
+    stmt_count, stmt_get_tag
 }
 use compiler.frontend.flat_ast_bridge.{flat_ast_to_module, parse_and_build_module}
 
@@ -14,6 +18,8 @@ extern fn rt_env_set(key: text, value: text) -> bool
 
 describe "bootstrap AST declaration count slots":
     it "keeps declaration counts in arena when the env mirror is cleared":
+        val old_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_DECL_COUNT") ?? ""
+        val old_module_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? ""
         ast_reset()
         val d = decl_fn("arena_count_guard", [], [], 0, [], 0, [], 0)
         module_add_decl(d)
@@ -32,12 +38,20 @@ describe "bootstrap AST declaration count slots":
         ast_reset()
         expect(decl_count()).to_equal(0)
         expect(module_decl_count_get()).to_equal(0)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", old_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", old_module_decl_count)).to_equal(true)
 
     it "uses arena declaration tags when bootstrap tag env mirrors are absent":
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
         val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_DECL_COUNT") ?? ""
+        val old_module_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? ""
+        val old_comptime = rt_env_get("SIMPLE_BOOTSTRAP_DECL_0_COMPTIME") ?? ""
+        val old_lazy = rt_env_get("SIMPLE_BOOTSTRAP_DECL_0_LAZY") ?? ""
         expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_COMPTIME", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_LAZY", "1")).to_equal(true)
 
         ast_reset()
         val d = decl_fn("arena_tag_guard", [], [], 0, [], 0, [], 0)
@@ -45,32 +59,147 @@ describe "bootstrap AST declaration count slots":
         val module = flat_ast_to_module("src/app/cli/bootstrap_main.spl")
 
         expect(module.functions.contains("arena_tag_guard")).to_equal(true)
+        expect(decl_get_is_comptime(d)).to_equal(false)
+        expect(decl_get_is_lazy(d)).to_equal(0)
 
         ast_reset()
         expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", old_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", old_module_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_COMPTIME", old_comptime)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_LAZY", old_lazy)).to_equal(true)
+
+    it "keeps the interpreter expression and statement mirrors":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_DECL_COUNT") ?? ""
+        val old_module_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? ""
+        val old_expr_count = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? ""
+        val old_expr_tag = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? ""
+        val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
+        val old_stmt_tag = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? ""
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "")).to_equal(true)
+
+        ast_reset()
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "").to_equal("0")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "").to_equal("0")
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "1")).to_equal(true)
+        expect(expr_count()).to_equal(1)
+        expect(stmt_count()).to_equal(1)
+        expect(expr_get_tag(0)).to_equal(1)
+        expect(stmt_get_tag(0)).to_equal(1)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", old_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", old_module_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", old_expr_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", old_expr_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", old_stmt_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", old_stmt_tag)).to_equal(true)
+
+    it "ignores stale declaration mirrors in native arena mode":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_DECL_COUNT") ?? ""
+        val old_module_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? ""
+        val old_tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_0") ?? ""
+        val old_name = rt_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_0") ?? ""
+        val old_fields = rt_env_get("SIMPLE_BOOTSTRAP_DECL_FIELD_NAMES_0") ?? ""
+        val old_field_types = rt_env_get("SIMPLE_BOOTSTRAP_DECL_FIELD_TYPES_0") ?? ""
+        val old_type_params = rt_env_get("SIMPLE_BOOTSTRAP_DECL_0_TYPE_PARAMS") ?? ""
+        val old_visibility = rt_env_get("SIMPLE_BOOTSTRAP_DECL_0_VIS") ?? ""
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_NAME_0", "StaleFunction")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_FIELD_NAMES_0", "stale_field")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_FIELD_TYPES_0", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_TYPE_PARAMS", "StaleType")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_VIS", "public")).to_equal(true)
+
+        val source = "struct CurrentStruct:\n    current_field: i64\n"
+        val module = parse_and_build_module(source, "current_struct.spl")
+        expect(module.structs.len()).to_equal(1)
+        expect(module.structs[0].name).to_equal("CurrentStruct")
+        expect(module.structs[0].fields.len()).to_equal(1)
+        expect(module.structs[0].fields[0].name).to_equal("current_field")
+        expect(module.structs[0].type_params.len()).to_equal(0)
+        expect(module.structs[0].is_public).to_equal(false)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", old_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", old_module_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", old_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_NAME_0", old_name)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_FIELD_NAMES_0", old_fields)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_FIELD_TYPES_0", old_field_types)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_TYPE_PARAMS", old_type_params)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_0_VIS", old_visibility)).to_equal(true)
 
     it "builds bootstrap-path functions with arena metadata only":
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
         val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_DECL_COUNT") ?? ""
+        val old_module_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? ""
+        val old_expr_count = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? ""
+        val old_expr_tag = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? ""
+        val old_expr_tag_1 = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_1_TAG") ?? ""
+        val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
+        val old_stmt_tag = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? ""
+        val old_stmt_tag_1 = rt_env_get("SIMPLE_BOOTSTRAP_STMT_1_TAG") ?? ""
         expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", "777")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "777")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_1_TAG", "777")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "777")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "777")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_1_TAG", "777")).to_equal(true)
 
         val path = "src/app/cli/bootstrap_main.spl"
-        val source = "fn main() -> i64:\n    0\n\nfn run_native_build_bootstrap(args: [text]) -> i64:\n    1\n"
+        val source = "fn main() -> i64:\n    0\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n\nfn run_native_build_bootstrap(args: [text]) -> i64:\n    1\n"
         val module = parse_and_build_module(source, path)
 
         expect(module.functions.contains("main")).to_equal(true)
         expect(module.functions.contains("run_native_build_bootstrap")).to_equal(true)
         expect(module.functions.len()).to_be_greater_than(0)
+        expect((module.functions["main"] ?? panic("missing main")).body.stmts.len()).to_equal(8)
+        val small = parse_and_build_module("fn small_body() -> i64:\n    9\n", path)
+        expect((small.functions["small_body"] ?? panic("missing small_body")).body.stmts.len()).to_equal(1)
+        expect((module.functions["main"] ?? panic("missing retained main")).body.stmts.len()).to_equal(8)
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "").to_equal("777")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? "").to_equal("777")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_1_TAG") ?? "").to_equal("777")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "").to_equal("777")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? "").to_equal("777")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_1_TAG") ?? "").to_equal("777")
 
         ast_reset()
         expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", old_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", old_module_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", old_expr_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", old_expr_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_1_TAG", old_expr_tag_1)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", old_stmt_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", old_stmt_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_1_TAG", old_stmt_tag_1)).to_equal(true)
 
     it "builds requested native-build entry functions in bootstrap mode":
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
         val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_DECL_COUNT") ?? ""
+        val old_module_decl_count = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? ""
         val old_native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
@@ -85,4 +214,6 @@ describe "bootstrap AST declaration count slots":
         ast_reset()
         expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", old_decl_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", old_module_decl_count)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)).to_equal(true)

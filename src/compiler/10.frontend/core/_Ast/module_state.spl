@@ -308,6 +308,8 @@ fn module_decl_at(index: i64) -> i64:
     if index < 0 or index >= ast_module_decl_count_get():
         return -1
     if (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1":
+        if index >= module_decl_slots.len():
+            return -1
         return module_decl_slots[index]
     val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
     if env_value != "":
@@ -324,64 +326,8 @@ fn ast_reset():
     if (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1":
         ast_reset_seq = ast_reset_seq + 1
         print "[ast_reset] seq={ast_reset_seq}"
-    # Bootstrap nil-guard: native binaries zero-initialize module-level vars
-    # instead of running the initializer code. Ensure they're valid containers.
-    decl_tag = []
-    decl_span = []
-    decl_name = []
-    decl_params = []
-    decl_param_names = []
-    decl_param_types = []
-    decl_ret_type = []
-    decl_body_stmts = []
-    decl_body_stmts_flat = []
-    decl_field_names = []
-    decl_field_types = []
-    decl_field_defaults = []
-    decl_field_bits = []
-    decl_imports = []
-    decl_visibility = []
-    decl_is_async = []
-    decl_is_comptime = []
-    decl_type_params = []
-    decl_type_param_constraints = []
-    decl_type_param_constraint_mode = []
-    decl_is_lazy = []
-    decl_is_gpu_kernel = []
-    decl_is_simd = []
-    decl_is_packed = []
-    decl_derives = []
-    decl_is_hardware = []
-    decl_clocked_args = []
-    decl_is_value_type = []
-    arm_pattern = []
-    arm_guard = []
-    arm_body = []
-    arm_body_flat = []
-    arm_binding = []
-    arm_rationale = []
-    elif_cond = []
-    elif_body = []
-    elif_else = []
-    module_decls = []
-    module_decl_slots = []
-    module_path_slot = [""]
-    lexer_state_core_pos_slot = ["0"]
-    lexer_state_core_line_slot = ["1"]
-    lexer_state_core_col_slot = ["1"]
-    lexer_state_core_pending_dedents_slot = ["0"]
-    lexer_state_core_at_line_start_slot = ["1"]
-    lexer_state_core_paren_depth_slot = ["0"]
-    lexer_state_core_cur_kind_slot = ["0"]
-    lexer_state_core_cur_text_slot = [""]
-    lexer_state_core_cur_line_slot = ["0"]
-    lexer_state_core_cur_col_slot = ["0"]
-    lexer_state_core_indent_stack_slot = ["0"]
-    lexer_state_cur_kind_slot = ["0"]
-    lexer_state_cur_text_slot = [""]
-    lexer_state_cur_line_slot = ["0"]
-    lexer_state_cur_col_slot = ["0"]
-    lexer_state_cur_suffix_slot = [""]
+    # Native binaries may zero-initialize module vars. Allocate each arena only
+    # once; later module parses clear and reuse its backing storage.
     if decl_tag == nil:
         decl_tag = []
     if decl_span == nil:
@@ -432,6 +378,18 @@ fn ast_reset():
         decl_is_packed = []
     if decl_derives == nil:
         decl_derives = []
+    if decl_impl_trait == nil:
+        decl_impl_trait = []
+    if decl_is_trait == nil:
+        decl_is_trait = []
+    if decl_is_hardware == nil:
+        decl_is_hardware = []
+    if decl_clocked_args == nil:
+        decl_clocked_args = []
+    if decl_is_value_type == nil:
+        decl_is_value_type = []
+    if decl_param_mut_text == nil:
+        decl_param_mut_text = []
     if arm_pattern == nil:
         arm_pattern = []
     if arm_guard == nil:
@@ -452,40 +410,120 @@ fn ast_reset():
         elif_else = []
     if module_decls == nil:
         module_decls = []
-    if module_path_slot == nil:
+    if module_decl_slots == nil:
+        module_decl_slots = []
+
+    decl_tag.clear()
+    decl_span.clear()
+    decl_name.clear()
+    decl_params.clear()
+    decl_param_names.clear()
+    decl_param_types.clear()
+    decl_ret_type.clear()
+    decl_body_stmts.clear()
+    decl_body_stmts_flat.clear()
+    decl_field_names.clear()
+    decl_field_types.clear()
+    decl_field_defaults.clear()
+    decl_field_bits.clear()
+    decl_imports.clear()
+    decl_visibility.clear()
+    decl_is_async.clear()
+    decl_is_comptime.clear()
+    decl_type_params.clear()
+    decl_type_param_constraints.clear()
+    decl_type_param_constraint_mode.clear()
+    decl_is_lazy.clear()
+    decl_is_gpu_kernel.clear()
+    decl_is_simd.clear()
+    decl_is_packed.clear()
+    decl_derives.clear()
+    decl_impl_trait.clear()
+    decl_is_trait.clear()
+    decl_is_hardware.clear()
+    decl_clocked_args.clear()
+    decl_is_value_type.clear()
+    decl_param_mut_text.clear()
+    arm_pattern.clear()
+    arm_guard.clear()
+    arm_body.clear()
+    arm_body_flat.clear()
+    arm_binding.clear()
+    arm_rationale.clear()
+    elif_cond.clear()
+    elif_body.clear()
+    elif_else.clear()
+    module_decls.clear()
+    module_decl_slots.clear()
+
+    if module_path_slot == nil or module_path_slot.len() == 0:
         module_path_slot = [""]
-    if lexer_state_core_pos_slot == nil:
+    else:
+        module_path_slot[0] = ""
+    if lexer_state_core_pos_slot == nil or lexer_state_core_pos_slot.len() == 0:
         lexer_state_core_pos_slot = ["0"]
-    if lexer_state_core_line_slot == nil:
+    else:
+        lexer_state_core_pos_slot[0] = "0"
+    if lexer_state_core_line_slot == nil or lexer_state_core_line_slot.len() == 0:
         lexer_state_core_line_slot = ["1"]
-    if lexer_state_core_col_slot == nil:
+    else:
+        lexer_state_core_line_slot[0] = "1"
+    if lexer_state_core_col_slot == nil or lexer_state_core_col_slot.len() == 0:
         lexer_state_core_col_slot = ["1"]
-    if lexer_state_core_pending_dedents_slot == nil:
+    else:
+        lexer_state_core_col_slot[0] = "1"
+    if lexer_state_core_pending_dedents_slot == nil or lexer_state_core_pending_dedents_slot.len() == 0:
         lexer_state_core_pending_dedents_slot = ["0"]
-    if lexer_state_core_at_line_start_slot == nil:
+    else:
+        lexer_state_core_pending_dedents_slot[0] = "0"
+    if lexer_state_core_at_line_start_slot == nil or lexer_state_core_at_line_start_slot.len() == 0:
         lexer_state_core_at_line_start_slot = ["1"]
-    if lexer_state_core_paren_depth_slot == nil:
+    else:
+        lexer_state_core_at_line_start_slot[0] = "1"
+    if lexer_state_core_paren_depth_slot == nil or lexer_state_core_paren_depth_slot.len() == 0:
         lexer_state_core_paren_depth_slot = ["0"]
-    if lexer_state_core_cur_kind_slot == nil:
+    else:
+        lexer_state_core_paren_depth_slot[0] = "0"
+    if lexer_state_core_cur_kind_slot == nil or lexer_state_core_cur_kind_slot.len() == 0:
         lexer_state_core_cur_kind_slot = ["0"]
-    if lexer_state_core_cur_text_slot == nil:
+    else:
+        lexer_state_core_cur_kind_slot[0] = "0"
+    if lexer_state_core_cur_text_slot == nil or lexer_state_core_cur_text_slot.len() == 0:
         lexer_state_core_cur_text_slot = [""]
-    if lexer_state_core_cur_line_slot == nil:
+    else:
+        lexer_state_core_cur_text_slot[0] = ""
+    if lexer_state_core_cur_line_slot == nil or lexer_state_core_cur_line_slot.len() == 0:
         lexer_state_core_cur_line_slot = ["0"]
-    if lexer_state_core_cur_col_slot == nil:
+    else:
+        lexer_state_core_cur_line_slot[0] = "0"
+    if lexer_state_core_cur_col_slot == nil or lexer_state_core_cur_col_slot.len() == 0:
         lexer_state_core_cur_col_slot = ["0"]
-    if lexer_state_core_indent_stack_slot == nil:
+    else:
+        lexer_state_core_cur_col_slot[0] = "0"
+    if lexer_state_core_indent_stack_slot == nil or lexer_state_core_indent_stack_slot.len() == 0:
         lexer_state_core_indent_stack_slot = ["0"]
-    if lexer_state_cur_kind_slot == nil:
+    else:
+        lexer_state_core_indent_stack_slot[0] = "0"
+    if lexer_state_cur_kind_slot == nil or lexer_state_cur_kind_slot.len() == 0:
         lexer_state_cur_kind_slot = ["0"]
-    if lexer_state_cur_text_slot == nil:
+    else:
+        lexer_state_cur_kind_slot[0] = "0"
+    if lexer_state_cur_text_slot == nil or lexer_state_cur_text_slot.len() == 0:
         lexer_state_cur_text_slot = [""]
-    if lexer_state_cur_line_slot == nil:
+    else:
+        lexer_state_cur_text_slot[0] = ""
+    if lexer_state_cur_line_slot == nil or lexer_state_cur_line_slot.len() == 0:
         lexer_state_cur_line_slot = ["0"]
-    if lexer_state_cur_col_slot == nil:
+    else:
+        lexer_state_cur_line_slot[0] = "0"
+    if lexer_state_cur_col_slot == nil or lexer_state_cur_col_slot.len() == 0:
         lexer_state_cur_col_slot = ["0"]
-    if lexer_state_cur_suffix_slot == nil:
+    else:
+        lexer_state_cur_col_slot[0] = "0"
+    if lexer_state_cur_suffix_slot == nil or lexer_state_cur_suffix_slot.len() == 0:
         lexer_state_cur_suffix_slot = [""]
+    else:
+        lexer_state_cur_suffix_slot[0] = ""
     expr_reset()
     stmt_reset()
     ast_decl_count_set(0)

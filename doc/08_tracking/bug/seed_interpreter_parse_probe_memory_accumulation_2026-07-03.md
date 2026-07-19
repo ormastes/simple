@@ -63,3 +63,12 @@ writes, keeps node counts in local slots, and ignores stale per-node environment
 keys. The aggregate AST modules pass the bootstrap compile gate. Full Stage4
 memory and executable verification remains open and is intentionally deferred
 after the third bounded retry.
+
+## 2026-07-19 regression restoration
+
+Parallel work later replaced the arena-reuse resets with fresh `[]` allocations
+and re-enabled expression/statement env mirrors under native Stage4. The
+measured fix is restored against the current arena schema, including flat
+declaration bodies, trait metadata, and mutable-parameter markers. This restores
+the earlier ~15% improvement only; the no-GC runtime's process-lifetime object
+registry still needs a parse-owned scratch allocation domain for full closure.
