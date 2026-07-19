@@ -27,6 +27,14 @@ fn constructor_value_type_matches_name(value: &Value, expected: &str) -> bool {
 
 fn constructor_value_matches_type(value: &Value, ty: &Type) -> bool {
     match ty {
+        Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
+            match value {
+                Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, &args[0])),
+                Value::FrozenArray(items) => items.iter().all(|item| constructor_value_matches_type(item, &args[0])),
+                Value::Tuple(items) => items.iter().all(|item| constructor_value_matches_type(item, &args[0])),
+                _ => false,
+            }
+        }
         Type::Simple(name) | Type::Generic { name, .. } => constructor_value_type_matches_name(value, name),
         Type::Array { element, .. } => match value {
             Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
@@ -57,6 +65,7 @@ fn constructor_overload_score(func: &FunctionDef, values: &[Value]) -> Option<us
             }
             score += match ty {
                 Type::Array { .. } => 4,
+                Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => 4,
                 Type::Simple(_) | Type::Generic { .. } => 2,
                 _ => 1,
             };
