@@ -274,22 +274,29 @@ fn _storage_rb(args: [text]) -> i64:
 
 # ---------------------------------------------------------------------------
 # rm — confirmation-free single-object delete (mirrors mc's default
-# non-interactive `rm`). `--recursive`/`-r` (multi-object prefix delete)
-# stays not-yet-implemented: it needs its own bounded list+delete-many loop
-# with different semantics than `rb --force`'s bucket-emptying use of the
-# same minio_delete_object primitive, out of scope for this pass — see
+# non-interactive `rm`). `--recursive`/`-r` deletes every object under a
+# required, non-empty alias/bucket/prefix: list via minio_list_objects, then
+# a bounded per-object-DELETE loop with the same 1000-object safety cap and
+# message shape as `rb --force` (adapter_minio.spl has no batch
+# DeleteObjects call, only single-object DELETE). A bare `alias/bucket` (no
+# prefix) is refused outright — `rm -r` must never mass-delete a whole
+# bucket; that's `rb --force`'s job. See
 # doc/05_design/app/devhub/facade_storage.md §3 (rm row).
 # ---------------------------------------------------------------------------
 
 fn _storage_rm(args: [text]) -> i64:
-    """`storage rm alias/bucket/key [-r|--recursive]`"""
+    """`storage rm alias/bucket/key [-r|--recursive]`
+
+    Plain form deletes one object. `-r`/`--recursive` deletes every object
+    under alias/bucket/prefix — the prefix is required; a bare alias/bucket
+    is refused (use `rb --force` to remove a whole bucket).
+    """
     val pos = _positional_args(args)
     if pos.len() < 1:
         print_error("usage: storage rm alias/bucket/key [-r|--recursive]")
         return 1
     if _has_flag(args, "-r") or _has_flag(args, "--recursive"):
-        print_error("storage rm --recursive: not yet implemented — multi-object prefix delete needs its own bounded list+delete-many loop; see doc/05_design/app/devhub/facade_storage.md §3 (rm row). Workaround: delete objects one at a time with `storage rm alias/bucket/key`, or use the real `mc rm --recursive` CLI if installed.")
-        return 1
+        return _storage_rm_recursive(pos[0])
     val addr = parse_storage_addr(pos[0])
     if not addr.valid or not addr.is_remote or addr.bucket == "" or addr.key == "":
         print_error("usage: storage rm alias/bucket/key — TARGET must be a full alias/bucket/key (got '{pos[0]}')")
@@ -303,6 +310,50 @@ fn _storage_rm(args: [text]) -> i64:
         print_error(err)
         return 1
     print_success("deleted {addr.alias}/{addr.bucket}/{addr.key}")
+    0
+
+
+fn _storage_rm_recursive(target: text) -> i64:
+    """`storage rm -r alias/bucket/prefix` — list+delete-many over a
+    required, non-empty prefix.
+
+    Same 1000-object safety cap and message shape as `rb --force`
+    (facade_storage.md §3 rb row): adapter_minio.spl has no batch
+    DeleteObjects call, only single-object DELETE (minio_delete_object), so
+    this is a plain per-object loop — refused outright rather than run
+    partially over a huge listing. A bare alias/bucket (empty prefix) is
+    refused before any config/network access; use `rb --force` instead.
+    """
+    val addr = parse_storage_addr(target)
+    if not addr.valid or not addr.is_remote or addr.bucket == "":
+        print_error("usage: storage rm -r alias/bucket/prefix — TARGET must be alias/bucket/prefix (got '{target}')")
+        return 1
+    if addr.key == "":
+        print_error("storage rm --recursive: '{target}' has no prefix — rm -r never mass-deletes a whole bucket; use rb --force to remove a whole bucket, or give a prefix like alias/bucket/prefix.")
+        return 1
+    val (auth_ok, cfg, auth_err) = resolve_alias_config(addr.alias)
+    if not auth_ok:
+        print_error(auth_err)
+        return 1
+    val (list_ok, objects, list_err) = minio_list_objects(cfg, addr.bucket, addr.key)
+    if not list_ok:
+        print_error(list_err)
+        return 1
+    if objects.len() > 1000:
+        print_error("storage rm --recursive: refusing — {addr.alias}/{addr.bucket}/{addr.key} has {objects.len()} objects, over the 1000-object safety cap for per-object delete (adapter_minio.spl has no batch DeleteObjects call). Empty it with the real `mc rm --recursive` CLI first, then retry, or narrow the prefix.")
+        return 1
+    if objects.len() == 0:
+        print "No objects found under {addr.alias}/{addr.bucket}/{addr.key}. Nothing to delete."
+        return 0
+    var deleted = 0
+    for o in objects:
+        val (del_ok, del_err) = minio_delete_object(cfg, addr.bucket, o.key)
+        if not del_ok:
+            print_error("storage rm --recursive: failed deleting {addr.alias}/{addr.bucket}/{o.key}: {del_err}")
+            return 1
+        print_dim("deleted {addr.alias}/{addr.bucket}/{o.key}")
+        deleted = deleted + 1
+    print_success("deleted {deleted} objects under {addr.alias}/{addr.bucket}/{addr.key}")
     0
 
 
@@ -597,7 +648,7 @@ fn _print_storage_help():
     print "  stat alias/bucket/key            Size/etag/last-modified (via ListObjectsV2 — see NOTE)"
     print "  mb alias/bucket                  Create a bucket"
     print "  rb alias/bucket                  Delete a bucket (--force: delete objects first, bounded to 1000)"
-    print "  rm alias/bucket/key              Delete an object (--recursive/-r: not yet implemented)"
+    print "  rm alias/bucket/key              Delete an object (--recursive/-r: delete every object under a prefix, bounded to 1000)"
     print "  presign alias/bucket/key         Generate a presigned GET URL (--expires SECONDS)"
     print "  presign-put alias/bucket/key     Generate a presigned PUT URL (binary-upload workaround)"
     print "  du alias/bucket[/prefix]         Aggregate object sizes under a prefix (--depth N)"
@@ -619,8 +670,7 @@ fn _print_storage_help():
     print ""
     print "NOTE: `stat`/`ls` cannot use a real HEAD for size/etag/last-modified — the"
     print "  underlying HTTP transport exposes no response headers, so these fall back"
-    print "  to ListObjectsV2. `mirror` and `rm --recursive` are documented gaps, not"
-    print "  silent no-ops."
+    print "  to ListObjectsV2. `mirror` is a documented gap, not a silent no-op."
     print ""
     print "Config: ~/.config/itf/auth.sdn"
     print "  [minio]"

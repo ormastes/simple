@@ -18,12 +18,17 @@
 #   (b) the alias used is a deliberately-fake, never-registered name (e.g.
 #       "unknownalias"), which resolve_alias_config's "unknown alias"
 #       short-circuit rejects before touching any file or network at all, or
-#   (c) the verb (mirror; rm/rb with --recursive/--force flag variants that
-#       are still documented gaps) prints its message and returns before any
-#       config resolution happens at all — note `rm` (single-object delete)
-#       and `rb --force` (bounded list+delete-then-delete-bucket) are now
-#       real implementations, so their success/live-delete paths are NOT
-#       covered here; only their pre-network validation/error paths are.
+#   (c) the verb (mirror, still a documented gap; rm --recursive/-r and
+#       rb --force, both real bounded list+delete-many implementations) hits
+#       a pure validation refusal (empty prefix, non-remote/no-bucket
+#       target, or unknown alias) that returns before resolve_alias_config
+#       or any list/delete call runs — note `rm` (single-object delete),
+#       `rm --recursive` (list+delete-many over a prefix) and `rb --force`
+#       (bounded list+delete-then-delete-bucket) are now real
+#       implementations, so their success/live-delete paths, the >1000
+#       refusal, and the 0-objects branch are NOT covered here (all require
+#       a live list against a real endpoint); only their pre-network
+#       validation/error paths are.
 # This means real end-to-end behavior (successful ls/cp/stat/... against a
 # live MinIO endpoint) is NOT covered here — only dispatch/validation/error
 # paths are, per the task's explicit fallback instruction.
@@ -99,11 +104,17 @@ describe "cmd_storage dispatch":
         it "unknown alias with full bucket/key is rejected pre-network":
             expect(handle_storage(["rm", "unknownalias/bucket/key.bin"])).to_equal(1)
 
-        it "--recursive prints the not-yet-implemented message before any config access, even with a real alias-shaped TARGET (the flag check runs before resolve_alias_config)":
-            expect(handle_storage(["rm", "minio/bucket/key.bin", "--recursive"])).to_equal(1)
+        it "--recursive with no prefix (bare alias/bucket) refuses before any config access, even with a real alias-shaped TARGET, and names the rb --force escape hatch":
+            expect(handle_storage(["rm", "minio/bucket", "--recursive"])).to_equal(1)
 
-        it "-r (short form) also short-circuits pre-network":
-            expect(handle_storage(["rm", "minio/bucket/key.bin", "-r"])).to_equal(1)
+        it "-r (short form) with no prefix also short-circuits pre-network with the same refusal":
+            expect(handle_storage(["rm", "minio/bucket", "-r"])).to_equal(1)
+
+        it "-r with a non-remote/no-bucket TARGET is a usage error pre-network":
+            expect(handle_storage(["rm", "minio", "-r"])).to_equal(1)
+
+        it "-r with unknown-alias-shaped full TARGET is rejected pre-network (parses as a local path, never remote)":
+            expect(handle_storage(["rm", "unknownalias/bucket/key.bin", "-r"])).to_equal(1)
 
     context "mirror — documented gap, ignores args entirely":
 
