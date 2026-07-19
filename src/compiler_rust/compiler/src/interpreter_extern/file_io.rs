@@ -54,6 +54,9 @@ impl SymbolInterner {
 }
 
 // Helper to create Option::Some(value)
+// ponytail: dead after rt_file_read_bytes/read_lines/current_dir all return bare
+// values (P3+N3+KEY2 landed together); kept for any future optional-returning extern.
+#[allow(dead_code)]
 fn make_some(value: Value) -> Value {
     Value::Enum {
         enum_name: "Option".to_string(),
@@ -63,6 +66,7 @@ fn make_some(value: Value) -> Value {
 }
 
 // Helper to create Option::None
+#[allow(dead_code)]
 fn make_none() -> Value {
     Value::Enum {
         enum_name: "Option".to_string(),
@@ -378,15 +382,28 @@ pub fn rt_file_rename(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Read file as lines
+/// Read file as lines.
+///
+/// Returns a bare `Value::Array` on success and `Value::Nil` on failure --
+/// NOT an `Option::Some`/`None`-wrapped enum. Every real `.spl` call site
+/// (`src/compiler_rust/lib/std/src/infra/file_io.spl`,
+/// `src/lib/nogc_sync_mut/ffi/io.spl`, `src/lib/nogc_sync_mut/sffi/io.spl`)
+/// declares this extern as returning a plain `[text]`/`List<text>` and
+/// consumes the result directly, with no caller pattern-matching
+/// `Some(...)`/`None` on it. This is the identical make_some/make_none
+/// latent bug already fixed for the sibling `rt_file_read_bytes`
+/// (commit fec74762272 / doc
+/// native_build_fresh_seed_optionwrap_landmine_2026-07-18.md, which flagged
+/// this exact function as "worth the same audit if it ever surfaces") -- see
+/// doc/08_tracking/bug/rt_file_read_lines_current_dir_optionwrap_2026-07-18.md.
 pub fn rt_file_read_lines(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
         Ok(content) => {
             let lines: Vec<Value> = content.lines().map(|l| Value::text(l.to_string())).collect();
-            Ok(make_some(Value::array(lines)))
+            Ok(Value::array(lines))
         }
-        Err(_) => Ok(make_none()),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -403,15 +420,33 @@ pub fn rt_file_append_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Read file as bytes
+/// Read file as bytes.
+///
+/// Returns a bare `Value::Array` on success and `Value::Nil` on failure --
+/// NOT an `Option::Some`/`None`-wrapped enum. Most `.spl` callers declare
+/// this extern as returning a plain (non-optional) `[u8]` and consume the
+/// result directly (e.g. `src/compiler/70.backend/backend/
+/// llvm_backend_tools.spl`, `src/app/office/pptx_export.spl`) -- an
+/// `Option`-wrapped return left those call sites holding a boxed enum where
+/// a raw array was expected (see bug doc
+/// native_build_fresh_seed_optionwrap_landmine_2026-07-18.md). This mirrors
+/// the fix already applied to the sibling `rt_string_bytes_fn` (bug
+/// seed_flat_registry_len_i64_2026-07-17): a handful of `.spl` files declare
+/// this as `[u8]?` and consume it via `match ...: Some(value): ... nil: ...`
+/// (e.g. `src/lib/nogc_sync_mut/sfm/container.spl`) -- those call sites will
+/// no longer match the `Some(value)` arm against a bare array; `nil:` still
+/// matches `Value::Nil` correctly (`Value::is_nil_like`). Not touched by
+/// native (non-interpreted) compilation: natively compiled code calls the
+/// C runtime symbol directly (`src/runtime/runtime_native.c`), never this
+/// interpreter-only extern binding.
 pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read(&path) {
         Ok(bytes) => {
             let arr: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(make_some(Value::array(arr)))
+            Ok(Value::array(arr))
         }
-        Err(_) => Ok(make_none()),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -958,6 +993,16 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
 
+    // Regression coverage for the P2 interpreter-over-count bug
+    // (doc/08_tracking/bug/dir_walk_native_runtime_parity_2026-07-16.md,
+    // "## Interpreter over-count (P2)"): this and the symlink test below both
+    // pin down that `rt_dir_walk` pushes only non-directory entries and
+    // recurses into directories WITHOUT also pushing the directory itself.
+    // Pre-fix (before a6822a52dee), the loop unconditionally pushed every
+    // `read_dir` entry (files AND directories) and then separately recursed
+    // into directories, double-counting every directory in the tree — for a
+    // real tree with N subdirectories that inflates the count by exactly N
+    // (observed: `src/app/cli`, 76 files + 4 subdirs = the reported 80).
     #[cfg(unix)]
     #[test]
     fn dir_walk_emits_links_once_without_following_directory_cycles() {
@@ -997,6 +1042,30 @@ mod tests {
                 "regular.spl".to_string(),
             ]
         );
+    }
+
+    /// Symlink-free variant of the fixture above: N nested subdirectories with
+    /// files inside must yield exactly the file count, never file_count + N.
+    /// This is the literal shape of the `src/app/cli` ground-truth repro (0
+    /// symlinks, 4 subdirectories, 76 files) that exposed the pre-fix bug.
+    #[test]
+    fn dir_walk_counts_files_only_not_directories_themselves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("top.spl"), "").expect("top-level file");
+        for name in ["a", "b", "c", "d"] {
+            let sub = root.join(name);
+            std::fs::create_dir(&sub).expect("subdir");
+            std::fs::write(sub.join("child.spl"), "").expect("nested file");
+        }
+
+        let result = rt_dir_walk(&[Value::text(root.to_string_lossy().to_string())]).expect("walk");
+        let Value::Array(paths) = result else {
+            panic!("dir walk did not return an array");
+        };
+        // 1 top-level file + 4 subdirs * 1 file each = 5 files total; the 4
+        // subdirectory paths themselves must NOT appear in the result.
+        assert_eq!(paths.len(), 5, "directories must be recursed-into, not counted as entries");
     }
 
     #[test]
@@ -1085,19 +1154,70 @@ mod tests {
         let bytes = rt_file_mmap_read_bytes(&[Value::text(path)]).expect("mmap bytes");
 
         assert_eq!(text, Value::text("simple mmap".to_string()));
+        // rt_file_read_bytes (and its mmap-named alias) returns a bare
+        // Value::Array on success, not an Option::Some-wrapped enum -- see
+        // bug native_build_fresh_seed_optionwrap_landmine_2026-07-18.md.
+        // Most `.spl` callers declare this extern as returning a plain
+        // (non-optional) `[u8]` and use the result directly; an
+        // Option-wrapped return left those call sites holding a boxed enum
+        // where a raw array was expected.
         match bytes {
-            Value::Enum {
-                variant,
-                payload: Some(payload),
-                ..
-            } => {
-                assert_eq!(variant, "Some");
-                match *payload {
-                    Value::Array(values) => assert_eq!(values.len(), 11),
-                    other => panic!("unexpected payload: {other:?}"),
-                }
-            }
+            Value::Array(values) => assert_eq!(values.len(), 11),
             other => panic!("unexpected bytes value: {other:?}"),
+        }
+    }
+
+    // Regression coverage for the make_some/make_none latent bug flagged in
+    // doc/08_tracking/bug/native_build_fresh_seed_optionwrap_landmine_2026-07-18.md
+    // ("Not changed, flagged for awareness: rt_file_read_lines ... still
+    // returns make_some(...)/make_none() -- the same Option-wrapping this fix
+    // removed from its sibling") and fixed here alongside the identical
+    // pattern on rt_current_dir. Every real .spl call site declares these
+    // externs as returning a plain (non-optional) value and consumes the
+    // result directly, so the interpreter must return a bare Value, never an
+    // Option::Some/None-wrapped enum.
+    #[test]
+    fn read_lines_returns_bare_array_not_option_wrapped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lines.txt");
+        std::fs::write(&path, "one\ntwo\nthree").expect("write");
+        let path = path.to_string_lossy().to_string();
+
+        let result = rt_file_read_lines(&[Value::text(path)]).expect("read lines");
+        match result {
+            Value::Array(lines) => {
+                let text: Vec<String> = lines
+                    .iter()
+                    .map(|v| match v {
+                        Value::Str(s) => s.as_ref().clone(),
+                        other => panic!("non-text line: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(text, vec!["one".to_string(), "two".to_string(), "three".to_string()]);
+            }
+            other => panic!("rt_file_read_lines must return a bare Value::Array, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_lines_returns_nil_not_option_none_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.txt").to_string_lossy().to_string();
+
+        let result = rt_file_read_lines(&[Value::text(missing)]).expect("read lines on missing file");
+        assert_eq!(
+            result,
+            Value::Nil,
+            "rt_file_read_lines must return bare Value::Nil on failure, not Option::None"
+        );
+    }
+
+    #[test]
+    fn current_dir_returns_bare_text_not_option_wrapped() {
+        let result = rt_current_dir(&[]).expect("current dir");
+        match result {
+            Value::Str(s) => assert!(!s.is_empty(), "current dir should not be empty in a real process"),
+            other => panic!("rt_current_dir must return a bare Value::Str, not {other:?}"),
         }
     }
 }
@@ -1237,11 +1357,22 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(results))
 }
 
-/// Get current directory (returns Option<text>)
+/// Get current directory.
+///
+/// Returns a bare `Value::Str` on success and an empty string on failure --
+/// NOT an `Option::Some`/`None`-wrapped enum. The sole real `.spl` call site
+/// (`src/compiler_rust/lib/std/src/infra/file_io.spl`, `current_dir()`)
+/// declares this extern as returning a plain `text` and consumes the result
+/// directly with no `Some(...)`/`None` unwrap; the sibling `rt_get_cwd`
+/// below was added as a same-behavior workaround rather than fixing this
+/// function at its root (see doc
+/// rt_file_read_lines_current_dir_optionwrap_2026-07-18.md). Same
+/// make_some/make_none latent bug already fixed for `rt_file_read_bytes`
+/// (commit fec74762272) and `rt_file_read_lines` above.
 pub fn rt_current_dir(_args: &[Value]) -> Result<Value, CompileError> {
     match std::env::current_dir() {
-        Ok(cwd) => Ok(make_some(Value::text(cwd.to_string_lossy().to_string()))),
-        Err(_) => Ok(make_none()),
+        Ok(cwd) => Ok(Value::text(cwd.to_string_lossy().to_string())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
@@ -1622,9 +1753,41 @@ struct StatHandle {
     mtime: i64,
     is_dir: bool,
     is_file: bool,
+    is_symlink: bool,
+    readonly: bool,
+    created: i64,
 }
 
 static STAT_HANDLES: std::sync::Mutex<Vec<Option<StatHandle>>> = std::sync::Mutex::new(Vec::new());
+
+fn stat_path_is_symlink(path: &str) -> bool {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return false,
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return meta.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    meta.file_type().is_symlink()
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
+fn stat_created_seconds(meta: &fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    meta.created()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", windows)))]
+fn stat_created_seconds(_meta: &fs::Metadata) -> i64 {
+    0
+}
 
 pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
@@ -1645,6 +1808,9 @@ pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
         mtime,
         is_dir: meta.is_dir(),
         is_file: meta.is_file(),
+        is_symlink: stat_path_is_symlink(&path),
+        readonly: meta.permissions().readonly(),
+        created: stat_created_seconds(&meta),
     };
     let mut handles = STAT_HANDLES.lock().unwrap();
     for (i, slot) in handles.iter_mut().enumerate() {
@@ -1710,6 +1876,50 @@ pub fn rt_file_stat_is_file(args: &[Value]) -> Result<Value, CompileError> {
             .and_then(|s| s.as_ref())
             .map(|s| s.is_file)
             .unwrap_or(false),
+    ))
+}
+
+pub fn rt_file_stat_is_symlink(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Bool(false));
+    };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Bool(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.is_symlink)
+            .unwrap_or(false),
+    ))
+}
+
+pub fn rt_file_stat_readonly(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Bool(false));
+    };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Bool(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.readonly)
+            .unwrap_or(false),
+    ))
+}
+
+pub fn rt_file_stat_created(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Int(
+        handles.get(h).and_then(|s| s.as_ref()).map(|s| s.created).unwrap_or(0),
     ))
 }
 
