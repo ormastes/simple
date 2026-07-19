@@ -52,3 +52,9 @@ The spawner is NOT `.mcp.json` (which explicitly uses `bin/mcp_stdio_bridge.js`)
 The original 48-process observation remains real, but the server-child attribution is unproven: it recorded no PID/PPID, start command, open-stdin owner, log, or reproducible launcher. Current `.mcp.json` directly launches `bin/simple_lsp_mcp_server`; the named T32 and Obsidian config files no longer exist. The stdio server owns no background daemon, blocks on input, and exits on EOF. Do not add a singleton or idle timer until the external client owner is captured, because independent MCP clients require isolated stdio processes.
 
 The focused lifecycle gate should launch the exact wrapper with a tracked PID, initialize it, close stdin, bounded-wait for that PID to exit, repeat three times, and assert only those tracked PIDs are gone. A separate confirmed risk exists in opt-in diagnostics: its `simple check` subprocess uses direct-child timeout cleanup instead of the existing process-group-aware bounded API.
+
+The diagnostics risk is now fixed in source: the opt-in call uses
+`process_run_bounded` with its existing 10-second deadline and a 1 MiB output
+cap, and a focused regression rejects restoration of `process_run_timeout`.
+This does not identify or resolve the external owner of the original 48 server
+processes; the tracked-PID EOF lifecycle gate remains pending.

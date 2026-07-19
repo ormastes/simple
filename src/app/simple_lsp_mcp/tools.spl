@@ -4,11 +4,13 @@
 
 use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
 use std.io_runtime.{process_run}
-# Import process_run_timeout from the light std module, NOT app.io.mod — the
+# Import process_run_bounded from the light std module, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
-use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
 
 fn lsp_query_path() -> text:
     "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
@@ -41,7 +43,12 @@ fn run_lsp_diagnostics(file: text) -> text:
     val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
     if enabled != "1":
         return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
-    val (stdout, stderr, code) = process_run_timeout(find_simple_binary(), ["check", file], 10000)
+    val (stdout, stderr, code) = process_run_bounded(
+        find_simple_binary(),
+        ["check", file],
+        10000,
+        LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES
+    )
     val clean = clean_command_output(stdout)
     if code == 0:
         return clean
