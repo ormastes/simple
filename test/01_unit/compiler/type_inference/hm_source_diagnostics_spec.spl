@@ -1,0 +1,31 @@
+use std.spec.{describe, it, expect}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.ast.{ast_reset}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer.*
+use compiler.types.type_infer_types.{HmInferContext}
+
+fn hm_diagnostic_count(source: text, filename: text) -> i64:
+    ast_reset()
+    val ast = parse_and_build_module(source, filename)
+    var lowering = HirLowering.with_filename(filename)
+    val hir = lowering.lower_module(ast)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.functions.len()).to_be_greater_than(0)
+    var ctx = HmInferContext.with_builtins()
+    ctx.infer_module(hir)
+    ctx.errors.len()
+
+describe "HM source diagnostics":
+    it "accepts expression-bodied non-unit returns":
+        expect(hm_diagnostic_count("fn answer() -> i64:\n    42\n", "hm_valid_return.spl")).to_equal(0)
+
+    it "rejects mismatched expression-bodied returns":
+        expect(hm_diagnostic_count("fn answer() -> bool:\n    42\n", "hm_invalid_return.spl")).to_be_greater_than(0)
+
+    it "discards trailing values in unit functions":
+        expect(hm_diagnostic_count("fn main():\n    42\n", "hm_unit_return.spl")).to_equal(0)
+
+    it "rejects annotated local mismatches":
+        expect(hm_diagnostic_count("fn main():\n    val x: i64 = \"text\"\n", "hm_invalid_local.spl")).to_be_greater_than(0)
