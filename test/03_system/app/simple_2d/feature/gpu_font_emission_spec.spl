@@ -2,18 +2,17 @@
 # @tag: rendering, font, gpu, emission
 """# Shared Font GPU Program Emission
 
-Emits the versioned shared alpha-atlas composition source and constructs its
-compile plan for five portable targets. This scenario invokes no compiler
-toolchain, submits no device work, and makes no compiled-artifact, execution,
-readback, or presentation claim.
+Emits one versioned alpha-atlas composition program and compile plan for five portable targets.
+
+This scenario invokes no compiler toolchain, submits no device work, and makes
+no compiled-artifact, execution, readback, or presentation claim.
 """
 
 use std.spec.*
+use std.io.{file_read}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_hip_source, font_atlas_composite_vulkan_glsl_source}
 use compiler.backend.gpu_portable_compute.{PortableComputeArtifact, PortableComputeTarget, emit_portable_font_atlas_composite_kernel, emit_vulkan_font_atlas_composite_source, emit_portable_2d_optimization_module, portable_compute_artifact_source_hash, portable_compute_artifact_version_hash, portable_compute_compile_plan, portable_compute_2d_optimization_backend_plan, portable_compute_backend_target_diagnostic}
 use compiler.backend.gpu_generated_2d_contract.{vulkan_font_atlas_compile_plan, vulkan_font_atlas_artifact_evidence}
-
-extern fn rt_file_read_text(path: text) -> text
 
 fn expect_backend_emission(target: PortableComputeTarget, expected_target: text,
                            expected_marker: text, expected_source: text,
@@ -42,12 +41,35 @@ fn expect_backend_emission(target: PortableComputeTarget, expected_target: text,
     expect(plan.artifact_path_suffix).to_equal(expected_suffix)
     expect(plan.produces_binary()).to_be(produces_binary)
 
+fn expect_artifact_version_hash_binding():
+    # Keep this class-heavy hash oracle out of the generated monolithic BDD
+    # main. The pure-native backend otherwise reuses stale local metadata after
+    # the preceding large source-contract example and can nil-trap here.
+    val base = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
+    expect(base != nil).to_be(true)
+    if base != nil:
+        val changed_entry = PortableComputeArtifact(target: base.target, entry_name: base.entry_name + "_changed", source: base.source, binary_format: base.binary_format)
+        val changed_format = PortableComputeArtifact(target: base.target, entry_name: base.entry_name, source: base.source, binary_format: base.binary_format + "-changed")
+        val changed_source = PortableComputeArtifact(target: base.target, entry_name: base.entry_name, source: base.source + "\n", binary_format: base.binary_format)
+        val base_plan = portable_compute_compile_plan(base, "font")
+        val entry_plan = portable_compute_compile_plan(changed_entry, "font")
+        val format_plan = portable_compute_compile_plan(changed_format, "font")
+        val source_plan = portable_compute_compile_plan(changed_source, "font")
+        expect(portable_compute_artifact_source_hash(base)).to_equal(portable_compute_artifact_source_hash(base).lower())
+        expect(base_plan.artifact_identity).to_equal(portable_compute_artifact_version_hash(base))
+        assert_not_equal(base_plan.artifact_identity, entry_plan.artifact_identity)
+        assert_not_equal(base_plan.artifact_identity, format_plan.artifact_identity)
+        assert_not_equal(base_plan.artifact_identity, source_plan.artifact_identity)
+        assert_not_equal(portable_compute_artifact_version_hash(base), portable_compute_artifact_version_hash(changed_entry))
+        assert_not_equal(portable_compute_artifact_version_hash(base), portable_compute_artifact_version_hash(changed_format))
+        assert_not_equal(portable_compute_artifact_version_hash(base), portable_compute_artifact_version_hash(changed_source))
+
 describe "shared font GPU source emission and compile plans":
     # @req REQ-009 REQ-010
     it "should gate configured ROCm font readback with admitted and provenance-bound evidence":
         step("Inspect the strict public Engine2D harness and its fail-closed evidence wrapper")
-        val harness = rt_file_read_text("scripts/check/rocm_engine2d_font_readback_harness.spl") ?? ""
-        val wrapper = rt_file_read_text("scripts/check/check-rocm-engine2d-font-readback.shs") ?? ""
+        val harness = file_read("scripts/check/rocm_engine2d_font_readback_harness.spl")
+        val wrapper = file_read("scripts/check/check-rocm-engine2d-font-readback.shs")
         expect(harness).to_contain("Engine2D.create_with_backend_strict(WIDTH, HEIGHT, \"rocm\")")
         expect(harness).to_contain("execution_policy: FontExecutionPolicy.Required")
         expect(harness).to_contain("rocm.draw_text_configured(")
@@ -68,8 +90,9 @@ describe "shared font GPU source emission and compile plans":
     # @req REQ-010
     it "should expose one stable pure-Simple source-emitter handoff":
         step("Invoke the stable pure-Simple GPU source emitter without a generated test file")
-        val app = rt_file_read_text("src/app/portable_compute_emit/main.spl") ?? ""
-        val checker = rt_file_read_text("scripts/check/check-portable-compute-toolchains.shs") ?? ""
+        val app = file_read("src/app/portable_compute_emit/main.spl")
+        val checker = file_read("scripts/check/check-portable-compute-toolchains.shs")
+        val portability = file_read("scripts/check/check-bootstrap-portability.shs")
         expect(app).to_contain("emit_portable_2d_optimization_module(target)")
         expect(app).to_contain("emit_portable_font_atlas_composite_kernel(target)")
         expect(app).to_contain("emit_vulkan_font_atlas_composite_source()")
@@ -104,9 +127,39 @@ describe "shared font GPU source emission and compile plans":
         expect(checker).to_contain("if [ -s \"$artifact\" ]; then candidate_compiled=true; fi")
         expect(checker).to_contain("run_with_timeout \"$NVCC_TOOL\" --ptx")
         expect(checker).to_contain("run_with_timeout \"$NVCC_TOOL\" --list-gpu-arch")
-        expect(checker).to_contain("run_with_timeout \"$VULKAN_GLSLC_TOOL\"")
+        expect(checker).to_contain("run_vulkan_glslc_compile \"$out\" \"$src\"")
+        expect(checker).to_contain("run_vulkan_glslc_compile \"$out_repro\" \"$src\"")
         expect(checker).to_contain("run_with_timeout \"$SPIRV_VAL_TOOL\" --target-env vulkan1.1")
         expect(checker).to_contain("vulkan_font_validator_result=pass")
+        expect(checker).to_contain("record_vulkan_glslc_library_provenance")
+        expect(checker).to_contain("env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+        expect(checker).to_contain("LD_DEBUG=libs")
+        expect(checker).to_contain("vulkan_font_compiler_library_sha256=")
+        expect(checker).to_contain("vulkan_font_compiler_format=$VULKAN_GLSLC_COMPILER_FORMAT")
+        expect(checker).to_contain("HOME=\"$VULKAN_GLSLC_CLEAN_HOME\"")
+        expect(checker).to_contain("capture_vulkan_glslc_compile_provenance a")
+        expect(checker).to_contain("capture_vulkan_glslc_compile_provenance b")
+        expect(checker).to_contain("finalize_vulkan_glslc_compile_provenance")
+        expect(checker).to_contain("vulkan_font_compiler_sha256_after_a=")
+        expect(checker).to_contain("vulkan_font_compiler_sha256_after_b=")
+        expect(checker).to_contain("vulkan_font_compiler_library_path_repro=")
+        expect(checker).to_contain("vulkan_font_compiler_loader_log_repro_sha256=")
+        expect(checker).to_contain("vulkan_font_compiler_loader_log_sha256=")
+        expect(checker).to_contain("vulkan_font_compile_deterministic=")
+        expect(checker).to_contain("vulkan_artifact_tuple_deterministic \"$artifact_sha_a\" \"$artifact_sha_b\" \"$compile_bytes_equal\"")
+        expect(checker).to_contain("missing-loaded-library-provenance")
+        expect(checker).to_contain("loaded-library-path-mismatch")
+        expect(checker).to_contain("multiple-loaded-library-provenance")
+        expect(checker).to_contain("compiler-changed-during-compile")
+        expect(checker).to_contain("producer-library-path-mismatch")
+        expect(checker).to_contain("producer-library-changed-during-compile")
+        expect(checker).to_contain("unsupported-loader-provenance-host")
+        expect(checker).to_contain("non-elf-compiler")
+        expect(checker).to_contain("vulkan_glslc_compiler_status /tmp/compiler script")
+        expect(checker).to_contain("glslang-diagnostic-only-missing-clean-loader-provenance")
+        expect(checker).to_contain("--vulkan-provenance-self-test")
+        expect(portability).to_contain("sh scripts/check/check-portable-compute-toolchains.shs --vulkan-provenance-self-test")
+        expect(checker.contains("record_tool_provenance vulkan_font compiler \"$VULKAN_GLSLC_TOOL\"")).to_be(false)
         expect(checker).to_contain("all_portable_compute_candidates_validated=")
         expect(checker).to_contain("all_portable_compute_pins_verified=")
         expect(checker).to_contain("PORTABLE_COMPUTE_REQUIRE_VERIFIED")
@@ -126,28 +179,19 @@ describe "shared font GPU source emission and compile plans":
         expect(evidence_pos).to_be_greater_than(-1)
         expect(cat_pos).to_be_greater_than(-1)
         expect(strict_pos).to_be_greater_than(cat_pos)
+        val deterministic_pos = checker.last_index_of("if vulkan_artifact_tuple_deterministic") ?? -1
+        val validator_pos = checker.last_index_of("if ! have \"$SPIRV_VAL_TOOL\"") ?? -1
+        val pin_pos = checker.last_index_of("artifact_sha=\"$(sha256_file \"$out\" || true)\"") ?? -1
+        expect(deterministic_pos).to_be_greater_than(-1)
+        expect(validator_pos).to_be_greater_than(deterministic_pos)
+        expect(pin_pos).to_be_greater_than(validator_pos)
         expect(strict_pos).to_be_greater_than(report_pos)
         expect(strict_pos).to_be_greater_than(evidence_pos)
         expect(checker).to_contain("if target_requested cuda; then run_cuda; fi")
 
     # @req REQ-010
     it "should bind artifact version hashes to entry format and source":
-        val base = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
-        val changed_entry = PortableComputeArtifact(target: base.target, entry_name: base.entry_name + "_changed", source: base.source, binary_format: base.binary_format)
-        val changed_format = PortableComputeArtifact(target: base.target, entry_name: base.entry_name, source: base.source, binary_format: base.binary_format + "-changed")
-        val changed_source = PortableComputeArtifact(target: base.target, entry_name: base.entry_name, source: base.source + "\n", binary_format: base.binary_format)
-        val base_plan = portable_compute_compile_plan(base, "font")
-        val entry_plan = portable_compute_compile_plan(changed_entry, "font")
-        val format_plan = portable_compute_compile_plan(changed_format, "font")
-        val source_plan = portable_compute_compile_plan(changed_source, "font")
-        expect(portable_compute_artifact_source_hash(base)).to_equal(portable_compute_artifact_source_hash(base).lower())
-        expect(base_plan.artifact_identity).to_equal(portable_compute_artifact_version_hash(base))
-        assert_not_equal(base_plan.artifact_identity, entry_plan.artifact_identity)
-        assert_not_equal(base_plan.artifact_identity, format_plan.artifact_identity)
-        assert_not_equal(base_plan.artifact_identity, source_plan.artifact_identity)
-        assert_not_equal(portable_compute_artifact_version_hash(base), portable_compute_artifact_version_hash(changed_entry))
-        assert_not_equal(portable_compute_artifact_version_hash(base), portable_compute_artifact_version_hash(changed_format))
-        assert_not_equal(portable_compute_artifact_version_hash(base), portable_compute_artifact_version_hash(changed_source))
+        expect_artifact_version_hash_binding()
 
     # @req REQ-010
     it "should emit the dedicated Vulkan GLSL 15-input ABI without portable target planning":
@@ -245,8 +289,9 @@ describe "shared font GPU source emission and compile plans":
         expect(plan.ready).to_be(true)
         expect(plan.artifacts.len()).to_equal(4)
         expect(plan.plans.len()).to_equal(4)
-        expect(plan.plans[1].artifact_path_suffix).to_equal("simple_2d_optimization_font_atlas.ptx")
-        expect(plan.plans[3].artifact_path_suffix).to_equal("simple_2d_optimization_font_atlas.wgsl")
+        if plan.plans.len() == 4:
+            expect(plan.plans[1].artifact_path_suffix).to_equal("simple_2d_optimization_font_atlas.ptx")
+            expect(plan.plans[3].artifact_path_suffix).to_equal("simple_2d_optimization_font_atlas.wgsl")
         expect(optimization_wgsl.source).to_contain("@binding(3) var<uniform> params")
         expect(optimization_wgsl.source.contains("var<storage, read> atlas")).to_be(false)
         expect(font_wgsl.source).to_contain("@binding(2) var<storage, read> params")
