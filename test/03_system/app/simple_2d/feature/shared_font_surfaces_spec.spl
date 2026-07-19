@@ -1,10 +1,16 @@
 # codex-system-test
-# @tag: rendering, font, atlas, engine2d, engine3d
-"""# Shared Font Material Across 2D and 3D
+# @tag: rendering, font, atlas, engine2d
+"""# Shared Font Material Across 2D Surfaces
 
-Prepares one persistent glyph batch, checks warm atlas reuse, exercises the 2D
-atlas-subrect consumer, and checks the Engine3D CPU HUD/world compatibility
-surface. CPU output is an oracle and compatibility path, not native GPU proof.
+Checks one persistent 2D glyph batch, warm atlas reuse, atlas-subrect blending, and fail-closed material behavior.
+
+CPU output is an oracle and compatibility path, not native GPU proof. This lane
+does not claim native texture upload, submission, fence, device readback, or presentation.
+Engine3D CPU HUD/world compatibility remains in
+`test/01_unit/lib/gpu/engine3d/font_compat_spec.spl` so this 2D system spec does
+not statically close over optional Vulkan symbols. Font configuration remains
+transient material input and is not serialized into Draw IR; captured identity
+does not claim atomic process-global font replacement or a global lock.
 """
 
 use std.spec.*
@@ -13,8 +19,6 @@ use std.nogc_sync_mut.text_layout.font_renderer.{
 }
 use std.common.ui.draw_ir.{draw_ir_empty_glyph_run_payload}
 use std.gc_async_mut.gpu.engine2d.engine.{engine2d_font_atlas_subrect_pixels}
-use std.gpu.engine3d.engine.{Engine3D}
-use std.gpu.engine3d.types3d.{mat4_identity, mat4_perspective}
 
 fn setup_shared_font_fixture() -> FontRenderer:
     FontRenderer.new()
@@ -36,7 +40,7 @@ fn _nonzero_pixels(pixels: [u32]) -> i64:
 describe "shared font surfaces":
     # @req REQ-006 REQ-009
     it "should prepare stable glyph quads and no warm dirty upload":
-        step("Prepare one shared font batch for 2D and 3D")
+        step("Prepare one shared font batch for 2D")
         var renderer = setup_shared_font_fixture()
         val cold = renderer.prepare_text("AB", 0xFF336699u32, 16)
         val warm = renderer.prepare_text("AB", 0xFFCC8844u32, 16)
@@ -57,7 +61,7 @@ describe "shared font surfaces":
 
     # @req REQ-015
     it "should carry one validated runtime configuration through every material path":
-        step("Prepare one shared font batch for 2D and 3D")
+        step("Prepare one shared font batch for 2D")
         var renderer = setup_shared_font_fixture()
         val config = FontRenderConfig(
             family: "Noto Sans Mono", category: "mono", language: "en", script: "latn", size: 16,
@@ -77,9 +81,10 @@ describe "shared font surfaces":
         val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 0,
             glyph_ids: [], xs: [], ys: [], clusters: [])
         expect(renderer.prepare_glyph_run_configured(run, 0xFFFFFFFFu32, config).render_config_identity).to_equal(config.identity())
-        expect(renderer.prepare_selected_glyph_run_configured(
+        val selected_config_identity = renderer.prepare_selected_glyph_run_configured(
             draw_ir_empty_glyph_run_payload(), 0xFFFFFFFFu32, config
-        ).render_config_identity).to_equal(config.identity())
+        ).render_config_identity
+        expect(selected_config_identity).to_equal(config.identity())
 
     it "should preserve selected font identity across cold and warm batches":
         var renderer = FontRenderer.browser_serif_default()
@@ -115,17 +120,6 @@ describe "shared font surfaces":
         )
         expect(pixels.len()).to_equal((quad.width * quad.height).to_i64())
         expect(_nonzero_pixels(pixels)).to_be_greater_than(0)
-
-    # @req REQ-006
-    it "should render HUD and projected world text through the honest CPU fallback":
-        var engine = Engine3D.create_with_backend(64, 64, "cpu")
-        engine.clear(0u32)
-        expect(engine.draw_text_hud(2, 2, "HUD", 0xFFFFFFFFu32, 14)).to_be(true)
-        engine.set_camera(mat4_identity(), mat4_perspective(1.0, 1.0, 0.1, 100.0))
-        expect(engine.draw_text_world(0.0, 0.0, -1.0, "W", 0xFF00FF00u32, 12)).to_be(true)
-        expect(engine.backend_name()).to_equal("cpu")
-        expect(_nonzero_pixels(engine.read_pixels())).to_be_greater_than(0)
-        engine.shutdown()
 
     it "should fail closed for invalid sizes and empty content":
         var renderer = setup_shared_font_fixture()

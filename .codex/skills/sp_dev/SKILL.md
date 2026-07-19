@@ -526,7 +526,7 @@ font GPU emission, or GUI/Web/2D/3D text.
 8. Freeze these five primary SSpec phrases exactly:
    `Load the pinned multilingual font manifest`;
    `Accept exact-face-bound simple-script shaping`;
-   `Prepare one shared font batch for 2D and 3D`;
+   `Prepare one shared font batch for 2D`;
    `Emit the selected font composite program and plan compilation`;
    `Prove native submission and device readback`.
    Resolved-host, completion, and folded secondary detail phrases are defined
