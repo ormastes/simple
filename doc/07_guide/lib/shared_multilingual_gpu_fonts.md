@@ -86,7 +86,7 @@ and two rank-eleven Bengali faces remain candidates.
 49 paths derived from the 16 candidate binary/metadata/license/notice fields,
 plus `CORPUS.sdn` and seven pinned CLDR resources. The distribution-size gate
 requires that exact 57-path set, then counts root `LICENSE` and
-`THIRD_PARTY_NOTICES.md`: 59 files and 53,433,272 bytes against the 80 MiB
+`THIRD_PARTY_NOTICES.md`: 59 files and 53,433,279 bytes against the 80 MiB
 ceiling.
 Before its first font copy, the release installer rejects a wrong pin count,
 missing or extra source paths, missing bytes, or a source hash mismatch. It
@@ -105,7 +105,7 @@ registry-owned relative asset path; unmanaged paths are never redirected.
 Installed paths do not create a second catalog or change pinned identities.
 SimpleOS images use the OS-owned `simpleos_font_bundle_entries()` projection:
 all 50 Google Fonts files, the CLDR license, root `LICENSE`, and
-`THIRD_PARTY_NOTICES.md` (53 files / 51,932,523 bytes). The six CLDR
+`THIRD_PARTY_NOTICES.md` (53 files / 51,932,530 bytes). The six CLDR
 XML/tag/source/ranking inputs stay host-build evidence because the guest uses
 the compiled ranking, not those inputs. Existing TTF long paths and 8.3 aliases
 remain unchanged; metadata, licenses, corpus, and notices use unique 8.3
