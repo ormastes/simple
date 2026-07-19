@@ -2,6 +2,7 @@
 
 use simple_parser::ast::Visibility;
 use simple_runtime::bytecode::vm::BytecodeVM;
+use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload};
 use simple_runtime::RuntimeValue;
 
 use super::compiler::BytecodeCompiler;
@@ -297,4 +298,66 @@ fn test_compile_bool_const() {
     vm.load_bytecode(&compiled.code);
     let result = vm.execute().expect("Execution failed");
     assert!(result.as_bool());
+}
+
+#[test]
+fn test_compile_enum_constructors_preserve_runtime_type_identity() {
+    let unit = make_function(
+        "unit_enum",
+        vec![],
+        vec![MirInst::EnumUnit {
+            dest: VReg(0),
+            enum_name: "pkg.Config".to_string(),
+            variant_name: "Ready".to_string(),
+        }],
+        Terminator::Return(Some(VReg(0))),
+    );
+    let payload = make_function(
+        "payload_enum",
+        vec![],
+        vec![
+            MirInst::ConstInt {
+                dest: VReg(0),
+                value: 42,
+            },
+            MirInst::EnumWith {
+                dest: VReg(1),
+                enum_name: "pkg.Other".to_string(),
+                variant_name: "Ready".to_string(),
+                payload: VReg(0),
+            },
+        ],
+        Terminator::Return(Some(VReg(1))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let unit = compiler.compile_function(&unit).expect("unit enum compilation failed");
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&unit.code);
+    let unit = vm.execute().expect("unit enum execution failed");
+
+    let payload = compiler
+        .compile_function(&payload)
+        .expect("payload enum compilation failed");
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&payload.code);
+    let payload = vm.execute().expect("payload enum execution failed");
+
+    assert_eq!(
+        rt_enum_id(unit),
+        i64::from(crate::codegen::shared::enum_runtime_type_id("pkg.Config"))
+    );
+    assert_eq!(
+        rt_enum_id(payload),
+        i64::from(crate::codegen::shared::enum_runtime_type_id("pkg.Other"))
+    );
+    assert!(rt_enum_id(unit) >= 2);
+    assert!(rt_enum_id(payload) >= 2);
+    assert_ne!(rt_enum_id(unit), rt_enum_id(payload));
+    let discriminant = hash_variant_discriminant("Ready");
+    assert!(discriminant > u32::from(u16::MAX));
+    assert_eq!(rt_enum_discriminant(unit), i64::from(discriminant));
+    assert_eq!(rt_enum_discriminant(payload), i64::from(discriminant));
+    assert!(rt_enum_payload(unit).is_nil());
+    assert_eq!(rt_enum_payload(payload).as_int(), 42);
 }

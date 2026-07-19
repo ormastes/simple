@@ -1009,7 +1009,8 @@ impl BytecodeVM {
 
                 ENUM_NEW => {
                     let dest = self.read_u16()?;
-                    let discriminant = self.read_u16()?;
+                    let enum_id = self.read_u32()?;
+                    let discriminant = self.read_u32()?;
                     let field_count = self.read_u16()?;
 
                     let mut fields = Vec::with_capacity(field_count as usize);
@@ -1025,7 +1026,7 @@ impl BytecodeVM {
                     };
 
                     // rt_enum_new takes (enum_id: u32, discriminant: u32, payload: RuntimeValue)
-                    let enum_val = crate::value::rt_enum_new(0, discriminant as u32, payload);
+                    let enum_val = crate::value::rt_enum_new(enum_id, discriminant, payload);
                     self.set_stack(dest, enum_val)?;
                 }
 

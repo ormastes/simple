@@ -30,6 +30,7 @@ use std::collections::HashMap;
 
 use simple_runtime::bytecode::opcodes::{self, InstructionEncoder};
 use simple_runtime::bytecode::vm::FunctionMetadata;
+use simple_runtime::value::hash_variant_discriminant;
 use simple_runtime::RuntimeValue;
 
 use crate::hir::{BinOp, UnaryOp};
@@ -152,6 +153,28 @@ impl BytecodeCompiler {
         self.constants.push(RuntimeValue::NIL);
         self.string_pool.insert(s.to_string(), idx);
         idx
+    }
+
+    fn compile_enum_constructor(
+        &mut self,
+        dest: VReg,
+        enum_name: &str,
+        variant_name: &str,
+        payload: Option<VReg>,
+    ) -> Result<(), CompileError> {
+        let dest_slot = self.alloc_slot(dest)?;
+        if let Some(payload) = payload {
+            let payload_slot = self.get_slot(payload)?;
+            self.encoder.emit_opcode(opcodes::PUSH);
+            self.encoder.emit_u16(payload_slot);
+        }
+        self.encoder.emit_opcode(opcodes::ENUM_NEW);
+        self.encoder.emit_u16(dest_slot);
+        self.encoder
+            .emit_u32(crate::codegen::shared::enum_runtime_type_id(enum_name));
+        self.encoder.emit_u32(hash_variant_discriminant(variant_name));
+        self.encoder.emit_u16(payload.is_some() as u16);
+        Ok(())
     }
 
     /// Record a pending jump fixup (offset position -> target block).
@@ -442,6 +465,19 @@ impl BytecodeCompiler {
                 self.encoder.emit_u16(dest_slot);
                 self.encoder.emit_u16(elements.len() as u16);
             }
+
+            MirInst::EnumUnit {
+                dest,
+                enum_name,
+                variant_name,
+            } => self.compile_enum_constructor(*dest, enum_name, variant_name, None)?,
+
+            MirInst::EnumWith {
+                dest,
+                enum_name,
+                variant_name,
+                payload,
+            } => self.compile_enum_constructor(*dest, enum_name, variant_name, Some(*payload))?,
 
             MirInst::IndexGet {
                 dest,

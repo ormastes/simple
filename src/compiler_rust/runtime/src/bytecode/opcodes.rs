@@ -462,8 +462,8 @@ pub const ENUM_PAYLOAD: Opcode = 0x0083;
 
 /// Create enum value.
 ///
-/// **Encoding:** `ENUM_NEW dest:u16 discriminant:u16 field_count:u16`
-/// **Size:** 8 bytes
+/// **Encoding:** `ENUM_NEW dest:u16 enum_id:u32 discriminant:u32 field_count:u16`
+/// **Size:** 14 bytes
 /// **Effect:** Pop fields from stack, create enum
 pub const ENUM_NEW: Opcode = 0x0084;
 

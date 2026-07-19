@@ -1,21 +1,27 @@
 # Rust seed enum runtime type identity
 
-Status: open; bootstrap-only follow-up after the Pure implementation.
+Status: source-fixed; focused Rust execution pending.
 
-Rust bytecode, LLVM, and Cranelift constructor paths still emit custom enum ID
-0, while the Rust structural runtime compares only discriminant and payload.
-Changing equality alone would make hashing inconsistent and leave those
-constructors broken, so the Pure fix deliberately does not partially alter the
-seed runtime.
+The Pure implementation remains canonical. Rust LLVM and Cranelift constructors
+now reuse the same stable qualified-type ID, and structural equality/hashing
+include that ID. The remaining bytecode constructor path formerly rejected
+`EnumUnit` and `EnumWith`; its dormant `ENUM_NEW` opcode also hardcoded enum ID
+0 and truncated the hashed discriminant to 16 bits.
 
-Owners to update together:
+The bytecode compiler now lowers both constructors through the existing opcode.
+`ENUM_NEW` carries the stable `u32` enum ID and full `u32` discriminant into
+`rt_enum_new`, with zero or one payload field. The disassembler uses the same
+wire layout.
 
-- `src/compiler_rust/runtime/src/bytecode/vm.rs`
-- `src/compiler_rust/compiler/src/codegen/llvm/functions.rs`
-- `src/compiler_rust/compiler/src/codegen/instr/calls.rs`
-- `src/compiler_rust/compiler/src/codegen/instr/pattern.rs`
-- `src/compiler_rust/runtime/src/value/sffi/equality.rs`
+Prevention coverage compiles and executes unit and payload constructors with
+the same variant name under two qualified enum types, then checks distinct IDs
+at least 2, the untruncated discriminant, NIL unit payload, and payload value.
 
-Acceptance: the same cross-type and cross-module enum identity fixture must
-pass through both Rust-seed backends, and the Rust equality hash must include
-the enum ID whenever equality does.
+Fresh focused Rust execution and the scheduled cross-platform seed matrix remain
+pending; no seed redeploy is authorized by this source fix.
+
+Separate bytecode matching remains unsupported: the compiler does not emit
+`EnumDiscriminant`, `EnumPayload`, or `ENUM_MATCH`, and the dormant match opcode
+still has its older discriminant-only `u16` layout. Widen that opcode only when
+the compiler gains a real matching producer; it is not part of constructor
+metadata acceptance.

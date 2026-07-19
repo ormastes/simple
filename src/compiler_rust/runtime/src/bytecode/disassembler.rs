@@ -148,9 +148,10 @@ pub fn disassemble(code: &[u8]) -> String {
             }
             ENUM_NEW => {
                 let dest = decoder.read_u16().unwrap_or(0);
-                let disc = decoder.read_u16().unwrap_or(0);
+                let enum_id = decoder.read_u32().unwrap_or(0);
+                let disc = decoder.read_u32().unwrap_or(0);
                 let count = decoder.read_u16().unwrap_or(0);
-                write!(output, " s{}, disc={}, fields={}", dest, disc, count).unwrap();
+                write!(output, " s{}, enum={}, disc={}, fields={}", dest, enum_id, disc, count).unwrap();
             }
             // Super-instructions
             CONST_I64_PUSH => {
