@@ -458,9 +458,12 @@ the shared binary — deploys require explicit user go-ahead).
   Rust seed's owning module-prefix derivation. The existing hosted native smoke
   matrix adds a dynamic module-global case under its punctuated work directory.
   See
-  `native_module_init_symbol_path_sanitization_2026-07-19.md`; the focused LLVM
-  execution passes and the Cranelift initializer failure is tracked separately.
-- Cranelift still rejects a function-initialized module global during semantic
-  lowering with a spurious two-argument arity diagnostic. LLVM passes the same
-  focused case; Cranelift remains a platform-matrix XFAIL tracked by
+  `native_module_init_symbol_path_sanitization_2026-07-19.md`; focused LLVM and
+  Cranelift execution pass.
+- The Cranelift direct adapter now calls its shared function-definition wrapper
+  with the wrapper's two-argument `(module, context)` contract. The focused
+  function-initialized module-global case now gets zero-backed MIR storage, a
+  runtime init/store function, and a hosted startup call before `main`.
+  Multiple runtime initializers fail loudly until HIR preserves declaration
+  order. The focused case is a normal platform-matrix PASS; see
   `cranelift_module_global_initializer_arity_2026-07-19.md`.

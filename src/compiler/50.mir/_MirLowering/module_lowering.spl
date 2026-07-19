@@ -710,6 +710,8 @@ impl MirLowering:
             self.lower_static(const_vals[coni])
             coni = coni + 1
 
+        self.lower_runtime_module_initializers(module, const_vals)
+
         # Order-independent pre-pass: walk every function body (read-only,
         # no MIR emitted) to seed struct_field_type_name from its real
         # construction sites BEFORE any function is actually lowered. See
@@ -790,10 +792,17 @@ impl MirLowering:
         static-storage slot (MirModule.statics), independent of the
         always-populated `MirModule.constants` entry `lower_const` already
         produces for the same binding."""
-        if not const_.is_mutable:
-            return
-        val static_type = self.lower_type(const_.type_)
         val folded = self.lower_const_expr(const_.value)
+        if folded.?:
+            if not const_.is_mutable:
+                return
+        else:
+            match const_.value.kind:
+                case Call(_, _, _): ()
+                case _: return
+        val static_type = match const_.type_.kind:
+            case Infer(_, _): MirType.i64()
+            case _: self.lower_type(const_.type_)
         var init_const: MirConstant? = nil
         if val const_value = folded:
             init_const = Some(MirConstant(
@@ -810,11 +819,72 @@ impl MirLowering:
             name: const_.name,
             type_: static_type,
             init: init_const,
-            is_mutable: true
+            is_mutable: const_.is_mutable
         )
         module_.statics = statics
         bldr.module = module_
         self.builder = bldr
+
+    me lower_runtime_module_initializers(module: HirModule, consts: [HirConst]):
+        var dynamic: [HirConst] = []
+        for const_ in consts:
+            match const_.value.kind:
+                case Call(_, _, _): dynamic.push(const_)
+                case _: ()
+        if dynamic.len() == 0:
+            return
+        # ponytail: HIR stores globals in an unordered Dict; carry declaration
+        # order before supporting dependent runtime initializers.
+        if dynamic.len() > 1:
+            self.error("multiple runtime module initializers require declaration-order metadata", Some(dynamic[1].span))
+            return
+
+        val module_name = module.name.replace(".", "_").replace("/", "_").replace("-", "_")
+        val init_name = "__module_init_{module_name}_dynamic"
+        var symbols = self.symbols
+        val init_symbol = symbols.define(init_name, SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
+        self.symbols = symbols
+
+        self.local_map = {}
+        self.local_hir_types = {}
+        self.runtime_array_locals = {}
+        self.runtime_dict_locals = {}
+        self.runtime_value_locals = {}
+        self.option_value_locals = {}
+        self.nil_locals = {}
+
+        val signature = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
+        var bldr = self.builder
+        bldr.begin_function(init_symbol, init_name, signature, Span.empty())
+        self.builder = bldr
+
+        for const_ in dynamic:
+            val value = self.lower_expr(const_.value)
+            val value_type = self.lookup_local_type(value)
+            var value_builder = self.builder
+            var value_module = value_builder.module
+            var statics = value_module.statics
+            statics[const_.symbol] = MirStatic(
+                symbol: const_.symbol,
+                name: const_.name,
+                type_: value_type,
+                init: nil,
+                is_mutable: const_.is_mutable
+            )
+            value_module.statics = statics
+            value_builder.module = value_module
+            value_builder.emit(MirInst(kind: MirInstKind.StoreGlobal(const_.symbol, mir_operand_copy(value)), span: Some(const_.span)))
+            self.builder = value_builder
+
+        var finish = self.builder
+        finish.terminate_return(nil)
+        val init_function = finish.end_function()
+        var result_module = finish.module
+        var functions = result_module.functions
+        functions[init_function.symbol] = init_function
+        result_module.functions = functions
+        finish.module = result_module
+        self.builder = finish
 
     me lower_struct_type(struct_def: HirStruct):
         """Lower a HIR struct definition into MIR type metadata."""

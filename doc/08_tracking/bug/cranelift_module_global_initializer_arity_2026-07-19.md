@@ -1,9 +1,9 @@
-# Cranelift rejects a function-initialized module global
+# Cranelift module-global initializer fails before code generation
 
 - **ID:** cranelift_module_global_initializer_arity_2026-07-19
-- **Status:** OPEN
+- **Status:** FIXED
 - **Severity:** high
-- **Backend:** Cranelift only; LLVM passes
+- **Backend:** Cranelift trigger; shared pure-Simple MIR/startup follow-on
 
 ## Reproducer
 
@@ -17,7 +17,20 @@ val module_value = init_value()
 fn main() -> i64: module_value
 ```
 
-The build fails before code generation with
-`semantic: function expects 2 argument(s), but more were provided`. The same
-case passes with LLVM and returns `4`. The matrix marks only the Cranelift row
-XFAIL so every hosted platform keeps the reproducer active.
+The build failed before code generation with
+`semantic: function expects 2 argument(s), but more were provided`.
+
+## Root cause and fix
+
+The pure-Simple Cranelift adapter first passed `(module, name, context)` to a
+two-argument `(module, context)` wrapper. Fixing that exposed the shared MIR
+gap: a non-foldable module binding had no storage or runtime initializer, and
+the hosted entry shim never called module-init symbols. The adapter now uses
+the wrapper contract; MIR emits a zero-backed global plus runtime init/store
+function; and the hosted entry calls discovered init symbols before `main`.
+
+## Verification
+
+- `hyphenated_module_init`: LLVM PASS, return code 4, no fallback.
+- `hyphenated_module_init`: Cranelift PASS, return code 4, no fallback.
+- `scripts/check/check-bootstrap-portability.shs`: PASS.

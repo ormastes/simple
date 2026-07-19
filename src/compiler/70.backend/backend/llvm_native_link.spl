@@ -806,7 +806,7 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
 # C-Based Entry Point Compiler (no llc needed)
 # ============================================================================
 
-fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
+fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
     """Compile entry point as C source (no llc needed)."""
     val cc = if compiler != "": compiler else: find_c_compiler()
     if cc == "":
@@ -821,13 +821,18 @@ fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64, compiler: text
     dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
+    val init_names = simpleos_module_init_symbols(user_objects)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
     c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
+    for name in init_names:
+        c_source = c_source + "extern void {name}(void);\n"
     c_source = c_source + "int main(int argc, char** argv) {\n"
     c_source = c_source + "    spl_init_args(argc, argv);\n"
     c_source = c_source + "    __simple_runtime_init();\n"
+    for name in init_names:
+        c_source = c_source + "    {name}();\n"
     c_source = c_source + "    long long result = __simple_main();\n"
     c_source = c_source + "    __simple_runtime_shutdown();\n"
     c_source = c_source + "    return (int)result;\n"
@@ -1077,7 +1082,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # Step 2: Generate and compile entry point
     if trace:
         print "[LLVM-LINK] step 2: compile entry point..."
-    val c_result = compile_entry_point_c(pid, verbose, options.opt_level, hosted_cc)
+    val c_result = compile_entry_point_c(user_objects, pid, verbose, options.opt_level, hosted_cc)
     if trace:
         print "[LLVM-LINK] entry point compiled"
     val entry_obj_path = match c_result:
@@ -1545,10 +1550,13 @@ fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
     var names: [text] = []
     for obj in user_objects:
         for symbol in extract_symbols_nm(obj):
-            if symbol.name == "__module_init" or symbol.name.starts_with("__module_init_"):
-                if not seen.has(symbol.name):
-                    seen[symbol.name] = true
-                    names.push(symbol.name)
+            var name = symbol.name
+            if name.starts_with("___module_init"):
+                name = name.substring(1)
+            if name == "__module_init" or name.starts_with("__module_init_"):
+                if not seen.has(name):
+                    seen[name] = true
+                    names.push(name)
     names.sort()
     names
 
@@ -1624,7 +1632,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         if not file_exists(linker_script):
             return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
 
-        val entry_result = compile_entry_point_c(getpid(), verbose, opt_level)
+        val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level)
         val entry_object = match entry_result:
             case Ok(path): path
             case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
