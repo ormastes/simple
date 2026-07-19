@@ -9779,40 +9779,12 @@ RuntimeValue rt_string_to_lower(RuntimeValue str)
     return ENCODE_PTR(r);
 }
 
-/* rt_string_replace(str, old, new) — replace first occurrence */
+RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val);
+
+/* Simple text.replace replaces every non-overlapping occurrence. */
 RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
 {
-    RuntimeString *s = decode_string(str);
-    RuntimeString *o = decode_string(old_val);
-    RuntimeString *n = decode_string(new_val);
-    if (!s || !o || o->len == 0) return str;
-    if (o->len > s->len) return str; /* needle longer than haystack */
-    if (!n) n = (RuntimeString *)0; /* treat nil replacement as empty */
-    uint32_t nlen = n ? n->len : 0;
-
-    /* Find first occurrence */
-    for (uint32_t i = 0; i <= s->len - o->len; i++) {
-        uint32_t j;
-        for (j = 0; j < o->len; j++) {
-            if (s->data[i + j] != o->data[j]) break;
-        }
-        if (j == o->len) {
-            /* Found at position i */
-            uint32_t result_len = s->len - o->len + nlen;
-            RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
-            if (!r) return str;
-            r->hdr.type = HEAP_STRING;
-            r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
-            r->len = result_len;
-            /* Copy: prefix + replacement + suffix */
-            __builtin_memcpy(r->data, s->data, i);
-            if (n && nlen > 0) __builtin_memcpy(r->data + i, n->data, nlen);
-            __builtin_memcpy(r->data + i + nlen, s->data + i + o->len, s->len - i - o->len);
-            r->data[result_len] = '\0';
-            return ENCODE_PTR(r);
-        }
-    }
-    return str; /* not found, return original */
+    return rt_string_replace_all(str, old_val, new_val);
 }
 
 /* rt_string_replace_all(str, old, new) — replace all occurrences (single-pass) */
@@ -9837,7 +9809,10 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     if (count == 0) return str;
 
     /* Allocate result */
-    uint32_t result_len = s->len - count * o->len + count * nlen;
+    uint64_t result_len_wide =
+        (uint64_t)s->len - (uint64_t)count * o->len + (uint64_t)count * nlen;
+    if (result_len_wide > (uint64_t)UINT32_MAX - sizeof(RuntimeString) - 1U) return str;
+    uint32_t result_len = (uint32_t)result_len_wide;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
     r->hdr.type = HEAP_STRING;

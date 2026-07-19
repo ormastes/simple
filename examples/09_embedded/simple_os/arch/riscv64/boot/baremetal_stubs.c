@@ -546,7 +546,7 @@ RuntimeValue rt_string_starts_with(RuntimeValue str, RuntimeValue prefix)
     return 1;
 }
 
-RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
 {
     if (!IS_HEAP(str) || !IS_HEAP(old_val) || !IS_HEAP(new_val)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
@@ -557,24 +557,48 @@ RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeVa
     }
     if (o->len == 0 || o->len > s->len) return str;
 
-    for (uint32_t i = 0; i <= s->len - o->len; i++) {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i + o->len <= s->len;) {
         uint32_t j = 0;
         while (j < o->len && s->data[i + j] == o->data[j]) j++;
-        if (j != o->len) continue;
-
-        uint32_t out_len = s->len - o->len + n->len;
-        RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + out_len + 1U);
-        if (!out) return str;
-        out->hdr.type = HEAP_STRING;
-        out->hdr.size = (uint32_t)(sizeof(RuntimeString) + out_len + 1U);
-        out->len = out_len;
-        for (uint32_t k = 0; k < i; k++) out->data[k] = s->data[k];
-        for (uint32_t k = 0; k < n->len; k++) out->data[i + k] = n->data[k];
-        for (uint32_t k = i + o->len; k < s->len; k++) out->data[i + n->len + (k - i - o->len)] = s->data[k];
-        out->data[out_len] = 0;
-        return ENCODE_PTR(out);
+        if (j == o->len) {
+            count++;
+            i += o->len;
+        } else {
+            i++;
+        }
     }
-    return str;
+    if (count == 0) return str;
+
+    uint64_t out_len_wide =
+        (uint64_t)s->len - (uint64_t)count * o->len + (uint64_t)count * n->len;
+    if (out_len_wide > (uint64_t)UINT32_MAX - sizeof(RuntimeString) - 1U) return str;
+    uint32_t out_len = (uint32_t)out_len_wide;
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + out_len + 1U);
+    if (!out) return str;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + out_len + 1U);
+    out->len = out_len;
+
+    uint32_t in = 0;
+    uint32_t out_i = 0;
+    while (in < s->len) {
+        uint32_t j = 0;
+        while (in + j < s->len && j < o->len && s->data[in + j] == o->data[j]) j++;
+        if (j == o->len) {
+            for (uint32_t k = 0; k < n->len; k++) out->data[out_i++] = n->data[k];
+            in += o->len;
+        } else {
+            out->data[out_i++] = s->data[in++];
+        }
+    }
+    out->data[out_len] = 0;
+    return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+{
+    return rt_string_replace_all(str, old_val, new_val);
 }
 
 RuntimeValue rt_string_to_upper(RuntimeValue str)

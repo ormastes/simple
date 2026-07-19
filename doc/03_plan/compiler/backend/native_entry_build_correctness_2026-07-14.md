@@ -523,5 +523,8 @@ the shared binary — deploys require explicit user go-ahead).
   aggregate forces collisions plus two Unicode widths and is scheduled on
   hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, AArch64/RISC-V64 execution,
   and ARM32/RISC-V32/Windows-ARM64 object gates; the simple-core smoke runs C5
-  against the pure runtime. Rebuilt current-source execution remains pending. See
+  against the pure runtime. The observed bare-metal text `.replace` sibling now
+  uses replace-all semantics on x86_64, ARM64, and both RISC-V64 runtime owners;
+  focused C behavior and SSpec ownership contracts prevent first-match-only
+  regressions. Rebuilt current-source execution remains pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

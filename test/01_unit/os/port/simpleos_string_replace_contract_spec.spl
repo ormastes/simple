@@ -1,0 +1,37 @@
+use std.io_runtime.{file_read}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn replace_wrapper(source: text) -> text:
+    source.split("RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)")[1].split("}")[0]
+
+fn replace_all_owner(source: text) -> text:
+    source.split("RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)")[1].split("RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)")[0]
+
+describe "SimpleOS text.replace runtime parity":
+    it "routes every executable 64-bit architecture through replace-all semantics":
+        val x86 = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        val arm = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val rv = file_read("examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c")
+        val rv_ghdl = file_read("examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c")
+
+        expect(replace_wrapper(x86)).to_contain("return rt_string_replace_all(str, old_val, new_val);")
+        expect(replace_wrapper(arm)).to_contain("return rt_string_replace_all(str, old_val, new_val);")
+        expect(replace_wrapper(rv)).to_contain("return rt_string_replace_all(str, old_val, new_val);")
+        expect(replace_wrapper(rv_ghdl)).to_contain("return rt_string_replace_all(str, old_val, new_val);")
+        expect(x86).to_contain("if (result_len_wide > (uint64_t)UINT32_MAX")
+        expect(arm).to_contain("if (result_len_wide > (uint64_t)UINT32_MAX")
+        expect(rv).to_contain("if (out_len_wide > (uint64_t)UINT32_MAX")
+        expect(rv_ghdl).to_contain("if (out_len_wide > (uint64_t)UINT32_MAX")
+
+    it "keeps both RISC-V runtime algorithms identical":
+        val rv = file_read("examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c")
+        val rv_ghdl = file_read("examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c")
+
+        expect(replace_all_owner(rv)).to_equal(replace_all_owner(rv_ghdl))
+
+    it "compiles and executes the portable runtime behavior oracle":
+        val command = "out=/tmp/simpleos-string-replace-runtime-test.$$; trap 'rm -f \"$out\"' EXIT; cc -std=gnu11 -O0 -I. test/01_unit/os/port/simpleos_string_replace_runtime_test.c -o \"$out\" && \"$out\""
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", command], 15000)
+
+        expect(exit_code).to_equal(0)

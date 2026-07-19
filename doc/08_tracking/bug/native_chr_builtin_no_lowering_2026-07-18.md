@@ -54,7 +54,7 @@ Note `char_from_code_inline` covers ASCII 32–126 + \t\n\v\f\r only; non-ASCII
 codepoints decode to "". Sufficient for SFNT name matching and 8.3/FAT text,
 NOT a general Unicode chr replacement.
 
-## Sibling defect: native-lane `.replace` replaces only the FIRST occurrence
+## Sibling defect: bare-metal `.replace` replaced only the first occurrence (source-fixed)
 In-guest proof (same probe run): `"Noto Sans Mono".replace(" ", "")` returned
 `NotoSans Mono` (one space left). Interpreter semantics = replace ALL
 (`str_replace_all`). This made `_font_candidate_embedded_postscript_name`
@@ -62,8 +62,15 @@ compute a wrong expected PostScript name, so `sfnt_manifest_names_match`
 correctly failed with reason=names even after the decode side was fixed —
 serial line `font names expected-runtime=|…|NotoSans Mono-Regular|…` vs
 decoded `…|NotoSansMono-Regular|…`. Worked around in font_registry with
-primitive char-extraction stripping; the builtin needs an all-occurrences
-native lowering (rt_string_replace appears to be single-shot).
+primitive char-extraction stripping.
+
+The x86_64 and ARM64 hardware runtimes now route `rt_string_replace` through
+their existing replace-all owner. Both RISC-V64 runtime copies use the same
+two-pass non-overlapping algorithm and the same wrapper. A host-executable C
+regression covers repeated, expanding, deleting, missing, empty-needle, and
+aliased-replacement cases; an SSpec source contract pins all four owners and
+keeps both RISC-V64 implementations identical. Fresh guest execution remains
+pending.
 
 ## Sibling defect (ROOT of the render-fault chain): Option None-discrimination broken on baremetal
 A function that legitimately returns `None` can surface in the caller's
