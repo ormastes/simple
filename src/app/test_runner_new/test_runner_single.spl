@@ -19,10 +19,8 @@
 # for the repro and doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md
 # for the underlying resolution defect (out of scope for the runner layer).
 #
-# Instead, count REAL executed examples directly from the interpreter's own
-# per-example glyph markers (✓ pass / ✗ fail) rather than trusting the
-# "N examples, M failures" summary line, which miscounts pending()-only specs
-# as 1 executed example with 0 failures (see count_real_examples below).
+# Under `--assert-ran`, the child writes versioned pass/fail counts through
+# `SIMPLE_TEST_RESULT_FILE`; stdout markers remain only for legacy runs.
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
@@ -35,6 +33,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
 # independent of std.test_runner.* so child runs stay lightweight). Mirrors
@@ -94,7 +93,7 @@ fn preprocess_infix_for_child(file_path: text) -> text:
     val slash = _single_last_slash(file_path)
     val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
     val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
-    val tmp = dir + ".spipe_matchers_" + base
+    val tmp = dir + ".spipe_matchers_{rt_getpid()}_{rt_time_now_unix_micros()}_" + base
     val ok = rt_file_write_text(tmp, joined)
     if not ok:
         return file_path
@@ -264,6 +263,25 @@ fn parse_child_example_summary(output: text) -> (i64, i64, i64):
         return (examples - failures, failures, 1)
     (0, 0, 0)
 
+fn read_test_result_evidence(path: text) -> (i64, i64, i64):
+    if path == "" or not rt_file_exists(path):
+        return (0, 0, 0)
+    val content = rt_file_read_text(path)
+    val parts = content.split("\n")
+    if parts.len() < 3 or parts[0] != "simple-bdd-v1":
+        return (0, 0, 0)
+    val passed_text = parts[1].trim()
+    val failed_text = parts[2].trim()
+    if passed_text == "" or failed_text == "":
+        return (0, 0, 0)
+    val passed = to_int(passed_text)
+    val failed = to_int(failed_text)
+    if passed < 0 or failed < 0 or passed.to_text() != passed_text or failed.to_text() != failed_text:
+        return (0, 0, 0)
+    if content != "simple-bdd-v1\n{passed_text}\n{failed_text}\n":
+        return (0, 0, 0)
+    (passed, failed, 1)
+
 fn main() -> i64:
     val run = parse_child_run(clean_args())
     if not run.valid:
@@ -291,9 +309,45 @@ fn main() -> i64:
     # interpreter `run` path evaluates the matcher (else it drops it → false-red
     # on falsy calls, silent false-green otherwise).
     val exec_path = preprocess_infix_for_child(run.path)
+    val assert_ran = env_get("SIMPLE_TEST_ASSERT_RAN") == "1"
+    var evidence_path = ""
+    var previous_evidence_path = ""
+    if assert_ran:
+        var temp_root = env_get("TMPDIR")
+        if temp_root == "":
+            temp_root = env_get("TMP")
+        if temp_root == "":
+            temp_root = env_get("TEMP")
+        if temp_root == "":
+            temp_root = "/tmp"
+        val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
+        evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+        if rt_file_exists(evidence_path):
+            val _ = rt_file_delete(evidence_path)
+        if rt_file_exists(evidence_path):
+            if exec_path != run.path:
+                val _ = rt_file_delete(exec_path)
+            print "error: test-runner: cannot prepare structured result evidence"
+            return 1
+        previous_evidence_path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
+        if not rt_env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
+            if exec_path != run.path and rt_file_exists(exec_path):
+                val _ = rt_file_delete(exec_path)
+            print "error: test-runner: cannot configure structured result evidence"
+            return 1
     val start = rt_time_now_unix_micros()
     val (stdout, stderr, code) = process_run_bounded(binary, ["run", exec_path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val duration_ms = (rt_time_now_unix_micros() - start) / 1000
+    if assert_ran and not rt_env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
+        if evidence_path != "" and rt_file_exists(evidence_path):
+            val _ = rt_file_delete(evidence_path)
+        if exec_path != run.path and rt_file_exists(exec_path):
+            val _ = rt_file_delete(exec_path)
+        print "error: test-runner: cannot restore structured result environment"
+        return 1
+    val (evidence_passed, evidence_failed, has_evidence) = read_test_result_evidence(evidence_path)
+    if evidence_path != "" and rt_file_exists(evidence_path):
+        val _ = rt_file_delete(evidence_path)
     if exec_path != run.path and rt_file_exists(exec_path):
         val _ = rt_file_delete(exec_path)
     if stdout != "":
@@ -315,6 +369,19 @@ fn main() -> i64:
         failed = 1
         passed = 0
         print "error: test-runner: file timed out"
+    elif code != 0 and assert_ran:
+        passed = if has_evidence == 1: evidence_passed else: 0
+        failed = if has_evidence == 1 and evidence_failed > 0: evidence_failed else: 1
+        print "error: test-runner: spec failed"
+    elif assert_ran and (has_evidence == 0 or evidence_passed + evidence_failed == 0):
+        failed = 1
+        passed = 0
+        print "error: --assert-ran: no BDD examples executed"
+    elif assert_ran:
+        passed = evidence_passed
+        failed = evidence_failed
+        if failed > 0:
+            print "error: test-runner: spec failed"
     elif real_executed == 0 and (has_summary == 0 or summary_failed == 0):
         # Fail-closed zero-executed check: a spec whose only content is
         # pending()/an orphan describe with no real `it` executions must not
