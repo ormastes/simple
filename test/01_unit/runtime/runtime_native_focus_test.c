@@ -72,6 +72,18 @@ static int walk_contains(SplArray* paths, const char* expected) {
 }
 
 int main(void) {
+    int64_t empty_a = rt_string_new(NULL, 0);
+    int64_t empty_b = rt_string_new((const uint8_t*)"", 0);
+    int64_t one_a = rt_string_new((const uint8_t*)"a", 1);
+    int64_t one_a_repeat = rt_string_new((const uint8_t*)"a", 1);
+    int64_t one_b = rt_string_new((const uint8_t*)"b", 1);
+    int64_t short_source = rt_string_new((const uint8_t*)"za", 2);
+    assert(empty_a == empty_b);
+    assert(one_a == one_a_repeat);
+    assert(one_a != one_b);
+    assert(rt_string_char_at(short_source, 1) == one_a);
+    assert(rt_slice(short_source, 1, 2, 1) == one_a);
+
     SplArray* wffi_args = rt_array_new(2);
     assert(rt_array_push(wffi_args, rt_value_int(0x24c7468)));
     assert(rt_array_push(wffi_args, rt_value_int(7)));

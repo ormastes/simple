@@ -1106,6 +1106,7 @@ pub fn clear_all_runtime_registries() {
 
     // Clear heap allocation registry
     heap::clear_heap_allocation_registry();
+    collections::reregister_short_string_cache();
 
     // Clear memory-mapped file registry
     file_io::clear_mmap_registry();

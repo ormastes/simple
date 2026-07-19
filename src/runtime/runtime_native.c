@@ -624,6 +624,8 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 static RtCoreString** rt_core_string_registry = NULL;
 static size_t rt_core_string_registry_len = 0;
 static size_t rt_core_string_registry_cap = 0;
+static RtCoreString* rt_core_short_string_cache[257] = {0};
+static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
 static RtCoreArray** rt_core_array_registry = NULL;
 static size_t rt_core_array_registry_len = 0;
 static size_t rt_core_array_registry_cap = 0;
@@ -1089,7 +1091,7 @@ int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t 
     return rt_function_not_found(name, len);
 }
 
-int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
+static int64_t rt_string_new_uncached(const uint8_t* bytes, uint64_t len) {
     if (!bytes && len > 0) return rt_core_nil();
     if (len > SIZE_MAX - sizeof(RtCoreString) - 1) return rt_core_nil();
 
@@ -1104,6 +1106,24 @@ int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
     s->data[len] = '\0';
     rt_core_register_string(s);
     return (int64_t)(((uint64_t)(uintptr_t)s) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
+    if (!bytes && len > 0) return rt_core_nil();
+    if (len > 1) return rt_string_new_uncached(bytes, len);
+
+    size_t index = len == 0 ? 0 : (size_t)bytes[0] + 1;
+    while (atomic_flag_test_and_set_explicit(&rt_core_short_string_cache_lock, memory_order_acquire)) { }
+    RtCoreString* cached = rt_core_short_string_cache[index];
+    if (!cached) {
+        int64_t value = rt_string_new_uncached(bytes, len);
+        cached = rt_core_as_string(value);
+        if (cached) rt_core_short_string_cache[index] = cached;
+    }
+    atomic_flag_clear_explicit(&rt_core_short_string_cache_lock, memory_order_release);
+    return cached
+        ? (int64_t)(((uint64_t)(uintptr_t)cached) | RT_VALUE_TAG_HEAP)
+        : rt_core_nil();
 }
 
 int64_t rt_string_len(int64_t string) {

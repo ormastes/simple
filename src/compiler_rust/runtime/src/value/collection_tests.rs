@@ -657,6 +657,31 @@ fn test_dict_get_missing() {
 }
 
 #[test]
+fn test_empty_and_single_byte_strings_are_interned() {
+    let empty_a = rt_string_new(std::ptr::null(), 0);
+    let empty_b = rt_string_new("".as_ptr(), 0);
+    assert_eq!(empty_a, empty_b);
+
+    let a_direct = rt_string_new("a".as_ptr(), 1);
+    let a_repeat = rt_string_new("a".as_ptr(), 1);
+    let b_direct = rt_string_new("b".as_ptr(), 1);
+    assert_eq!(a_direct, a_repeat);
+    assert_ne!(a_direct, b_direct);
+
+    let source = rt_string_new("za".as_ptr(), 2);
+    assert_eq!(rt_string_char_at(source, 1), a_direct);
+    assert_eq!(rt_slice(source, 1, 2, 1), a_direct);
+
+    let unicode = "€";
+    let unicode_value = rt_string_new(unicode.as_ptr(), unicode.len() as u64);
+    assert_eq!(rt_string_len(unicode_value), unicode.len() as i64);
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(rt_string_data(unicode_value), unicode.len()) },
+        unicode.as_bytes()
+    );
+}
+
+#[test]
 fn test_dict_contains_distinguishes_present_nil_value() {
     let dict = rt_dict_new(10);
     let present = rt_string_new("present".as_ptr(), 7);

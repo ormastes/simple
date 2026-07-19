@@ -251,3 +251,32 @@ evidence. Bounded seed diagnostics passed the route spec 11/11, database specs
 three-cycle cap at 21/22 on a test-only literal-brace construction; that source
 assertion is corrected but intentionally not rerun in this session. Its manual
 therefore remains stale, and no live QEMU web/DB claim is made.
+
+## Short-string cache restoration — 2026-07-19
+
+History found a second reviewed optimization in `ee4d21b4bf`: immutable empty
+and one-byte runtime strings are interned in a fixed 257-entry cache. The Rust
+runtime re-registers those stable objects after test-only registry clearing;
+the Core-C runtime uses the same fixed mapping. The unrelated 262-file
+`fa1ee50c35` snapshot deleted both implementations and their regression
+assertions without a cache-specific rationale. The exact Rust and Core-C
+implementations and tests are restored.
+
+Focused evidence passes for Rust string identity/Unicode/`char_at`/slice,
+Rust registry-clear lifecycle, and a compiled Core-C identity/`char_at`/slice
+probe. Incremental seed and `simple-native-all` builds pass, followed by fresh
+Stage2/Stage3 compiler sanity and Stage2 native-build capability. The admitted
+compiler hashes are
+`c6112ca01b528efffedb80cba443bd9d4346d62ac9efdcbe91a37fb957a3f0c6`
+(Stage2) and
+`9013f8d0c0b4681d9347a428832e3a42f9e0859eb3e05672b6a850dbec339f5a`
+(Stage3).
+
+A source-matched Stage4 profile was intentionally stopped after 380.08 seconds:
+43 files completed and `src/compiler/10.frontend/core/parser.spl` was active.
+The chronological position is not materially better than the cache-less run,
+so the older 344-file/163-second log cannot be attributed to this cache alone.
+That older tree also contained arena-preferred declaration accessors and
+integer environment reads later removed by the same broad snapshot. Restore
+and test those existing fast paths as the next single frontend fix before
+another Stage4 attempt. No Stage4 completion or full-CLI claim is made.

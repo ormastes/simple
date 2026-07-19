@@ -137,9 +137,12 @@ fn test_sffi_functions() {
 fn clear_all_runtime_registries_resets_tier_sensitive_provider_caches() {
     let _guard = simd_tier_env_lock().lock().unwrap();
     let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+    let cached_a = rt_string_new("a".as_ptr(), 1);
 
     std::env::set_var("SIMPLE_SIMD_TIER", "x86_64_sse2");
     clear_all_runtime_registries();
+    assert_eq!(rt_string_new("a".as_ptr(), 1), cached_a);
+    assert_eq!(rt_string_len(cached_a), 1);
     assert_eq!(
         super::numeric_kernels::active_numeric_kernel_tier(),
         simple_simd::SimdTier::X86_64Sse2
