@@ -1,6 +1,6 @@
 # `simple fix` failed-write false-green
 
-**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING  
+**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 **Severity:** P1 — a failed persistence was reported as an applied fix
 
 ## Root cause

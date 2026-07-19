@@ -1,6 +1,6 @@
 # Test runner unconditional SPipe docgen hang
 
-**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING  
+**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 **Severity:** P1 — passing tests could hang before the runner returned
 
 ## Root cause
