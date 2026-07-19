@@ -57,49 +57,38 @@ impl<'a> Parser<'a> {
                 let parts = parts.clone();
                 self.advance();
                 let mut result_parts = Vec::new();
+                let parse_complete_expr = |source: &str| {
+                    let mut parser = Parser::new_expression(source);
+                    match parser.parse_expression() {
+                        Ok(expr) if parser.is_at_end() || matches!(parser.current.kind, TokenKind::Eof) => Some(expr),
+                        _ => None,
+                    }
+                };
                 for part in parts {
                     match part {
                         FStringToken::Literal(s) => {
                             result_parts.push(FStringPart::Literal(s));
                         }
                         FStringToken::Expr(expr_str) => {
-                            // Parse the expression string using expression parser
-                            // (does not treat leading whitespace as indentation)
-                            let mut sub_parser = Parser::new_expression(&expr_str);
-                            match sub_parser.parse_expression() {
-                                Ok(expr) => {
-                                    // Verify the entire expression was consumed
-                                    // If there's leftover content, treat as literal
-                                    if sub_parser.is_at_end() || matches!(sub_parser.current.kind, TokenKind::Eof) {
-                                        result_parts.push(FStringPart::Expr(expr));
-                                    } else {
-                                        // Expression didn't consume all input, treat as literal
-                                        result_parts.push(FStringPart::Literal(format!("{{{}}}", expr_str)));
-                                    }
-                                }
-                                Err(_) => {
-                                    // If parsing fails, treat the whole thing as a literal
-                                    // This allows strings like "re{ ^\\d{4} }" to work
-                                    result_parts.push(FStringPart::Literal(format!("{{{}}}", expr_str)));
-                                }
+                            if let Some(expr) = parse_complete_expr(&expr_str) {
+                                result_parts.push(FStringPart::Expr(expr));
+                            } else {
+                                // Keep brace-bearing regex/CSS text compatible.
+                                result_parts.push(FStringPart::Literal(format!("{{{}}}", expr_str)));
                             }
                         }
                         FStringToken::ExprWithFormat(expr_str, format_spec) => {
-                            // Parse the expression part (before the ':')
-                            let mut sub_parser = Parser::new_expression(&expr_str);
-                            match sub_parser.parse_expression() {
-                                Ok(expr) => {
-                                    if sub_parser.is_at_end() || matches!(sub_parser.current.kind, TokenKind::Eof) {
-                                        result_parts.push(FStringPart::ExprWithFormat(expr, format_spec));
-                                    } else {
-                                        // Expression didn't consume all input, treat as literal
-                                        result_parts
-                                            .push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
-                                    }
-                                }
-                                Err(_) => {
-                                    result_parts
-                                        .push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                            if let Some(expr) = parse_complete_expr(&expr_str) {
+                                result_parts.push(FStringPart::ExprWithFormat(expr, format_spec));
+                            } else {
+                                // A top-level colon can belong to the expression grammar
+                                // (`if cond: yes else: no`). The lexer only marks a format
+                                // candidate, so retry the complete hole before literalizing it.
+                                let complete = format!("{}:{}", expr_str, format_spec);
+                                if let Some(expr) = parse_complete_expr(&complete) {
+                                    result_parts.push(FStringPart::Expr(expr));
+                                } else {
+                                    result_parts.push(FStringPart::Literal(format!("{{{}}}", complete)));
                                 }
                             }
                         }

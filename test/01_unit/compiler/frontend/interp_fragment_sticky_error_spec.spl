@@ -20,11 +20,31 @@ use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{parser_has_errors, parser_diagnostics_suppressed_get, parser_warnings_get}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.frontend.parser_types_expr.{ExprKind}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 
 describe "Flat AST bridge interpolation fragment recovery does not stick par_had_error":
+    it "keeps an inline conditional as a real Pure Simple interpolation expression":
+        val src = "val rendered = \"value={if true: 1 else: 0}\"\n"
+        val module = parse_and_build_module(src, "inline_if_interp.spl")
+        val rendered = module.constants["rendered"] ?? panic("missing rendered constant")
+
+        match rendered.value.kind:
+            case StringLit(_, interps):
+                expect(interps.?).to_equal(true)
+                val parts = interps.unwrap()
+                expect(parts.len()).to_equal(1)
+                var is_if = false
+                match parts[0].expr.kind:
+                    case If(_, _, _):
+                        is_if = true
+                    case _: ()
+                expect(is_if).to_equal(true)
+            case _:
+                fail("inline conditional interpolation did not remain a string literal")
+
     it "recovers from a non-expression brace region in a string literal without leaving par_had_error set":
         # `{,}` is not a clean single expression (a bare comma), so
         # flat_bridge_parse_interp_inner's primary-expr parse fails silently

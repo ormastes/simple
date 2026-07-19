@@ -1,7 +1,7 @@
 # Native codegen: nested if/else inside {} string interpolation emits raw source text instead of evaluating
 
 - **ID:** native_string_interp_nested_if_verbatim_2026-07-19
-- **Status:** OPEN
+- **Status:** FIXED (2026-07-19)
 - **Severity:** medium (silent wrong output; no diagnostic)
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -38,3 +38,17 @@ on the native path (parser/lowering parity with whatever the hosted lane
 does), or reject it at compile time — silent verbatim passthrough is the
 worst of both. Per repo rule (compact expression forms that fail must be
 fixed or filed): this file is the filing.
+
+## Resolution
+
+The Rust seed lexer treated the last top-level colon as a possible format
+delimiter. For `{if C: 1 else: 0}`, the suffix ` 0` passed its format-spec
+heuristic, leaving the invalid fragment `if C: 1 else`; the f-string parser
+then silently converted the whole hole to literal text.
+
+The parser now treats the lexer result as a format *candidate*: when the
+prefix is not a complete expression, it reparses the reconstructed full hole
+through the ordinary expression grammar. The Pure Simple frontend already
+uses that ordinary grammar; a focused AST-shape test now locks its `ExprKind.If`
+path, and the shared LLVM/Cranelift cross-target fixture checks both true and
+false arms using the original `u8` bit-mask shape.

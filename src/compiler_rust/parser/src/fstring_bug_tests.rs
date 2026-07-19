@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use crate::ast::{Expr, FStringPart};
     use crate::lexer::Lexer;
+    use crate::parser_impl::core::Parser;
     use crate::token::{FStringToken, TokenKind};
 
     fn find_errors(source: &str) -> Vec<(usize, usize, String)> {
@@ -189,6 +191,20 @@ main()
                 FStringToken::Expr("member_ids.map(\"{_}\").join(\"_\")".to_string()),
             ])]
         );
+    }
+
+    #[test]
+    fn test_inline_if_colons_are_expression_syntax_not_format_spec() {
+        let mut parser = Parser::new_expression(r#""x={if true: 1 else: 0}""#);
+        let parsed = parser.parse_expression().expect("inline if interpolation should parse");
+        match parsed {
+            Expr::FString { parts, .. } => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(parts[0], FStringPart::Literal(ref s) if s == "x="));
+                assert!(matches!(parts[1], FStringPart::Expr(Expr::If { .. })));
+            }
+            other => panic!("expected FString, got {other:?}"),
+        }
     }
 
     /// {{ escape still works
