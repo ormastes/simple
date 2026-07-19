@@ -16,7 +16,7 @@ use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
 use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
-use compiler.core.parser_decls.{parse_type_params, parse_type_param_constraint_list}
+use compiler.core.parser_decls.{parse_type_params, parse_type_param_constraint_list, parser_skip_mut_if_present}
 use compiler.core.parser_decls.{parser_expect_param_name}
 use compiler.core.parser_decls.{file_generic_constraints, file_generic_constraint_modes}
 use compiler.frontend.core.parser_expr.{parse_expr}
@@ -31,7 +31,7 @@ use compiler.core.ast.{expr_int_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
-use compiler.core.ast.{decl_set_param_defaults}
+use compiler.core.ast.{decl_set_param_defaults, decl_set_param_muts}
 
 # ===== Use/Export Declarations =====
 
@@ -337,11 +337,14 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     var param_names: [text] = []
     var param_types: [i64] = []
     var param_defaults: [i64] = []
+    var param_muts: [i64] = []
 
     if par_kind_get() != 141:
+        val p_is_mut = parser_skip_mut_if_present()
         val pname = par_text_get()
         parser_expect_param_name()
         param_names.push(pname)
+        param_muts.push(if p_is_mut: 1 else: 0)
         var ptype = 0
         if par_kind_get() == 161:
             parser_advance()
@@ -358,9 +361,11 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
             if par_kind_get() != 160:
                 break
             parser_advance()
+            val pn_is_mut = parser_skip_mut_if_present()
             val pn = par_text_get()
             parser_expect_param_name()
             param_names.push(pn)
+            param_muts.push(if pn_is_mut: 1 else: 0)
             var pt = 0
             if par_kind_get() == 161:
                 parser_advance()
@@ -433,17 +438,22 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
             var method_param_names: [text] = ["self"]
             var method_param_types: [i64] = [self_type]
             var method_param_defaults: [i64] = [-1]
+            var method_param_muts: [i64] = [0]
             for pn in param_names:
                 method_param_names.push(pn)
             for pt in param_types:
                 method_param_types.push(pt)
             for pd in param_defaults:
                 method_param_defaults.push(pd)
+            for pm in param_muts:
+                method_param_muts.push(pm)
             param_names = method_param_names
             param_types = method_param_types
             param_defaults = method_param_defaults
+            param_muts = method_param_muts
     val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
     decl_set_param_defaults(mid, param_defaults)
+    decl_set_param_muts(mid, param_muts)
     return mid
 
 fn skip_impl_where_clause():

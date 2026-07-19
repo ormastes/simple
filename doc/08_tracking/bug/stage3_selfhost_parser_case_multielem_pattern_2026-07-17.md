@@ -352,3 +352,27 @@ While building the (reverted) `decl_reset()`, noticed `ast_reset()`
 `decl_param_mut_text` (all declared in `decl_nodes.spl`) at all — not even
 via the old bare-rebind approach. Separate, smaller issue from this bug; not
 investigated further since the main fix attempt was reverted.
+
+## UPDATE 2026-07-19: distinct impl-method `mut` parity bug fixed
+
+A fresh current-head Stage4 profile reached 633 parsed files before failing
+at the same source location, but it did **not** reproduce the historical
+stale-AST signature: there were zero `[stmt_get_tag] OOB` and zero
+`[flat-bridge] missing stmt tag` diagnostics. Its first error was directly:
+
+```
+collection_opt_core.spl:470:43: expected ), got Ident 'counts'
+```
+
+The current root cause was therefore narrower and independent of the
+historical compiled-state bug. Top-level `parse_fn_decl` already consumed
+prefix-`mut` parameters and recorded `decl_set_param_muts`; the separate
+`parse_class_body_method` path did neither. That path now reuses the existing
+peek-safe `parser_skip_mut_if_present`, keeps a parallel mutability vector,
+prepends immutable metadata for synthetic `self`, and stores it on the method
+declaration. `collection_opt_core.spl` remains unchanged.
+
+The focused `impl_method_mut_param_spec.spl` diagnostic passes 1/1 and proves
+the parsed parameter names are `["self", "inst", "counts"]` with mutability
+`[0, 0, 1]`. The Stage4 allowance was already consumed, so the full closure was
+not rerun in that session.
