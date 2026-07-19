@@ -4560,6 +4560,90 @@ static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
     return (const uint8_t*)s->data;
 }
 
+int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
+    static atomic_uint_fast64_t sequence = 0;
+    RtCoreString* path_string = rt_core_as_string(path_value);
+    RtCoreString* content_string = rt_core_as_string(content_value);
+    if (!path_string || !content_string || path_string->len == 0 ||
+        memchr(path_string->data, '\0', (size_t)path_string->len) != NULL) return 0;
+
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return 0;
+    char* parent = spl_strdup(path);
+    if (!parent) {
+        free(path);
+        return 0;
+    }
+    char* slash = strrchr(parent, '/');
+#if defined(_WIN32)
+    char* backslash = strrchr(parent, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
+    if (slash) {
+        if (slash == parent || (slash == parent + 2 && parent[1] == ':')) slash[1] = '\0';
+        else *slash = '\0';
+        if (!rt_dir_exists(parent) && !rt_dir_create(parent, true)) {
+            free(parent);
+            free(path);
+            return 0;
+        }
+    }
+    free(parent);
+    size_t path_len = strlen(path);
+    char* temp_path = (char*)malloc(path_len + 64);
+    if (!temp_path) {
+        free(path);
+        return 0;
+    }
+    int fd = -1;
+    for (int attempt = 0; attempt < 16 && fd < 0; attempt++) {
+#if defined(_WIN32)
+        int temp_len = snprintf(temp_path, path_len + 64, "%s.tmp.%lu.%llu", path,
+                                (unsigned long)GetCurrentProcessId(),
+                                (unsigned long long)atomic_fetch_add(&sequence, 1));
+        if (temp_len >= 0 && (size_t)temp_len < path_len + 64)
+            fd = _open(temp_path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+        int temp_len = snprintf(temp_path, path_len + 64, "%s.tmp.%ld.%llu", path,
+                                (long)getpid(), (unsigned long long)atomic_fetch_add(&sequence, 1));
+        if (temp_len >= 0 && (size_t)temp_len < path_len + 64)
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+#endif
+        if (fd < 0 && errno != EEXIST) break;
+    }
+#if defined(_WIN32)
+    FILE* file = fd < 0 ? NULL : _fdopen(fd, "wb");
+#else
+    FILE* file = fd < 0 ? NULL : fdopen(fd, "wb");
+#endif
+    int created = fd >= 0;
+    int ok = file != NULL;
+    if (ok) ok = fwrite(content_string->data, 1, (size_t)content_string->len, file) == (size_t)content_string->len;
+    if (ok) ok = fflush(file) == 0;
+#if defined(_WIN32)
+    if (ok) ok = _commit(fd) == 0;
+#else
+    if (ok) ok = fsync(fd) == 0;
+#endif
+    if (file && fclose(file) != 0) ok = 0;
+    else if (!file && fd >= 0) {
+#if defined(_WIN32)
+        _close(fd);
+#else
+        close(fd);
+#endif
+    }
+#if defined(_WIN32)
+    if (ok) ok = MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    if (ok) ok = rename(temp_path, path) == 0;
+#endif
+    if (created && !ok) remove(temp_path);
+    free(temp_path);
+    free(path);
+    return ok ? 1 : 0;
+}
+
 static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t offset) {
 #if defined(_WIN32)
     if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;

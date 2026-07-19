@@ -1,6 +1,6 @@
 # atomic-write providers were non-atomic
 
-**Status:** SOURCE FIXED / NATIVE-ALL EXECUTION PENDING
+**Status:** CORE-C ABI BASELINE PASS / COLLISION HARDENING RERUN PENDING
 **Severity:** P1 — interrupted lint, formatter, runner, or doc writes could lose data
 
 ## Root cause
@@ -12,14 +12,18 @@ writes could expose a missing or partial destination.
 
 ## Solution
 
-The canonical Simple facade now calls `rt_file_atomic_write`. Interpreter and
-native-all providers create a unique temporary file in the destination
-directory, write and sync it, then persist it atomically. Failure leaves the
-existing destination and directory intact and cleans the temporary file.
+The canonical Simple facade now calls `rt_file_atomic_write`. Interpreter,
+native-all, and core-C providers create a unique temporary file in the
+destination directory, write and sync it, then persist it atomically. The
+core-C owner decodes the real tagged-text ABI and preserves embedded NUL bytes.
+Failure leaves the existing destination intact and cleans the temporary file.
 
 ## Evidence
 
 - interpreter replacement, relative-parent, and fail-closed regression: PASS
 - equivalent native-all regression: authored; execution remains pending after
   the native-all lane reached its bounded-attempt cap
+- core-C tagged-ABI replacement regression: PASS before the final stale-temp,
+  embedded-NUL, truncation, parent-creation, and rename-cleanup cases were added;
+  the expanded regression awaits a fresh bounded session
 - admitted Stage 4 lint/formatter integration: pending

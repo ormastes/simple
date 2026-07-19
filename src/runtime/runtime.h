@@ -603,6 +603,7 @@ int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const char* path);
 int         rt_dir_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
+int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);

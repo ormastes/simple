@@ -59,6 +59,10 @@ static int64_t text(const char* value) {
     return rt_string_new((const uint8_t*)value, strlen(value));
 }
 
+static int64_t text_bytes(const uint8_t* value, size_t len) {
+    return rt_string_new(value, len);
+}
+
 static int walk_contains(SplArray* paths, const char* expected) {
     for (int64_t i = 0; i < spl_array_len(paths); i++) {
         const char* actual = spl_as_str(spl_array_get(paths, i));
@@ -122,6 +126,48 @@ int main(void) {
     assert(!walk_contains(walked, walk_suffix_dir));
     assert(rt_dir_remove_all(walk_root));
     assert(access(walk_root, F_OK) != 0);
+
+    char atomic_root[] = "/tmp/simple-atomic-write-XXXXXX";
+    assert(mkdtemp(atomic_root) != NULL);
+    char atomic_path[256], atomic_temp[320], missing_path[320], occupied_path[320], exhausted_path[320];
+    snprintf(atomic_path, sizeof(atomic_path), "%s/value.txt", atomic_root);
+    FILE* atomic_file = fopen(atomic_path, "wb");
+    assert(atomic_file && fwrite("original-is-longer", 1, 18, atomic_file) == 18 && fclose(atomic_file) == 0);
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.0", atomic_path, (long)getpid());
+    atomic_file = fopen(atomic_temp, "wb");
+    assert(atomic_file && fclose(atomic_file) == 0);
+    const uint8_t replacement_bytes[] = {'n', 'e', 'w', 0, 'x'};
+    assert(rt_file_atomic_write(text(atomic_path), text_bytes(replacement_bytes, sizeof(replacement_bytes))) == 1);
+    atomic_file = fopen(atomic_path, "rb");
+    char atomic_content[16] = {0};
+    assert(atomic_file && fread(atomic_content, 1, sizeof(replacement_bytes), atomic_file) == sizeof(replacement_bytes));
+    assert(fgetc(atomic_file) == EOF && fclose(atomic_file) == 0);
+    assert(memcmp(atomic_content, replacement_bytes, sizeof(replacement_bytes)) == 0);
+    assert(access(atomic_temp, F_OK) == 0);
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.1", atomic_path, (long)getpid());
+    assert(access(atomic_temp, F_OK) != 0);
+    snprintf(missing_path, sizeof(missing_path), "%s/missing/value.txt", atomic_root);
+    assert(rt_file_atomic_write(text(missing_path), text("created")) == 1);
+    snprintf(occupied_path, sizeof(occupied_path), "%s/occupied", atomic_root);
+    assert(mkdir(occupied_path, 0700) == 0);
+    assert(rt_file_atomic_write(text(occupied_path), text("never")) == 0);
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.3", occupied_path, (long)getpid());
+    assert(access(atomic_temp, F_OK) != 0);
+    snprintf(exhausted_path, sizeof(exhausted_path), "%s/exhausted.txt", atomic_root);
+    for (int i = 4; i < 20; i++) {
+        snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.%d", exhausted_path, (long)getpid(), i);
+        atomic_file = fopen(atomic_temp, "wb");
+        assert(atomic_file && fclose(atomic_file) == 0);
+    }
+    assert(rt_file_atomic_write(text(exhausted_path), text("never")) == 0);
+    for (int i = 4; i < 20; i++) {
+        snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.%d", exhausted_path, (long)getpid(), i);
+        assert(unlink(atomic_temp) == 0);
+    }
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s/value.txt.tmp.%ld.0", atomic_root, (long)getpid());
+    assert(unlink(atomic_temp) == 0 && unlink(atomic_path) == 0 && unlink(missing_path) == 0);
+    snprintf(missing_path, sizeof(missing_path), "%s/missing", atomic_root);
+    assert(rmdir(missing_path) == 0 && rmdir(occupied_path) == 0 && rmdir(atomic_root) == 0);
 
     int64_t builder = rt_string_builder_new();
     assert(builder != 0);

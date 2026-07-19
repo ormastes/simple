@@ -2671,6 +2671,7 @@ fn test_core_c_runtime_native_focus_contract() {
         .arg(repo_root.join("src/runtime"))
         .arg(repo_root.join("test/01_unit/runtime/runtime_native_focus_test.c"))
         .arg(&runtime)
+        .arg("-Wl,--gc-sections")
         .args(["-lpthread", "-ldl", "-lm"])
         .arg("-o")
         .arg(&executable)
