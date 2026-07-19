@@ -518,6 +518,56 @@ converts probe/perf logs to level-gated output; never delete historical logs,
 only gate verbosity. This applies to render-performance tracing and fault 
 diagnostics.
 
+## Session update 2026-07-19 (Aqua theme + px blitter hardening)
+
+**Aqua Mac-glass theme landed (2248995c72d):**
+`wm_chrome_theme_defaults()` in
+[src/lib/common/ui/wm_chrome_theme.spl](../../../../src/lib/common/ui/wm_chrome_theme.spl)
+is the real single source of truth for the baremetal WM boot path's
+default palette — it now returns a classic Aqua-light palette (soft
+blue-gray desktop, `#F2F2F2` window bodies, glossy-blue focused
+titlebars, dark text) instead of the old dark-slate default. New
+`AQUA_*` tokens + `aqua_light()`/`aqua_dark()` registry factories added in
+[src/lib/common/ui/glass/theme.spl](../../../../src/lib/common/ui/glass/theme.spl)
+and
+[src/lib/common/ui/glass/numeric_tokens.spl](../../../../src/lib/common/ui/glass/numeric_tokens.spl).
+Both chrome routes retargeted: the CSS/scene backend in
+[src/lib/common/ui/window_scene_draw_ir.spl](../../../../src/lib/common/ui/window_scene_draw_ir.spl)
+and the hosted-compositor route in
+[src/os/compositor/host_compositor_core.spl](../../../../src/os/compositor/host_compositor_core.spl)
+(plus `src/os/compositor/shared_mdi_framebuffer_scene.spl`) — 10
+accent-fill sites retargeted to `title_focused` so dark text never sits
+on saturated blue.
+
+**Field-order landmine — explicitly checked and clear this time:**
+`WmChromeColors` field order was verified unchanged by this change (no
+offset-shift risk). This struct is read positionally at multiple
+construction sites across both chrome routes; ANY future edit to its
+field list MUST redo that same check, since a silent reorder would
+corrupt every positional construction site without a compile error.
+`wm_chrome_theme_spec` was updated to the new default contract.
+**Existing bitmap-evidence baselines pinned to the old dark-slate palette
+will need refresh** after visual verification — expect this gate to look
+"changed" for the right reason, not as a regression.
+
+**px blitter hardening (`_px_draw_text`):** the pixel-buffer text
+blitter every WM chrome route funnels through, in
+[src/lib/common/ui/window_scene_draw_ir.spl](../../../../src/lib/common/ui/window_scene_draw_ir.spl)
+(around line 259), now reads text via `.bytes()` + an i64 bit-test
+instead of `char_code_at` / native `!=`, working around the two
+freestanding-lane miscompiles documented in
+[native_char_code_at_tag_shift_2026-07-19.md](../../../../doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md).
+Same recipe family as the rasterizer fix in `spl_fonts.spl` — see the new
+[vector_fonts](../../feature_expert/vector_fonts/skill.md) feature expert
+for the full landmine list this and the rasterizer both work around.
+
+**Do NOT yet cite as landed:** `engine.spl`'s
+`engine2d_default_font_config_for` execution-target pin (routes around
+the broken enum `==`, see
+`native_enum_eq_always_false_freestanding_2026-07-19.md`) and a
+glyph-cache null-deref fix are still IN FLIGHT as of this update — check
+origin before citing either as shipped.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

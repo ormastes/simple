@@ -92,6 +92,48 @@ functions as workaround; seed-side root fix still pending.
 **i64 print truncation fixed (5c71ca50c00):** 61-bit tag-box was truncating 
 large i64 values. Bypass via `rt_raw_i64_to_string` now restores full precision.
 
+## Session update 2026-07-19 (freestanding native-lane miscompile cluster)
+
+Four new codegen defects filed from the SimpleOS vector-font rasterizer
+campaign, all `--target x86_64-unknown-none --entry-closure --mode
+dynload` (cranelift) only — none reproduce hosted:
+
+- **Tuple spill/reload across a call boundary**: a stack-spilled tuple's
+  element pointer can be read from a slot the callee's own tuple
+  construction reused, after the call returns — silent wild-pointer
+  dereference, not a crash-at-fault-site bug (79,403 exception frames from
+  one instance before the workaround).
+  [native_tuple_spill_clobber_across_call_2026-07-19.md](../../../../doc/08_tracking/bug/native_tuple_spill_clobber_across_call_2026-07-19.md).
+- **`char_code_at` returns a tag-still-attached value**: the same logical
+  byte reads as `v`, `v>>3`, or `v&7` at different call sites; fix belongs
+  at the boxing/untag layer, not by compensating per call site (two wrong
+  reads can cancel and look correct — a documented trap for whoever
+  "fixes" this next).
+  [native_char_code_at_tag_shift_2026-07-19.md](../../../../doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md).
+- **String interpolation silently passes through source text** for a
+  nested `if/else` hole (`{if c: 1 else: 0}`) instead of evaluating or
+  rejecting it — no diagnostic either way.
+  [native_string_interp_nested_if_verbatim_2026-07-19.md](../../../../doc/08_tracking/bug/native_string_interp_nested_if_verbatim_2026-07-19.md).
+- **Enum `==` is false for every variant** on this lane, including against
+  a freshly constructed value of the same variant — silently no-ops whole
+  subsystems with zero exceptions and zero diagnostics. Suspected
+  tagged-vs-raw-discriminant mismatch between construction and compare
+  sites; same family as the BoxInt `<<3` tag-shift class (2026-07-04) and
+  the cross-module VHDL enum defect (2026-07-18).
+  [native_enum_eq_always_false_freestanding_2026-07-19.md](../../../../doc/08_tracking/bug/native_enum_eq_always_false_freestanding_2026-07-19.md).
+
+All four are cross-linked with concrete avoidance recipes
+(snapshot-to-locals across calls, `bytes()` over `char_code_at`,
+hoist-before-interpolate, route-around-the-compare) in the new
+[vector_fonts](../../feature_expert/vector_fonts/skill.md) feature expert
+— this entry is the codegen-defect index, that one is the "how to write
+freestanding font/text code" guide; don't duplicate the recipe prose here.
+
+Regression-test suggestion from the enum_eq filing, worth adopting as a
+standing gate for this layer: construct each enum variant and
+`==`-compare it against itself inside a `--target x86_64-unknown-none`
+build.
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill
