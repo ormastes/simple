@@ -173,26 +173,59 @@ pub fn _driver_entry_import_dirname(path: text) -> text:
         i = i + 1
     dir
 
-fn _driver_import_path_token(rest_in: text) -> text:
+fn _driver_import_space(byte: u8) -> bool:
+    byte == 32 or byte == 9 or byte == 11 or byte == 12 or byte == 13
+
+fn _driver_import_path_token(bytes: [u8], start_in: i64, end_in: i64) -> text:
     # Dotted module path prefix of a use/import tail; "" when the tail is not
     # a plausible module path (guards against prose lines that begin with
     # "use " inside strings the docstring toggle missed).
     val word_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_."
-    val rest = rest_in.trim()
-    var cut = rest.len()
-    var i = 0
-    while i < rest.len():
-        val ch = rest.substring(i, i + 1)
-        if ch == " " or ch == "{" or ch == "(" or ch == "*" or ch == "#":
+    var start = start_in
+    var end_pos = end_in
+    while start < end_pos and _driver_import_space(bytes[start]):
+        start = start + 1
+    while end_pos > start and _driver_import_space(bytes[end_pos - 1]):
+        end_pos = end_pos - 1
+    var cut = end_pos
+    var i = start
+    while i < end_pos:
+        val byte = bytes[i]
+        if byte == 32 or byte == 123 or byte == 40 or byte == 42 or byte == 35:
             cut = i
             break
-        if not word_chars.contains(ch):
+        val is_word = (byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 95 or byte == 46
+        if not is_word:
             return ""
         i = i + 1
-    var path_text = rest[0:cut]
-    while path_text.ends_with("."):
-        path_text = path_text[0:path_text.len() - 1]
-    path_text.trim()
+    while cut > start and bytes[cut - 1] == 46:
+        cut = cut - 1
+    var path_text = ""
+    i = start
+    while i < cut:
+        val byte = bytes[i]
+        var char_index = 63
+        if byte >= 97 and byte <= 122:
+            char_index = (byte as i64) - 97
+        elif byte >= 65 and byte <= 90:
+            char_index = (byte as i64) - 65 + 26
+        elif byte >= 48 and byte <= 57:
+            char_index = (byte as i64) - 48 + 52
+        elif byte == 95:
+            char_index = 62
+        path_text = path_text + word_chars[char_index:char_index + 1]
+        i = i + 1
+    path_text
+
+fn _driver_import_prefix_at(bytes: [u8], start: i64, end_pos: i64, prefix: [u8]) -> bool:
+    if start + prefix.len() > end_pos:
+        return false
+    var i = 0
+    while i < prefix.len():
+        if bytes[start + i] != prefix[i]:
+            return false
+        i = i + 1
+    true
 
 pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     """Dotted module paths of the use/export-use/import declarations in a
@@ -200,35 +233,48 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     Docstring bodies are skipped via a triple-quote toggle."""
     var result: [text] = []
     var in_doc = false
-    val lines = content.split("\n")
-    for raw in lines:
-        val line = raw.trim()
+    val bytes = content.bytes()
+    val lazy_prefix = "use lazy ".bytes()
+    val export_prefix = "export use ".bytes()
+    val use_prefix = "use ".bytes()
+    val import_prefix = "import ".bytes()
+    var line_start = 0
+    var scan_pos = 0
+    while scan_pos <= bytes.len():
+        if scan_pos < bytes.len() and bytes[scan_pos] != 10:
+            scan_pos = scan_pos + 1
+            continue
+        val line_end = scan_pos
         var quote_count = 0
-        var quote_tail = line
-        var quote_pos = quote_tail.index_of("\"\"\"") ?? -1
-        while quote_pos >= 0:
-            quote_count = quote_count + 1
-            quote_tail = quote_tail.substring(quote_pos + 3)
-            quote_pos = quote_tail.index_of("\"\"\"") ?? -1
+        var quote_pos = line_start
+        while quote_pos + 2 < line_end:
+            if bytes[quote_pos] == 34 and bytes[quote_pos + 1] == 34 and bytes[quote_pos + 2] == 34:
+                quote_count = quote_count + 1
+                quote_pos = quote_pos + 3
+            else:
+                quote_pos = quote_pos + 1
         val was_in_doc = in_doc
         if quote_count % 2 == 1:
             in_doc = not in_doc
-        if was_in_doc or quote_count > 0:
-            continue
-        var rest = ""
-        if line.starts_with("use lazy "):
-            continue
-        elif line.starts_with("export use "):
-            rest = line.substring(11)
-        elif line.starts_with("use "):
-            rest = line.substring(4)
-        elif line.starts_with("import "):
-            rest = line.substring(7)
-        else:
-            continue
-        val mp = _driver_import_path_token(rest)
-        if mp != "":
-            result = result.push(mp)
+        if not was_in_doc and quote_count == 0:
+            var decl_start = line_start
+            while decl_start < line_end and _driver_import_space(bytes[decl_start]):
+                decl_start = decl_start + 1
+            var rest_start = -1
+            if _driver_import_prefix_at(bytes, decl_start, line_end, lazy_prefix):
+                rest_start = -1
+            elif _driver_import_prefix_at(bytes, decl_start, line_end, export_prefix):
+                rest_start = decl_start + export_prefix.len()
+            elif _driver_import_prefix_at(bytes, decl_start, line_end, use_prefix):
+                rest_start = decl_start + use_prefix.len()
+            elif _driver_import_prefix_at(bytes, decl_start, line_end, import_prefix):
+                rest_start = decl_start + import_prefix.len()
+            if rest_start >= 0:
+                val mp = _driver_import_path_token(bytes, rest_start, line_end)
+                if mp != "":
+                    result = result.push(mp)
+        line_start = scan_pos + 1
+        scan_pos = scan_pos + 1
     result
 
 fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:

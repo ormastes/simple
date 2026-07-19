@@ -7,7 +7,7 @@ use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.driver.driver_source_loading.{
     _driver_canonical_source_path, _driver_module_name_from_path, _driver_unique_physical_sources,
     _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
-    _driver_collect_sources_via_find
+    _driver_collect_sources_via_find, _driver_entry_import_module_paths
 }
 
 describe "entry-closure physical source deduplication":
@@ -68,15 +68,19 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(8192)")
         expect(driver).to_not_contain("var closure_seen_mods: [text]")
 
-    it "skips docstring imports without slicing every source character":
-        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\nexport use app.live.*\n")
-        val long_imports = _driver_entry_import_module_paths("x".repeat(65536) + "\nuse std.real\n")
+    it "scans imports without materializing ordinary source lines":
+        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\nexport use app.live.*\nimport third.party\n")
+        val long_imports = _driver_entry_import_module_paths(("# filler\n").repeat(8192) + "use std.tail.{Thing}\n")
+        val ordinary_imports = _driver_entry_import_module_paths("val x = 1\n".repeat(4096) + "\timport app.final\n")
+        val unicode_imports = _driver_entry_import_module_paths("é\n# 文\n\tuse std.unicode\n")
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
 
-        expect(imports).to_equal(["std.real", "app.live"])
-        expect(long_imports).to_equal(["std.real"])
-        expect(loading).to_contain("var quote_pos = quote_tail.index_of")
-        expect(loading).to_not_contain("line.substring(scan_pos, scan_pos + 3)")
+        expect(imports).to_equal(["std.real", "app.live", "third.party"])
+        expect(long_imports).to_equal(["std.tail"])
+        expect(ordinary_imports).to_equal(["app.final"])
+        expect(unicode_imports).to_equal(["std.unicode"])
+        expect(loading).to_contain("val bytes = content.bytes()")
+        expect(loading).to_not_contain("content.split(\"\\n\")")
 
     it "uses the HIR call type arguments already bound by inference":
         val inference = rt_file_read_text("src/compiler/30.types/type_infer/inference_expr.spl") ?? ""
