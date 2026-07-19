@@ -22,6 +22,7 @@
 #include <windows.h>
 #else
 #include <dirent.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -533,5 +534,32 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
         _exit(127);
     }
     return (int64_t)pid;
+#endif
+}
+
+int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+    if (pid <= 0) return -1;
+#if defined(_WIN32)
+    HANDLE process = (HANDLE)(intptr_t)pid;
+    DWORD result = WaitForSingleObject(process, timeout_ms <= 0 ? INFINITE : (DWORD)timeout_ms);
+    if (result == WAIT_TIMEOUT) return -2;
+    if (result != WAIT_OBJECT_0) return -1;
+    DWORD exit_code = 0;
+    if (!GetExitCodeProcess(process, &exit_code)) return -1;
+    CloseHandle(process);
+    return (int64_t)exit_code;
+#else
+    int status = 0;
+    if (timeout_ms <= 0) {
+        if (waitpid((pid_t)pid, &status, 0) < 0) return -1;
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+    for (int64_t elapsed_ms = 0; elapsed_ms < timeout_ms; elapsed_ms += 10) {
+        pid_t result = waitpid((pid_t)pid, &status, WNOHANG);
+        if (result < 0) return -1;
+        if (result > 0) return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        rt_sleep_ms_native(10);
+    }
+    return -2;
 #endif
 }

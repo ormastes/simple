@@ -241,7 +241,7 @@ the shared binary — deploys require explicit user go-ahead).
   execution remains pending. Cross-target objects are not counted as proof for
   this host link/runtime defect.
 - The whole-compiler redeploy (#99 / Stage4) remains separate from this
-  correctness campaign. Runtime-native's 18-symbol legacy dependency owner is
+  correctness campaign. Runtime-native's 19-symbol legacy dependency owner is
   now source-implemented as an exact localized compatibility provider. The
   exact archive projection and strict final-link routing are now
   source-implemented after inventory and transitive requested-owner resolution.

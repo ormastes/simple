@@ -255,7 +255,7 @@ not valid canonical owners. The reachable `rt_bytes_from_raw` and `rt_strsplit`
 bridges now build tagged arrays directly; a future compatibility capsule must
 localize every legacy array/dictionary/split export before admission. That
 exact localized compatibility capsule is now source-implemented: strict Stage4 compiles the
-fresh legacy object, localizes it to the audited 18-symbol runtime-native
+fresh legacy object, localizes it to the audited 19-symbol runtime-native
 closure, validates the exact raw and localized envelopes for every hosted
 object-format contract, and admits only those exact names for direct or
 transitive ownership.

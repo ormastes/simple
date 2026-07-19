@@ -68,6 +68,20 @@ static int walk_contains(SplArray* paths, const char* expected) {
 }
 
 int main(void) {
+    assert(rt_process_wait(-1, 1) == -1);
+    pid_t wait_child = fork();
+    assert(wait_child >= 0);
+    if (wait_child == 0) _exit(23);
+    assert(rt_process_wait(wait_child, 0) == 23);
+    wait_child = fork();
+    assert(wait_child >= 0);
+    if (wait_child == 0) {
+        usleep(50000);
+        _exit(0);
+    }
+    assert(rt_process_wait(wait_child, 1) == -2);
+    assert(rt_process_wait(wait_child, 0) == 0);
+
     int64_t empty_a = rt_string_new(NULL, 0);
     int64_t empty_b = rt_string_new((const uint8_t*)"", 0);
     int64_t one_a = rt_string_new((const uint8_t*)"a", 1);

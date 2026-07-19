@@ -5,14 +5,14 @@
 Source-fixed; execution pending.
 
 Strict Stage4 selected `runtime_native.o`, whose complete member dependency
-closure still needs 18 small legacy string, console, environment, file, sleep,
+closure still needs 19 small legacy string, console, environment, file, sleep,
 directory, and async-process helpers. Raw `runtime_legacy_core.o` was not an
 admissible owner because it also exported legacy array/split layouts, no-op
 dictionary functions, thread/platform overlaps, and other broad helpers.
 
 ## Root Cause
 
-The provider inventory had no exact owner for the 18 transitive dependencies.
+The provider inventory had no exact owner for the 19 transitive dependencies.
 Owner resolution therefore stopped before the already intentional archive
 projection barrier. Adding the raw legacy object would have hidden the missing
 owner while reopening duplicate and invalid ABI definitions.
