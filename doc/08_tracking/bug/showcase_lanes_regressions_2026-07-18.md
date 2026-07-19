@@ -127,3 +127,29 @@ the freestanding lane, guest→WM content protocol is text-only
 file-based). Shortest credible path: after C8, stage the proven
 fs_exec_ring3 + WindowClient text app as `/sys/apps/graphics_2d_showcase.smf`
 to prove the pipeline, then design a pixel-frame IPC (`COMP_UPDATE_FRAME`).
+
+## 2026-07-19 evening — parallel-agent fix round results
+- Item 10 (jit-0x890 defaulted fields): **END-TO-END PROVEN** — after the
+  narrow-field readback fix (translate_get_field trunc branch, 09bee48d),
+  the m5-class repro binary prints `k=5 flag=true` exit 0.
+- Item 7 follow-ups: CompilabilityMode landed (44060018) — FString no
+  longer InterpCall-routed in standalone natives; ~19 other constructs
+  audited and kept (Match = documented follow-up). `___module_init`
+  root-traced: stubs.rs:403 emits a weak REFERENCE with no weak no-op
+  DEFINITION fallback while backends skip emitting the symbol for
+  no-init modules.
+- Item 6 (interpreter 3-4x): **BISECTED**. Fixed Engine2D microbench
+  (create_offscreen + N draw_rect_filled, frozen deployed binary,
+  SIMPLE_LIB as variable): 8s→151s @N=100 (~19x), linear per call —
+  dispatch overhead, not rasterization. First-bad commit `a10935e78a`
+  (2026-07-16, Dict<text,SdnValue>→named-alias; NOT in Engine2D's import
+  closure) — it lifted a parser limitation that had under-registered
+  generic Dict fields, tipping the interpreter's whole-program
+  erased-receiver dispatch registry (~15 RenderBackend impls; grew with
+  ~7 new GPU backends 07-16→07-18) over a cliff. SAME defect class as
+  item 4's ambiguous-method guard and the seed vtable fix 8932fcb3a1.
+  Fix direction (not implemented): bound-scoped dispatch resolution +
+  per-call-site memoization — treat as one work item with item 4.
+  Full tables: session scratchpad interp_perf_bisect_report.md.
+- ByteSpan/text.bytes() tagged-slot bug root-fixed in both runtimes
+  (18ad64b2; effective on next redeploy).
