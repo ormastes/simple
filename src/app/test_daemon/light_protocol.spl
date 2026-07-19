@@ -1,0 +1,51 @@
+val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
+val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 600000
+val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
+val LIGHT_REQUEST_V1_HEADER: text = "simple-test-daemon-request-v1"
+
+fn light_request_clamp_timeout_ms(timeout_ms: i64) -> i64:
+    if timeout_ms <= 0:
+        return LIGHT_REQUEST_DEFAULT_TIMEOUT_MS
+    if timeout_ms > LIGHT_REQUEST_MAX_TIMEOUT_MS:
+        return LIGHT_REQUEST_MAX_TIMEOUT_MS
+    timeout_ms
+
+fn light_request_timeout_ms_from_seconds(timeout_secs: i64) -> i64:
+    if timeout_secs <= 0:
+        return LIGHT_REQUEST_DEFAULT_TIMEOUT_MS
+    if timeout_secs > LIGHT_REQUEST_MAX_TIMEOUT_MS / 1000:
+        return LIGHT_REQUEST_MAX_TIMEOUT_MS
+    timeout_secs * 1000
+
+fn light_request_expiry_micros(now_micros: i64, timeout_ms: i64) -> i64:
+    now_micros + (light_request_clamp_timeout_ms(timeout_ms) * 1000)
+
+fn light_request_encode(path: text, expiry_micros: i64) -> text:
+    "{LIGHT_REQUEST_V1_HEADER}\n{expiry_micros}\n{path}"
+
+fn light_request_parse(content: text) -> (text, i64):
+    val lines = content.split("\n")
+    if lines.len() == 0 or lines[0] != LIGHT_REQUEST_V1_HEADER:
+        return (content, 0)
+    if lines.len() < 3:
+        return ("", -1)
+    val expiry_text = lines[1].trim()
+    val parsed_expiry_micros = expiry_text.to_i64() ?? -1
+    val expiry_micros = if parsed_expiry_micros > 0: parsed_expiry_micros else: -1
+    var path_parts: [text] = []
+    var i = 2
+    while i < lines.len():
+        path_parts.push(lines[i])
+        i = i + 1
+    (path_parts.join("\n"), expiry_micros)
+
+fn light_request_deadline(expiry_micros: i64, now_micros: i64) -> (bool, i64):
+    if expiry_micros == 0:
+        return (false, LIGHT_REQUEST_DEFAULT_TIMEOUT_MS)
+    if expiry_micros < 0 or expiry_micros <= now_micros:
+        return (true, 0)
+    val max_expiry_micros = now_micros + (LIGHT_REQUEST_MAX_TIMEOUT_MS * 1000)
+    if expiry_micros > max_expiry_micros:
+        return (false, LIGHT_REQUEST_MAX_TIMEOUT_MS)
+    val remaining_micros = expiry_micros - now_micros
+    (false, (remaining_micros + 999) / 1000)

@@ -65,6 +65,11 @@ The client must detect stale or dead daemon state, replace the stale lock/PID,
 and keep `test-daemon start/status/stop` available through pure Simple
 entrypoints. A stale daemon lock must not force users to clean files manually.
 
+Light-daemon work carries a tagged absolute expiry. The daemon charges time
+spent in its queue, refuses expired work before spawn, and passes only the
+remaining budget to `process_run_bounded`. Protocol-unit evidence does not
+replace the required end-to-end stale-state and child-cleanup gate.
+
 For the implemented sequential interpreter paths, `--assert-ran` requires an exact private
 `SIMPLE_TEST_RESULT_FILE` payload: `simple-bdd-v1`, passed count, failed count,
 and one final newline. Counts are canonical nonnegative integers; missing,

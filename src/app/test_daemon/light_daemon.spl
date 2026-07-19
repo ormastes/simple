@@ -3,6 +3,7 @@
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use app.test_daemon.light_protocol.{light_request_deadline, light_request_parse}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
@@ -13,6 +14,7 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
 
 # Atomic write: tmp + rename (see test_runner_client.spl for the race this
 # closes — #98: a plain rt_file_write_text response could be observed
@@ -67,15 +69,22 @@ fn handle_request(binary: text, name: text):
     if not name.ends_with(".req"):
         return
     val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
-    val test_path = (rt_file_read_text(req_path) ?? "").trim()
+    val request = light_request_parse(rt_file_read_text(req_path) ?? "")
+    val test_path = request.0
     if test_path == "":
         atomic_write_text(response_path(name), "1\nmissing test path")
         rt_file_delete(req_path)
         return
+    val deadline = light_request_deadline(request.1, rt_time_now_unix_micros())
+    if deadline.0:
+        atomic_write_text(response_path(name), "1\nERROR: test daemon request expired before execution")
+        rt_file_delete(req_path)
+        return
+    val timeout_ms = deadline.1
     val (stdout, stderr, code) = process_run_bounded(
         binary,
         ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential"],
-        600000,
+        timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
     var body = stdout

@@ -6,6 +6,7 @@ use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
+use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -183,6 +184,7 @@ fn main() -> i64:
         print "Simple Test Runner client"
         print "error: {run.error}: {run.path}"
         return 1
+    val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
     ensure_dirs()
     if not ensure_daemon():
         # The light daemon could not start (e.g. it relies on runtime methods
@@ -194,7 +196,7 @@ fn main() -> i64:
         val (out, err, code) = process_run_bounded(
             binary,
             ["test", "--no-session-daemon", run.path],
-            run.timeout_secs * 1000,
+            timeout_ms,
             TEST_OUTPUT_CAPTURE_BYTES
         )
         if out != "":
@@ -205,9 +207,10 @@ fn main() -> i64:
     val id = "{rt_time_now_unix_micros()}-{rt_getpid()}.req"
     val req_path = "{LIGHT_REQ_DIR}/{id}"
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
+    val expiry_micros = light_request_expiry_micros(rt_time_now_unix_micros(), timeout_ms)
     rt_file_delete(resp_path)
-    atomic_write_text(req_path, run.path)
-    val deadline = rt_time_now_unix_micros() + (run.timeout_secs * 1000000)
+    atomic_write_text(req_path, light_request_encode(run.path, expiry_micros))
+    val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
     while rt_time_now_unix_micros() < deadline:
         if rt_file_exists(resp_path):
             val content = rt_file_read_text(resp_path) ?? ""

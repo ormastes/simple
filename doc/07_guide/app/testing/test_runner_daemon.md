@@ -20,7 +20,7 @@ Before submitting, the client verifies that the daemon answers a status ping.
 If the PID exists but the daemon does not answer, the client restarts it and
 pings again.
 
-The production CLI exposes the same lifecycle directly:
+The intended production CLI surface exposes the same lifecycle directly:
 
 ```bash
 bin/simple test-daemon status
@@ -28,6 +28,19 @@ bin/simple test-daemon run test/01_unit/example_spec.spl
 bin/simple test-daemon clean test/01_unit/example_spec.spl
 bin/simple test-daemon stop
 ```
+
+Current-source qualification note (2026-07-19): the self-hosted CLI lifecycle
+handler still reports this surface unavailable, while the light runner and the
+daemon-SDK session client use different owners/protocols. Treat the commands
+above as the target contract, not current PASS evidence, until the owners are
+reconciled and the bounded lifecycle gate passes.
+
+The current light runner request is versioned and carries an absolute expiry,
+not a fresh duration. Queue delay therefore consumes the caller's budget. The
+daemon rejects expired requests before spawning and gives live work only the
+remaining time through `process_run_bounded`; untagged legacy requests retain
+the former 600-second default. A short client grace covers bounded child cleanup
+and atomic response publication, not extra execution time.
 
 `run` may reuse a dependency-fresh result and reports
 `test_daemon_cache=hit` or `test_daemon_cache=miss`. `clean` always executes,
