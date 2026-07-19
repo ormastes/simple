@@ -267,9 +267,76 @@ pub(crate) fn instantiate_class(
     }
 
     // Field-based construction
-    // Used when there's no `__init__` or `new` method with special attributes
+    // Used when there's no `__init__` or `new` method with special attributes.
+    //
+    // First pass: apply struct spreads. Paren-form functional update
+    // `Foo(..base, field: x)` copies every field of `base` before explicit
+    // fields override them (identical semantics to the brace-form
+    // `Expr::StructInit` spread handled in interpreter/expr/collections.rs).
+    // The parser encodes the `..base` spread argument as an unnamed positional
+    // prefix range `Expr::Range { start: None, end: Some(base) }` (the `..`
+    // token is shared with range syntax), so recognize that shape here. Without
+    // this the spread argument was evaluated as a real range and coerced via
+    // `as_int()`, which failed with "type mismatch: cannot convert object to
+    // int" whenever the base was a struct (e.g. `MirFunction(..func, blocks:
+    // ...)` throughout the MIR optimization passes).
+    for arg in args {
+        if arg.name.is_some() {
+            continue;
+        }
+        let base_expr = match &arg.value {
+            simple_parser::ast::Expr::Range {
+                start: None,
+                end: Some(base),
+                ..
+            } => base,
+            _ => continue,
+        };
+        let base_val = evaluate_expr(base_expr, env, functions, classes, enums, impl_methods)?;
+        match &base_val {
+            Value::Object {
+                fields: base_fields, ..
+            } => {
+                for (k, v) in base_fields.as_ref() {
+                    fields.insert(k.clone(), v.clone());
+                }
+            }
+            Value::Dict(base_map) => {
+                for (k, v) in base_map.iter() {
+                    fields.insert(k.clone(), v.clone());
+                }
+            }
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("struct spread (..) requires an object or dict value as base");
+                return Err(CompileError::semantic_with_context(
+                    format!(
+                        "type mismatch: struct spread requires object or dict, got {}",
+                        base_val.type_name()
+                    ),
+                    ctx,
+                ));
+            }
+        }
+    }
+
+    // Second pass: explicit named/positional fields override any spread values.
     let mut positional_idx = 0;
     for arg in args {
+        // Struct-spread arguments were consumed in the first pass above.
+        if arg.name.is_none()
+            && matches!(
+                &arg.value,
+                simple_parser::ast::Expr::Range {
+                    start: None,
+                    end: Some(_),
+                    ..
+                }
+            )
+        {
+            continue;
+        }
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
             if !fields.contains_key(name) {
