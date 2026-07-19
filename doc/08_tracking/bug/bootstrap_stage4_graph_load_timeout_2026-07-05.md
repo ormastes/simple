@@ -374,3 +374,28 @@ assigned the second module's first named type ID at zero, and printed
 600+ file library before the scenario body, so it is not counted as evidence.
 No Stage4 retry was started because another active session already owns that
 run; RSS impact remains unproven.
+
+## Per-token lexer scratch reuse — 2026-07-19
+
+The externally owned Stage4 v45 profile used the current compiled Stage4 route
+and terminated at its 1,200-second cap without a candidate. Import discovery
+finished at +38.293 seconds; 40 files completed by +346.179 seconds;
+`src/compiler/10.frontend/core/lexer_struct.spl` started at +346.203 seconds
+and never emitted its done marker. The compiler remained CPU-active for the
+full envelope and reached about 6.9 GiB RSS, so the file had roughly 854
+seconds rather than being an incidental last-file cutoff. Retained evidence is
+`/tmp/simple-tooling-hardening-land/build/bootstrap/tooling-stage4-v45/build.log`;
+the outer redirected log remained empty.
+
+`CoreLexer.char_slice` already joined token spans once, but still registered a
+new temporary `[text]` array for every token. It now keeps one per-lexer
+`slice_parts` array and clears/reuses it for each span. The lexer facade and
+token behavior are unchanged. The existing five-case lexer regression passes
+once under the explicitly bounded Rust bootstrap repair runner; this is not a
+product admission claim. `simple optimize` and generated-manual refresh remain
+unavailable until a pure-Simple CLI is admitted.
+
+Do not repeat Stage4 in this session. The next fresh cycle may refresh the
+cached Stage2/Stage3 pair with this source, run the same lexer regression under
+the admitted CLI, then perform one bounded Stage4 A/B against the v45
+40-file/6.9-GiB baseline.

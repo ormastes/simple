@@ -20,16 +20,19 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/10.frontend/core/lexer_struct.spl") ?? ""
+val source = file_read("src/compiler/10.frontend/core/lexer_struct.spl")
 val start = source.find("fn char_slice(start: i64, end: i64) -> text:") ?? -1
 val end = source.find("fn token_kind() -> i64:") ?? -1
 val body = if start >= 0 and end > start: source.substring(start, end) else: ""
-expect(body).to_contain("parts.push(self.source_chars[i])")
-expect(body).to_contain("parts.join(\"\")")
+expect(source).to_contain("slice_parts: [text]")
+expect(body).to_contain("self.slice_parts.clear()")
+expect(body).to_contain("self.slice_parts.push(self.source_chars[i])")
+expect(body).to_contain("self.slice_parts.join(\"\")")
+expect(body.contains("var parts: [text] = []")).to_be(false)
 expect(body.contains("result = result + self.source_chars[i]")).to_be(false)
 ```
 
@@ -119,8 +122,8 @@ for i in 0..40:
 # No Error tokens, and the docstring is one String token containing
 # both lines.
 expect(error_count).to_equal(0)
-expect(string_text.contains("line one")).to_equal(true)
-expect(string_text.contains("line two")).to_equal(true)
+expect(string_text.contains("line one")).to_be(true)
+expect(string_text.contains("line two")).to_be(true)
 ```
 
 </details>
