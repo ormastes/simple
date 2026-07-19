@@ -163,3 +163,24 @@ paths; this may be the same code path re-regressing, or the `--emit-object`
 branch specifically skipping a step the normal full-link path performs (e.g.
 a symbol-table finalization pass that only runs before linking, not before
 raw object emission).
+
+## Orchestrator bisection addendum (2026-07-19)
+
+Probed the minimal 2-fn control repro (`--emit-object`, riscv32) against every
+available seed+source vintage pairing:
+
+| seed binary (mtime) | src/compiler tree | result |
+|---|---|---|
+| main repo seed (07-19 04:33) | main tip / cf3b364c548 / b620f0cd023a / a7454f2be8a (Jul 16) | object-to-int |
+| simple-seed-llvm-fix (07-18 08:00) | its own tree | object-to-int |
+| pure-simple-shared-enum (07-18 11:56) | its own tree | object-to-int |
+| pure-simple-tool-remain (07-18 05:41) | its own tree | object-to-int |
+
+Conclusion: `--emit-object` is broken across ALL available vintages back to at
+least 2026-07-16 (and probably since shortly after 2026-07-05, when the last
+known-good probe ELFs were produced). It went unnoticed because the rv32 boot
+spec fails closed on a missing ELF and nothing else exercises the flag.
+Reproducing the last-good state requires rebuilding a ~Jul-05 seed from that
+era's compiler_rust — compiler-owner territory. Full-link (no `--emit-object`)
+WORKS on the identical source (x86_64 validated 15.4s), so the flattened SMP
+firmware source itself is compile-clean; only object emission is blocked.
