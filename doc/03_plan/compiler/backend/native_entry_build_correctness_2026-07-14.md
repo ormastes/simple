@@ -313,8 +313,12 @@ the shared binary — deploys require explicit user go-ahead).
   half of the same overwrite: `0a749ba7f10c` replaced the retained pure-Simple
   `hm_hash_text` with runtime `rt_hash_text`, whose registered-string validation
   linearly scans the global string registry on every hot-set hash. The proven
-  pure-Simple hash is restored and source-pinned. A cache-preserving LLVM
-  compile emitted the loader object with a direct `hm_hash_text` relocation;
+  pure-Simple hash is restored and source-pinned. Higher review then found that
+  native `s[i].ord()` discarded the low three byte bits and allocated a
+  one-character string per byte. The hash now reuses `text.bytes()` once and
+  hashes the resulting integer bytes, preserving FNV entropy without that
+  per-character registry path. A cache-preserving LLVM compile had emitted the
+  loader object with a direct `hm_hash_text` relocation;
   the standalone bootstrap relink remained unavailable because that partial
   route omitted the existing runtime providers. Its bounded profile therefore
   remains pending. See
