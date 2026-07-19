@@ -57,6 +57,41 @@ pub enum FallbackReason {
     NotYetImplemented(String),
 }
 
+/// Which execution lane `analyze_module`/`analyze_function` is classifying for.
+///
+/// The classifier's job is to flag constructs that would otherwise get
+/// rewritten to `MirInst::InterpCall` (see `mir::apply_hybrid_transform`) and
+/// decide whether that rewrite is *safe* for the target the AST is being
+/// compiled for:
+///
+/// - `HybridJit`: the compiled code runs inside a host process that has a
+///   live interpreter bridge (`bin/simple run`, in-process JIT, dynload —
+///   see `codegen/instr/core.rs` `compile_interp_call` and
+///   `runtime/src/value/sffi/interpreter_bridge.rs`). `InterpCall` resolves
+///   there, so it is fine to keep flagging constructs conservatively.
+/// - `AotNative`: the compiled code is linked into a standalone native
+///   binary (`compile --native`) with **no embedded interpreter**.
+///   `InterpCall` unconditionally returns NIL there (exit code 3, missing
+///   program body — see
+///   doc/08_tracking/bug/native_aot_missing_program_body_exit3_2026-07-19.md),
+///   so only constructs that genuinely lack native codegen may be flagged.
+///   Constructs proven to lower to ordinary native calls (e.g. `Expr::FString`
+///   interpolation, which lowers to `rt_value_to_string`/`rt_value_format_string`
+///   + `rt_string_concat` — plain runtime calls handled by both the Cranelift
+///   and LLVM backends, see `codegen/instr/collections.rs::compile_fstring_format`
+///   and `codegen/llvm/functions.rs` `MirInst::FStringFormat`) must NOT be
+///   flagged in this mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilabilityMode {
+    /// Conservative: flag every construct without a fully-verified native
+    /// path, because falling back to `InterpCall` is safe (interpreter is
+    /// embedded in the host process).
+    HybridJit,
+    /// Permissive: only flag constructs with NO native codegen at all,
+    /// because `InterpCall` silently no-ops (NIL) in a standalone binary.
+    AotNative,
+}
+
 /// Compilability status for a function or expression
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompilabilityStatus {
@@ -100,12 +135,12 @@ impl CompilabilityStatus {
 }
 
 /// Analyzes a module to determine compilability of each function
-pub fn analyze_module(items: &[Node]) -> HashMap<String, CompilabilityStatus> {
+pub fn analyze_module(items: &[Node], mode: CompilabilityMode) -> HashMap<String, CompilabilityStatus> {
     let mut results = HashMap::new();
 
     for item in items {
         if let Node::Function(f) = item {
-            let status = analyze_function(f);
+            let status = analyze_function(f, mode);
             results.insert(f.name.clone(), status);
         }
     }
@@ -157,7 +192,7 @@ fn return_type_keeps_boxed(ty: &Type) -> bool {
 }
 
 /// Analyze a single function for compilability
-pub fn analyze_function(f: &FunctionDef) -> CompilabilityStatus {
+pub fn analyze_function(f: &FunctionDef, mode: CompilabilityMode) -> CompilabilityStatus {
     if is_known_compilable_green_thread_helper(&f.name) {
         return CompilabilityStatus::Compilable;
     }
@@ -174,7 +209,7 @@ pub fn analyze_function(f: &FunctionDef) -> CompilabilityStatus {
     // such as `await`, `yield`, or blocking builtin calls add reasons below.
 
     // Analyze the function body
-    analyze_block(&f.body, &mut reasons);
+    analyze_block(&f.body, &mut reasons, mode);
 
     if reasons.is_empty() {
         CompilabilityStatus::Compilable
@@ -184,70 +219,70 @@ pub fn analyze_function(f: &FunctionDef) -> CompilabilityStatus {
 }
 
 /// Analyze a block of statements (Block contains Vec<Node>)
-fn analyze_block(block: &Block, reasons: &mut Vec<FallbackReason>) {
+fn analyze_block(block: &Block, reasons: &mut Vec<FallbackReason>, mode: CompilabilityMode) {
     for node in &block.statements {
-        analyze_node(node, reasons);
+        analyze_node(node, reasons, mode);
     }
 }
 
 /// Analyze a single AST node (statement or definition)
-fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>) {
+fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>, mode: CompilabilityMode) {
     match node {
         Node::Expression(expr) => {
-            analyze_expr(expr, reasons);
+            analyze_expr(expr, reasons, mode);
         }
         Node::Let(let_stmt) => {
             if let Some(expr) = &let_stmt.value {
-                analyze_expr(expr, reasons);
+                analyze_expr(expr, reasons, mode);
             }
         }
         Node::Const(const_stmt) => {
-            analyze_expr(&const_stmt.value, reasons);
+            analyze_expr(&const_stmt.value, reasons, mode);
         }
         Node::Assignment(assign) => {
-            analyze_expr(&assign.target, reasons);
-            analyze_expr(&assign.value, reasons);
+            analyze_expr(&assign.target, reasons, mode);
+            analyze_expr(&assign.value, reasons, mode);
         }
         Node::Return(ret) => {
             if let Some(expr) = &ret.value {
-                analyze_expr(expr, reasons);
+                analyze_expr(expr, reasons, mode);
             }
         }
         Node::If(if_stmt) => {
-            analyze_expr(&if_stmt.condition, reasons);
-            analyze_block(&if_stmt.then_block, reasons);
+            analyze_expr(&if_stmt.condition, reasons, mode);
+            analyze_block(&if_stmt.then_block, reasons, mode);
             for (_pattern, cond, block) in &if_stmt.elif_branches {
-                analyze_expr(cond, reasons);
-                analyze_block(block, reasons);
+                analyze_expr(cond, reasons, mode);
+                analyze_block(block, reasons, mode);
             }
             if let Some(else_block) = &if_stmt.else_block {
-                analyze_block(else_block, reasons);
+                analyze_block(else_block, reasons, mode);
             }
         }
         Node::While(while_stmt) => {
-            analyze_expr(&while_stmt.condition, reasons);
-            analyze_block(&while_stmt.body, reasons);
+            analyze_expr(&while_stmt.condition, reasons, mode);
+            analyze_block(&while_stmt.body, reasons, mode);
         }
         Node::For(for_stmt) => {
-            analyze_expr(&for_stmt.iterable, reasons);
-            analyze_block(&for_stmt.body, reasons);
+            analyze_expr(&for_stmt.iterable, reasons, mode);
+            analyze_block(&for_stmt.body, reasons, mode);
         }
         Node::Loop(loop_stmt) => {
-            analyze_block(&loop_stmt.body, reasons);
+            analyze_block(&loop_stmt.body, reasons, mode);
         }
         Node::Break(_) | Node::Continue(_) => {}
         Node::Match(match_stmt) => {
-            analyze_expr(&match_stmt.subject, reasons);
+            analyze_expr(&match_stmt.subject, reasons, mode);
             add_reason(reasons, FallbackReason::PatternMatch);
         }
         Node::With(with_stmt) => {
-            analyze_expr(&with_stmt.resource, reasons);
-            analyze_block(&with_stmt.body, reasons);
+            analyze_expr(&with_stmt.resource, reasons, mode);
+            analyze_block(&with_stmt.body, reasons, mode);
             add_reason(reasons, FallbackReason::WithStatement);
         }
         Node::Context(ctx_stmt) => {
-            analyze_expr(&ctx_stmt.context, reasons);
-            analyze_block(&ctx_stmt.body, reasons);
+            analyze_expr(&ctx_stmt.context, reasons, mode);
+            analyze_block(&ctx_stmt.body, reasons, mode);
             add_reason(reasons, FallbackReason::ContextBlock);
         }
         Node::Function(_) => {
@@ -260,7 +295,7 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>) {
 }
 
 /// Analyze an expression
-fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
+fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: CompilabilityMode) {
     match expr {
         // Compilable literals
         Expr::Integer(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Nil => {}
@@ -281,8 +316,8 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // Binary operations - mostly compilable except membership test
         Expr::Binary { op, left, right } => {
-            analyze_expr(left, reasons);
-            analyze_expr(right, reasons);
+            analyze_expr(left, reasons, mode);
+            analyze_expr(right, reasons, mode);
             if op == &BinOp::In {
                 add_reason(reasons, FallbackReason::CollectionOps);
             }
@@ -290,7 +325,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // Unary operations - mostly compilable except ref operations
         Expr::Unary { op, operand } => {
-            analyze_expr(operand, reasons);
+            analyze_expr(operand, reasons, mode);
             match op {
                 UnaryOp::Ref | UnaryOp::RefMut | UnaryOp::Deref => {
                     add_reason(reasons, FallbackReason::NotYetImplemented("ref".into()));
@@ -301,7 +336,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // Function calls - may be compilable depending on the callee
         Expr::Call { callee, args, .. } => {
-            analyze_expr(callee, reasons);
+            analyze_expr(callee, reasons, mode);
             let compiled_closure_arg = matches!(
                 callee.as_ref(),
                 Expr::Identifier(name)
@@ -312,9 +347,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             );
             for arg in args {
                 if compiled_closure_arg {
-                    analyze_expr_as_compiled_closure_arg(&arg.value, reasons);
+                    analyze_expr_as_compiled_closure_arg(&arg.value, reasons, mode);
                 } else {
-                    analyze_expr(&arg.value, reasons);
+                    analyze_expr(&arg.value, reasons, mode);
                 }
             }
             // Check if it's a known compilable builtin
@@ -339,9 +374,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // receiver/args for unsupported nested constructs, but do not blanket-
         // fallback just because the syntax is `value.method(...)`.
         Expr::MethodCall { receiver, args, .. } => {
-            analyze_expr(receiver, reasons);
+            analyze_expr(receiver, reasons, mode);
             for arg in args {
-                analyze_expr(&arg.value, reasons);
+                analyze_expr(&arg.value, reasons, mode);
             }
         }
 
@@ -349,7 +384,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // receiver for nested unsupported constructs, but do not force
         // interpreter fallback just because a field is read.
         Expr::FieldAccess { receiver, .. } => {
-            analyze_expr(receiver, reasons);
+            analyze_expr(receiver, reasons, mode);
         }
 
         // Indexed access now lowers through MIR `rt_array_get` / `rt_index_get`
@@ -357,13 +392,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // genuinely unsupported constructs, but do not force fallback just
         // because an element is indexed out of a collection.
         Expr::Index { receiver, index } => {
-            analyze_expr(receiver, reasons);
-            analyze_expr(index, reasons);
+            analyze_expr(receiver, reasons, mode);
+            analyze_expr(index, reasons, mode);
         }
 
         // Tuple index access: tuple.0, tuple.1
         Expr::TupleIndex { receiver, .. } => {
-            analyze_expr(receiver, reasons);
+            analyze_expr(receiver, reasons, mode);
             // Tuple index with literal index is compilable if receiver is
         }
 
@@ -374,15 +409,15 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             end,
             step,
         } => {
-            analyze_expr(receiver, reasons);
+            analyze_expr(receiver, reasons, mode);
             if let Some(s) = start {
-                analyze_expr(s, reasons);
+                analyze_expr(s, reasons, mode);
             }
             if let Some(e) = end {
-                analyze_expr(e, reasons);
+                analyze_expr(e, reasons, mode);
             }
             if let Some(st) = step {
-                analyze_expr(st, reasons);
+                analyze_expr(st, reasons, mode);
             }
             add_reason(reasons, FallbackReason::CollectionOps);
         }
@@ -393,19 +428,19 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // constructs an array or tuple.
         Expr::Array(items) => {
             for item in items {
-                analyze_expr(item, reasons);
+                analyze_expr(item, reasons, mode);
             }
         }
 
         Expr::Tuple(items) => {
             for item in items {
-                analyze_expr(item, reasons);
+                analyze_expr(item, reasons, mode);
             }
         }
 
         Expr::VecLiteral(items) => {
             for item in items {
-                analyze_expr(item, reasons);
+                analyze_expr(item, reasons, mode);
             }
             add_reason(reasons, FallbackReason::CollectionLiteral);
         }
@@ -428,18 +463,18 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // not force hybrid fallback just because a helper constructs a dict.
         Expr::Dict(entries) => {
             for (key, value) in entries {
-                analyze_expr(key, reasons);
-                analyze_expr(value, reasons);
+                analyze_expr(key, reasons, mode);
+                analyze_expr(value, reasons, mode);
             }
         }
 
         // Range needs collection runtime
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {
-                analyze_expr(s, reasons);
+                analyze_expr(s, reasons, mode);
             }
             if let Some(e) = end {
-                analyze_expr(e, reasons);
+                analyze_expr(e, reasons, mode);
             }
         }
 
@@ -448,7 +483,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // runtime bugs, but blanket hybrid fallback here prevents valid native
         // code from being emitted at all.
         Expr::Lambda { body, .. } => {
-            analyze_expr(body, reasons);
+            analyze_expr(body, reasons, mode);
         }
 
         // If expressions are compilable
@@ -458,16 +493,16 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             else_branch,
             ..
         } => {
-            analyze_expr(condition, reasons);
-            analyze_expr(then_branch, reasons);
+            analyze_expr(condition, reasons, mode);
+            analyze_expr(then_branch, reasons, mode);
             if let Some(else_e) = else_branch {
-                analyze_expr(else_e, reasons);
+                analyze_expr(else_e, reasons, mode);
             }
         }
 
         // Match expressions
         Expr::Match { subject, .. } => {
-            analyze_expr(subject, reasons);
+            analyze_expr(subject, reasons, mode);
             add_reason(reasons, FallbackReason::PatternMatch);
         }
 
@@ -475,54 +510,54 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // the current native surface.
         Expr::StructInit { fields, spread, .. } => {
             for (_, value) in fields {
-                analyze_expr(value, reasons);
+                analyze_expr(value, reasons, mode);
             }
             if let Some(spread_expr) = spread {
-                analyze_expr(spread_expr, reasons);
+                analyze_expr(spread_expr, reasons, mode);
             }
         }
 
         // New/pointer operations
         Expr::New { expr, .. } => {
-            analyze_expr(expr, reasons);
+            analyze_expr(expr, reasons, mode);
             add_reason(reasons, FallbackReason::NotYetImplemented("new".into()));
         }
 
         // Spawn expression
         Expr::Spawn(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::ActorOps);
         }
 
         // Await expressions
         Expr::Await(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::AsyncAwait);
         }
 
         // Yield expressions
         Expr::Yield(value) => {
             if let Some(v) = value {
-                analyze_expr(v, reasons);
+                analyze_expr(v, reasons, mode);
             }
             add_reason(reasons, FallbackReason::Generator);
         }
 
         // Try operator
         Expr::Try(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
         // Force unwrap operator
         Expr::ForceUnwrap(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
         // Existence check operator
         Expr::ExistsCheck(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             // ExistsCheck requires runtime type inspection
             add_reason(reasons, FallbackReason::TryOperator);
         }
@@ -536,8 +571,20 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // FString. A pure-literal FString (only `Literal` parts, no `{expr}`
         // interpolation) is just a string constant — it lowers to a single
         // `ConstString` and the native backend compiles it directly, so it must
-        // NOT force interpreter fallback. Only genuine interpolation (an `Expr`
-        // or `ExprWithFormat` part) needs the runtime string-format path.
+        // NOT force interpreter fallback.
+        //
+        // Genuine interpolation (an `Expr`/`ExprWithFormat` part) lowers to
+        // `rt_value_to_string`/`rt_value_format_string` + `rt_string_concat`
+        // calls (`hir/lower/expr/literals.rs::lower_fstring`), which are
+        // ordinary runtime calls with real Cranelift AND LLVM codegen
+        // (`codegen/instr/collections.rs::compile_fstring_format`,
+        // `codegen/llvm/functions.rs` `MirInst::FStringFormat` case) — there is
+        // no native-codegen gap here. In `AotNative` mode (no embedded
+        // interpreter — see `CompilabilityMode`) this must NOT force interpreter
+        // fallback, since `InterpCall` would silently resolve to NIL instead
+        // (doc/08_tracking/bug/native_aot_missing_program_body_exit3_2026-07-19.md).
+        // `HybridJit` mode keeps flagging it conservatively, matching prior
+        // behavior for the in-process/`run` lane.
         Expr::FString { parts, .. } => {
             let mut has_interpolation = false;
             for part in parts {
@@ -545,12 +592,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
                     simple_parser::ast::FStringPart::Expr(e)
                     | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
                         has_interpolation = true;
-                        analyze_expr(e, reasons);
+                        analyze_expr(e, reasons, mode);
                     }
                     _ => {}
                 }
             }
-            if has_interpolation {
+            if has_interpolation && mode != CompilabilityMode::AotNative {
                 add_reason(reasons, FallbackReason::StringOps);
             }
         }
@@ -565,13 +612,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
                 match part {
                     simple_parser::ast::FStringPart::Expr(e)
                     | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
-                        analyze_expr(e, reasons);
+                        analyze_expr(e, reasons, mode);
                     }
                     _ => {}
                 }
             }
             for (_, value) in args {
-                analyze_expr(value, reasons);
+                analyze_expr(value, reasons, mode);
             }
             add_reason(reasons, FallbackReason::NotYetImplemented("i18n template".into()));
         }
@@ -587,10 +634,10 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             condition,
             ..
         } => {
-            analyze_expr(expr, reasons);
-            analyze_expr(iterable, reasons);
+            analyze_expr(expr, reasons, mode);
+            analyze_expr(iterable, reasons, mode);
             if let Some(cond) = condition {
-                analyze_expr(cond, reasons);
+                analyze_expr(cond, reasons, mode);
             }
             add_reason(reasons, FallbackReason::CollectionOps);
         }
@@ -602,11 +649,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             condition,
             ..
         } => {
-            analyze_expr(key, reasons);
-            analyze_expr(value, reasons);
-            analyze_expr(iterable, reasons);
+            analyze_expr(key, reasons, mode);
+            analyze_expr(value, reasons, mode);
+            analyze_expr(iterable, reasons, mode);
             if let Some(cond) = condition {
-                analyze_expr(cond, reasons);
+                analyze_expr(cond, reasons, mode);
             }
             add_reason(reasons, FallbackReason::CollectionOps);
         }
@@ -617,20 +664,20 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // Spread operator
         Expr::Spread(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
         Expr::DictSpread(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
         // Functional update
         Expr::FunctionalUpdate { target, args, .. } => {
-            analyze_expr(target, reasons);
+            analyze_expr(target, reasons, mode);
             for arg in args {
-                analyze_expr(&arg.value, reasons);
+                analyze_expr(&arg.value, reasons, mode);
             }
             add_reason(reasons, FallbackReason::MethodCall);
         }
@@ -640,20 +687,20 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::NotYetImplemented("contract result".into()));
         }
         Expr::ContractOld(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::NotYetImplemented("contract old()".into()));
         }
         Expr::Forall { range, predicate, .. } => {
-            analyze_expr(range, reasons);
-            analyze_expr(predicate, reasons);
+            analyze_expr(range, reasons, mode);
+            analyze_expr(predicate, reasons, mode);
             add_reason(
                 reasons,
                 FallbackReason::NotYetImplemented("forall quantifier (verification only)".into()),
             );
         }
         Expr::Exists { range, predicate, .. } => {
-            analyze_expr(range, reasons);
-            analyze_expr(predicate, reasons);
+            analyze_expr(range, reasons, mode);
+            analyze_expr(predicate, reasons, mode);
             add_reason(
                 reasons,
                 FallbackReason::NotYetImplemented("exists quantifier (verification only)".into()),
@@ -663,13 +710,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // DoBlock - a sequence of statements (used for BDD DSL colon-blocks)
         Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
             for node in nodes {
-                analyze_node(node, reasons);
+                analyze_node(node, reasons, mode);
             }
         }
 
         // Cast expression: expr as Type
         Expr::Cast { expr: inner, .. } => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
         }
 
         // Simple Math: Grid and Tensor literals (#1920-#1929)
@@ -677,7 +724,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::GridLiteral { rows, .. } => {
             for row in rows {
                 for cell in row {
-                    analyze_expr(cell.as_ref(), reasons);
+                    analyze_expr(cell.as_ref(), reasons, mode);
                 }
             }
             add_reason(
@@ -702,35 +749,35 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // Go statement (concurrency)
         Expr::Go { args, body, .. } => {
             for arg in args {
-                analyze_expr(arg, reasons);
+                analyze_expr(arg, reasons, mode);
             }
-            analyze_expr(body, reasons);
+            analyze_expr(body, reasons, mode);
             // Go expressions are now fully implemented via HIR lowering
         }
 
         // Array repeat: [value; count]
         Expr::ArrayRepeat { value, count } => {
-            analyze_expr(value, reasons);
-            analyze_expr(count, reasons);
+            analyze_expr(value, reasons, mode);
+            analyze_expr(count, reasons, mode);
             add_reason(reasons, FallbackReason::CollectionLiteral);
         }
 
         // Safe unwrap operators - require Option/Result runtime handling
         Expr::UnwrapOr { expr: inner, default } => {
-            analyze_expr(inner, reasons);
-            analyze_expr(default, reasons);
+            analyze_expr(inner, reasons, mode);
+            analyze_expr(default, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
         Expr::UnwrapElse {
             expr: inner,
             fallback_fn,
         } => {
-            analyze_expr(inner, reasons);
-            analyze_expr(fallback_fn, reasons);
+            analyze_expr(inner, reasons, mode);
+            analyze_expr(fallback_fn, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
         Expr::UnwrapOrReturn(inner) => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
@@ -738,8 +785,8 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::CastOr {
             expr: inner, default, ..
         } => {
-            analyze_expr(inner, reasons);
-            analyze_expr(default, reasons);
+            analyze_expr(inner, reasons, mode);
+            analyze_expr(default, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
         Expr::CastElse {
@@ -747,31 +794,31 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             fallback_fn,
             ..
         } => {
-            analyze_expr(inner, reasons);
-            analyze_expr(fallback_fn, reasons);
+            analyze_expr(inner, reasons, mode);
+            analyze_expr(fallback_fn, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
         Expr::CastOrReturn { expr: inner, .. } => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
         // Null coalescing: expr ?? default
         Expr::Coalesce { expr: inner, default } => {
-            analyze_expr(inner, reasons);
-            analyze_expr(default, reasons);
+            analyze_expr(inner, reasons, mode);
+            analyze_expr(default, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
         // Optional chaining: expr?.field or expr?.method(args)
         Expr::OptionalChain { expr: inner, .. } => {
-            analyze_expr(inner, reasons);
+            analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::FieldAccess);
         }
         Expr::OptionalMethodCall { receiver, args, .. } => {
-            analyze_expr(receiver, reasons);
+            analyze_expr(receiver, reasons, mode);
             for arg in args {
-                analyze_expr(&arg.value, reasons);
+                analyze_expr(&arg.value, reasons, mode);
             }
             add_reason(reasons, FallbackReason::MethodCall);
         }
@@ -788,11 +835,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
     }
 }
 
-fn analyze_expr_as_compiled_closure_arg(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
+fn analyze_expr_as_compiled_closure_arg(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: CompilabilityMode) {
     if let Expr::Lambda { body, .. } = expr {
-        analyze_expr(body, reasons);
+        analyze_expr(body, reasons, mode);
     } else {
-        analyze_expr(expr, reasons);
+        analyze_expr(expr, reasons, mode);
     }
 }
 
@@ -868,7 +915,13 @@ mod tests {
     fn parse_and_analyze(source: &str) -> HashMap<String, CompilabilityStatus> {
         let mut parser = Parser::new(source);
         let module = parser.parse().unwrap();
-        analyze_module(&module.items)
+        analyze_module(&module.items, CompilabilityMode::HybridJit)
+    }
+
+    fn parse_and_analyze_aot(source: &str) -> HashMap<String, CompilabilityStatus> {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().unwrap();
+        analyze_module(&module.items, CompilabilityMode::AotNative)
     }
 
     #[test]
@@ -1174,6 +1227,46 @@ fn run_one() -> i64:
             "empty handle-array for-loop helper should compile natively, got {:?}",
             status.reasons()
         );
+    }
+
+    // Regression test for the AOT-native "missing program body / exit 3" bug
+    // (doc/08_tracking/bug/native_aot_missing_program_body_exit3_2026-07-19.md):
+    // interpolated FString lowers to plain rt_value_to_string/rt_string_concat
+    // runtime calls with real Cranelift and LLVM codegen, so it must not be
+    // flagged for the standalone-native-binary path (no embedded interpreter,
+    // InterpCall silently returns NIL there). The in-process/hybrid-JIT lane
+    // keeps the conservative flag unchanged.
+    #[test]
+    fn test_fstring_interpolation_flagged_hybrid_not_aot() {
+        let source = "fn greet(name: text) -> text:\n    return \"hello {name}\"\n";
+
+        let hybrid_results = parse_and_analyze(source);
+        let hybrid_status = hybrid_results.get("greet").unwrap();
+        assert!(
+            !hybrid_status.is_compilable(),
+            "interpolated FString should still require interpreter fallback in HybridJit mode"
+        );
+        assert!(hybrid_status.reasons().contains(&FallbackReason::StringOps));
+
+        let aot_results = parse_and_analyze_aot(source);
+        let aot_status = aot_results.get("greet").unwrap();
+        assert!(
+            aot_status.is_compilable(),
+            "interpolated FString should compile natively in AotNative mode (native codegen \
+             exists for rt_value_to_string/rt_string_concat), got {:?}",
+            aot_status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_fstring_pure_literal_compilable_both_modes() {
+        let source = "fn greet() -> text:\n    return \"hello world\"\n";
+
+        let hybrid_results = parse_and_analyze(source);
+        assert!(hybrid_results.get("greet").unwrap().is_compilable());
+
+        let aot_results = parse_and_analyze_aot(source);
+        assert!(aot_results.get("greet").unwrap().is_compilable());
     }
 
     #[test]

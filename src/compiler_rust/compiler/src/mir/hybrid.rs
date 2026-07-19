@@ -215,7 +215,7 @@ mod tests {
     /// `transform_function` as a plain `Call`, not `InterpCall`.
     #[test]
     fn dict_returning_function_call_stays_native_not_interp_call() {
-        use crate::compilability::analyze_module;
+        use crate::compilability::{analyze_module, CompilabilityMode};
         use simple_parser::Parser;
 
         let source = "fn ret_built() -> Dict<text, i64>:\n    \
@@ -227,7 +227,7 @@ mod tests {
                        0\n";
         let mut parser = Parser::new(source);
         let module = parser.parse().expect("parse repro source");
-        let statuses = analyze_module(&module.items);
+        let statuses = analyze_module(&module.items, CompilabilityMode::HybridJit);
 
         let ret_built_status = statuses
             .get("ret_built")
@@ -282,7 +282,7 @@ mod tests {
     /// tests) stays load-bearing rather than dead code.
     #[test]
     fn dict_returning_function_with_try_operator_still_routes_through_interp_call() {
-        use crate::compilability::analyze_module;
+        use crate::compilability::{analyze_module, CompilabilityMode};
         use simple_parser::Parser;
 
         let source = "fn ret_via_try() -> Dict<text, i64>:\n    \
@@ -295,7 +295,7 @@ mod tests {
                        0\n";
         let mut parser = Parser::new(source);
         let module = parser.parse().expect("parse repro source");
-        let statuses = analyze_module(&module.items);
+        let statuses = analyze_module(&module.items, CompilabilityMode::HybridJit);
 
         let status = statuses
             .get("ret_via_try")

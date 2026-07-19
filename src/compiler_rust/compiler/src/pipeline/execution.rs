@@ -12,7 +12,7 @@ use simple_type::check as type_check;
 use tracing::instrument;
 
 use super::core::CompilerPipeline;
-use crate::compilability::{analyze_module, boxed_return_functions};
+use crate::compilability::{analyze_module, boxed_return_functions, CompilabilityMode};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::import_loader::{has_script_statements, load_module_with_imports, load_module_with_imports_for_target};
 use crate::interpreter::evaluate_module_with_di_and_aop;
@@ -538,8 +538,11 @@ impl CompilerPipeline {
             ast_module
         };
 
-        // 4. Compilability analysis for hybrid execution
-        let compilability = analyze_module(&ast_module.items);
+        // 4. Compilability analysis for hybrid execution. This SMF is loaded
+        // and run through the in-process/hybrid-JIT lane (embedded
+        // interpreter bridge), so keep the conservative HybridJit
+        // classification — see `CompilabilityMode`.
+        let compilability = analyze_module(&ast_module.items, CompilabilityMode::HybridJit);
         let boxed_returns = boxed_return_functions(&ast_module.items);
         let non_compilable: HashSet<String> = compilability
             .iter()
@@ -698,8 +701,11 @@ impl CompilerPipeline {
             ast_module
         };
 
-        // 4. Compilability analysis for hybrid execution
-        let compilability = analyze_module(&ast_module.items);
+        // 4. Compilability analysis for hybrid execution. Target-specific SMF
+        // output is loaded and run through the in-process/hybrid-JIT lane
+        // (embedded interpreter bridge), so keep the conservative HybridJit
+        // classification — see `CompilabilityMode`.
+        let compilability = analyze_module(&ast_module.items, CompilabilityMode::HybridJit);
         let boxed_returns = boxed_return_functions(&ast_module.items);
         let non_compilable: HashSet<String> = compilability
             .iter()
@@ -950,10 +956,14 @@ impl CompilerPipeline {
         // sources using `text?`, missing `panic`, etc. can still self-host.
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
 
-        // Standalone native binaries need the same hybrid boundary as SMF/native-memory
-        // compilation so imported stdlib helpers can keep using interpreter fallback
-        // where the direct AOT surface is still incomplete.
-        let compilability = analyze_module(&ast_module.items);
+        // Standalone native binaries have NO embedded interpreter (see
+        // doc/08_tracking/bug/native_aot_missing_program_body_exit3_2026-07-19.md):
+        // `InterpCall` silently resolves to NIL here, so use the permissive
+        // AotNative classification, which only flags constructs with no real
+        // native codegen (unlike the HybridJit lane used by SMF/native-memory
+        // compilation, where InterpCall safely resolves through the embedded
+        // interpreter bridge).
+        let compilability = analyze_module(&ast_module.items, CompilabilityMode::AotNative);
         let boxed_returns = boxed_return_functions(&ast_module.items);
         let non_compilable: HashSet<String> = compilability
             .iter()
