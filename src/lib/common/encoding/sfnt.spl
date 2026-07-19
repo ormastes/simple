@@ -209,6 +209,39 @@ class SfntNameValue:
             self.value = candidate
             self.seen = true
 
+# Local re-implementation of std.common.string_core.char_from_code, used only
+# by _sfnt_utf16be_text below. ROOT CAUSE (host-reproduced on the seed
+# `--native` backend, isolated to a 6-line repro): calling the cross-module
+# std.common.encoding.utf16.utf16_decode_one immediately followed by the
+# cross-module std.common.string_core.char_from_code corrupts
+# char_from_code's returned text (len() reports -1, concatenation silently
+# drops it) -- a text-return marshalling defect triggered specifically by
+# THAT call sequence across THOSE two modules; char_from_code alone, or a
+# same-file copy of its logic called right after utf16_decode_one, both
+# return correct text. This is exactly the sequence _sfnt_utf16be_text uses
+# per decoded character, so every decoded name-table string was built from
+# corrupted/empty pieces. Kept file-local (mirrors the existing
+# native-lane-workaround pattern in this file) instead of touching the
+# shared std.common.string_core/utf16 modules, which are out of this lane's
+# scope and other call sites (e.g. _sfnt_tag_text's char_from_code use)
+# already work correctly in production serial evidence.
+fn _sfnt_char_from_code(code: i64) -> text:
+    if code == 9:
+        return "\t"
+    elif code == 10:
+        return "\n"
+    elif code == 11:
+        return "\u000B"
+    elif code == 12:
+        return "\u000C"
+    elif code == 13:
+        return "\r"
+    elif code >= 32 and code <= 126:
+        val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+        val index = code - 32
+        return chars[index]
+    ""
+
 fn _sfnt_utf16be_text(blob: [u8], start: i64, length: i64) -> Option<text>:
     if length % 2 != 0: return None
     var units: [i64] = []
@@ -226,13 +259,17 @@ fn _sfnt_utf16be_text(blob: [u8], start: i64, length: i64) -> Option<text>:
         elif code_unit >= 0xDC00 and code_unit <= 0xDFFF:
             return None
         val decoded = utf16_decode_one(units, index)
-        # `.chr()` has no working native-lane lowering (empty on baremetal);
-        # char_from_code is pure Simple and already proven in-kernel by the
-        # sfnt tag-name path. ASCII coverage suffices for name matching.
+        # `.chr()` has no working native-lane lowering (empty on baremetal).
+        # `_sfnt_char_from_code` (file-local, NOT the cross-module
+        # std.common.string_core.char_from_code) is required here: calling
+        # utf16_decode_one immediately followed by the cross-module
+        # char_from_code corrupts char_from_code's returned text under the
+        # native backend (host-reproduced; see _sfnt_char_from_code doc
+        # comment above). ASCII coverage suffices for name matching.
         val decoded_cp: i64 = decoded[0]
         val decoded_len: i64 = decoded[1]
         if decoded_len <= 0: return None
-        val piece: text = char_from_code(decoded_cp)
+        val piece: text = _sfnt_char_from_code(decoded_cp)
         result = result + piece
         index = index + decoded_len
     Some(result)
