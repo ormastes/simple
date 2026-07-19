@@ -34,19 +34,34 @@ BG_ERR_LOG="$LOG_DIR/nvme_fw_rv32_background.err"
 
 # Wave-3 4-core SMP mode (design contract: doc/05_design/hardware/
 # nvme_fw_multicore/fourcore_ipc_index_handle_design.md §9, lane spec L6b).
-# NVME_RV32_SMP=1 selects an ADDITIVE branch below: it compiles entry_smp.spl
-# (+ its real `use` imports, multi-file, NOT the flattened DIRECT_ENTRY concat
-# the default mode below uses) and links a 4-hart _start stub instead of the
-# default single-hart direct-firmware path. The default path (SMP_MODE unset)
-# is completely unchanged by this branch.
+# NVME_RV32_SMP=1 selects an ADDITIVE branch below and links a 4-hart _start
+# stub instead of the default single-hart direct-firmware path. The default
+# path (SMP_MODE unset) is completely unchanged by this branch.
+#
+# FLATTEN, not multi-file entry-closure (fixed 2026-07-19): an earlier version
+# of this branch copied the 189 individual logic*.spl files into
+# $SMP_ENTRY_DIR and compiled entry_smp.spl with --entry-closure. That fails
+# with `HIR lowering error ... unresolved name: _rv32_io_command_valid` (and
+# _rv32_ecc_*) because *_cases.spl files reference module-PRIVATE underscore
+# names from their *_core.spl modules -- legal only inside ONE module. The
+# default (non-SMP) build below sidesteps this by flattening every logic*.spl
+# into ONE module ($DIRECT_ENTRY, a plain concatenation -- see the sed loop
+# under `else` further down). The SMP branch now does the same: it builds the
+# identical flattened base, then appends the wave-3 IPC/pool/fourcore cores
+# and entry_smp.spl on top, all as one module.
 SMP_MODE="${NVME_RV32_SMP:-0}"
 SMP_OUT="build/nvme_fw_rv32_smp.elf"
 SMP_ENTRY_DIR="build/os/generated_smp"
+SMP_DIRECT_ENTRY="$SMP_ENTRY_DIR/nvme_fw_smp_direct_entry.spl"
 SMP_OBJ="build/test-artifacts/nvme_fw_rv32_smp.o"
 SMP_START_OBJ="build/test-artifacts/nvme_fw_rv32_smp_start.o"
 SMP_START_ASM="build/test-artifacts/nvme_fw_rv32_smp_start.S"
 SMP_OUT_LOG="$LOG_DIR/nvme_fw_rv32_smp_build.out"
 SMP_ERR_LOG="$LOG_DIR/nvme_fw_rv32_smp_build.err"
+SMP_NAMES_SEEN="$LOG_DIR/nvme_fw_rv32_smp_names_seen.txt"
+SMP_NAMES_NEW="$LOG_DIR/nvme_fw_rv32_smp_names_new.txt"
+SMP_NAMES_DUP="$LOG_DIR/nvme_fw_rv32_smp_names_dup.txt"
+SMP_TMP_APPEND="$LOG_DIR/nvme_fw_rv32_smp_append_tmp.spl"
 
 if ! grep -q "rt_rv32_boot_optional_nvme_fw_selftest" "$BOOT"; then
   echo "NVME_RV32_BOOT_NOT_WIRED: add rt_rv32_boot_optional_nvme_fw_selftest() to $BOOT before building $OUT"
@@ -89,21 +104,120 @@ fi
 if [ "$SMP_MODE" = "1" ]; then
   rm -rf "$SMP_ENTRY_DIR"
   mkdir -p "$SMP_ENTRY_DIR"
+
+  # smp_check_collisions LABEL FILE: fails the build (fail-closed) if FILE
+  # defines a top-level `fn`/`val` name already seen in an earlier appended
+  # file. This is the guard that would have caught the underscore-private
+  # collision class above BEFORE it reached the compiler as an opaque HIR
+  # error, and it protects future edits to any of the appended files.
+  : >"$SMP_NAMES_SEEN"
+  smp_check_collisions() {
+    grep -oE '^(fn|val) [A-Za-z_][A-Za-z0-9_]*' "$2" | awk '{print $2}' | sort -u >"$SMP_NAMES_NEW"
+    comm -12 "$SMP_NAMES_SEEN" "$SMP_NAMES_NEW" >"$SMP_NAMES_DUP"
+    if [ -s "$SMP_NAMES_DUP" ]; then
+      echo "NVME_RV32_SMP_FLATTEN_COLLISION source=$1 names=$(tr '\n' ',' <"$SMP_NAMES_DUP")" >&2
+      exit 1
+    fi
+    cat "$SMP_NAMES_SEEN" "$SMP_NAMES_NEW" | sort -u >"$SMP_NAMES_SEEN.tmp"
+    mv "$SMP_NAMES_SEEN.tmp" "$SMP_NAMES_SEEN"
+  }
+
+  # 1) Base = the SAME flattened concat the default (non-SMP) build produces
+  #    below (all logic*.spl except logic.spl/logic_check.spl, then logic.spl
+  #    with its `use` lines stripped, then the direct-entry footer).
+  #    Regenerated here (rather than depending on a prior default build
+  #    having produced $DIRECT_ENTRY) so `NVME_RV32_SMP=1` alone is
+  #    sufficient to build.
+  : >"$SMP_DIRECT_ENTRY"
   for logic_src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
     case "$(basename "$logic_src")" in
-      logic_check.spl) continue ;;
+      logic.spl|logic_check.spl) continue ;;
     esac
-    cp "$logic_src" "$SMP_ENTRY_DIR/$(basename "$logic_src")"
+    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' "$logic_src" >>"$SMP_DIRECT_ENTRY"
+    printf '\n' >>"$SMP_DIRECT_ENTRY"
   done
-  cp examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl "$SMP_ENTRY_DIR/entry.spl"
-  cp examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry_smp.spl "$SMP_ENTRY_DIR/entry_smp.spl"
+  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
+    examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic.spl >>"$SMP_DIRECT_ENTRY"
+  cat >>"$SMP_DIRECT_ENTRY" <<'EOF_SMP_BASE_FOOTER'
+
+@export("C", name: "rt_rv32_boot_optional_nvme_fw_selftest")
+fn rt_rv32_boot_optional_nvme_fw_selftest() -> i64:
+    nvme_fw_rv32_logic_selftest()
+
+fn main() -> i64:
+    nvme_fw_rv32_logic_selftest()
+EOF_SMP_BASE_FOOTER
+  printf '\n' >>"$SMP_DIRECT_ENTRY"
+  grep -oE '^(fn|val) [A-Za-z_][A-Za-z0-9_]*' "$SMP_DIRECT_ENTRY" | awk '{print $2}' | sort -u >"$SMP_NAMES_SEEN"
+
+  # NOTE (found + verified during L6-fix via the collision guard itself,
+  # 2026-07-19): the wave-3 IPC/pool/fourcore/coro pure-logic core files
+  # (logic_ipc_layout_core.spl, logic_ipc_msg_core.spl, logic_ipc_ring_core.spl,
+  # logic_buf_pool_core.spl, logic_nand_region_core.spl, logic_fourcore_core.spl,
+  # logic_coro_core.spl) already match the `logic*.spl` glob in step 1 above and
+  # are therefore ALREADY part of the base flatten -- appending them again here
+  # would be a hard duplicate-definition collision (confirmed: all of
+  # logic_ipc_layout_core.spl's 38 top-level names, and every other core file's
+  # names, collide with the base on first append attempt). No separate append
+  # step for them is needed or correct.
+
+  # 2) entry.spl's boot-selftest wrapper: entry_smp.spl's hart0 path calls
+  #    nvme_fw_rv32_selftest() (design §6, "run the existing single-hart
+  #    regression guard first"), which is NOT part of the base flatten above
+  #    -- the default DIRECT_ENTRY intentionally omits entry.spl and calls
+  #    the raw nvme_fw_rv32_logic_selftest() instead, since its own _start
+  #    asm prints the PASS banner itself. Pull in only what entry_smp.spl
+  #    needs (nvme_fw_rv32_selftest + its private _emit_* helpers) via an
+  #    awk paragraph filter; entry.spl's `_uart_put`, `main`, and
+  #    `rt_rv32_boot_optional_nvme_fw_selftest` paragraphs are dropped here
+  #    because they duplicate definitions already present (entry_smp.spl
+  #    defines its own `_uart_put`; the base footer above already defines
+  #    `main` and `rt_rv32_boot_optional_nvme_fw_selftest`) -- real
+  #    collisions found+fixed during L6-fix, confirmed by the same
+  #    collision-guard grep run on every other appended file.
+  # NOTE: each `if` test is kept on its own statement (not chained with a
+  # multi-line `&&` pattern) -- gawk does not auto-continue a bare top-level
+  # PATTERN expression across a newline after `&&` (verified empirically: it
+  # silently splits into separate always-true rules instead of erroring).
+  awk 'BEGIN{RS=""; ORS="\n\n"}
+       {
+         keep = 1
+         if ($0 ~ /^extern fn rt_riscv_uart_put/) keep = 0
+         if ($0 ~ /^use logic\./) keep = 0
+         if ($0 ~ /^fn _uart_put\(/) keep = 0
+         if ($0 ~ /^@export\("C", name: "rt_rv32_boot_optional_nvme_fw_selftest"\)/) keep = 0
+         if ($0 ~ /^fn main\(\)/) keep = 0
+         if (keep == 1) print
+       }' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl \
+    | sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
+    >"$SMP_TMP_APPEND"
+  smp_check_collisions "entry.spl(filtered)" "$SMP_TMP_APPEND"
+  cat "$SMP_TMP_APPEND" >>"$SMP_DIRECT_ENTRY"
+  printf '\n' >>"$SMP_DIRECT_ENTRY"
+
+  # 3) entry_smp.spl: the 4-hart boot driver + dataplane selftest +
+  #    @export("C") rt_rv32_fourcore_main (the SMP _start asm stub's call
+  #    target). `use` lines stripped; extern declarations kept -- they are
+  #    the sole surviving decls after step 2 dropped entry.spl's duplicate
+  #    `extern fn rt_riscv_uart_put`. Same i32->i64 transform as steps 1/2:
+  #    entry_smp.spl has 17 `i32` annotations (e.g. `fn shm_ring_push_ok(...)
+  #    -> i32:` returning the now-i64 `ring_can_push(...)` from step 1) --
+  #    without this, the flattened module would mix i32 return types against
+  #    i64 core-fn bodies, either a hard type error or the exact i32/rv32
+  #    landmine this transform exists to avoid.
+  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
+    examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry_smp.spl >"$SMP_TMP_APPEND"
+  smp_check_collisions "entry_smp.spl" "$SMP_TMP_APPEND"
+  cat "$SMP_TMP_APPEND" >>"$SMP_DIRECT_ENTRY"
+
+  rm -f "$SMP_NAMES_SEEN" "$SMP_NAMES_NEW" "$SMP_NAMES_DUP" "$SMP_TMP_APPEND"
 
   rm -f "$SMP_OUT" "$SMP_OBJ" "$SMP_START_OBJ" "$SMP_START_ASM"
   {
     echo "NVME_RV32_SMP_BUILD_START timeout=${TIMEOUT_SECS}s out=$SMP_OUT"
     echo "compiler=$SIMPLE_BIN"
     echo "sources=$SMP_ENTRY_DIR"
-    echo "entry=$SMP_ENTRY_DIR/entry_smp.spl target=riscv32-unknown-none mode=smp_firmware"
+    echo "entry=$SMP_DIRECT_ENTRY target=riscv32-unknown-none mode=smp_firmware_flattened"
   } >"$SMP_OUT_LOG"
   : >"$SMP_ERR_LOG"
   if command -v timeout >/dev/null 2>&1; then
@@ -116,7 +230,7 @@ if [ "$SMP_MODE" = "1" ]; then
   set +e
   $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
     --source "$SMP_ENTRY_DIR" \
-    --entry "$SMP_ENTRY_DIR/entry_smp.spl" --entry-closure \
+    --entry "$SMP_DIRECT_ENTRY" --entry-closure \
     --target riscv32-unknown-none \
     --emit-object -o "$SMP_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"
   rc=$?
