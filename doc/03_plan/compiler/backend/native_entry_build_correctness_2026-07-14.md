@@ -211,7 +211,11 @@ the shared binary — deploys require explicit user go-ahead).
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
-  Array `map`/`filter`/`fold` retain their existing lifted i64 ABI. Linux runs
+  Array `filter`/`fold` retain their existing lifted i64 ABI. Array `map` is a
+  separate open correctness bug: missing owner metadata can select Option map,
+  while its forced-i64 fallback loses text tags and result element provenance.
+  The exact known-red fixture and acceptance contract are tracked in
+  `doc/08_tracking/bug/native_array_map_text_provenance_2026-07-19.md`. Linux runs
   the strict dual-backend typed-output/filter control in the full gate; that
   control now also observes the receiver's mutation count so duplicate
   evaluation cannot pass. macOS
