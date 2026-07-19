@@ -1,7 +1,7 @@
-# `local_mir_type_of` declared `MirType?` but implemented via `Some(...)`/`nil` — landmine class, one victim fixed
+# `local_mir_type_of` returned `Some(MirType)` through a bare nilable contract
 
-- **Status:** ONE VICTIM FIXED (`lower_array_lit`, see below); the underlying
-  contract mismatch is NOT fixed and remains a landmine for future callers.
+- **Status:** ROOT FIXED; `local_mir_type_of` now returns a bare `MirType` or
+  `nil`, and both wrapper-dependent callers use the nilable contract.
 - **Fixed victim:** 2026-07-19, `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
   (`lower_array_lit`), lane W2 (native-smoke-matrix `array_index_rw`).
 - **Severity:** medium — silently corrupts array-element MIR types for any
@@ -101,23 +101,15 @@ build-failed). Regression-checked against `for_in_array`, `dict_index`,
 `dict_struct_value`, `struct_field` (all still PASS) — chosen because they
 share the same array/dict/struct MIR-type-tracking machinery.
 
-## What is NOT fixed — the landmine remains armed
+## Root fix — 2026-07-19
 
-The contract mismatch in `local_mir_type_of` itself was deliberately left
-alone: changing it to return a bare `MirType` (dropping the `Some(...)`
-wrapper, to match its declared `MirType?` signature) would be the "fix at the
-source" move, but at least two existing callers
-(`mir_lowering_stmts.spl:100` `local_is_unit`, and `:204`) pattern-match with
-`case Some(t): ... case nil: ...` — which, per a targeted repro, does NOT
-match a bare non-`Option` value (`case Some(w): return w.v` against a
-directly-returned `Wrap(v:5)` crashes: "runtime error: field access on nil
-receiver", i.e. `w` binds to nil, not the object). Changing the producer
-would require auditing and fixing those two consumers in the same change,
-which was judged out of scope for this lane (single matrix-case fix). Any
-future caller of `local_mir_type_of` that writes the "obvious" nilable idiom
-(`if x != nil: use x` / `val x = f(); if x != nil: assign x`, without `??`)
-will silently reproduce this exact defect class. Flagging as the concrete
-follow-up: either (a) audit+fix the two `case Some(t)` consumers and then
-switch the producer to a bare return, or (b) leave the producer as-is and
-grep for any NEW `local_mir_type_of` caller that doesn't use `??`/`case
-Some`/field-access-only before merging.
+`local_mir_type_of` now returns `item.type_` directly. `local_is_unit` uses an
+i64 fallback before matching `MirTypeKind`, and the struct-copy path matches
+the same bare type before returning a bare `SymbolId?`. No caller depends on
+the accidental `Some(MirType)` wrapper.
+
+The focused regression assigns the returned nilable value through the exact
+previously-broken `!= nil` path and passes it to `MirType.ptr`; it would fail
+with `unknown static method ptr on class MirType` under the old producer. A
+bounded direct pure-Simple execution prints `local_mir_type_bare_ok`. The
+larger native smoke matrix remains pending an incremental compiler rebuild.

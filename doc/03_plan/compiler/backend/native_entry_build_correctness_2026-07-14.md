@@ -234,6 +234,12 @@ the shared binary — deploys require explicit user go-ahead).
   `Err(text).unwrap_err()`, and single receiver evaluation in Linux's full gate
   plus the selected macOS, Windows, and FreeBSD gates. First staged execution
   is pending.
+- `local_mir_type_of` now honors its nilable contract by returning a bare
+  `MirType` or `nil`; its two wrapper-dependent consumers were converted in
+  the same owner. The focused regression reproduces the former plain
+  assignment plus `MirType.ptr` failure and a bounded direct pure-Simple run
+  prints `local_mir_type_bare_ok`. Native matrix replay awaits the next
+  incremental compiler rebuild.
 - The Engine2D host-runtime queue symbol bug now has one incremental
   gate that builds the existing no-GPU probe with the host-GPU bundle under
   flagless LLVM or explicit Cranelift, compares native output byte-for-byte
