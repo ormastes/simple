@@ -14,12 +14,64 @@ macro_rules! check_timeout {
         }
     };
 }
-use super::core_types::{Control, Enums, ImplMethods};
+use super::core_types::{Control, Enums, ImplMethods, get_pattern_name};
 use super::node_exec::exec_node;
 use super::expr::evaluate_expr;
 use super::macros::{enter_block_scope, exit_block_scope};
 use super::interpreter_control::{exec_match_expr, exec_if_expr, exec_match_core, exec_if_core};
 use super::interpreter_helpers::handle_method_call_with_self_update;
+
+/// Capture the pre-block value (if any) of every name that this block directly
+/// declares via `var`/`val` (`Node::Let`), `const`, or `static`.
+///
+/// The flat `Env` has no block-scope stack, so a `var` redeclared inside a
+/// nested block (if/for/while/... body) would otherwise silently overwrite —
+/// and leak past — the outer binding of the same name. Recording what each
+/// name looked like immediately before this block ran lets the caller restore
+/// (or remove) it once the block exits, giving nested blocks real scope. See
+/// doc/08_tracking/bug/interpreter_nested_block_var_redeclare_leaks_scope_2026-07-17.md.
+///
+/// Only *direct* statements of this block are scanned — nested blocks (the
+/// bodies of `if`/`for`/`while`/`match`/... statements within it) manage their
+/// own scope via their own `exec_block`/`exec_block_fn` call, so recursing
+/// into them here would double-handle (and mis-scope) their locals.
+fn capture_block_scope_shadows(block: &Block, env: &Env) -> Vec<(String, Option<Value>)> {
+    let mut shadows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for stmt in &block.statements {
+        let name = match stmt {
+            Node::Let(let_stmt) => get_pattern_name(&let_stmt.pattern),
+            Node::Const(const_stmt) => Some(const_stmt.name.clone()),
+            Node::Static(static_stmt) => Some(static_stmt.name.clone()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            // Only the first declaration of a name in this block matters: it
+            // reflects the value visible from the enclosing scope before this
+            // block started executing.
+            if seen.insert(name.clone()) {
+                shadows.push((name.clone(), env.get(&name).cloned()));
+            }
+        }
+    }
+    shadows
+}
+
+/// Undo the shadowing captured by `capture_block_scope_shadows`: restore each
+/// name's pre-block value, or remove it entirely if it did not exist before
+/// the block ran (so a block-local `var` never leaks into the caller).
+fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>, env: &mut Env) {
+    for (name, prior_value) in shadows {
+        match prior_value {
+            Some(value) => {
+                env.insert(name, value);
+            }
+            None => {
+                env.remove(&name);
+            }
+        }
+    }
+}
 
 pub(crate) fn exec_block(
     block: &Block,
@@ -34,6 +86,7 @@ pub(crate) fn exec_block(
 
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
+    let shadows = capture_block_scope_shadows(block, env);
 
     for stmt in &block.statements {
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
@@ -44,6 +97,7 @@ pub(crate) fn exec_block(
                 for tail_block in tail_blocks {
                     exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
                 }
+                restore_block_scope_shadows(shadows, env);
                 return Ok(flow);
             }
         }
@@ -55,6 +109,7 @@ pub(crate) fn exec_block(
         exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
     }
 
+    restore_block_scope_shadows(shadows, env);
     Ok(Control::Next)
 }
 
@@ -92,6 +147,7 @@ pub(crate) fn exec_block_fn(
 ) -> Result<(Control, Option<Value>), CompileError> {
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
+    let shadows = capture_block_scope_shadows(block, env);
 
     let len = block.statements.len();
     let mut last_expr_value: Option<Value> = None;
@@ -109,6 +165,7 @@ pub(crate) fn exec_block_fn(
                         for tail_block in tail_blocks {
                             exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
                         }
+                        restore_block_scope_shadows(shadows, env);
                         return Ok((other, None));
                     }
                 }
@@ -139,6 +196,7 @@ pub(crate) fn exec_block_fn(
                         for tail_block in tail_blocks {
                             exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
                         }
+                        restore_block_scope_shadows(shadows, env);
                         return Ok((other, None));
                     }
                 }
@@ -158,6 +216,7 @@ pub(crate) fn exec_block_fn(
                         for tail_block in tail_blocks {
                             exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
                         }
+                        restore_block_scope_shadows(shadows, env);
                         return Ok((other, None));
                     }
                 }
@@ -173,6 +232,7 @@ pub(crate) fn exec_block_fn(
                 for tail_block in tail_blocks {
                     exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
                 }
+                restore_block_scope_shadows(shadows, env);
                 return Ok((flow, None));
             }
         }
@@ -184,5 +244,6 @@ pub(crate) fn exec_block_fn(
         exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
     }
 
+    restore_block_scope_shadows(shadows, env);
     Ok((Control::Next, last_expr_value))
 }

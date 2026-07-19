@@ -121,7 +121,6 @@ main = flags.a"#;
 }
 
 #[test]
-#[ignore = "OPEN: nested block declarations share the caller Env; see interpreter_nested_block_var_redeclare_leaks_scope_2026-07-17.md"]
 fn test_nested_block_var_redeclaration_restores_outer_binding() {
     let code = r#"fn probe() -> i32:
     var kpath = 40
