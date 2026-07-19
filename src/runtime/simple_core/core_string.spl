@@ -1,6 +1,7 @@
 # Pure-Simple `simple-core` string and string-backed stdio ABI.
 
 extern fn malloc(size: i64) -> i64
+extern fn calloc(count: i64, size: i64) -> i64
 extern fn realloc(ptr: i64, size: i64) -> i64
 extern fn free(ptr: i64)
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
@@ -192,6 +193,13 @@ pub fn rt_string_chars(value: i64) -> i64:
     val data = string_data_ptr_value(ptr)
     val len = string_len_ptr(ptr)
     val out = rt_array_new(len)
+    if len < 1:
+        return out
+    # The pure runtime has no global short-string cache. Reuse each ASCII
+    # handle within this conversion so lexer `source.chars()` does not retain
+    # one heap string per source byte. Multibyte codepoints keep the existing
+    # exact UTF-8 slice path.
+    val ascii_cache = calloc(256, 8)
     var byte_index = 0
     while byte_index < len:
         val b0 = spl_load_u8(data, byte_index) & 255
@@ -202,8 +210,20 @@ pub fn rt_string_chars(value: i64) -> i64:
             width = 3
         elif b0 >= 240 and b0 <= 244 and byte_index + 3 < len:
             width = 4
-        rt_array_push(out, rt_string_new(data + byte_index, width))
+        var char_value = 0
+        if width == 1 and ascii_cache > 0:
+            val cache_offset = b0 * 8
+            char_value = spl_load_i64(ascii_cache, cache_offset)
+            if char_value < 1:
+                char_value = rt_string_new(data + byte_index, width)
+                if string_ptr(char_value) > 0:
+                    spl_store_i64(ascii_cache, cache_offset, char_value)
+        else:
+            char_value = rt_string_new(data + byte_index, width)
+        rt_array_push(out, char_value)
         byte_index = byte_index + width
+    if ascii_cache > 0:
+        free(ascii_cache)
     return out
 
 pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:

@@ -379,8 +379,10 @@ the shared binary — deploys require explicit user go-ahead).
   token/cache singleton storage now reuse the same owners, and the lexer only
   replaces its source-specific payload instead of its outer active slot.
   Warning collection also retains every warning from the current parse instead
-  of discarding the previous one. The lexer's per-source `source.chars()`
-  materialization remains a separate Unicode-sensitive retention candidate.
+  of discarding the previous one. Pure runtime `source.chars()` now reuses each
+  one-byte character handle within a conversion, retaining at most 256 distinct
+  one-byte string objects plus unchanged multibyte objects. The O(N)
+  `source_chars` reference array remains; Stage4 RSS evidence is pending.
   The isolated rich-module bridge now resets the flat type/span/token/symbol/
   signature/composite pools before each file, while `reset_all_pools` clears
   their outer arrays in place instead of registering replacement arrays. A
