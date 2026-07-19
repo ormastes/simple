@@ -21,8 +21,9 @@ is unchanged.
 - failed write returns `Err` and preserves the destination directory: PASS
 - focused source checks for the regression and applicator: PASS
 - compiler, lib, MCP, and LSP MCP source checks: PASS
-- pure-Simple MCP stdio integration: blocked by the separately tracked
-  test-runner diagnostic flood; no release qualification claimed
+- source-runner MCP stdio integration on the bootstrap seed: 3 examples,
+  0 failures, exit 0 after the automatic-docgen hang was fixed
+- admitted self-hosted Stage 4 evidence: pending
 
 ## Remaining sibling
 
