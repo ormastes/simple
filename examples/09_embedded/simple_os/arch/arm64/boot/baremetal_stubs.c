@@ -3261,8 +3261,9 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
 }
 
 #define ARM64_UAS_REGION_BASE 0x48000000ULL
-#define ARM64_UAS_REGION_SIZE 0x00200000ULL
+#define ARM64_UAS_REGION_SIZE 0x00800000ULL
 #define ARM64_UAS_TABLE_BYTES 0x00100000ULL
+#define ARM64_UAS_IMAGE_BYTES (ARM64_UAS_REGION_SIZE - ARM64_UAS_TABLE_BYTES - 4096ULL)
 #define ARM64_UAS_MAX_SPACES 16U
 #define ARM64_PTE_VALID (1ULL << 0)
 #define ARM64_PTE_TABLE (1ULL << 1)
@@ -3286,6 +3287,8 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
 #define ARM64_TCR_IRGN0_WBWA (1ULL << 8)
 #define ARM64_TCR_VALUE (ARM64_TCR_T0SZ | ARM64_TCR_TG0_4KB | ARM64_TCR_SH0_INNER | ARM64_TCR_ORGN0_WBWA | ARM64_TCR_IRGN0_WBWA)
 #define ARM64_SCTLR_M 1ULL
+#define ARM64_USER_ENTRY_FRAME_BYTES 128ULL
+#define ARM64_LOWER_EL_FRAME_BYTES 272ULL
 
 typedef struct {
     uint64_t root;
@@ -3306,6 +3309,10 @@ extern char _vectors[];
 extern char _stack_top[];
 extern char _sbss[];
 extern void _lower_el_aarch64_sync_handler(void);
+extern uint64_t arm64_enter_user_virtual(uint64_t root, uint64_t entry,
+                                         uint64_t user_sp, uint64_t mair,
+                                         uint64_t tcr);
+extern void arm64_user_exit_resume(void);
 
 RuntimeValue rt_arm64_user_as_map_page(RuntimeValue root_val, RuntimeValue virt_val, RuntimeValue phys_val, RuntimeValue flags_val);
 RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt_val);
@@ -3387,7 +3394,15 @@ static int arm64_user_as_kernel_window_prepare(uint64_t root)
     }
     if (!arm64_user_as_map_identity_el1(root, uart, rw_el1_nx)) return 0;
     if (!arm64_user_as_map_identity_el1(root, stack_top - 1ULL, rw_el1_nx)) return 0;
-    if (!arm64_user_as_map_identity_el1(root, current_sp, rw_el1_nx)) return 0;
+    uint64_t return_stack_bytes = ARM64_USER_ENTRY_FRAME_BYTES + ARM64_LOWER_EL_FRAME_BYTES;
+    if (current_sp < return_stack_bytes) return 0;
+    uint64_t return_page = (current_sp - return_stack_bytes) & ~4095ULL;
+    uint64_t current_sp_page = current_sp & ~4095ULL;
+    while (return_page <= current_sp_page) {
+        if (!arm64_user_as_map_identity_el1(root, return_page, rw_el1_nx)) return 0;
+        if (return_page == current_sp_page) break;
+        return_page += 4096ULL;
+    }
     return 1;
 }
 
@@ -3430,6 +3445,14 @@ static int arm64_user_as_virtual_entry_preflight(uint64_t root, uint64_t entry, 
     }
     if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)rt_arm64_enter_recorded_user_live) == 0) {
         serial_puts("[arm64-user] preflight handoff failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)arm64_enter_user_virtual) == 0) {
+        serial_puts("[arm64-user] preflight entry trampoline failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)arm64_user_exit_resume) == 0) {
+        serial_puts("[arm64-user] preflight exit resume failed\r\n");
         return 0;
     }
     if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)0x09000000ULL) == 0) {
@@ -3579,61 +3602,33 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
     (void)elr;
     (void)esr;
     if (id == 0) {
-        serial_puts("[arm64-user] svc exit ok\r\n");
-        serial_puts("[arm-fs-exec] vfs:ok\r\n");
-        serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
-        serial_puts("[arm-fs-exec] user-svc-exit:ok\r\n");
-        serial_puts("TEST PASSED\r\n");
-        rt_qemu_exit_success();
+        serial_puts("[arm64-user] svc exit ok code=");
+        serial_put_dec((int64_t)a0);
+        serial_puts("\r\n[arm-fs-exec] user-svc-exit:ok code=");
+        serial_put_dec((int64_t)a0);
+        serial_puts("\r\n");
+        return a0;
     }
     return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
-static void arm64_enter_user_virtual(uint64_t root, uint64_t entry, uint64_t sp)
-{
-    __asm__ volatile(
-        "msr mair_el1, %0\n\t"
-        "msr tcr_el1, %1\n\t"
-        "dsb sy\n\t"
-        "isb\n\t"
-        "msr ttbr0_el1, %2\n\t"
-        "dsb sy\n\t"
-        "tlbi vmalle1\n\t"
-        "dsb sy\n\t"
-        "isb\n\t"
-        "mrs x3, sctlr_el1\n\t"
-        "orr x3, x3, #1\n\t"
-        "msr sctlr_el1, x3\n\t"
-        "isb\n\t"
-        "msr sp_el0, %3\n\t"
-        "msr elr_el1, %4\n\t"
-        "msr spsr_el1, xzr\n\t"
-        "isb\n\t"
-        "eret\n\t"
-        :
-        : "r"(ARM64_MAIR_VALUE), "r"(ARM64_TCR_VALUE), "r"(root), "r"(sp), "r"(entry)
-        : "x3", "memory"
-    );
-    for (;;) __asm__ volatile("wfe");
-}
-
 RuntimeValue rt_arm64_enter_recorded_user_live(void)
 {
-    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return 0;
+    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return (RuntimeValue)-14;
     serial_puts("[arm64-user] live virtual eret enter\r\n");
     uint64_t entry = arm64_recorded_user_entry;
     uint64_t sp = arm64_recorded_user_sp;
     uint64_t root = arm64_recorded_user_root;
     if (!arm64_user_as_find(root) || !entry || !sp) {
         serial_puts("[arm64-user] live virtual invalid handoff\r\n");
-        return 0;
+        return (RuntimeValue)-22;
     }
     if (!arm64_user_as_virtual_entry_preflight(root, entry, sp)) {
         serial_puts("[arm64-user] live virtual preflight failed\r\n");
-        return 0;
+        return (RuntimeValue)-14;
     }
-    arm64_enter_user_virtual(root, entry, sp);
-    return 0;
+    return (RuntimeValue)arm64_enter_user_virtual(
+        root, entry, sp, ARM64_MAIR_VALUE, ARM64_TCR_VALUE);
 }
 
 /* --- genuine EL0 execution: stage REAL aarch64 code and eret into it ---
@@ -3641,9 +3636,8 @@ RuntimeValue rt_arm64_enter_recorded_user_live(void)
  * (no svc), so it can only be load-proofed, not run. This maps actual EL0
  * instructions (mov x8,#0; svc #0) into a fresh user address space and eret's
  * to EL0. The svc traps via vbar_el1 (crt0.S, EC=0x15) into
- * rt_arm64_handle_user_svc(id=0), which prints [arm-fs-exec] user-svc-exit:ok +
- * TEST PASSED and exits — proving real EL0 usercode execution + a syscall
- * round-trip. Returns 0 only if AS setup / preflight fails (no eret taken). */
+ * rt_arm64_handle_user_svc(id=0), which returns the user's exit code through
+ * the blocking EL1 trampoline. Negative values report setup/preflight failure. */
 RuntimeValue rt_arm64_exec_probe_live_real(void)
 {
     uint64_t root = (uint64_t)rt_arm64_user_as_create();
@@ -3745,6 +3739,32 @@ RuntimeValue rt_arm_elf64_pt_load_align(RuntimeValue bytes, RuntimeValue idx_val
     return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 48ULL);
 }
 
+static int arm64_elf64_load_bounds(RuntimeValue bytes, uint64_t *min_out, uint64_t *end_out)
+{
+    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes);
+    uint64_t file_len = arm64_elf_len(bytes);
+    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t end_vaddr = 0;
+    if (count == 0) return 0;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t file_off = arm64_elf_u64(bytes, ph + 8ULL);
+        uint64_t vaddr = arm64_elf_u64(bytes, ph + 16ULL);
+        uint64_t filesz = arm64_elf_u64(bytes, ph + 32ULL);
+        uint64_t memsz = arm64_elf_u64(bytes, ph + 40ULL);
+        if (filesz > memsz || file_off > file_len || filesz > file_len - file_off) return 0;
+        if (memsz > UINT64_MAX - vaddr) return 0;
+        if (vaddr < min_vaddr) min_vaddr = vaddr;
+        if (vaddr + memsz > end_vaddr) end_vaddr = vaddr + memsz;
+    }
+    min_vaddr &= ~4095ULL;
+    if (end_vaddr < min_vaddr || end_vaddr - min_vaddr > ARM64_UAS_IMAGE_BYTES) return 0;
+    *min_out = min_vaddr;
+    *end_out = end_vaddr;
+    return 1;
+}
+
 RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
 {
     uint64_t dst_phys = (uint64_t)dst_phys_val;
@@ -3752,16 +3772,9 @@ RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue dst_phys_val, RuntimeVal
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
-    for (uint32_t idx = 0; idx < count; idx++) {
-        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
-        if (ph == UINT64_MAX) return 0;
-        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-    }
-    min_vaddr &= ~4095ULL;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
 
     for (uint32_t idx = 0; idx < count; idx++) {
         uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
@@ -3793,16 +3806,9 @@ RuntimeValue rt_arm64_user_as_map_elf64(RuntimeValue root_val, RuntimeValue dst_
     if (!root || !dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
-    for (uint32_t idx = 0; idx < count; idx++) {
-        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
-        if (ph == UINT64_MAX) return 0;
-        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-    }
-    min_vaddr &= ~4095ULL;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
 
     uint32_t mapped = 0;
     for (uint32_t idx = 0; idx < count; idx++) {
@@ -3833,18 +3839,10 @@ RuntimeValue rt_arm_elf64_direct_entry(RuntimeValue dst_phys_val, RuntimeValue b
     bytes_val = arm64_exec_image_or(bytes_val);
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
-    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
-    for (uint32_t idx = 0; idx < count; idx++) {
-        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
-        if (ph == UINT64_MAX) return 0;
-        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-    }
-    min_vaddr &= ~4095ULL;
-    if (entry < min_vaddr) return 0;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
+    if (entry < min_vaddr || entry >= end_vaddr) return 0;
     uint64_t direct = dst_phys + (entry - min_vaddr);
     arm64_last_elf_virtual_entry = entry;
     arm64_last_elf_direct_entry = direct;
@@ -3859,9 +3857,9 @@ RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, Runti
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
-    if (count == 0) return 0;
-
-    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t min_vaddr = 0;
+    uint64_t end_vaddr = 0;
+    if (!arm64_elf64_load_bounds(bytes_val, &min_vaddr, &end_vaddr)) return 0;
     uint64_t entry_ph = UINT64_MAX;
     for (uint32_t idx = 0; idx < count; idx++) {
         uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
@@ -3870,13 +3868,11 @@ RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, Runti
         uint64_t filesz = arm64_elf_u64(bytes_val, ph + 32ULL);
         uint64_t memsz = arm64_elf_u64(bytes_val, ph + 40ULL);
         if (filesz > memsz) return 0;
-        if (vaddr < min_vaddr) min_vaddr = vaddr;
-        if (entry >= vaddr && entry < vaddr + filesz) entry_ph = ph;
+        if (entry >= vaddr && entry - vaddr < filesz) entry_ph = ph;
     }
     if (entry_ph == UINT64_MAX) return 0;
 
-    min_vaddr &= ~4095ULL;
-    if (entry < min_vaddr) return 0;
+    if (entry < min_vaddr || entry >= end_vaddr) return 0;
 
     uint64_t file_off = arm64_elf_u64(bytes_val, entry_ph + 8ULL);
     uint64_t vaddr = arm64_elf_u64(bytes_val, entry_ph + 16ULL);
@@ -3936,11 +3932,13 @@ RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue byte
     uint64_t dst_phys = (uint64_t)dst_phys_val;
     RuntimeArray *bytes = (RuntimeArray *)(IS_HEAP(bytes_val) ? DECODE_PTR(bytes_val) : (void *)(uintptr_t)(uint64_t)bytes_val);
     if (!dst_phys || !bytes || bytes->hdr.type != HEAP_ARRAY || bytes->len > bytes->cap) return 0;
+    if (bytes->len > ARM64_UAS_IMAGE_BYTES || bytes->len > UINT64_MAX - 4095ULL) return 0;
+    uint64_t padded = (bytes->len + 4095ULL) & ~4095ULL;
+    if (padded > ARM64_UAS_IMAGE_BYTES) return 0;
     volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_phys;
     for (uint64_t i = 0; i < bytes->len; i++) {
         dst[i] = (uint8_t)arm64_array_byte_at_raw_index(bytes_val, i);
     }
-    uint64_t padded = (bytes->len + 4095ULL) & ~4095ULL;
     for (uint64_t i = bytes->len; i < padded; i++) {
         dst[i] = 0;
     }
