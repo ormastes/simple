@@ -1,5 +1,6 @@
 use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
 use std.io.{file_delete, file_read, file_write, time_now_unix_micros}
+use app.test.font_evidence_runner.{valid_native_result}
 
 describe "interpreter test result wrapper":
     it "adds summary and fail-closed result checks":
@@ -23,12 +24,60 @@ describe "interpreter test result wrapper":
         expect(wrapped_path).to_equal("")
         expect(cleanup_path).to_equal("")
 
-    it "keeps the focused runner explicit and free of an embedded compiler closure":
+    it "accepts only coherent native summaries and one completion marker":
+        val marker = "test-runner: native result wrapper complete"
+        val green = "sample\n1 examples, 0 failures\n{marker}\n"
+        val red = "sample\n1 examples, 1 failures\n{marker}\nerror: test-runner: spec failed\n"
+        expect(valid_native_result(green, 0)).to_be(true)
+        expect(valid_native_result(red, 1)).to_be(true)
+        expect(valid_native_result(red + "junk\n", 1)).to_be(false)
+        expect(valid_native_result("sample\n1 examples, 1 failures\n{marker}\nprefix test-runner: spec failed suffix\n", 1)).to_be(false)
+        expect(valid_native_result(green, 1)).to_be(false)
+        expect(valid_native_result(red, 0)).to_be(false)
+        expect(valid_native_result("sample\n1 examples, 0 failures\n", 0)).to_be(false)
+        expect(valid_native_result("sample\n1 examples, 0 failures\n{marker}\n{marker}\n", 0)).to_be(false)
+        expect(valid_native_result("sample\n01 examples, 00 failures\n{marker}\n", 0)).to_be(true)
+        expect(valid_native_result("sample\n2 examples, 10 failures\n{marker}\ntest-runner: spec failed\n", 1)).to_be(false)
+        expect(valid_native_result("sample\nx examples, 0 failures\n{marker}\n", 0)).to_be(false)
+
+    it "keeps the focused runner on the fail-closed pure native route":
         val runner = file_read("src/app/test/font_evidence_runner.spl")
-        expect(runner).to_contain("<pure-simple-bin> <spec.spl>")
-        expect(runner).to_contain("build_interpreter_result_wrapper(args[2])")
-        expect(runner).to_contain("process_run_timeout(runtime, [\"run\", wrapped], 120000)")
-        expect(runner).to_contain("stderr.contains(\"[TIMEOUT:\")")
+        expect(runner).to_contain("<pure-simple-compiler> <compiler-sha256> <core-c-runtime-dir> <runtime-sha256> <spec.spl>")
+        expect(runner).to_contain("preprocess_spipe_native_result_file(spec)")
+        expect(runner).to_contain("use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file}")
+        expect(runner.contains("use std.test_runner.test_runner_execute")).to_be(false)
+        expect(runner).to_contain("SIMPLE_NATIVE_SPEC_MODE")
+        expect(runner).to_contain("SIMPLE_EXECUTION_MODE=")
+        expect(runner).to_contain("SIMPLE_BOOTSTRAP_STAGE4=0")
+        expect(runner).to_contain("\"-i\"")
+        expect(runner).to_contain("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        expect(runner).to_contain("--runtime-bundle\", \"core-c-bootstrap")
+        expect(runner).to_contain("rt_bdd_executed_count")
+        expect(runner).to_contain("test-runner: native result wrapper complete")
+        expect(runner).to_contain("stdout.index_of(marker) ?? -1")
+        expect(runner).to_contain("after_marker.contains(marker)")
+        expect(runner.contains("stdout.split(marker)")).to_be(false)
+        expect(runner).to_contain("decimal_text_valid(examples)")
+        expect(runner).to_contain("decimal_text_lte(failures, examples)")
+        expect(runner.contains("fields[0].to_i64()")).to_be(false)
+        expect(runner.contains("fields[2].to_i64()")).to_be(false)
+        expect(runner).to_contain("run_bounded(\"300s\", \"/usr/bin/env\", build_env_args)")
+        expect(runner).to_contain("compiler_sha != expected_compiler_sha")
+        expect(runner).to_contain("archive_sha != expected_archive_sha")
+        expect(runner).to_contain("wrapped_sha = file_sha256(wrapped)")
+        expect(runner).to_contain("file_sha256(wrapped) == wrapped_sha")
+        expect(runner).to_contain("cache_key = expected_archive_sha + \"-\" + wrapped_sha")
+        expect(runner.contains("substring(0, 16)")).to_be(false)
+        expect(runner).to_contain("\"build/native_probe/font-spec-cache-\" + cache_key")
+        expect(runner).to_contain("pure_compiler_route_valid(compiler)")
+        expect(runner).to_contain("defines_symbols(native")
+        expect(runner).to_contain("file_sha256(native) == native_sha")
+        expect(runner).to_contain("compiler/runtime provider changed during build")
+        expect(runner).to_contain("run_bounded(\"15s\", \"/usr/bin/unlink\", [path])")
+        expect(runner.contains("file_delete")).to_be(false)
         expect(runner).to_contain("eprint stderr")
         expect(runner).to_contain("return 124")
+        expect(runner.contains("build_interpreter_result_wrapper")).to_be(false)
+        expect(runner.contains("process_run_timeout")).to_be(false)
+        expect(runner).to_contain("compiler.contains(\"compiler_rust\")")
         expect(runner.contains("interpret_file")).to_be(false)

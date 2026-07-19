@@ -3,6 +3,8 @@
 use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read, file_write}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+
 fn result_wrapper_path(file_path: text) -> text:
     val slash = file_path.last_index_of("/") ?? -1
     val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
@@ -24,4 +26,470 @@ fn build_interpreter_result_wrapper(file_path: text) -> (text, text):
         return ("", "")
     (wrapped, wrapped)
 
-export build_interpreter_result_wrapper
+fn read_file_content(file_path: text) -> text:
+    file_read(file_path) ?? ""
+
+fn spipe_inline_helpers() -> text:
+    "# === spipe inline helpers (compile-mode only) ===\n" +
+    "extern fn rt_bdd_expect_truthy(value)\n\n" +
+    "extern fn rt_exit(code: i64)\n\n" +
+    "fn expect(value):\n" +
+    "    rt_bdd_expect_truthy(value)\n\n" +
+    "fn step(description: text):\n" +
+    "    if description == \"\":\n" +
+    "        return\n\n" +
+    "fn pending(name: text):\n" +
+    "    print \"    {name} ... pending\"\n\n" +
+    "fn skip(name: text, reason: text):\n" +
+    "    print \"    {name} ... skipped ({reason})\"\n\n" +
+    "fn skip_it(name: text, block: fn()):\n" +
+    "    print \"    {name} ... skipped (compiled-only)\"\n\n" +
+    "fn check(condition: bool):\n" +
+    "    expect condition\n\n" +
+    "fn check_msg(condition: bool, message: text):\n" +
+    "    if not condition:\n" +
+    "        print \"    check failed: {message}\"\n" +
+    "    expect condition\n\n" +
+    "fn fail_assertion(message: text):\n" +
+    "    print \"    assertion failed: \" + message\n" +
+    "    expect false\n" +
+    "    rt_exit(1)\n\n" +
+    "fn fail_test(message: text):\n" +
+    "    fail_assertion(message)\n\n" +
+    "fn fail(message: text):\n" +
+    "    fail_assertion(message)\n\n" +
+    "fn assert_eq(a, b):\n" +
+    "    expect a == b\n\n" +
+    "fn assert_ne(a, b):\n" +
+    "    expect a != b\n\n" +
+    "fn assert_not_equal(a, b):\n" +
+    "    expect a != b\n\n" +
+    "fn assert_true(value):\n" +
+    "    expect value\n\n" +
+    "fn assert_false(value):\n" +
+    "    expect not value\n\n" +
+    "fn assert_nil(value):\n" +
+    "    expect value == nil\n\n" +
+    "fn assert_not_nil(value):\n" +
+    "    expect value != nil\n\n" +
+    "# === end spipe inline helpers ===\n"
+
+fn spipe_last_index_of(haystack: text, needle: text) -> i64:
+    if needle.len() == 0 or haystack.len() < needle.len():
+        return -1
+    var idx = haystack.len() - needle.len()
+    while idx >= 0:
+        if haystack.slice(idx, idx + needle.len()) == needle:
+            return idx
+        idx = idx - 1
+    -1
+
+fn spipe_rewrite_infix_expect_line(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
+        return line
+    val matchers: [text] = ["to_equal", "to_not_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
+    var i = 0
+    while i < matchers.len():
+        val matcher = matchers[i]
+        val needle = " " + matcher + " "
+        val split_at = trimmed.index_of(needle) ?? -1
+        if split_at >= 0:
+            val actual = trimmed.substring(7, split_at).trim()
+            val expected = trimmed.substring(split_at + needle.len()).trim()
+            if actual.len() == 0 or expected.len() == 0:
+                return line
+            val indent_len = line.index_of(line.trim()) ?? 0
+            val indent = line.substring(0, indent_len)
+            return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
+        i = i + 1
+    line
+
+fn preprocess_infix_matchers_only(file_path: text) -> text:
+    """Rewrite legacy word-infix `expect X to_equal Y` lines to method form
+    `expect(X).to_equal(Y)` so the interpreter `run` path actually evaluates the
+    matcher. Without this the `run`/light-daemon path drops the matcher: a falsy
+    call subject false-REDs ("call result to be truthy") and any other subject
+    silently false-GREENs. Mirrors the Rust `preprocess_matchers_only`;
+    interpreter-only, so (unlike the SMF path) it does NOT also fold method form
+    into `expect a == b`. Returns a sibling temp path when anything changed, else
+    the original path."""
+    if not file_path.ends_with("_spec.spl"):
+        return file_path
+    val content = read_file_content(file_path)
+    if content == "":
+        return file_path
+    val lines = content.split("\n")
+    var joined = ""
+    var first = true
+    var changed = false
+    for raw_line in lines:
+        val rewritten = spipe_rewrite_infix_expect_line(raw_line)
+        if rewritten != raw_line:
+            changed = true
+        if first:
+            joined = rewritten
+            first = false
+        else:
+            joined = joined + "\n" + rewritten
+    if not changed:
+        return file_path
+    val slash = spipe_last_index_of(file_path, "/")
+    val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
+    val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
+    val tmp = dir + ".spipe_matchers_" + base
+    file_write(tmp, joined)
+    tmp
+
+fn spipe_matching_close_paren(value: text, initial_depth: i64) -> i64:
+    var depth = initial_depth
+    var in_string = false
+    var escaped = false
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn spipe_rewrite_method_expect_line(line: text) -> text:
+    val trimmed_start = line.trim()
+    if not trimmed_start.starts_with("expect(") and not trimmed_start.starts_with("expect ("):
+        return line
+    val indent_len = line.index_of(trimmed_start) ?? 0
+    val indent = line.substring(0, indent_len)
+    val rest_after_expect = trimmed_start.substring(6)
+    val after_open_paren = rest_after_expect.trim()
+    if not after_open_paren.starts_with("("):
+        return line
+    val inner = after_open_paren.substring(1)
+    val actual_end = spipe_matching_close_paren(inner, 1)
+    if actual_end < 0:
+        return line
+    val actual = inner.substring(0, actual_end).trim()
+    val after_actual = inner.substring(actual_end + 1).trim()
+    if not after_actual.starts_with("."):
+        return line
+    var negated = false
+    var after_neg = after_actual.substring(1)
+    if after_neg.starts_with("not_()"):
+        val next = after_neg.substring(6).trim()
+        if not next.starts_with("."):
+            return line
+        negated = true
+        after_neg = next.substring(1)
+    val matcher_end = after_neg.index_of("(") ?? -1
+    if matcher_end < 0:
+        return line
+    val matcher = after_neg.substring(0, matcher_end)
+    val matcher_args = after_neg.substring(matcher_end + 1)
+    val close_idx = spipe_matching_close_paren(matcher_args, 1)
+    if close_idx < 0:
+        return line
+    if matcher_args.substring(close_idx + 1).trim() != "":
+        return line
+    val arg_str = matcher_args.substring(0, close_idx).trim()
+    val zero_arg_matcher = matcher == "to_be_nil" or matcher == "to_be_truthy" or matcher == "to_be_true" or matcher == "to_be_falsy" or matcher == "to_be_false" or matcher == "to_be_empty"
+    if zero_arg_matcher and arg_str != "":
+        return line
+    if not zero_arg_matcher and arg_str == "":
+        return line
+    var form = ""
+    if matcher == "to_equal" or matcher == "to_be":
+        form = if negated: actual + " != " + arg_str else: actual + " == " + arg_str
+    elif matcher == "to_not_equal":
+        form = if negated: actual + " == " + arg_str else: actual + " != " + arg_str
+    elif matcher == "to_be_nil":
+        form = if negated: actual + " != nil" else: actual + " == nil"
+    elif matcher == "to_be_truthy" or matcher == "to_be_true":
+        form = if negated: "not (" + actual + ")" else: actual
+    elif matcher == "to_be_falsy" or matcher == "to_be_false":
+        form = if negated: actual else: "not (" + actual + ")"
+    elif matcher == "to_be_greater_than":
+        form = if negated: actual + " <= " + arg_str else: actual + " > " + arg_str
+    elif matcher == "to_be_less_than":
+        form = if negated: actual + " >= " + arg_str else: actual + " < " + arg_str
+    elif matcher == "to_be_at_least":
+        form = if negated: actual + " < " + arg_str else: actual + " >= " + arg_str
+    elif matcher == "to_be_at_most":
+        form = if negated: actual + " > " + arg_str else: actual + " <= " + arg_str
+    elif matcher == "to_contain":
+        form = if negated: "not ((" + actual + ").contains(" + arg_str + "))" else: "(" + actual + ").contains(" + arg_str + ")"
+    elif matcher == "to_start_with":
+        form = if negated: "not ((" + actual + ").starts_with(" + arg_str + "))" else: "(" + actual + ").starts_with(" + arg_str + ")"
+    elif matcher == "to_end_with":
+        form = if negated: "not ((" + actual + ").ends_with(" + arg_str + "))" else: "(" + actual + ").ends_with(" + arg_str + ")"
+    elif matcher == "to_have_length":
+        form = if negated: "(" + actual + ").len() != " + arg_str else: "(" + actual + ").len() == " + arg_str
+    elif matcher == "to_be_empty":
+        form = if negated: "(" + actual + ").len() != 0" else: "(" + actual + ").len() == 0"
+    else:
+        return line
+    indent + "expect " + form
+
+fn spipe_expect_has_method_suffix(line: text) -> bool:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("expect(") and not trimmed.starts_with("expect ("):
+        return false
+    val after_expect = trimmed.substring(6).trim()
+    if not after_expect.starts_with("("):
+        return false
+    val inner = after_expect.substring(1)
+    val close_idx = spipe_matching_close_paren(inner, 1)
+    if close_idx < 0:
+        return false
+    val suffix = inner.substring(close_idx + 1).trim()
+    suffix.starts_with(".to_") or suffix.starts_with(".not_()")
+
+fn spipe_brace_delta(line: text) -> i64:
+    var delta = 0
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "{":
+            delta = delta + 1
+        elif ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn spipe_is_top_level_start(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or
+    trimmed.starts_with("pub fn ") or
+    trimmed.starts_with("private fn ") or
+    trimmed.starts_with("protected fn ") or
+    trimmed.starts_with("async fn ") or
+    trimmed.starts_with("static fn ") or
+    trimmed.starts_with("extern fn ") or
+    trimmed.starts_with("class ") or
+    trimmed.starts_with("struct ") or
+    trimmed.starts_with("actor ") or
+    trimmed.starts_with("mixin ") or
+    trimmed.starts_with("impl ") or
+    trimmed.starts_with("enum ") or
+    trimmed.starts_with("trait ") or
+    trimmed.starts_with("type ") or
+    trimmed.starts_with("alias ") or
+    trimmed.starts_with("const ") or
+    trimmed.starts_with("export ") or
+    trimmed.starts_with("val ") or
+    trimmed.starts_with("let ") or
+    trimmed.starts_with("var ") or
+    trimmed.starts_with("mod ")
+
+fn spipe_helpers_used(body: text, top_level: text, native_result: bool) -> bool:
+    val helper_names: [text] = [
+        "step", "pending", "skip", "skip_it", "check", "check_msg",
+        "fail_assertion", "fail_test", "fail", "assert_eq", "assert_ne", "assert_not_equal",
+        "assert_true", "assert_false", "assert_nil", "assert_not_nil", "expect"
+    ]
+    var i = 0
+    while i < helper_names.len():
+        if native_result and helper_names[i] == "expect":
+            i = i + 1
+            continue
+        val needle = helper_names[i] + "("
+        if body.contains(needle) or top_level.contains(needle):
+            return true
+        i = i + 1
+    false
+
+fn spipe_write_native_wrapper(wrapped: text) -> text:
+    val stamp = time_now_unix_micros()
+    var attempt = 0
+    while attempt < 16:
+        val path = "/tmp/spipe_native_{stamp}_{attempt}_spec.spl"
+        if rt_file_create_excl(path, wrapped):
+            return path
+        attempt = attempt + 1
+    ""
+
+fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
+    """Wrap SPipe file content in fn main() for native compilation.
+    Returns path to temporary wrapped file, or original path if not SPipe."""
+    if not file_path.ends_with("_spec.spl"):
+        return file_path
+
+    val content = read_file_content(file_path)
+    if content == "":
+        return if native_result: "" else: file_path
+    if native_result and (content.contains("fn main(") or content.contains("__simple_native_spec_") or content.contains("rt_bdd_format_results") or content.contains("rt_bdd_executed_count")):
+        return ""
+
+    # Split into imports/top-level-defs and body, wrap body in fn main():
+    val lines = content.split("\n")
+    var import_parts: [text] = []
+    var top_level_parts: [text] = []
+    var body_parts: [text] = []
+    var in_docstring = false
+    var in_top_fn = false
+    var top_fn_indent = 0
+    var in_import_block = false
+    var import_brace_depth = 0
+    var skipping_spec_import = false
+
+    for raw_line in lines:
+        val infix_line = spipe_rewrite_infix_expect_line(raw_line)
+        var line = spipe_rewrite_method_expect_line(infix_line)
+        var trimmed = line.trim()
+        if native_result and (trimmed.starts_with("pending_on(") or trimmed.starts_with("pending_skip(")):
+            return ""
+        if native_result and (trimmed.starts_with("fn expect(") or trimmed.starts_with("fn step(") or
+            trimmed.starts_with("fn check(") or trimmed.starts_with("fn fail(") or
+            trimmed.starts_with("fn assert_")):
+            return ""
+        val is_expect_line = trimmed.starts_with("expect(") or trimmed.starts_with("expect ")
+        if native_result and ((is_expect_line and trimmed.contains(" to_")) or spipe_expect_has_method_suffix(trimmed) or trimmed.starts_with(".to_") or trimmed.starts_with(".not_()")):
+            return ""
+        if native_result and trimmed.starts_with("expect "):
+            val indent_len = line.index_of(trimmed) ?? 0
+            line = line.substring(0, indent_len) + "expect(" + trimmed.substring(7) + ")"
+            trimmed = line.trim()
+
+        if skipping_spec_import:
+            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
+            if import_brace_depth <= 0:
+                skipping_spec_import = false
+                import_brace_depth = 0
+            continue
+
+        if in_import_block:
+            import_parts.push(line)
+            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
+            if import_brace_depth <= 0:
+                in_import_block = false
+                import_brace_depth = 0
+            continue
+
+        # Track multi-line docstrings (""")
+        if trimmed.starts_with("\"\"\""):
+            # Toggle docstring state. A line with """ toggles in/out.
+            # If we see """ at start of line and we're NOT in a function body,
+            # treat docstrings at top level as body (they'll go into main).
+            if in_docstring:
+                in_docstring = false
+                if in_top_fn:
+                    top_level_parts.push(line)
+                else:
+                    body_parts.push("    " + line)
+                continue
+            else:
+                in_docstring = true
+                if in_top_fn:
+                    top_level_parts.push(line)
+                else:
+                    body_parts.push("    " + line)
+                continue
+
+        if in_docstring:
+            if in_top_fn:
+                top_level_parts.push(line)
+            else:
+                body_parts.push("    " + line)
+            continue
+
+        # Import/use statements go before fn main()
+        if trimmed.starts_with("import ") or trimmed.starts_with("use "):
+            if (trimmed.starts_with("import std.spec") or trimmed.starts_with("use std.spec") or
+                trimmed.starts_with("import std.spipe") or trimmed.starts_with("use std.spipe")):
+                val delta = spipe_brace_delta(line)
+                if delta > 0:
+                    skipping_spec_import = true
+                    import_brace_depth = delta
+                continue
+            import_parts.push(line)
+            val delta = spipe_brace_delta(line)
+            if delta > 0:
+                in_import_block = true
+                import_brace_depth = delta
+            continue
+
+        # Top-level declarations (at column 0 only) stay outside main.
+        if not in_top_fn:
+            val line_indent = line.index_of(trimmed) ?? 0
+            if line_indent == 0:
+                if spipe_is_top_level_start(trimmed):
+                    in_top_fn = true
+                    top_fn_indent = 0
+                    top_level_parts.push(line)
+                    continue
+
+        # If we're inside a top-level function definition, keep collecting
+        # lines until we see a line at the same or lesser indentation (not blank)
+        if in_top_fn:
+            if trimmed.len() == 0:
+                top_level_parts.push("")
+                continue
+            val current_indent = line.index_of(trimmed) ?? 0
+            if current_indent > top_fn_indent:
+                top_level_parts.push(line)
+                continue
+            else:
+                # This line is at same/lesser indent — end of function
+                if current_indent == top_fn_indent and spipe_is_top_level_start(trimmed):
+                    top_level_parts.push(line)
+                    continue
+                in_top_fn = false
+                # Fall through to body processing
+
+        # Everything else goes into fn main() body
+        if trimmed.len() > 0:
+            body_parts.push("    " + line)
+        else:
+            body_parts.push("")
+
+    val imports = import_parts.join("\n")
+    val top_level = top_level_parts.join("\n")
+    val body = body_parts.join("\n")
+    val helpers = if spipe_helpers_used(body, top_level, native_result): spipe_inline_helpers() else: ""
+    val native_decls = if native_result:
+        "extern fn rt_bdd_clear_state()\n" +
+        "extern fn rt_bdd_format_results() -> i64\n" +
+        "extern fn rt_bdd_executed_count() -> i64\n"
+    else:
+        ""
+    val native_start = if native_result: "    rt_bdd_clear_state()\n" else: ""
+    val native_end = if native_result:
+        "\n    val __simple_native_spec_failures = rt_bdd_format_results()\n" +
+        "    val __simple_native_spec_executed = rt_bdd_executed_count()\n" +
+        "    if __simple_native_spec_executed == 0:\n" +
+        "        print \"error: test-runner: no examples executed\"\n" +
+        "        return 1\n" +
+        "    print \"test-runner: native result wrapper complete\"\n" +
+        "    if __simple_native_spec_failures != 0:\n" +
+        "        print \"error: test-runner: spec failed\"\n" +
+        "        return 1\n" +
+        "    return 0\n"
+    else:
+        ""
+    val main_decl = if native_result: "fn main() -> i64:\n" else: "fn main():\n"
+    val wrapped = imports + "\n" + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
+    if native_result:
+        return spipe_write_native_wrapper(wrapped)
+    val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")
+    if not file_write(tmp_path, wrapped):
+        return file_path
+    tmp_path
+
+fn preprocess_spipe_file(file_path: text) -> text:
+    _preprocess_spipe_file(file_path, false)
+
+fn preprocess_spipe_native_result_file(file_path: text) -> text:
+    _preprocess_spipe_file(file_path, true)
+
+
+export result_wrapper_path, build_interpreter_result_wrapper, preprocess_infix_matchers_only, preprocess_spipe_file, preprocess_spipe_native_result_file

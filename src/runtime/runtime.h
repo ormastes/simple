@@ -575,6 +575,7 @@ void     rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len);
 void     rt_bdd_expect_eq_rv(int64_t actual, int64_t expected);
 void     rt_bdd_expect_truthy_rv(int64_t value);
 int64_t  rt_bdd_format_results(void);
+int64_t  rt_bdd_executed_count(void);
 void     rt_bdd_clear_state(void);
 
 /* ===== Command-Line Arguments ===== */
@@ -604,6 +605,7 @@ int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uin
 int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_delete(const char* path);
+int         rt_file_remove(const char* path, int64_t path_len);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
 int         rt_file_fsync(const char* path);

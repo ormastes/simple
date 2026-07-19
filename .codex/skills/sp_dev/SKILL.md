@@ -509,6 +509,14 @@ font GPU emission, or GUI/Web/2D/3D text.
    Stale pins keep `pinned_verified=false` and cannot promote. Only independent
    review may update tracked source/artifact pins; a reproducing run must then
    set `pinned_verified=true`. Never repin merely to make the first run green.
+   Vulkan compiler evidence must run in a clean loader environment, retain the
+   actually loaded shader-compiler library real path/SHA-256 and loader-log
+   SHA-256, reject any operator-supplied expected-library path mismatch, and
+   compile the exact emitted source independently twice. Reject a candidate
+   before pin review when the A/B SPIR-V hashes or bytes differ. The current
+   loader proof admits only a resolved native-ELF compiler on glibc; wrappers
+   and unsupported loaders fail closed, and
+   `glslangValidator` remains diagnostic-only rather than admissible.
 7. Shaping and material preparation fail closed unless every required operation
    completed. Hosted runs remain bound to the exact live face handle and
    generation. Registered-only SimpleOS runs are the bounded exception: exact
@@ -566,14 +574,19 @@ font GPU emission, or GUI/Web/2D/3D text.
     submit-through-device-completion interval, never sum it with the later
     fence-observation `sync` interval, and record offscreen presentation as
     `not-applicable-offscreen` while still requiring device readback.
-14. Interpreter diagnostics reuse `build_interpreter_result_wrapper` through
-    the canonical test runner or `src/app/test/font_evidence_runner.spl`.
-    Before trusting them, require exit 1 and the distinct canonical failure
-    markers from
+14. Focused font diagnostics use
+    `preprocess_spipe_native_result_file` through
+    `src/app/test/font_evidence_runner.spl`. Pin the pure-Simple compiler and
+    core-C archive by path plus SHA-256, require one exact native completion
+    marker, and recheck wrapper/provider hashes. Before trusting them, require
+    exit 1 and the distinct canonical failure markers from
     `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
     `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`; reject
-    2/124/139 and retain commands, binary SHA-256, and logs per `$system_test`.
-    They never replace native evidence.
+    2/124/132/139 and retain commands, binary SHA-256, and logs per
+    `$system_test`. Calibration never replaces passing canonical acceptance.
+    The generated `fail(...)` helper records failure and immediately exits 1;
+    it must not fall through from a return-valued helper into a nil/default
+    value and SIGILL. Reject source-defined replacements for `fail`.
 15. AC-13 source review must reject font owners that import raw `rt_mutex_*`
     calls instead of the existing mutex facade, mutable module-global engine
     pools, or unsynchronized scalar generation counters used by hosted paths.

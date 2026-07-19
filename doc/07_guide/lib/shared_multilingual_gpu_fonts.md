@@ -791,7 +791,7 @@ native device-loss injection remains the NFR-007 execution gate.
 
 Keep the five primary SSpec steps exact: `Load the pinned multilingual
 font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
-shared font batch for 2D and 3D`; `Emit the selected font composite program and
+shared font batch for 2D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Resolved-host,
 completion, and folded secondary detail steps use the vocabulary recorded in
 the authoritative system-test plan below.
@@ -814,25 +814,28 @@ operator manual, and `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 Interpreter runs are diagnostics only. These native source gates still do not
 substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
-A focused runner invoking a selected pure-Simple runtime is trustworthy only
-when its wrapper checks `get_executed_test_count` and `get_exit_code` inside the
-interpreted source;
-`CompileResult.Success` by itself is false green for matcher failures. The fail
-fixture must exit 1 with `test-runner: spec failed`; the empty fixture must exit
-1 with `test-runner: no examples executed`. Reject 2/124/139 and retain exact
-commands, runner SHA-256, and both logs under
+A focused runner is trustworthy only when it receives the admitted pure-Simple
+compiler path and SHA-256, core-C runtime directory and archive SHA-256, and the
+spec path. `font_evidence_runner.spl` atomically creates a compiler-safe native
+wrapper, verifies its hash and the provider identities before and after build,
+and admits one exact summary/completion marker. The fail fixture must exit 1
+with the exact `error: test-runner: spec failed` suffix; the empty fixture must
+exit 1 with `test-runner: no examples executed` and no completion marker.
+Reject 2/124/132/139 and retain exact commands, runner SHA-256, and logs under
 `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
-The result may be labeled only
-`interpret-diagnostic`; it cannot promote manifest, native GPU, SimpleOS pixel,
-Engine3D, or performance evidence. Use the two calibration fixtures under
-`scripts/check/fixtures/font_evidence_runner_{fail,empty}_spec.spl`.
-The pure runner and focused runner share
-`std.test_runner.test_result_wrapper.build_interpreter_result_wrapper`; do not
-fork another harness or bypass its summary and fail-closed checks.
-Pass the exact admitted pure-Simple CLI as the focused runner's first argument;
-the second argument is the spec path. It deliberately has no implicit binary
-fallback. The runner preserves child stdout/stderr, maps only an explicit
-timeout marker to 124, and reports launch failure as 1.
+Calibration alone may be labeled only `native-runner-calibration`; it cannot
+promote manifest, native GPU, SimpleOS pixel, Engine3D, or performance evidence.
+The generated native `fail(...)` helper records the assertion and immediately
+exits 1. Falling through from a return-valued helper can otherwise replace an
+ordinary missing-fixture failure with a nil-field SIGILL, which is never valid
+test evidence.
+Use the pass/fail/empty calibration fixtures under
+`scripts/check/fixtures/font_evidence_runner_{pass,fail,empty}_spec.spl`.
+The focused runner uses
+`std.test_runner.test_result_wrapper.preprocess_spipe_native_result_file`; do
+not fork another harness or bypass its summary and fail-closed checks. It has no
+implicit compiler/runtime fallback, preserves child stdout/stderr, maps timeout
+to 124, and reports launch/build failure as nonzero.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

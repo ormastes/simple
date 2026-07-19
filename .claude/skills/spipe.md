@@ -414,7 +414,13 @@ Portable font admission aggregates only `PORTABLE_COMPUTE_TARGETS` and first
 requires emitted semantics to match `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`,
 `candidate_compiled=true`, and `artifact_validated=true`. Evidence records the
 compiler and validator path/version/SHA-256; Vulkan additionally requires a
-passing `spirv-val` row. Stale pins remain `pinned_verified=false`. Independent
+passing `spirv-val` row, actual loaded shader-compiler library path/SHA-256
+and loader-log SHA-256 under a clean loader environment, rejection of any
+operator-supplied expected-library path mismatch, and byte-identical independent
+A/B SPIR-V compiles. The current proof admits only a resolved native-ELF
+compiler on glibc; wrappers and other loaders fail closed, and
+`glslangValidator` is diagnostic-only. Stale pins remain
+`pinned_verified=false`. Independent
 review may then update tracked source/artifact pins, after which a reproducing
 run must set `pinned_verified=true`; never repin merely to green the first run.
 
@@ -660,18 +666,24 @@ observe a pass:
   Run shared multilingual font acceptance SSpecs with
   `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native`; interpreter runs are diagnostics and cannot
   promote a manifest cell, backend, or performance row.
-  The pure test runner and canonical `src/app/test/font_evidence_runner.spl`
-  must share `build_interpreter_result_wrapper`, which appends `print_summary`,
-  `get_executed_test_count`, and `get_exit_code` checks to the interpreted source.
-  `CompileResult.Success` alone is false green: matcher failures only update
-  spec state. Require exit 1 plus `test-runner: spec failed` for deliberate-red
-  and exit 1 plus `test-runner: no examples executed` for zero-executed before
-  using that runner as diagnostic evidence; reject 2/124/139. Use
+  The focused `src/app/test/font_evidence_runner.spl` uses
+  `preprocess_spipe_native_result_file`, not an interpreter wrapper. Invoke it
+  with the admitted pure-Simple compiler path and SHA-256, the core-C runtime
+  directory and archive SHA-256, then the spec path. It builds a private
+  `/tmp/spipe_native_*_spec.spl`, hashes and rechecks the wrapper/providers,
+  executes the native artifact, and admits only an exact summary plus one
+  `test-runner: native result wrapper complete` marker. Require exit 1 plus the
+  exact `error: test-runner: spec failed` suffix for deliberate-red and exit 1
+  plus `test-runner: no examples executed` without a completion marker for
+  zero-executed; reject 2/124/132/139. Use
   `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
   `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. It must use the
-  existing file facade, map every non-success `CompileResult` nonzero, and
-  delete its temporary wrapper. Retain exact commands, runner binary SHA-256,
+  atomic exclusive wrapper creation, map every non-success build nonzero, and
+  delete its wrapper and native binary. Retain exact commands, runner binary SHA-256,
   and both logs under the canonical `$system_test` artifact path.
+  Its generated `fail(...)` helper records the failed assertion and immediately
+  exits 1; it must never fall through into a nil/default return and turn a test
+  failure into SIGILL. Source-defined replacements for `fail` remain rejected.
   Resolve matrix policy by exact language and category. Unknown axes fail
   closed, and `witness_family` must not be treated as a loadable asset unless
   the resolved status is `native` or `fallback`.

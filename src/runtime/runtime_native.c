@@ -3339,7 +3339,9 @@ void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
 }
 
 void rt_bdd_expect_truthy_rv(int64_t value) {
-    if (value == 0 || value == rt_core_nil()) {
+    if (value == 0 ||
+        value == rt_core_nil() ||
+        value == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_FALSE)) {
         rt_bdd_current_failed = 1;
     }
 }
@@ -3351,6 +3353,10 @@ void rt_bdd_expect_truthy(int64_t value) {
 int64_t rt_bdd_format_results(void) {
     rt_bdd_describe_end();
     return rt_bdd_failed;
+}
+
+int64_t rt_bdd_executed_count(void) {
+    return rt_bdd_passed + rt_bdd_failed;
 }
 
 void rt_bdd_clear_state(void) {
@@ -3711,12 +3717,15 @@ int rt_file_delete(const char* path) {
     return remove(path) == 0 ? 1 : 0;
 }
 
-int rt_file_remove(int64_t path_value, int64_t path_len_unused) {
-    (void)path_len_unused;
-    char* path = rt_core_string_to_cpath(path_value);
-    if (!path) return 0;
-    int ok = remove(path) == 0 ? 1 : 0;
-    free(path);
+int rt_file_remove(const char* path, int64_t path_len) {
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL) return 0;
+    char* path_copy = (char*)malloc((size_t)path_len + 1);
+    if (!path_copy) return 0;
+    memcpy(path_copy, path, (size_t)path_len);
+    path_copy[path_len] = '\0';
+    int ok = remove(path_copy) == 0 ? 1 : 0;
+    free(path_copy);
     return ok;
 }
 

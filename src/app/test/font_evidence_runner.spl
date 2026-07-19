@@ -1,34 +1,304 @@
-# Pure-Simple runner for focused font evidence specs.
+# Pure-Simple runner for focused native font evidence specs.
 
 use std.nogc_sync_mut.sffi.cli (cli_get_args)
-use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists}
-use std.nogc_sync_mut.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
-use app.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file}
+use app.io.process_ops.{process_run}
+
+extern fn rt_string_bytes(value: text) -> [i64]
+
+fn run_bounded(seconds: text, command: text, args: [text]) -> (text, text, i64):
+    var timeout_args = ["--kill-after=5s", seconds, command]
+    for arg in args:
+        timeout_args.push(arg)
+    process_run("/usr/bin/timeout", timeout_args)
+
+fn delete_artifact(path: text) -> bool:
+    if not file_exists(path):
+        return true
+    val (_, _, code) = run_bounded("15s", "/usr/bin/unlink", [path])
+    code == 0 and not file_exists(path)
+
+fn file_sha256(path: text) -> text:
+    val (stdout, _, code) = run_bounded("15s", "/usr/bin/sha256sum", [path])
+    if code != 0:
+        return ""
+    val fields = stdout.trim().split(" ")
+    if fields.len() == 0 or fields[0].len() != 64:
+        return ""
+    fields[0]
+
+fn defined_symbols(path: text) -> text:
+    val (symbols, _, code) = run_bounded("15s", "/usr/bin/nm", ["-g", "--defined-only", path])
+    if code != 0:
+        return ""
+    symbols
+
+fn defines_symbols(path: text, required: [text]) -> bool:
+    val symbols = defined_symbols(path)
+    if symbols == "":
+        return false
+    for symbol in required:
+        if not symbols.contains(" " + symbol + "\n"):
+            return false
+    true
+
+fn pure_compiler_route_valid(compiler: text) -> bool:
+    val symbols = defined_symbols(compiler)
+    (symbols.contains(" driver__driver__compiler_driver_create\n") and
+        symbols.contains(" driver__driver__compiler_driver_run_compile\n") and
+        (symbols.contains(" cli___CliMain__main_and_help__run_native_build_bootstrap\n") or
+            symbols.contains(" cli__bootstrap_main__run_native_build_bootstrap\n")))
+
+fn core_c_provider_valid(archive: text) -> bool:
+    defines_symbols(archive, [
+        "rt_bdd_clear_state",
+        "rt_bdd_describe_start_rv",
+        "rt_bdd_describe_end",
+        "rt_bdd_it_start_rv",
+        "rt_bdd_it_end",
+        "rt_bdd_expect_truthy",
+        "rt_bdd_expect_truthy_rv",
+        "rt_bdd_format_results",
+        "rt_bdd_executed_count"
+    ])
+
+fn decimal_text_valid(value: text) -> bool:
+    val bytes = rt_string_bytes(value)
+    if bytes.len() == 0:
+        return false
+    for byte in bytes:
+        val code = byte.to_i64()
+        if code < 48 or code > 57:
+            return false
+    true
+
+fn decimal_text_is_zero(value: text) -> bool:
+    if not decimal_text_valid(value):
+        return false
+    for byte in rt_string_bytes(value):
+        if byte.to_i64() != 48:
+            return false
+    true
+
+fn decimal_text_lte(left: text, right: text) -> bool:
+    val lhs = rt_string_bytes(left)
+    val rhs = rt_string_bytes(right)
+    var lhs_start = 0
+    var rhs_start = 0
+    while lhs_start + 1 < lhs.len():
+        if lhs[lhs_start].to_i64() != 48:
+            break
+        lhs_start = lhs_start + 1
+    while rhs_start + 1 < rhs.len():
+        if rhs[rhs_start].to_i64() != 48:
+            break
+        rhs_start = rhs_start + 1
+    val lhs_len = lhs.len() - lhs_start
+    val rhs_len = rhs.len() - rhs_start
+    if lhs_len != rhs_len:
+        return lhs_len < rhs_len
+    var offset = 0
+    while offset < lhs_len:
+        val lhs_digit = lhs[lhs_start + offset].to_i64()
+        val rhs_digit = rhs[rhs_start + offset].to_i64()
+        if lhs_digit != rhs_digit:
+            return lhs_digit < rhs_digit
+        offset = offset + 1
+    true
+
+fn valid_native_result(stdout: text, code: i64) -> bool:
+    val marker = "test-runner: native result wrapper complete"
+    val marker_at = stdout.index_of(marker) ?? -1
+    if marker_at < 0:
+        return false
+    val after_marker = stdout.substring(marker_at + marker.len())
+    if after_marker.contains(marker):
+        return false
+    val lines = stdout.substring(0, marker_at).trim().split("\n")
+    if lines.len() == 0:
+        return false
+    val fields = lines[lines.len() - 1].trim().split(" ")
+    if fields.len() != 4:
+        return false
+    if fields[1] != "examples," or fields[3] != "failures":
+        return false
+    val examples = fields[0]
+    val failures = fields[2]
+    if not decimal_text_valid(examples):
+        return false
+    if decimal_text_is_zero(examples):
+        return false
+    if not decimal_text_valid(failures):
+        return false
+    if not decimal_text_lte(failures, examples):
+        return false
+    if code == 0:
+        decimal_text_is_zero(failures) and after_marker.trim() == ""
+    else:
+        code == 1 and not decimal_text_is_zero(failures) and after_marker.trim() == "error: test-runner: spec failed"
 
 fn main() -> i64:
     val args = cli_get_args()
-    if args.len() != 3:
-        print "usage: font_evidence_runner <pure-simple-bin> <spec.spl>"
+    if args.len() != 6:
+        print "usage: font_evidence_runner <pure-simple-compiler> <compiler-sha256> <core-c-runtime-dir> <runtime-sha256> <spec.spl>"
         return 2
 
-    val runtime = args[1]
-    if not file_exists(runtime):
-        print "font-evidence-runner: pure-Simple runtime not found: {runtime}"
+    val compiler = args[1]
+    val expected_compiler_sha = args[2]
+    val runtime_dir = args[3]
+    val expected_archive_sha = args[4]
+    val spec = args[5]
+    val archive = runtime_dir + "/libsimple_runtime.a"
+    if compiler.contains("compiler_rust") or compiler.contains("/target/bootstrap/"):
+        print "font-evidence-runner: Rust/bootstrap seed is forbidden: {compiler}"
         return 1
-    val (wrapped, cleanup_path) = build_interpreter_result_wrapper(args[2])
+    if not file_exists(compiler):
+        print "font-evidence-runner: pure-Simple compiler not found: {compiler}"
+        return 1
+    if not file_exists(spec):
+        print "font-evidence-runner: spec not found: {spec}"
+        return 1
+    if not file_exists(archive) or not core_c_provider_valid(archive):
+        print "font-evidence-runner: invalid core-C runtime provider: {archive}"
+        return 1
+    val (version_stdout, version_stderr, version_code) = run_bounded("15s", compiler, ["--version"])
+    val compiler_sha = file_sha256(compiler)
+    val archive_sha = file_sha256(archive)
+    val compiler_symbols_valid = pure_compiler_route_valid(compiler)
+    if (version_code != 0 or compiler_sha == "" or archive_sha == "" or
+        compiler_sha != expected_compiler_sha or archive_sha != expected_archive_sha or
+        not compiler_symbols_valid):
+        print "font-evidence-runner: compiler/provider identity check failed"
+        if version_stderr != "":
+            eprint version_stderr
+        return 1
+    print "font-evidence-runner: compiler={compiler}"
+    print "font-evidence-runner: compiler-version={version_stdout.trim()}"
+    print "font-evidence-runner: compiler-sha256={compiler_sha}"
+    print "font-evidence-runner: runtime-archive={archive}"
+    print "font-evidence-runner: runtime-sha256={archive_sha}"
+
+    val wrapped = preprocess_spipe_native_result_file(spec)
     if wrapped == "":
-        print "font-evidence-runner: cannot wrap spec: {args[2]}"
+        print "font-evidence-runner: cannot wrap spec: {spec}"
         return 1
-    val (stdout, stderr, code) = process_run_timeout(runtime, ["run", wrapped], 120000)
+    val wrapped_sha = file_sha256(wrapped)
+    if wrapped_sha == "":
+        delete_artifact(wrapped)
+        print "font-evidence-runner: cannot hash wrapped spec"
+        return 1
+
+    val native = wrapped + ".bin"
+    val cache_key = expected_archive_sha + "-" + wrapped_sha
+    val build_args = [
+        "native-build",
+        "--backend", "cranelift",
+        "--runtime-bundle", "core-c-bootstrap",
+        "--runtime-path", runtime_dir,
+        "--entry-closure",
+        "--entry", wrapped,
+        "--cache-dir", "build/native_probe/font-spec-cache-" + cache_key,
+        "--mode", "one-binary",
+        "--output", native
+    ]
+    var build_env_args = [
+        "-i",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME=/tmp",
+        "TMPDIR=/tmp",
+        "LANG=C",
+        "LC_ALL=C",
+        "SIMPLE_BINARY=" + compiler,
+        "SIMPLE_BIN=" + compiler,
+        "SIMPLE_BOOTSTRAP_DRIVER=" + compiler,
+        "SIMPLE_FRONTEND_DELEGATE=" + compiler,
+        "SIMPLE_FRONTEND_DELEGATED=1",
+        "SIMPLE_NO_STUB_FALLBACK=1",
+        "SIMPLE_NATIVE_SPEC_MODE=1",
+        "SIMPLE_RUNTIME_MODE=native",
+        "SIMPLE_NATIVE_BUILD_FORCE_WORKER=0",
+        "SIMPLE_BOOTSTRAP=0",
+        "SIMPLE_BOOTSTRAP_STAGE4=0",
+        "SIMPLE_EXECUTION_MODE=",
+        "SIMPLE_LIB=src",
+        compiler
+    ]
+    for arg in build_args:
+        build_env_args.push(arg)
+    val build_args_text = build_args.join(" ")
+    print "font-evidence-runner: build-command=timeout --kill-after=5s 300s env <pinned-native-env> {compiler} {build_args_text}"
+    val (build_stdout, build_stderr, build_code) = run_bounded("300s", "/usr/bin/env", build_env_args)
+    if build_stdout != "":
+        print build_stdout
+    if build_stderr != "":
+        eprint build_stderr
+    if build_code != 0 or not file_exists(native):
+        delete_artifact(wrapped)
+        if file_exists(native):
+            delete_artifact(native)
+        if build_code == 124:
+            return 124
+        print "font-evidence-runner: native build failed"
+        return 1
+
+    val compiler_sha_unchanged = file_sha256(compiler) == compiler_sha
+    val archive_sha_unchanged = file_sha256(archive) == archive_sha
+    val wrapper_sha_unchanged = file_sha256(wrapped) == wrapped_sha
+    val compiler_symbols_unchanged = pure_compiler_route_valid(compiler)
+    val archive_symbols_unchanged = core_c_provider_valid(archive)
+    val providers_unchanged = compiler_sha_unchanged and archive_sha_unchanged and wrapper_sha_unchanged and compiler_symbols_unchanged and archive_symbols_unchanged
+    if not providers_unchanged:
+        delete_artifact(wrapped)
+        delete_artifact(native)
+        print "font-evidence-runner: compiler/runtime provider changed during build"
+        return 1
+    val native_sha = file_sha256(native)
+    val native_symbols_valid = defines_symbols(native, [
+        "main",
+        "rt_bdd_clear_state",
+        "rt_bdd_format_results",
+        "rt_bdd_executed_count"
+    ])
+    if native_sha == "" or not native_symbols_valid:
+        delete_artifact(wrapped)
+        delete_artifact(native)
+        print "font-evidence-runner: invalid native spec artifact"
+        return 1
+    print "font-evidence-runner: native-sha256={native_sha}"
+    print "font-evidence-runner: run-command=timeout --kill-after=5s 120s env SIMPLE_RUNTIME_MODE=native {native}"
+    val (stdout, stderr, code) = run_bounded("120s", "/usr/bin/env", [
+        "-i",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME=/tmp",
+        "TMPDIR=/tmp",
+        "LANG=C",
+        "LC_ALL=C",
+        "SIMPLE_RUNTIME_MODE=native",
+        native
+    ])
     if stdout != "":
         print stdout
     if stderr != "":
         eprint stderr
-    if cleanup_path != "" and not file_delete(cleanup_path):
-        print "font-evidence-runner: cannot delete wrapper: {cleanup_path}"
+    val native_unchanged = file_sha256(native) == native_sha
+    val wrapper_deleted = delete_artifact(wrapped)
+    val native_deleted = delete_artifact(native)
+    if not native_unchanged:
+        print "font-evidence-runner: native artifact changed during execution"
         return 1
-    if code == -1:
-        if stderr.contains("[TIMEOUT:") or stderr.contains("Process timed out"):
-            return 124
+    if not wrapper_deleted or not native_deleted:
+        print "font-evidence-runner: cannot delete native artifacts"
         return 1
-    code as i64
+    if code == 124:
+        return 124
+    if code != 0 and code != 1:
+        if code < 0:
+            return 1
+        return code
+    if code == 1 and stdout.contains("test-runner: no examples executed") and not stdout.contains("test-runner: native result wrapper complete"):
+        return 1
+    if not valid_native_result(stdout, code):
+        print "font-evidence-runner: missing or invalid native result marker"
+        return 1
+    code
