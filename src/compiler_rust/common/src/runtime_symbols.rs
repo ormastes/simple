@@ -125,6 +125,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_memset",
     "rt_value_as_int",
     "rt_array_new",
+    "rt_array_free",
     "rt_byte_array_new",
     "rt_byte_array_new_len",
     "rt_array_get",
@@ -2026,6 +2027,7 @@ mod tests {
     #[test]
     fn test_symbol_classification_marks_core_abi_and_hosted_symbols() {
         assert_eq!(symbol_class_of("rt_alloc"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(symbol_class_of("rt_array_free"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_string_trim_start"), RuntimeSymbolClass::CoreRequired);

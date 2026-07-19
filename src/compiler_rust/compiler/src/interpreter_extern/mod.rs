@@ -466,6 +466,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_alloc", memory::rt_alloc);
     insert_simple!("rt_array_clear", sffi_array::rt_array_clear_fn);
     insert_simple!("rt_array_extend_i64", sffi_array::rt_array_extend_i64_fn);
+    insert_simple!("rt_array_free", sffi_array::rt_array_free_fn);
     insert_simple!("rt_array_get", sffi_array::rt_array_get_fn);
     insert_simple!("rt_array_get_text", sffi_array::rt_array_get_fn);
     insert_simple!("rt_array_len", sffi_array::rt_array_len_fn);

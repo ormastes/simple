@@ -209,6 +209,13 @@ int main(void) {
     SplArray* registered_array = rt_array_new(0);
     assert(registered_text != 0 && registered_array != NULL);
     assert(rt_heap_registry_count() >= registry_before + 2);
+    int64_t before_shallow_free = rt_heap_registry_count();
+    assert(rt_array_push(registered_array, registered_text));
+    rt_array_free(registered_array);
+    assert(rt_heap_registry_count() == before_shallow_free - 1);
+    assert(rt_string_len(registered_text) == 19);
+    rt_array_free(registered_array);
+    assert(rt_heap_registry_count() == before_shallow_free - 1);
 
     SplArray* allocated = rt_bytes_alloc(4);
     assert(allocated != NULL);

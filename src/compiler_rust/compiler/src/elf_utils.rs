@@ -440,6 +440,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
     let addr: usize = match name {
         // Array operations
         "rt_array_new" => simple_runtime::rt_array_new as *const () as usize,
+        "rt_array_free" => value::rt_array_free as *const () as usize,
         "rt_array_push" => simple_runtime::rt_array_push as *const () as usize,
         "rt_array_get" => simple_runtime::rt_array_get as *const () as usize,
         "rt_array_get_text" => value::rt_array_get_text as *const () as usize,
@@ -849,6 +850,11 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_array_free_runtime_symbol() {
+        assert!(resolve_runtime_symbol("rt_array_free").unwrap_or(0) != 0);
+    }
 
     #[test]
     fn resolves_security_sandbox_capability_runtime_symbols() {

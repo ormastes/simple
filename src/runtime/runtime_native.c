@@ -687,6 +687,16 @@ static int rt_core_is_registered_array(RtCoreArray* array) {
     return 0;
 }
 
+static int rt_core_unregister_array(RtCoreArray* array) {
+    for (size_t i = 0; i < rt_core_array_registry_len; i++) {
+        if (rt_core_array_registry[i] != array) continue;
+        rt_core_array_registry[i] = rt_core_array_registry[--rt_core_array_registry_len];
+        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        return 1;
+    }
+    return 0;
+}
+
 static void rt_core_register_mutex(RtCoreMutex* mutex) {
     if (!mutex) return;
     while (atomic_flag_test_and_set_explicit(&rt_core_mutex_registry_lock, memory_order_acquire)) { }
@@ -2736,6 +2746,13 @@ SplArray* rt_array_new_uninit(int64_t cap) {
 
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
+}
+
+void rt_array_free(SplArray* value) {
+    RtCoreArray* array = rt_core_as_registered_array((int64_t)(uintptr_t)value);
+    if (!array || !rt_core_unregister_array(array)) return;
+    free(array->data);
+    free(array);
 }
 
 SplArray* rt_byte_array_new(uint64_t cap) {

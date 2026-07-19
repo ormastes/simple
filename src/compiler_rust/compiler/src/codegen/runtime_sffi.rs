@@ -223,6 +223,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Array operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_to_text", &[I64], &[I64]),
@@ -1913,6 +1914,17 @@ mod tests {
         assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
         assert_eq!(tier_of("rt_par_map"), Ext);
         assert_eq!(tier_of("rt_simd_aes_round_u8x16"), Ext);
+    }
+
+    #[test]
+    fn array_free_has_void_pointer_abi() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_array_free")
+            .expect("rt_array_free must be registered for native codegen");
+        assert_eq!(spec.params, [I64]);
+        assert!(spec.returns.is_empty());
+        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Alloc);
     }
 
     #[test]

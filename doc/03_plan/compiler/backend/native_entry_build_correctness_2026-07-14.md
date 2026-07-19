@@ -382,13 +382,15 @@ the shared binary — deploys require explicit user go-ahead).
   of discarding the previous one. Pure runtime `source.chars()` now reuses each
   one-byte character handle within a conversion, retaining at most 256 distinct
   one-byte string objects plus unchanged multibyte objects. The O(N)
-  `source_chars` reference array remains; Stage4 RSS evidence is pending. A
+  `source_chars` reference array is now shallow-released after each active lexer
+  replacement across pure-Simple, hosted-C, Rust native/JIT, and interpreter
+  ownership models. Stage4 RSS evidence is pending. A
   bounded current-source refresh reached its 180-second cap without an
   artifact, while an isolated lexer probe compiled from cache but could not
   link through the preserved driver's incomplete pure/core-C runtime bundle
-  projection. Shallow release must occur only after active-slot replacement
-  and first needs aligned pure-Simple, hosted-C, and interpreter ownership;
-  freeing the old array before replacement is an aliasing/UAF bug.
+  projection. The aligned shallow-release ABI now enforces active-slot
+  replacement before release; freeing the old array earlier remains an
+  aliasing/UAF bug.
   The isolated rich-module bridge now resets the flat type/span/token/symbol/
   signature/composite pools before each file, while `reset_all_pools` clears
   their outer arrays in place instead of registering replacement arrays. A

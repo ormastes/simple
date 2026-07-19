@@ -8,8 +8,8 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
-    rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
+    rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len, rt_array_new, rt_array_pop,
+    rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
     rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set, rt_typed_words_u32_unchecked,
     rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
@@ -570,6 +570,21 @@ pub fn rt_array_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(result))
 }
 
+/// Shallow-free a native runtime array. Interpreter-managed arrays use Arc and
+/// are released naturally after the lexer replaces its global owner.
+pub fn rt_array_free_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let array = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_array_free expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+    if let Value::Int(raw) = array {
+        rt_array_free(RuntimeValue::from_raw(*raw as u64));
+    }
+    Ok(Value::Nil)
+}
+
 /// Get array length
 pub fn rt_array_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     let arr_raw = args
@@ -645,10 +660,11 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        interpreter_byte_at, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn,
-        rt_bytes_u8_set_fn,
+        interpreter_byte_at, rt_array_free_fn, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn,
+        rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
     };
     use crate::value::Value;
+    use simple_runtime::value::heap::is_registered_heap_ptr;
     use simple_runtime::value::{rt_array_new, rt_array_push, rt_bytes_u8_at, RuntimeValue};
 
     #[test]
@@ -675,6 +691,31 @@ mod tests {
         let result = rt_array_len_safe_fn(&[Value::array(vec![Value::Int(1), Value::Int(2)])])
             .expect("safe length should succeed");
         assert_eq!(result, Value::Int(2));
+    }
+
+    #[test]
+    fn rt_array_free_leaves_interpreter_managed_arrays_to_arc() {
+        let array = Value::array(vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(
+            rt_array_free_fn(&[array.clone()]).expect("managed free should succeed"),
+            Value::Nil
+        );
+        assert_eq!(
+            rt_array_len_safe_fn(&[array]).expect("managed array should remain live"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn rt_array_free_releases_native_runtime_array() {
+        let array = rt_array_new(1);
+        let pointer = array.as_heap_ptr();
+        assert!(is_registered_heap_ptr(pointer));
+        assert_eq!(
+            rt_array_free_fn(&[Value::Int(array.to_raw() as i64)]).expect("native free should succeed"),
+            Value::Nil
+        );
+        assert!(!is_registered_heap_ptr(pointer));
     }
 
     #[test]

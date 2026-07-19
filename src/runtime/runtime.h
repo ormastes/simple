@@ -313,6 +313,7 @@ int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_array_new_uninit(int64_t cap);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
+void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
 SplArray* rt_bytes_alloc(int64_t len);
