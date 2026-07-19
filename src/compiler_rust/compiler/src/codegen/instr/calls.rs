@@ -1191,13 +1191,18 @@ fn compile_inline_hash_text<M: Module>(
     builder.switch_to_block(kind_block);
     let kind = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
     let masked_kind = builder.ins().band_imm(kind, 0xFFFF_FFFF);
-    let is_string = builder.ins().icmp_imm(IntCC::Equal, masked_kind, 1398034993);
+    let is_core_string = builder.ins().icmp_imm(IntCC::Equal, masked_kind, 1398034993);
+    let object_type = builder.ins().band_imm(kind, 0xFF);
+    let is_runtime_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
+    let is_string = builder.ins().bor(is_core_string, is_runtime_string);
     builder.ins().brif(is_string, len_block, &[], done_block, &[zero]);
     builder.seal_block(kind_block);
 
     builder.switch_to_block(len_block);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr, 8);
-    let data = builder.ins().iadd_imm(ptr, 16);
+    let core_data = builder.ins().iadd_imm(ptr, 16);
+    let runtime_data = builder.ins().iadd_imm(ptr, 24);
+    let data = builder.ins().select(is_runtime_string, runtime_data, core_data);
     builder.ins().jump(loop_block, &[hash_seed, zero]);
     builder.seal_block(len_block);
 

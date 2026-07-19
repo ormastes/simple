@@ -132,7 +132,7 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(script).to_contain("virtio-gpu-pci,disable-modern=on,disable-legacy=off")
         expect(script).to_contain("Display service ready")
 
-    it "uses a real virtio-blk queue and NVFS superblock for storage readiness":
+    it "uses a real virtio-blk queue, NVFS superblock, and arena payload for storage readiness":
         val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
         val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
         val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
@@ -144,6 +144,7 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(runtime).to_contain("rt_pci_is_virtio_blk")
         expect(runtime).to_contain("rt_storage_read_sector")
         expect(runtime).to_contain("rt_storage_probe_nvfs_superblock")
+        expect(runtime).to_contain("rt_storage_probe_nvfs_arena_payload")
         expect(runtime).to_contain("rt_storage_sector_has_nvfs_superblock")
         expect(runtime).to_contain("RT_NVFS_MAGIC")
         expect(runtime).to_contain("RT_NVFS_VERSION")
@@ -153,16 +154,20 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(services).to_contain("extern fn rt_storage_init() -> i64")
         expect(services).to_contain("extern fn rt_storage_read_probe() -> i64")
         expect(services).to_contain("extern fn rt_storage_nvfs_ready() -> i64")
+        expect(services).to_contain("extern fn rt_storage_nvfs_arena_ready() -> i64")
         expect(services).to_contain("[storage-riscv] Storage unavailable rc=")
         expect(services).to_contain("[storage-riscv] NVFS superblock probe passed")
+        expect(services).to_contain("[storage-riscv] NVFS arena payload probe passed")
         expect(services).to_contain("[storage-riscv] Storage service ready")
         expect(services).to_contain("fn riscv_storage_ready() -> bool")
         expect(services).to_contain("[fs-riscv] NVFS root superblock ready")
+        expect(services).to_contain("[fs-riscv] NVFS arena payload ready")
         expect(services).to_contain("[init] filesystem: nvfs-superblock-ready")
         expect(services).to_contain("fn riscv_filesystem_ready() -> bool")
         expect(script).to_contain("--with-storage")
         expect(script).to_contain("virtio-blk-pci,drive=blk0")
         expect(script).to_contain("\\123\\106\\126\\116\\002\\000\\000\\000")
+        expect(script).to_contain("SIMPLEOS_NVFS_ARENA_FILE")
         expect(script).to_contain("Storage service ready")
         expect(script).to_contain("NVFS root superblock ready")
 
@@ -308,11 +313,13 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
         expect(script).to_contain("--allow-prebuilt-artifact")
         expect(script).to_contain("current-source build stamp not found")
         expect(script).to_contain("as current-source RV64 QEMU evidence")
-        expect(script).to_contain("Build it first through the SimpleOS runner with an LLVM-enabled compiler")
+        expect(script).to_contain("Build it first through the SimpleOS runner with a target-capable compiler")
         expect(script).to_contain("bin/simple os build --arch=riscv64")
-        expect(script).to_contain("backend=llvm")
-        expect(script).to_contain("target=riscv64-unknown-none")
-        expect(script).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
+        expect(script).to_contain("^backend=(llvm|cranelift)$")
+        expect(script).to_contain("^target=riscv64-unknown-none$")
+        expect(script).to_contain("^entry=src/os/kernel/arch/riscv64/boot.spl$")
+        expect(script).to_contain("^simple_bin=.*(compiler_rust|simple_seed)")
+        expect(script).to_contain("Rust-seed provenance is not self-hosted RV64 evidence")
         expect(script).to_contain("--expect-http-only")
         expect(script).to_contain("EXPECT_HTTP_ONLY=true")
         expect(script).to_contain("PMM OK")
@@ -340,34 +347,55 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
         expect(runner).to_contain("Cranelift native builds do not support hosted riscv32 yet")
         expect(runner).to_contain("LLVM backend unavailable: rebuild the selected Simple compiler")
 
-    it "runs the RV64 HTTP and NVFS storage QEMU gate when explicitly enabled":
+    it "runs the RV64 HTTP, NVFS storage, and database QEMU gate when explicitly enabled":
         val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
 
         expect(script).to_contain("--expect-http-only")
         expect(script).to_contain("--with-storage")
+        expect(script).to_contain("--with-db")
         expect(script).to_contain("WARNING: --allow-prebuilt-artifact gives smoke-only evidence")
         expect(script).to_contain("Storage service ready")
         expect(script).to_contain("NVFS root superblock ready")
+        expect(script).to_contain("SIMPLEOS_NVFS_ARENA_FILE")
 
         if rv64_http_storage_live_enabled():
             val result = rt_process_run_timeout(
-                "sh",
-                ["scripts/qemu/qemu_rv64_http_test.shs", "--expect-http-only", "--with-storage"],
+                "env",
+                [
+                    "SERIAL_LOG=build/test-artifacts/simpleos-rv64-http-db-live/serial.log",
+                    "DB_QUERY_LOG=build/test-artifacts/simpleos-rv64-http-db-live/db_query.log",
+                    "sh", "scripts/qemu/qemu_rv64_http_test.shs",
+                    "--expect-http-only", "--with-storage", "--with-db",
+                ],
                 90000,
             )
             val output = result[0] + result[1]
 
             expect(result[2]).to_equal(0)
-            expect(output).to_contain("ALL PASSED")
+            expect(output).to_contain("HTTP-only PASSED")
             expect(output).to_contain("Storage service verified")
             expect(output).to_contain("NVFS root superblock verified")
+            expect(output).to_contain("NVFS arena payload ready")
+            expect(output).to_contain("DB CREATE/INSERT/SELECT... PASS (codex-41)")
             expect(output).to_contain("GET /health (HTTP)... PASS (200)")
             expect(output).to_contain("GET / (HTTP)... PASS (200)")
             expect(output).to_contain("SKIP (HTTP-only gate; RISC-V TLS not production-ready)")
             expect(output).to_contain("GET /health content-type... PASS (JSON)")
             expect(output).to_contain("GET / content-type... PASS (HTML)")
+
+            val checker_result = rt_process_run_timeout(
+                "sh",
+                [
+                    "scripts/qemu/check_simpleos_rv64_db_server.shs",
+                    "--artifacts", "build/test-artifacts/simpleos-rv64-http-db-live",
+                ],
+                10000,
+            )
+            val checker_output = checker_result[0] + checker_result[1]
+            expect(checker_result[2]).to_equal(0)
+            expect(checker_output).to_contain("PASS simpleos_rv64_db_server_connected")
         else:
-            print "SKIP: set SIMPLEOS_RV64_HTTP_STORAGE_QEMU=1 to run live RV64 HTTP+NVFS QEMU gate"
+            print "SKIP: set SIMPLEOS_RV64_HTTP_STORAGE_QEMU=1 to run live RV64 HTTP+NVFS+DB QEMU gate"
 
 fn expect_no_fake_network_pass(path: text):
     val source = rt_file_read_text(path)

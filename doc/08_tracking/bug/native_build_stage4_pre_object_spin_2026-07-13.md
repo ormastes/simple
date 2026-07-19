@@ -816,3 +816,176 @@ runaway guard terminated it. This was the third bounded Stage 4 cycle, so no
 retry was made. The next fix must make the canonical Stage 4 wrapper use the
 same bounded pure-Simple closure path before strict provider/backfill linking;
 it must not re-enter the pre-object whole-tree bootstrap path.
+
+## 2026-07-18 Stage2 package-data narrowing
+
+The recovery path first failed strict MIR in 16 files because native-project
+HIR lowering had no types for selected package data. The seed now injects only
+explicit/current/ancestor package data before MIR; a focused Rust regression
+passes and the next cache-preserving Stage2 run narrowed the failure to five
+interpreter files. The remaining names (`val_arrays`, `val_struct_fields`, and
+`eval_implicit_new_stack`) are sibling-owned rather than ancestor-owned. A
+follow-up source patch now indexes unique data owners by effective package and
+treats underscore-prefixed split directories as transparent. Its focused Rust
+regression proves sibling and transparent access while rejecting ordinary
+children, unrelated packages, and duplicate owners. No Stage2 retry was made
+after the bounded gate failed; the next fresh cycle should rerun that gate once
+and must not restore global unique-name fallback.
+
+## 2026-07-18 phase-one allocation localization
+
+The corrected package visibility and bootstrap-only hosted runtime bridge now
+produce sane Stage2 and Stage3 compilers. Stage4 still reached about 11.3 GiB
+RSS before parsing. Phase profiling localized the peak to
+`phase1:load_sources`; a 20-second trace scanned 905 distinct files totaling
+11.8 MiB with no duplicate physical paths.
+
+The closure import scanner counted triple-quote delimiters by calling
+`substring(scan_pos, scan_pos + 3)` for every source character. Native lowering
+allocates a raw C string for each slice, and those transient slices are not
+reclaimed during phase one. The scanner now advances between actual `\"\"\"`
+matches, so ordinary lines allocate no slices while odd/even docstring behavior
+is preserved. A regression covers block and same-line docstrings, real imports,
+and removal of the per-character slice. The Stage2 cycle cap prevented another
+rebuild in this session; the next fresh cycle must embed the patch and use one
+profiled Stage4 run before claiming the runaway fixed.
+
+### Follow-up profile and corrected dominant cause
+
+Fresh Stage2 and Stage3 builds embedded the delimiter-search change and passed
+their sanity gates. A single bounded Stage4 profile still remained in
+`phase1:load_sources:start`, reaching about 6.0 GiB at 39 seconds and 13.7 GiB
+at 81 seconds. The delimiter change removes a real per-character allocation,
+but it is not the complete fix.
+
+Stage3 disassembly shows `_driver_text_bucket_index` checking the Simple-core
+string-header magic before hashing. Rust-hosted Stage3 strings use a different
+header, so every key hashes to zero and all 8192 logical buckets collapse into
+bucket zero. Each membership probe then calls `bucket.split("\n")` over the
+entire growing set, producing the observed quadratic retained allocations. The
+next bounded cycle must use a runtime-compatible text hash, prove multi-bucket
+distribution with the actual Stage3 executable, and make at most one final
+profiled Stage4 attempt.
+
+### Dual-layout hash proof and bounded phase-one progress
+
+A focused Cranelift JIT regression constructed a real Rust `RuntimeString` and
+passed it to generated `rt_hash_text` code. Before repair the generated hash
+was `0` while the runtime owner returned `193485963`. The inline code now
+accepts both existing layouts: Core-C `STR1` with bytes at offset 16, and the
+Rust/SimpleOS header-plus-hash string with bytes at offset 24. The same focused
+test passes after the change. Bucket membership also uses exact newline
+sentinels instead of `split`, avoiding array and copied-string allocation on
+every lookup.
+
+One optimized seed build and one cached dynload cycle produced Stage2 and
+Stage3 compilers that passed sanity; Stage2 also passed the native-build
+capability gate. The next profiled Stage4 attempt exited after 7.2 seconds with
+maximum RSS 460540 KiB on a concrete unresolved import, `std.alloc.sffi`.
+Compared with the previous 13.7 GiB source-loading growth, this run reached an
+actionable error with bounded memory. Because the import failed early and its
+provider was added afterward, complete phase-one convergence still requires
+the next permitted Stage4 run.
+
+The facade's only source was under the Rust-seed legacy stdlib even though
+eleven pure compiler files import it. The pure source tree now owns the three
+dictionary declarations actually used at `src/lib/alloc/sffi.spl`; this avoids
+coupling the product compiler resolver to `src/compiler_rust` or duplicating
+extern declarations across callers. The session iteration cap prevents a
+second Stage4 attempt; the next cycle must run the focused import-resolution
+gate before one cached Stage4 retry.
+
+Focused Stage3 single-positional probes used both compact terminal-symbol and
+production brace imports. In each run the driver resolved `std.alloc.sffi`,
+parsed both modules, and completed HIR and MIR before failing only at
+`aot:borrow_check:start` with `runtime error: field access on nil receiver` and
+SIGILL 132 (`build/native_probe/std-alloc-sffi-resolution-diag.log`). The
+provider fix is therefore proven through resolution; the later single-file AOT
+borrow-check failure is separate. The temporary always-red fixture was removed,
+while the unit resolver assertion retains terminal-symbol fallback coverage.
+
+### Phase-two heap-registry allocation wall
+
+The next single bounded Stage4 attempt completed source loading in 7.237
+seconds (`n_sources=1761`) and began parsing 1,278 unique physical sources.
+It parsed 307 files before the 8 GiB address-space guard rejected an exact
+2,415,919,120-byte allocation at 7,218,796 KiB maximum RSS. This is not an
+array-capacity or dual-layout hash regression: `0x90000010` is exactly the
+hashbrown layout for the Rust heap-pointer registry growing to 2^28 buckets.
+The previous table threshold proves more than 117 million registered transient
+heap objects after only 3,432,229 parsed source characters.
+
+Two bounded allocation fixes now address that evidence. Empty and single-byte
+immutable runtime strings are interned at `rt_string_new` in both Rust and
+Core-C, so parser character slices, `char_at`, and one-byte comparisons reuse
+at most 257 objects. Module/declaration mode checks use the existing
+registry-allocation-free `rt_env_get_i64` ABI, while expression and statement
+arenas cache their mode during reset instead of manufacturing a registered
+RuntimeString per node operation. Flat declaration, expression, and statement
+arenas also clear and reuse their current backing arrays rather than abandoning
+one allocation set per parsed module; all newer flat-body, GPU, and ASM fields
+remain covered.
+
+The focused Rust identity/content regression passes (1/1), Rust formatting and
+the Core-C/runtime-focus syntax gate pass, and the native-arena source contract
+was strengthened. The Rust bootstrap seed's product test command is unsuitable
+evidence here: it loaded the broad runner but ended with `no examples executed`;
+that command must not be repeated. No Stage2/Stage3 refresh or Stage4 retry has
+run after these fixes yet.
+
+The subsequent incremental refresh rebuilt only the optimized bootstrap driver
+and pure-Simple Stage2/Stage3 dynload compilers. Stage2 sanity, Stage3 sanity,
+and the Stage2 native-build capability gate all passed; the refresh peaked at
+332,936 KiB RSS. The admitted handoff hashes are
+`40b734440d7a6627f23e46199e22c82e3b1247ac4678b9044760943f3dfe4a98`
+(Stage2, canonical for Stage4) and
+`360f0447bb4912ba6a9bd5df10035c439a2ac28a6527c6cf4d36bd2ee4a5b1b4`
+(Stage3). The session's single Stage4 attempt was already consumed before the
+allocation fix, so the next fresh bounded cycle may run one profiled Stage4
+attempt and must compare its phase-two RSS/file slope with the failed 307-file
+baseline.
+
+Final runtime review also made test-registry clearing re-register the stable
+257 cached pointers; otherwise a cached string could fail heap validation after
+test isolation cleared the registry. The extended focused regression passes
+again and covers that lifecycle edge. This follow-up does not change the
+Stage4 hot allocation path, so the already-admitted Stage2/Stage3 handoff is
+retained for the next bounded profile rather than rebuilt a second time.
+
+### 2026-07-19 stale embedded runtime and inline-arm correction
+
+The next session's single bounded Stage4 profile was accidentally launched with
+the previously admitted Stage2. Artifact review then proved that Stage2 still
+embedded the old unconditional-allocation `rt_string_new`: only the optimized
+driver had been refreshed, while `libsimple_native_all.a` was older than the
+short-string source. The profile is therefore rejected as interning evidence.
+It nevertheless confirmed the same failure class, reaching 7,277,400 KiB
+maximum RSS before an exact 2,415,919,120-byte allocation failed during phase
+two parsing. The session cap prohibits another Stage4 attempt.
+
+The failed profile also exposed repeated `stmt_get_tag` out-of-bounds diagnostics.
+These were a real parser/bridge correctness bug, not harmless arena-reset noise:
+inline fat-arrow match arms stored expression ids, while all arm consumers read
+statement ids. The parser now wraps inline expressions with `stmt_expr_stmt`.
+The executable flat-bridge regression covers two literal arms and one inline
+return arm and passed once with `1 example, 0 failures` plus
+`flat_ast_fat_arrow_match_bridge=true`.
+
+The incremental recovery rebuilt only `simple-native-all`, then ran the normal
+dynload Stage2/Stage3 wrapper without `--full-bootstrap`, `--full-cli`, deploy,
+or MCP stages. Both built-in sanity checks and the Stage2 native-build capability
+passed at 371,256 KiB peak RSS. Disassembly proves that each fresh binary now contains the short-string
+branch. The handoff hashes are
+`a1d5e46b795534d057d4d6ab199b7dc0d18fe8db11b317aefbbea665ea0d5bcc`
+(Stage2) and
+`c4ade909cf6590138f27bcf2f7a0fd668c3e488666cff62aac048b088d5d9d05`
+(Stage3). No full CLI exists. The next fresh session may run one bounded Stage4
+profile from this Stage2 and must reject any CLI admission until that profile
+and the essential-tools smoke pass.
+
+Final focused review moved the short-cache re-registration assertion into the
+existing serialized registry-clear test; it passed 1/1 without adding another
+process-global clear. The native-arena test now uses canonical bootstrap-entry
+fixture paths and asserts that the first converted Module still contains value
+7 after a second parse/reset; all three examples pass. Scoped rustfmt and
+`git diff --check` also pass.
