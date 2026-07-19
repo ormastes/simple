@@ -623,23 +623,29 @@ impl Ftl:
             val ppn: i64 = base + p
             val live: bool = me.band.is_valid(ppn)
             if live:
-                val rd: FilRead = me.fil.read(ppn)
-                if rd.code == NAND_ECC_FAIL:
-                    return UNMAP    # source page is not safely readable; do NOT copy or erase
+                # Source read through the L8 recovery-ladder mount (design §2, closes
+                # gap A2): a retention-drifted-but-recoverable source page is recovered
+                # via the Vref retry table instead of aborting the whole reclaim. On the
+                # default backend / a truly uncorrectable page the ladder exhausts
+                # (res.ok == 0) and we abort exactly as before — no copy, no erase.
+                val res: RelReadResult = me.fil.read_with_ladder(ppn, nd_block(blk))
+                if res.ok == 0:
+                    return UNMAP    # source page is not safely recoverable; do NOT copy or erase
                 val newp: i64 = me.band.alloc_page()
                 if newp == NO_PPN:
                     return UNMAP    # cannot relocate -> do NOT erase; block stays intact
                 val s: i64 = me.next_seq()
-                val pc: i64 = me.fil.program(newp, rd.lba, s, rd.data)
+                val pc: i64 = me.fil.program(newp, res.lba, s, res.data)
                 if pc != NAND_OK:
                     me.band.set_bad(ppn_block(newp))
+                    me.rel_retire(ppn_block(newp))  # relocation-target retire -> spare substitution
                     return UNMAP    # failed relocation -> old page remains live; do NOT erase
                 me.ensure_journal_room()
                 val before_wal: i64 = me.journal.wal_len()
-                if me.journal.append(0, rd.lba, ppn, newp, s) <= before_wal:
+                if me.journal.append(0, res.lba, ppn, newp, s) <= before_wal:
                     return UNMAP    # relocation is not durable; old page remains live
-                me.rain_update_page(newp, 0, rd.data)
-                me.map.update(rd.lba, newp)
+                me.rain_update_page(newp, 0, res.data)
+                me.map.update(res.lba, newp)
                 me.band.mark_valid(newp)
                 me.band.mark_invalid(ppn)
             p = p + 1
@@ -648,10 +654,12 @@ impl Ftl:
         if er != NAND_OK:
             me.band.set_bad(blk)
             me.clear_read_disturb(blk)
+            me.rel_retire(blk)              # erase-fail retire -> event-driven spare substitution
             return UNMAP
         me.rain_note_erased_block(blk, old_words)
         me.band.free_block(blk)
         me.clear_read_disturb(blk)  # erased -> read-disturb accumulation cleared
+        me.rel_on_erase(blk)        # design §7 erase-reset: vref decay + disturb/health clear + wear/refresh update
         blk
 
     # Garbage-collect one victim. The victim is chosen by the (sandboxed) GC-scoring
