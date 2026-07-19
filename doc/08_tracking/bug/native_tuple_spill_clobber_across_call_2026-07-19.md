@@ -1,7 +1,7 @@
 # Native codegen: tuple stack-spill clobbered by intervening method call
 
 - **ID:** native_tuple_spill_clobber_across_call_2026-07-19
-- **Status:** OPEN (workaround landed in spl_fonts.spl; root cause in compiler)
+- **Status:** SOURCE FIXED (staged platform execution pending; workaround remains)
 - **Severity:** high (silent memory corruption → wild pointer dereference)
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -12,7 +12,7 @@ whose bytes were ASCII text from `self.font_cache_identity` (cr2 =
 exception frames per boot on the SimpleOS desktop (-kernel lane); quiet
 glyph skip under OVMF.
 
-## Root cause (disassembly-verified, compiler defect suspected)
+## Root cause
 Code shape:
 
 ```
@@ -22,14 +22,15 @@ if not self.is_current(): return nil              # <-- intervening call
 val metrics: [i64] = parts.1                      # faults here
 ```
 
-The tuple was spilled to stack (0x60/0x68(rsp)). `is_current()` internally
-builds its own `(i64, text)` tuple whose slot 1 holds
-`self.font_cache_identity`. After the call, the inlined constant-index read
-of `parts.1` (`rt_tuple_get(parts, 1)` → untag → items ptr at +0x18 →
-`mov (%r10),%r12`) yielded the identity string's data pointer instead of the
-metrics array — i.e. the spilled tuple value was not preserved across the
-call boundary. No `free()` exists anywhere on the path (premature-free ruled
-out). Heap-layout dependent, not per-glyph deterministic.
+Cranelift's fallback aggregate branch stored tuple literals in a stack slot
+and returned that slot's address unchanged. The pointer therefore referred to
+the dead callee frame. `is_current()` later built another tuple and reused the
+same frame, replacing `parts.1` with `self.font_cache_identity`. No reload rule
+could recover the already-dangling pointer. LLVM already avoided this by
+allocating tuple words with `rt_alloc`.
+
+Cranelift now mirrors that ownership: tuple words are heap allocated and the
+raw base pointer is returned. Unlike structs, tuples are not heap-tagged.
 
 ## Workaround (landed)
 Snapshot every `parts.N` / `metrics[N]` into locals immediately after the
@@ -45,8 +46,11 @@ exception frames, first-frame-rendered, desktop-ready.
 - Disassembly: faulting rip +0x480 in `_rasterize_selected_outline`;
   before/after dumps preserved in session scratchpad rasterfix2_backup/.
 
-## Fix direction
-Audit native-lane tuple spill/reload around call boundaries: a spilled
-tuple-typed SSA value (or its element pointers) must be reloaded from its
-spill slot after a call, not from a register/slot the callee's own tuple
-construction may have reused.
+## Regression
+The native smoke and shared cross-target fixtures return `(17, 37, true)`, then
+call a same-sized tuple producer returning `(91, 99, false)` before rereading
+the first tuple. Both producers are multi-block so MIR inlining cannot erase
+the call boundary; hosted Cranelift also uses aggressive optimization. Existing
+gates run this on hosted Linux/macOS/Windows/FreeBSD and AArch64/RV64 QEMU;
+ARM32/RV32 and Windows ARM64 retain compile-only receipts. Output succeeds only
+when the first tuple survives the intervening call.

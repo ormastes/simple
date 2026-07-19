@@ -426,3 +426,11 @@ the shared binary — deploys require explicit user go-ahead).
   execution fixtures now pin raw/tagged/Unicode/bounds behavior. Focused C
   syntax and hosted runtime behavior pass; the original x86_64-unknown-none
   pure-Simple redeploy/QEMU proof remains pending.
+- Cranelift tuple returns no longer expose dead callee stack slots. Tuple
+  aggregates now reuse LLVM's existing `rt_alloc` ownership while preserving
+  the raw, untagged tuple pointer ABI. Multi-block native-smoke and cross-target
+  producers keep a returned `(17, 37, true)` live across a same-sized
+  tuple-producing call and reread it afterward; the hosted Cranelift case uses
+  aggressive optimization. Linux/macOS/Windows/FreeBSD and AArch64/RV64
+  execution are scheduled through existing gates; ARM32/RV32 and Windows ARM64
+  remain compile-only. First staged platform execution is pending.

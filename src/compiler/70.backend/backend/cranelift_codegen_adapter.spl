@@ -556,6 +556,21 @@ fn cl_translate_instruction(
                     if slot_map.has(dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         cranelift_store(ctx, tagged, addr, 0)
+                case Tuple:
+                    # Tuple values can escape through returns, so their storage
+                    # must outlive the callee frame. Structs use the same word
+                    # layout above but add a heap tag; tuples stay raw pointers.
+                    val size = cranelift_iconst(ctx, CL_TYPE_I64, operands.len() * 8)
+                    val base = translate_runtime_import_call_i64(ctx, cl_module, "rt_alloc", [size])
+                    var offset = 0
+                    for op in operands:
+                        val value = cl_translate_operand(ctx, cl_module, op, value_map, slot_map, func)
+                        cranelift_store(ctx, value, base, offset)
+                        offset = offset + 8
+                    value_map[dest.id] = base
+                    if slot_map.has(dest.id):
+                        val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
+                        cranelift_store(ctx, base, addr, 0)
                 case _:
                     if slot_map.has(dest.id):
                         val base = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
