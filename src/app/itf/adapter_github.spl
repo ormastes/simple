@@ -1,15 +1,38 @@
-# ITF CLI — GitHub Adapter (stub, delegates to gh)
+# ITF CLI — GitHub Adapter — thin wrapper around the system `gh` CLI.
 #
-# Future: pass-through to `gh` CLI
-# Currently a placeholder for Phase 3
+# `gh` is the sanctioned GitHub tool for this repo (see
+# tools/claude-plugin/repo-and-pull-req). We shell out to it instead of
+# reimplementing the GitHub REST/GraphQL API — gh already owns auth,
+# pagination, and API-version compatibility. This adapter owns process
+# invocation + actionable-error detection; cmd_github.spl owns table/JSON
+# formatting on top of `gh ... --json ...` output.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
 
 
-fn github_passthrough(args: [text]) -> (bool, text, text):
-    """Pass arguments through to gh CLI.
-
-    Returns: (success, stdout, stderr)
-    """
+fn gh_run(args: [text]) -> (bool, text, text):
+    """Run `gh <args>`, returning (success, stdout, stderr)."""
     val (stdout, stderr, code) = process_run("gh", args)
     (code == 0, stdout, stderr)
+
+
+fn gh_available() -> bool:
+    """True if the `gh` binary is on PATH and runnable."""
+    val (_stdout, _stderr, code) = process_run("gh", ["--version"])
+    code == 0
+
+
+fn gh_actionable_error(stderr: text) -> text:
+    """Map a gh failure into a message that tells the user what to do next.
+
+    Distinguishes "gh isn't installed" from "gh isn't authenticated" from a
+    generic API/usage error, so failures never surface as a bare exit code.
+    """
+    if not gh_available():
+        return "gh CLI not found on PATH. Install it: https://cli.github.com/"
+    val trimmed = stderr.trim()
+    if trimmed.contains("gh auth login") or trimmed.contains("not logged into") or trimmed.contains("authentication") or trimmed.contains("To use GitHub CLI"):
+        return "gh is not authenticated. Run: gh auth login"
+    if trimmed != "":
+        return "gh error: {trimmed}"
+    "gh error (no output — check `gh auth status`)"

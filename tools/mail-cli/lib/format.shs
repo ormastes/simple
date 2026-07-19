@@ -43,6 +43,86 @@ EOF
   echo "$body"
 }
 
+# Map a filename's extension to a MIME content-type. Unknown extensions
+# fall back to application/octet-stream (safe default for any binary).
+mail_format_content_type() {
+  local filename="$1"
+  local ext
+  ext=$(printf '%s' "$filename" | sed -n 's/.*\.\([A-Za-z0-9]\{1,10\}\)$/\1/p' | tr '[:upper:]' '[:lower:]')
+  case "$ext" in
+    txt|log|md)  echo "text/plain" ;;
+    csv)         echo "text/csv" ;;
+    html|htm)    echo "text/html" ;;
+    json)        echo "application/json" ;;
+    pdf)         echo "application/pdf" ;;
+    png)         echo "image/png" ;;
+    jpg|jpeg)    echo "image/jpeg" ;;
+    gif)         echo "image/gif" ;;
+    zip)         echo "application/zip" ;;
+    doc)         echo "application/msword" ;;
+    docx)        echo "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ;;
+    xls)         echo "application/vnd.ms-excel" ;;
+    xlsx)        echo "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ;;
+    mp3)         echo "audio/mpeg" ;;
+    mp4)         echo "video/mp4" ;;
+    *)           echo "application/octet-stream" ;;
+  esac
+}
+
+mail_format_mime_boundary() {
+  echo "mailcli-$(date +%s)-$$-${RANDOM}"
+}
+
+# Compose a multipart/mixed RFC 2822 message: a text/plain body part plus
+# one base64-encoded part per attachment. Attachment paths are passed as a
+# newline-separated list (bash 3.x compatible — no array args across the
+# 9th positional parameter).
+mail_format_compose_multipart() {
+  local from="$1" to="$2" subject="$3" body="$4"
+  local cc="${5:-}" bcc="${6:-}" in_reply_to="${7:-}" references="${8:-}"
+  local attachments="${9:-}"
+
+  local msg_id date_str boundary
+  msg_id=$(mail_format_message_id)
+  date_str=$(date -R 2>/dev/null || date '+%a, %d %b %Y %H:%M:%S %z')
+  boundary=$(mail_format_mime_boundary)
+
+  cat <<EOF
+From: ${from}
+To: ${to}
+Subject: ${subject}
+Date: ${date_str}
+Message-ID: ${msg_id}
+MIME-Version: 1.0
+EOF
+  [ -n "$cc" ] && echo "Cc: ${cc}"
+  [ -n "$in_reply_to" ] && echo "In-Reply-To: ${in_reply_to}"
+  [ -n "$references" ] && echo "References: ${references}"
+  echo "Content-Type: multipart/mixed; boundary=\"${boundary}\""
+  echo ""
+  echo "--${boundary}"
+  echo "Content-Type: text/plain; charset=UTF-8"
+  echo "Content-Transfer-Encoding: 8bit"
+  echo ""
+  echo "$body"
+
+  local att base ctype
+  while IFS= read -r att; do
+    [ -z "$att" ] && continue
+    base=$(basename "$att")
+    ctype=$(mail_format_content_type "$base")
+    echo "--${boundary}"
+    echo "Content-Type: ${ctype}; name=\"${base}\""
+    echo "Content-Transfer-Encoding: base64"
+    echo "Content-Disposition: attachment; filename=\"${base}\""
+    echo ""
+    base64 "$att"
+    echo ""
+  done <<< "$attachments"
+
+  echo "--${boundary}--"
+}
+
 # Parse headers from raw email → JSON
 mail_format_parse_headers() {
   local raw="$1"
@@ -55,13 +135,14 @@ mail_format_parse_headers() {
   # Unfold multi-line headers (lines starting with whitespace are continuations)
   headers=$(echo "$headers" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n[[:space:]]\+/ /g')
 
-  local from to subject date msg_id reply_to
+  local from to subject date msg_id reply_to references
   from=$(echo "$headers" | grep -i '^From:' | head -1 | sed 's/^[Ff]rom:[[:space:]]*//')
   to=$(echo "$headers" | grep -i '^To:' | head -1 | sed 's/^[Tt]o:[[:space:]]*//')
   subject=$(echo "$headers" | grep -i '^Subject:' | head -1 | sed 's/^[Ss]ubject:[[:space:]]*//')
   date=$(echo "$headers" | grep -i '^Date:' | head -1 | sed 's/^[Dd]ate:[[:space:]]*//')
   msg_id=$(echo "$headers" | grep -i '^Message-ID:' | head -1 | sed 's/^[Mm]essage-[Ii][Dd]:[[:space:]]*//')
   reply_to=$(echo "$headers" | grep -i '^In-Reply-To:' | head -1 | sed 's/^[Ii]n-[Rr]eply-[Tt]o:[[:space:]]*//')
+  references=$(echo "$headers" | grep -i '^References:' | head -1 | sed 's/^[Rr]eferences:[[:space:]]*//')
 
   jq -n \
     --arg from "$from" \
@@ -70,7 +151,8 @@ mail_format_parse_headers() {
     --arg date "$date" \
     --arg msg_id "$msg_id" \
     --arg reply_to "$reply_to" \
-    '{from: $from, to: $to, subject: $subject, date: $date, message_id: $msg_id, in_reply_to: $reply_to}'
+    --arg references "$references" \
+    '{from: $from, to: $to, subject: $subject, date: $date, message_id: $msg_id, in_reply_to: $reply_to, references: $references}'
 }
 
 # Parse body from raw email → plain text
@@ -100,29 +182,130 @@ mail_format_parse_body() {
   esac
 }
 
+# Normalize a subject for thread grouping: strip repeated leading
+# Re:/Fwd:/Fw: prefixes (case-insensitive) and surrounding whitespace.
+# "Re: Fwd: Hello" and "Hello" both normalize to "Hello".
+mail_format_normalize_subject() {
+  local subject="$1"
+  subject=$(printf '%s' "$subject" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  while :; do
+    case "$subject" in
+      [Rr][Ee]:*|[Ff][Ww][Dd]:*|[Ff][Ww]:*)
+        subject="${subject#*:}"
+        subject=$(printf '%s' "$subject" | sed 's/^[[:space:]]*//')
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$subject"
+}
+
 # Quote body text for reply (prefix each line with "> ")
 mail_format_quote() {
   local body="$1"
   echo "$body" | sed 's/^/> /'
 }
 
-# Format a message summary for table display
+# Parse a raw multi-message "FETCH n:m (UID BODY[HEADER] {len})" response
+# (as returned by mail_imap_fetch_headers_range) into one TSV line per
+# message: "<uid>\t<base64 header block>". Structural parsing only — it
+# does NOT trust the literal {len} byte count (unverifiable without a live
+# IMAP server), it bounds each header block between one "* n FETCH (UID ..."
+# boundary and the next (or a standalone ")" line). Emits nothing if no
+# boundary line is found at all, so the caller can detect "unparseable" and
+# fall back to the SEARCH-based path.
+mail_format_parse_fetch_range() {
+  local raw="$1"
+  raw=$(printf "%s" "$raw" | tr -d '\r')
+
+  local uid=""
+  local -a block=()
+  local line
+
+  _flush_block() {
+    if [ -n "$uid" ]; then
+      local text
+      text=$(printf '%s\n' "${block[@]}")
+      printf '%s\t%s\n' "$uid" "$(printf '%s' "$text" | base64 | tr -d '\n')"
+    fi
+    uid=""
+    block=()
+  }
+
+  while IFS= read -r line; do
+    case "$line" in
+      "* "*"FETCH ("*"UID "*)
+        _flush_block
+        uid=$(printf '%s' "$line" | sed -n 's/.*UID[[:space:]]\+\([0-9]\+\).*/\1/p')
+        ;;
+      ")")
+        _flush_block
+        ;;
+      *)
+        [ -n "$uid" ] && block+=("$line")
+        ;;
+    esac
+  done <<< "$raw"
+  _flush_block
+}
+
+# Print a bold table header + separator matching mail_format_summary_line's
+# column widths (pass wide=1 to match --wide's untruncated columns — in
+# that case just print a plain fixed header since data widths vary per row).
+mail_format_table_header() {
+  local wide="${1:-0}"
+  local from_w subject_w
+  if [ "$wide" -eq 1 ]; then
+    from_w=30; subject_w=50
+  else
+    read -r from_w subject_w <<< "$(_mail_col_widths)"
+  fi
+  printf "${C_BOLD}%-6s   %-${from_w}s %-${subject_w}s %s${C_RESET}\n" "UID" "FROM" "SUBJECT" "DATE"
+  printf "%-6s   %-${from_w}s %-${subject_w}s %s\n" "---" "----" "-------" "----"
+}
+
+# Format a message summary for table display. Column widths scale with the
+# terminal width (min 30/50 for from/subject); pass wide=1 to disable
+# truncation entirely (--wide).
 mail_format_summary_line() {
-  local uid="$1" headers_json="$2" flags="${3:-}"
+  local uid="$1" headers_json="$2" flags="${3:-}" wide="${4:-0}"
 
-  local from subject date
-  from=$(echo "$headers_json" | jq -r '.from' | head -c 30)
-  subject=$(echo "$headers_json" | jq -r '.subject' | head -c 50)
-  date=$(echo "$headers_json" | jq -r '.date' | head -c 20)
+  local from subject date_raw date
+  from=$(echo "$headers_json" | jq -r '.from')
+  subject=$(echo "$headers_json" | jq -r '.subject')
+  date_raw=$(echo "$headers_json" | jq -r '.date')
+  date=$(mail_format_relative_date "$date_raw")
 
-  local flag_mark=""
-  case "$flags" in
-    *Seen*) flag_mark="" ;;
-    *)      flag_mark="*" ;;
-  esac
-  case "$flags" in
-    *Flagged*) flag_mark="${flag_mark}!" ;;
-  esac
+  local from_w subject_w
+  read -r from_w subject_w <<< "$(_mail_col_widths)"
+  if [ "$wide" -eq 1 ]; then
+    from_w=${#from}
+    subject_w=${#subject}
+  else
+    from=$(_mail_truncate "$from" "$from_w")
+    subject=$(_mail_truncate "$subject" "$subject_w")
+  fi
 
-  printf "%-6s %-2s %-30s %-50s %s\n" "$uid" "$flag_mark" "$from" "$subject" "$date"
+  local unread=1 starred=0
+  case "$flags" in *Seen*) unread=0 ;; esac
+  case "$flags" in *Flagged*) starred=1 ;; esac
+
+  local star_mark="  "
+  [ "$starred" -eq 1 ] && star_mark="${C_YELLOW}★${C_RESET} "
+
+  # Pad the PLAIN text to width first, then wrap in color codes — color
+  # escapes are zero-width on screen but count toward printf's %-Ns width,
+  # which would misalign columns if applied before padding.
+  local from_padded subject_padded
+  from_padded=$(printf "%-${from_w}s" "$from")
+  subject_padded=$(printf "%-${subject_w}s" "$subject")
+
+  local from_c="$from_padded" subject_c="$subject_padded"
+  if [ "$unread" -eq 1 ]; then
+    from_c="${C_BOLD}${from_padded}${C_RESET}"
+    subject_c="${C_BOLD}${subject_padded}${C_RESET}"
+  fi
+
+  printf "%-6s %s%s %s ${C_DIM}%s${C_RESET}\n" \
+    "$uid" "$star_mark" "$from_c" "$subject_c" "$date"
 }

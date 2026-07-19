@@ -1,19 +1,20 @@
 # Test Specification Index
 
-*Generated: 2026-07-10*
+*Generated: 2026-07-19*
 
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
+- **Complete Documentation:** 1
 - **Stubs Remaining:** 0
-- **Total Lines:** 40
+- **Total Lines:** 12
+- **Warnings:** 6
 
 ---
 
-## Other (1 features)
+## Syntax / Math DSL (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Simple Web Backend Equivalence Specification](test/03_system/gui/wm_compare/simple_web_backend_equivalence_spec.md) | Minimal | N/A | 4 | 20% | 40 lines |
+| [loss{} and nograd{} Block Tests](feature/usage/loss_nograd_blocks_spec.md) | Implemented | 2/5 | 27 | 20% | 12 lines |
 

@@ -4,6 +4,7 @@
 
 cmd_send() {
   local to="" subject="" body="" cc="" bcc="" input_file=""
+  local -a attach_files=()
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -14,11 +15,12 @@ cmd_send() {
       --cc)      cc="$2"; shift 2 ;;
       --bcc)     bcc="$2"; shift 2 ;;
       --input)   input_file="$2"; shift 2 ;;
+      --attach)  attach_files+=("$2"); shift 2 ;;
       *) shift ;;
     esac
   done
 
-  mail_resolve_account || return 1
+  mail_resolve_account || return $?
 
   if [ -z "$to" ]; then
     echo "? To:"
@@ -40,12 +42,28 @@ cmd_send() {
     body=$(cat "$input_file")
   fi
 
+  # Validate attachments up front (trust-boundary check) — fail before any
+  # network activity if a file is missing or unreadable.
+  local att
+  for att in "${attach_files[@]}"; do
+    if [ ! -f "$att" ] || [ ! -r "$att" ]; then
+      echo "${C_RED}error:${C_RESET} attachment not found or unreadable: ${att}" >&2
+      return 2
+    fi
+  done
+
   local from="${MAIL_ACCT_DISPLAY} <${MAIL_ACCT_EMAIL}>"
 
-  # Compose message
+  # Compose message (plain text, or multipart/mixed when attachments given)
   local msg_file
   msg_file=$(mktemp /tmp/mail-cli-send.XXXXXX)
-  mail_format_compose "$from" "$to" "$subject" "$body" "$cc" "$bcc" > "$msg_file"
+  if [ "${#attach_files[@]}" -gt 0 ]; then
+    local attachments_list
+    attachments_list=$(printf '%s\n' "${attach_files[@]}")
+    mail_format_compose_multipart "$from" "$to" "$subject" "$body" "$cc" "$bcc" "" "" "$attachments_list" > "$msg_file"
+  else
+    mail_format_compose "$from" "$to" "$subject" "$body" "$cc" "$bcc" > "$msg_file"
+  fi
 
   # Collect all recipients
   local all_rcpt="$to"
@@ -61,12 +79,13 @@ cmd_send() {
 
   if [ $send_exit -eq 0 ]; then
     echo " done"
-    echo "✓ Sent to ${to}"
+    echo "${C_GREEN}✓${C_RESET} Sent to ${to}"
     [ -n "$cc" ] && echo "  Cc: ${cc}"
+    [ "${#attach_files[@]}" -gt 0 ] && echo "  Attachments: ${#attach_files[@]}"
     return 0
   else
     echo " FAILED"
-    echo "error: could not send email (exit code: ${send_exit})" >&2
+    echo "${C_RED}error:${C_RESET} could not send email — $(_mail_curl_error_message "$send_exit")" >&2
     return 1
   fi
 }
@@ -86,18 +105,18 @@ cmd_reply() {
   done
 
   if [ -z "$uid" ]; then
-    echo "error: message UID required" >&2
+    echo "${C_RED}error:${C_RESET} message UID required" >&2
     echo "Usage: mail reply <uid> --body 'text'" >&2
-    return 1
+    return 2
   fi
 
-  mail_resolve_account || return 1
+  mail_resolve_account || return $?
 
   # Fetch original message
   local raw_original
   raw_original=$(mail_imap_fetch_body "$folder" "$uid")
   if [ -z "$raw_original" ]; then
-    echo "error: could not fetch original message" >&2; return 1
+    echo "${C_RED}error:${C_RESET} could not fetch original message" >&2; return 1
   fi
 
   local orig_headers
@@ -157,10 +176,11 @@ ${quoted}"
 
   if [ $send_exit -eq 0 ]; then
     echo " done"
-    echo "✓ Replied to ${reply_to}"
+    echo "${C_GREEN}✓${C_RESET} Replied to ${reply_to}"
     return 0
   else
     echo " FAILED"
+    echo "${C_RED}error:${C_RESET} could not send reply — $(_mail_curl_error_message "$send_exit")" >&2
     return 1
   fi
 }
@@ -181,7 +201,7 @@ cmd_forward() {
   done
 
   if [ -z "$uid" ]; then
-    echo "error: message UID required" >&2; return 1
+    echo "${C_RED}error:${C_RESET} message UID required" >&2; return 2
   fi
   if [ -z "$to" ]; then
     echo "? Forward to:"
@@ -189,7 +209,7 @@ cmd_forward() {
     read -r to
   fi
 
-  mail_resolve_account || return 1
+  mail_resolve_account || return $?
 
   # Fetch original
   local raw_original
@@ -232,10 +252,11 @@ ${orig_body}"
 
   if [ $send_exit -eq 0 ]; then
     echo " done"
-    echo "✓ Forwarded to ${to}"
+    echo "${C_GREEN}✓${C_RESET} Forwarded to ${to}"
     return 0
   else
     echo " FAILED"
+    echo "${C_RED}error:${C_RESET} could not forward message — $(_mail_curl_error_message "$send_exit")" >&2
     return 1
   fi
 }

@@ -133,15 +133,24 @@ cmd_auth_login() {
       ;;
   esac
 
-  echo "? Password / App Password:"
-  printf "  > "
-  if [ -t 0 ]; then
-    stty -echo 2>/dev/null || true
-    read -r password
-    stty echo 2>/dev/null || true
-    echo ""
+  local password=""
+  if [ -n "$password_cmd" ]; then
+    password=$(bash -c "$password_cmd" 2>/dev/null)
+    if [ -z "$password" ]; then
+      echo "${C_RED}error:${C_RESET} --password-cmd produced no output" >&2
+      return 1
+    fi
   else
-    read -r password
+    echo "? Password / App Password:"
+    printf "  > "
+    if [ -t 0 ]; then
+      stty -echo 2>/dev/null || true
+      read -r password
+      stty echo 2>/dev/null || true
+      echo ""
+    else
+      read -r password
+    fi
   fi
 
   # Test IMAP connection
@@ -161,20 +170,20 @@ cmd_auth_login() {
       ;;
   esac
   local test_result
-  test_result=$(curl -s --url "$imap_url" \
+  test_result=$(_mail_curl -s --url "$imap_url" \
     --user "${username}:${password}" \
     --request "NOOP" "${imap_extra_args[@]}" -o /dev/null -w "%{http_code}" 2>&1)
   local test_exit=$?
 
   if [ $test_exit -ne 0 ]; then
     echo " FAILED"
-    echo "error: could not connect to IMAP server (exit code: ${test_exit})" >&2
-    echo "  Check your server, email, and password." >&2
+    echo "${C_RED}error:${C_RESET} could not connect to IMAP server — $(_mail_curl_error_message "$test_exit")" >&2
     return 1
   fi
   echo " OK"
 
-  # Save account
+  # Save account. When --password-cmd is set, store the command instead of
+  # the plaintext password (config.shs resolves it at use-time).
   local account_json
   account_json=$(jq -n \
     --arg provider "$provider" \
@@ -186,6 +195,7 @@ cmd_auth_login() {
     --arg smtp "$smtp_server" \
     --arg sport "$smtp_port" \
     --arg pass "$password" \
+    --arg pass_cmd "$password_cmd" \
     --arg tls "$tls_mode" \
     '{
       provider: $provider,
@@ -196,9 +206,9 @@ cmd_auth_login() {
       imap_port: ($iport | tonumber),
       smtp_server: $smtp,
       smtp_port: ($sport | tonumber),
-      password: $pass,
       tls: $tls
-    }')
+    }
+    + (if $pass_cmd != "" then {password_cmd: $pass_cmd} else {password: $pass} end)')
 
   mail_config_set_account "$account_name" "$account_json"
 
@@ -210,7 +220,7 @@ cmd_auth_login() {
   fi
 
   echo ""
-  echo "✓ Account '${account_name}' configured (${email} via ${provider})"
+  echo "${C_GREEN}✓${C_RESET} Account '${account_name}' configured (${email} via ${provider})"
   [ "$(mail_config_get_default)" = "$account_name" ] && echo "  Set as default account"
 }
 
@@ -228,13 +238,13 @@ cmd_auth_logout() {
   fi
 
   if [ -z "$account_name" ]; then
-    echo "error: specify account to remove" >&2; return 1
+    echo "${C_RED}error:${C_RESET} specify account to remove" >&2; return 2
   fi
 
   local acc
   acc=$(mail_config_get_account "$account_name")
   if [ -z "$acc" ]; then
-    echo "error: account '${account_name}' not found" >&2; return 1
+    echo "${C_RED}error:${C_RESET} account '${account_name}' not found" >&2; return 1
   fi
 
   local email
@@ -246,7 +256,7 @@ cmd_auth_logout() {
     mail_config_set_default ""
   fi
 
-  echo "✓ Account '${account_name}' (${email}) removed"
+  echo "${C_GREEN}✓${C_RESET} Account '${account_name}' (${email}) removed"
 }
 
 cmd_auth_status() {
@@ -281,6 +291,15 @@ cmd_auth_status() {
     echo "  ✓ ${email} (${provider})"
     echo "  - IMAP: ${imap_server}:${imap_port}"
 
+    # Resolve password (honors password_cmd, same as mail_resolve_account)
+    local status_password status_password_cmd
+    status_password_cmd=$(echo "$acc" | jq -r '.password_cmd // empty')
+    if [ -n "$status_password_cmd" ]; then
+      status_password=$(bash -c "$status_password_cmd" 2>/dev/null)
+    else
+      status_password=$(echo "$acc" | jq -r '.password // empty')
+    fi
+
     # Quick connection test
     local test_exit
     local imap_url
@@ -297,12 +316,13 @@ cmd_auth_status() {
         imap_url="imaps://${imap_server}:${imap_port}/"
         ;;
     esac
-    if curl -s --url "$imap_url" \
-      --user "${username}:$(echo "$acc" | jq -r '.password')" \
+    if _mail_curl -s --url "$imap_url" \
+      --user "${username}:${status_password}" \
       --request "NOOP" "${imap_extra_args[@]}" -o /dev/null 2>/dev/null; then
       echo "  ✓ Connection OK"
     else
-      echo "  ✗ Connection failed"
+      test_exit=$?
+      echo "  ✗ Connection failed — $(_mail_curl_error_message "$test_exit")"
     fi
   done
 }

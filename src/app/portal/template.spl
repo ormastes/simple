@@ -1,0 +1,160 @@
+"""
+# Minimal View Templating
+
+The portal's `views/` directory (layouts/application.html, shared/_nav.html,
+shared/_flash.html, home/index.html) was written against a mustache-style
+`{{var}}` / `{{{raw}}}` / `{{#if}}` / `{{>partial}}` syntax that was never
+wired to a real renderer (see git history: the whole MVC layer was dead
+code). Rather than pull in the broken `web_framework` framework (its
+`render_html`/`render_error` helpers return plain tuples where an
+`HttpResponseData` struct is required — it does not compile against real
+usage), this module implements just enough of that syntax to serve the
+existing view files as-is: named substitution, raw substitution, and a
+single-level `{{#if key}}...{{else}}...{{/if}}` conditional. This keeps the
+shared chrome (layout + nav + flash) as the one source of truth instead of
+re-deriving it in Simple string-building code.
+"""
+
+use std.common.web.html_escape.{html_escape}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+val VIEWS_ROOT = "src/app/portal/views"
+
+fn _read_view(rel: text) -> text:
+    val path = "{VIEWS_ROOT}/{rel}"
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+# ----------------------------------------------------------------------------
+# Simple's string literals interpolate `{expr}` inline, so a raw `"{{...}}"`
+# literal is NOT literal text — the lexer treats `{{`/`}}` as escaped single
+# braces and a lone `{ident}` in between as a real interpolation (this is how
+# `"{{{body}}}"` used to blow up with `semantic: variable 'body' not found`:
+# it decoded to literal-`{` + interpolate(body) + literal-`}`). Building the
+# mustache delimiters below out of independently-returned single-brace
+# strings sidesteps the lexer's escaping entirely — the concatenation happens
+# at runtime, well after parsing.
+# ----------------------------------------------------------------------------
+
+fn _open1() -> text:
+    return "{"
+
+fn _close1() -> text:
+    return "}"
+
+fn _open2() -> text:
+    _open1() + _open1()
+
+fn _close2() -> text:
+    _close1() + _close1()
+
+fn _open3() -> text:
+    _open1() + _open1() + _open1()
+
+fn _close3() -> text:
+    _close1() + _close1() + _close1()
+
+# ============================================================================
+# {{#if key}}...{{else}}...{{/if}} — single, non-nested block
+# ============================================================================
+
+pub fn render_if_block(content: text, key: text, condition: bool) -> text:
+    val open_tag = _open2() + "#if " + key + _close2()
+    val close_tag = _open2() + "/if" + _close2()
+    val else_tag = _open2() + "else" + _close2()
+    val start = content.index_of(open_tag)
+    if start < 0:
+        return content
+    val after_open = start + open_tag.len()
+    val rel_end = content[after_open:].index_of(close_tag)
+    if rel_end < 0:
+        return content
+    val end = after_open + rel_end
+    val inner = content[after_open:end]
+    val else_idx = inner.index_of(else_tag)
+    var chosen = ""
+    if else_idx >= 0:
+        chosen = if condition: inner[0:else_idx] else: inner[else_idx + else_tag.len():]
+    else:
+        chosen = if condition: inner else: ""
+    content[0:start] + chosen + content[end + close_tag.len():]
+
+# ============================================================================
+# {{{raw}}} / {{escaped}} substitution
+# ============================================================================
+
+pub fn substitute_raw(content: text, key: text, value: text) -> text:
+    content.replace(_open3() + key + _close3(), value)
+
+pub fn substitute_escaped(content: text, key: text, value: text) -> text:
+    content.replace(_open2() + key + _close2(), html_escape(value))
+
+# ============================================================================
+# Layout rendering — reuses views/layouts/application.html + shared partials
+# ============================================================================
+
+pub fn render_layout(title: text, body_html: text) -> text:
+    var nav = _read_view("shared/_nav.html")
+    nav = render_if_block(nav, "current_user_id", false)
+
+    var flash = _read_view("shared/_flash.html")
+    flash = render_if_block(flash, "_flash_html", false)
+
+    var layout = _read_view("layouts/application.html")
+    if layout == "":
+        return "<html><body><h1>{title}</h1>{body_html}</body></html>"
+    layout = substitute_escaped(layout, "title", title)
+    layout = layout.replace(_open2() + ">_nav" + _close2(), nav)
+    layout = layout.replace(_open2() + ">_flash" + _close2(), flash)
+    layout = layout.replace(_open3() + "body" + _close3(), body_html)
+    layout
+
+fn _strip_layout_wrapper(content: text) -> text:
+    val trimmed = content.trim()
+    if not trimmed.starts_with(_open2() + "#layout"):
+        return trimmed
+    val first_nl = trimmed.index_of("\n")
+    var rest = if first_nl >= 0: trimmed[first_nl + 1:] else: ""
+    val close_idx = rest.index_of(_open2() + "/layout" + _close2())
+    if close_idx >= 0:
+        rest = rest[0:close_idx]
+    rest
+
+pub fn render_home_page() -> text:
+    var body = _strip_layout_wrapper(_read_view("home/index.html"))
+    if body == "":
+        return render_layout("Simple Language Portal", "<p>Home view missing.</p>")
+
+    body = substitute_raw(body, "featured_html", _home_featured_html())
+    body = substitute_raw(body, "recent_html", _home_recent_html())
+    body = substitute_escaped(body, "page_title", "Discover Simple Packages")
+    body = substitute_escaped(body, "page_description",
+        "Browse, search, and publish packages for the Simple programming language.")
+    body = substitute_escaped(body, "total_packages", "0")
+    body = substitute_escaped(body, "total_downloads", "0")
+    body = substitute_escaped(body, "total_users", "0")
+    body = render_if_block(body, "docs_nav_html", false)
+
+    render_layout("Simple Language Portal", body)
+
+fn _home_featured_html() -> text:
+    "<div class=\"package-grid\">" +
+        "<div class=\"package-card\"><h3><a href=\"/repos\">Browse repositories</a></h3>" +
+        "<p>Read-only git browser for repos under this portal.</p></div>" +
+        "</div>"
+
+fn _home_recent_html() -> text:
+    "<div class=\"package-list\"><p class=\"empty-state\">Package publishing is not wired up yet — try <a href=\"/repos\">Repos</a>.</p></div>"
+
+# ============================================================================
+# Error pages
+# ============================================================================
+
+pub fn render_error_page(status: i64, title: text, message: text) -> text:
+    val body = "<section class=\"error-page\"><h1>{status}</h1><h2>{html_escape(title)}</h2>" +
+        "<p>{html_escape(message)}</p><p><a href=\"/\">Back to home</a></p></section>"
+    render_layout("{status} {title}", body)

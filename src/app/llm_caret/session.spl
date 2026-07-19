@@ -1,0 +1,159 @@
+# LLM Caret - Session Persistence
+#
+# Persists a conversation (transcript + provider session id) to
+# ~/.llm_caret/sessions/<id>.json so `--resume <id>` / `/resume <id>` can
+# restore it across process runs and within a single interactive session.
+#
+# Storage is one small JSON file per session id (hand-rolled reader/writer,
+# matching json_helpers.spl's dependency-light style - no external JSON lib
+# in this stdlib slice). Session transcripts are internal to llm_caret, so
+# SDN (the repo's preferred config/data format) is not required here.
+
+use app.io.mod.{home, file_exists, file_read, file_write, dir_create_all, dir_list, is_dir, getpid, current_time_ms}
+use app.llm_caret.types.{Message}
+use app.llm_caret.json_helpers.{jo6, ja, build_message_json, json_find, extract_json_string, extract_json_int}
+use std.mcp.helpers.{jp, js}
+
+struct Session:
+    id: text
+    provider: text
+    model: text
+    provider_session_id: text
+    messages: [Message]
+    updated_at_ms: i64
+
+fn _sessions_dir() -> text:
+    home() + "/.llm_caret/sessions"
+
+fn session_path(id: text) -> text:
+    _sessions_dir() + "/" + id + ".json"
+
+# Timestamp + pid keeps ids unique across quick successive calls without a
+# process-wide counter (which would need module state shared across files).
+fn gen_session_id() -> text:
+    "sess-" + current_time_ms().to_text() + "-" + getpid().to_text()
+
+fn new_session(id: text, provider: text, model: text) -> Session:
+    Session(id: id, provider: provider, model: model, provider_session_id: "", messages: [], updated_at_ms: 0)
+
+fn session_with_messages(sess: Session, messages: [Message], provider_session_id: text, now_ms: i64) -> Session:
+    Session(
+        id: sess.id, provider: sess.provider, model: sess.model,
+        provider_session_id: provider_session_id, messages: messages, updated_at_ms: now_ms
+    )
+
+# ============================================================================
+# JSON encode
+# ============================================================================
+
+fn _messages_json(msgs: [Message]) -> text:
+    var items: [text] = []
+    for m in msgs:
+        items = items + [build_message_json(m.role, m.content)]
+    ja(items)
+
+fn session_to_json(sess: Session) -> text:
+    jo6(
+        jp("id", js(sess.id)),
+        jp("provider", js(sess.provider)),
+        jp("model", js(sess.model)),
+        jp("provider_session_id", js(sess.provider_session_id)),
+        jp("updated_at_ms", sess.updated_at_ms.to_text()),
+        jp("messages", _messages_json(sess.messages))
+    )
+
+# ============================================================================
+# JSON decode (brace/quote-aware object scanner, same idiom as
+# tools.spl's _extract_object_at - required because message content can
+# itself contain literal '{'/'}' characters, e.g. tool output).
+# ============================================================================
+
+fn _extract_object_at(json: text, start: i64) -> text:
+    var depth = 0
+    var i = start
+    var in_str = false
+    var escaped = false
+    while i < json.len():
+        val ch = json.substring(i, i + 1)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == "{":
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    return json.substring(start, i + 1)
+        i = i + 1
+    json.substring(start)
+
+fn parse_messages_array(json: text) -> [Message]:
+    val key = "\"messages\":"
+    val idx = json_find(json, key)
+    if idx < 0:
+        return []
+    var j = idx + key.len()
+    while j < json.len() and json.substring(j, j + 1) != "[":
+        j = j + 1
+    if j >= json.len():
+        return []
+    var msgs: [Message] = []
+    var i = j + 1
+    while i < json.len():
+        val ch = json.substring(i, i + 1)
+        if ch == "]":
+            break
+        if ch == "{":
+            val obj = _extract_object_at(json, i)
+            val role = extract_json_string(obj, "role")
+            val content = extract_json_string(obj, "content")
+            msgs = msgs + [Message(role: role, content: content)]
+            i = i + obj.len()
+        else:
+            i = i + 1
+    msgs
+
+fn session_from_json(raw: text) -> Session:
+    Session(
+        id: extract_json_string(raw, "id"),
+        provider: extract_json_string(raw, "provider"),
+        model: extract_json_string(raw, "model"),
+        provider_session_id: extract_json_string(raw, "provider_session_id"),
+        messages: parse_messages_array(raw),
+        updated_at_ms: extract_json_int(raw, "updated_at_ms")
+    )
+
+# ============================================================================
+# Disk I/O
+# ============================================================================
+
+fn save_session(sess: Session) -> bool:
+    dir_create_all(_sessions_dir())
+    file_write(session_path(sess.id), session_to_json(sess))
+
+fn load_session(id: text) -> Session?:
+    val path = session_path(id)
+    if not file_exists(path):
+        return nil
+    val raw = file_read(path) ?? ""
+    if raw == "":
+        return nil
+    Some(session_from_json(raw))
+
+fn list_session_ids() -> [text]:
+    val dir = _sessions_dir()
+    if not is_dir(dir):
+        return []
+    val entries = dir_list(dir) ?? []
+    var ids: [text] = []
+    for e in entries:
+        if e.ends_with(".json"):
+            ids = ids + [e.substring(0, e.len() - 5)]
+    ids

@@ -1,0 +1,243 @@
+"""
+# Git Repo Plumbing
+
+Read-only git repository browsing backed entirely by `git` plumbing
+subprocesses (the same approach gitweb uses) — this module never parses
+git object storage itself.
+
+All external input (repo name, ref, path) MUST go through the `sanitize_*`
+functions before being used to build a git command line. Values are always
+passed as argv array elements (never interpolated into a shell string), and
+sanitization additionally rejects `..`, absolute paths, and any character
+outside a small safe whitelist so a crafted ref/path cannot be interpreted
+as a git option (e.g. a leading `-`) or escape the repository root.
+"""
+
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir}
+
+extern fn rt_file_exists(path: text) -> bool
+
+val GIT_TIMEOUT_MS: i64 = 10000
+val GIT_MAX_OUTPUT_BYTES: i64 = 4194304
+
+# ============================================================================
+# Data types
+# ============================================================================
+
+pub struct RepoInfo:
+    name: text
+    path: text
+    git_dir: text
+    bare: bool
+
+pub struct TreeEntry:
+    mode: text
+    kind: text
+    object_id: text
+    size: text
+    name: text
+
+pub struct CommitEntry:
+    sha: text
+    author: text
+    relative_date: text
+    subject: text
+
+# ============================================================================
+# Input sanitization
+# ============================================================================
+
+val _SAFE_NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+val _SAFE_PATH_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./"
+
+fn _all_chars_in(raw: text, allowed: text) -> bool:
+    var i = 0
+    while i < raw.len():
+        if not allowed.contains(raw.char_at(i)):
+            return false
+        i = i + 1
+    true
+
+pub fn sanitize_repo_name(raw: text) -> Result<text, text>:
+    if raw == "":
+        return Err("empty repository name")
+    if raw.contains("..") or raw.starts_with("-") or raw.starts_with("."):
+        return Err("invalid repository name")
+    if not _all_chars_in(raw, _SAFE_NAME_CHARS):
+        return Err("invalid repository name")
+    Ok(raw)
+
+pub fn sanitize_ref(raw: text) -> Result<text, text>:
+    if raw == "":
+        return Err("empty ref")
+    if raw.contains("..") or raw.starts_with("-"):
+        return Err("invalid ref")
+    if not _all_chars_in(raw, _SAFE_NAME_CHARS):
+        return Err("invalid ref")
+    Ok(raw)
+
+pub fn sanitize_path(raw: text) -> Result<text, text>:
+    if raw.contains("..") or raw.starts_with("/") or raw.starts_with("-"):
+        return Err("invalid path")
+    if not _all_chars_in(raw, _SAFE_PATH_CHARS):
+        return Err("invalid path")
+    Ok(raw)
+
+# ============================================================================
+# Repo discovery
+# ============================================================================
+
+fn _basename(path: text) -> text:
+    var trimmed = path
+    while trimmed.len() > 1 and trimmed.ends_with("/"):
+        trimmed = trimmed[0:trimmed.len() - 1]
+    if trimmed == "." or trimmed == "" or trimmed == "/":
+        return "repo"
+    val parts = trimmed.split("/")
+    val last = parts[parts.len() - 1]
+    if last == "":
+        "repo"
+    else:
+        last
+
+pub fn list_repos(root: text) -> [RepoInfo]:
+    """List repos found directly under `root`, plus `root` itself if it is
+    a repo. Only scans one level deep (not a recursive filesystem walk)."""
+    var repos: [RepoInfo] = []
+    val root_git = "{root}/.git"
+    if is_dir(root_git) or rt_file_exists(root_git):
+        repos.push(RepoInfo(name: _basename(root), path: root, git_dir: root_git, bare: false))
+
+    for entry in dir_list(root):
+        if entry == "" or entry == "." or entry == "..":
+            continue
+        val full = "{root}/{entry}"
+        if not is_dir(full):
+            continue
+        val nested_git = "{full}/.git"
+        if is_dir(nested_git) or rt_file_exists(nested_git):
+            repos.push(RepoInfo(name: entry, path: full, git_dir: nested_git, bare: false))
+        elif entry.ends_with(".git") and is_dir("{full}/refs") and rt_file_exists("{full}/HEAD"):
+            repos.push(RepoInfo(name: entry[0:entry.len() - 4], path: full, git_dir: full, bare: true))
+    repos
+
+pub fn find_repo(root: text, name: text) -> RepoInfo?:
+    for r in list_repos(root):
+        if r.name == name:
+            return r
+    nil
+
+# ============================================================================
+# Git plumbing calls
+# ============================================================================
+
+fn _git(git_dir: text, args: [text]) -> (text, text, i64):
+    var full_args: [text] = ["--git-dir", git_dir]
+    for a in args:
+        full_args.push(a)
+    process_run_bounded("git", full_args, GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+
+fn _is_empty_repo_error(err: text) -> bool:
+    val lower = err.lower()
+    lower.contains("does not have any commits") or
+        lower.contains("not a valid object name") or
+        lower.contains("bad revision") or
+        lower.contains("unknown revision") or
+        lower.contains("ambiguous argument")
+
+fn _split_ws(s: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == " " or ch == "\t":
+            if cur != "":
+                out.push(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur != "":
+        out.push(cur)
+    out
+
+pub fn repo_default_ref(repo: RepoInfo) -> text:
+    val (out, err, code) = _git(repo.git_dir, ["symbolic-ref", "--short", "HEAD"])
+    if code == 0 and out.trim() != "":
+        return out.trim()
+    "HEAD"
+
+pub fn repo_last_commit(repo: RepoInfo, ref: text) -> (text, text):
+    """Returns (relative_date, subject); ("", "") if the repo has no commits."""
+    val (out, err, code) = _git(repo.git_dir, ["log", "-1", "--format=%cr%x09%s", ref])
+    if code != 0:
+        return ("", "")
+    val trimmed = out.trim()
+    if trimmed == "":
+        return ("", "")
+    val tab_idx = trimmed.index_of("\t")
+    if tab_idx < 0:
+        return ("", trimmed)
+    (trimmed[0:tab_idx], trimmed[tab_idx + 1:])
+
+pub fn git_ls_tree(repo: RepoInfo, ref: text, path: text) -> Result<[TreeEntry], text>:
+    val treeish = if path == "": ref else: "{ref}:{path}"
+    val (out, err, code) = _git(repo.git_dir, ["ls-tree", "-l", treeish])
+    if code != 0:
+        if _is_empty_repo_error(err):
+            return Ok([])
+        return Err(err.trim())
+    var entries: [TreeEntry] = []
+    for line in out.split("\n"):
+        if line.trim() == "":
+            continue
+        val tab_idx = line.index_of("\t")
+        if tab_idx < 0:
+            continue
+        val meta = line[0:tab_idx].trim()
+        val name = line[tab_idx + 1:]
+        val fields = _split_ws(meta)
+        if fields.len() < 4:
+            continue
+        entries.push(TreeEntry(mode: fields[0], kind: fields[1], object_id: fields[2], size: fields[3], name: name))
+    Ok(entries)
+
+pub fn git_show_blob(repo: RepoInfo, ref: text, path: text) -> Result<text, text>:
+    if path == "":
+        return Err("empty path")
+    val (out, err, code) = _git(repo.git_dir, ["show", "{ref}:{path}"])
+    if code != 0:
+        return Err(err.trim())
+    Ok(out)
+
+pub fn git_log(repo: RepoInfo, ref: text, skip_count: i64, limit: i64) -> Result<[CommitEntry], text>:
+    val (out, err, code) = _git(repo.git_dir, [
+        "log", "--format=%H%x09%an%x09%ar%x09%s",
+        "--skip={skip_count}", "--max-count={limit}", ref
+    ])
+    if code != 0:
+        if _is_empty_repo_error(err):
+            return Ok([])
+        return Err(err.trim())
+    var entries: [CommitEntry] = []
+    for line in out.split("\n"):
+        if line.trim() == "":
+            continue
+        val parts = line.split("\t")
+        if parts.len() < 4:
+            continue
+        var subject = parts[3]
+        var k = 4
+        while k < parts.len():
+            subject = subject + "\t" + parts[k]
+            k = k + 1
+        entries.push(CommitEntry(sha: parts[0], author: parts[1], relative_date: parts[2], subject: subject))
+    Ok(entries)
+
+pub fn git_show_commit(repo: RepoInfo, sha: text) -> Result<text, text>:
+    val (out, err, code) = _git(repo.git_dir, ["show", "--stat", "--patch", "--no-color", sha])
+    if code != 0:
+        return Err(err.trim())
+    Ok(out)

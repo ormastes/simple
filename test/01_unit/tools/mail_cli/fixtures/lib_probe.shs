@@ -1,0 +1,203 @@
+#!/bin/bash
+# Offline probe driver for tools/mail-cli's pure-logic library functions.
+# Sources config.shs + format.shs directly (no curl/network involved) and
+# exercises: config round-trip (incl. password_cmd), MIME/attachment
+# builder, subject-thread normalization, column-width truncation, and the
+# FETCH-range response parser. Prints one "<check>: PASS" or
+# "<check>: FAIL <detail>" line per assertion; the calling spec asserts on
+# these lines rather than parsing raw output structure itself.
+#
+# Usage: lib_probe.shs <path-to-tools/mail-cli/lib> <isolated-temp-dir>
+set -u
+
+LIB_DIR="$1"
+WORK_DIR="$2"
+
+# Isolate config.shs's HOME lookup — never touch the real user config.
+export HOME="${WORK_DIR}/home"
+mkdir -p "$HOME"
+
+. "${LIB_DIR}/config.shs"
+. "${LIB_DIR}/format.shs"
+
+pass() { echo "$1: PASS"; }
+fail() { echo "$1: FAIL $2"; }
+
+# ---------------------------------------------------------------------------
+# Config round-trip: add an account, list it, resolve it back.
+# ---------------------------------------------------------------------------
+account_json=$(jq -n '{
+  provider: "gmail", email: "alice@example.com", username: "alice@example.com",
+  display_name: "Alice", imap_server: "imap.gmail.com", imap_port: 993,
+  smtp_server: "smtp.gmail.com", smtp_port: 465, password: "plaintext-secret",
+  tls: "implicit"
+}')
+mail_config_set_account "work" "$account_json"
+mail_config_set_default "work"
+
+listed=$(mail_config_list_accounts)
+if [ "$listed" = "work" ]; then
+  pass "config_round_trip_list"
+else
+  fail "config_round_trip_list" "expected 'work', got '${listed}'"
+fi
+
+perms=$(stat -c '%a' "$MAIL_CONFIG_FILE" 2>/dev/null || stat -f '%A' "$MAIL_CONFIG_FILE" 2>/dev/null)
+if [ "$perms" = "600" ]; then
+  pass "config_file_permissions"
+else
+  fail "config_file_permissions" "expected 600, got '${perms}'"
+fi
+
+mail_resolve_account
+if [ "$MAIL_ACCT_EMAIL" = "alice@example.com" ] && [ "$MAIL_ACCT_PASSWORD" = "plaintext-secret" ]; then
+  pass "config_resolve_plaintext_password"
+else
+  fail "config_resolve_plaintext_password" "email='${MAIL_ACCT_EMAIL}' password='${MAIL_ACCT_PASSWORD}'"
+fi
+
+# ---------------------------------------------------------------------------
+# password_cmd: account with no stored password, resolved via a command.
+# ---------------------------------------------------------------------------
+account_json2=$(jq -n '{
+  provider: "other", email: "bob@example.com", username: "bob@example.com",
+  display_name: "Bob", imap_server: "imap.example.com", imap_port: 993,
+  smtp_server: "smtp.example.com", smtp_port: 465,
+  password_cmd: "echo cmd-derived-secret", tls: "implicit"
+}')
+mail_config_set_account "secondary" "$account_json2"
+MAIL_ACCOUNT="secondary"
+mail_resolve_account
+if [ "$MAIL_ACCT_PASSWORD" = "cmd-derived-secret" ]; then
+  pass "config_resolve_password_cmd"
+else
+  fail "config_resolve_password_cmd" "got '${MAIL_ACCT_PASSWORD}'"
+fi
+
+stored_password_field=$(mail_config_get_account "secondary" | jq -r '.password // "MISSING"')
+if [ "$stored_password_field" = "MISSING" ]; then
+  pass "config_password_cmd_not_persisted_as_plaintext"
+else
+  fail "config_password_cmd_not_persisted_as_plaintext" "found plaintext password field: ${stored_password_field}"
+fi
+MAIL_ACCOUNT=""
+
+# ---------------------------------------------------------------------------
+# Subject normalization (thread grouping key)
+# ---------------------------------------------------------------------------
+norm1=$(mail_format_normalize_subject "Re: Fwd: Ship it")
+[ "$norm1" = "Ship it" ] && pass "subject_normalize_stacked_prefixes" || fail "subject_normalize_stacked_prefixes" "got '${norm1}'"
+
+norm2=$(mail_format_normalize_subject "Plain subject")
+[ "$norm2" = "Plain subject" ] && pass "subject_normalize_noop" || fail "subject_normalize_noop" "got '${norm2}'"
+
+# ---------------------------------------------------------------------------
+# Column-width truncation
+# ---------------------------------------------------------------------------
+trunc=$(_mail_truncate "This is a very long subject line" 10)
+if [ "${#trunc}" -eq 10 ] && [[ "$trunc" == *"…" ]]; then
+  pass "truncate_cuts_and_marks"
+else
+  fail "truncate_cuts_and_marks" "got '${trunc}' (len ${#trunc})"
+fi
+
+notrunc=$(_mail_truncate "short" 20)
+[ "$notrunc" = "short" ] && pass "truncate_noop_when_short" || fail "truncate_noop_when_short" "got '${notrunc}'"
+
+# ---------------------------------------------------------------------------
+# Relative date formatting
+# ---------------------------------------------------------------------------
+five_min_ago=$(date -R -d "5 minutes ago" 2>/dev/null)
+rel=$(mail_format_relative_date "$five_min_ago")
+[ "$rel" = "5m ago" ] && pass "relative_date_minutes" || fail "relative_date_minutes" "got '${rel}'"
+
+bad_rel=$(mail_format_relative_date "not a real date")
+[ "$bad_rel" = "not a real date" ] && pass "relative_date_fallback_on_unparseable" || fail "relative_date_fallback_on_unparseable" "got '${bad_rel}'"
+
+# ---------------------------------------------------------------------------
+# MIME multipart/mixed attachment builder
+# ---------------------------------------------------------------------------
+att_file="${WORK_DIR}/report.pdf"
+printf 'PDF-fixture-bytes' > "$att_file"
+
+mime=$(mail_format_compose_multipart \
+  "Alice <alice@example.com>" "bob@example.com" "Report attached" "See attached." \
+  "" "" "" "" "$att_file")
+
+if echo "$mime" | grep -q '^Content-Type: multipart/mixed; boundary='; then
+  pass "mime_has_multipart_content_type"
+else
+  fail "mime_has_multipart_content_type" "missing multipart Content-Type header"
+fi
+
+if echo "$mime" | grep -q 'Content-Type: application/pdf; name="report.pdf"'; then
+  pass "mime_content_type_by_extension"
+else
+  fail "mime_content_type_by_extension" "expected application/pdf for .pdf attachment"
+fi
+
+if echo "$mime" | grep -q 'Content-Disposition: attachment; filename="report.pdf"'; then
+  pass "mime_content_disposition_attachment"
+else
+  fail "mime_content_disposition_attachment" "missing Content-Disposition"
+fi
+
+expected_b64=$(base64 "$att_file")
+if echo "$mime" | grep -qF "$expected_b64"; then
+  pass "mime_attachment_base64_body_present"
+else
+  fail "mime_attachment_base64_body_present" "base64 payload not found in composed message"
+fi
+
+boundary=$(echo "$mime" | sed -n 's/.*boundary="\(.*\)"/\1/p')
+close_count=$(echo "$mime" | grep -c "^--${boundary}--$")
+if [ "$close_count" -eq 1 ]; then
+  pass "mime_boundary_closed_once"
+else
+  fail "mime_boundary_closed_once" "expected exactly 1 closing boundary, found ${close_count}"
+fi
+
+# ---------------------------------------------------------------------------
+# FETCH-range response parser (structural, not byte-literal-exact — see
+# imap.shs mail_imap_fetch_headers_range comment on the live-server caveat)
+# ---------------------------------------------------------------------------
+fetch_fixture="* 5 FETCH (UID 105 BODY[HEADER] {58}
+From: alice@example.com
+Subject: Hello
+
+)
+* 6 FETCH (UID 106 BODY[HEADER] {40}
+From: bob@example.com
+Subject: Hi
+
+)
+a1 OK FETCH completed"
+
+parsed=$(mail_format_parse_fetch_range "$fetch_fixture")
+pair_count=$(echo "$parsed" | grep -c $'\t')
+if [ "$pair_count" -eq 2 ]; then
+  pass "fetch_range_parses_two_messages"
+else
+  fail "fetch_range_parses_two_messages" "expected 2 pairs, got ${pair_count}"
+fi
+
+first_uid=$(echo "$parsed" | head -1 | cut -f1)
+[ "$first_uid" = "105" ] && pass "fetch_range_first_uid" || fail "fetch_range_first_uid" "got '${first_uid}'"
+
+second_b64=$(echo "$parsed" | tail -1 | cut -f2)
+decoded=$(echo "$second_b64" | base64 -d 2>/dev/null)
+if echo "$decoded" | grep -q "bob@example.com"; then
+  pass "fetch_range_second_header_decodes"
+else
+  fail "fetch_range_second_header_decodes" "decoded: '${decoded}'"
+fi
+
+# Unparseable input must yield nothing (so the caller falls back to SEARCH)
+empty_parsed=$(mail_format_parse_fetch_range "a1 NO garbage response")
+if [ -z "$empty_parsed" ]; then
+  pass "fetch_range_empty_on_unparseable"
+else
+  fail "fetch_range_empty_on_unparseable" "expected empty, got '${empty_parsed}'"
+fi
+
+exit 0

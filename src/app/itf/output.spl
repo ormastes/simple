@@ -188,6 +188,68 @@ fn print_table_row(values: [text]):
     print row
 
 
+fn _table_col_widths(headers: [text], rows: [[text]]) -> [i64]:
+    """Max content width per column, seeded with the header width."""
+    var widths: [i64] = []
+    for h in headers:
+        widths.push(h.len())
+    for row in rows:
+        var i = 0
+        while i < row.len() and i < widths.len():
+            if row[i].len() > widths[i]:
+                widths[i] = row[i].len()
+            i = i + 1
+    widths
+
+
+fn print_table_dynamic(headers: [text], rows: [[text]]):
+    """Print a table with per-column widths computed from content (2-space gap).
+
+    Unlike print_table_header/print_table_row (fixed pad_right(20), used by
+    minio/jira listings), this does not truncate long titles/keys — used for
+    github issue/PR listings where titles vary widely in length.
+    """
+    val widths = _table_col_widths(headers, rows)
+    val color = should_use_color()
+    var header_line = ""
+    var i = 0
+    while i < headers.len():
+        val w = if i < widths.len(): widths[i] else: headers[i].len()
+        header_line = header_line + headers[i].pad_right(w + 2)
+        i = i + 1
+    if color:
+        print "{ansi_bold()}{header_line}{ansi_reset()}"
+    else:
+        print header_line
+    for row in rows:
+        var line = ""
+        var j = 0
+        while j < row.len():
+            val w = if j < widths.len(): widths[j] else: 0
+            line = line + row[j].pad_right(w + 2)
+            j = j + 1
+        print line
+
+
+fn colorize_state(state: text) -> text:
+    """Color a status word: open=green, closed/merged/done=dim, in-progress/review=yellow.
+
+    Used by github issue/PR listings and jira status columns. No-op when
+    color is disabled (NO_COLOR / non-tty) or the state doesn't match a
+    known bucket.
+    """
+    if not should_use_color():
+        return state
+    val lower = state.lower()
+    if lower == "open" or lower == "opened" or lower == "to do" or lower == "todo":
+        return "{ansi_green()}{state}{ansi_reset()}"
+    if lower == "closed" or lower == "merged" or lower == "done" or lower == "resolved":
+        return "{ansi_dim()}{state}{ansi_reset()}"
+    if lower.contains("progress") or lower == "review" or lower == "in review":
+        return "{ansi_yellow()}{state}{ansi_reset()}"
+    state
+
+
 fn open_in_browser(url: text) -> i64:
     """Open URL in browser (--web flag handler)."""
     use std.nogc_sync_mut.io.process_ops.{process_run}

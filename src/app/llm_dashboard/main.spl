@@ -1,6 +1,11 @@
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.text.{to_int_or}
+use app.llm_dashboard.data.store.{AgentDashboardStore}
+use app.web_dashboard.server.{DashboardServer}
+use app.io.cli_commands.{cli_run_file}
 
 extern fn rt_cli_get_args() -> [text]
+extern fn rt_env_get(key: text) -> text
 
 fn _is_help_arg(arg: text) -> bool:
     arg == "--help" or arg == "-h" or arg == "help"
@@ -43,6 +48,26 @@ fn _dashboard_mode(args: [text]) -> text:
             return "tui"
     "tui"
 
+fn _dir_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == "--dir" and i + 1 < args.len():
+            return args[i + 1]
+        i = i + 1
+    ""
+
+fn _port_arg(args: [text]) -> i64:
+    var i = 0
+    while i < args.len():
+        if (args[i] == "--port" or args[i] == "-p") and i + 1 < args.len():
+            return to_int_or(args[i + 1], 3600)
+        i = i + 1
+    3600
+
+fn _is_interactive_tty() -> bool:
+    val term = rt_env_get("TERM")
+    term != "" and term != "dumb"
+
 fn _print_status(mode: text):
     print "command=llm-dashboard"
     print "mode={mode}"
@@ -67,18 +92,20 @@ fn _print_help(progress_mode: text):
     print "  --tui               Render the terminal dashboard surface"
     print "  --ios               Use iOS-friendly web layout defaults"
     print ""
+    print "Options:"
+    print "  --port N, -p N     Web/iOS surface port (default 3600)"
+    print "  --dir PATH         Agent activity directory to watch"
+    print ""
     print "Shared log options:"
     for line in log_options_help():
         print "  {line}"
     print "  --status           Print dashboard mode and readiness without launching a host"
 
-fn _print_tui(mode: text):
+fn _print_plain_summary(mode: text, dir: text):
+    val store = if dir != "": AgentDashboardStore.with_dir(dir) else: AgentDashboardStore.new()
     print "LLM Agent Dashboard"
-    print "Mode: {mode}"
-    print "Research | Code | Review | Verify"
-    print "Claude   | Codex | Gemini"
-    print "Tasks    | Blockers | Signals"
-    print "q:quit"
+    print "mode={mode}"
+    print store.summary_line()
 
 fn main() -> i64:
     val args = _llm_dashboard_args()
@@ -100,5 +127,18 @@ fn main() -> i64:
         print "{\"command\":\"llm-dashboard\",\"status\":\"ready\",\"mode\":\"" + mode + "\"}"
         return 0
 
-    _print_tui(mode)
+    val dir = _dir_arg(args)
+
+    if mode == "web" or mode == "ios":
+        val port = _port_arg(args)
+        val server = if mode == "ios": DashboardServer.new_ios(port, dir) else: DashboardServer.new(port)
+        server.start()
+        return 0
+
+    if _is_interactive_tty():
+        # Delegate to the isolated TUI entrypoint so the (lightweight) web/ios
+        # path above never has to eagerly compile the common-ui TUI stack.
+        return cli_run_file("src/app/llm_dashboard/tui_main.spl", args, false, false)
+
+    _print_plain_summary(mode, dir)
     0

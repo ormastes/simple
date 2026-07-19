@@ -5,6 +5,87 @@
 MAIL_CONFIG_DIR="${HOME}/.config/mail-cli"
 MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/config.json"
 
+# Color support — bold headers, colored status/flags, dim metadata.
+# Respects NO_COLOR (https://no-color.org) and falls back to plain text
+# when stdout is not a terminal.
+if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
+  C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_RESET=""
+else
+  C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RESET=$'\033[0m'
+fi
+
+# Terminal width, for dynamic column sizing. Falls back to 80 when not a
+# tty or `tput` is unavailable.
+_mail_term_width() {
+  if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+    tput cols 2>/dev/null || echo 80
+  else
+    echo 80
+  fi
+}
+
+# Compute the FROM/SUBJECT column widths for table listings, scaling with
+# terminal width beyond the 100-col baseline (30/50 default split, extra
+# space distributed ~40/60). Echoes "<from_w> <subject_w>". Shared by the
+# header row and data rows so they always agree.
+_mail_col_widths() {
+  local from_w=30 subject_w=50
+  local term_w
+  term_w=$(_mail_term_width)
+  if [ "$term_w" -gt 100 ]; then
+    local extra=$((term_w - 100))
+    from_w=$((30 + extra * 2 / 5))
+    subject_w=$((50 + extra * 3 / 5))
+  fi
+  echo "$from_w $subject_w"
+}
+
+# Truncate text to N columns, appending "…" when it was cut. Safe on short
+# input (no-op).
+_mail_truncate() {
+  local text="$1" width="$2"
+  [ "$width" -lt 4 ] && width=4
+  if [ "${#text}" -le "$width" ]; then
+    printf '%s' "$text"
+  else
+    printf '%s…' "${text:0:$((width - 1))}"
+  fi
+}
+
+# Render an RFC 2822 date as a relative time ("3h ago", "Jun 12") when it
+# parses; falls back to the raw string on any parse failure (e.g. BSD date
+# without GNU-style -d, or an unparseable header value).
+mail_format_relative_date() {
+  local raw="$1"
+  [ -z "$raw" ] && { echo ""; return; }
+
+  local epoch now diff
+  epoch=$(date -d "$raw" +%s 2>/dev/null)
+  if [ -z "$epoch" ]; then
+    epoch=$(date -j -f "%a, %d %b %Y %H:%M:%S %z" "$raw" +%s 2>/dev/null)
+  fi
+  if [ -z "$epoch" ]; then
+    printf '%s' "$raw"
+    return
+  fi
+
+  now=$(date +%s)
+  diff=$((now - epoch))
+  [ "$diff" -lt 0 ] && diff=0
+
+  if [ "$diff" -lt 60 ]; then
+    echo "just now"
+  elif [ "$diff" -lt 3600 ]; then
+    echo "$((diff / 60))m ago"
+  elif [ "$diff" -lt 86400 ]; then
+    echo "$((diff / 3600))h ago"
+  elif [ "$diff" -lt 604800 ]; then
+    echo "$((diff / 86400))d ago"
+  else
+    date -d "$raw" '+%b %d' 2>/dev/null || date -j -f "%a, %d %b %Y %H:%M:%S %z" "$raw" '+%b %d' 2>/dev/null || printf '%s' "$raw"
+  fi
+}
+
 # Shared curl wrapper: bounded timeout + backoff retry on transient network
 # failures only. Passthrough — does not merge stderr or alter stdout framing,
 # so callers keep their own -o/-w/redirection semantics unchanged.
@@ -156,15 +237,15 @@ mail_resolve_account() {
     name=$(mail_config_get_default)
   fi
   if [ -z "$name" ]; then
-    echo "error: no account specified and no default set. Use --account NAME or run 'mail auth login'." >&2
-    return 1
+    echo "${C_RED}error:${C_RESET} no account specified and no default set. Use --account NAME or run 'mail auth login'." >&2
+    return 2
   fi
 
   local acc
   acc=$(mail_config_get_account "$name")
   if [ -z "$acc" ]; then
-    echo "error: account '${name}' not found" >&2
-    return 1
+    echo "${C_RED}error:${C_RESET} account '${name}' not found" >&2
+    return 2
   fi
 
   # Export account fields for use by other modules
@@ -186,7 +267,7 @@ mail_resolve_account() {
   if [ -n "$password_cmd" ]; then
     MAIL_ACCT_PASSWORD=$(bash -c "$password_cmd" 2>/dev/null)
     if [ -z "$MAIL_ACCT_PASSWORD" ]; then
-      echo "error: password_cmd for account '${name}' produced no output" >&2
+      echo "${C_RED}error:${C_RESET} password_cmd for account '${name}' produced no output" >&2
       return 1
     fi
   else

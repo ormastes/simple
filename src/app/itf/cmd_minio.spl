@@ -43,7 +43,22 @@ fn handle_minio(args: [text]) -> i64:
             1
 
 
+fn _require_transport(cfg: MinioConfig) -> bool:
+    """Hard-fail if the config asks for a TLS behavior the transport can't provide.
+
+    rt_http_request / rt_http_client_* expose no TLS-verify override, so
+    tls_skip_verify=true would silently be ignored (still verifying TLS) if we
+    let it through — that is a security lie. Fail loudly instead of warning.
+    """
+    if cfg.tls_skip_verify:
+        print_error("tls_skip_verify is not supported by the pure-Simple HTTP transport (no TLS-verify override in rt_http_request/rt_http_client_*). Remove tls_skip_verify from ~/.config/itf/auth.sdn, or use `itf minio` against a host with a valid cert. adapter_minio_mc.spl (mc CLI) can honor --insecure if you need that escape hatch.")
+        return false
+    true
+
+
 fn _require_auth(cfg: MinioConfig) -> bool:
+    if not _require_transport(cfg):
+        return false
     if not check_minio_auth(cfg):
         print_error("MinIO auth not configured. Set [minio] section in ~/.config/itf/auth.sdn")
         return false
@@ -209,6 +224,8 @@ fn _minio_presign(args: [text]) -> i64:
 fn _minio_health(args: [text]) -> i64:
     """`itf minio health`"""
     val cfg = load_minio_config()
+    if not _require_transport(cfg):
+        return 1
     if cfg.url == "":
         print_error("MinIO URL not configured")
         return 1

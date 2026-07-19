@@ -3,7 +3,7 @@
 # Depends on: config.shs, imap.shs, format.shs (sourced by main entry point)
 
 cmd_inbox() {
-  local folder="INBOX" limit=25 unread_only=0 output_mode="table"
+  local folder="INBOX" limit=25 unread_only=0 output_mode="table" threads_mode=0 wide=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -11,57 +11,159 @@ cmd_inbox() {
       --folder)  folder="$2"; shift 2 ;;
       --limit)   limit="$2"; shift 2 ;;
       --unread)  unread_only=1; shift ;;
+      --threads) threads_mode=1; shift ;;
+      --wide)    wide=1; shift ;;
       --json)    output_mode="json"; shift ;;
       *) shift ;;
     esac
   done
 
-  mail_resolve_account || return 1
+  mail_resolve_account || return $?
 
-  # Search for messages
   local criteria="ALL"
   [ "$unread_only" -eq 1 ] && criteria="UNSEEN"
 
-  local uids
-  uids=$(mail_imap_search "$folder" "$criteria")
+  # entry_uid[]/entry_json[] hold the final listing, most-recent-first,
+  # regardless of which fetch strategy populated them.
+  local -a entry_uid=() entry_json=()
+  local used_efficient=0
 
-  if [ -z "$uids" ]; then
-    echo "No messages found."
+  # Efficient path: only for the plain "ALL" listing (no --unread filter).
+  # Gets the message count via STATUS, then FETCHes just the last N by
+  # sequence range instead of SEARCH ALL (whole-mailbox UID list) + tail.
+  # Falls back unconditionally to the SEARCH path below if the count or the
+  # FETCH response can't be parsed — never bricks the listing on a server
+  # quirk we haven't seen.
+  if [ "$criteria" = "ALL" ]; then
+    local count
+    count=$(mail_imap_folder_count "$folder" 2>/dev/null)
+    if printf '%s' "$count" | grep -qE '^[0-9]+$' && [ "$count" -gt 0 ]; then
+      local start=$((count - limit + 1))
+      [ "$start" -lt 1 ] && start=1
+      local raw parsed
+      raw=$(mail_imap_fetch_headers_range "$folder" "${start}:${count}" 2>/dev/null)
+      parsed=$(mail_format_parse_fetch_range "$raw")
+      if [ -n "$parsed" ]; then
+        local -a tmp_uid=() tmp_json=()
+        local p_uid p_b64 hdr_text hdr_json
+        while IFS=$(printf '\t') read -r p_uid p_b64; do
+          [ -z "$p_uid" ] && continue
+          hdr_text=$(printf '%s' "$p_b64" | base64 -d 2>/dev/null)
+          hdr_json=$(mail_format_parse_headers "$hdr_text")
+          tmp_uid+=("$p_uid")
+          tmp_json+=("$hdr_json")
+        done <<< "$parsed"
+        if [ "${#tmp_uid[@]}" -gt 0 ]; then
+          # tmp_* is ascending by sequence (oldest..newest); reverse for
+          # most-recent-first, matching the fallback path's ordering.
+          local i
+          for (( i=${#tmp_uid[@]}-1; i>=0; i-- )); do
+            entry_uid+=("${tmp_uid[$i]}")
+            entry_json+=("${tmp_json[$i]}")
+          done
+          used_efficient=1
+        fi
+      fi
+    fi
+  fi
+
+  if [ "$used_efficient" -eq 0 ]; then
+    local uids
+    uids=$(mail_imap_search "$folder" "$criteria")
+
+    if [ -z "$uids" ]; then
+      if [ "$unread_only" -eq 1 ]; then
+        echo "No unread messages. Try 'mail inbox' to see everything."
+      else
+        echo "Inbox empty."
+      fi
+      return 0
+    fi
+
+    local uid headers_raw headers_json
+    for uid in $(echo "$uids" | tr ' ' '\n' | tail -n "$limit" | tac); do
+      headers_raw=$(mail_imap_fetch_headers "$folder" "$uid")
+      [ -z "$headers_raw" ] && continue
+      headers_json=$(mail_format_parse_headers "$headers_raw")
+      entry_uid+=("$uid")
+      entry_json+=("$headers_json")
+    done
+  fi
+
+  if [ "${#entry_uid[@]}" -eq 0 ]; then
+    if [ "$unread_only" -eq 1 ]; then
+      echo "No unread messages. Try 'mail inbox' to see everything."
+    else
+      echo "Inbox empty."
+    fi
     return 0
   fi
 
-  # Take only the last N UIDs (most recent)
-  local uid_array
-  uid_array=($(echo "$uids" | tr ' ' '\n' | tail -n "$limit" | tac))
-
-  if [ "$output_mode" = "table" ]; then
-    printf "%-6s %-2s %-30s %-50s %s\n" "UID" "" "FROM" "SUBJECT" "DATE"
-    printf "%-6s %-2s %-30s %-50s %s\n" "---" "--" "----" "-------" "----"
+  if [ "$output_mode" = "json" ]; then
+    local json_array="[]" i item
+    for (( i=0; i<${#entry_uid[@]}; i++ )); do
+      item=$(echo "${entry_json[$i]}" | jq --arg uid "${entry_uid[$i]}" --arg folder "$folder" '. + {uid: $uid, folder: $folder}')
+      json_array=$(echo "$json_array" | jq --argjson item "$item" '. + [$item]')
+    done
+    echo "$json_array" | jq '.'
+    return 0
   fi
 
-  local json_array="[]"
+  if [ "$threads_mode" -eq 1 ]; then
+    _mail_inbox_print_threads "$wide"
+    return 0
+  fi
 
-  for uid in "${uid_array[@]}"; do
-    local headers_raw
-    headers_raw=$(mail_imap_fetch_headers "$folder" "$uid")
-    if [ -z "$headers_raw" ]; then continue; fi
+  mail_format_table_header "$wide"
+  local i
+  for (( i=0; i<${#entry_uid[@]}; i++ )); do
+    mail_format_summary_line "${entry_uid[$i]}" "${entry_json[$i]}" "" "$wide"
+  done
+  return 0
+}
 
-    local headers_json
-    headers_json=$(mail_format_parse_headers "$headers_raw")
-
-    case "$output_mode" in
-      json)
-        headers_json=$(echo "$headers_json" | jq --arg uid "$uid" --arg folder "$folder" '. + {uid: $uid, folder: $folder}')
-        json_array=$(echo "$json_array" | jq --argjson item "$headers_json" '. + [$item]')
-        ;;
-      *)
-        mail_format_summary_line "$uid" "$headers_json" ""
-        ;;
-    esac
+# Group the entry_uid[]/entry_json[] arrays already populated by cmd_inbox
+# by normalized subject (Re:/Fwd: stripped), preserving first-seen order.
+# Parent = first message in each group; the rest render indented below it.
+# Deliberately O(n^2) — n is bounded by --limit (default 25) — to avoid
+# bash 4+ associative arrays (this tool targets bash 3.x too).
+_mail_inbox_print_threads() {
+  local wide="${1:-0}"
+  local -a norm_keys=()
+  local i subj
+  for (( i=0; i<${#entry_uid[@]}; i++ )); do
+    subj=$(echo "${entry_json[$i]}" | jq -r '.subject')
+    norm_keys+=("$(mail_format_normalize_subject "$subj")")
   done
 
-  [ "$output_mode" = "json" ] && echo "$json_array" | jq '.'
-  return 0
+  local -a order_keys=()
+  local key k found
+  for key in "${norm_keys[@]}"; do
+    found=0
+    for k in "${order_keys[@]}"; do
+      [ "$k" = "$key" ] && { found=1; break; }
+    done
+    [ "$found" -eq 0 ] && order_keys+=("$key")
+  done
+
+  mail_format_table_header "$wide"
+
+  local first from_val date_val
+  for key in "${order_keys[@]}"; do
+    first=1
+    for (( i=0; i<${#entry_uid[@]}; i++ )); do
+      [ "${norm_keys[$i]}" = "$key" ] || continue
+      if [ "$first" -eq 1 ]; then
+        mail_format_summary_line "${entry_uid[$i]}" "${entry_json[$i]}" "" "$wide"
+        first=0
+      else
+        from_val=$(echo "${entry_json[$i]}" | jq -r '.from')
+        date_val=$(mail_format_relative_date "$(echo "${entry_json[$i]}" | jq -r '.date')")
+        [ "$wide" -ne 1 ] && from_val=$(_mail_truncate "$from_val" 28)
+        printf "  %-4s  ${C_DIM}↳${C_RESET} %-28s %-50s ${C_DIM}%s${C_RESET}\n" "${entry_uid[$i]}" "$from_val" "" "$date_val"
+      fi
+    done
+  done
 }
 
 cmd_read() {
@@ -80,19 +182,19 @@ cmd_read() {
   done
 
   if [ -z "$uid" ]; then
-    echo "error: message UID required" >&2
+    echo "${C_RED}error:${C_RESET} message UID required" >&2
     echo "Usage: mail read <uid>" >&2
-    return 1
+    return 2
   fi
 
-  mail_resolve_account || return 1
+  mail_resolve_account || return $?
 
   # Fetch full message
   local raw_message
   raw_message=$(mail_imap_fetch_body "$folder" "$uid")
 
   if [ -z "$raw_message" ]; then
-    echo "error: could not fetch message ${uid}" >&2
+    echo "${C_RED}error:${C_RESET} could not fetch message ${uid}" >&2
     return 1
   fi
 
@@ -114,8 +216,24 @@ cmd_read() {
         "From:    \(.from)",
         "To:      \(.to)",
         "Subject: \(.subject)",
-        "Date:    \(.date)",
-        ""'
+        "Date:    \(.date)"'
+
+      # Thread chain summary (header-based only — no server THREAD ext)
+      local in_reply_to references
+      in_reply_to=$(echo "$headers_json" | jq -r '.in_reply_to // empty')
+      references=$(echo "$headers_json" | jq -r '.references // empty')
+      if [ -n "$in_reply_to" ] || [ -n "$references" ]; then
+        local ref_count=0
+        if [ -n "$references" ]; then
+          ref_count=$(echo "$references" | wc -w | tr -d ' ')
+        fi
+        if [ "$ref_count" -gt 0 ]; then
+          echo "Thread:  reply in a ${ref_count}-message chain (In-Reply-To: ${in_reply_to:-none})"
+        else
+          echo "Thread:  reply to ${in_reply_to}"
+        fi
+      fi
+      echo ""
 
       mail_format_parse_body "$raw_message"
       ;;
@@ -127,7 +245,7 @@ cmd_read() {
 }
 
 cmd_search() {
-  local query="" folder="INBOX" from="" subject="" since="" before="" limit=25 output_mode="table"
+  local query="" folder="INBOX" from="" subject="" since="" before="" limit=25 output_mode="table" wide=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -138,13 +256,14 @@ cmd_search() {
       --since)   since="$2"; shift 2 ;;
       --before)  before="$2"; shift 2 ;;
       --limit)   limit="$2"; shift 2 ;;
+      --wide)    wide=1; shift ;;
       --json)    output_mode="json"; shift ;;
       -*)        shift ;;
       *)         query="$1"; shift ;;
     esac
   done
 
-  mail_resolve_account || return 1
+  mail_resolve_account || return $?
 
   # Build IMAP SEARCH criteria
   local criteria=""
@@ -160,7 +279,11 @@ cmd_search() {
   uids=$(mail_imap_search "$folder" "$criteria")
 
   if [ -z "$uids" ]; then
-    echo "No messages found."
+    if [ -n "$query" ]; then
+      echo "No matches for '${query}'. Try a broader query or --since/--before."
+    else
+      echo "No matches. Try a broader --from/--subject/--since/--before."
+    fi
     return 0
   fi
 
@@ -168,10 +291,7 @@ cmd_search() {
   local uid_array
   uid_array=($(echo "$uids" | tr ' ' '\n' | tail -n "$limit" | tac))
 
-  if [ "$output_mode" = "table" ]; then
-    printf "%-6s %-30s %-50s %s\n" "UID" "FROM" "SUBJECT" "DATE"
-    printf "%-6s %-30s %-50s %s\n" "---" "----" "-------" "----"
-  fi
+  [ "$output_mode" = "table" ] && mail_format_table_header "$wide"
 
   local json_array="[]"
 
@@ -189,11 +309,7 @@ cmd_search() {
         json_array=$(echo "$json_array" | jq --argjson item "$headers_json" '. + [$item]')
         ;;
       *)
-        local from_val subject_val date_val
-        from_val=$(echo "$headers_json" | jq -r '.from' | head -c 30)
-        subject_val=$(echo "$headers_json" | jq -r '.subject' | head -c 50)
-        date_val=$(echo "$headers_json" | jq -r '.date' | head -c 20)
-        printf "%-6s %-30s %-50s %s\n" "$uid" "$from_val" "$subject_val" "$date_val"
+        mail_format_summary_line "$uid" "$headers_json" "" "$wide"
         ;;
     esac
   done

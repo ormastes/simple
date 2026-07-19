@@ -16,6 +16,7 @@ use std.nogc_sync_mut.aws_sigv4.{
     parse_s3_error, S3ErrorInfo
 }
 use app.itf.errors.{ItfError}
+use app.itf.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_should_retry, itf_retry_wait}
 
 
 val MINIO_DEFAULT_REGION = "us-east-1"
@@ -89,12 +90,13 @@ fn load_minio_config() -> MinioConfig:
     val content = file_read_text(path)
     if content == nil:
         return MinioConfig.default()
-    val cfg = _parse_minio_section(content)
-    if cfg.tls_skip_verify:
-        # Memory note: rt_http_client doesn't expose a TLS-verify knob (2026-04-26).
-        # We log the warning; effective enforcement requires runtime SFFI follow-up.
-        print "[WARN] MinIO TLS verify disabled — not safe for production"
-    cfg
+    # NOTE: tls_skip_verify enforcement lives at the command boundary
+    # (cmd_minio._require_transport), not here — this loader stays a pure
+    # parser so config-parsing specs can assert on it directly. Memory note:
+    # rt_http_request/rt_http_client_* expose no TLS-verify knob (2026-04-26
+    # and reconfirmed) — the pure-Simple transport cannot honor this flag,
+    # so callers must treat tls_skip_verify=true as a hard configuration error.
+    _parse_minio_section(content)
 
 
 fn check_minio_auth(cfg: MinioConfig) -> bool:
@@ -219,8 +221,17 @@ fn _signed_get(
         "{cfg.url}{canonical_uri}"
     else:
         "{cfg.url}{canonical_uri}?{canonical_query}"
-    val (status, body, err) = rt_http_request("GET", full_url, sffi_headers, "")
-    S3Response(status: status, body: body, error: err)
+
+    var attempt = 0
+    var resp = S3Response(status: 0, body: "", error: "")
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val (status, body, err) = rt_http_request("GET", full_url, sffi_headers, "")
+        resp = S3Response(status: status, body: body, error: err)
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            return resp
+        itf_retry_wait(attempt - 1, "")
+    resp
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +478,19 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
         sffi = sffi + ["Range: {range_header}"]
     sffi = sffi + ["Authorization: {auth}"]
 
-    val (status, body, err) = rt_http_request("GET", "{cfg.url}{canonical_uri}", sffi, "")
+    var attempt = 0
+    var status = 0
+    var body = ""
+    var err = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val r = rt_http_request("GET", "{cfg.url}{canonical_uri}", sffi, "")
+        status = r.0
+        body = r.1
+        err = r.2
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
     val mapped = map_s3_error(status, body, err)
     val empty = GetObjectResult(body: "", content_length: -1, etag: "")
     if mapped.kind != "ok":
@@ -531,7 +554,19 @@ fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
     sffi = sffi + ["x-amz-date: {amz_dt}"]
     sffi = sffi + ["Authorization: {auth}"]
 
-    val (status, body, err) = rt_http_request("HEAD", "{cfg.url}{canonical_uri}", sffi, "")
+    var attempt = 0
+    var status = 0
+    var body = ""
+    var err = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val r = rt_http_request("HEAD", "{cfg.url}{canonical_uri}", sffi, "")
+        status = r.0
+        body = r.1
+        err = r.2
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
     val mapped = map_s3_error(status, body, err)
     val empty = HeadObjectResult(content_length: -1, last_modified: "", etag: "")
     if mapped.kind != "ok":
@@ -587,7 +622,19 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     sffi = sffi + ["x-amz-date: {amz_dt}"]
     sffi = sffi + ["Authorization: {auth}"]
 
-    val (status, resp_body, err) = rt_http_request("PUT", "{cfg.url}{canonical_uri}", sffi, body)
+    var attempt = 0
+    var status = 0
+    var resp_body = ""
+    var err = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val r = rt_http_request("PUT", "{cfg.url}{canonical_uri}", sffi, body)
+        status = r.0
+        resp_body = r.1
+        err = r.2
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
     val mapped = map_s3_error(status, resp_body, err)
     if mapped.kind != "ok":
         return (false, "", mapped.message)

@@ -19,6 +19,14 @@
 # ponytail: assistant replies render after completion (non-streaming). std.tui
 # has no incremental/streaming re-render primitive; token-by-token streaming is
 # the upgrade path (would need a partial-line redraw during responder()).
+#
+# Session hooks + slash commands: run_chat_tui/run_chat_plain accept a
+# SessionHooks bundle so provider/model switching, session listing, and
+# session resume/persistence (owned by app.llm_caret.session + main.spl's
+# runtime state) can be triggered from the chat input without chat_tui.spl
+# depending on main.spl (that would be circular - main.spl imports this
+# module). dispatch_slash/parse_slash_command/SlashResult are pure and
+# unit-testable with a fake SessionHooks.
 
 use std.tui.terminal.*
 use std.tui.style.*
@@ -27,7 +35,7 @@ use std.tui.widgets.box_widget.{BoxWidget, make_box_widget_with_content, box_ren
 use std.tui.widgets.input.{InputWidget, make_input_widget, input_insert_char,
                             input_delete_back, input_clear, input_render}
 
-use app.llm_caret.types.{Message, new_user_message, new_assistant_message}
+use app.llm_caret.types.{Message, new_user_message}
 use app.llm_caret.tools.{ToolCall, ToolResult, ModelResponse, PermissionPolicy}
 use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered,
                         tool_call_status, tool_call_summary}
@@ -39,10 +47,12 @@ extern fn rt_stdin_read_line() -> text
 # Module-level session state
 # ============================================================================
 
-# Accumulated styled conversation lines (transcript panel contents).
+# Accumulated styled conversation lines (transcript panel contents). The
+# conversation history itself (threaded back into the model each turn) is a
+# local var owned by run_chat_tui/run_chat_plain, not module state - each
+# call is one session and the history is passed in/out via SessionHooks +
+# AgentResult.final_transcript instead.
 var TUI_TRANSCRIPT: [StyledLine] = []
-# Full message history threaded back into the model each turn (real multi-turn).
-var TUI_CONV: [Message] = []
 
 # ============================================================================
 # ChatTui - owns the session's widgets (transcript panel title, prompt input,
@@ -123,12 +133,95 @@ fn caret_is_tty() -> bool:
     true
 
 # ============================================================================
+# Session hooks (DI seam into main.spl's runtime state + session.spl)
+# ============================================================================
+
+# `on_resume` returns (found, message, messages): found=false means "no such
+# saved session" (message carries the reason, messages is empty).
+struct SessionHooks:
+    session_id: text
+    on_model: fn(text) -> text
+    on_provider: fn(text) -> text
+    on_sessions: fn() -> text
+    on_resume: fn(text) -> (bool, text, [Message])
+    on_persist: fn(text, [Message])
+
+# ============================================================================
+# Slash commands (pure parse + dispatch - unit-testable without a terminal)
+# ============================================================================
+
+fn is_slash_command(line: text) -> bool:
+    line.starts_with("/")
+
+fn _split_first_space(s: text) -> (text, text):
+    var i = 0
+    while i < s.len():
+        if s[i] == " ":
+            return (s.substring(0, i), s.substring(i + 1).trim())
+        i = i + 1
+    (s, "")
+
+# Splits "/model foo" into ("model", "foo"); "/help" into ("help", "").
+fn parse_slash_command(line: text) -> (text, text):
+    _split_first_space(line.substring(1))
+
+fn slash_help_text() -> text:
+    "Commands:\n" +
+    "  /help              show this help\n" +
+    "  /exit, /quit       end the session\n" +
+    "  /new               start a new conversation (clears history)\n" +
+    "  /model <name>      switch model\n" +
+    "  /provider <name>   switch provider\n" +
+    "  /sessions          list saved sessions\n" +
+    "  /resume <id>       resume a saved session"
+
+struct SlashResult:
+    message: text
+    exit: bool
+    new_conv: bool
+    replace_conv: bool
+    loaded_messages: [Message]
+    new_session_id: text
+
+fn _slash_msg(message: text) -> SlashResult:
+    SlashResult(message: message, exit: false, new_conv: false, replace_conv: false, loaded_messages: [], new_session_id: "")
+
+# Every /command's effect is expressed purely in the returned SlashResult;
+# the caller (run_chat_tui/run_chat_plain) applies it. Unknown /commands are
+# reported back instead of being sent to the model (never silently forwarded).
+fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
+    if cmd == "help":
+        return _slash_msg(slash_help_text())
+    if cmd == "exit" or cmd == "quit":
+        return SlashResult(message: "", exit: true, new_conv: false, replace_conv: false, loaded_messages: [], new_session_id: "")
+    if cmd == "new":
+        return SlashResult(message: "started a new conversation", exit: false, new_conv: true, replace_conv: false, loaded_messages: [], new_session_id: "")
+    if cmd == "model":
+        if arg == "":
+            return _slash_msg("Usage: /model <name>")
+        return _slash_msg(hooks.on_model(arg))
+    if cmd == "provider":
+        if arg == "":
+            return _slash_msg("Usage: /provider <name>")
+        return _slash_msg(hooks.on_provider(arg))
+    if cmd == "sessions":
+        return _slash_msg(hooks.on_sessions())
+    if cmd == "resume":
+        if arg == "":
+            return _slash_msg("Usage: /resume <session_id>")
+        val (found, msg, messages) = hooks.on_resume(arg)
+        var new_id = ""
+        if found:
+            new_id = arg
+        return SlashResult(message: msg, exit: false, new_conv: false, replace_conv: found, loaded_messages: messages, new_session_id: new_id)
+    _slash_msg("Unknown command: /" + cmd + " (try /help)")
+
+# ============================================================================
 # Transcript state ops
 # ============================================================================
 
 fn tui_transcript_reset():
     TUI_TRANSCRIPT = []
-    TUI_CONV = []
 
 fn tui_transcript_len() -> i64:
     TUI_TRANSCRIPT.len()
@@ -236,16 +329,37 @@ fn _read_line(ui0: ChatTui) -> (ChatTui, text, i64):
 # Interactive loop
 # ============================================================================
 
+# Re-renders a fully loaded/replaced conversation (resume, /new) into the
+# transcript panel so the user sees the restored history, not a blank screen.
+fn _render_history(conv: [Message]):
+    for m in conv:
+        render_turn(m.role, m.content)
+
+# Applies a dispatched SlashResult to the running (ui, conv, session_id,
+# running) state. Returns the updated triple; shared by the TUI and plain
+# loops so both surfaces apply /commands identically.
+fn _apply_slash(result: SlashResult, conv: [Message], session_id: text) -> ([Message], text, bool):
+    if result.new_conv:
+        tui_transcript_reset()
+        return ([], session_id, true)
+    if result.replace_conv:
+        tui_transcript_reset()
+        _render_history(result.loaded_messages)
+        return (result.loaded_messages, result.new_session_id, true)
+    (conv, session_id, true)
+
 # The full-screen interactive chat loop. Sets up the alt screen + raw mode per
-# editor/tui_shell.spl, reads a prompt, runs one agent turn (threading the whole
-# conversation for real multi-turn), renders the reply + any tool-call lines,
-# and loops until /exit or Ctrl-C/Ctrl-D. Restores the terminal on exit.
-#
-# ponytail: teardown runs after the loop (Simple has no try/finally and no
-# throwing by design). A hard runtime panic mid-loop could leave raw mode on;
-# acceptable for a minimal shell.
-fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse):
+# editor/tui_shell.spl, reads a prompt, runs one agent turn (threading the
+# whole conversation - including tool_result turns, via AgentResult's
+# final_transcript - for real multi-turn memory), renders the reply + any
+# tool-call lines, persists the session after every turn, and loops until
+# /exit or Ctrl-C/Ctrl-D. Restores the terminal on exit (also on a panic - see
+# run_chat_tui_guarded below).
+fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, hooks: SessionHooks, initial_conv: [Message]):
     tui_transcript_reset()
+    var conv = initial_conv
+    var session_id = hooks.session_id
+    _render_history(conv)
     terminal_enter_alt_screen()
     terminal_enter_raw_mode()
     terminal_hide_cursor()
@@ -264,14 +378,25 @@ fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message])
                 running = false
             elif trimmed == "":
                 ui = _ui_set_input(ui, input_clear(ui.input))
+            elif is_slash_command(trimmed):
+                val (cmd, arg) = parse_slash_command(trimmed)
+                val result = dispatch_slash(cmd, arg, hooks)
+                if result.message != "":
+                    render_turn("system", result.message)
+                if result.exit:
+                    running = false
+                else:
+                    val applied = _apply_slash(result, conv, session_id)
+                    conv = applied.0
+                    session_id = applied.1
+                ui = _ui_set_input(ui, input_clear(ui.input))
             else:
                 render_turn("user", trimmed)
-                TUI_CONV = TUI_CONV + [new_user_message(trimmed)]
-                # ponytail: past-turn tool_result plumbing is not threaded back
-                # into TUI_CONV (only user/assistant text is); fine for a shell.
-                val result = run_agent_loop_rendered(policy, TUI_CONV, responder, 25, tui_tool_renderer)
-                TUI_CONV = TUI_CONV + [new_assistant_message(result.final_text)]
+                conv = conv + [new_user_message(trimmed)]
+                val result = run_agent_loop_rendered(policy, conv, responder, 25, tui_tool_renderer)
+                conv = result.final_transcript
                 render_turn("assistant", result.final_text)
+                hooks.on_persist(session_id, conv)
                 ui = _ui_set_input(ui, input_clear(ui.input))
     terminal_show_cursor()
     terminal_exit_raw_mode()
@@ -282,8 +407,9 @@ fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message])
 # Plain fallback loop (non-tty: piped / CI / server)
 # ============================================================================
 
-fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse):
-    var conv: [Message] = []
+fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, hooks: SessionHooks, initial_conv: [Message]):
+    var conv: [Message] = initial_conv
+    var session_id = hooks.session_id
     var running = true
     while running:
         print "> "
@@ -292,11 +418,24 @@ fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelRes
         # Empty line == EOF on a drained pipe -> exit. Explicit /exit too.
         if trimmed == "" or trimmed == "/exit" or trimmed == "/quit":
             running = false
+        elif is_slash_command(trimmed):
+            val (cmd, arg) = parse_slash_command(trimmed)
+            val result = dispatch_slash(cmd, arg, hooks)
+            if result.message != "":
+                print result.message
+            if result.exit:
+                running = false
+            elif result.new_conv:
+                conv = []
+            elif result.replace_conv:
+                conv = result.loaded_messages
+                session_id = result.new_session_id
         else:
             conv = conv + [new_user_message(trimmed)]
             val result = run_agent_loop(policy, conv, responder, 25)
-            conv = conv + [new_assistant_message(result.final_text)]
+            conv = result.final_transcript
             print "Claude: " + result.final_text
+            hooks.on_persist(session_id, conv)
 
 # ============================================================================
 # Top-level entry: pick TUI vs plain per flag/tty
@@ -304,10 +443,13 @@ fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelRes
 
 # Interactive chat entry point. `ui_mode` is "auto" (default), "tui", or
 # "plain". TUI is the default for interactive TTY use; non-tty falls back to the
-# plain print path so piped/CI/server output is not ANSI-corrupted.
-fn caret_chat(ui: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, ui_mode: text):
+# plain print path so piped/CI/server output is not ANSI-corrupted. `hooks`
+# wires slash-command effects (model/provider switch, session list/resume,
+# persistence) into main.spl's runtime state; `initial_conv` seeds the
+# transcript (e.g. a --resume'd session's messages, or [] for a fresh chat).
+fn caret_chat(ui: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, ui_mode: text, hooks: SessionHooks, initial_conv: [Message]):
     val mode = select_renderer_mode(ui_mode, caret_is_tty())
     if mode == "tui":
-        run_chat_tui(ui, policy, responder)
+        run_chat_tui(ui, policy, responder, hooks, initial_conv)
     else:
-        run_chat_plain(policy, responder)
+        run_chat_plain(policy, responder, hooks, initial_conv)

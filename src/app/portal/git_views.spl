@@ -1,0 +1,190 @@
+"""
+# Git Browser View Fragments
+
+Builds the HTML body fragments for the `/repos*` routes. All git-sourced
+text (names, refs, paths, commit metadata, file/diff content) is passed
+through `html_escape` before being placed in markup — none of it is trusted.
+The fragments are wrapped in the shared layout by `template.render_layout`,
+so every git page shares the same header/nav/footer chrome as the rest of
+the portal.
+"""
+
+use std.common.web.html_escape.{html_escape}
+use app.portal.git_repo.{RepoInfo, TreeEntry, CommitEntry, repo_default_ref, repo_last_commit}
+
+# ============================================================================
+# Shared chrome
+# ============================================================================
+
+fn _repo_subnav(name: text, ref: text) -> text:
+    val n = html_escape(name)
+    val r = html_escape(ref)
+    "<nav class=\"repo-subnav\">" +
+        "<a href=\"/repos/{n}\">Overview</a>" +
+        "<a href=\"/repos/{n}/tree/{r}\">Files</a>" +
+        "<a href=\"/repos/{n}/commits/{r}\">Commits</a>" +
+        "</nav>"
+
+pub fn breadcrumb(name: text, ref: text, kind: text, path: text) -> text:
+    val n = html_escape(name)
+    val r = html_escape(ref)
+    var out = "<nav class=\"breadcrumb\"><a href=\"/repos\">Repos</a> / " +
+        "<a href=\"/repos/{n}\">{n}</a> / <a href=\"/repos/{n}/{kind}/{r}\">{r}</a>"
+    if path != "":
+        var acc = ""
+        for seg in path.split("/"):
+            if seg == "":
+                continue
+            acc = if acc == "": seg else: acc + "/" + seg
+            out = out + " / <a href=\"/repos/{n}/{kind}/{r}/{html_escape(acc)}\">{html_escape(seg)}</a>"
+    out + "</nav>"
+
+# ============================================================================
+# /repos
+# ============================================================================
+
+pub fn render_repos_index(repos: [RepoInfo], root: text) -> text:
+    if repos.len() == 0:
+        return "<h1>Repositories</h1><p class=\"empty-state\">No repositories found under " +
+            "<code>{html_escape(root)}</code>. Set <code>PORTAL_REPO_ROOT</code> to a directory " +
+            "containing one or more git repositories.</p>"
+
+    var rows = ""
+    for r in repos:
+        val n = html_escape(r.name)
+        val default_ref = repo_default_ref(r)
+        val last = repo_last_commit(r, default_ref)
+        val relative_date = last.0
+        val subject = last.1
+        val last_display = if subject == "": "No commits yet" else: "{html_escape(relative_date)} — {html_escape(subject)}"
+        rows = rows + "<tr><td><a href=\"/repos/{n}\">{n}</a></td>" +
+            "<td class=\"dim\">{html_escape(default_ref)}</td>" +
+            "<td class=\"dim\">{last_display}</td></tr>"
+
+    "<h1>Repositories</h1><table class=\"repo-table\">" +
+        "<thead><tr><th>Name</th><th>Branch</th><th>Last commit</th></tr></thead>" +
+        "<tbody>{rows}</tbody></table>"
+
+# ============================================================================
+# /repos/{name} landing
+# ============================================================================
+
+pub fn render_repo_landing(repo: RepoInfo, ref: text, readme_html: text, has_readme: bool) -> text:
+    var out = "<div class=\"repo-header\"><h1>{html_escape(repo.name)}</h1></div>" + _repo_subnav(repo.name, ref)
+    if has_readme:
+        out = out + "<section class=\"readme\">{readme_html}</section>"
+    else:
+        out = out + "<p class=\"empty-state\">No README found at the root of <code>{html_escape(ref)}</code>.</p>"
+    out
+
+# ============================================================================
+# /repos/{name}/tree/{ref}/{path...}
+# ============================================================================
+
+pub fn render_tree(repo: RepoInfo, ref: text, path: text, entries: [TreeEntry]) -> text:
+    var out = "<div class=\"repo-header\"><h1>{html_escape(repo.name)}</h1></div>" +
+        _repo_subnav(repo.name, ref) + breadcrumb(repo.name, ref, "tree", path)
+
+    if entries.len() == 0:
+        return out + "<p class=\"empty-state\">This directory is empty.</p>"
+
+    var rows = ""
+    for e in entries:
+        val prefix = if path == "": "" else: path + "/"
+        val entry_path = prefix + e.name
+        val n = html_escape(repo.name)
+        val r = html_escape(ref)
+        val ep = html_escape(entry_path)
+        val label = html_escape(e.name)
+        val kind_class = if e.kind == "tree": "kind-tree" else: "kind-blob"
+        val link = if e.kind == "tree":
+            "/repos/{n}/tree/{r}/{ep}"
+        else:
+            "/repos/{n}/blob/{r}/{ep}"
+        val size = if e.kind == "blob": e.size else: "-"
+        rows = rows + "<tr class=\"{kind_class}\"><td>{if e.kind == \"tree\": \"dir\" else: \"file\"}</td>" +
+            "<td><a href=\"{link}\">{label}</a></td><td class=\"dim\">{html_escape(size)}</td></tr>"
+
+    out + "<table class=\"file-tree\"><thead><tr><th></th><th>Name</th><th>Size</th></tr></thead>" +
+        "<tbody>{rows}</tbody></table>"
+
+# ============================================================================
+# /repos/{name}/blob/{ref}/{path...}
+# ============================================================================
+
+pub fn render_blob(repo: RepoInfo, ref: text, path: text, content: text, is_binary: bool) -> text:
+    var out = "<div class=\"repo-header\"><h1>{html_escape(repo.name)}</h1></div>" +
+        _repo_subnav(repo.name, ref) + breadcrumb(repo.name, ref, "blob", path)
+
+    if is_binary:
+        val n = html_escape(repo.name)
+        val r = html_escape(ref)
+        val p = html_escape(path)
+        return out + "<p class=\"empty-state\">Binary file not shown. " +
+            "<a href=\"/repos/{n}/raw/{r}/{p}\">Download</a></p>"
+
+    var lines_html = ""
+    for line in content.split("\n"):
+        lines_html = lines_html + "<li>{html_escape(line)}</li>"
+
+    out + "<ol class=\"code-view\">{lines_html}</ol>"
+
+# ============================================================================
+# /repos/{name}/commits/{ref}
+# ============================================================================
+
+pub fn render_commits(repo: RepoInfo, ref: text, commits: [CommitEntry], page: i64, has_more: bool) -> text:
+    var out = "<div class=\"repo-header\"><h1>{html_escape(repo.name)}</h1></div>" + _repo_subnav(repo.name, ref)
+
+    if commits.len() == 0:
+        return out + "<p class=\"empty-state\">No commits on <code>{html_escape(ref)}</code> yet.</p>"
+
+    var rows = ""
+    for c in commits:
+        val n = html_escape(repo.name)
+        val short_sha = if c.sha.len() > 10: c.sha[0:10] else: c.sha
+        rows = rows + "<tr><td><a href=\"/repos/{n}/commit/{html_escape(c.sha)}\" class=\"sha\">" +
+            "{html_escape(short_sha)}</a></td><td>{html_escape(c.subject)}</td>" +
+            "<td class=\"dim\">{html_escape(c.author)}</td><td class=\"dim\">{html_escape(c.relative_date)}</td></tr>"
+
+    out = out + "<table class=\"commit-table\"><thead><tr><th>SHA</th><th>Subject</th><th>Author</th><th>Date</th></tr></thead>" +
+        "<tbody>{rows}</tbody></table>"
+
+    val n = html_escape(repo.name)
+    val r = html_escape(ref)
+    var pager = "<nav class=\"pagination\">"
+    if page > 1:
+        pager = pager + "<a href=\"/repos/{n}/commits/{r}?page={page - 1}\">&laquo; Newer</a>"
+    if has_more:
+        pager = pager + "<a href=\"/repos/{n}/commits/{r}?page={page + 1}\">Older &raquo;</a>"
+    pager = pager + "</nav>"
+    out + pager
+
+# ============================================================================
+# /repos/{name}/commit/{sha}
+# ============================================================================
+
+fn _diff_line_class(line: text) -> text:
+    if line.starts_with("+++") or line.starts_with("---"):
+        "diff-file"
+    elif line.starts_with("+"):
+        "diff-add"
+    elif line.starts_with("-"):
+        "diff-del"
+    elif line.starts_with("@@"):
+        "diff-hunk"
+    elif line.starts_with("commit ") or line.starts_with("Author:") or line.starts_with("Date:"):
+        "diff-meta"
+    else:
+        "diff-context"
+
+pub fn render_commit_diff(repo: RepoInfo, sha: text, raw_diff: text) -> text:
+    var out = "<div class=\"repo-header\"><h1>{html_escape(repo.name)}</h1></div>" +
+        "<h2 class=\"sha\">{html_escape(sha)}</h2>"
+
+    var lines_html = ""
+    for line in raw_diff.split("\n"):
+        val cls = _diff_line_class(line)
+        lines_html = lines_html + "<div class=\"{cls}\">{html_escape(line)}</div>"
+
+    out + "<pre class=\"diff-view\">{lines_html}</pre>"

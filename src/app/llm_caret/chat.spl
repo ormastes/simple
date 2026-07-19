@@ -152,6 +152,13 @@ struct AgentResult:
     iterations: i64
     stopped_reason: text     # "end_turn" | "max_iterations"
     tool_calls_made: i64
+    # Full transcript including every tool_result / re-prompt turn made during
+    # this call (not just the initial messages + final reply). Callers that
+    # need real multi-turn memory across top-level calls (e.g. the TUI/plain
+    # chat shells) should carry this forward as the next call's `initial`
+    # instead of manually re-appending just `final_text` - that was the
+    # gap that silently dropped tool_result history between turns.
+    final_transcript: [Message]
 
 # Format a tool_result the way it re-enters the transcript for the model.
 fn _tool_result_message(call: ToolCall, result: ToolResult) -> text:
@@ -211,10 +218,10 @@ fn run_agent_loop_rendered(policy: PermissionPolicy, initial: [Message], respond
         if resp.text != "":
             transcript = transcript + [Message(role: "assistant", content: resp.text)]
         if resp.tool_calls.len() == 0:
-            return AgentResult(final_text: final_text, iterations: iters, stopped_reason: "end_turn", tool_calls_made: tool_count)
+            return AgentResult(final_text: final_text, iterations: iters, stopped_reason: "end_turn", tool_calls_made: tool_count, final_transcript: transcript)
         for call in resp.tool_calls:
             val result = run_tool(policy, call)
             tool_count = tool_count + 1
             on_tool(call, result)
             transcript = transcript + [Message(role: "user", content: _tool_result_message(call, result))]
-    AgentResult(final_text: final_text, iterations: iters, stopped_reason: "max_iterations", tool_calls_made: tool_count)
+    AgentResult(final_text: final_text, iterations: iters, stopped_reason: "max_iterations", tool_calls_made: tool_count, final_transcript: transcript)

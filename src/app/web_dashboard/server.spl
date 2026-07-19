@@ -7,8 +7,25 @@ use app.llm_runtime.manifest.{llm_runtime_manifest_from_text}
 use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
 use app.dashboard.assistant_collectors.{collect_assistant_snapshot_from_root}
 use app.dashboard.assistant_live_view.{assistant_dashboard_live_view_from_snapshot, assistant_dashboard_render_live_view}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.text.{to_int_or}
+use app.llm_dashboard.web_login.{
+    DashboardAuthSession,
+    auth_session_from_headers,
+    auth_authenticate_form,
+    auth_delete_session,
+    auth_login_page,
+    auth_login_cookie_header,
+    auth_clear_cookie_header
+}
+
+extern fn rt_env_get(key: text) -> text
 
 val DEFAULT_DIAGNOSTICS_JSONL = ".build/llm_dashboard/diagnostics/session.jsonl"
+
+# Auth is opt-in (DASH_AUTH=1) so plain localhost dev usage needs no login.
+fn _dash_auth_enabled() -> bool:
+    rt_env_get("DASH_AUTH") == "1"
 
 fn _status_text(status: i64) -> text:
     match status:
@@ -29,6 +46,12 @@ pub fn http_response(status: i64, content_type: text, body: text) -> text:
 
 pub fn http_redirect(location: text) -> text:
     "HTTP/1.1 302 Found\r\nLocation: " + location + "\r\nContent-Length: 0\r\n\r\n"
+
+pub fn http_redirect_with_headers(location: text, extra_headers: [text]) -> text:
+    var response = "HTTP/1.1 302 Found\r\nLocation: " + location + "\r\n"
+    for header in extra_headers:
+        response = response + header + "\r\n"
+    response + "Content-Length: 0\r\n\r\n"
 
 pub fn http_error(status: i64, message: text) -> text:
     http_response(status, "text/plain", message)
@@ -59,6 +82,98 @@ pub struct DashboardServer:
 
     static fn new_with_agent_dir(port: i64, agent_dir: text) -> DashboardServer:
         DashboardServer(port: port, diagnostics_path: DEFAULT_DIAGNOSTICS_JSONL, tooling_source_path: "", tooling_target: "", vllm_manifest_text: "", is_ios: false, agent_dir: agent_dir)
+
+    # Real TCP accept loop. Reuses login_only_server's request-parsing shape,
+    # dispatching every request through route_http (auth optionally gated by
+    # DASH_AUTH=1; see _route_request).
+    fn start():
+        print "Starting LLM dashboard web server on http://localhost:{self.port}"
+        print "Press Ctrl+C to stop"
+        match TcpListener.bind("0.0.0.0:{self.port}"):
+            Err(e):
+                print "Error: Failed to bind to port {self.port}: {e}"
+                return
+            Ok(listener):
+                loop:
+                    match listener.accept():
+                        Ok(stream):
+                            self.handle_connection(stream)
+                        Err(e):
+                            print "Error accepting connection: {e}"
+
+    fn handle_connection(stream: TcpStream):
+        match stream.read_line():
+            Err(_):
+                val _ = stream.close()
+                return
+            Ok(request_line):
+                val parts = request_line.split(" ")
+                if parts.len() < 2:
+                    val _ = stream.write_text(http_error(400, "Bad Request"))
+                    val _ = stream.close()
+                    return
+                val method = parts[0]
+                val path = parts[1]
+
+                var headers = ""
+                var content_length = 0
+                loop:
+                    match stream.read_line():
+                        Ok(header_line):
+                            if header_line.trim() == "":
+                                break
+                            headers = "{headers}{header_line}\n"
+                            if header_line.starts_with("Content-Length:"):
+                                content_length = to_int_or(header_line[15:].trim(), 0)
+                        Err(_):
+                            break
+
+                var body = ""
+                if method == "POST" and content_length > 0:
+                    match stream.read_bytes(content_length):
+                        Ok(data):
+                            body = data
+                        Err(_):
+                            pass_dn
+
+                val response = self.route_request(method, path, body, headers)
+                val _ = stream.write_text(response)
+                val _ = stream.close()
+
+    # Auth-aware wrapper around route_http. Off by default (DASH_AUTH unset)
+    # so localhost dev needs no login; set DASH_AUTH=1 to require the
+    # web_login cookie session before any /agents or /api/ route resolves.
+    fn route_request(method: text, path: text, body: text, headers: text) -> text:
+        if not _dash_auth_enabled():
+            return self.route_http(method, path, body, "local-dev")
+
+        val clean_path = _clean_path(path)
+        val session = auth_session_from_headers(headers)
+
+        if clean_path == "/login":
+            return self._handle_login(method, body, session)
+        if clean_path == "/logout":
+            if val active = session:
+                auth_delete_session(active.session_id)
+            return http_redirect_with_headers("/login", [auth_clear_cookie_header()])
+
+        match session:
+            case Some(active):
+                self.route_http(method, path, body, active.session_id)
+            case nil:
+                http_redirect("/login")
+
+    fn _handle_login(method: text, body: text, session: DashboardAuthSession?) -> text:
+        if method == "GET":
+            if session != nil:
+                return http_redirect("/")
+            return http_response(200, "text/html", auth_login_page("", ""))
+        if method != "POST":
+            return http_error(401, "Method not supported")
+        val auth_result = auth_authenticate_form(body)
+        if val auth_session = auth_result.0:
+            return http_redirect_with_headers("/", [auth_login_cookie_header(auth_session)])
+        http_response(401, "text/html", auth_login_page(auth_result.1, auth_result.2))
 
     fn render_dashboard_html() -> text:
         val panel = collect_llm_diagnostics_jsonl(self.diagnostics_path)

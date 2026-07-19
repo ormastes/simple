@@ -1,7 +1,8 @@
 # @cover src/lib/common/encoding/sfnt.spl 80%
 
 use std.spec.*
-use std.common.encoding.sfnt.{read_u32_be, read_fixed_1616, parse_offset_table, validate_default_glyf_font, validate_glyf_font_instance, font_runtime_ttf_default_supported, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match}
+use std.common.encoding.sfnt.{read_u32_be, read_fixed_1616, parse_offset_table, validate_default_glyf_font, validate_glyf_font_instance, font_runtime_ttf_default_supported, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match, sfnt_debug_selected_names}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var bytes: [u8] = []
@@ -214,3 +215,15 @@ describe "sfnt manifest names":
             (4, "Simple Sans Regular"), (6, "SimpleSans-Regular"), (5, "Version 1.0")
         ]))])
         expect(sfnt_manifest_names_match(style_conflict, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+
+describe "sfnt name-table decode on a real staged font":
+    it "decodes the five manifest name slots for the checked-in NotoSansMono variable font":
+        # Hermetic regression for the desktop boot decode bug: all five slots
+        # (family/style/full/postscript/version) previously read back as the
+        # same nameID-5 version string ("Version 2.014" x5) on the freestanding
+        # native lane. The font is checked into the repo, so this needs no VFS
+        # boot and no network fetch.
+        val blob = file_read_bytes("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
+        expect(blob.len()).to_equal(1708408)
+        val decoded = sfnt_debug_selected_names(blob)
+        expect(decoded).to_equal("|Noto Sans Mono|Regular|Noto Sans Mono Regular|NotoSansMono-Regular|Version 2.014")

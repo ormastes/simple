@@ -1,0 +1,97 @@
+use std.spec
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.portal.server.{PortalServer}
+
+fn _fixture_repo_root() -> text:
+    """Create a throwaway git repo with a README, a subdirectory, and two
+    commits, and return its parent directory (the PORTAL_REPO_ROOT)."""
+    val script = "set -eu\n" +
+        "ROOT=$(mktemp -d /tmp/portal-git-fixture.XXXXXX)\n" +
+        "REPO=\"$ROOT/demo\"\n" +
+        "mkdir -p \"$REPO/src\"\n" +
+        "cd \"$REPO\"\n" +
+        "git init -q\n" +
+        "git config user.email test@example.invalid\n" +
+        "git config user.name 'Portal Test'\n" +
+        "printf '# Demo Repo\\n\\nHello from the fixture repo.\\n' > README.md\n" +
+        "printf 'print 1\\n' > src/main.spl\n" +
+        "git add -A\n" +
+        "git commit -q -m 'first commit'\n" +
+        "printf 'print 2\\n' > src/main.spl\n" +
+        "git add -A\n" +
+        "git commit -q -m 'second commit'\n" +
+        "printf '%s' \"$ROOT\"\n"
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    out.trim()
+
+fn _server() -> PortalServer:
+    PortalServer.with_repo_root("127.0.0.1", "0", _fixture_repo_root())
+
+describe "portal server":
+    it "serves the home page through the shared layout":
+        val resp = _server().route_request("GET", "/", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("Simple Portal")
+        expect(resp).to_contain("Content-Security-Policy:")
+
+    it "serves the app stylesheet":
+        val resp = _server().route_request("GET", "/css/app.css", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("Content-Type: text/css")
+
+    it "lists the fixture repository":
+        val resp = _server().route_request("GET", "/repos", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("/repos/demo")
+
+    it "renders the repo landing page with the README":
+        val resp = _server().route_request("GET", "/repos/demo", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("Demo Repo")
+
+    it "lists the tree at the default ref":
+        val resp = _server().route_request("GET", "/repos/demo/tree/main", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("src")
+        expect(resp).to_contain("README.md")
+
+    it "lists a nested directory":
+        val resp = _server().route_request("GET", "/repos/demo/tree/main/src", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("main.spl")
+
+    it "shows a blob's content with the latest revision":
+        val resp = _server().route_request("GET", "/repos/demo/blob/main/src/main.spl", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("print 2")
+
+    it "lists commit history newest first":
+        val resp = _server().route_request("GET", "/repos/demo/commits/main", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("second commit")
+        expect(resp).to_contain("first commit")
+
+    it "renders a commit diff":
+        val resp = _server().route_request("GET", "/repos/demo/commits/main", "", "")
+        expect(resp).to_contain("commit/")
+
+    it "returns a styled 404 for an unknown repository":
+        val resp = _server().route_request("GET", "/repos/does-not-exist", "", "")
+        expect(resp).to_start_with("HTTP/1.1 404 Not Found")
+        expect(resp).to_contain("Back to home")
+
+    it "returns a styled 404 for an unknown top-level page":
+        val resp = _server().route_request("GET", "/nope", "", "")
+        expect(resp).to_start_with("HTTP/1.1 404 Not Found")
+
+    it "rejects a repository name attempting path traversal":
+        val resp = _server().route_request("GET", "/repos/../../etc", "", "")
+        expect(resp).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "rejects a path-traversal attempt inside a tree route":
+        val resp = _server().route_request("GET", "/repos/demo/tree/main/../../../etc", "", "")
+        expect(resp).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "rejects unsupported HTTP methods":
+        val resp = _server().route_request("POST", "/repos", "", "")
+        expect(resp).to_start_with("HTTP/1.1 405 Method Not Allowed")
