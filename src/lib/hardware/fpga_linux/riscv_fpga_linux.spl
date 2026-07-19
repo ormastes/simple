@@ -30,6 +30,7 @@ fn rtl_file_exists(path: text) -> bool:
     rt_file_exists(path)
 
 use std.hardware.fpga_linux.soc_vhdl_gen.{generate_soc_vhdl_bundle}
+use std.hardware.fpga_linux.linux_media.{RiscvLinuxMediaManifest}
 use std.hardware.riscv_common.pkg.riscv_generated_core_pkg.{RiscvProofLane}
 
 # ============================================================================
@@ -380,6 +381,7 @@ pub struct RiscvFpgaLinuxManifest:
     board: XilinxBoardProfile
     product: RiscvFpgaProductProfile
     lanes: [RiscvFpgaLane]
+    media: [RiscvLinuxMediaManifest]
 
 impl RiscvFpgaLinuxManifest:
     fn readiness_summary() -> text:
@@ -388,6 +390,36 @@ impl RiscvFpgaLinuxManifest:
         for lane in self.lanes:
             parts = parts.push(lane.summary_token())
         return parts.join(", ")
+
+    fn media_sdn_text(lane_id: text) -> text:
+        var match_count: i64 = 0
+        var selected = ""
+        var unknown_lane = false
+        for media_manifest in self.media:
+            if media_manifest.lane_id != "rv32" and media_manifest.lane_id != "rv64":
+                unknown_lane = true
+            if media_manifest.lane_id == lane_id:
+                match_count = match_count + 1
+                selected = media_manifest.sdn_text(lane_id)
+        if match_count == 1 and self.media.len() == 2 and not unknown_lane: return selected
+        val unpinned = RiscvLinuxMediaManifest.unpinned(lane_id)
+        val missing = unpinned.sdn_text(lane_id)
+        missing + "\nmedia_status_reason = \"manifest-count-invalid\""
+
+    fn with_pinned_media(rv32_media: RiscvLinuxMediaManifest, rv64_media: RiscvLinuxMediaManifest) -> Result<RiscvFpgaLinuxManifest, text>:
+        if rv32_media.lane_id != "rv32": return Err("rv32-media:lane-id-mismatch")
+        if rv64_media.lane_id != "rv64": return Err("rv64-media:lane-id-mismatch")
+        val rv32_errors = rv32_media.file_errors()
+        if rv32_errors.len() > 0: return Err("rv32-media:" + rv32_errors.join(","))
+        val rv64_errors = rv64_media.file_errors()
+        if rv64_errors.len() > 0: return Err("rv64-media:" + rv64_errors.join(","))
+        if rv32_media.shares_artifact_with(rv64_media): return Err("media:cross-lane-artifact-reuse")
+        Ok(RiscvFpgaLinuxManifest(
+            board: self.board,
+            product: self.product,
+            lanes: self.lanes,
+            media: [rv32_media, rv64_media]
+        ))
 
     fn vivado_tcl_plan() -> text:
         """
@@ -431,6 +463,8 @@ impl RiscvFpgaLinuxManifest:
             lines = lines.push("validation_kind = \"contract-not-ready\"")
             lines = lines.push("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
             lines = lines.push("authoritative_rtl_provenance = \"none\"")
+            val media_text = self.media_sdn_text(xl)
+            lines = lines.push(media_text)
             lines = lines.push("")
         return lines.join("\n")
 
@@ -484,6 +518,8 @@ impl RiscvFpgaLinuxManifest:
             lines = lines.push("debug_output = \"semi_param\"")
             lines = lines.push("debug_output = \"debug_pc\"")
             lines = lines.push("authoritative = \"false\"")
+            val media_text = self.media_sdn_text(xl)
+            lines = lines.push(media_text)
             lines = lines.push("contract_file = \"{output_dir}/{xl}/rtl/{core}.spl\"")
             lines = lines.push("contract_file = \"{output_dir}/{xl}/rtl/{core}_pkg.vhd\"")
             lines = lines.push("contract_file = \"{output_dir}/{xl}/rtl/{core}.vhd\"")
@@ -552,7 +588,8 @@ pub fn create_default_riscv_fpga_linux_manifest() -> RiscvFpgaLinuxManifest:
     RiscvFpgaLinuxManifest(
         board: XilinxBoardProfile.generic(),
         product: RiscvFpgaProductProfile.default_linux_rtl(),
-        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()],
+        media: [RiscvLinuxMediaManifest.unpinned("rv32"), RiscvLinuxMediaManifest.unpinned("rv64")]
     )
 
 pub fn create_default_riscv_fpga_linux_manifest_with_profile(configuration_profile: text) -> RiscvFpgaLinuxManifest:
@@ -562,7 +599,8 @@ pub fn create_default_riscv_fpga_linux_manifest_with_profile(configuration_profi
     RiscvFpgaLinuxManifest(
         board: XilinxBoardProfile.generic(),
         product: RiscvFpgaProductProfile.with_configuration_profile(configuration_profile),
-        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()],
+        media: [RiscvLinuxMediaManifest.unpinned("rv32"), RiscvLinuxMediaManifest.unpinned("rv64")]
     )
 
 pub fn create_riscv_fpga_linux_manifest_for_board(board_id: text) -> Result<RiscvFpgaLinuxManifest, text>:
@@ -579,7 +617,8 @@ pub fn create_riscv_fpga_linux_manifest_for_board(board_id: text) -> Result<Risc
     Ok(RiscvFpgaLinuxManifest(
         board: board,
         product: RiscvFpgaProductProfile.default_linux_rtl(),
-        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()],
+        media: [RiscvLinuxMediaManifest.unpinned("rv32"), RiscvLinuxMediaManifest.unpinned("rv64")]
     ))
 
 pub fn create_riscv_fpga_linux_manifest_for_board_with_profile(board_id: text, configuration_profile: text) -> Result<RiscvFpgaLinuxManifest, text>:
@@ -595,7 +634,8 @@ pub fn create_riscv_fpga_linux_manifest_for_board_with_profile(board_id: text, c
     Ok(RiscvFpgaLinuxManifest(
         board: board,
         product: RiscvFpgaProductProfile.with_configuration_profile(configuration_profile),
-        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()],
+        media: [RiscvLinuxMediaManifest.unpinned("rv32"), RiscvLinuxMediaManifest.unpinned("rv64")]
     ))
 
 pub fn create_riscv_fpga_linux_manifest_configured(board_id: text, product_level: text, configuration_profile: text, rv32_luts: i64, rv64_luts: i64, rv32_mhz: i64, rv64_mhz: i64) -> Result<RiscvFpgaLinuxManifest, text>:
@@ -616,7 +656,8 @@ pub fn create_riscv_fpga_linux_manifest_configured(board_id: text, product_level
     Ok(RiscvFpgaLinuxManifest(
         board: board,
         product: RiscvFpgaProductProfile.configured(level, profile, rv32_luts, rv64_luts, rv32_mhz, rv64_mhz),
-        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()],
+        media: [RiscvLinuxMediaManifest.unpinned("rv32"), RiscvLinuxMediaManifest.unpinned("rv64")]
     ))
 
 # ============================================================================

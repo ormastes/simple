@@ -187,6 +187,16 @@ RV64. QEMU first validates the media/platform contract. A generated-RTL
 simulator must then boot the identical hashes and produce DUT-origin OpenSBI,
 kernel, init, and `login:` bytes.
 
+The canonical media lock is
+`src/lib/hardware/fpga_linux/linux_media.spl`. Each lane must provide exactly
+one manifest with separate firmware, kernel, DTB, and rootfs pins. Every pin
+records the path, byte size, SHA-256, load address, entrypoint, producing tool,
+configuration SHA-256, and DT relationship SHA-256. Product manifests validate
+the files again when rendered and fail closed on a missing or changed file,
+duplicate lane, unknown lane, incomplete role set, or cross-lane reuse. Default
+RV32/RV64 products remain visibly `unpinned`; no Linux media has been accepted
+for either lane yet.
+
 QEMU success is recorded as `qemu-media`; it never satisfies `rtl-sim`.
 
 ### 4. Run terminal login and list guest files

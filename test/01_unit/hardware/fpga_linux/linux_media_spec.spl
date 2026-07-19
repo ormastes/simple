@@ -1,0 +1,221 @@
+"""
+# RISC-V Linux Media Lock Tests
+
+Fail-closed evidence contract for the QEMU, generated-RTL, and FPGA consumers.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_delete, file_hash_sha256, file_size, file_write, getpid}
+use hardware.fpga_linux.linux_media.{
+    RiscvLinuxArtifactRole, RiscvLinuxArtifactPin, RiscvLinuxMediaManifest
+}
+use hardware.fpga_linux.riscv_fpga_linux.{
+    RiscvFpgaLinuxManifest, create_default_riscv_fpga_linux_manifest
+}
+
+fn materialized_media(lane_id: text, suffix: text) -> RiscvLinuxMediaManifest:
+    val pid = getpid()
+    val base = "/tmp/simple-riscv-linux-media-{lane_id}-{pid}-{suffix}"
+    val firmware_path = "{base}-fw.bin"
+    val kernel_path = "{base}-Image"
+    val dtb_path = "{base}.dtb"
+    val rootfs_path = "{base}-rootfs.cpio"
+    file_write(firmware_path, "opensbi-{lane_id}")
+    file_write(kernel_path, "linux-{lane_id}")
+    file_write(dtb_path, "dtb-{lane_id}")
+    file_write(rootfs_path, "rootfs-{lane_id}")
+    val dt_sha256 = file_hash_sha256(dtb_path)
+    val configuration_sha256 = "c".repeat(64)
+    RiscvLinuxMediaManifest(
+        lane_id: lane_id,
+        artifacts: [
+            RiscvLinuxArtifactPin(
+                role: RiscvLinuxArtifactRole.Firmware,
+                path: firmware_path,
+                size_bytes: file_size(firmware_path),
+                sha256: file_hash_sha256(firmware_path),
+                load_address: 0x80000000,
+                entrypoint: 0x80000000,
+                tool_identity: "opensbi-test",
+                configuration_sha256: configuration_sha256,
+                dt_sha256: dt_sha256
+            ),
+            RiscvLinuxArtifactPin(
+                role: RiscvLinuxArtifactRole.Kernel,
+                path: kernel_path,
+                size_bytes: file_size(kernel_path),
+                sha256: file_hash_sha256(kernel_path),
+                load_address: 0x80200000,
+                entrypoint: 0x80200000,
+                tool_identity: "linux-test",
+                configuration_sha256: configuration_sha256,
+                dt_sha256: dt_sha256
+            ),
+            RiscvLinuxArtifactPin(
+                role: RiscvLinuxArtifactRole.Dtb,
+                path: dtb_path,
+                size_bytes: file_size(dtb_path),
+                sha256: dt_sha256,
+                load_address: 0x88000000,
+                entrypoint: 0,
+                tool_identity: "dtc-test",
+                configuration_sha256: configuration_sha256,
+                dt_sha256: dt_sha256
+            ),
+            RiscvLinuxArtifactPin(
+                role: RiscvLinuxArtifactRole.Rootfs,
+                path: rootfs_path,
+                size_bytes: file_size(rootfs_path),
+                sha256: file_hash_sha256(rootfs_path),
+                load_address: 0x89000000,
+                entrypoint: 0,
+                tool_identity: "buildroot-test",
+                configuration_sha256: configuration_sha256,
+                dt_sha256: dt_sha256
+            )
+        ]
+    )
+
+fn remove_media(media: RiscvLinuxMediaManifest):
+    for artifact in media.artifacts: file_delete(artifact.path)
+
+describe "RISC-V Linux media lock":
+    it "keeps absent media fail closed and visible in the product manifest":
+        val media = RiscvLinuxMediaManifest.unpinned("rv32")
+        val errors = media.contract_errors()
+        val default_manifest = create_default_riscv_fpga_linux_manifest()
+        val products = default_manifest.board_linux_boot_products_manifest_text("/tmp/media-lock")
+        expect(media.status_text()).to_equal("unpinned")
+        expect(errors.len()).to_be_greater_than(0)
+        expect(products).to_contain("media_status = \"unpinned\"")
+        expect(products).to_contain("media_kernel_sha256 = \"\"")
+
+    it "accepts exactly one complete pin for every required role":
+        val rv32_media = materialized_media("rv32", "product")
+        val media = materialized_media("rv64", "same")
+        val errors = media.contract_errors()
+        val copy = materialized_media("rv64", "same")
+        expect(errors.len()).to_equal(0)
+        expect(media.status_text()).to_equal("pinned")
+        expect(media.same_pin_set(copy)).to_be(true)
+        val default_manifest = create_default_riscv_fpga_linux_manifest()
+        val product_result = default_manifest.with_pinned_media(rv32_media, media)
+        expect(product_result.is_ok()).to_be(true)
+        val product_option = product_result.ok()
+        val product = product_option.unwrap()
+        val products = product.board_linux_boot_products_manifest_text("/tmp/media-lock")
+        expect(products).to_contain("media_status = \"pinned\"")
+        remove_media(media)
+        remove_media(rv32_media)
+        expect(media.status_text()).to_equal("unpinned")
+        expect(media.same_pin_set(copy)).to_be(false)
+
+    it "rejects cross-lane, missing-role, and dt-relationship evidence":
+        val valid = materialized_media("rv32", "negative")
+        val cross_lane_reuse = RiscvLinuxMediaManifest(lane_id: "rv64", artifacts: valid.artifacts)
+        val default_manifest = create_default_riscv_fpga_linux_manifest()
+        val cross_lane_product = default_manifest.with_pinned_media(valid, cross_lane_reuse)
+        val cross_lane_text = valid.sdn_text("rv64")
+        val missing = RiscvLinuxMediaManifest(lane_id: "rv32", artifacts: [valid.artifacts[0]])
+        val missing_errors = missing.contract_errors()
+        val kernel = valid.artifacts[1]
+        val wrong_kernel = RiscvLinuxArtifactPin(
+            role: kernel.role,
+            path: kernel.path,
+            size_bytes: kernel.size_bytes,
+            sha256: kernel.sha256,
+            load_address: kernel.load_address,
+            entrypoint: kernel.entrypoint,
+            tool_identity: kernel.tool_identity,
+            configuration_sha256: kernel.configuration_sha256,
+            dt_sha256: "e".repeat(64)
+        )
+        val wrong_dt = RiscvLinuxMediaManifest(
+            lane_id: "rv32",
+            artifacts: [valid.artifacts[0], wrong_kernel, valid.artifacts[2], valid.artifacts[3]]
+        )
+        val wrong_dt_errors = wrong_dt.contract_errors()
+        val base = create_default_riscv_fpga_linux_manifest()
+        val duplicate = RiscvFpgaLinuxManifest(
+            board: base.board,
+            product: base.product,
+            lanes: base.lanes,
+            media: [valid, valid]
+        )
+        val duplicate_text = duplicate.board_linux_boot_products_manifest_text("/tmp/media-lock")
+        expect(cross_lane_text).to_contain("media_status = \"lane-mismatch\"")
+        expect(cross_lane_product.is_err()).to_be(true)
+        expect(missing_errors.len()).to_be_greater_than(0)
+        expect(wrong_dt_errors.len()).to_be_greater_than(0)
+        expect(valid.same_pin_set(wrong_dt)).to_be(false)
+        expect(duplicate_text).to_contain("media_status_reason = \"manifest-count-invalid\"")
+        remove_media(valid)
+
+    it "escapes quoted SDN path and tool text":
+        val media = materialized_media("rv64", "quote-\"-newline-\n-slash-\\")
+        val kernel = media.artifacts[1]
+        val escaped_kernel = RiscvLinuxArtifactPin(
+            role: kernel.role,
+            path: kernel.path,
+            size_bytes: kernel.size_bytes,
+            sha256: kernel.sha256,
+            load_address: kernel.load_address,
+            entrypoint: kernel.entrypoint,
+            tool_identity: "linux-\"-newline-\n-cr-\r-slash-\\",
+            configuration_sha256: kernel.configuration_sha256,
+            dt_sha256: kernel.dt_sha256
+        )
+        val escaped = RiscvLinuxMediaManifest(
+            lane_id: media.lane_id,
+            artifacts: [media.artifacts[0], escaped_kernel, media.artifacts[2], media.artifacts[3]]
+        )
+        val text = escaped.sdn_text("rv64")
+        expect(escaped.status_text()).to_equal("pinned")
+        expect(text).to_contain("quote-\\\"")
+        expect(text).to_contain("newline-\\n")
+        expect(text).to_contain("cr-\\r")
+        expect(text).to_contain("slash-\\\\")
+        remove_media(media)
+
+    it "checks the pinned file size and sha256":
+        val pid = getpid()
+        val path = "/tmp/simple-riscv-linux-media-pin-{pid}.bin"
+        file_write(path, "linux-media")
+        val pin = RiscvLinuxArtifactPin(
+            role: RiscvLinuxArtifactRole.Kernel,
+            path: path,
+            size_bytes: file_size(path),
+            sha256: file_hash_sha256(path),
+            load_address: 0x80200000,
+            entrypoint: 0x80200000,
+            tool_identity: "test-tool",
+            configuration_sha256: "c".repeat(64),
+            dt_sha256: "d".repeat(64)
+        )
+        expect(pin.file_error()).to_equal("")
+        val wrong_size = RiscvLinuxArtifactPin(
+            role: pin.role,
+            path: pin.path,
+            size_bytes: pin.size_bytes + 1,
+            sha256: pin.sha256,
+            load_address: pin.load_address,
+            entrypoint: pin.entrypoint,
+            tool_identity: pin.tool_identity,
+            configuration_sha256: pin.configuration_sha256,
+            dt_sha256: pin.dt_sha256
+        )
+        expect(wrong_size.file_error()).to_equal("kernel:size-mismatch")
+        val wrong_hash = RiscvLinuxArtifactPin(
+            role: pin.role,
+            path: pin.path,
+            size_bytes: pin.size_bytes,
+            sha256: "0".repeat(64),
+            load_address: pin.load_address,
+            entrypoint: pin.entrypoint,
+            tool_identity: pin.tool_identity,
+            configuration_sha256: pin.configuration_sha256,
+            dt_sha256: pin.dt_sha256
+        )
+        expect(wrong_hash.file_error()).to_equal("kernel:sha256-mismatch")
+        file_delete(path)
+        expect(pin.file_error()).to_equal("kernel:file-missing")

@@ -36,6 +36,10 @@ board-origin login evidence.
   `e66263f73d2a23548f6011a1b6936eb11c2041ce8833cc83051517f047300887`
   and a 2026-05-21 timestamp. It is stale, non-authoritative marker evidence;
   it cannot prove Simple-compiler RTL, Linux boot, login, or `ls`.
+- The repository has no pinned RV32/RV64 OpenSBI, Linux kernel, DTB, and rootfs
+  set. The new canonical media manifest therefore emits `unpinned` for both
+  lanes and rejects missing/changed files, duplicate or unknown lanes, and DT
+  relationship mismatches. No QEMU or generated-RTL Linux boot is claimed.
 
 Physical F1/N3 execution remains **BLOCKED**, not passed. Restore the FTDI
 interface before touching JTAG, then produce new compiler-provenance-bound

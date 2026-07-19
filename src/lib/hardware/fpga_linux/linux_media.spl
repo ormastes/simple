@@ -1,0 +1,219 @@
+# Pinned Linux media evidence contract for QEMU, generated RTL, and FPGA consumers.
+
+use std.io_runtime.{file_exists, file_hash_sha256, file_size}
+use std.nogc_sync_mut.io.{is_valid_hex}
+
+pub enum RiscvLinuxArtifactRole:
+    Firmware
+    Kernel
+    Dtb
+    Rootfs
+    Combined
+
+impl RiscvLinuxArtifactRole:
+    fn to_text() -> text:
+        match self:
+            case Firmware: "firmware"
+            case Kernel: "kernel"
+            case Dtb: "dtb"
+            case Rootfs: "rootfs"
+            case Combined: "combined"
+
+    fn needs_entrypoint() -> bool:
+        self == RiscvLinuxArtifactRole.Firmware or self == RiscvLinuxArtifactRole.Kernel
+
+fn _riscv_linux_artifact_roles() -> [RiscvLinuxArtifactRole]:
+    [
+        RiscvLinuxArtifactRole.Firmware,
+        RiscvLinuxArtifactRole.Kernel,
+        RiscvLinuxArtifactRole.Dtb,
+        RiscvLinuxArtifactRole.Rootfs,
+        RiscvLinuxArtifactRole.Combined
+    ]
+
+fn _riscv_linux_required_artifact_roles() -> [RiscvLinuxArtifactRole]:
+    [
+        RiscvLinuxArtifactRole.Firmware,
+        RiscvLinuxArtifactRole.Kernel,
+        RiscvLinuxArtifactRole.Dtb,
+        RiscvLinuxArtifactRole.Rootfs
+    ]
+
+fn _valid_sha256(value: text) -> bool:
+    value.len() == 64 and value == value.lower() and is_valid_hex(value)
+
+fn _escape_sdn_string(value: text) -> text:
+    val slash_escaped = value.replace("\\", "\\\\")
+    val quote_escaped = slash_escaped.replace("\"", "\\\"")
+    val cr_escaped = quote_escaped.replace("\r", "\\r")
+    cr_escaped.replace("\n", "\\n")
+
+pub struct RiscvLinuxArtifactPin:
+    role: RiscvLinuxArtifactRole
+    path: text
+    size_bytes: i64
+    sha256: text
+    load_address: u64
+    entrypoint: u64
+    tool_identity: text
+    configuration_sha256: text
+    dt_sha256: text
+
+impl RiscvLinuxArtifactPin:
+    static fn missing(role: RiscvLinuxArtifactRole) -> RiscvLinuxArtifactPin:
+        RiscvLinuxArtifactPin(
+            role: role,
+            path: "",
+            size_bytes: 0,
+            sha256: "",
+            load_address: 0,
+            entrypoint: 0,
+            tool_identity: "",
+            configuration_sha256: "",
+            dt_sha256: ""
+        )
+
+    fn contract_error() -> text:
+        val role_name = self.role.to_text()
+        if self.path == "": return "{role_name}:path-missing"
+        if self.size_bytes <= 0: return "{role_name}:size-invalid"
+        if not _valid_sha256(self.sha256): return "{role_name}:sha256-invalid"
+        if self.load_address == 0: return "{role_name}:load-address-missing"
+        if self.role.needs_entrypoint() and self.entrypoint == 0:
+            return "{role_name}:entrypoint-missing"
+        if self.tool_identity == "": return "{role_name}:tool-identity-missing"
+        if not _valid_sha256(self.configuration_sha256):
+            return "{role_name}:configuration-sha256-invalid"
+        if not _valid_sha256(self.dt_sha256): return "{role_name}:dt-sha256-invalid"
+        ""
+
+    fn file_error() -> text:
+        val contract = self.contract_error()
+        if contract != "": return contract
+        val role_name = self.role.to_text()
+        if not file_exists(self.path): return "{role_name}:file-missing"
+        if file_size(self.path) != self.size_bytes: return "{role_name}:size-mismatch"
+        if file_hash_sha256(self.path) != self.sha256: return "{role_name}:sha256-mismatch"
+        ""
+
+    fn same_pin(other: RiscvLinuxArtifactPin) -> bool:
+        (self.role == other.role and
+         self.path == other.path and
+         self.size_bytes == other.size_bytes and
+         self.sha256 == other.sha256 and
+         self.load_address == other.load_address and
+         self.entrypoint == other.entrypoint and
+         self.tool_identity == other.tool_identity and
+         self.configuration_sha256 == other.configuration_sha256 and
+         self.dt_sha256 == other.dt_sha256)
+
+    fn sdn_text() -> text:
+        val role_name = self.role.to_text()
+        val escaped_path = _escape_sdn_string(self.path)
+        val escaped_tool_identity = _escape_sdn_string(self.tool_identity)
+        var lines: [text] = []
+        lines = lines.push("media_{role_name}_path = \"{escaped_path}\"")
+        lines = lines.push("media_{role_name}_size_bytes = {self.size_bytes}")
+        lines = lines.push("media_{role_name}_sha256 = \"{self.sha256}\"")
+        lines = lines.push("media_{role_name}_load_address = \"{self.load_address}\"")
+        lines = lines.push("media_{role_name}_entrypoint = \"{self.entrypoint}\"")
+        lines = lines.push("media_{role_name}_tool_identity = \"{escaped_tool_identity}\"")
+        lines = lines.push("media_{role_name}_configuration_sha256 = \"{self.configuration_sha256}\"")
+        lines = lines.push("media_{role_name}_dt_sha256 = \"{self.dt_sha256}\"")
+        lines.join("\n")
+
+pub struct RiscvLinuxMediaManifest:
+    lane_id: text
+    artifacts: [RiscvLinuxArtifactPin]
+
+impl RiscvLinuxMediaManifest:
+    static fn unpinned(lane_id: text) -> RiscvLinuxMediaManifest:
+        RiscvLinuxMediaManifest(
+            lane_id: lane_id,
+            artifacts: [
+                RiscvLinuxArtifactPin.missing(RiscvLinuxArtifactRole.Firmware),
+                RiscvLinuxArtifactPin.missing(RiscvLinuxArtifactRole.Kernel),
+                RiscvLinuxArtifactPin.missing(RiscvLinuxArtifactRole.Dtb),
+                RiscvLinuxArtifactPin.missing(RiscvLinuxArtifactRole.Rootfs)
+            ]
+        )
+
+    fn _role_count(role: RiscvLinuxArtifactRole) -> i64:
+        var count: i64 = 0
+        for artifact in self.artifacts:
+            if artifact.role == role: count = count + 1
+        count
+
+    fn _dt_sha256() -> text:
+        for artifact in self.artifacts:
+            if artifact.role == RiscvLinuxArtifactRole.Dtb: return artifact.sha256
+        ""
+
+    fn contract_errors() -> [text]:
+        var errors: [text] = []
+        if self.lane_id != "rv32" and self.lane_id != "rv64":
+            errors = errors.push("lane-id-invalid")
+        val required_roles = _riscv_linux_required_artifact_roles()
+        for role in required_roles:
+            if self._role_count(role) != 1:
+                val role_name = role.to_text()
+                errors = errors.push("{role_name}:role-count-invalid")
+        if self._role_count(RiscvLinuxArtifactRole.Combined) > 1:
+            errors = errors.push("combined:role-count-invalid")
+        for artifact in self.artifacts:
+            val error = artifact.contract_error()
+            if error != "": errors = errors.push(error)
+        val dt_sha256 = self._dt_sha256()
+        if dt_sha256 != "":
+            for artifact in self.artifacts:
+                if artifact.dt_sha256 != dt_sha256:
+                    val role_name = artifact.role.to_text()
+                    errors = errors.push("{role_name}:dt-relationship-mismatch")
+        errors
+
+    fn file_errors() -> [text]:
+        val contract = self.contract_errors()
+        if contract.len() > 0: return contract
+        var errors: [text] = []
+        for artifact in self.artifacts:
+            val error = artifact.file_error()
+            if error != "": errors = errors.push(error)
+        errors
+
+    fn status_text() -> text:
+        val errors = self.file_errors()
+        if errors.len() == 0: "pinned" else: "unpinned"
+
+    fn same_pin_set(other: RiscvLinuxMediaManifest) -> bool:
+        val self_errors = self.file_errors()
+        val other_errors = other.file_errors()
+        if self_errors.len() > 0 or other_errors.len() > 0: return false
+        if self.lane_id != other.lane_id: return false
+        if self.artifacts.len() != other.artifacts.len(): return false
+        for artifact in self.artifacts:
+            var found = false
+            for candidate in other.artifacts:
+                if artifact.same_pin(candidate): found = true
+            if not found: return false
+        true
+
+    fn shares_artifact_with(other: RiscvLinuxMediaManifest) -> bool:
+        for artifact in self.artifacts:
+            for candidate in other.artifacts:
+                if artifact.path == candidate.path: return true
+                if artifact.role == candidate.role and artifact.sha256 == candidate.sha256:
+                    return true
+        false
+
+    fn sdn_text(expected_lane_id: text) -> text:
+        val contract_status = self.status_text()
+        val status = if self.lane_id == expected_lane_id: contract_status else: "lane-mismatch"
+        var lines: [text] = []
+        lines = lines.push("media_lane_id = \"{self.lane_id}\"")
+        lines = lines.push("media_status = \"{status}\"")
+        lines = lines.push("media_artifact_count = {self.artifacts.len()}")
+        val roles = _riscv_linux_artifact_roles()
+        for role in roles:
+            for artifact in self.artifacts:
+                if artifact.role == role: lines = lines.push(artifact.sdn_text())
+        lines.join("\n")

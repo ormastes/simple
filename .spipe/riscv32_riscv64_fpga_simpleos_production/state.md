@@ -322,3 +322,15 @@ implementation-clocked-boundary-complete-generated-rtl-and-board-evidence-pendin
   evidence, not a compiler-generated RV32/RV64 product. AC-10 and AC-11 remain
   open until new provenance-bound bitstreams produce board-origin bidirectional
   Linux login and `ls` transcripts for both XLEN lanes.
+
+## 2026-07-19 Linux media lock boundary
+
+- Added the canonical RV32/RV64 Linux media manifest owner with separate
+  firmware, kernel, DTB, and rootfs pins. Pins carry file size/SHA-256, load and
+  entry addresses, tool/configuration identity, and DT relationship identity.
+- Product rendering revalidates the pinned files and requires exactly one RV32
+  and one RV64 manifest. Missing, changed, duplicate, unknown, incomplete, or
+  cross-lane evidence fails closed and stays visibly `unpinned`.
+- No boot media was discovered or accepted. Identical-hash QEMU boot, generated
+  RTL boot, terminal login/`ls`, and FPGA qualification remain open; the media
+  lock establishes the evidence boundary but does not claim AC-9 completion.
