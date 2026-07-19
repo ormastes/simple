@@ -1,0 +1,293 @@
+# ITF CLI — GitHub wiki backend (git-shell adapter)
+#
+# GitHub wikis have NO REST/GraphQL API (confirmed against `gh --help`) — a
+# wiki is just a plain git repository at
+# `github.com/<owner>/<repo>.wiki.git`, one Markdown file per page. This
+# module never talks to GitHub's API for wiki content: it shells out to the
+# `git` binary (argv arrays only, never a shell string — same posture as
+# app.portal.git_repo) to clone/pull that repo into a local cache dir, then
+# operates on the checked-out files: list/read/write/delete/grep.
+#
+# Sanitization mirrors app.portal.git_repo's style: every external page
+# name / owner / repo goes through a `sanitize_*` function before it can
+# touch a path or an argv element — rejecting `..`, leading `-` (git-option
+# injection), and anything outside a small safe whitelist so a crafted page
+# name can't escape the cache dir or be interpreted as a git flag.
+
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir, dir_create_all}
+use std.nogc_sync_mut.env.{env_get}
+
+# NOTE: deliberately NOT using std.nogc_sync_mut.file_system.file_ops here —
+# that module's file_read_text/file_write_text/file_exists are a mock
+# ("Mock implementations for pure Simple demonstration", per its own header)
+# that never touch the real filesystem (file_exists_mock() just checks
+# whether the path string starts with "/" or "."). Found while writing
+# wiki_git_spec.spl: real git-tracked page files need real I/O, so this
+# module goes straight to the rt_* externs instead — same choice
+# app.portal.git_repo already made for rt_file_exists. The pre-existing
+# cmd_wiki.spl confluence edit/create paths still use the mocked wrapper
+# (out of scope here — flagged in the worker report, not silently fixed).
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+val GIT_TIMEOUT_MS: i64 = 30000
+val GIT_MAX_OUTPUT_BYTES: i64 = 4194304
+
+pub struct WikiGrepMatch:
+    page: text
+    line_no: i64
+    line: text
+
+
+# ============================================================================
+# Input sanitization
+# ============================================================================
+
+val _SAFE_NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+
+fn _all_chars_in(raw: text, allowed: text) -> bool:
+    var i = 0
+    while i < raw.len():
+        if not allowed.contains(raw.char_at(i)):
+            return false
+        i = i + 1
+    true
+
+pub fn sanitize_wiki_page_name(raw: text) -> Result<text, text>:
+    """Validate a wiki page name (used as `<cache_dir>/<name>.md`). Flat
+    namespace only (no `/`) — matches the simplest-correct G14 scope in
+    facade_tasks_git_wiki.md (`ls *.md`), not a nested-page hierarchy."""
+    if raw == "":
+        return Err("empty page name")
+    if raw.contains("..") or raw.starts_with("-") or raw.starts_with("."):
+        return Err("invalid page name")
+    if raw.contains("/"):
+        return Err("invalid page name (nested pages not supported)")
+    if not _all_chars_in(raw, _SAFE_NAME_CHARS):
+        return Err("invalid page name")
+    Ok(raw)
+
+pub fn sanitize_owner_or_repo(raw: text) -> Result<text, text>:
+    """Validate one segment (owner or repo) of a `owner/repo` slug."""
+    if raw == "":
+        return Err("empty value")
+    if raw.contains("..") or raw.starts_with("-") or raw.starts_with("."):
+        return Err("invalid value")
+    if not _all_chars_in(raw, _SAFE_NAME_CHARS):
+        return Err("invalid value")
+    Ok(raw)
+
+pub fn sanitize_owner_repo_slug(raw: text) -> Result<(text, text), text>:
+    """Split+validate an `owner/repo` slug (the `--repo`/`-R` flag value)."""
+    val parts = raw.split("/")
+    if parts.len() != 2:
+        return Err("expected owner/repo, got '{raw}'")
+    match sanitize_owner_or_repo(parts[0]):
+        Err(msg):
+            Err(msg)
+        Ok(owner):
+            match sanitize_owner_or_repo(parts[1]):
+                Err(msg):
+                    Err(msg)
+                Ok(repo):
+                    Ok((owner, repo))
+
+
+# ============================================================================
+# Clone URL / cache dir resolution
+# ============================================================================
+
+fn _home_dir() -> text:
+    val home = env_get("HOME")
+    if home != "": home else: env_get("USERPROFILE")
+
+pub fn wiki_git_default_clone_url(owner: text, repo: text) -> text:
+    "https://github.com/{owner}/{repo}.wiki.git"
+
+pub fn wiki_git_default_cache_dir(owner: text, repo: text) -> text:
+    "{_home_dir()}/.cache/devhub/wiki/{owner}__{repo}"
+
+pub fn wiki_git_clone_url(owner: text, repo: text) -> text:
+    """Resolve the `.wiki.git` clone URL. `DEVHUB_WIKI_CLONE_URL_OVERRIDE`
+    lets specs point this at a local fixture repo path instead of a real
+    `github.com` remote — the git-shell analogue of the PATH-shim trick
+    cmd_github_spec.spl uses to fake the `gh` binary, since here the thing
+    under test is a git *remote*, not a subprocess binary."""
+    val override_url = env_get("DEVHUB_WIKI_CLONE_URL_OVERRIDE")
+    if override_url != "": override_url else: wiki_git_default_clone_url(owner, repo)
+
+pub fn wiki_git_cache_dir(owner: text, repo: text) -> text:
+    """Resolve the local cache dir. `DEVHUB_WIKI_CACHE_ROOT_OVERRIDE`
+    redirects the `~/.cache/devhub/wiki` root into a temp dir for specs, so
+    tests never write into the real user cache."""
+    val root_override = env_get("DEVHUB_WIKI_CACHE_ROOT_OVERRIDE")
+    if root_override != "":
+        "{root_override}/{owner}__{repo}"
+    else:
+        wiki_git_default_cache_dir(owner, repo)
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx > 0: path[0:idx] else: "."
+
+
+# ============================================================================
+# Clone / pull
+# ============================================================================
+
+pub fn wiki_git_clone_or_pull(clone_url: text, cache_dir: text) -> (bool, text):
+    """Clone `clone_url` into `cache_dir` if not already a git checkout,
+    else fast-forward pull. Returns (ok, error_message)."""
+    if is_dir("{cache_dir}/.git"):
+        val (_out, err, code) = process_run_bounded("git", ["-C", cache_dir, "pull", "--ff-only"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+        if code != 0:
+            return (false, err.trim())
+        return (true, "")
+    val _mk = dir_create_all(_parent_dir(cache_dir))
+    val (_out, err, code) = process_run_bounded("git", ["clone", clone_url, cache_dir], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+    if code != 0:
+        return (false, err.trim())
+    (true, "")
+
+pub fn wiki_git_ensure_synced(owner: text, repo: text) -> (bool, text, text):
+    """Resolve clone URL + cache dir (honoring the DEVHUB_WIKI_*_OVERRIDE
+    test hooks above) and clone-or-pull. Returns (ok, cache_dir, error)."""
+    val clone_url = wiki_git_clone_url(owner, repo)
+    val cache_dir = wiki_git_cache_dir(owner, repo)
+    val (ok, err) = wiki_git_clone_or_pull(clone_url, cache_dir)
+    (ok, cache_dir, err)
+
+
+# ============================================================================
+# Page operations
+# ============================================================================
+
+pub fn wiki_git_list(cache_dir: text) -> [text]:
+    """List page names (without the `.md` extension), sorted."""
+    var names: [text] = []
+    for entry in dir_list(cache_dir):
+        if entry.ends_with(".md") and entry.len() > 3:
+            names.push(entry[0:entry.len() - 3])
+    names.sort()
+
+pub fn wiki_git_read(cache_dir: text, page: text) -> Result<text, text>:
+    match sanitize_wiki_page_name(page):
+        Err(msg):
+            Err(msg)
+        Ok(safe_page):
+            val path = "{cache_dir}/{safe_page}.md"
+            if not rt_file_exists(path):
+                Err("page not found: {page}")
+            else:
+                Ok(rt_file_read_text(path))
+
+pub fn wiki_git_write(cache_dir: text, page: text, content: text, message: text) -> (bool, text):
+    """Write `page`.md and commit locally. Never pushes — callers must call
+    wiki_git_push() explicitly (and only when the user passed --push)."""
+    match sanitize_wiki_page_name(page):
+        Err(msg):
+            (false, msg)
+        Ok(safe_page):
+            val path = "{cache_dir}/{safe_page}.md"
+            if not rt_file_write_text(path, content):
+                return (false, "could not write {path}")
+            val (_add_out, add_err, add_code) = process_run_bounded("git", ["-C", cache_dir, "add", "{safe_page}.md"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            if add_code != 0:
+                return (false, add_err.trim())
+            val commit_msg = if message != "": message else: "Update {safe_page} via devhub"
+            val (commit_out, commit_err, commit_code) = process_run_bounded("git", ["-C", cache_dir, "-c", "user.email=devhub@localhost", "-c", "user.name=devhub", "commit", "-m", commit_msg], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            if commit_code != 0:
+                if commit_out.contains("nothing to commit") or commit_err.contains("nothing to commit"):
+                    return (true, "")
+                val err_msg = if commit_err.trim() != "": commit_err.trim() else: commit_out.trim()
+                return (false, err_msg)
+            (true, "")
+
+pub fn wiki_git_delete(cache_dir: text, page: text, message: text) -> (bool, text):
+    match sanitize_wiki_page_name(page):
+        Err(msg):
+            (false, msg)
+        Ok(safe_page):
+            val path = "{cache_dir}/{safe_page}.md"
+            if not rt_file_exists(path):
+                return (false, "page not found: {page}")
+            val (_rm_out, rm_err, rm_code) = process_run_bounded("git", ["-C", cache_dir, "rm", "{safe_page}.md"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            if rm_code != 0:
+                return (false, rm_err.trim())
+            val commit_msg = if message != "": message else: "Delete {safe_page} via devhub"
+            val (_commit_out, commit_err, commit_code) = process_run_bounded("git", ["-C", cache_dir, "-c", "user.email=devhub@localhost", "-c", "user.name=devhub", "commit", "-m", commit_msg], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            if commit_code != 0:
+                return (false, commit_err.trim())
+            (true, "")
+
+pub fn wiki_git_push(cache_dir: text) -> (bool, text):
+    """Push the local commits to the wiki remote. Only ever called when the
+    user passes --push explicitly — never from a spec/test."""
+    val (_out, err, code) = process_run_bounded("git", ["-C", cache_dir, "push"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+    if code != 0:
+        return (false, err.trim())
+    (true, "")
+
+pub fn wiki_git_page_modified(cache_dir: text, page: text) -> text:
+    """Relative last-modified time ("3h ago") for a page, from git log.
+    "" if the page has no history (or an invalid name)."""
+    match sanitize_wiki_page_name(page):
+        Err(_msg):
+            ""
+        Ok(safe_page):
+            val (out, _err, code) = process_run_bounded("git", ["-C", cache_dir, "log", "-1", "--format=%cr", "--", "{safe_page}.md"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            if code != 0: "" else: out.trim()
+
+
+# ============================================================================
+# Search (git grep — no server-side search API exists for wikis)
+# ============================================================================
+
+fn _wiki_grep_lineno_to_i64(s: text) -> i64:
+    var n: i64 = 0
+    for ch in s:
+        if ch < "0" or ch > "9":
+            return -1
+        n = n * 10 + (ch.to_i64() - "0".to_i64())
+    n
+
+fn _parse_grep_line(line: text) -> WikiGrepMatch?:
+    """Parse one `git grep -n` output line: `<path>:<lineno>:<content>`."""
+    val first_colon = line.index_of(":")
+    if first_colon < 0:
+        return nil
+    val rest = line[first_colon + 1:]
+    val second_colon = rest.index_of(":")
+    if second_colon < 0:
+        return nil
+    val path = line[0:first_colon]
+    val lineno_str = rest[0:second_colon]
+    val content = rest[second_colon + 1:]
+    val lineno = _wiki_grep_lineno_to_i64(lineno_str)
+    if lineno < 0:
+        return nil
+    val page = if path.ends_with(".md"): path[0:path.len() - 3] else: path
+    WikiGrepMatch(page: page, line_no: lineno, line: content)
+
+pub fn wiki_git_search(cache_dir: text, term: text) -> Result<[WikiGrepMatch], text>:
+    """Full-text search over the cloned wiki's *.md files via `git grep`
+    (no server-side search API exists for GitHub wikis). `-e` guards
+    against a `term` that looks like a git-grep flag (e.g. starts with
+    `-`) being parsed as an option instead of the search pattern."""
+    if term == "":
+        return Err("empty search term")
+    val (out, err, code) = process_run_bounded("git", ["-C", cache_dir, "grep", "-n", "-I", "-e", term, "--", "*.md"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+    if code > 1:
+        return Err(err.trim())
+    if code == 1:
+        return Ok([])
+    var matches: [WikiGrepMatch] = []
+    for line in out.split("\n"):
+        if line.trim() == "":
+            continue
+        val parsed = _parse_grep_line(line)
+        if parsed != nil:
+            matches.push(parsed ?? WikiGrepMatch(page: "", line_no: 0, line: ""))
+    Ok(matches)

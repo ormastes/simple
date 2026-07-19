@@ -1,7 +1,11 @@
-# ITF CLI — Wiki commands (Confluence backend)
+# ITF CLI — Wiki commands (Confluence + GitHub-wiki backends)
 #
 # Subcommands: list, view, edit, create, delete, search
 # gh-compatible flags: --json, --jq, --format, --web
+# --backend confluence|github (default: confluence, matches pre-existing
+# behavior verbatim); github routes onto app.itf.wiki_git (`.wiki.git`
+# git-shell adapter — GitHub wikis have no REST/GraphQL API, see
+# doc/05_design/app/devhub/facade_tasks_git_wiki.md §4).
 
 use app.itf.config.{ItfConfig, load_config}
 use app.itf.auth.{check_confluence_auth}
@@ -9,6 +13,18 @@ use app.itf.adapter_confluence.{confluence_list_pages, confluence_get_page, conf
 use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
 use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json, should_use_color, open_in_browser}
 use app.ui.render.ansi.{ansi_bold, ansi_reset, ansi_dim, ansi_cyan}
+use app.itf.wiki_git.{sanitize_owner_repo_slug, wiki_git_ensure_synced, wiki_git_list, wiki_git_read, wiki_git_write, wiki_git_delete, wiki_git_push, wiki_git_search, wiki_git_page_modified, WikiGrepMatch}
+use std.common.text_advanced.{escape_json}
+
+# Real (non-mocked) file I/O for the github-backend functions below —
+# std.nogc_sync_mut.file_system.file_ops (used by the pre-existing
+# confluence _wiki_edit/_wiki_create functions further down, kept
+# untouched) is a mock that never touches the real filesystem; see the
+# note in app.itf.wiki_git for detail. Real git-tracked page files need
+# real reads/writes, so the github functions go straight to these externs.
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 
 
 fn handle_wiki(args: [text]) -> i64:
@@ -22,17 +38,53 @@ fn handle_wiki(args: [text]) -> i64:
 
     match action:
         "list" | "ls":
-            _wiki_list(action_args)
+            match _wiki_dispatch_backend(action_args):
+                "github":
+                    _wiki_github_list(action_args)
+                "confluence":
+                    _wiki_list(action_args)
+                _:
+                    _wiki_unknown_backend(action_args)
         "view":
-            _wiki_view(action_args)
+            match _wiki_dispatch_backend(action_args):
+                "github":
+                    _wiki_github_view(action_args)
+                "confluence":
+                    _wiki_view(action_args)
+                _:
+                    _wiki_unknown_backend(action_args)
         "edit":
-            _wiki_edit(action_args)
+            match _wiki_dispatch_backend(action_args):
+                "github":
+                    _wiki_github_edit(action_args)
+                "confluence":
+                    _wiki_edit(action_args)
+                _:
+                    _wiki_unknown_backend(action_args)
         "create":
-            _wiki_create(action_args)
+            match _wiki_dispatch_backend(action_args):
+                "github":
+                    _wiki_github_create(action_args)
+                "confluence":
+                    _wiki_create(action_args)
+                _:
+                    _wiki_unknown_backend(action_args)
         "delete" | "rm":
-            _wiki_delete(action_args)
+            match _wiki_dispatch_backend(action_args):
+                "github":
+                    _wiki_github_delete(action_args)
+                "confluence":
+                    _wiki_delete(action_args)
+                _:
+                    _wiki_unknown_backend(action_args)
         "search":
-            _wiki_search(action_args)
+            match _wiki_dispatch_backend(action_args):
+                "github":
+                    _wiki_github_search(action_args)
+                "confluence":
+                    _wiki_search(action_args)
+                _:
+                    _wiki_unknown_backend(action_args)
         "-h" | "--help" | "help":
             _print_wiki_help()
             0
@@ -40,6 +92,52 @@ fn handle_wiki(args: [text]) -> i64:
             print_error("unknown wiki command: {action}")
             _print_wiki_help()
             1
+
+
+fn _wiki_dispatch_backend(args: [text]) -> text:
+    """Resolve --backend, validated against the two supported values (D1:
+    explicit flag only — wiki has no configured default-backend field yet,
+    see devhub_overview.md gap G6). Returns "" for an unsupported value —
+    callers route that to _wiki_unknown_backend()."""
+    val backend = _extract_flag(args, "--backend", "confluence")
+    if backend == "confluence" or backend == "github":
+        backend
+    else:
+        ""
+
+
+fn _wiki_unknown_backend(args: [text]) -> i64:
+    val backend = _extract_flag(args, "--backend", "")
+    print_error("unknown --backend '{backend}'; supported: confluence, github")
+    1
+
+
+fn _wiki_repo_flag(args: [text]) -> text:
+    """--repo owner/name for --backend github (D8: -R is a gh-familiar
+    alias for the same value)."""
+    val repo = _extract_flag(args, "--repo", "")
+    if repo != "":
+        return repo
+    _extract_flag(args, "-R", "")
+
+
+fn _resolve_github_wiki(args: [text]) -> Result<(text, text), text>:
+    """Parse+validate --repo owner/name and clone-or-sync its `.wiki.git`.
+    Returns (repo_slug, cache_dir) on success."""
+    val repo_flag = _wiki_repo_flag(args)
+    if repo_flag == "":
+        return Err("--repo owner/name required for --backend github")
+    match sanitize_owner_repo_slug(repo_flag):
+        Err(msg):
+            Err("invalid --repo: {msg}")
+        Ok(pair):
+            val owner = pair.0
+            val repo = pair.1
+            val (ok, cache_dir, err) = wiki_git_ensure_synced(owner, repo)
+            if not ok:
+                Err("failed to sync {owner}/{repo}.wiki.git: {err}")
+            else:
+                Ok((repo_flag, cache_dir))
 
 
 fn _require_confluence_auth() -> (bool, ItfConfig):
@@ -318,6 +416,257 @@ fn _wiki_search(args: [text]) -> i64:
     0
 
 
+# ============================================================================
+# GitHub wiki backend (`.wiki.git` git-shell adapter — gap G14-G16)
+# ============================================================================
+
+fn _wiki_github_list(args: [text]) -> i64:
+    """List pages. Usage: itf wiki list --backend github --repo owner/name [--json fields]"""
+    match _resolve_github_wiki(args):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(pair):
+            val cache_dir = pair.1
+            val pages = wiki_git_list(cache_dir)
+
+            if _has_flag(args, "--web"):
+                val repo_slug = pair.0
+                return open_in_browser("https://github.com/{repo_slug}/wiki")
+
+            if wants_json(args):
+                print format_json_output(_github_wiki_list_json(pages, cache_dir), args)
+                return 0
+
+            if pages.len() == 0:
+                print "No pages found."
+                return 0
+
+            print_table_header(["PAGE", "MODIFIED"])
+            for page in pages:
+                print_table_row([page, wiki_git_page_modified(cache_dir, page)])
+            0
+
+
+fn _wiki_github_view(args: [text]) -> i64:
+    """View a page. Usage: itf wiki view <page-name> --backend github --repo owner/name [--json fields]"""
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("page name required. Usage: itf wiki view <page-name> --backend github --repo owner/name")
+        return 1
+    val page = positionals[0]
+
+    match _resolve_github_wiki(args):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(pair):
+            val repo_slug = pair.0
+            val cache_dir = pair.1
+
+            if _has_flag(args, "--web"):
+                return open_in_browser("https://github.com/{repo_slug}/wiki/{page}")
+
+            match wiki_git_read(cache_dir, page):
+                Err(msg):
+                    print_error(msg)
+                    1
+                Ok(content):
+                    if wants_json(args):
+                        print format_json_output(_github_wiki_view_json(page, content), args)
+                        return 0
+                    if should_use_color():
+                        print "{ansi_bold()}{page}{ansi_reset()}"
+                    else:
+                        print page
+                    print ""
+                    print content
+                    0
+
+
+fn _wiki_github_create(args: [text]) -> i64:
+    """Create a page. Usage: itf wiki create --backend github --repo owner/name --title T [--from-file PATH] [--message MSG] [--push]"""
+    val title = _extract_flag(args, "--title", "")
+    if title == "":
+        print_error("--title required. Usage: itf wiki create --backend github --repo owner/name --title T")
+        return 1
+
+    match _resolve_github_wiki(args):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(pair):
+            val cache_dir = pair.1
+            val from_file = _extract_flag(args, "--from-file", "")
+            var body = "# {title}\n"
+            if from_file != "":
+                if not rt_file_exists(from_file):
+                    print_error("could not read file: {from_file}")
+                    return 1
+                body = rt_file_read_text(from_file)
+
+            val message = _extract_flag(args, "--message", "")
+            val (ok, err) = wiki_git_write(cache_dir, title, body, message)
+            if not ok:
+                print_error("failed to create page: {err}")
+                return 1
+
+            if _has_flag(args, "--push"):
+                val (push_ok, push_err) = wiki_git_push(cache_dir)
+                if not push_ok:
+                    print_error("committed locally but push failed: {push_err}")
+                    return 1
+
+            print_success("Page created: {title}")
+            0
+
+
+fn _wiki_github_edit(args: [text]) -> i64:
+    """Edit a page in $EDITOR. Usage: itf wiki edit <page-name> --backend github --repo owner/name [--message MSG] [--push]"""
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("page name required. Usage: itf wiki edit <page-name> --backend github --repo owner/name")
+        return 1
+    val page = positionals[0]
+
+    match _resolve_github_wiki(args):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(pair):
+            val cache_dir = pair.1
+            match wiki_git_read(cache_dir, page):
+                Err(_msg):
+                    _wiki_github_edit_continue(cache_dir, page, "", args)
+                Ok(content):
+                    _wiki_github_edit_continue(cache_dir, page, content, args)
+
+
+fn _wiki_github_edit_continue(cache_dir: text, page: text, original: text, args: [text]) -> i64:
+    """Rest of _wiki_github_edit() once the (possibly empty, for a
+    not-yet-existing page) current page content is resolved — split out so
+    the wiki_git_read() Err/Ok branches don't need to bind a shared local
+    (Simple's nested-closure capture can read but not modify outer vars;
+    passing the resolved value as a plain argument sidesteps that instead
+    of relying on match-arm mutation of an enclosing var)."""
+    use std.nogc_sync_mut.io.process_ops.{process_run}
+
+    val tmp_path = "/tmp/itf_wiki_github_edit_{page}.md"
+    val _write_tmp = rt_file_write_text(tmp_path, original)
+
+    val editor = _resolve_editor(load_config())
+    val (_e_out, _e_err, editor_code) = process_run(editor, [tmp_path])
+    if editor_code != 0:
+        print_error("editor exited with code {editor_code}")
+        return 2
+
+    if not rt_file_exists(tmp_path):
+        print_error("could not read edited file")
+        return 1
+    val edited = rt_file_read_text(tmp_path)
+    if edited == original:
+        print "No changes made."
+        return 0
+
+    val message = _extract_flag(args, "--message", "")
+    val (ok, err) = wiki_git_write(cache_dir, page, edited, message)
+    if not ok:
+        print_error("failed to update page: {err}")
+        return 1
+
+    if _has_flag(args, "--push"):
+        val (push_ok, push_err) = wiki_git_push(cache_dir)
+        if not push_ok:
+            print_error("committed locally but push failed: {push_err}")
+            return 1
+
+    print_success("Page updated: {page}")
+    0
+
+
+fn _wiki_github_delete(args: [text]) -> i64:
+    """Delete a page. Usage: itf wiki delete <page-name> --backend github --repo owner/name [--yes] [--push]"""
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("page name required. Usage: itf wiki delete <page-name> --backend github --repo owner/name")
+        return 1
+    val page = positionals[0]
+
+    if not _has_flag(args, "--yes"):
+        print "Are you sure you want to delete page {page}? Use --yes to confirm."
+        return 2
+
+    match _resolve_github_wiki(args):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(pair):
+            val cache_dir = pair.1
+            val (ok, err) = wiki_git_delete(cache_dir, page, _extract_flag(args, "--message", ""))
+            if not ok:
+                print_error("failed to delete page {page}: {err}")
+                return 1
+
+            if _has_flag(args, "--push"):
+                val (push_ok, push_err) = wiki_git_push(cache_dir)
+                if not push_ok:
+                    print_error("committed locally but push failed: {push_err}")
+                    return 1
+
+            print_success("Page {page} deleted.")
+            0
+
+
+fn _wiki_github_search(args: [text]) -> i64:
+    """Search pages. Usage: itf wiki search <query> --backend github --repo owner/name [--json fields]"""
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("search query required. Usage: itf wiki search <query> --backend github --repo owner/name")
+        return 1
+    val query = positionals[0]
+
+    match _resolve_github_wiki(args):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(pair):
+            val cache_dir = pair.1
+            match wiki_git_search(cache_dir, query):
+                Err(msg):
+                    print_error("search failed: {msg}")
+                    1
+                Ok(matches):
+                    if wants_json(args):
+                        print format_json_output(_github_wiki_search_json(matches), args)
+                        return 0
+                    if matches.len() == 0:
+                        print "No pages found matching \"{query}\"."
+                        return 0
+                    print_table_header(["PAGE", "LINE", "MATCH"])
+                    for m in matches:
+                        print_table_row([m.page, "{m.line_no}", _truncate(m.line.trim(), 60)])
+                    0
+
+
+fn _github_wiki_list_json(pages: [text], cache_dir: text) -> text:
+    var items: [text] = []
+    for page in pages:
+        val modified = wiki_git_page_modified(cache_dir, page)
+        items.push("\{\"page\": \"{escape_json(page)}\", \"modified\": \"{escape_json(modified)}\"\}")
+    "[" + items.join(", ") + "]"
+
+
+fn _github_wiki_view_json(page: text, content: text) -> text:
+    "\{\"page\": \"{escape_json(page)}\", \"content\": \"{escape_json(content)}\"\}"
+
+
+fn _github_wiki_search_json(matches: [WikiGrepMatch]) -> text:
+    var items: [text] = []
+    for m in matches:
+        items.push("\{\"page\": \"{escape_json(m.page)}\", \"line\": {m.line_no}, \"match\": \"{escape_json(m.line)}\"\}")
+    "[" + items.join(", ") + "]"
+
+
 fn _resolve_editor(config: ItfConfig) -> text:
     """Resolve editor from config/env."""
     use std.nogc_sync_mut.env.{env_get}
@@ -345,8 +694,16 @@ fn _print_wiki_help():
     print "  search       Search pages by title"
     print ""
     print "Common flags:"
+    print "  --backend confluence|github  Wiki backend (default: confluence)"
     print "  --space KEY  Confluence space (or set default in config)"
+    print "  --repo, -R OWNER/NAME  GitHub repo whose .wiki.git to use (--backend github)"
     print "  --json       Output as JSON"
     print "  --jq EXPR    Filter JSON output (e.g. .[].title)"
     print "  --web        Open in browser"
-    print "  --limit N    Max results (default: 25)"
+    print "  --limit N    Max results (default: 25, confluence only)"
+    print "  --push       Push local wiki commits to GitHub (--backend github create/edit/delete; never implied)"
+    print ""
+    print "Examples:"
+    print "  itf wiki list --space ENG"
+    print "  itf wiki list --backend github --repo acme/widgets"
+    print "  itf wiki view Home --backend github --repo acme/widgets"

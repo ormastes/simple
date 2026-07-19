@@ -1,0 +1,145 @@
+# @cover src/app/itf/cmd_wiki.spl 50%
+#
+# `devhub wiki --backend confluence|github` routing (D1/D8 in
+# doc/05_design/app/devhub/devhub_overview.md; command table in
+# doc/05_design/app/devhub/facade_tasks_git_wiki.md §4).
+#
+# Confluence stays the untouched default backend — proven here by asserting
+# the no-flag and explicit `--backend confluence` paths produce IDENTICAL
+# exit codes (not a hardcoded exit code, since whether Confluence happens
+# to be configured on the machine running this spec is environment-
+# dependent — see _require_confluence_auth in cmd_wiki.spl).
+#
+# GitHub routing is exercised end-to-end against a local fixture
+# `.wiki.git` bare repo (same local-only style as wiki_git_spec.spl),
+# reached through the DEVHUB_WIKI_CLONE_URL_OVERRIDE /
+# DEVHUB_WIKI_CACHE_ROOT_OVERRIDE test hooks in app.itf.wiki_git — the
+# git-shell analogue of the PATH-shim trick cmd_github_spec.spl uses to
+# fake the `gh` binary (here the thing under test is a git remote, not a
+# subprocess binary, so the seam is an env var instead of PATH). --push is
+# never passed from this spec — the last test below ("create ... without
+# --push") positively confirms nothing was pushed to the fixture remote.
+
+use std.spec
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.itf.cmd_wiki.{handle_wiki}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+
+
+fn _fixture_bare_wiki_repo() -> text:
+    """Bare `demo.wiki.git` seeded with a Home.md page, through a temp
+    clone (all local — no network)."""
+    val script = "set -eu\n" +
+        "ROOT=$(mktemp -d /tmp/devhub-wiki-routing-fixture.XXXXXX)\n" +
+        "BARE=\"$ROOT/demo.wiki.git\"\n" +
+        "SEED=\"$ROOT/seed\"\n" +
+        "git init -q --bare \"$BARE\"\n" +
+        "git clone -q \"$BARE\" \"$SEED\"\n" +
+        "cd \"$SEED\"\n" +
+        "git config user.email test@example.invalid\n" +
+        "git config user.name 'Wiki Routing Fixture'\n" +
+        "printf '# Home\\n\\nWelcome to the wiki.\\n' > Home.md\n" +
+        "git add -A\n" +
+        "git commit -q -m 'seed wiki'\n" +
+        "BRANCH=$(git symbolic-ref --short HEAD)\n" +
+        "git push -q origin \"$BRANCH\"\n" +
+        "printf '%s' \"$BARE\"\n"
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", script])
+    out.trim()
+
+
+fn _fresh_temp_dir() -> text:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", "mktemp -d /tmp/devhub-wiki-routing-cache.XXXXXX\n"])
+    out.trim()
+
+
+fn _run_wiki_github(bare_repo: text, cache_root: text, args: [text]) -> i64:
+    """Run handle_wiki(args) with the wiki_git test-hook env vars pointed at
+    a local fixture; always restores both vars afterward."""
+    val orig_clone_url = rt_env_get("DEVHUB_WIKI_CLONE_URL_OVERRIDE") ?? ""
+    val orig_cache_root = rt_env_get("DEVHUB_WIKI_CACHE_ROOT_OVERRIDE") ?? ""
+    val _s1 = rt_env_set("DEVHUB_WIKI_CLONE_URL_OVERRIDE", bare_repo)
+    val _s2 = rt_env_set("DEVHUB_WIKI_CACHE_ROOT_OVERRIDE", cache_root)
+    val code = handle_wiki(args)
+    val _r1 = rt_env_set("DEVHUB_WIKI_CLONE_URL_OVERRIDE", orig_clone_url)
+    val _r2 = rt_env_set("DEVHUB_WIKI_CACHE_ROOT_OVERRIDE", orig_cache_root)
+    code
+
+
+describe "devhub wiki --backend routing":
+
+    context "confluence (default, untouched)":
+
+        it "routes the default (no --backend) identically to explicit --backend confluence":
+            val code_default = handle_wiki(["list"])
+            val code_explicit = handle_wiki(["list", "--backend", "confluence"])
+            expect(code_default).to_equal(code_explicit)
+
+    context "unknown --backend":
+
+        it "exits 1 with an actionable error, without attempting any clone":
+            expect(handle_wiki(["list", "--backend", "bogus"])).to_equal(1)
+
+    context "github — missing --repo":
+
+        it "exits 1 without attempting a clone":
+            expect(handle_wiki(["list", "--backend", "github"])).to_equal(1)
+
+    context "github — invalid --repo shape":
+
+        it "exits 1 for a slug that is not owner/repo":
+            expect(handle_wiki(["list", "--backend", "github", "--repo", "bogus"])).to_equal(1)
+
+    context "github — delete confirmation gate":
+
+        it "exits 2 without --yes, before any clone is attempted":
+            expect(handle_wiki(["delete", "Home", "--backend", "github", "--repo", "acme/demo"])).to_equal(2)
+
+    context "github — end to end against a local fixture wiki repo":
+
+        it "list exits 0 and syncs the fixture":
+            val bare_repo = _fixture_bare_wiki_repo()
+            val cache_root = _fresh_temp_dir()
+            val code = _run_wiki_github(bare_repo, cache_root, ["list", "--backend", "github", "--repo", "acme/demo"])
+            expect(code).to_equal(0)
+
+        it "view exits 0 for the seeded page and 1 for a missing one":
+            val bare_repo = _fixture_bare_wiki_repo()
+            val cache_root = _fresh_temp_dir()
+            val code_ok = _run_wiki_github(bare_repo, cache_root, ["view", "Home", "--backend", "github", "--repo", "acme/demo"])
+            expect(code_ok).to_equal(0)
+            val code_missing = _run_wiki_github(bare_repo, cache_root, ["view", "NoSuchPage", "--backend", "github", "--repo", "acme/demo"])
+            expect(code_missing).to_equal(1)
+
+        it "search exits 0 for a matching term":
+            val bare_repo = _fixture_bare_wiki_repo()
+            val cache_root = _fresh_temp_dir()
+            val code = _run_wiki_github(bare_repo, cache_root, ["search", "Welcome", "--backend", "github", "--repo", "acme/demo"])
+            expect(code).to_equal(0)
+
+        it "create commits locally without --push, and delete --yes removes it locally":
+            val bare_repo = _fixture_bare_wiki_repo()
+            val cache_root = _fresh_temp_dir()
+            val create_code = _run_wiki_github(bare_repo, cache_root, ["create", "--backend", "github", "--repo", "acme/demo", "--title", "NewPage"])
+            expect(create_code).to_equal(0)
+
+            val view_code = _run_wiki_github(bare_repo, cache_root, ["view", "NewPage", "--backend", "github", "--repo", "acme/demo"])
+            expect(view_code).to_equal(0)
+
+            val delete_code = _run_wiki_github(bare_repo, cache_root, ["delete", "NewPage", "--backend", "github", "--repo", "acme/demo", "--yes"])
+            expect(delete_code).to_equal(0)
+
+        it "never pushes: a page created without --push is invisible from a fresh clone of the fixture remote":
+            val bare_repo = _fixture_bare_wiki_repo()
+            val cache_root_a = _fresh_temp_dir()
+            val create_code = _run_wiki_github(bare_repo, cache_root_a, ["create", "--backend", "github", "--repo", "acme/demo", "--title", "NeverPushed"])
+            expect(create_code).to_equal(0)
+
+            # A second, independent cache root forces a brand-new clone
+            # straight from the fixture remote — if NeverPushed leaked
+            # through a push, it would show up here too.
+            val cache_root_b = _fresh_temp_dir()
+            val verify_code = _run_wiki_github(bare_repo, cache_root_b, ["view", "NeverPushed", "--backend", "github", "--repo", "acme/demo"])
+            expect(verify_code).to_equal(1)
