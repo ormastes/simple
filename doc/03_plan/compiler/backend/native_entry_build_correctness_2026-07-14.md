@@ -332,7 +332,10 @@ the shared binary — deploys require explicit user go-ahead).
   `content.bytes()` once, recognizes declaration prefixes in place, and
   materializes only the ASCII module token. It never uses byte offsets to slice
   `text`, preserving interpreter/native behavior after preceding Unicode. The
-  focused regression covers docstrings, all declaration forms, long ordinary
-  source, indentation, and Unicode before an import; fresh Stage4 execution
-  evidence remains pending. See
+  scanner also stops at `#` while outside a docstring so documentation comments
+  containing `\"\"\"` cannot suppress later imports, while a quoted delimiter
+  after `#` inside an active docstring still closes it. The focused regression
+  covers both comment states, all declaration forms, long ordinary source,
+  indentation, and Unicode before an import; fresh Stage4 execution evidence
+  remains pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
