@@ -54,7 +54,7 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_auto, compute_dispatch_for_backend}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_text}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
@@ -926,6 +926,26 @@ class Engine2D:
                 batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
                 quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
             )
+            # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md
+            # (BLOCKER B): the Option<i32>-returning font_destination_origin(...).?
+            # round-trip decoded to a CONSTANT (1, 1) for every quad of every
+            # draw here on this freestanding target -- confirmed via gated
+            # boot probes: dst_x=1 dst_y=1 regardless of x spanning 6..3788
+            # and quad.dst_x varying per glyph, which collapsed every draw's
+            # glyphs onto the same origin pixel. Same "constructed value loses
+            # its real payload" family as the transform_identity class-default
+            # bug. Compute the destination with plain i64 arithmetic and an
+            # explicit bounds check instead of routing through the Option
+            # helper, so the real value survives.
+            val dst_x_i64 = x.to_i64() + quad.dst_x.to_i64()
+            val dst_y_i64 = y.to_i64() + quad.dst_y.to_i64()
+            val dst_x_end = dst_x_i64 + quad.width.to_i64() - 1
+            val dst_y_end = dst_y_i64 + quad.height.to_i64() - 1
+            val dst_in_range = (quad.width > 0 and quad.height > 0 and
+                dst_x_i64 >= -2147483648 and dst_x_i64 <= 2147483647 and
+                dst_x_end >= -2147483648 and dst_x_end <= 2147483647 and
+                dst_y_i64 >= -2147483648 and dst_y_i64 <= 2147483647 and
+                dst_y_end >= -2147483648 and dst_y_end <= 2147483647)
             if _VEC_TEXT_PROBE and _vec_blit_probe_count < 8:
                 _vec_blit_probe_count = _vec_blit_probe_count + 1
                 var pnz = 0
@@ -934,20 +954,14 @@ class Engine2D:
                     if ((pixels[pi] >> 24) & 0xFFu32) > 0u32:
                         pnz = pnz + 1
                     pi = pi + 1
-                val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
-                val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
                 var dxs = "nil"
                 var dys = "nil"
-                if dst_x != nil:
-                    dxs = "{dst_x.?}"
-                if dst_y != nil:
-                    dys = "{dst_y.?}"
+                if dst_in_range:
+                    dxs = "{dst_x_i64}"
+                    dys = "{dst_y_i64}"
                 print("[vec-text-probe] blit qi={quad_index} w={quad.width} h={quad.height} pix_len={pixels.len()} expect={quad.width.to_i64() * quad.height.to_i64()} pix_nz={pnz} color_a={(quad.color >> 24) & 0xFFu32} dst_x={dxs} dst_y={dys} x={x} y={y}")
-            if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
-                val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
-                val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
-                if dst_x != nil and dst_y != nil:
-                    self.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
+            if pixels.len() == quad.width.to_i64() * quad.height.to_i64() and dst_in_range:
+                self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, pixels)
             quad_index = quad_index + 1
         quad_index
 
