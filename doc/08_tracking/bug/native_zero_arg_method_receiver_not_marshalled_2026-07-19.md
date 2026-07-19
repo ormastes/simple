@@ -1,8 +1,8 @@
-# Native codegen: zero-explicit-arg method call on non-self local receiver never marshals the receiver register
+# Native codegen: investigate target-only zero-arg method receiver corruption
 
 - **ID:** native_zero_arg_method_receiver_not_marshalled_2026-07-19
-- **Status:** OPEN (call-site inline workaround landed in engine.spl, fd5e9184c21)
-- **Severity:** high (silent wrong-receiver dispatch or nil-receiver panic; latent everywhere)
+- **Status:** OPEN (the current source-level receiver-omission diagnosis is refuted; reproduce below the MIR boundary)
+- **Severity:** high on the affected kernel path; no evidence of a universal method-call defect
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
 ## Symptom
@@ -11,11 +11,10 @@
 worse, silently read the WRONG object's memory — depending on incidental
 register pressure.
 
-## Root cause (disassembly-verified two independent ways)
-Receiver materialization is folded into explicit-argument marshalling. A
-method call with ZERO explicit arguments therefore emits **no
-`mov rdi,<receiver>` at all**; the `call` reuses whatever rdi already
-holds. Consequences:
+## Original target observation
+The affected kernel disassembly appeared to omit `mov rdi,<receiver>` for a
+method call with zero explicit arguments. Consequences of that generated code
+would be:
 - `self`-receiver zero-arg calls accidentally work (rdi == self at entry) —
   which is why this stayed latent.
 - Non-self local receivers dispatch on garbage: in the probes-off build rdi
@@ -27,10 +26,23 @@ Verified not order/CSE-related: hoisting the call first still emitted no
 rdi reload; a comparison 3-arg call (`cuda.draw_font_batch(x,y,batch)`)
 reloads every argument including the receiver from its spill slot.
 
+## Current-source correction
+The universal source-level explanation does not match the current compiler.
+`lower_receiver_and_args` initializes the MIR argument list with the receiver
+before visiting explicit arguments. Resolved instance, trait, UFCS, and
+unresolved instance calls all use a receiver-first helper. Cranelift direct and
+indirect call lowering then forwards every MIR argument, and the SFFI provider
+consumes all staged arguments. Static methods are the intentional exception.
+
+The existing target disassembly remains useful evidence of a downstream or
+artifact-specific failure, but it does not justify changing common method-call
+lowering. Capture the MIR call argument count and Cranelift IR from the exact
+failing artifact before assigning a code owner.
+
 ## Known latent sibling
-`backend_rocm.spl:277` — `batch.material_supported()` same shape, off the
-boot path, not fixed. Any zero-arg method call on a non-self local is
-suspect until the compiler fix lands.
+`backend_rocm.spl:277` — `batch.material_supported()` has the same source shape
+and remains worth exercising on its real target. It is not evidence by itself
+that hosted or common call lowering is defective.
 
 ## Workaround (landed)
 Inline the method body at the call site (plain field loads + calls that
@@ -38,8 +50,15 @@ carry explicit operands). Maintenance trap: the inlined copy in engine.spl
 diverges from the canonical `material_supported` — reconcile when this bug
 is fixed.
 
-## Fix direction
-Emit receiver marshalling unconditionally in the call lowering (receiver is
-argument 0, not a side effect of the explicit-arg loop). Regression test:
-zero-arg method call on a non-self local receiver inside a function whose
-own self is live, compiled --target x86_64-unknown-none.
+## Next evidence and regression
+The cross-module native fixture now calls a zero-argument method on a local
+receiver whose value is 37 while the enclosing `self` remains live with marker
+99. The existing matrix executes that fixture with LLVM and Cranelift on hosted
+systems and on AArch64/RV64 QEMU; ARM32/RV32 and Windows ARM keep compile-only
+receipts. A stale receiver therefore fails deterministically rather than
+silently passing.
+
+For the kernel-only symptom, record that this exact call has one MIR argument,
+then capture Cranelift IR and disassembly. Fix the first layer where the
+receiver disappears; do not add another receiver in MIR while it is already
+present.
