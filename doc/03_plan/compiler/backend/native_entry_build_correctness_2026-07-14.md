@@ -277,12 +277,15 @@ the shared binary — deploys require explicit user go-ahead).
   modules and are not duplicate ASTs; alias lookup remains unchanged.
   Higher-level review accepted the fast paths. Execution proof remains pending:
   the broad parser fixture stopped on existing phase-three lowering errors, a
-  narrow current-source probe reached the known `HirExpr.is_some` bootstrap
-  crash, and the cache-preserving Stage2-to-Stage3 rebuild was OOM-killed at
-  the 4 GiB safety cap before producing a candidate. Per the bounded retry
-  policy, those failing commands were not repeated. A later current-source
-  incremental LLVM Stage2/Stage3 rebuild completed without Cargo or a full-CLI
-  relink: Stage3 compiled 657 files with zero failures, linked in 618.2 seconds,
+  narrow current-source probe reached the former `HirExpr.is_some` bootstrap
+  crash. Current source binds the optional Return payload in both MIR prescan
+  and lowering, and focused parse-to-HIR-to-MIR coverage now exercises both a
+  value return and a bare return. The cache-preserving Stage2-to-Stage3 rebuild
+  was OOM-killed at the 4 GiB safety cap before producing a candidate. Per the
+  bounded retry policy, those failing commands were not repeated. A later
+  current-source incremental LLVM Stage2/Stage3 rebuild completed without Cargo
+  or a full-CLI relink: Stage3 compiled 657 files with zero failures, linked in
+  618.2 seconds,
   and its one-file LLVM capability probe printed `windows native hello`. Its
   hash is `950f96418ae2f55d2eae1732a440e66509335c34526a603b92d31a060e16bdbc`.
   The first capped Stage4 follow-up lacked usable phase evidence because the
@@ -356,7 +359,9 @@ the shared binary — deploys require explicit user go-ahead).
   negative registry IDs are rejected. Parser exhaustion follows the existing
   diagnostic-plus-bare-type fallback instead of propagating `-1`. See
   `doc/08_tracking/bug/composite_type_registry_tag_overflow_2026-07-19.md`.
-  Current-source object emission reached the
-  existing hosted `path_join` provider gap, so bounded RSS and executable proof
-  remain pending. See
+  Current-source object emission had reached a hosted `path_join` provider gap.
+  The affected tools now call the existing public two-argument `std.path.join2`
+  API instead of importing the private one-argument `join` compatibility alias;
+  a focused native repro prints `left/right`. Bounded RSS and full executable
+  proof remain pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
